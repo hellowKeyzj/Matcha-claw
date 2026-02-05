@@ -167,10 +167,10 @@ export function buildProviderEnvVars(providers: Array<{ type: string; apiKey: st
  * Used to set the gateway's default model when the user selects a provider
  */
 const PROVIDER_DEFAULT_MODELS: Record<string, string> = {
-  anthropic: 'anthropic/claude-sonnet-4-20250514',
-  openai: 'openai/gpt-4o',
-  google: 'google/gemini-2.5-pro-preview-06-05',
-  openrouter: 'openrouter/anthropic/claude-sonnet-4',
+  anthropic: 'anthropic/claude-opus-4-6',
+  openai: 'openai/gpt-5.2',
+  google: 'google/gemini-3-pro-preview',
+  openrouter: 'openrouter/anthropic/claude-opus-4.6',
 };
 
 /**
