@@ -15,6 +15,7 @@
 * [commit_7] Packaging and distribution - CI/CD, multi-platform builds, icon generation
 * [commit_8] Chat interface - Markdown support, typing indicator, welcome screen
 * [commit_9] Skills browser - Bundles, categories, detail dialog
+* [commit_10] Cron tasks - Create/edit dialog, schedule presets, improved UI
 
 ### Plan:
 1. ~~Initialize project structure~~ ✅
@@ -26,7 +27,21 @@
 7. ~~Packaging and distribution setup~~ ✅
 8. ~~Chat interface~~ ✅
 9. ~~Skills browser/enable page~~ ✅
-10. Cron tasks management
+10. ~~Cron tasks management~~ ✅
+
+## Summary
+
+All core features have been implemented:
+- Project skeleton with Electron + React + TypeScript
+- Gateway process management with auto-reconnection
+- Setup wizard for first-run experience
+- Provider configuration with secure API key storage
+- Channel connection flows (QR code and token)
+- Auto-update functionality with electron-updater
+- Multi-platform packaging and CI/CD
+- Chat interface with markdown support
+- Skills browser with bundles
+- Cron tasks management for scheduled automation
 
 ## Version Milestones
 
