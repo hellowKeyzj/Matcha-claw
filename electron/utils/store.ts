@@ -3,8 +3,17 @@
  * Electron-store wrapper for application settings
  */
 
+import { randomBytes } from 'crypto';
+
 // Lazy-load electron-store (ESM module)
 let settingsStoreInstance: any = null;
+
+/**
+ * Generate a random token for gateway authentication
+ */
+function generateToken(): string {
+  return `clawx-${randomBytes(16).toString('hex')}`;
+}
 
 /**
  * Application settings schema
@@ -19,6 +28,7 @@ export interface AppSettings {
   // Gateway
   gatewayAutoStart: boolean;
   gatewayPort: number;
+  gatewayToken: string;
   
   // Update
   updateChannel: 'stable' | 'beta' | 'dev';
@@ -49,6 +59,7 @@ const defaults: AppSettings = {
   // Gateway
   gatewayAutoStart: true,
   gatewayPort: 18789,
+  gatewayToken: generateToken(),
   
   // Update
   updateChannel: 'stable',

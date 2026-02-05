@@ -16,6 +16,7 @@
 * [commit_8] Chat interface - Markdown support, typing indicator, welcome screen
 * [commit_9] Skills browser - Bundles, categories, detail dialog
 * [commit_10] Cron tasks - Create/edit dialog, schedule presets, improved UI
+* [commit_11] OpenClaw submodule fix - GitHub URL, auto-generated token, WebSocket auth
 
 ### Plan:
 1. ~~Initialize project structure~~ ✅
@@ -42,6 +43,7 @@ All core features have been implemented:
 - Chat interface with markdown support
 - Skills browser with bundles
 - Cron tasks management for scheduled automation
+- OpenClaw submodule from official GitHub (v2026.2.3) with auto-token auth
 
 ## Version Milestones
 

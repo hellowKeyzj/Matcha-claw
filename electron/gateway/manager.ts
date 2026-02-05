@@ -14,6 +14,7 @@ import {
   isOpenClawSubmodulePresent,
   isOpenClawInstalled 
 } from '../utils/paths';
+import { getSetting } from '../utils/store';
 import { GatewayEventType, JsonRpcNotification, isNotification, isResponse } from './protocol';
 
 /**
@@ -319,45 +320,47 @@ export class GatewayManager extends EventEmitter {
    * Uses OpenClaw submodule - supports both production (dist) and development modes
    */
   private async startProcess(): Promise<void> {
+    const openclawDir = getOpenClawDir();
+    const entryScript = getOpenClawEntryPath();
+    
+    // Verify OpenClaw submodule exists
+    if (!isOpenClawSubmodulePresent()) {
+      throw new Error(
+        'OpenClaw submodule not found. Please run: git submodule update --init'
+      );
+    }
+    
+    // Verify dependencies are installed
+    if (!isOpenClawInstalled()) {
+      throw new Error(
+        'OpenClaw dependencies not installed. Please run: cd openclaw && pnpm install'
+      );
+    }
+    
+    // Get or generate gateway token
+    const gatewayToken = await getSetting('gatewayToken');
+    console.log('Using gateway token:', gatewayToken.substring(0, 10) + '...');
+    
+    let command: string;
+    let args: string[];
+    
+    // Check if OpenClaw is built (production mode) or use pnpm dev mode
+    if (isOpenClawBuilt() && existsSync(entryScript)) {
+      // Production mode: use openclaw.mjs directly
+      console.log('Starting Gateway in production mode (using dist)');
+      command = 'node';
+      args = [entryScript, 'gateway', 'run', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
+    } else {
+      // Development mode: use pnpm gateway:dev which handles tsx compilation
+      console.log('Starting Gateway in development mode (using pnpm)');
+      command = 'pnpm';
+      args = ['run', 'dev', 'gateway', 'run', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
+    }
+    
+    console.log(`Spawning Gateway: ${command} ${args.join(' ')}`);
+    console.log(`Working directory: ${openclawDir}`);
+    
     return new Promise((resolve, reject) => {
-      const openclawDir = getOpenClawDir();
-      const entryScript = getOpenClawEntryPath();
-      
-      // Verify OpenClaw submodule exists
-      if (!isOpenClawSubmodulePresent()) {
-        reject(new Error(
-          'OpenClaw submodule not found. Please run: git submodule update --init'
-        ));
-        return;
-      }
-      
-      // Verify dependencies are installed
-      if (!isOpenClawInstalled()) {
-        reject(new Error(
-          'OpenClaw dependencies not installed. Please run: cd openclaw && pnpm install'
-        ));
-        return;
-      }
-      
-      let command: string;
-      let args: string[];
-      
-      // Check if OpenClaw is built (production mode) or use pnpm dev mode
-      if (isOpenClawBuilt() && existsSync(entryScript)) {
-        // Production mode: use openclaw.mjs directly
-        console.log('Starting Gateway in production mode (using dist)');
-        command = 'node';
-        args = [entryScript, 'gateway', 'run', '--port', String(this.status.port), '--allow-unconfigured'];
-      } else {
-        // Development mode: use pnpm gateway:dev which handles tsx compilation
-        console.log('Starting Gateway in development mode (using pnpm)');
-        command = 'pnpm';
-        args = ['run', 'dev', 'gateway', 'run', '--port', String(this.status.port), '--allow-unconfigured'];
-      }
-      
-      console.log(`Spawning Gateway: ${command} ${args.join(' ')}`);
-      console.log(`Working directory: ${openclawDir}`);
-      
       this.process = spawn(command, args, {
         cwd: openclawDir,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -368,6 +371,8 @@ export class GatewayManager extends EventEmitter {
           // Skip channel auto-connect during startup for faster boot
           OPENCLAW_SKIP_CHANNELS: '1',
           CLAWDBOT_SKIP_CHANNELS: '1',
+          // Also set token via environment variable as fallback
+          OPENCLAW_GATEWAY_TOKEN: gatewayToken,
         },
       });
       
@@ -433,8 +438,12 @@ export class GatewayManager extends EventEmitter {
    * Connect WebSocket to Gateway
    */
   private async connect(port: number): Promise<void> {
+    // Get token for WebSocket authentication
+    const gatewayToken = await getSetting('gatewayToken');
+    
     return new Promise((resolve, reject) => {
-      const wsUrl = `ws://localhost:${port}/ws`;
+      // Include token in WebSocket URL for authentication
+      const wsUrl = `ws://localhost:${port}/ws?auth=${encodeURIComponent(gatewayToken)}`;
       
       this.ws = new WebSocket(wsUrl);
       
