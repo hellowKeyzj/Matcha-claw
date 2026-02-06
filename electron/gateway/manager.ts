@@ -2,6 +2,8 @@
  * Gateway Process Manager
  * Manages the OpenClaw Gateway process lifecycle
  */
+import { app } from 'electron';
+import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
@@ -361,16 +363,40 @@ export class GatewayManager extends EventEmitter {
       // Production mode: use openclaw.mjs directly
       console.log('Starting Gateway in production mode (using dist)');
       command = 'node';
-      args = [entryScript, 'gateway', 'run', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
+      args = [entryScript, 'gateway', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
     } else {
       // Development mode: use pnpm gateway:dev which handles tsx compilation
       console.log('Starting Gateway in development mode (using pnpm)');
       command = 'pnpm';
-      args = ['run', 'dev', 'gateway', 'run', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
+      args = ['run', 'dev', 'gateway', '--port', String(this.status.port), '--token', gatewayToken, '--dev', '--allow-unconfigured'];
     }
     
     console.log(`Spawning Gateway: ${command} ${args.join(' ')}`);
     console.log(`Working directory: ${openclawDir}`);
+
+    // Resolve bundled bin path for uv
+    let binPath = '';
+    const platform = process.platform;
+    const arch = process.arch;
+    // Map arch if necessary (e.g. x64 is standard, but ensure consistency with script)
+    const target = `${platform}-${arch}`;
+
+    if (app.isPackaged) {
+      // In production, we flattened the structure to 'bin/' using electron-builder macros
+      binPath = path.join(process.resourcesPath, 'bin');
+    } else {
+      // In dev, resources are at project root/resources/bin/<platform>-<arch>
+      binPath = path.join(process.cwd(), 'resources', 'bin', target);
+    }
+
+    // Only inject if the bundled directory exists
+    const finalPath = existsSync(binPath) 
+      ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
+      : process.env.PATH || '';
+    
+    if (existsSync(binPath)) {
+      console.log('Injecting bundled bin path:', binPath);
+    }
     
     // Load provider API keys from secure storage to pass as environment variables
     const providerEnv: Record<string, string> = {};
@@ -398,13 +424,15 @@ export class GatewayManager extends EventEmitter {
         shell: process.platform === 'win32', // Use shell on Windows for pnpm
         env: {
           ...process.env,
+          PATH: finalPath, // Inject bundled bin path if it exists
           // Provider API keys
           ...providerEnv,
-          // Skip channel auto-connect during startup for faster boot
-          OPENCLAW_SKIP_CHANNELS: '1',
-          CLAWDBOT_SKIP_CHANNELS: '1',
           // Also set token via environment variable as fallback
           OPENCLAW_GATEWAY_TOKEN: gatewayToken,
+          // Ensure OPENCLAW_SKIP_CHANNELS is NOT set so channels auto-start
+          // and config hot-reload can restart channels when config changes
+          OPENCLAW_SKIP_CHANNELS: '',
+          CLAWDBOT_SKIP_CHANNELS: '',
         },
       });
       

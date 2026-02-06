@@ -16,6 +16,8 @@ import {
   RefreshCw,
   CheckCircle2,
   XCircle,
+  ExternalLink,
+  BookOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,12 +26,28 @@ import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 import { toast } from 'sonner';
+import {
+  CHANNEL_META,
+  getPrimaryChannels,
+  type ChannelType,
+  type ChannelMeta,
+  type ChannelConfigField,
+} from '@/types/channel';
 
 interface SetupStep {
   id: string;
   title: string;
   description: string;
 }
+
+const STEP = {
+  WELCOME: 0,
+  RUNTIME: 1,
+  PROVIDER: 2,
+  CHANNEL: 3,
+  INSTALLING: 4,
+  COMPLETE: 5,
+} as const;
 
 const steps: SetupStep[] = [
   {
@@ -47,7 +65,11 @@ const steps: SetupStep[] = [
     title: 'AI Provider',
     description: 'Configure your AI service',
   },
-  // Skills selection removed - auto-install essential components
+  {
+    id: 'channel',
+    title: 'Connect a Channel',
+    description: 'Connect a messaging platform (optional)',
+  },
   {
     id: 'installing',
     title: 'Setting Up',
@@ -143,19 +165,23 @@ export function Setup() {
   // Update canProceed based on current step
   useEffect(() => {
     switch (currentStep) {
-      case 0: // Welcome
+      case STEP.WELCOME:
         setCanProceed(true);
         break;
-      case 1: // Runtime
+      case STEP.RUNTIME:
         // Will be managed by RuntimeContent
         break;
-      case 2: // Provider
+      case STEP.PROVIDER:
         setCanProceed(selectedProvider !== null && apiKey.length > 0);
         break;
-      case 3: // Installing
+      case STEP.CHANNEL:
+        // Always allow proceeding — channel step is optional
+        setCanProceed(true);
+        break;
+      case STEP.INSTALLING:
         setCanProceed(false); // Cannot manually proceed, auto-proceeds when done
         break;
-      case 4: // Complete
+      case STEP.COMPLETE:
         setCanProceed(true);
         break;
     }
@@ -213,9 +239,9 @@ export function Setup() {
           
           {/* Step-specific content */}
           <div className="rounded-xl bg-white/10 backdrop-blur p-8 mb-8">
-            {currentStep === 0 && <WelcomeContent />}
-            {currentStep === 1 && <RuntimeContent onStatusChange={setCanProceed} />}
-            {currentStep === 2 && (
+            {currentStep === STEP.WELCOME && <WelcomeContent />}
+            {currentStep === STEP.RUNTIME && <RuntimeContent onStatusChange={setCanProceed} />}
+            {currentStep === STEP.PROVIDER && (
               <ProviderContent
                 providers={providers}
                 selectedProvider={selectedProvider}
@@ -224,13 +250,15 @@ export function Setup() {
                 onApiKeyChange={setApiKey}
               />
             )}
-            {currentStep === 3 && (
+            {currentStep === STEP.CHANNEL && <SetupChannelContent />}
+            {currentStep === STEP.INSTALLING && (
               <InstallingContent
                 skills={defaultSkills}
                 onComplete={handleInstallationComplete}
+                onSkip={() => setCurrentStep((i) => i + 1)}
               />
             )}
-            {currentStep === 4 && (
+            {currentStep === STEP.COMPLETE && (
               <CompleteContent
                 selectedProvider={selectedProvider}
                 installedSkills={installedSkills}
@@ -239,7 +267,7 @@ export function Setup() {
           </div>
           
           {/* Navigation - hidden during installation step */}
-          {currentStep !== 3 && (
+          {currentStep !== STEP.INSTALLING && (
             <div className="flex justify-between">
               <div>
                 {!isFirstStep && (
@@ -250,7 +278,12 @@ export function Setup() {
                 )}
               </div>
               <div className="flex gap-2">
-                {!isLastStep && currentStep !== 1 && (
+                {currentStep === STEP.CHANNEL && (
+                  <Button variant="ghost" onClick={handleNext}>
+                    Skip this step
+                  </Button>
+                )}
+                {!isLastStep && currentStep !== STEP.RUNTIME && currentStep !== STEP.CHANNEL && (
                   <Button variant="ghost" onClick={handleSkip}>
                     Skip Setup
                   </Button>
@@ -531,6 +564,45 @@ function ProviderContent({
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [keyValid, setKeyValid] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ id: string; hasKey: boolean }>;
+        const defaultId = await window.electron.ipcRenderer.invoke('provider:getDefault') as string | null;
+        const preferred = (defaultId && list.find((p) => p.id === defaultId && p.hasKey)) || list.find((p) => p.hasKey);
+        if (preferred && !cancelled) {
+          onSelectProvider(preferred.id);
+          const storedKey = await window.electron.ipcRenderer.invoke('provider:getApiKey', preferred.id) as string | null;
+          if (storedKey) {
+            onApiKeyChange(storedKey);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to load provider list:', error);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onApiKeyChange, onSelectProvider]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!selectedProvider) return;
+      try {
+        const storedKey = await window.electron.ipcRenderer.invoke('provider:getApiKey', selectedProvider) as string | null;
+        if (!cancelled && storedKey) {
+          onApiKeyChange(storedKey);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to load provider key:', error);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onApiKeyChange, selectedProvider]);
   
   const selectedProviderData = providers.find((p) => p.id === selectedProvider);
   
@@ -628,6 +700,7 @@ function ProviderContent({
                     onApiKeyChange(e.target.value);
                     setKeyValid(null);
                   }}
+                  autoComplete="off"
                   className="pr-10 bg-white/5 border-white/10"
                 />
                 <button
@@ -666,7 +739,257 @@ function ProviderContent({
   );
 }
 
-// NOTE: ChannelContent component moved to Settings > Channels page
+// ==================== Setup Channel Content ====================
+
+function SetupChannelContent() {
+  const [selectedChannel, setSelectedChannel] = useState<ChannelType | null>(null);
+  const [configValues, setConfigValues] = useState<Record<string, string>>({});
+  const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const meta: ChannelMeta | null = selectedChannel ? CHANNEL_META[selectedChannel] : null;
+  const primaryChannels = getPrimaryChannels();
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!selectedChannel) return;
+      try {
+        const result = await window.electron.ipcRenderer.invoke(
+          'channel:getFormValues',
+          selectedChannel
+        ) as { success: boolean; values?: Record<string, string> };
+        if (cancelled) return;
+        if (result.success && result.values) {
+          setConfigValues(result.values);
+        } else {
+          setConfigValues({});
+        }
+      } catch {
+        if (!cancelled) {
+          setConfigValues({});
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedChannel]);
+
+  const isFormValid = () => {
+    if (!meta) return false;
+    return meta.configFields
+      .filter((f: ChannelConfigField) => f.required)
+      .every((f: ChannelConfigField) => configValues[f.key]?.trim());
+  };
+
+  const handleSave = async () => {
+    if (!selectedChannel || !meta || !isFormValid()) return;
+
+    setSaving(true);
+    setValidationError(null);
+
+    try {
+      // Validate credentials first
+      const validation = await window.electron.ipcRenderer.invoke(
+        'channel:validateCredentials',
+        selectedChannel,
+        configValues
+      ) as { success: boolean; valid?: boolean; errors?: string[]; details?: Record<string, string> };
+
+      if (!validation.valid) {
+        setValidationError((validation.errors || ['Validation failed']).join(', '));
+        setSaving(false);
+        return;
+      }
+
+      // Save config
+      await window.electron.ipcRenderer.invoke('channel:saveConfig', selectedChannel, { ...configValues });
+
+      const botName = validation.details?.botUsername ? ` (@${validation.details.botUsername})` : '';
+      toast.success(`${meta.name} configured${botName}`);
+      setSaved(true);
+    } catch (error) {
+      setValidationError(String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Already saved — show success
+  if (saved) {
+    return (
+      <div className="text-center space-y-4">
+        <div className="text-5xl">✅</div>
+        <h2 className="text-xl font-semibold">
+          {meta?.name || 'Channel'} Connected
+        </h2>
+        <p className="text-slate-300">
+          Your channel has been configured. It will connect when the Gateway starts.
+        </p>
+        <Button
+          variant="ghost"
+          className="text-slate-400"
+          onClick={() => {
+            setSaved(false);
+            setSelectedChannel(null);
+            setConfigValues({});
+          }}
+        >
+          Configure another channel
+        </Button>
+      </div>
+    );
+  }
+
+  // Channel type not selected — show picker
+  if (!selectedChannel) {
+    return (
+      <div className="space-y-4">
+        <div className="text-center mb-2">
+          <div className="text-4xl mb-3">📡</div>
+          <h2 className="text-xl font-semibold">Connect a Messaging Channel</h2>
+          <p className="text-slate-300 text-sm mt-1">
+            Choose a platform to connect your AI assistant to. You can add more channels later in Settings.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {primaryChannels.map((type) => {
+            const channelMeta = CHANNEL_META[type];
+            if (channelMeta.connectionType !== 'token') return null;
+            return (
+              <button
+                key={type}
+                onClick={() => setSelectedChannel(type)}
+                className="p-4 rounded-lg bg-white/5 hover:bg-white/10 transition-all text-left"
+              >
+                <span className="text-3xl">{channelMeta.icon}</span>
+                <p className="font-medium mt-2">{channelMeta.name}</p>
+                <p className="text-xs text-slate-400 mt-1 line-clamp-2">
+                  {channelMeta.description}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // Channel selected — show config form
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 mb-2">
+        <button
+          onClick={() => { setSelectedChannel(null); setConfigValues({}); setValidationError(null); }}
+          className="text-slate-400 hover:text-white transition-colors"
+        >
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+        <div>
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <span>{meta?.icon}</span> Configure {meta?.name}
+          </h2>
+          <p className="text-slate-400 text-sm">{meta?.description}</p>
+        </div>
+      </div>
+
+      {/* Instructions */}
+      <div className="p-3 rounded-lg bg-white/5 text-sm">
+        <div className="flex items-center justify-between mb-2">
+          <p className="font-medium text-slate-200">How to connect:</p>
+          {meta?.docsUrl && (
+            <button
+              onClick={() => {
+                try {
+                  window.electron?.openExternal?.(meta.docsUrl!);
+                } catch {
+                  window.open(meta.docsUrl, '_blank');
+                }
+              }}
+              className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              <BookOpen className="h-3 w-3" />
+              View docs
+              <ExternalLink className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+        <ol className="list-decimal list-inside text-slate-400 space-y-1">
+          {meta?.instructions.map((inst, i) => (
+            <li key={i}>{inst}</li>
+          ))}
+        </ol>
+      </div>
+
+      {/* Config fields */}
+      {meta?.configFields.map((field: ChannelConfigField) => {
+        const isPassword = field.type === 'password';
+        return (
+          <div key={field.key} className="space-y-1.5">
+            <Label htmlFor={`setup-${field.key}`} className="text-slate-200">
+              {field.label}
+              {field.required && <span className="text-red-400 ml-1">*</span>}
+            </Label>
+            <div className="flex gap-2">
+              <Input
+                id={`setup-${field.key}`}
+                type={isPassword && !showSecrets[field.key] ? 'password' : 'text'}
+                placeholder={field.placeholder}
+                value={configValues[field.key] || ''}
+                onChange={(e) => setConfigValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                autoComplete="off"
+                className="font-mono text-sm bg-white/5 border-white/10"
+              />
+              {isPassword && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="shrink-0"
+                  onClick={() => setShowSecrets((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
+                >
+                  {showSecrets[field.key] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </Button>
+              )}
+            </div>
+            {field.description && (
+              <p className="text-xs text-slate-500">{field.description}</p>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Validation error */}
+      {validationError && (
+        <div className="p-3 rounded-lg bg-red-900/30 border border-red-500/30 text-sm text-red-300 flex items-start gap-2">
+          <XCircle className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>{validationError}</span>
+        </div>
+      )}
+
+      {/* Save button */}
+      <Button
+        className="w-full"
+        onClick={handleSave}
+        disabled={!isFormValid() || saving}
+      >
+        {saving ? (
+          <>
+            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            Validating & Saving...
+          </>
+        ) : (
+          <>
+            <Check className="h-4 w-4 mr-2" />
+            Validate & Save
+          </>
+        )}
+      </Button>
+    </div>
+  );
+}
+
 // NOTE: SkillsContent component removed - auto-install essential skills
 
 // Installation status for each skill
@@ -682,55 +1005,55 @@ interface SkillInstallState {
 interface InstallingContentProps {
   skills: DefaultSkill[];
   onComplete: (installedSkills: string[]) => void;
+  onSkip: () => void;
 }
 
-function InstallingContent({ skills, onComplete }: InstallingContentProps) {
+function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProps) {
   const [skillStates, setSkillStates] = useState<SkillInstallState[]>(
     skills.map((s) => ({ ...s, status: 'pending' as InstallStatus }))
   );
   const [overallProgress, setOverallProgress] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const installStarted = useRef(false);
   
-  // Simulate installation process
+  // Real installation process
   useEffect(() => {
     if (installStarted.current) return;
     installStarted.current = true;
     
-    const installSkills = async () => {
-      const installedIds: string[] = [];
-      
-      for (let i = 0; i < skills.length; i++) {
-        // Set current skill to installing
-        setSkillStates((prev) => 
-          prev.map((s, idx) => 
-            idx === i ? { ...s, status: 'installing' } : s
-          )
-        );
-        
-        // Simulate installation time (1-2 seconds per skill)
-        const installTime = 1000 + Math.random() * 1000;
-        await new Promise((resolve) => setTimeout(resolve, installTime));
-        
-        // Mark as completed
-        setSkillStates((prev) => 
-          prev.map((s, idx) => 
-            idx === i ? { ...s, status: 'completed' } : s
-          )
-        );
-        installedIds.push(skills[i].id);
-        
-        // Update overall progress
-        setOverallProgress(Math.round(((i + 1) / skills.length) * 100));
+    const runRealInstall = async () => {
+      try {
+        // Step 1: Initialize all skills to 'installing' state for UI
+        setSkillStates(prev => prev.map(s => ({ ...s, status: 'installing' })));
+        setOverallProgress(10);
+
+        // Step 2: Call the backend to install uv and setup Python
+        const result = await window.electron.ipcRenderer.invoke('uv:install-all') as { 
+          success: boolean; 
+          error?: string 
+        };
+
+        if (result.success) {
+          setSkillStates(prev => prev.map(s => ({ ...s, status: 'completed' })));
+          setOverallProgress(100);
+          
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          onComplete(skills.map(s => s.id));
+        } else {
+          setSkillStates(prev => prev.map(s => ({ ...s, status: 'failed' })));
+          setErrorMessage(result.error || 'Unknown error during installation');
+          toast.error('Environment setup failed');
+        }
+      } catch (err) {
+        setSkillStates(prev => prev.map(s => ({ ...s, status: 'failed' })));
+        setErrorMessage(String(err));
+        toast.error('Installation error');
       }
-      
-      // Small delay before completing
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      onComplete(installedIds);
     };
     
-    installSkills();
+    runRealInstall();
   }, [skills, onComplete]);
-  
+
   const getStatusIcon = (status: InstallStatus) => {
     switch (status) {
       case 'pending':
@@ -784,7 +1107,7 @@ function InstallingContent({ skills, onComplete }: InstallingContentProps) {
       </div>
       
       {/* Skill list */}
-      <div className="space-y-2 max-h-64 overflow-y-auto">
+      <div className="space-y-2 max-h-48 overflow-y-auto">
         {skillStates.map((skill) => (
           <motion.div
             key={skill.id}
@@ -806,14 +1129,50 @@ function InstallingContent({ skills, onComplete }: InstallingContentProps) {
           </motion.div>
         ))}
       </div>
+
+      {/* Error Message Display */}
+      {errorMessage && (
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="p-4 rounded-lg bg-red-900/30 border border-red-500/50 text-red-200 text-sm"
+        >
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-semibold">Setup Error:</p>
+              <pre className="text-xs bg-black/30 p-2 rounded overflow-x-auto whitespace-pre-wrap font-monospace">
+                {errorMessage}
+              </pre>
+              <Button 
+                variant="link" 
+                className="text-red-400 p-0 h-auto text-xs underline"
+                onClick={() => window.location.reload()}
+              >
+                Try restarting the app
+              </Button>
+            </div>
+          </div>
+        </motion.div>
+      )}
       
-      <p className="text-sm text-slate-400 text-center">
-        This may take a few moments...
-      </p>
+      {!errorMessage && (
+        <p className="text-sm text-slate-400 text-center">
+          This may take a few moments...
+        </p>
+      )}
+      <div className="flex justify-end">
+        <Button
+          variant="ghost"
+          className="text-slate-400"
+          onClick={onSkip}
+        >
+          Skip this step
+        </Button>
+      </div>
     </div>
   );
 }
-
 interface CompleteContentProps {
   selectedProvider: string | null;
   installedSkills: string[];

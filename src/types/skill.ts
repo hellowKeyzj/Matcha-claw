@@ -4,33 +4,21 @@
  */
 
 /**
- * Skill category
- */
-export type SkillCategory =
-  | 'productivity'
-  | 'developer'
-  | 'smart-home'
-  | 'media'
-  | 'communication'
-  | 'security'
-  | 'information'
-  | 'utility'
-  | 'custom';
-
-/**
  * Skill data structure
  */
 export interface Skill {
   id: string;
+  slug?: string;
   name: string;
   description: string;
   enabled: boolean;
-  category: SkillCategory;
   icon?: string;
   version?: string;
   author?: string;
   configurable?: boolean;
+  config?: Record<string, unknown>;
   isCore?: boolean;
+  isBundled?: boolean;
   dependencies?: string[];
 }
 
@@ -46,6 +34,20 @@ export interface SkillBundle {
   icon: string;
   skills: string[];
   recommended?: boolean;
+}
+
+
+/**
+ * Marketplace skill data
+ */
+export interface MarketplaceSkill {
+  slug: string;
+  name: string;
+  description: string;
+  version: string;
+  author?: string;
+  downloads?: number;
+  stars?: number;
 }
 
 /**

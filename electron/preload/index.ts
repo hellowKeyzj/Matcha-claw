@@ -78,15 +78,37 @@ const electronAPI = {
         'cron:delete',
         'cron:toggle',
         'cron:trigger',
+        // Channel Config
+        'channel:saveConfig',
+        'channel:getConfig',
+        'channel:getFormValues',
+        'channel:deleteConfig',
+        'channel:listConfigured',
+        'channel:setEnabled',
+        'channel:validate',
+        'channel:validateCredentials',
+        // ClawHub
+        'clawhub:search',
+        'clawhub:install',
+        'clawhub:uninstall',
+        'clawhub:list',
+        'clawhub:openSkillReadme',
+        // UV
+        'uv:check',
+        'uv:install-all',
+        // Skill config (direct file access)
+        'skill:updateConfig',
+        'skill:getConfig',
+        'skill:getAllConfigs',
       ];
-      
+
       if (validChannels.includes(channel)) {
         return ipcRenderer.invoke(channel, ...args);
       }
-      
+
       throw new Error(`Invalid IPC channel: ${channel}`);
     },
-    
+
     /**
      * Listen for events from main process
      */
@@ -109,23 +131,23 @@ const electronAPI = {
         'update:error',
         'cron:updated',
       ];
-      
+
       if (validChannels.includes(channel)) {
         // Wrap the callback to strip the event
         const subscription = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => {
           callback(...args);
         };
         ipcRenderer.on(channel, subscription);
-        
+
         // Return unsubscribe function
         return () => {
           ipcRenderer.removeListener(channel, subscription);
         };
       }
-      
+
       throw new Error(`Invalid IPC channel: ${channel}`);
     },
-    
+
     /**
      * Listen for a single event from main process
      */
@@ -147,15 +169,15 @@ const electronAPI = {
         'update:downloaded',
         'update:error',
       ];
-      
+
       if (validChannels.includes(channel)) {
         ipcRenderer.once(channel, (_event, ...args) => callback(...args));
         return;
       }
-      
+
       throw new Error(`Invalid IPC channel: ${channel}`);
     },
-    
+
     /**
      * Remove all listeners for a channel
      */
@@ -168,19 +190,19 @@ const electronAPI = {
       }
     },
   },
-  
+
   /**
    * Open external URL in default browser
    */
   openExternal: (url: string) => {
     return ipcRenderer.invoke('shell:openExternal', url);
   },
-  
+
   /**
    * Get current platform
    */
   platform: process.platform,
-  
+
   /**
    * Check if running in development
    */
