@@ -62,7 +62,7 @@ interface ChatState {
   switchSession: (key: string) => void;
   newSession: () => void;
   loadHistory: () => Promise<void>;
-  sendMessage: (text: string) => Promise<void>;
+  sendMessage: (text: string, attachments?: { type: string; mimeType: string; fileName: string; content: string }[]) => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
@@ -108,7 +108,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
           model: s.model ? String(s.model) : undefined,
         })).filter((s: ChatSession) => s.key);
 
-        set({ sessions });
+        // Normalize: the Gateway returns the main session with canonical key
+        // like "agent:main:main", but the frontend uses "main" for all RPC calls.
+        // Map the canonical main session key to "main" so the selector stays consistent.
+        const mainCanonicalPattern = /^agent:[^:]+:main$/;
+        const normalizedSessions = sessions.map((s) => {
+          if (mainCanonicalPattern.test(s.key)) {
+            return { ...s, key: 'main', displayName: s.displayName || 'main' };
+          }
+          return s;
+        });
+
+        // Deduplicate: if both "main" and "agent:X:main" existed, keep only one
+        const seen = new Set<string>();
+        const dedupedSessions = normalizedSessions.filter((s) => {
+          if (seen.has(s.key)) return false;
+          seen.add(s.key);
+          return true;
+        });
+
+        set({ sessions: dedupedSessions });
+
+        // If currentSessionKey is 'main' and we now have sessions,
+        // ensure we stay on 'main' (no-op, but load history if needed)
+        const { currentSessionKey } = get();
+        if (currentSessionKey === 'main' && !dedupedSessions.find((s) => s.key === 'main') && dedupedSessions.length > 0) {
+          // Main session not found at all — switch to the first available session
+          set({ currentSessionKey: dedupedSessions[0].key });
+          get().loadHistory();
+        }
       }
     } catch (err) {
       console.warn('Failed to load sessions:', err);
@@ -176,16 +204,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // ── Send message ──
 
-  sendMessage: async (text: string) => {
+  sendMessage: async (text: string, attachments?: { type: string; mimeType: string; fileName: string; content: string }[]) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && (!attachments || attachments.length === 0)) return;
 
     const { currentSessionKey } = get();
 
     // Add user message optimistically
     const userMsg: RawMessage = {
       role: 'user',
-      content: trimmed,
+      content: trimmed || '(image)',
       timestamp: Date.now() / 1000,
       id: crypto.randomUUID(),
     };
@@ -199,15 +227,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const idempotencyKey = crypto.randomUUID();
+      const rpcParams: Record<string, unknown> = {
+        sessionKey: currentSessionKey,
+        message: trimmed || 'Describe this image.',
+        deliver: false,
+        idempotencyKey,
+      };
+
+      // Include image attachments if any
+      if (attachments && attachments.length > 0) {
+        rpcParams.attachments = attachments.map((a) => ({
+          type: a.type,
+          mimeType: a.mimeType,
+          fileName: a.fileName,
+          content: a.content,
+        }));
+      }
+
       const result = await window.electron.ipcRenderer.invoke(
         'gateway:rpc',
         'chat.send',
-        {
-          sessionKey: currentSessionKey,
-          message: trimmed,
-          deliver: false,
-          idempotencyKey,
-        }
+        rpcParams,
       ) as { success: boolean; result?: { runId?: string }; error?: string };
 
       if (!result.success) {
