@@ -841,6 +841,12 @@ export class GatewayManager extends EventEmitter {
     );
     this.lastSpawnSummary = `mode=${mode}, command="${command}", args="${this.sanitizeSpawnArgs(args).join(' ')}", cwd="${openclawDir}"`;
     
+    // Load proxy settings for Gateway subprocess
+    const proxyEnabled = await getSetting('gatewayProxyEnabled');
+    const proxyHttp = await getSetting('gatewayProxyHttp');
+    const proxyHttps = await getSetting('gatewayProxyHttps');
+    const proxyAll = await getSetting('gatewayProxyAll');
+
     return new Promise((resolve, reject) => {
       const spawnEnv: Record<string, string | undefined> = {
         ...process.env,
@@ -851,6 +857,32 @@ export class GatewayManager extends EventEmitter {
         OPENCLAW_SKIP_CHANNELS: '',
         CLAWDBOT_SKIP_CHANNELS: '',
       };
+
+      const httpProxy = proxyHttp?.trim();
+      const httpsProxy = proxyHttps?.trim();
+      const allProxy = proxyAll?.trim();
+
+      if (proxyEnabled) {
+        if (httpProxy) {
+          spawnEnv.HTTP_PROXY = httpProxy;
+          spawnEnv.http_proxy = httpProxy;
+        }
+        if (httpsProxy) {
+          spawnEnv.HTTPS_PROXY = httpsProxy;
+          spawnEnv.https_proxy = httpsProxy;
+        }
+        if (allProxy) {
+          spawnEnv.ALL_PROXY = allProxy;
+          spawnEnv.all_proxy = allProxy;
+        }
+      } else {
+        delete spawnEnv.HTTP_PROXY;
+        delete spawnEnv.http_proxy;
+        delete spawnEnv.HTTPS_PROXY;
+        delete spawnEnv.https_proxy;
+        delete spawnEnv.ALL_PROXY;
+        delete spawnEnv.all_proxy;
+      }
 
       // Critical: In packaged mode, make Electron binary act as Node.js
       if (app.isPackaged) {

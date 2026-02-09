@@ -86,6 +86,10 @@ export function Settings() {
       // ignore
     }
   };
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyHttp, setProxyHttp] = useState('');
+  const [proxyHttps, setProxyHttps] = useState('');
+  const [proxyAll, setProxyAll] = useState('');
 
   // Open developer console
   const openDevConsole = async () => {
@@ -182,6 +186,70 @@ export function Settings() {
       },
     );
     return () => { unsubscribe?.(); };
+  }, []);
+
+  const loadProxySettings = async () => {
+    try {
+      const settings = await window.electron.ipcRenderer.invoke('settings:getAll') as {
+        gatewayProxyEnabled?: boolean;
+        gatewayProxyHttp?: string;
+        gatewayProxyHttps?: string;
+        gatewayProxyAll?: string;
+      };
+      return {
+        enabled: Boolean(settings.gatewayProxyEnabled),
+        http: settings.gatewayProxyHttp || '',
+        https: settings.gatewayProxyHttps || '',
+        all: settings.gatewayProxyAll || '',
+      };
+    } catch (error) {
+      console.error('Failed to load proxy settings:', error);
+      return null;
+    }
+  };
+
+  const applyProxySettings = (settings: {
+    enabled: boolean;
+    http: string;
+    https: string;
+    all: string;
+  }) => {
+    setProxyEnabled(settings.enabled);
+    setProxyHttp(settings.http);
+    setProxyHttps(settings.https);
+    setProxyAll(settings.all);
+  };
+
+  const reloadProxySettings = async () => {
+    const settings = await loadProxySettings();
+    if (!settings) return;
+    applyProxySettings(settings);
+  };
+
+  const saveProxySettings = async () => {
+    try {
+      await window.electron.ipcRenderer.invoke('settings:set', 'gatewayProxyEnabled', proxyEnabled);
+      await window.electron.ipcRenderer.invoke('settings:set', 'gatewayProxyHttp', proxyHttp.trim());
+      await window.electron.ipcRenderer.invoke('settings:set', 'gatewayProxyHttps', proxyHttps.trim());
+      await window.electron.ipcRenderer.invoke('settings:set', 'gatewayProxyAll', proxyAll.trim());
+      await window.electron.ipcRenderer.invoke('settings:applyProxy');
+
+      if (gatewayStatus.state === 'running') {
+        toast.success('Proxy saved. Restarting Gateway...');
+        await restartGateway();
+      } else {
+        toast.success('Proxy saved. Start Gateway to apply.');
+      }
+    } catch (error) {
+      toast.error(`Failed to save proxy: ${String(error)}`);
+    }
+  };
+
+  useEffect(() => {
+    void loadProxySettings().then((settings) => {
+      if (!settings) return;
+      applyProxySettings(settings);
+    });
   }, []);
 
   return (
@@ -331,6 +399,61 @@ export function Settings() {
               checked={gatewayAutoStart}
               onCheckedChange={setGatewayAutoStart}
             />
+          </div>
+
+          <Separator />
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label>Gateway Proxy</Label>
+                <p className="text-sm text-muted-foreground">
+                  Apply proxy settings to the Gateway subprocess only
+                </p>
+              </div>
+              <Switch
+                checked={proxyEnabled}
+                onCheckedChange={setProxyEnabled}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <div className="space-y-1">
+                <Label>HTTP Proxy</Label>
+                <Input
+                  value={proxyHttp}
+                  onChange={(e) => setProxyHttp(e.target.value)}
+                  placeholder="http://127.0.0.1:7890"
+                  disabled={!proxyEnabled}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>HTTPS Proxy</Label>
+                <Input
+                  value={proxyHttps}
+                  onChange={(e) => setProxyHttps(e.target.value)}
+                  placeholder="http://127.0.0.1:7890"
+                  disabled={!proxyEnabled}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>ALL Proxy (SOCKS)</Label>
+                <Input
+                  value={proxyAll}
+                  onChange={(e) => setProxyAll(e.target.value)}
+                  placeholder="socks5://127.0.0.1:7890"
+                  disabled={!proxyEnabled}
+                />
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <Button variant="outline" onClick={saveProxySettings}>
+                  Apply
+                </Button>
+                <Button variant="ghost" onClick={reloadProxySettings}>
+                  Reload
+                </Button>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

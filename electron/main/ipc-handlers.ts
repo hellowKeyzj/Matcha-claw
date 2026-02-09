@@ -24,7 +24,7 @@ import {
 } from '../utils/secure-storage';
 import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
-import { getSetting } from '../utils/store';
+import { getAllSettings, getSetting, resetSettings, setSetting } from '../utils/store';
 import {
   saveProviderKeyToOpenClaw,
   removeProviderFromOpenClaw,
@@ -34,6 +34,7 @@ import {
   updateAgentModelProvider,
 } from '../utils/openclaw-auth';
 import { logger } from '../utils/logger';
+import { applyProxyFromSettings } from './proxy';
 import {
   saveChannelConfig,
   getChannelConfig,
@@ -98,6 +99,9 @@ export function registerIpcHandlers(
 
   // App handlers
   registerAppHandlers();
+
+  // Settings handlers
+  registerSettingsHandlers();
 
   // UV handlers
   registerUvHandlers();
@@ -890,6 +894,40 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
       logger.error('whatsapp:login-error', error);
       mainWindow.webContents.send('channel:whatsapp-error', error);
     }
+  });
+}
+
+/**
+ * Settings-related IPC handlers
+ */
+function registerSettingsHandlers(): void {
+  // Get a single setting
+  ipcMain.handle('settings:get', async (_, key: string) => {
+    return await getSetting(key as never);
+  });
+
+  // Set a single setting
+  ipcMain.handle('settings:set', async (_, key: string, value: unknown) => {
+    await setSetting(key as never, value as never);
+    return { success: true };
+  });
+
+  // Get all settings
+  ipcMain.handle('settings:getAll', async () => {
+    return await getAllSettings();
+  });
+
+  // Reset settings to defaults
+  ipcMain.handle('settings:reset', async () => {
+    await resetSettings();
+    await applyProxyFromSettings();
+    return { success: true };
+  });
+
+  // Apply proxy to main process (and sync env)
+  ipcMain.handle('settings:applyProxy', async () => {
+    await applyProxyFromSettings();
+    return { success: true };
   });
 }
 

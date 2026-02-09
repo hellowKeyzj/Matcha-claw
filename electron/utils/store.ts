@@ -30,6 +30,10 @@ export interface AppSettings {
   gatewayAutoStart: boolean;
   gatewayPort: number;
   gatewayToken: string;
+  gatewayProxyEnabled: boolean;
+  gatewayProxyHttp: string;
+  gatewayProxyHttps: string;
+  gatewayProxyAll: string;
   
   // Update
   updateChannel: 'stable' | 'beta' | 'dev';
@@ -61,6 +65,10 @@ const defaults: AppSettings = {
   gatewayAutoStart: true,
   gatewayPort: 18789,
   gatewayToken: generateToken(),
+  gatewayProxyEnabled: false,
+  gatewayProxyHttp: '',
+  gatewayProxyHttps: '',
+  gatewayProxyAll: '',
   
   // Update
   updateChannel: 'stable',
