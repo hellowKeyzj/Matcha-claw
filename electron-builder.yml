@@ -35,8 +35,8 @@ asarUnpack:
 # Auto-update configuration
 publish:
   - provider: github
-    owner: clawx
-    repo: clawx
+    owner: ValueCell-ai
+    repo: ClawX
     releaseType: release
 
 # macOS Configuration
@@ -48,7 +48,9 @@ mac:
   icon: resources/icons/icon.icns
   target:
     - target: dmg
-    - target: zip
+      arch:
+        - x64
+        - arm64
   darkModeSupport: true
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -85,6 +87,7 @@ win:
     - target: nsis
       arch:
         - x64
+        - arm64
 
 nsis:
   oneClick: false
