@@ -10,10 +10,65 @@
  * Solution: This hook runs AFTER electron-builder finishes packing. It manually
  * copies build/openclaw/node_modules/ into the output resources directory,
  * bypassing electron-builder's glob filtering entirely.
+ * 
+ * Additionally, it removes unnecessary files (type definitions, source maps, docs)
+ * to reduce the number of files that need to be code-signed on macOS.
  */
 
-const { cpSync, existsSync, readdirSync } = require('fs');
+const { cpSync, existsSync, readdirSync, rmSync, statSync } = require('fs');
 const { join } = require('path');
+
+/**
+ * Recursively remove unnecessary files to reduce code signing overhead
+ */
+function cleanupUnnecessaryFiles(dir) {
+  let removedCount = 0;
+  
+  function walk(currentDir) {
+    const entries = readdirSync(currentDir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = join(currentDir, entry.name);
+      
+      if (entry.isDirectory()) {
+        // Remove entire test directories
+        if (entry.name === 'test' || entry.name === 'tests' || 
+            entry.name === '__tests__' || entry.name === '.github' ||
+            entry.name === 'docs' || entry.name === 'examples') {
+          try {
+            rmSync(fullPath, { recursive: true, force: true });
+            removedCount++;
+          } catch (err) {
+            // Ignore errors
+          }
+        } else {
+          walk(fullPath);
+        }
+      } else if (entry.isFile()) {
+        const name = entry.name;
+        // Remove unnecessary file types
+        if (name.endsWith('.d.ts') || name.endsWith('.d.ts.map') ||
+            name.endsWith('.js.map') || name.endsWith('.mjs.map') ||
+            name.endsWith('.ts.map') || name === '.DS_Store' ||
+            name === 'README.md' || name === 'CHANGELOG.md' ||
+            name === 'LICENSE.md' || name === 'CONTRIBUTING.md' ||
+            name.endsWith('.md.txt') || name.endsWith('.markdown') ||
+            name === 'tsconfig.json' || name === '.npmignore' ||
+            name === '.eslintrc' || name === '.prettierrc') {
+          try {
+            rmSync(fullPath, { force: true });
+            removedCount++;
+          } catch (err) {
+            // Ignore errors
+          }
+        }
+      }
+    }
+  }
+  
+  walk(dir);
+  return removedCount;
+}
 
 exports.default = async function afterPack(context) {
   const appOutDir = context.appOutDir;
@@ -44,4 +99,9 @@ exports.default = async function afterPack(context) {
   console.log(`[after-pack] Copying ${depCount} openclaw dependencies to ${dest} ...`);
   cpSync(src, dest, { recursive: true });
   console.log('[after-pack] ✅ openclaw node_modules copied successfully.');
+  
+  // Clean up unnecessary files to reduce code signing overhead (especially on macOS)
+  console.log('[after-pack] 🧹 Cleaning up unnecessary files (type definitions, source maps, docs)...');
+  const removedCount = cleanupUnnecessaryFiles(dest);
+  console.log(`[after-pack] ✅ Removed ${removedCount} unnecessary files/directories.`);
 };
