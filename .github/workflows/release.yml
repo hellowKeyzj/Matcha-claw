@@ -64,12 +64,6 @@ jobs:
         run: pnpm run build:vite
 
       # macOS specific steps
-      - name: Increase file descriptor limit (macOS)
-        if: matrix.platform == 'mac'
-        run: |
-          ulimit -n 10240
-          echo "File descriptor limit increased to: $(ulimit -n)"
-      
       - name: Build macOS
         if: matrix.platform == 'mac'
         env:
@@ -82,7 +76,14 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          ulimit -n 10240
+          # Increase file descriptor limit to handle large number of files during code signing
+          ulimit -n 65536
+          echo "File descriptor limit: $(ulimit -n)"
+          
+          # Create missing bin directories to avoid warnings
+          mkdir -p resources/bin/darwin-x64
+          mkdir -p resources/bin/darwin-arm64
+          
           pnpm run package:mac
 
       # Windows specific steps
