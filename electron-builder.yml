@@ -77,7 +77,7 @@ mac:
   gatekeeperAssess: false
   entitlements: entitlements.mac.plist
   entitlementsInherit: entitlements.mac.plist
-  notarize: true
+  notarize: false
   extendInfo:
     NSMicrophoneUsageDescription: ClawX requires microphone access for voice features
     NSCameraUsageDescription: ClawX requires camera access for video features
