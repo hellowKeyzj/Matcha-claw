@@ -62,3 +62,8 @@ build/
 
 .cursor/
 .pnpm-store/
+
+.kiro/
+.windsurf/
+_bmad/
+.codex/
