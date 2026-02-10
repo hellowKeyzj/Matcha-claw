@@ -412,12 +412,29 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   useEffect(() => {
     if (selectedType !== 'whatsapp') return;
 
-    const onQr = (data: { qr: string; raw: string }) => {
+    const onQr = (...args: unknown[]) => {
+      const data = args[0] as { qr: string; raw: string };
       setQrCode(`data:image/png;base64,${data.qr}`);
     };
 
-    const onSuccess = () => {
+    const onSuccess = async (...args: unknown[]) => {
+      const data = args[0] as { accountId?: string } | undefined;
       toast.success('WhatsApp connected successfully!');
+      const accountId = data?.accountId || channelName.trim() || 'default';
+      try {
+        const saveResult = await window.electron.ipcRenderer.invoke(
+          'channel:saveConfig',
+          'whatsapp',
+          { enabled: true }
+        ) as { success?: boolean; error?: string };
+        if (!saveResult?.success) {
+          console.error('Failed to save WhatsApp config:', saveResult?.error);
+        } else {
+          console.info('Saved WhatsApp config for account:', accountId);
+        }
+      } catch (error) {
+        console.error('Failed to save WhatsApp config:', error);
+      }
       // Register the channel locally so it shows up immediately
       addChannel({
         type: 'whatsapp',
@@ -429,16 +446,17 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       });
     };
 
-    const onError = (err: string) => {
+    const onError = (...args: unknown[]) => {
+      const err = args[0] as string;
       console.error('WhatsApp Login Error:', err);
       toast.error(`WhatsApp Login Failed: ${err}`);
       setQrCode(null);
       setConnecting(false);
     };
 
-    const removeQrListener = (window.electron.ipcRenderer.on as any)('channel:whatsapp-qr', onQr);
-    const removeSuccessListener = (window.electron.ipcRenderer.on as any)('channel:whatsapp-success', onSuccess);
-    const removeErrorListener = (window.electron.ipcRenderer.on as any)('channel:whatsapp-error', onError);
+    const removeQrListener = window.electron.ipcRenderer.on('channel:whatsapp-qr', onQr);
+    const removeSuccessListener = window.electron.ipcRenderer.on('channel:whatsapp-success', onSuccess);
+    const removeErrorListener = window.electron.ipcRenderer.on('channel:whatsapp-error', onError);
 
     return () => {
       if (typeof removeQrListener === 'function') removeQrListener();

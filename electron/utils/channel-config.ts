@@ -6,17 +6,27 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSy
 import { join } from 'path';
 import { homedir } from 'os';
 import { getOpenClawResolvedDir } from './paths';
+import * as logger from './logger';
 
 const OPENCLAW_DIR = join(homedir(), '.openclaw');
 const CONFIG_FILE = join(OPENCLAW_DIR, 'openclaw.json');
+
+// Channels that are managed as plugins (config goes under plugins.entries, not channels)
+const PLUGIN_CHANNELS = ['whatsapp'];
 
 export interface ChannelConfigData {
     enabled?: boolean;
     [key: string]: unknown;
 }
 
+export interface PluginsConfig {
+    entries?: Record<string, ChannelConfigData>;
+    [key: string]: unknown;
+}
+
 export interface OpenClawConfig {
     channels?: Record<string, ChannelConfigData>;
+    plugins?: PluginsConfig;
     [key: string]: unknown;
 }
 
@@ -43,6 +53,7 @@ export function readOpenClawConfig(): OpenClawConfig {
         const content = readFileSync(CONFIG_FILE, 'utf-8');
         return JSON.parse(content) as OpenClawConfig;
     } catch (error) {
+        logger.error('Failed to read OpenClaw config', error);
         console.error('Failed to read OpenClaw config:', error);
         return {};
     }
@@ -57,6 +68,7 @@ export function writeOpenClawConfig(config: OpenClawConfig): void {
     try {
         writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
     } catch (error) {
+        logger.error('Failed to write OpenClaw config', error);
         console.error('Failed to write OpenClaw config:', error);
         throw error;
     }
@@ -72,6 +84,28 @@ export function saveChannelConfig(
     config: ChannelConfigData
 ): void {
     const currentConfig = readOpenClawConfig();
+
+    // Plugin-based channels (e.g. WhatsApp) go under plugins.entries, not channels
+    if (PLUGIN_CHANNELS.includes(channelType)) {
+        if (!currentConfig.plugins) {
+            currentConfig.plugins = {};
+        }
+        if (!currentConfig.plugins.entries) {
+            currentConfig.plugins.entries = {};
+        }
+        currentConfig.plugins.entries[channelType] = {
+            ...currentConfig.plugins.entries[channelType],
+            enabled: config.enabled ?? true,
+        };
+        writeOpenClawConfig(currentConfig);
+        logger.info('Plugin channel config saved', {
+            channelType,
+            configFile: CONFIG_FILE,
+            path: `plugins.entries.${channelType}`,
+        });
+        console.log(`Saved plugin channel config for ${channelType}`);
+        return;
+    }
 
     if (!currentConfig.channels) {
         currentConfig.channels = {};
@@ -146,6 +180,13 @@ export function saveChannelConfig(
     };
 
     writeOpenClawConfig(currentConfig);
+    logger.info('Channel config saved', {
+        channelType,
+        configFile: CONFIG_FILE,
+        rawKeys: Object.keys(config),
+        transformedKeys: Object.keys(transformedConfig),
+        enabled: currentConfig.channels[channelType]?.enabled,
+    });
     console.log(`Saved channel config for ${channelType}`);
 }
 
@@ -288,6 +329,23 @@ export function listConfiguredChannels(): string[] {
  */
 export function setChannelEnabled(channelType: string, enabled: boolean): void {
     const currentConfig = readOpenClawConfig();
+
+    // Plugin-based channels go under plugins.entries
+    if (PLUGIN_CHANNELS.includes(channelType)) {
+        if (!currentConfig.plugins) {
+            currentConfig.plugins = {};
+        }
+        if (!currentConfig.plugins.entries) {
+            currentConfig.plugins.entries = {};
+        }
+        if (!currentConfig.plugins.entries[channelType]) {
+            currentConfig.plugins.entries[channelType] = {};
+        }
+        currentConfig.plugins.entries[channelType].enabled = enabled;
+        writeOpenClawConfig(currentConfig);
+        console.log(`Set plugin channel ${channelType} enabled: ${enabled}`);
+        return;
+    }
 
     if (!currentConfig.channels) {
         currentConfig.channels = {};
@@ -457,8 +515,14 @@ async function validateTelegramCredentials(
 ): Promise<CredentialValidationResult> {
     const botToken = config.botToken?.trim();
 
+    const allowedUsers = config.allowedUsers?.trim();
+
     if (!botToken) {
         return { valid: false, errors: ['Bot token is required'], warnings: [] };
+    }
+
+    if (!allowedUsers) {
+        return { valid: false, errors: ['At least one allowed user ID is required'], warnings: [] };
     }
 
     try {
@@ -551,6 +615,12 @@ export async function validateChannelConfig(channelType: string): Promise<Valida
             const telegramConfig = config.channels?.telegram;
             if (!telegramConfig?.botToken) {
                 result.errors.push('Telegram: Bot token is required');
+                result.valid = false;
+            }
+            // Check allowed users (stored as allowFrom array)
+            const allowedUsers = telegramConfig?.allowFrom as string[] | undefined;
+            if (!allowedUsers || allowedUsers.length === 0) {
+                result.errors.push('Telegram: Allowed User IDs are required');
                 result.valid = false;
             }
         }

@@ -43,7 +43,10 @@ const QRCodeModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'index
 const QRErrorCorrectLevelModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'QRErrorCorrectLevel.js'));
 
 // Types from Baileys (approximate since we don't have types for dynamic require)
-type BaileysSocket = any;
+interface BaileysError extends Error {
+    output?: { statusCode?: number };
+}
+type BaileysSocket = ReturnType<typeof makeWASocket>;
 type ConnectionState = {
     connection: 'close' | 'open' | 'connecting';
     lastDisconnect?: {
@@ -187,6 +190,18 @@ export class WhatsAppLoginManager extends EventEmitter {
     }
 
     /**
+     * Finish login: close socket and emit success after credentials are saved
+     */
+    private async finishLogin(accountId: string): Promise<void> {
+        if (!this.active) return;
+        console.log('[WhatsAppLogin] Finishing login, closing socket to hand over to Gateway...');
+        await this.stop();
+        // Delay to ensure socket is fully released before Gateway connects
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        this.emit('success', { accountId });
+    }
+
+    /**
      * Start WhatsApp pairing process
      */
     async start(accountId: string = 'default'): Promise<void> {
@@ -226,7 +241,8 @@ export class WhatsAppLoginManager extends EventEmitter {
 
             console.log(`[WhatsAppLogin] Connecting for ${accountId} at ${authDir} (Attempt ${this.retryCount + 1})`);
 
-            let pino: any;
+             
+            let pino: (...args: unknown[]) => Record<string, unknown>;
             try {
                 // Try to resolve pino from baileys context since it's a dependency of baileys
                 const baileysRequire = createRequire(join(baileysPath, 'package.json'));
@@ -268,7 +284,21 @@ export class WhatsAppLoginManager extends EventEmitter {
                 // browser: ['ClawX', 'Chrome', '1.0.0'],
             });
 
-            this.socket.ev.on('creds.update', saveCreds);
+            let connectionOpened = false;
+            let credsReceived = false;
+            let credsTimeout: ReturnType<typeof setTimeout> | null = null;
+
+            this.socket.ev.on('creds.update', async () => {
+                await saveCreds();
+                if (connectionOpened && !credsReceived) {
+                    credsReceived = true;
+                    if (credsTimeout) clearTimeout(credsTimeout);
+                    console.log('[WhatsAppLogin] Credentials saved after connection open, finishing login...');
+                    // Small delay to ensure file writes are fully flushed
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    await this.finishLogin(accountId);
+                }
+            });
 
             this.socket.ev.on('connection.update', async (update: ConnectionState) => {
                 try {
@@ -282,7 +312,7 @@ export class WhatsAppLoginManager extends EventEmitter {
                     }
 
                     if (connection === 'close') {
-                        const error = (lastDisconnect?.error as any);
+                        const error = lastDisconnect?.error as BaileysError | undefined;
                         const shouldReconnect = error?.output?.statusCode !== DisconnectReason.loggedOut;
                         console.log('[WhatsAppLogin] Connection closed.',
                             'Reconnect:', shouldReconnect,
@@ -317,17 +347,17 @@ export class WhatsAppLoginManager extends EventEmitter {
                             this.emit('error', 'Logged out');
                         }
                     } else if (connection === 'open') {
-                        console.log('[WhatsAppLogin] Connection opened! Closing socket to hand over to Gateway...');
+                        console.log('[WhatsAppLogin] Connection opened! Waiting for credentials to be saved...');
                         this.retryCount = 0;
+                        connectionOpened = true;
 
-                        // Close socket gracefully to avoid conflict with Gateway
-                        await this.stop();
-
-                        // Add a small delay to ensure socket is fully closed and released
-                        // This prevents "401 Conflict" when Gateway tries to connect immediately
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-
-                        this.emit('success', { accountId });
+                        // Safety timeout: if creds don't update within 15s, proceed anyway
+                        credsTimeout = setTimeout(async () => {
+                            if (!credsReceived && this.active) {
+                                console.warn('[WhatsAppLogin] Timed out waiting for creds.update after connection open, proceeding...');
+                                await this.finishLogin(accountId);
+                            }
+                        }, 15000);
                     }
                 } catch (innerErr) {
                     console.error('[WhatsAppLogin] Error in connection update:', innerErr);
