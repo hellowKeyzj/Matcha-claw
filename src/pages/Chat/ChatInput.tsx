@@ -19,6 +19,7 @@ export interface ChatAttachment {
 
 interface ChatInputProps {
   onSend: (text: string, attachments?: ChatAttachment[]) => void;
+  onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
 }
@@ -54,11 +55,12 @@ function fileToAttachment(file: File): Promise<ChatAttachment> {
   });
 }
 
-export function ChatInput({ onSend, disabled = false, sending = false }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, disabled = false, sending = false }: ChatInputProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isComposingRef = useRef(false);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -85,6 +87,7 @@ export function ChatInput({ onSend, disabled = false, sending = false }: ChatInp
   }, []);
 
   const canSend = (input.trim() || attachments.length > 0) && !disabled && !sending;
+  const canStop = sending && !disabled && !!onStop;
 
   const handleSend = useCallback(() => {
     if (!canSend) return;
@@ -96,9 +99,18 @@ export function ChatInput({ onSend, disabled = false, sending = false }: ChatInp
     }
   }, [input, attachments, canSend, onSend]);
 
+  const handleStop = useCallback(() => {
+    if (!canStop) return;
+    onStop?.();
+  }, [canStop, onStop]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        const nativeEvent = e.nativeEvent as KeyboardEvent;
+        if (isComposingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
+          return;
+        }
         e.preventDefault();
         handleSend();
       }
@@ -221,6 +233,12 @@ export function ChatInput({ onSend, disabled = false, sending = false }: ChatInp
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onCompositionStart={() => {
+                isComposingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                isComposingRef.current = false;
+              }}
               onPaste={handlePaste}
               placeholder={disabled ? 'Gateway not connected...' : 'Message (Enter to send, Shift+Enter for new line)'}
               disabled={disabled}
@@ -231,11 +249,12 @@ export function ChatInput({ onSend, disabled = false, sending = false }: ChatInp
 
           {/* Send Button */}
           <Button
-            onClick={handleSend}
-            disabled={!canSend}
+            onClick={sending ? handleStop : handleSend}
+            disabled={sending ? !canStop : !canSend}
             size="icon"
             className="shrink-0 h-[44px] w-[44px]"
             variant={sending ? 'destructive' : 'default'}
+            title={sending ? 'Stop' : 'Send'}
           >
             {sending ? (
               <Square className="h-4 w-4" />
