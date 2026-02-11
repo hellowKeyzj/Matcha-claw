@@ -3,6 +3,7 @@
  * Manages application update state
  */
 import { create } from 'zustand';
+import { useSettingsStore } from './settings';
 
 export interface UpdateInfo {
   version: string;
@@ -83,6 +84,8 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     }
 
     // Listen for update events
+    // Single source of truth: listen only to update:status-changed
+    // (sent by AppUpdater.updateStatus() in the main process)
     window.electron.ipcRenderer.on('update:status-changed', (data) => {
       const status = data as {
         status: UpdateStatus;
@@ -98,31 +101,22 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       });
     });
 
-    window.electron.ipcRenderer.on('update:checking', () => {
-      set({ status: 'checking', error: null });
-    });
-
-    window.electron.ipcRenderer.on('update:available', (info) => {
-      set({ status: 'available', updateInfo: info as UpdateInfo });
-    });
-
-    window.electron.ipcRenderer.on('update:not-available', () => {
-      set({ status: 'not-available' });
-    });
-
-    window.electron.ipcRenderer.on('update:progress', (progress) => {
-      set({ status: 'downloading', progress: progress as ProgressInfo });
-    });
-
-    window.electron.ipcRenderer.on('update:downloaded', (info) => {
-      set({ status: 'downloaded', updateInfo: info as UpdateInfo, progress: null });
-    });
-
-    window.electron.ipcRenderer.on('update:error', (error) => {
-      set({ status: 'error', error: error as string, progress: null });
-    });
-
     set({ isInitialized: true });
+
+    // Apply persisted settings from the settings store
+    const { autoCheckUpdate, autoDownloadUpdate } = useSettingsStore.getState();
+
+    // Sync auto-download preference to the main process
+    if (autoDownloadUpdate) {
+      window.electron.ipcRenderer.invoke('update:setAutoDownload', true).catch(() => {});
+    }
+
+    // Auto-check for updates on startup (respects user toggle)
+    if (autoCheckUpdate) {
+      setTimeout(() => {
+        get().checkForUpdates().catch(() => {});
+      }, 10000);
+    }
   },
 
   checkForUpdates: async () => {
@@ -134,15 +128,34 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         new Promise((_, reject) => setTimeout(() => reject(new Error('Update check timed out')), 30000))
       ]) as {
         success: boolean;
-        info?: UpdateInfo;
         error?: string;
+        status?: {
+          status: UpdateStatus;
+          info?: UpdateInfo;
+          progress?: ProgressInfo;
+          error?: string;
+        };
       };
       
-      if (!result.success) {
+      if (result.status) {
+        set({
+          status: result.status.status,
+          updateInfo: result.status.info || null,
+          progress: result.status.progress || null,
+          error: result.status.error || null,
+        });
+      } else if (!result.success) {
         set({ status: 'error', error: result.error || 'Failed to check for updates' });
       }
     } catch (error) {
       set({ status: 'error', error: String(error) });
+    } finally {
+      // In dev mode autoUpdater skips without emitting events, so the
+      // status may still be 'checking' or even 'idle'. Catch both.
+      const currentStatus = get().status;
+      if (currentStatus === 'checking' || currentStatus === 'idle') {
+        set({ status: 'error', error: 'Update check completed without a result. This usually means the app is running in dev mode.' });
+      }
     }
   },
 

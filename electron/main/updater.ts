@@ -3,11 +3,15 @@
  * Handles automatic application updates using electron-updater
  *
  * Update providers are configured in electron-builder.yml (OSS primary, GitHub fallback).
- * electron-updater handles provider resolution automatically.
+ * For prerelease channels (alpha, beta), the feed URL is overridden at runtime
+ * to point at the channel-specific OSS directory (e.g. /alpha/, /beta/).
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain } from 'electron';
 import { EventEmitter } from 'events';
+
+/** Base CDN URL (without trailing channel path) */
+const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -24,6 +28,15 @@ export interface UpdaterEvents {
   'download-progress': (progress: ProgressInfo) => void;
   'update-downloaded': (event: UpdateDownloadedEvent) => void;
   'error': (error: Error) => void;
+}
+
+/**
+ * Detect the update channel from a semver version string.
+ * e.g. "0.1.8-alpha.0" → "alpha", "1.0.0-beta.1" → "beta", "1.0.0" → "latest"
+ */
+function detectChannel(version: string): string {
+  const match = version.match(/-([a-zA-Z]+)/);
+  return match ? match[1] : 'latest';
 }
 
 export class AppUpdater extends EventEmitter {
@@ -44,6 +57,20 @@ export class AppUpdater extends EventEmitter {
       error: (msg: string) => console.error('[Updater]', msg),
       debug: (msg: string) => console.debug('[Updater]', msg),
     };
+
+    // Override feed URL for prerelease channels so that
+    // alpha -> /alpha/alpha-mac.yml, beta -> /beta/beta-mac.yml, etc.
+    const version = app.getVersion();
+    const channel = detectChannel(version);
+    const feedUrl = `${OSS_BASE_URL}/${channel}`;
+
+    console.log(`[Updater] Version: ${version}, channel: ${channel}, feedUrl: ${feedUrl}`);
+
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: feedUrl,
+      useMultipleRangeRequest: false,
+    });
 
     this.setupListeners();
   }
@@ -115,13 +142,34 @@ export class AppUpdater extends EventEmitter {
   }
 
   /**
-   * Check for updates
-   * electron-updater automatically tries providers defined in electron-builder.yml in order
+   * Check for updates.
+   * electron-updater automatically tries providers defined in electron-builder.yml in order.
+   *
+   * In dev mode (not packed), autoUpdater.checkForUpdates() silently returns
+   * null without emitting any events, so we must detect this and force a
+   * final status so the UI never gets stuck in 'checking'.
    */
   async checkForUpdates(): Promise<UpdateInfo | null> {
     try {
       const result = await autoUpdater.checkForUpdates();
-      return result?.updateInfo || null;
+
+      // In dev mode (app not packaged), autoUpdater silently returns null
+      // without emitting ANY events (not even checking-for-update).
+      // Detect this and force an error so the UI never stays silent.
+      if (result == null) {
+        this.updateStatus({
+          status: 'error',
+          error: 'Update check skipped (dev mode – app is not packaged)',
+        });
+        return null;
+      }
+
+      // Safety net: if events somehow didn't fire, force a final state.
+      if (this.status.status === 'checking' || this.status.status === 'idle') {
+        this.updateStatus({ status: 'not-available' });
+      }
+
+      return result.updateInfo || null;
     } catch (error) {
       console.error('[Updater] Check for updates failed:', error);
       this.updateStatus({ status: 'error', error: (error as Error).message || String(error) });
@@ -189,13 +237,14 @@ export function registerUpdateHandlers(
     return updater.getCurrentVersion();
   });
 
-  // Check for updates
+  // Check for updates – always return final status so the renderer
+  // never gets stuck in 'checking' waiting for a push event.
   ipcMain.handle('update:check', async () => {
     try {
-      const info = await updater.checkForUpdates();
-      return { success: true, info };
+      await updater.checkForUpdates();
+      return { success: true, status: updater.getStatus() };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: String(error), status: updater.getStatus() };
     }
   });
 
@@ -227,42 +276,6 @@ export function registerUpdateHandlers(
     return { success: true };
   });
 
-  // Forward update events to renderer
-  updater.on('checking-for-update', () => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:checking');
-    }
-  });
-
-  updater.on('update-available', (info) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:available', info);
-    }
-  });
-
-  updater.on('update-not-available', (info) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:not-available', info);
-    }
-  });
-
-  updater.on('download-progress', (progress) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:progress', progress);
-    }
-  });
-
-  updater.on('update-downloaded', (event) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:downloaded', event);
-    }
-  });
-
-  updater.on('error', (error) => {
-    if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update:error', error.message);
-    }
-  });
 }
 
 // Export singleton instance

@@ -3,7 +3,7 @@
  * Displays update status and allows manual update checking/installation
  */
 import { useEffect, useCallback } from 'react';
-import { Download, RefreshCw, CheckCircle2, AlertCircle, Loader2, Rocket } from 'lucide-react';
+import { Download, RefreshCw, Loader2, Rocket } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useUpdateStore } from '@/stores/update';
@@ -41,25 +41,6 @@ export function UpdateSettings() {
     await checkForUpdates();
   }, [checkForUpdates, clearError]);
 
-  const renderStatusIcon = () => {
-    switch (status) {
-      case 'checking':
-        return <Loader2 className="h-5 w-5 animate-spin text-blue-500" />;
-      case 'downloading':
-        return <Download className="h-5 w-5 text-blue-500 animate-pulse" />;
-      case 'available':
-        return <Download className="h-5 w-5 text-green-500" />;
-      case 'downloaded':
-        return <CheckCircle2 className="h-5 w-5 text-green-500" />;
-      case 'error':
-        return <AlertCircle className="h-5 w-5 text-red-500" />;
-      case 'not-available':
-        return <CheckCircle2 className="h-5 w-5 text-green-500" />;
-      default:
-        return <RefreshCw className="h-5 w-5 text-muted-foreground" />;
-    }
-  };
-
   const renderStatusText = () => {
     switch (status) {
       case 'checking':
@@ -71,7 +52,7 @@ export function UpdateSettings() {
       case 'downloaded':
         return `Ready to install: v${updateInfo?.version}`;
       case 'error':
-        return error || 'Update check failed';
+        return 'Update check failed';
       case 'not-available':
         return 'You have the latest version';
       default:
@@ -138,12 +119,9 @@ export function UpdateSettings() {
   return (
     <div className="space-y-4">
       {/* Current Version */}
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <p className="text-sm font-medium">Current Version</p>
-          <p className="text-2xl font-bold">v{currentVersion}</p>
-        </div>
-        {renderStatusIcon()}
+      <div className="space-y-1">
+        <p className="text-sm font-medium">Current Version</p>
+        <p className="text-2xl font-bold">v{currentVersion}</p>
       </div>
 
       {/* Status */}
