@@ -16,8 +16,8 @@ import {
   isOpenClawPresent 
 } from '../utils/paths';
 import { getSetting } from '../utils/store';
-import { getApiKey } from '../utils/secure-storage';
-import { getProviderEnvVar } from '../utils/openclaw-auth';
+import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-storage';
+import { getProviderEnvVar, getKeyableProviderTypes } from '../utils/provider-registry';
 import { GatewayEventType, JsonRpcNotification, isNotification, isResponse } from './protocol';
 import { logger } from '../utils/logger';
 import { getUvMirrorEnv } from '../utils/uv-env';
@@ -521,10 +521,30 @@ export class GatewayManager extends EventEmitter {
       ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
       : process.env.PATH || '';
     
-    // Load provider API keys from secure storage to pass as environment variables
+    // Load provider API keys from storage to pass as environment variables
     const providerEnv: Record<string, string> = {};
-    const providerTypes = ['anthropic', 'openai', 'google', 'openrouter'];
+    const providerTypes = getKeyableProviderTypes();
     let loadedProviderKeyCount = 0;
+
+    // Prefer the selected default provider key when provider IDs are instance-based.
+    try {
+      const defaultProviderId = await getDefaultProvider();
+      if (defaultProviderId) {
+        const defaultProvider = await getProvider(defaultProviderId);
+        const defaultProviderType = defaultProvider?.type;
+        const defaultProviderKey = await getApiKey(defaultProviderId);
+        if (defaultProviderType && defaultProviderKey) {
+          const envVar = getProviderEnvVar(defaultProviderType);
+          if (envVar) {
+            providerEnv[envVar] = defaultProviderKey;
+            loadedProviderKeyCount++;
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn('Failed to load default provider key for environment injection:', err);
+    }
+
     for (const providerType of providerTypes) {
       try {
         const key = await getApiKey(providerType);

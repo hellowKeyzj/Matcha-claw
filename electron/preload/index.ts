@@ -64,12 +64,12 @@ const electronAPI = {
         'env:setApiKey',
         'env:deleteApiKey',
         // Provider
-        'provider:encryptionAvailable',
         'provider:list',
         'provider:get',
         'provider:save',
         'provider:delete',
         'provider:setApiKey',
+        'provider:updateWithKey',
         'provider:deleteApiKey',
         'provider:hasApiKey',
         'provider:getApiKey',

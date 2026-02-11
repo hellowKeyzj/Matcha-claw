@@ -3,28 +3,10 @@
  * Manages AI provider configurations
  */
 import { create } from 'zustand';
+import type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
 
-/**
- * Provider configuration
- */
-export interface ProviderConfig {
-  id: string;
-  name: string;
-  type: 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'custom';
-  baseUrl?: string;
-  model?: string;
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * Provider with key info (for display)
- */
-export interface ProviderWithKeyInfo extends ProviderConfig {
-  hasKey: boolean;
-  keyMasked: string | null;
-}
+// Re-export types for consumers that imported from here
+export type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
 
 interface ProviderState {
   providers: ProviderWithKeyInfo[];
@@ -38,6 +20,11 @@ interface ProviderState {
   updateProvider: (providerId: string, updates: Partial<ProviderConfig>, apiKey?: string) => Promise<void>;
   deleteProvider: (providerId: string) => Promise<void>;
   setApiKey: (providerId: string, apiKey: string) => Promise<void>;
+  updateProviderWithKey: (
+    providerId: string,
+    updates: Partial<ProviderConfig>,
+    apiKey?: string
+  ) => Promise<void>;
   deleteApiKey: (providerId: string) => Promise<void>;
   setDefaultProvider: (providerId: string) => Promise<void>;
   validateApiKey: (providerId: string, apiKey: string) => Promise<{ valid: boolean; error?: string }>;
@@ -95,9 +82,11 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       if (!existing) {
         throw new Error('Provider not found');
       }
+
+      const { hasKey: _hasKey, keyMasked: _keyMasked, ...providerConfig } = existing;
       
       const updatedConfig: ProviderConfig = {
-        ...existing,
+        ...providerConfig,
         ...updates,
         updatedAt: new Date().toISOString(),
       };
@@ -144,6 +133,26 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       await get().fetchProviders();
     } catch (error) {
       console.error('Failed to set API key:', error);
+      throw error;
+    }
+  },
+
+  updateProviderWithKey: async (providerId, updates, apiKey) => {
+    try {
+      const result = await window.electron.ipcRenderer.invoke(
+        'provider:updateWithKey',
+        providerId,
+        updates,
+        apiKey
+      ) as { success: boolean; error?: string };
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update provider');
+      }
+
+      await get().fetchProviders();
+    } catch (error) {
+      console.error('Failed to update provider with key:', error);
       throw error;
     }
   },

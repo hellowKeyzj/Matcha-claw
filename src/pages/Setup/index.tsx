@@ -7,6 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Check, 
+  ChevronDown,
   ChevronLeft, 
   ChevronRight, 
   Loader2, 
@@ -97,52 +98,45 @@ const defaultSkills: DefaultSkill[] = [
   { id: 'terminal', name: 'Terminal', description: 'Shell command execution' },
 ];
 
-// Provider types
-interface Provider {
-  id: string;
-  name: string;
-  model: string;
-  icon: string;
-  placeholder: string;
-}
+import { SETUP_PROVIDERS, type ProviderTypeInfo } from '@/lib/providers';
 
-const providers: Provider[] = [
-  { id: 'anthropic', name: 'Anthropic', model: 'Claude', icon: '🤖', placeholder: 'sk-ant-...' },
-  { id: 'openai', name: 'OpenAI', model: 'GPT-4', icon: '💚', placeholder: 'sk-...' },
-  { id: 'google', name: 'Google', model: 'Gemini', icon: '🔷', placeholder: 'AI...' },
-  { id: 'openrouter', name: 'OpenRouter', model: 'Multi-Model', icon: '🌐', placeholder: 'sk-or-...' },
-];
+// Use the shared provider registry for setup providers
+const providers = SETUP_PROVIDERS;
 
 // NOTE: Channel types moved to Settings > Channels page
 // NOTE: Skill bundles moved to Settings > Skills page - auto-install essential skills during setup
 
 export function Setup() {
   const navigate = useNavigate();
-  const [currentStep, setCurrentStep] = useState(0);
+  const [currentStep, setCurrentStep] = useState<number>(STEP.WELCOME);
   
   // Setup state
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const [providerConfigured, setProviderConfigured] = useState(false);
   const [apiKey, setApiKey] = useState('');
   // Installation state for the Installing step
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
   
-  const step = steps[currentStep];
-  const isFirstStep = currentStep === 0;
-  const isLastStep = currentStep === steps.length - 1;
+  const safeStepIndex = Number.isInteger(currentStep)
+    ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
+    : STEP.WELCOME;
+  const step = steps[safeStepIndex] ?? steps[STEP.WELCOME];
+  const isFirstStep = safeStepIndex === STEP.WELCOME;
+  const isLastStep = safeStepIndex === steps.length - 1;
   
   const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
   
   // Derive canProceed based on current step - computed directly to avoid useEffect
   const canProceed = useMemo(() => {
-    switch (currentStep) {
+    switch (safeStepIndex) {
       case STEP.WELCOME:
         return true;
       case STEP.RUNTIME:
         return runtimeChecksPassed;
       case STEP.PROVIDER:
-        return selectedProvider !== null && apiKey.length > 0;
+        return providerConfigured;
       case STEP.CHANNEL:
         return true; // Always allow proceeding — channel step is optional
       case STEP.INSTALLING:
@@ -152,7 +146,7 @@ export function Setup() {
       default:
         return true;
     }
-  }, [currentStep, selectedProvider, apiKey, runtimeChecksPassed]);
+  }, [safeStepIndex, providerConfigured, runtimeChecksPassed]);
   
   const handleNext = async () => {
     if (isLastStep) {
@@ -193,14 +187,14 @@ export function Setup() {
               <div
                 className={cn(
                   'flex h-8 w-8 items-center justify-center rounded-full border-2 transition-colors',
-                  i < currentStep
+                  i < safeStepIndex
                     ? 'border-primary bg-primary text-primary-foreground'
-                    : i === currentStep
+                    : i === safeStepIndex
                     ? 'border-primary text-primary'
                     : 'border-slate-600 text-slate-600'
                 )}
               >
-                {i < currentStep ? (
+                {i < safeStepIndex ? (
                   <Check className="h-4 w-4" />
                 ) : (
                   <span className="text-sm">{i + 1}</span>
@@ -210,7 +204,7 @@ export function Setup() {
                 <div
                   className={cn(
                     'h-0.5 w-8 transition-colors',
-                    i < currentStep ? 'bg-primary' : 'bg-slate-600'
+                    i < safeStepIndex ? 'bg-primary' : 'bg-slate-600'
                   )}
                 />
               )}
@@ -235,26 +229,27 @@ export function Setup() {
           
           {/* Step-specific content */}
           <div className="rounded-xl bg-white/10 backdrop-blur p-8 mb-8">
-            {currentStep === STEP.WELCOME && <WelcomeContent />}
-            {currentStep === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
-            {currentStep === STEP.PROVIDER && (
+                {safeStepIndex === STEP.WELCOME && <WelcomeContent />}
+                {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
+                {safeStepIndex === STEP.PROVIDER && (
               <ProviderContent
                 providers={providers}
                 selectedProvider={selectedProvider}
                 onSelectProvider={setSelectedProvider}
                 apiKey={apiKey}
                 onApiKeyChange={setApiKey}
+                onConfiguredChange={setProviderConfigured}
               />
             )}
-            {currentStep === STEP.CHANNEL && <SetupChannelContent />}
-            {currentStep === STEP.INSTALLING && (
+                {safeStepIndex === STEP.CHANNEL && <SetupChannelContent />}
+                {safeStepIndex === STEP.INSTALLING && (
               <InstallingContent
                 skills={defaultSkills}
                 onComplete={handleInstallationComplete}
                 onSkip={() => setCurrentStep((i) => i + 1)}
               />
             )}
-            {currentStep === STEP.COMPLETE && (
+                {safeStepIndex === STEP.COMPLETE && (
               <CompleteContent
                 selectedProvider={selectedProvider}
                 installedSkills={installedSkills}
@@ -263,7 +258,7 @@ export function Setup() {
           </div>
           
           {/* Navigation - hidden during installation step */}
-          {currentStep !== STEP.INSTALLING && (
+          {safeStepIndex !== STEP.INSTALLING && (
             <div className="flex justify-between">
               <div>
                 {!isFirstStep && (
@@ -274,12 +269,12 @@ export function Setup() {
                 )}
               </div>
               <div className="flex gap-2">
-                {currentStep === STEP.CHANNEL && (
+                {safeStepIndex === STEP.CHANNEL && (
                   <Button variant="ghost" onClick={handleNext}>
                     Skip this step
                   </Button>
                 )}
-                {!isLastStep && currentStep !== STEP.RUNTIME && currentStep !== STEP.CHANNEL && (
+                {!isLastStep && safeStepIndex !== STEP.RUNTIME && safeStepIndex !== STEP.CHANNEL && (
                   <Button variant="ghost" onClick={handleSkip}>
                     Skip Setup
                   </Button>
@@ -641,11 +636,12 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
 }
 
 interface ProviderContentProps {
-  providers: Provider[];
+  providers: ProviderTypeInfo[];
   selectedProvider: string | null;
   onSelectProvider: (id: string | null) => void;
   apiKey: string;
   onApiKeyChange: (key: string) => void;
+  onConfiguredChange: (configured: boolean) => void;
 }
 
 function ProviderContent({ 
@@ -653,24 +649,39 @@ function ProviderContent({
   selectedProvider, 
   onSelectProvider, 
   apiKey, 
-  onApiKeyChange 
+  onApiKeyChange,
+  onConfiguredChange,
 }: ProviderContentProps) {
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [keyValid, setKeyValid] = useState<boolean | null>(null);
+  const [baseUrl, setBaseUrl] = useState('');
+  const [modelId, setModelId] = useState('');
+
+  // On mount, try to restore previously configured provider
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ id: string; hasKey: boolean }>;
+        const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ id: string; type: string; hasKey: boolean }>;
         const defaultId = await window.electron.ipcRenderer.invoke('provider:getDefault') as string | null;
-        const preferred = (defaultId && list.find((p) => p.id === defaultId && p.hasKey)) || list.find((p) => p.hasKey);
+        const setupProviderTypes = new Set<string>(providers.map((p) => p.id));
+        const setupCandidates = list.filter((p) => setupProviderTypes.has(p.type));
+        const preferred =
+          (defaultId && setupCandidates.find((p) => p.id === defaultId))
+          || setupCandidates.find((p) => p.hasKey)
+          || setupCandidates[0];
         if (preferred && !cancelled) {
-          onSelectProvider(preferred.id);
+          onSelectProvider(preferred.type);
+          const typeInfo = providers.find((p) => p.id === preferred.type);
+          const requiresKey = typeInfo?.requiresApiKey ?? false;
+          onConfiguredChange(!requiresKey || preferred.hasKey);
           const storedKey = await window.electron.ipcRenderer.invoke('provider:getApiKey', preferred.id) as string | null;
           if (storedKey) {
             onApiKeyChange(storedKey);
           }
+        } else if (!cancelled) {
+          onConfiguredChange(false);
         }
       } catch (error) {
         if (!cancelled) {
@@ -679,15 +690,36 @@ function ProviderContent({
       }
     })();
     return () => { cancelled = true; };
-  }, [onApiKeyChange, onSelectProvider]);
+  }, [onApiKeyChange, onConfiguredChange, onSelectProvider, providers]);
+
+  // When provider changes, load stored key + reset base URL
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!selectedProvider) return;
       try {
-        const storedKey = await window.electron.ipcRenderer.invoke('provider:getApiKey', selectedProvider) as string | null;
-        if (!cancelled && storedKey) {
-          onApiKeyChange(storedKey);
+        const list = await window.electron.ipcRenderer.invoke('provider:list') as Array<{ id: string; type: string; hasKey: boolean }>;
+        const defaultId = await window.electron.ipcRenderer.invoke('provider:getDefault') as string | null;
+        const sameType = list.filter((p) => p.type === selectedProvider);
+        const preferredInstance =
+          (defaultId && sameType.find((p) => p.id === defaultId))
+          || sameType.find((p) => p.hasKey)
+          || sameType[0];
+        const providerIdForLoad = preferredInstance?.id || selectedProvider;
+
+        const savedProvider = await window.electron.ipcRenderer.invoke(
+          'provider:get',
+          providerIdForLoad
+        ) as { baseUrl?: string; model?: string } | null;
+        const storedKey = await window.electron.ipcRenderer.invoke('provider:getApiKey', providerIdForLoad) as string | null;
+        if (!cancelled) {
+          if (storedKey) {
+            onApiKeyChange(storedKey);
+          }
+
+          const info = providers.find((p) => p.id === selectedProvider);
+          setBaseUrl(savedProvider?.baseUrl || info?.defaultBaseUrl || '');
+          setModelId(savedProvider?.model || info?.defaultModelId || '');
         }
       } catch (error) {
         if (!cancelled) {
@@ -696,95 +728,177 @@ function ProviderContent({
       }
     })();
     return () => { cancelled = true; };
-  }, [onApiKeyChange, selectedProvider]);
+  }, [onApiKeyChange, selectedProvider, providers]);
   
   const selectedProviderData = providers.find((p) => p.id === selectedProvider);
+  const showBaseUrlField = selectedProviderData?.showBaseUrl ?? false;
+  const showModelIdField = selectedProviderData?.showModelId ?? false;
+  const requiresKey = selectedProviderData?.requiresApiKey ?? false;
   
-  const handleValidateKey = async () => {
-    if (!apiKey || !selectedProvider) return;
+  const handleValidateAndSave = async () => {
+    if (!selectedProvider) return;
     
     setValidating(true);
     setKeyValid(null);
     
     try {
-      // Call real API validation
-      const result = await window.electron.ipcRenderer.invoke(
-        'provider:validateKey',
-        selectedProvider,
-        apiKey
-      ) as { valid: boolean; error?: string };
-      
-      setKeyValid(result.valid);
-      
-      if (result.valid) {
-        // Save the API key to both ClawX secure storage and OpenClaw auth-profiles
-        try {
-          await window.electron.ipcRenderer.invoke(
-            'provider:save',
-            {
-              id: selectedProvider,
-              name: selectedProviderData?.name || selectedProvider,
-              type: selectedProvider,
-              enabled: true,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            },
-            apiKey
-          );
-        } catch (saveErr) {
-          console.warn('Failed to persist API key:', saveErr);
+      // Validate key if the provider requires one and a key was entered
+      if (requiresKey && apiKey) {
+        const result = await window.electron.ipcRenderer.invoke(
+          'provider:validateKey',
+          selectedProvider,
+          apiKey
+        ) as { valid: boolean; error?: string };
+        
+        setKeyValid(result.valid);
+        
+        if (!result.valid) {
+          toast.error(result.error || 'Invalid API key');
+          setValidating(false);
+          return;
         }
-        toast.success('API key validated and saved');
       } else {
-        toast.error(result.error || 'Invalid API key');
+        setKeyValid(true);
       }
+
+      const effectiveModelId =
+        selectedProviderData?.defaultModelId ||
+        modelId.trim() ||
+        undefined;
+
+      // Save provider config + API key, then set as default
+      const saveResult = await window.electron.ipcRenderer.invoke(
+        'provider:save',
+        {
+          id: selectedProvider,
+          name: selectedProviderData?.name || selectedProvider,
+          type: selectedProvider,
+          baseUrl: baseUrl.trim() || undefined,
+          model: effectiveModelId,
+          enabled: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        apiKey || undefined
+      ) as { success: boolean; error?: string };
+
+      if (!saveResult.success) {
+        throw new Error(saveResult.error || 'Failed to save provider config');
+      }
+
+      const defaultResult = await window.electron.ipcRenderer.invoke(
+        'provider:setDefault',
+        selectedProvider
+      ) as { success: boolean; error?: string };
+
+      if (!defaultResult.success) {
+        throw new Error(defaultResult.error || 'Failed to set default provider');
+      }
+
+      onConfiguredChange(true);
+      toast.success('Provider configured');
     } catch (error) {
       setKeyValid(false);
-      toast.error('Validation failed: ' + String(error));
+      onConfiguredChange(false);
+      toast.error('Configuration failed: ' + String(error));
     } finally {
       setValidating(false);
     }
   };
+
+  // Can the user submit?
+  const canSubmit =
+    selectedProvider
+    && (requiresKey ? apiKey.length > 0 : true)
+    && (showModelIdField ? modelId.trim().length > 0 : true);
   
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold mb-2">Select AI Provider</h2>
-        <p className="text-slate-300">
-          Choose your preferred AI model provider
-        </p>
-      </div>
-      
-      <div className="grid grid-cols-3 gap-4">
-        {providers.map((provider) => (
-          <button
-            key={provider.id}
-            onClick={() => {
-              onSelectProvider(provider.id);
+      {/* Provider selector — dropdown */}
+      <div className="space-y-2">
+        <Label htmlFor="provider">Model Provider</Label>
+        <div className="relative">
+          <select
+            id="provider"
+            value={selectedProvider || ''}
+            onChange={(e) => {
+              const val = e.target.value || null;
+              onSelectProvider(val);
+              onConfiguredChange(false);
+              onApiKeyChange('');
               setKeyValid(null);
             }}
             className={cn(
-              'p-4 rounded-lg bg-white/5 hover:bg-white/10 transition-all text-center',
-              selectedProvider === provider.id && 'ring-2 ring-primary bg-white/10'
+              'appearance-none rounded-md border border-white/10 bg-white/5 px-3 py-2 pr-8',
+              'w-full text-sm text-white cursor-pointer',
+              'focus:outline-none focus:ring-2 focus:ring-ring',
             )}
           >
-            <span className="text-3xl">{provider.icon}</span>
-            <p className="font-medium mt-2">{provider.name}</p>
-            <p className="text-sm text-slate-400">{provider.model}</p>
-          </button>
-        ))}
+            <option value="" disabled className="bg-slate-800 text-slate-400">Select a provider...</option>
+            {providers.map((p) => (
+              <option key={p.id} value={p.id} className="bg-slate-800 text-white">
+                {p.icon}  {p.name}{p.model ? ` — ${p.model}` : ''}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400 pointer-events-none" />
+        </div>
       </div>
-      
+
+      {/* Dynamic config fields based on selected provider */}
       {selectedProvider && (
         <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: 'auto' }}
+          key={selectedProvider}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
           className="space-y-4"
         >
-          <div className="space-y-2">
-            <Label htmlFor="apiKey">API Key</Label>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
+          {/* Base URL field (for siliconflow, ollama, custom) */}
+          {showBaseUrlField && (
+            <div className="space-y-2">
+              <Label htmlFor="baseUrl">Base URL</Label>
+              <Input
+                id="baseUrl"
+                type="text"
+                placeholder="https://api.example.com/v1"
+                value={baseUrl}
+                onChange={(e) => {
+                  setBaseUrl(e.target.value);
+                  onConfiguredChange(false);
+                }}
+                autoComplete="off"
+                className="bg-white/5 border-white/10"
+              />
+            </div>
+          )}
+
+          {/* Model ID field (for siliconflow etc.) */}
+          {showModelIdField && (
+            <div className="space-y-2">
+              <Label htmlFor="modelId">Model ID</Label>
+              <Input
+                id="modelId"
+                type="text"
+                placeholder={selectedProviderData?.modelIdPlaceholder || 'e.g. deepseek-ai/DeepSeek-V3'}
+                value={modelId}
+                onChange={(e) => {
+                  setModelId(e.target.value);
+                  onConfiguredChange(false);
+                }}
+                autoComplete="off"
+                className="bg-white/5 border-white/10"
+              />
+              <p className="text-xs text-slate-500">
+                The model identifier from your provider (e.g. deepseek-ai/DeepSeek-V3)
+              </p>
+            </div>
+          )}
+
+          {/* API Key field (hidden for ollama) */}
+          {requiresKey && (
+            <div className="space-y-2">
+              <Label htmlFor="apiKey">API Key</Label>
+              <div className="relative">
                 <Input
                   id="apiKey"
                   type={showKey ? 'text' : 'password'}
@@ -792,6 +906,7 @@ function ProviderContent({
                   value={apiKey}
                   onChange={(e) => {
                     onApiKeyChange(e.target.value);
+                    onConfiguredChange(false);
                     setKeyValid(null);
                   }}
                   autoComplete="off"
@@ -805,27 +920,29 @@ function ProviderContent({
                   {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
-              <Button 
-                variant="outline" 
-                onClick={handleValidateKey}
-                disabled={!apiKey || validating}
-              >
-                {validating ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  'Validate'
-                )}
-              </Button>
             </div>
-            {keyValid !== null && (
-              <p className={cn('text-sm', keyValid ? 'text-green-400' : 'text-red-400')}>
-                {keyValid ? '✓ API key is valid' : '✗ Invalid API key'}
-              </p>
-            )}
-          </div>
-          
-          <p className="text-sm text-slate-400">
-            Your API key will be securely stored in the system keychain.
+          )}
+
+          {/* Validate & Save */}
+          <Button
+            onClick={handleValidateAndSave}
+            disabled={!canSubmit || validating}
+            className="w-full"
+          >
+            {validating ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : null}
+            {requiresKey ? 'Validate & Save' : 'Save'}
+          </Button>
+
+          {keyValid !== null && (
+            <p className={cn('text-sm text-center', keyValid ? 'text-green-400' : 'text-red-400')}>
+              {keyValid ? '✓ Provider configured successfully' : '✗ Invalid API key'}
+            </p>
+          )}
+
+          <p className="text-sm text-slate-400 text-center">
+            Your API key is stored locally on your machine.
           </p>
         </motion.div>
       )}
