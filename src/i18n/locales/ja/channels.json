@@ -135,10 +135,11 @@
                 }
             },
             "instructions": [
-                "Feishu Open Platform に移動します",
+                "ドキュメントを読み、Feishu Open Platform に移動します",
                 "新しいアプリケーションを作成します",
                 "App ID と App Secret を取得します",
-                "イベント購読を設定します"
+                "イベント購読を設定します",
+                "注意：現在のドキュメントには記載されていませんが、権限管理で 'contact:contact.base:readonly' 権限を必ず追加してください"
             ]
         },
         "imessage": {
