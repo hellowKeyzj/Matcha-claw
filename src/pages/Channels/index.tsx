@@ -37,7 +37,6 @@ import {
   CHANNEL_NAMES,
   CHANNEL_META,
   getPrimaryChannels,
-  getAllChannels,
   type ChannelType,
   type Channel,
   type ChannelMeta,
@@ -53,7 +52,6 @@ export function Channels() {
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
-  const [showAllChannels, setShowAllChannels] = useState(false);
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([]);
 
   // Fetch channels on mount
@@ -94,7 +92,7 @@ export function Channels() {
   }, [fetchChannels, fetchConfiguredTypes]);
 
   // Get channel types to display
-  const displayedChannelTypes = showAllChannels ? getAllChannels() : getPrimaryChannels();
+  const displayedChannelTypes = getPrimaryChannels();
 
   // Connected/disconnected channel counts
   const connectedCount = channels.filter((c) => c.status === 'connected').length;
@@ -228,13 +226,6 @@ export function Channels() {
                 {t('availableDesc')}
               </CardDescription>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowAllChannels(!showAllChannels)}
-            >
-              {showAllChannels ? t('showLess') : t('showAll')}
-            </Button>
           </div>
         </CardHeader>
         <CardContent>
