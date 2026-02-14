@@ -30,6 +30,7 @@ export interface AppSettings {
   gatewayAutoStart: boolean;
   gatewayPort: number;
   gatewayToken: string;
+  gatewayHostRuntime: 'linux' | 'wsl' | 'windows' | 'macos';
   gatewayProxyEnabled: boolean;
   gatewayProxyHttp: string;
   gatewayProxyHttps: string;
@@ -65,6 +66,7 @@ const defaults: AppSettings = {
   gatewayAutoStart: true,
   gatewayPort: 18789,
   gatewayToken: generateToken(),
+  gatewayHostRuntime: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux',
   gatewayProxyEnabled: false,
   gatewayProxyHttp: '',
   gatewayProxyHttps: '',

@@ -2,6 +2,9 @@
  * Proxy Utilities
  * Applies proxy settings for the main process (Electron session)
  * and synchronizes environment variables for Node-based requests.
+ *
+ * Note: This only affects the ClawX process (and its own subprocesses).
+ * It does NOT mutate an already-running external OpenClaw process that ClawX attaches to.
  */
 import { session } from 'electron';
 import { getSetting } from '../utils/store';
@@ -98,4 +101,3 @@ export async function applyProxyFromSettings(): Promise<void> {
     await session.defaultSession.setProxy({ mode: 'direct' });
   }
 }
-

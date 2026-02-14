@@ -42,13 +42,19 @@
         "nodejs": "Node.js 运行时",
         "openclaw": "OpenClaw 包",
         "gateway": "网关服务",
+        "gatewayConnection": "网关连接",
         "startGateway": "启动网关",
+        "connectGatewayAutoStart": "连接网关（必要时自动启动）",
         "status": {
             "checking": "检查中...",
             "success": "Node.js 可用",
             "error": "失败",
             "gatewayRunning": "运行在端口 {{port}}",
-            "packageReady": "OpenClaw 包已就绪"
+            "packageReady": "OpenClaw 包已就绪",
+            "waitingConnectAutoStart": "等待连接网关（必要时自动启动）...",
+            "connectingAutoStart": "连接中（必要时自动启动）...",
+            "connectOrStartFailed": "连接/启动网关失败",
+            "connectTimeoutAfterAutoStart": "连接网关超时（自动启动后仍未就绪）"
         },
         "issue": {
             "title": "检测到环境问题",

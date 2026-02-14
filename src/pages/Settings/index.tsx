@@ -235,13 +235,13 @@ export function Settings() {
       await window.electron.ipcRenderer.invoke('settings:applyProxy');
 
       if (gatewayStatus.state === 'running') {
-        toast.success('Proxy saved. Restarting Gateway...');
+        toast.success(t('gateway.proxy.toast.savedRestarting'));
         await restartGateway();
       } else {
-        toast.success('Proxy saved. Start Gateway to apply.');
+        toast.success(t('gateway.proxy.toast.savedStartToApply'));
       }
     } catch (error) {
-      toast.error(`Failed to save proxy: ${String(error)}`);
+      toast.error(t('gateway.proxy.toast.saveFailed', { error: String(error) }));
     }
   };
 
@@ -406,9 +406,9 @@ export function Settings() {
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <div>
-                <Label>Gateway Proxy</Label>
+                <Label>{t('gateway.proxy.title')}</Label>
                 <p className="text-sm text-muted-foreground">
-                  Apply proxy settings to the Gateway subprocess only
+                  {t('gateway.proxy.description')}
                 </p>
               </div>
               <Switch
@@ -419,7 +419,7 @@ export function Settings() {
 
             <div className="grid gap-2">
               <div className="space-y-1">
-                <Label>HTTP Proxy</Label>
+                <Label>{t('gateway.proxy.http')}</Label>
                 <Input
                   value={proxyHttp}
                   onChange={(e) => setProxyHttp(e.target.value)}
@@ -428,7 +428,7 @@ export function Settings() {
                 />
               </div>
               <div className="space-y-1">
-                <Label>HTTPS Proxy</Label>
+                <Label>{t('gateway.proxy.https')}</Label>
                 <Input
                   value={proxyHttps}
                   onChange={(e) => setProxyHttps(e.target.value)}
@@ -437,7 +437,7 @@ export function Settings() {
                 />
               </div>
               <div className="space-y-1">
-                <Label>ALL Proxy (SOCKS)</Label>
+                <Label>{t('gateway.proxy.allSocks')}</Label>
                 <Input
                   value={proxyAll}
                   onChange={(e) => setProxyAll(e.target.value)}
@@ -447,10 +447,10 @@ export function Settings() {
               </div>
               <div className="flex items-center gap-2 pt-1">
                 <Button variant="outline" onClick={saveProxySettings}>
-                  Apply
+                  {t('gateway.proxy.apply')}
                 </Button>
                 <Button variant="ghost" onClick={reloadProxySettings}>
-                  Reload
+                  {t('gateway.proxy.reload')}
                 </Button>
               </div>
             </div>

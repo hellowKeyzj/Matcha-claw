@@ -459,7 +459,9 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         ...prev,
         gateway: {
           status: 'checking',
-          message: currentGateway.state === 'starting' ? t('runtime.status.checking') : 'Waiting for gateway...'
+          message: currentGateway.state === 'starting'
+            ? t('runtime.status.checking')
+            : t('runtime.status.waitingConnectAutoStart')
         },
       }));
     }
@@ -487,12 +489,12 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
     } else if (gatewayStatus.state === 'error') {
       setChecks((prev) => ({
         ...prev,
-        gateway: { status: 'error', message: gatewayStatus.error || 'Failed to start' },
+        gateway: { status: 'error', message: gatewayStatus.error || t('runtime.status.connectOrStartFailed') },
       }));
     } else if (gatewayStatus.state === 'starting' || gatewayStatus.state === 'reconnecting') {
       setChecks((prev) => ({
         ...prev,
-        gateway: { status: 'checking', message: 'Starting...' },
+        gateway: { status: 'checking', message: t('runtime.status.connectingAutoStart') },
       }));
     }
     // 'stopped' state: keep current check status (likely 'checking') to allow startup time
@@ -516,7 +518,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         if (prev.gateway.status === 'checking') {
           return {
             ...prev,
-            gateway: { status: 'error', message: 'Gateway startup timed out' },
+            gateway: { status: 'error', message: t('runtime.status.connectTimeoutAfterAutoStart') },
           };
         }
         return prev;
@@ -534,7 +536,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   const handleStartGateway = async () => {
     setChecks((prev) => ({
       ...prev,
-      gateway: { status: 'checking', message: 'Starting...' },
+      gateway: { status: 'checking', message: t('runtime.status.connectingAutoStart') },
     }));
     await startGateway();
   };
@@ -638,10 +640,10 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         </div>
         <div className="grid grid-cols-[1fr_auto] items-center gap-4 p-3 rounded-lg bg-muted/50">
           <div className="flex items-center gap-2 text-left">
-            <span>Gateway Service</span>
+            <span>{t('runtime.gatewayConnection')}</span>
             {checks.gateway.status === 'error' && (
               <Button variant="outline" size="sm" onClick={handleStartGateway}>
-                Start Gateway
+                {t('runtime.connectGatewayAutoStart')}
               </Button>
             )}
           </div>
