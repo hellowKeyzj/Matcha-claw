@@ -133,6 +133,8 @@ const electronAPI = {
         'openclaw:getDir',
         'openclaw:getConfigDir',
         'openclaw:getSkillsDir',
+        'openclaw:getWorkspaceDir',
+        'openclaw:getRuntimeInfo',
         'openclaw:getCliCommand',
       ];
 

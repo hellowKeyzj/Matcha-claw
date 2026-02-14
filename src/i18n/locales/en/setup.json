@@ -42,13 +42,19 @@
         "nodejs": "Node.js Runtime",
         "openclaw": "OpenClaw Package",
         "gateway": "Gateway Service",
+        "gatewayConnection": "Gateway Connection",
         "startGateway": "Start Gateway",
+        "connectGatewayAutoStart": "Connect Gateway (auto-start if needed)",
         "status": {
             "checking": "Checking...",
             "success": "Node.js is available",
             "error": "Failed",
             "gatewayRunning": "Running on port {{port}}",
-            "packageReady": "OpenClaw package ready"
+            "packageReady": "OpenClaw package ready",
+            "waitingConnectAutoStart": "Waiting to connect to gateway (auto-start if needed)...",
+            "connectingAutoStart": "Connecting (auto-start if needed)...",
+            "connectOrStartFailed": "Failed to connect/start gateway",
+            "connectTimeoutAfterAutoStart": "Gateway connection timed out (not ready after auto-start)"
         },
         "issue": {
             "title": "Environment issue detected",
