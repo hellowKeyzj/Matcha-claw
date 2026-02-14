@@ -42,13 +42,19 @@
         "nodejs": "Node.js ランタイム",
         "openclaw": "OpenClaw パッケージ",
         "gateway": "ゲートウェイサービス",
+        "gatewayConnection": "ゲートウェイ接続",
         "startGateway": "ゲートウェイを起動",
+        "connectGatewayAutoStart": "ゲートウェイに接続（必要なら自動起動）",
         "status": {
             "checking": "確認中...",
             "success": "Node.js は利用可能です",
             "error": "失敗",
             "gatewayRunning": "ポート {{port}} で実行中",
-            "packageReady": "OpenClaw パッケージ準備完了"
+            "packageReady": "OpenClaw パッケージ準備完了",
+            "waitingConnectAutoStart": "ゲートウェイ接続待機中（必要なら自動起動）...",
+            "connectingAutoStart": "接続中（必要なら自動起動）...",
+            "connectOrStartFailed": "ゲートウェイの接続/起動に失敗しました",
+            "connectTimeoutAfterAutoStart": "ゲートウェイ接続がタイムアウトしました（自動起動後も未準備）"
         },
         "issue": {
             "title": "環境の問題が検出されました",
