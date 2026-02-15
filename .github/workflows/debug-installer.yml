@@ -1,0 +1,61 @@
+name: Debug Installer (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: 'Artifact name prefix'
+        required: false
+        default: 'debug-installer-win'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package-win:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm run package:win
+
+      - name: Show generated release files
+        shell: powershell
+        run: |
+          if (-not (Test-Path release)) {
+            Write-Error "release directory not found"
+          }
+          Get-ChildItem release | Format-Table -AutoSize
+
+      - name: Upload debug installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+

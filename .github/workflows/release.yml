@@ -2,6 +2,7 @@
 # Builds and publishes releases for macOS, Windows, and Linux
 
 name: Release
+run-name: Release (${{ github.event_name }})
 
 on:
   push:
@@ -12,21 +13,57 @@ on:
       version:
         description: 'Version to release (e.g., 1.0.0)'
         required: true
+      platform:
+        description: 'Build target platform'
+        required: false
+        default: 'win'
+        type: choice
+        options:
+          - win
+          - mac
+          - linux
+          - all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set-matrix.outputs.include }}
+    steps:
+      - id: set-matrix
+        shell: bash
+        run: |
+          event="${{ github.event_name }}"
+          platform="${{ github.event.inputs.platform }}"
+
+          if [ "$event" = "push" ] || [ -z "$platform" ] || [ "$platform" = "all" ]; then
+            include='[{"os":"macos-latest","platform":"mac"},{"os":"windows-latest","platform":"win"},{"os":"ubuntu-latest","platform":"linux"}]'
+          elif [ "$platform" = "win" ]; then
+            include='[{"os":"windows-latest","platform":"win"}]'
+          elif [ "$platform" = "mac" ]; then
+            include='[{"os":"macos-latest","platform":"mac"}]'
+          elif [ "$platform" = "linux" ]; then
+            include='[{"os":"ubuntu-latest","platform":"linux"}]'
+          else
+            echo "Unsupported platform input: $platform"
+            exit 1
+          fi
+
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+          echo "Resolved matrix: $include"
+
   release:
+    needs: resolve-matrix
     strategy:
       matrix:
-        include:
-          - os: macos-latest
-            platform: mac
-          - os: windows-latest
-            platform: win
-          - os: ubuntu-latest
-            platform: linux
+        include: ${{ fromJSON(needs.resolve-matrix.outputs.include) }}
 
     runs-on: ${{ matrix.os }}
     
