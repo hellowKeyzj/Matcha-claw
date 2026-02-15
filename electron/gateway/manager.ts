@@ -23,6 +23,7 @@ import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-stor
 import { getProviderEnvVar, getKeyableProviderTypes } from '../utils/provider-registry';
 import { GatewayEventType, JsonRpcNotification, isNotification, isResponse } from './protocol';
 import {
+  buildPosixPortOwnerProbeScript,
   buildWindowsPortOwnerProbeScript,
   isLikelyWslPortProxyCommand,
   tryConvertPosixWslUncToWindowsPath,
@@ -84,6 +85,8 @@ const FAST_ATTACH_HANDSHAKE_TIMEOUT_MS = 1200;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10000;
 const ATTACH_TOTAL_BUDGET_MS = 3000;
 const ATTACH_RETRY_INTERVAL_MS = 200;
+const FAST_ATTACH_TOTAL_BUDGET_MS = 1200;
+const PORT_OWNER_PROBE_TIMEOUT_MS = 3500;
 
 export type GatewayHostRuntime = 'linux' | 'wsl' | 'windows' | 'macos';
 
@@ -424,7 +427,7 @@ export class GatewayManager extends EventEmitter {
       const probe = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
         encoding: 'utf-8',
         windowsHide: true,
-        timeout: 1800,
+        timeout: PORT_OWNER_PROBE_TIMEOUT_MS,
       });
       const elapsedMs = Date.now() - startedAt;
       if (probe.status !== 0) {
@@ -461,24 +464,11 @@ export class GatewayManager extends EventEmitter {
       return { occupied: false };
     }
     try {
-      const script = [
-        `line=$(ss -H -ltnp "sport = :${port}" 2>/dev/null | head -n 1)`,
-        'if [ -z "$line" ]; then',
-        '  echo "0||"',
-        '  exit 0',
-        'fi',
-        "pid=$(printf '%s' \"$line\" | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p')",
-        'cmd=""',
-        'if [ -n "$pid" ]; then',
-        '  cmd=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)',
-        'fi',
-        'printf "1|%s|%s\\n" "$pid" "$cmd"',
-      ].join('; ');
       const startedAt = Date.now();
-      const probe = spawnSync('wsl.exe', ['sh', '-lc', script], {
+      const probe = spawnSync('wsl.exe', ['--exec', 'ss', '-H', '-ltnp', `sport = :${port}`], {
         encoding: 'utf-8',
         windowsHide: true,
-        timeout: 1800,
+        timeout: PORT_OWNER_PROBE_TIMEOUT_MS,
       });
       const elapsedMs = Date.now() - startedAt;
       if (probe.status !== 0) {
@@ -490,18 +480,35 @@ export class GatewayManager extends EventEmitter {
         logger.debug(`WSL port owner probe returned empty output (port=${port}): ${this.formatProbeDiagnostics(probe, elapsedMs)}`);
         return { occupied: false };
       }
-      const [occupiedFlag, pidRaw, ...cmdParts] = raw.split('|');
-      if (occupiedFlag !== '1') {
-        logger.debug(
-          `WSL port owner probe reported not-occupied flag (port=${port}, occupiedFlag=${occupiedFlag}): ${this.formatProbeDiagnostics(probe, elapsedMs)}`,
-        );
+      const firstLine = raw.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim();
+      if (!firstLine) {
+        logger.debug(`WSL port owner probe returned no parsable line (port=${port}): ${this.formatProbeDiagnostics(probe, elapsedMs)}`);
         return { occupied: false };
       }
-      const pid = Number(pidRaw);
+      const pidMatch = firstLine.match(/pid=([0-9]+)/);
+      const pid = pidMatch ? Number(pidMatch[1]) : undefined;
+      let command: string | undefined;
+      if (typeof pid === 'number' && Number.isFinite(pid)) {
+        const psStartedAt = Date.now();
+        const psProbe = spawnSync('wsl.exe', ['--exec', 'ps', '-p', String(pid), '-o', 'args='], {
+          encoding: 'utf-8',
+          windowsHide: true,
+          timeout: PORT_OWNER_PROBE_TIMEOUT_MS,
+        });
+        const psElapsedMs = Date.now() - psStartedAt;
+        if (psProbe.status !== 0) {
+          logger.debug(`WSL pid command probe failed (port=${port}, pid=${pid}): ${this.formatProbeDiagnostics(psProbe, psElapsedMs)}`);
+        } else {
+          const psRaw = (psProbe.stdout ?? '').trim();
+          if (psRaw.length > 0) {
+            command = psRaw.split(/\r?\n/)[0]?.trim() || undefined;
+          }
+        }
+      }
       return {
         occupied: true,
-        pid: Number.isFinite(pid) ? pid : undefined,
-        command: cmdParts.join('|').trim() || undefined,
+        pid: typeof pid === 'number' && Number.isFinite(pid) ? pid : undefined,
+        command,
       };
     } catch (error) {
       logger.debug('Failed to query WSL port owner:', error);
@@ -514,23 +521,11 @@ export class GatewayManager extends EventEmitter {
       return this.getWindowsPortOwner(port);
     }
     try {
-      const script = [
-        `line=$(ss -H -ltnp "sport = :${port}" 2>/dev/null | head -n 1)`,
-        'if [ -z "$line" ]; then',
-        '  echo "0||"',
-        '  exit 0',
-        'fi',
-        "pid=$(printf '%s' \"$line\" | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p')",
-        'cmd=""',
-        'if [ -n "$pid" ]; then',
-        '  cmd=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)',
-        'fi',
-        'printf "1|%s|%s\\n" "$pid" "$cmd"',
-      ].join('; ');
+      const script = buildPosixPortOwnerProbeScript(port);
       const probe = spawnSync('sh', ['-lc', script], {
         encoding: 'utf-8',
         windowsHide: true,
-        timeout: 1800,
+        timeout: PORT_OWNER_PROBE_TIMEOUT_MS,
       });
       if (probe.status !== 0) {
         return { occupied: false };
@@ -896,12 +891,16 @@ export class GatewayManager extends EventEmitter {
     throw lastError ?? new Error('Gateway authentication failed');
   }
 
-  private async attachWithBudget(port: number, hostRuntime: GatewayHostRuntime): Promise<void> {
+  private async attachWithBudget(
+    port: number,
+    hostRuntime: GatewayHostRuntime,
+    totalBudgetMs = ATTACH_TOTAL_BUDGET_MS,
+  ): Promise<void> {
     const startedAt = Date.now();
     let lastError: Error | null = null;
-    while (Date.now() - startedAt < ATTACH_TOTAL_BUDGET_MS) {
+    while (Date.now() - startedAt < totalBudgetMs) {
       const elapsed = Date.now() - startedAt;
-      const remaining = ATTACH_TOTAL_BUDGET_MS - elapsed;
+      const remaining = totalBudgetMs - elapsed;
       const handshakeTimeoutMs = Math.min(FAST_ATTACH_HANDSHAKE_TIMEOUT_MS, Math.max(350, remaining - 50));
       try {
         await this.connectWithTokenDiscovery(port, hostRuntime, handshakeTimeoutMs);
@@ -910,12 +909,52 @@ export class GatewayManager extends EventEmitter {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
       const nowElapsed = Date.now() - startedAt;
-      if (nowElapsed >= ATTACH_TOTAL_BUDGET_MS) {
+      if (nowElapsed >= totalBudgetMs) {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, ATTACH_RETRY_INTERVAL_MS));
     }
-    throw lastError ?? new Error(`Failed to attach Gateway within ${ATTACH_TOTAL_BUDGET_MS}ms`);
+    throw lastError ?? new Error(`Failed to attach Gateway within ${totalBudgetMs}ms`);
+  }
+
+  private async getFastAttachHostCandidates(): Promise<GatewayHostRuntime[]> {
+    const localRuntime = this.detectLocalRuntime();
+    if (process.platform !== 'win32') {
+      return [localRuntime];
+    }
+    const ordered: GatewayHostRuntime[] = [];
+    const pushUnique = (runtime: GatewayHostRuntime) => {
+      if (!ordered.includes(runtime)) {
+        ordered.push(runtime);
+      }
+    };
+
+    const saved = await getSetting('gatewayHostRuntime');
+    if (saved === 'windows' || saved === 'wsl') {
+      pushUnique(saved);
+    }
+    if (this.runtimePaths.hostRuntime === 'windows' || this.runtimePaths.hostRuntime === 'wsl') {
+      pushUnique(this.runtimePaths.hostRuntime);
+    }
+    pushUnique('wsl');
+    pushUnique('windows');
+    return ordered;
+  }
+
+  private async tryFastAttachBeforeProbe(port: number): Promise<GatewayHostRuntime | undefined> {
+    const candidates = await this.getFastAttachHostCandidates();
+    for (const hostRuntime of candidates) {
+      try {
+        this.applyHostRuntime(hostRuntime);
+        await this.attachWithBudget(port, hostRuntime, FAST_ATTACH_TOTAL_BUDGET_MS);
+        logger.debug(`Fast attach succeeded before owner probe (port=${port}, hostRuntime=${hostRuntime})`);
+        return hostRuntime;
+      } catch (error) {
+        logger.debug(`Fast attach attempt failed before owner probe (port=${port}, hostRuntime=${hostRuntime})`, error);
+      }
+    }
+    logger.debug(`Fast attach did not succeed before owner probe (port=${port})`);
+    return undefined;
   }
   
   /**
@@ -962,6 +1001,14 @@ export class GatewayManager extends EventEmitter {
     this.setStatus({ state: 'starting', reconnectAttempts: 0 });
     
     try {
+      const fastAttachHost = await this.tryFastAttachBeforeProbe(this.status.port);
+      if (fastAttachHost) {
+        this.ownsProcess = false;
+        this.setStatus({ pid: undefined });
+        this.startHealthCheck();
+        return;
+      }
+
       const attachTarget = await this.detectAttachTarget(this.status.port);
       this.applyHostRuntime(attachTarget.hostRuntime);
       logger.debug(`Gateway attach target: occupied=${attachTarget.occupied}, ownerKind=${attachTarget.ownerKind}, details=${attachTarget.details}`);
@@ -1824,6 +1871,15 @@ export class GatewayManager extends EventEmitter {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
+        const fastAttachHost = await this.tryFastAttachBeforeProbe(this.status.port);
+        if (fastAttachHost) {
+          this.ownsProcess = false;
+          this.setStatus({ pid: undefined });
+          this.reconnectAttempts = 0;
+          this.startHealthCheck();
+          return;
+        }
+
         const attachTarget = await this.detectAttachTarget(this.status.port);
         this.applyHostRuntime(attachTarget.hostRuntime);
         if (attachTarget.occupied) {

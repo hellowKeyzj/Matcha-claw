@@ -13,6 +13,23 @@ export function buildWindowsPortOwnerProbeScript(port: number): string {
   ].join('; ');
 }
 
+export function buildPosixPortOwnerProbeScript(port: number): string {
+  const localPort = Math.trunc(port);
+  return [
+    `line=$(ss -H -ltnp "sport = :${localPort}" 2>/dev/null | head -n 1)`,
+    'if [ -z "$line" ]; then',
+    '  echo "0||"',
+    '  exit 0',
+    'fi',
+    "pid=$(printf '%s' \"$line\" | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p')",
+    'cmd=""',
+    'if [ -n "$pid" ]; then',
+    '  cmd=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)',
+    'fi',
+    'printf "1|%s|%s\\n" "$pid" "$cmd"',
+  ].join('\n');
+}
+
 export function tryConvertPosixWslUncToWindowsPath(input: string): string | undefined {
   const trimmed = input.trim();
   if (!trimmed) {
