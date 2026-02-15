@@ -28,3 +28,13 @@ export function tryConvertPosixWslUncToWindowsPath(input: string): string | unde
   return `\\\\wsl.localhost\\${distro}\\${relative}`;
 }
 
+export function isLikelyWslPortProxyCommand(command?: string): boolean {
+  if (!command) {
+    return false;
+  }
+  const normalized = command.toLowerCase();
+  return (
+    normalized.includes('wslhost') ||
+    (normalized.includes('--vm-id') && normalized.includes('--handle'))
+  );
+}
