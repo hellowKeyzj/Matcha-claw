@@ -1,0 +1,59 @@
+{
+  "title": "Subagent Workspace",
+  "subtitle": "Manage subagents and model settings.",
+  "newSubagent": "New Subagent",
+  "createDialogTitle": "Create Subagent",
+  "editDialogTitle": "Edit Subagent",
+  "manageTitle": "Managing: {{agentId}}",
+  "manage": {
+    "promptLabel": "Prompt",
+    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "generateDraft": "Generate Draft",
+    "generatingDraft": "Generating...",
+    "applyingDraft": "Applying...",
+    "generateDiffPreview": "Generate Diff Preview",
+    "diffPreviewTitle": "Diff Preview",
+    "currentFilesTitle": "Current Files",
+    "emptyFileContent": "(empty)",
+    "confirmApplyDraft": "Confirm Apply Draft",
+    "cancelDraft": "Cancel Draft",
+    "applyDraftSuccess": "Draft applied successfully."
+  },
+  "deleteDialog": {
+    "title": "Delete {{agentId}}",
+    "description": "Deleting this subagent will remove workspace/agentDir/sessions. Continue?",
+    "cancel": "Cancel",
+    "confirm": "Delete",
+    "deleting": "Deleting..."
+  },
+  "close": "Close",
+  "form": {
+    "name": "Name",
+    "workspace": "Workspace",
+    "model": "Model",
+    "emoji": "Emoji",
+    "emojiNone": "No emoji",
+    "emojiPlaceholder": "Type any emoji, or pick one below",
+    "emojiPanelShow": "Show emoji quick picks",
+    "emojiPanelHide": "Hide emoji quick picks",
+    "emojiHelp": "Quick picks are common presets. You can also type a custom emoji manually.",
+    "initialPrompt": "Initial Prompt",
+    "initialPromptPlaceholder": "Optional: seed prompt for this subagent",
+    "create": "Create",
+    "save": "Save",
+    "nameDuplicate": "Agent name is duplicated.",
+    "modelsLoading": "Loading models...",
+    "selectModel": "Select a configured model",
+    "modelUnavailable": "No configured models found."
+  },
+  "card": {
+    "default": "Default",
+    "modelFallback": "-",
+    "lockedHint": "Main agent is read-only.",
+    "actions": {
+      "edit": "Edit",
+      "delete": "Delete",
+      "manage": "Manage"
+    }
+  }
+}

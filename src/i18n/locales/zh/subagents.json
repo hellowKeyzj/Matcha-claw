@@ -1,0 +1,59 @@
+{
+  "title": "子Agent工作台",
+  "subtitle": "管理子Agent与模型配置。",
+  "newSubagent": "新增子Agent",
+  "createDialogTitle": "新增子Agent",
+  "editDialogTitle": "编辑子Agent",
+  "manageTitle": "配置人设：{{agentId}}",
+  "manage": {
+    "promptLabel": "提示词",
+    "promptPlaceholder": "描述这个子Agent要为 AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md 生成什么内容",
+    "generateDraft": "生成草稿",
+    "generatingDraft": "生成中...",
+    "applyingDraft": "应用中...",
+    "generateDiffPreview": "生成 Diff 预览",
+    "diffPreviewTitle": "Diff 预览",
+    "currentFilesTitle": "当前文件",
+    "emptyFileContent": "(空)",
+    "confirmApplyDraft": "确认应用草稿",
+    "cancelDraft": "取消草稿",
+    "applyDraftSuccess": "草稿已成功应用。"
+  },
+  "deleteDialog": {
+    "title": "删除 {{agentId}}",
+    "description": "删除该子Agent将移除工作区/agent目录/会话，是否继续？",
+    "cancel": "取消",
+    "confirm": "确认删除",
+    "deleting": "删除中..."
+  },
+  "close": "关闭",
+  "form": {
+    "name": "名称",
+    "workspace": "工作区",
+    "model": "模型",
+    "create": "创建",
+    "save": "保存",
+    "nameDuplicate": "Agent 名称重复。",
+    "modelsLoading": "模型加载中...",
+    "selectModel": "请选择已配置模型",
+    "modelUnavailable": "未找到可用的已配置模型。",
+    "initialPrompt": "初始提示词",
+    "initialPromptPlaceholder": "可选：先写一段给该子Agent的提示词",
+    "emoji": "表情",
+    "emojiNone": "不使用表情",
+    "emojiPlaceholder": "可手动输入任意 emoji，或从下方选择",
+    "emojiPanelShow": "显示快捷表情",
+    "emojiPanelHide": "隐藏快捷表情",
+    "emojiHelp": "下方是常用预设，也可以手动输入自定义 emoji。"
+  },
+  "card": {
+    "default": "默认",
+    "modelFallback": "-",
+    "lockedHint": "main agent 为系统保留，禁止操作。",
+    "actions": {
+      "edit": "编辑",
+      "delete": "删除",
+      "manage": "人设配置"
+    }
+  }
+}
