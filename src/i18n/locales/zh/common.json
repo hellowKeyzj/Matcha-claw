@@ -4,6 +4,7 @@
         "cronTasks": "定时任务",
         "skills": "技能",
         "channels": "频道",
+        "subagents": "子Agent",
         "dashboard": "仪表盘",
         "settings": "设置",
         "devConsole": "开发者控制台"

@@ -4,6 +4,7 @@
         "cronTasks": "定期タスク",
         "skills": "スキル",
         "channels": "チャンネル",
+        "subagents": "サブAgent",
         "dashboard": "ダッシュボード",
         "settings": "設定",
         "devConsole": "開発者コンソール"

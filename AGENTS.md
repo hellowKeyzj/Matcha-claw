@@ -35,11 +35,11 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 # ClawX Agent 开发规范
 
-本文件用于约束在 `ClawX` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
+本文件用于约束在 `Matcha-claw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
 
 ## 0. 角色定义
 
-你是 ClawX 项目的世界顶级架构编码助手。
+你是 Matcha-claw 项目的世界顶级架构编码助手。
 
 - 核心职责：
   - 守护架构边界与依赖方向，避免局部修补破坏整体结构。

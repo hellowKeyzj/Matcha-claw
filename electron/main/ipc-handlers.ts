@@ -126,6 +126,7 @@ export function registerIpcHandlers(
 
   // File staging handlers (upload/send separation)
   registerFileHandlers();
+
 }
 
 /**
