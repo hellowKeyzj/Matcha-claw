@@ -1,0 +1,56 @@
+{
+  "title": "サブAgentワークスペース",
+  "subtitle": "サブAgentとモデル設定を管理します。",
+  "newSubagent": "新規サブAgent",
+  "createDialogTitle": "サブAgentを作成",
+  "editDialogTitle": "サブAgentを編集",
+  "manageTitle": "管理中: {{agentId}}",
+  "manage": {
+    "promptLabel": "プロンプト",
+    "promptPlaceholder": "このサブAgentが AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md に書く内容を入力してください",
+    "generateDraft": "下書きを生成",
+    "generatingDraft": "生成中...",
+    "applyingDraft": "適用中...",
+    "generateDiffPreview": "Diffプレビューを生成",
+    "confirmApplyDraft": "下書きを反映",
+    "cancelDraft": "下書きをキャンセル",
+    "applyDraftSuccess": "下書きを適用しました。"
+  },
+  "deleteDialog": {
+    "title": "{{agentId}} を削除",
+    "description": "このサブAgentを削除すると、workspace/agentDir/sessions が削除されます。続行しますか？",
+    "cancel": "キャンセル",
+    "confirm": "削除",
+    "deleting": "削除中..."
+  },
+  "close": "閉じる",
+  "form": {
+    "name": "名前",
+    "workspace": "ワークスペース",
+    "model": "モデル",
+    "create": "作成",
+    "save": "保存",
+    "nameDuplicate": "Agent名が重複しています。",
+    "modelsLoading": "モデルを読み込み中...",
+    "selectModel": "設定済みモデルを選択",
+    "modelUnavailable": "利用可能な設定済みモデルがありません。",
+    "initialPrompt": "初期プロンプト",
+    "initialPromptPlaceholder": "任意: このサブAgentの初期プロンプトを入力",
+    "emoji": "絵文字",
+    "emojiNone": "絵文字なし",
+    "emojiPlaceholder": "任意の絵文字を入力するか、下から選択",
+    "emojiPanelShow": "絵文字候補を表示",
+    "emojiPanelHide": "絵文字候補を非表示",
+    "emojiHelp": "下はよく使う候補です。手入力でも設定できます。"
+  },
+  "card": {
+    "default": "デフォルト",
+    "modelFallback": "-",
+    "lockedHint": "main agent はシステム予約のため操作できません。",
+    "actions": {
+      "edit": "編集",
+      "delete": "削除",
+      "manage": "管理"
+    }
+  }
+}
