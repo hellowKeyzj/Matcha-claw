@@ -17,7 +17,8 @@
     "emptyFileContent": "(empty)",
     "confirmApplyDraft": "Confirm Apply Draft",
     "cancelDraft": "Cancel Draft",
-    "applyDraftSuccess": "Draft applied successfully."
+    "applyDraftSuccess": "Draft applied successfully.",
+    "rawOutputTitle": "Raw model output"
   },
   "deleteDialog": {
     "title": "Delete {{agentId}}",

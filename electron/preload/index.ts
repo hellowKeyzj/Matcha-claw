@@ -30,6 +30,7 @@ const electronAPI = {
         'shell:openExternal',
         'shell:showItemInFolder',
         'shell:openPath',
+        'shell:pathExists',
         // Dialog
         'dialog:open',
         'dialog:save',
@@ -129,6 +130,17 @@ const electronAPI = {
         'chat:sendWithMedia',
         // Session management
         'session:delete',
+        // Team roles metadata (ROLES_METADATA.md)
+        'roles:readMetadata',
+        'roles:writeMetadata',
+        // Team canonical artifacts
+        'teamfs:initLayout',
+        'teamfs:prepareTask',
+        'teamfs:publishTask',
+        'teamfs:publishShared',
+        'teamfs:syncMemberProjection',
+        'teamfs:deleteLayout',
+        'teamfs:exportFlowEvents',
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',

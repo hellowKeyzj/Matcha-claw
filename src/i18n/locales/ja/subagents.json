@@ -14,7 +14,8 @@
     "generateDiffPreview": "Diffプレビューを生成",
     "confirmApplyDraft": "下書きを反映",
     "cancelDraft": "下書きをキャンセル",
-    "applyDraftSuccess": "下書きを適用しました。"
+    "applyDraftSuccess": "下書きを適用しました。",
+    "rawOutputTitle": "モデル生出力"
   },
   "deleteDialog": {
     "title": "{{agentId}} を削除",

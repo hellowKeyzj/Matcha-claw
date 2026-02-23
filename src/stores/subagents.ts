@@ -1,21 +1,36 @@
-import { create } from 'zustand';
+﻿import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { buildLineDiff } from '@/lib/line-diff';
+import {
+  waitAgentRunWithProgress,
+} from '@/lib/openclaw/agent-runtime';
+import {
+  deleteSession,
+  fetchLatestAssistantText,
+  sendChatMessage,
+} from '@/lib/openclaw/session-runtime';
 import {
   buildSubagentWorkspacePath,
   hasSubagentNameConflict,
   normalizeSubagentNameToSlug,
-} from '@/lib/subagent-workspace';
+} from '@/lib/subagent/workspace';
 import {
   buildSubagentPromptPayload,
   extractChatSendOutput,
-  parseDraftByFile,
-} from '@/lib/subagent-prompt';
+  parseDraftPayload,
+} from '@/lib/subagent/prompt';
+import {
+  mergeRolesFromAgents,
+  readRolesMetadata,
+  resolveRolesMetadataRoot,
+  writeRolesMetadata,
+} from '@/lib/team/roles-metadata';
 import type {
   AgentConfigEntry,
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
+  SubagentDraftRoleMetadata,
   ModelCatalogEntry,
   PreviewDiffByFile,
   SubagentSummary,
@@ -35,28 +50,14 @@ interface RpcFailure {
 type RpcResult<T> = RpcSuccess<T> | RpcFailure;
 const MAIN_AGENT_ID = 'main';
 const DRAFT_HISTORY_POLL_INTERVAL_MS = 500;
-const DRAFT_HISTORY_TIMEOUT_MS = 180000;
-const DRAFT_AGENT_WAIT_TIMEOUT_MS = 180000;
+const DRAFT_HISTORY_READ_TIMEOUT_MS = 180000;
+const DRAFT_CHAT_SEND_RPC_TIMEOUT_MS = 30000;
+const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
-}
-
-interface ChatHistoryMessage {
-  role?: unknown;
-  content?: unknown;
-}
-
-interface ChatHistoryResult {
-  messages?: ChatHistoryMessage[];
-}
-
-interface AgentWaitResult {
-  runId?: string;
-  status?: string;
-  error?: string;
 }
 
 interface AgentFileGetResult {
@@ -85,6 +86,8 @@ interface SubagentsState {
   draftApplyingByAgent: Record<string, boolean>;
   draftApplySuccessByAgent: Record<string, boolean>;
   draftSessionKeyByAgent: Record<string, string>;
+  draftRawOutputByAgent: Record<string, string>;
+  draftRoleMetadataByAgent: Record<string, SubagentDraftRoleMetadata | undefined>;
   persistedFilesByAgent: Record<string, Partial<Record<SubagentTargetFile, string>>>;
   draftByFile: DraftByFile;
   draftError: string | null;
@@ -397,47 +400,69 @@ async function hydrateAgentIdentityEmoji(agents: SubagentSummary[]): Promise<Sub
   return hydrated;
 }
 
-function extractTextFromMessageContent(content: unknown): string | undefined {
-  if (typeof content === 'string') {
-    const trimmed = content.trim();
-    return trimmed || undefined;
+async function removeRoleMetadataForAgent(agentId: string, agents: SubagentSummary[]): Promise<void> {
+  if (agents.length === 0) {
+    return;
   }
-  if (!Array.isArray(content)) {
-    return undefined;
-  }
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== 'object') {
-      continue;
+  try {
+    const root = resolveRolesMetadataRoot(agents);
+    const current = await readRolesMetadata(root).catch(() => []);
+    if (!current.some((entry) => entry.agentId === agentId)) {
+      return;
     }
-    const text = (block as { text?: unknown }).text;
-    if (typeof text === 'string' && text.trim()) {
-      parts.push(text.trim());
-    }
+    const next = current.filter((entry) => entry.agentId !== agentId);
+    await writeRolesMetadata(root, next);
+  } catch {
+    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
   }
-  if (parts.length === 0) {
-    return undefined;
-  }
-  return parts.join('\n');
 }
 
-function findLatestAssistantText(messages: ChatHistoryMessage[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    const role = typeof message?.role === 'string' ? message.role.toLowerCase() : '';
-    if (role !== 'assistant') {
-      continue;
-    }
-    const text = extractTextFromMessageContent(message.content);
-    if (text) {
-      return text;
-    }
+async function syncRoleMetadataFromAgents(agents: SubagentSummary[]): Promise<void> {
+  if (agents.length === 0) {
+    return;
   }
-  return undefined;
+  try {
+    const root = resolveRolesMetadataRoot(agents);
+    const current = await readRolesMetadata(root).catch(() => []);
+    const next = mergeRolesFromAgents(current, agents);
+    await writeRolesMetadata(root, next);
+  } catch {
+    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
+  }
+}
+
+async function upsertRoleMetadataFromDraft(
+  agentId: string,
+  roleMetadata: SubagentDraftRoleMetadata,
+  agents: SubagentSummary[],
+): Promise<void> {
+  if (agents.length === 0) {
+    return;
+  }
+  try {
+    const root = resolveRolesMetadataRoot(agents);
+    const current = await readRolesMetadata(root).catch(() => []);
+    const merged = mergeRolesFromAgents(current, agents);
+    const nowIso = new Date().toISOString();
+    const next = merged.map((entry) => {
+      if (entry.agentId !== agentId) {
+        return entry;
+      }
+      return {
+        ...entry,
+        summary: roleMetadata.summary,
+        tags: roleMetadata.tags,
+        updatedAt: nowIso,
+      };
+    });
+    await writeRolesMetadata(root, next);
+  } catch {
+    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
+  }
 }
 
 async function waitForDraftOutputFromHistory(sessionKey: string): Promise<string> {
-  return waitForDraftOutputFromHistoryWithTimeout(sessionKey, DRAFT_HISTORY_TIMEOUT_MS);
+  return waitForDraftOutputFromHistoryWithTimeout(sessionKey, DRAFT_HISTORY_READ_TIMEOUT_MS);
 }
 
 async function waitForDraftOutputFromHistoryWithTimeout(
@@ -446,11 +471,10 @@ async function waitForDraftOutputFromHistoryWithTimeout(
 ): Promise<string> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const history = await rpc<ChatHistoryResult>('chat.history', {
+    const output = await fetchLatestAssistantText(rpc, {
       sessionKey,
       limit: 20,
     });
-    const output = findLatestAssistantText(history.messages ?? []);
     if (output) {
       return output;
     }
@@ -459,29 +483,19 @@ async function waitForDraftOutputFromHistoryWithTimeout(
   throw new Error('Timed out waiting for draft output');
 }
 
-async function waitForRunCompletion(runId: string): Promise<void> {
-  const result = await rpc<AgentWaitResult>('agent.wait', {
+async function waitForRunCompletion(runId: string, sessionKey: string): Promise<void> {
+  await waitAgentRunWithProgress(rpc, {
     runId,
-    timeoutMs: DRAFT_AGENT_WAIT_TIMEOUT_MS,
-  }, DRAFT_AGENT_WAIT_TIMEOUT_MS + DRAFT_RPC_TIMEOUT_BUFFER_MS);
-  const status = typeof result?.status === 'string' ? result.status.toLowerCase() : '';
-  if (!status || status === 'completed' || status === 'done' || status === 'success') {
-    return;
-  }
-  if (status === 'timeout') {
-    throw new Error('Timed out waiting for draft output');
-  }
-  if (status === 'aborted') {
-    throw new Error('Draft generation aborted');
-  }
-  if (status === 'error' || status === 'failed') {
-    const reason = typeof result.error === 'string' ? result.error.trim() : '';
-    throw new Error(reason || 'Draft generation failed');
-  }
+    sessionKey,
+    waitSliceMs: 30000,
+    idleTimeoutMs: DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS,
+    rpcTimeoutBufferMs: DRAFT_RPC_TIMEOUT_BUFFER_MS,
+    logPrefix: 'subagents.draft',
+  });
 }
 
 async function cleanupSession(sessionKey: string): Promise<void> {
-  await rpc('sessions.delete', { key: sessionKey, deleteTranscript: true });
+  await deleteSession(rpc, { key: sessionKey, deleteTranscript: true });
 }
 
 async function cleanupDraftSessionForAgent(agentId: string, getState: () => SubagentsState): Promise<void> {
@@ -540,6 +554,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   draftApplyingByAgent: {},
   draftApplySuccessByAgent: {},
   draftSessionKeyByAgent: {},
+  draftRawOutputByAgent: {},
+  draftRoleMetadataByAgent: {},
   persistedFilesByAgent: {},
   draftByFile: {},
   draftError: null,
@@ -640,11 +656,17 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         delete nextApplyingByAgent[agentId];
         const nextPromptByAgent = { ...state.draftPromptByAgent };
         delete nextPromptByAgent[agentId];
+        const nextRawOutputByAgent = { ...state.draftRawOutputByAgent };
+        delete nextRawOutputByAgent[agentId];
+        const nextRoleMetadataByAgent = { ...state.draftRoleMetadataByAgent };
+        delete nextRoleMetadataByAgent[agentId];
         return {
           draftByFile: {},
           previewDiffByFile: {},
           draftError: null,
           draftPromptByAgent: nextPromptByAgent,
+          draftRawOutputByAgent: nextRawOutputByAgent,
+          draftRoleMetadataByAgent: nextRoleMetadataByAgent,
           draftApplyingByAgent: nextApplyingByAgent,
           draftApplySuccessByAgent: {
             ...state.draftApplySuccessByAgent,
@@ -687,6 +709,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         model: modelId,
       });
       await get().loadAgents();
+      await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
       set({
         loading: false,
@@ -720,6 +743,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         model: nextModel,
       });
       await get().loadAgents();
+      await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
       set({
         loading: false,
@@ -740,7 +764,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
+      const agentsSnapshot = get().agents;
       await rpc('agents.delete', { agentId, deleteFiles: true });
+      await removeRoleMetadataForAgent(agentId, agentsSnapshot);
       await get().loadAgents();
     } catch (error) {
       set({
@@ -773,6 +799,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       loading: true,
       error: null,
       draftError: null,
+      draftRawOutputByAgent: {
+        ...state.draftRawOutputByAgent,
+        [agentId]: '',
+      },
       draftApplySuccessByAgent: {
         ...state.draftApplySuccessByAgent,
         [agentId]: false,
@@ -786,48 +816,91 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         [agentId]: true,
       },
     }));
+    let lastModelOutput = '';
     try {
       const payload = buildSubagentPromptPayload(trimmedPrompt, persistedFiles ?? {});
-      const result = await rpc<Record<string, unknown>>('chat.send', {
-        sessionKey,
-        message: `${payload.systemPrompt}\n\n${payload.userPrompt}`,
-        deliver: false,
-        idempotencyKey: crypto.randomUUID(),
-      }, DRAFT_AGENT_WAIT_TIMEOUT_MS + DRAFT_RPC_TIMEOUT_BUFFER_MS);
-      let outputText: string | undefined;
-      try {
-        outputText = extractChatSendOutput(result);
-      } catch {
-        outputText = undefined;
-      }
-      if (!outputText) {
-        const runId = typeof result.runId === 'string' ? result.runId.trim() : '';
-        if (runId) {
-          await waitForRunCompletion(runId);
-          outputText = await waitForDraftOutputFromHistoryWithTimeout(
-            sessionKey,
-            DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS,
-          );
-        } else {
-          outputText = await waitForDraftOutputFromHistory(sessionKey);
+      const baseMessage = `${payload.systemPrompt}\n\n${payload.userPrompt}`;
+      const sendDraftMessage = async (message: string): Promise<string> => {
+        const result = await sendChatMessage<Record<string, unknown>>(rpc, {
+          sessionKey,
+          message,
+          deliver: false,
+          idempotencyKey: crypto.randomUUID(),
+        }, DRAFT_CHAT_SEND_RPC_TIMEOUT_MS + DRAFT_RPC_TIMEOUT_BUFFER_MS);
+        try {
+          return extractChatSendOutput(result);
+        } catch {
+          const runId = typeof result.runId === 'string' ? result.runId.trim() : '';
+          if (runId) {
+            await waitForRunCompletion(runId, sessionKey);
+            return waitForDraftOutputFromHistoryWithTimeout(
+              sessionKey,
+              DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS,
+            );
+          }
+          return waitForDraftOutputFromHistory(sessionKey);
         }
+      };
+
+      let outputText = await sendDraftMessage(baseMessage);
+      lastModelOutput = outputText;
+
+      let draftByFile: DraftByFile;
+      let roleMetadata: SubagentDraftRoleMetadata;
+      try {
+        const parsedDraft = parseDraftPayload(outputText);
+        draftByFile = parsedDraft.draftByFile;
+        roleMetadata = parsedDraft.roleMetadata;
+      } catch (firstParseError) {
+        const parseMessage = firstParseError instanceof Error ? firstParseError.message : '';
+        const shouldRetry = parseMessage.includes('Invalid JSON output from model')
+          || parseMessage.includes('Invalid output schema');
+        if (!shouldRetry) {
+          throw firstParseError;
+        }
+
+        const retryMessage = [
+          '上一条输出无法解析为有效 JSON。',
+          '请只返回一个 JSON 对象，不要 Markdown 代码块，不要任何额外解释。',
+          '严格使用结构：{"files":[{"name","content","reason","confidence"}],"roleMetadata":{"summary","tags"}}。',
+          'roleMetadata.summary 必填。',
+          'roleMetadata.tags 必填，至少 3 个短标签。',
+          'content 内不要使用 ``` 代码块；若有双引号必须转义为 \\\\"。',
+          '请精简内容，确保 5 个文件都完整闭合后再输出。',
+        ].join('\n');
+        outputText = await sendDraftMessage(retryMessage);
+        lastModelOutput = outputText;
+        const parsedDraft = parseDraftPayload(outputText);
+        draftByFile = parsedDraft.draftByFile;
+        roleMetadata = parsedDraft.roleMetadata;
       }
-      const draftByFile = parseDraftByFile(outputText);
 
       set((state) => ({
         draftByFile,
         draftError: null,
+        draftRawOutputByAgent: {
+          ...state.draftRawOutputByAgent,
+          [agentId]: '',
+        },
         draftPromptByAgent: {
           ...state.draftPromptByAgent,
           [agentId]: trimmedPrompt,
         },
+        draftRoleMetadataByAgent: {
+          ...state.draftRoleMetadataByAgent,
+          [agentId]: roleMetadata,
+        },
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to generate draft';
-      set({
+      set((state) => ({
         error: message,
         draftError: message,
-      });
+        draftRawOutputByAgent: {
+          ...state.draftRawOutputByAgent,
+          [agentId]: lastModelOutput,
+        },
+      }));
       throw new Error(message);
     } finally {
       set((state) => {
@@ -865,6 +938,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       throw new Error('No approved draft content to apply');
     }
 
+    const roleMetadata = get().draftRoleMetadataByAgent[agentId];
+    if (!roleMetadata) {
+      throw new Error('Missing role metadata in draft; please regenerate draft');
+    }
+
     set((state) => ({
       loading: true,
       error: null,
@@ -883,6 +961,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       await rpc('agents.files.list', { agentId });
       await get().loadAgents();
+      await upsertRoleMetadataFromDraft(agentId, roleMetadata, get().agents);
       set((state) => ({
         loading: false,
         draftByFile: {},
@@ -891,6 +970,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         draftApplyingByAgent: {
           ...state.draftApplyingByAgent,
           [agentId]: false,
+        },
+        draftRoleMetadataByAgent: {
+          ...state.draftRoleMetadataByAgent,
+          [agentId]: undefined,
         },
         persistedFilesByAgent: {
           ...state.persistedFilesByAgent,
@@ -917,4 +1000,5 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 }));
+
 
