@@ -67,6 +67,14 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - `electron/main/ipc-handlers.ts` 实际处理逻辑
 - Gateway 生命周期管理（启动/停止/重连/健康）只能集中在 `electron/gateway/manager.ts`，禁止在页面层重复实现。
 
+### 2.1 页面共置（Colocation）规则（强约束）
+
+- 项目默认采用“按页面共置”组织：允许在 `src/pages/<Page>/` 下放该页面私有的业务逻辑文件（如 `*.logic.ts`、`*.mapper.ts`、`*utils.ts`）。
+- `index.tsx` 只负责页面编排（组装数据、调用 action、渲染组件）；复杂流程逻辑必须下沉到同目录的 `*.logic.ts`。
+- 页面共置逻辑必须满足“单页面私有”前提；一旦被第二个页面复用，必须上提到 `src/lib/*`（或后续 `src/features/*`）。
+- OpenClaw RPC 相关调用不属于页面共置范围；页面层及其共置文件不得直接拼装 `gateway:rpc` 的 OpenClaw 方法细节，必须走 `src/lib/openclaw/*` 兼容层。
+- 页面共置文件禁止反向依赖其他页面目录（例如 `src/pages/A` 直接依赖 `src/pages/B`）。
+
 ## 3. 技术栈约束
 
 - 桌面运行时：Electron 40+
@@ -88,6 +96,7 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ## 5. IPC 与协议规则
 
+- 继续开发时，先参考 `Matcha-claw/doc/gateway-rpc-api.md`，以其为 OpenClaw RPC 接口协议基准。
 - 所有 IPC 入参与返回值必须有明确 TypeScript 类型。
 - 错误语义统一：返回结构化错误（`code`/`message`），不要仅返回模糊字符串。
 - `gateway:rpc` 调用必须设置合理超时，超时后可见地反馈给 UI。
@@ -134,6 +143,25 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - 再验证 Gateway 握手、chat 流、skills、cron、channels 基本功能
 - 不允许依赖未文档化的私有行为。
 
+### 10.1 兼容层（Adapter Layer）强约束
+
+- 凡涉及 OpenClaw RPC 调用，`src/*` 业务代码（页面、store、业务 lib）必须优先调用兼容层接口，不得在调用点直接拼装 RPC 细节。
+- 若兼容层暂无对应接口，先在兼容层新增封装，再由业务代码调用；禁止“先直连 RPC，后续再重构”。
+- 新增封装必须按“可复用、跨场景”设计，禁止为单页面/单流程写一次性定制适配。
+- 兼容层对上提供稳定 contract，对下吸收 OpenClaw 版本变化（参数、返回结构、状态语义、超时语义）。
+- OpenClaw 升级时，优先只改兼容层实现；上层调用签名应保持稳定。
+- 错误语义统一由兼容层映射后再抛给上层；禁止把底层模糊错误直接扩散到 UI。
+
+### 10.2 兼容层目录规划（统一放置）
+
+- 兼容层统一放在：`src/lib/openclaw/`
+- 当前文件：
+  - `src/lib/openclaw/agent-runtime.ts`（agent run 生命周期：`agent` / `agent.wait`）
+  - `src/lib/openclaw/session-runtime.ts`（`chat.send` / `chat.history` / `sessions.*` + 消息提取工具）
+  - `src/lib/openclaw/types.ts`（兼容层共享类型）
+- 后续新增按职责拆分：
+  - `src/lib/openclaw/errors.ts`（错误码映射与错误构造）
+
 ## 11. 提交与评审
 
 - 一次提交只解决一个问题域（功能、重构、测试分离）。
@@ -143,6 +171,10 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - 验证清单
   - 回滚方案（如适用）
 - Code Review 以“行为正确性、回归风险、测试覆盖”优先，不做风格争论。
+- PR 必须补充结构边界自检：
+  - 是否新增了页面私有逻辑文件；若是，是否仅服务单页面；
+  - 是否出现跨页面复用但未上提；
+  - 是否出现页面层/共置文件直调 OpenClaw RPC。
 
 ## 12. 禁止事项
 
