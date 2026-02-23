@@ -24,11 +24,18 @@ export interface FileAttachment {
   error?: string;
 }
 
+export interface MentionCandidate {
+  id: string;
+  label?: string;
+  insertText?: string;
+}
+
 interface ChatInputProps {
   onSend: (text: string, attachments?: FileAttachment[]) => void;
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
+  mentionCandidates?: MentionCandidate[];
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -73,11 +80,43 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
   });
 }
 
+function normalizeMentionText(input: string): string {
+  return input.trim().toLowerCase();
+}
+
+function detectMentionRange(input: string, cursor: number): { start: number; end: number; query: string } | null {
+  const safeCursor = Math.max(0, Math.min(cursor, input.length));
+  const beforeCursor = input.slice(0, safeCursor);
+  const atIndex = beforeCursor.lastIndexOf('@');
+  if (atIndex < 0) {
+    return null;
+  }
+  if (atIndex > 0 && !/\s/.test(beforeCursor[atIndex - 1])) {
+    return null;
+  }
+  const query = beforeCursor.slice(atIndex + 1);
+  if (/[\s\r\n\t]/.test(query)) {
+    return null;
+  }
+  return { start: atIndex, end: safeCursor, query };
+}
+
 // ── Component ────────────────────────────────────────────────────
 
-export function ChatInput({ onSend, onStop, disabled = false, sending = false }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  onStop,
+  disabled = false,
+  sending = false,
+  mentionCandidates = [],
+}: ChatInputProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionStart, setMentionStart] = useState(-1);
+  const [mentionEnd, setMentionEnd] = useState(-1);
+  const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([]);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
 
@@ -88,6 +127,56 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [input]);
+
+  const closeMention = useCallback(() => {
+    setMentionOpen(false);
+    setMentionItems([]);
+    setMentionActiveIndex(0);
+    setMentionStart(-1);
+    setMentionEnd(-1);
+  }, []);
+
+  const refreshMentionCandidates = useCallback((nextInput: string, cursor: number) => {
+    if (mentionCandidates.length === 0) {
+      closeMention();
+      return;
+    }
+    const range = detectMentionRange(nextInput, cursor);
+    if (!range) {
+      closeMention();
+      return;
+    }
+    const query = normalizeMentionText(range.query);
+    const matched = mentionCandidates.filter((item) => {
+      const idMatched = normalizeMentionText(item.id).includes(query);
+      const labelMatched = normalizeMentionText(item.label ?? '').includes(query);
+      return idMatched || labelMatched;
+    });
+    if (matched.length === 0) {
+      closeMention();
+      return;
+    }
+    setMentionOpen(true);
+    setMentionStart(range.start);
+    setMentionEnd(range.end);
+    setMentionItems(matched);
+    setMentionActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
+  }, [closeMention, mentionCandidates]);
+
+  const applyMentionSelection = useCallback((candidate: MentionCandidate) => {
+    if (!textareaRef.current || mentionStart < 0 || mentionEnd < mentionStart) {
+      return;
+    }
+    const insertion = candidate.insertText ?? `@${candidate.id} `;
+    const nextValue = `${input.slice(0, mentionStart)}${insertion}${input.slice(mentionEnd)}`;
+    const caret = mentionStart + insertion.length;
+    setInput(nextValue);
+    closeMention();
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
+  }, [closeMention, input, mentionEnd, mentionStart]);
 
   // ── File staging via native dialog ─────────────────────────────
 
@@ -237,12 +326,13 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       })));
     }
     setInput('');
+    closeMention();
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     onSend(textToSend, attachmentsToSend);
-  }, [input, attachments, canSend, onSend]);
+  }, [input, attachments, canSend, closeMention, onSend]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -251,6 +341,29 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (mentionOpen && mentionItems.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setMentionActiveIndex((prev) => (prev + 1) % mentionItems.length);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setMentionActiveIndex((prev) => (prev - 1 + mentionItems.length) % mentionItems.length);
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          applyMentionSelection(mentionItems[mentionActiveIndex] ?? mentionItems[0]);
+          return;
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeMention();
+          return;
+        }
+      }
+
       if (e.key === 'Enter' && !e.shiftKey) {
         const nativeEvent = e.nativeEvent as KeyboardEvent;
         if (isComposingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229) {
@@ -260,7 +373,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         handleSend();
       }
     },
-    [handleSend],
+    [applyMentionSelection, closeMention, handleSend, mentionActiveIndex, mentionItems, mentionOpen],
   );
 
   // Handle paste (Ctrl/Cmd+V with files)
@@ -352,7 +465,11 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             <Textarea
               ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setInput(nextValue);
+                refreshMentionCandidates(nextValue, e.target.selectionStart ?? nextValue.length);
+              }}
               onKeyDown={handleKeyDown}
               onCompositionStart={() => {
                 isComposingRef.current = true;
@@ -366,6 +483,34 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
               className="min-h-[44px] max-h-[200px] resize-none pr-4"
               rows={1}
             />
+            {mentionOpen && mentionItems.length > 0 && (
+              <div
+                role="listbox"
+                className="absolute bottom-full mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-background p-1 shadow-md"
+              >
+                {mentionItems.map((item, index) => {
+                  const isActive = index === mentionActiveIndex;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs ${
+                        isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
+                      }`}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        applyMentionSelection(item);
+                      }}
+                    >
+                      <span className="font-medium">@{item.id}</span>
+                      {item.label && <span className="ml-2 truncate text-muted-foreground">{item.label}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Send Button */}

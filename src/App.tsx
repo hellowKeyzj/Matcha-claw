@@ -17,6 +17,8 @@ import { Cron } from './pages/Cron';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { SubAgents } from './pages/SubAgents';
+import { TeamsPage } from './pages/Teams';
+import { TeamChatPage } from './pages/Teams/TeamChat';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 
@@ -160,6 +162,8 @@ function App() {
             <Route path="/skills" element={<Skills />} />
             <Route path="/cron" element={<Cron />} />
             <Route path="/subagents" element={<SubAgents />} />
+            <Route path="/teams" element={<TeamsPage />} />
+            <Route path="/teams/:teamId" element={<TeamChatPage />} />
             <Route path="/settings/*" element={<Settings />} />
           </Route>
         </Routes>

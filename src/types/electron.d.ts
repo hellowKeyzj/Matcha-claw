@@ -4,6 +4,10 @@
  */
 
 export interface IpcRenderer {
+  /**
+   * Includes gateway/openclaw plus app-specific channels such as:
+   * `teamfs:initLayout`, `teamfs:prepareTask`, `teamfs:publishTask`, `teamfs:publishShared`.
+   */
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
   on(channel: string, callback: (...args: unknown[]) => void): (() => void) | void;
   once(channel: string, callback: (...args: unknown[]) => void): void;

@@ -1,4 +1,4 @@
-import { Button } from '@/components/ui/button';
+﻿import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import {
   buildSubagentWorkspacePath,
   hasSubagentNameConflict,
-} from '@/lib/subagent-workspace';
+} from '@/lib/subagent/workspace';
 import type { ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
 import { X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -44,16 +44,11 @@ const EMPTY_VALUES: SubagentFormValues = {
 };
 
 const EMOJI_OPTIONS = [
-  '😀', '😁', '😂', '🤣', '😊', '😉', '😍', '😘', '😎', '🤩',
-  '🤔', '🫡', '😴', '🤯', '🥳', '😇', '🙌', '👏', '👍', '👎',
-  '🔥', '✨', '⭐', '🌟', '⚡', '💡', '🧩', '🎯', '🎉', '🚀',
-  '🛠️', '🔧', '🔨', '⚙️', '🧪', '🧠', '📌', '📎', '📚', '📝',
-  '📊', '📈', '📉', '💻', '🖥️', '⌨️', '🧭', '🔍', '🔒', '🛡️',
-  '📣', '📬', '💬', '📢', '🌍', '🗺️', '🌱', '🌊', '☀️', '🌙',
-  '🐶', '🐱', '🐼', '🦊', '🐧', '🐢', '🦄', '🐙', '🐝', '🦉',
-  '🍀', '🍎', '🍋', '🍩', '🍵', '☕', '🍺', '🍷', '🍜', '🍣',
-  '🏆', '🥇', '🎮', '🎵', '🎬', '🧘', '🏃', '🚴', '✈️', '🚗',
-  '🤖', '👻', '🧸', '🦾', '🛰️', '🪄', '🔮', '🧙', '🧑‍💻', '👨‍🔬',
+  '\u{1F916}', '\u{1F9E0}', '\u{1F4A1}', '\u{1F680}', '\u{1F6E0}', '\u{1F4BB}', '\u{1F527}', '\u{1F4CA}', '\u{1F4C8}', '\u{1F4C4}',
+  '\u{1F4DD}', '\u{1F4E6}', '\u{1F3AF}', '\u{1F3C1}', '\u{1F3C6}', '\u{2705}', '\u{26A0}\u{FE0F}', '\u{1F6A7}', '\u{1F9F0}', '\u{1F4E3}',
+  '\u{1F4A5}', '\u{1F525}', '\u{1F48E}', '\u{2B50}', '\u{1F31F}', '\u{1F984}', '\u{1F981}', '\u{1F43C}', '\u{1F431}', '\u{1F436}',
+  '\u{1F332}', '\u{1F33F}', '\u{1F30A}', '\u{1F308}', '\u{2601}\u{FE0F}', '\u{1F31E}', '\u{1F319}', '\u{1F680}', '\u{1F6F0}\u{FE0F}', '\u{1F30D}',
+  '\u{1F3B5}', '\u{1F3A8}', '\u{1F3AD}', '\u{1F3AE}', '\u{1F3C0}', '\u{26BD}', '\u{1F3B2}', '\u{1F3AF}', '\u{1F4AF}', '\u{1F44D}',
 ];
 
 export function SubagentFormDialog({
@@ -97,8 +92,8 @@ export function SubagentFormDialog({
       name: initialName,
       workspace: initialWorkspace,
       model: initialValues?.model ?? (mode === 'create' ? (modelOptions[0]?.id ?? '') : ''),
-      emoji: '',
-      prompt: '',
+      emoji: initialValues?.emoji ?? '',
+      prompt: initialValues?.prompt ?? '',
     });
     setSubmitting(false);
     setEmojiPanelOpen(false);
@@ -300,3 +295,4 @@ export function SubagentFormDialog({
 }
 
 export default SubagentFormDialog;
+

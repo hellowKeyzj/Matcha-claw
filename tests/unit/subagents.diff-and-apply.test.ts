@@ -16,6 +16,13 @@ describe('subagents diff and apply', () => {
       draftSessionKeyByAgent: {
         writer: 'agent:writer:subagent-draft-123',
       },
+      draftRawOutputByAgent: {},
+      draftRoleMetadataByAgent: {
+        writer: {
+          summary: '负责子 agent 行为规范设计与执行流程约束。',
+          tags: ['subagent', 'prompt', 'workflow'],
+        },
+      },
       persistedFilesByAgent: {
         writer: {
           'AGENTS.md': 'line-1\nline-2',
@@ -49,7 +56,41 @@ describe('subagents diff and apply', () => {
 
   it('does not call agents.files.set until applyDraft is confirmed', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValue({ success: true, result: {} });
+    invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
+      if (channel === 'gateway:rpc') {
+        return { success: true, result: {} };
+      }
+      if (channel === 'roles:readMetadata') {
+        return {
+          path: '/tmp/ROLES_METADATA.md',
+          content: [
+            '# ROLES_METADATA',
+            '',
+            '```json',
+            JSON.stringify({
+              version: 1,
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              roles: [{
+                agentId: 'writer',
+                name: 'Writer',
+                role: 'Writer',
+                summary: 'writer handles tasks in its specialty and reports outcomes.',
+                tags: [],
+                model: 'custom/claude-sonnet-4.5',
+                emoji: '🤖',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+              }],
+            }, null, 2),
+            '```',
+            '',
+          ].join('\n'),
+        };
+      }
+      if (channel === 'roles:writeMetadata') {
+        return undefined;
+      }
+      return undefined;
+    });
 
     useSubagentsStore.getState().generatePreviewDiffByFile({
       'AGENTS.md': 'line-1\nline-2',
@@ -81,7 +122,18 @@ describe('subagents diff and apply', () => {
 
   it('clears draft/preview and marks apply success after applyDraft', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValue({ success: true, result: {} });
+    invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
+      if (channel === 'gateway:rpc') {
+        return { success: true, result: {} };
+      }
+      if (channel === 'roles:readMetadata') {
+        return {
+          path: '/tmp/ROLES_METADATA.md',
+          content: '# ROLES_METADATA\n\n```json\n{"version":1,"updatedAt":"2026-01-01T00:00:00.000Z","roles":[]}\n```\n',
+        };
+      }
+      return undefined;
+    });
 
     useSubagentsStore.getState().generatePreviewDiffByFile({
       'AGENTS.md': 'line-1\nline-2',
@@ -94,6 +146,58 @@ describe('subagents diff and apply', () => {
     expect(state.draftError).toBeNull();
     expect(state.draftApplySuccessByAgent.writer).toBe(true);
     expect(state.draftSessionKeyByAgent.writer).toBe('agent:writer:subagent-draft-123');
+    expect(state.draftRoleMetadataByAgent.writer).toBeUndefined();
+  });
+
+  it('writes role metadata from draft summary/tags instead of default summary', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const defaultSummary = 'writer handles tasks in its specialty and reports outcomes.';
+    const draftSummary = '负责子 agent 行为规范设计与执行流程约束。';
+    invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
+      if (channel === 'gateway:rpc') {
+        return { success: true, result: {} };
+      }
+      if (channel === 'roles:readMetadata') {
+        return {
+          path: '/tmp/ROLES_METADATA.md',
+          content: [
+            '# ROLES_METADATA',
+            '',
+            '```json',
+            JSON.stringify({
+              version: 1,
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              roles: [{
+                agentId: 'writer',
+                name: 'Writer',
+                role: 'Writer',
+                summary: defaultSummary,
+                tags: [],
+                model: 'custom/claude-sonnet-4.5',
+                emoji: '🤖',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+              }],
+            }, null, 2),
+            '```',
+            '',
+          ].join('\n'),
+        };
+      }
+      if (channel === 'roles:writeMetadata') {
+        return undefined;
+      }
+      return undefined;
+    });
+
+    await useSubagentsStore.getState().applyDraft('writer');
+
+    const writeCall = invoke.mock.calls.find((call) => call[0] === 'roles:writeMetadata');
+    expect(writeCall).toBeTruthy();
+    const payload = writeCall?.[1] as { rootDir: string; content: string } | undefined;
+    expect(payload?.content).toContain(draftSummary);
+    expect(payload?.content).toContain('"tags": [');
+    expect(payload?.content).toContain('"subagent"');
+    expect(payload?.content).not.toContain(defaultSummary);
   });
 
   it('deletes session and clears draft when cancelDraft is called', async () => {

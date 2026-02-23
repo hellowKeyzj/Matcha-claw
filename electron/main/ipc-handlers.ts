@@ -3,9 +3,9 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
-import { existsSync, cpSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, extname, basename } from 'node:path';
+import { join, extname, basename, dirname, resolve, relative, isAbsolute } from 'node:path';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
@@ -24,6 +24,7 @@ import {
 } from '../utils/secure-storage';
 import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
+import { expandPath } from '../utils/paths';
 import { getAllSettings, getSetting, resetSettings, setSetting } from '../utils/store';
 import {
   saveProviderKeyToOpenClaw,
@@ -50,6 +51,7 @@ import { updateSkillConfig, getSkillConfig, getAllSkillConfigs } from '../utils/
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
 import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
+import { registerTeamFsHandlers } from './team-fs-handlers';
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -126,7 +128,61 @@ export function registerIpcHandlers(
 
   // File staging handlers (upload/send separation)
   registerFileHandlers();
+  registerRolesMetadataHandlers(gatewayManager);
+  registerTeamFsHandlers();
 
+}
+
+function isPathInside(basePath: string, targetPath: string): boolean {
+  const relPath = relative(basePath, targetPath);
+  return relPath === '' || (!relPath.startsWith('..') && !isAbsolute(relPath));
+}
+
+function registerRolesMetadataHandlers(gatewayManager: GatewayManager): void {
+  const resolveRolesMetadataPath = (rootDir?: string): string => {
+    const configDir = resolve(expandPath(gatewayManager.getRuntimePaths().configDir || getOpenClawConfigDir()));
+    const workspaceDirRaw = gatewayManager.getRuntimePaths().workspaceDir;
+    const workspaceDir = workspaceDirRaw ? resolve(expandPath(workspaceDirRaw)) : null;
+    const fallbackRoot = workspaceDir ? join(configDir, 'workspace-subagents') : join(configDir, 'workspace-subagents');
+    const requestedRoot = (typeof rootDir === 'string' && rootDir.trim())
+      ? resolve(expandPath(rootDir.trim()))
+      : fallbackRoot;
+
+    // Keep write scope under OpenClaw config/workspace tree.
+    const underConfigDir = isPathInside(configDir, requestedRoot);
+    const underWorkspaceDir = workspaceDir ? isPathInside(workspaceDir, requestedRoot) : false;
+    if (!underConfigDir && !underWorkspaceDir) {
+      throw new Error(`roles metadata path is outside allowed roots: ${requestedRoot}`);
+    }
+
+    return join(requestedRoot, 'ROLES_METADATA.md');
+  };
+
+  ipcMain.handle('roles:readMetadata', async (_, rootDir?: string) => {
+    const filePath = resolveRolesMetadataPath(rootDir);
+    try {
+      const content = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
+      return { path: filePath, content };
+    } catch (error) {
+      logger.error('roles:readMetadata failed', error);
+      throw error;
+    }
+  });
+
+  ipcMain.handle('roles:writeMetadata', async (_, input: { rootDir?: string; content: string }) => {
+    if (!input || typeof input.content !== 'string') {
+      throw new Error('Invalid roles metadata payload');
+    }
+    const filePath = resolveRolesMetadataPath(input.rootDir);
+    try {
+      ensureDir(dirname(filePath));
+      writeFileSync(filePath, input.content, 'utf8');
+      return { path: filePath };
+    } catch (error) {
+      logger.error('roles:writeMetadata failed', error);
+      throw error;
+    }
+  });
 }
 
 /**
@@ -1673,6 +1729,19 @@ function registerShellHandlers(): void {
   // Open path
   ipcMain.handle('shell:openPath', async (_, path: string) => {
     return await shell.openPath(path);
+  });
+
+  // Check local path exists before opening (avoid native explorer error dialog)
+  ipcMain.handle('shell:pathExists', async (_, path: string) => {
+    try {
+      const target = String(path ?? '').trim();
+      if (!target) {
+        return false;
+      }
+      return existsSync(target);
+    } catch {
+      return false;
+    }
   });
 }
 
