@@ -18,10 +18,12 @@ import {
   ExternalLink,
   Trash2,
   Bot,
+  Users,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore } from '@/stores/chat';
+import { useTeamsStore } from '@/stores/teams';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -71,6 +73,11 @@ export function Sidebar() {
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const teams = useTeamsStore((state) => state.teams);
+  const activeTeamId = useTeamsStore((state) => state.activeTeamId);
+  const teamsRoute = activeTeamId && teams.some((team) => team.id === activeTeamId)
+    ? `/teams/${activeTeamId}`
+    : '/teams';
 
   const sessions = useChatStore((s) => s.sessions);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
@@ -114,6 +121,7 @@ export function Sidebar() {
     { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
     { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },
+    { to: teamsRoute, icon: <Users className="h-5 w-5" />, label: t('sidebar.agentsWorkspace') },
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
     { to: '/settings', icon: <Settings className="h-5 w-5" />, label: t('sidebar.settings') },
   ];

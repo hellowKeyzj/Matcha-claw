@@ -30,6 +30,11 @@ export default [
       ...js.configs.recommended.rules,
       ...tsPlugin.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
+      // TODO(architecture-boundary):
+      // Add hard boundary rules in next step:
+      // 1) forbid `src/pages/**` from calling `ipcRenderer.invoke('gateway:rpc', ...)` directly
+      // 2) forbid cross-page imports like `src/pages/A/** -> src/pages/B/**`
+      // 3) require OpenClaw RPC to go through `src/lib/openclaw/*`
       // TypeScript handles these checks natively, disable ESLint duplicates
       'no-undef': 'off',
       'react-refresh/only-export-components': [

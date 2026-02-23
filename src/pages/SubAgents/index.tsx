@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { normalizeSubagentNameToSlug } from '@/lib/subagent-workspace';
+import { normalizeSubagentNameToSlug } from '@/lib/subagent/workspace';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
@@ -27,6 +27,7 @@ export function SubAgents() {
   const draftGeneratingByAgent = useSubagentsStore((state) => state.draftGeneratingByAgent);
   const draftApplyingByAgent = useSubagentsStore((state) => state.draftApplyingByAgent);
   const draftApplySuccessByAgent = useSubagentsStore((state) => state.draftApplySuccessByAgent);
+  const draftRawOutputByAgent = useSubagentsStore((state) => state.draftRawOutputByAgent);
   const persistedFilesByAgent = useSubagentsStore((state) => state.persistedFilesByAgent);
   const previewDiffByFile = useSubagentsStore((state) => state.previewDiffByFile);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
@@ -53,6 +54,7 @@ export function SubAgents() {
   const hasApprovedDraft = Object.values(draftByFile).some((draft) => Boolean(draft) && !draft?.needsReview);
   const applySucceeded = managedAgentId ? Boolean(draftApplySuccessByAgent[managedAgentId]) : false;
   const applyingDraft = managedAgentId ? Boolean(draftApplyingByAgent[managedAgentId]) : false;
+  const draftRawOutput = managedAgentId ? (draftRawOutputByAgent[managedAgentId] ?? '') : '';
 
   useEffect(() => {
     loadAgents();
@@ -162,6 +164,7 @@ export function SubAgents() {
         applySucceeded={applySucceeded}
         draftByFile={draftByFile}
         draftError={draftError}
+        draftRawOutput={draftRawOutput}
         previewDiffByFile={previewDiffByFile}
         persistedContentByFile={persistedContentByFile}
         onDraftPromptChange={(prompt) => {

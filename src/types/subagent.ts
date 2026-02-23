@@ -86,5 +86,10 @@ export interface SubagentDraftFile {
   needsReview: boolean;
 }
 
+export interface SubagentDraftRoleMetadata {
+  summary: string;
+  tags: string[];
+}
+
 export type DraftByFile = Partial<Record<SubagentTargetFile, SubagentDraftFile>>;
 export type PreviewDiffByFile = Partial<Record<SubagentTargetFile, LineDiffEntry[]>>;

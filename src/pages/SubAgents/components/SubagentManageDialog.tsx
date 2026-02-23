@@ -17,6 +17,7 @@ interface SubagentManageDialogProps {
   applySucceeded: boolean;
   draftByFile: DraftByFile;
   draftError: string | null;
+  draftRawOutput: string;
   previewDiffByFile: PreviewDiffByFile;
   persistedContentByFile: Partial<Record<SubagentTargetFile, string>>;
   onDraftPromptChange: (prompt: string) => void;
@@ -37,6 +38,7 @@ export function SubagentManageDialog({
   applySucceeded,
   draftByFile,
   draftError,
+  draftRawOutput,
   previewDiffByFile,
   persistedContentByFile,
   onDraftPromptChange,
@@ -115,6 +117,14 @@ export function SubagentManageDialog({
         )}
         {draftError && (
           <p className="text-xs text-destructive">{draftError}</p>
+        )}
+        {draftError && draftRawOutput.trim() && (
+          <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 p-2">
+            <p className="text-[11px] font-medium text-destructive">{t('manage.rawOutputTitle')}</p>
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">
+              {draftRawOutput}
+            </pre>
+          </div>
         )}
 
         <div className="min-h-0 flex-1 overflow-auto pr-1">

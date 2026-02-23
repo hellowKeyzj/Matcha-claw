@@ -17,7 +17,8 @@
     "emptyFileContent": "(空)",
     "confirmApplyDraft": "确认应用草稿",
     "cancelDraft": "取消草稿",
-    "applyDraftSuccess": "草稿已成功应用。"
+    "applyDraftSuccess": "草稿已成功应用。",
+    "rawOutputTitle": "模型原始输出"
   },
   "deleteDialog": {
     "title": "删除 {{agentId}}",

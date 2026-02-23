@@ -13,6 +13,7 @@ describe('subagents prompt pipeline', () => {
       draftApplyingByAgent: {},
       draftApplySuccessByAgent: {},
       draftSessionKeyByAgent: {},
+      draftRawOutputByAgent: {},
       // writer 默认标记为“已加载但当前为空”，避免无关用例走基线加载分支
       persistedFilesByAgent: { writer: {} },
       selectedAgentId: 'writer',
@@ -60,9 +61,9 @@ describe('subagents prompt pipeline', () => {
     );
     expect(invoke.mock.calls[0]?.[2]).not.toHaveProperty('system');
     const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
-    expect(sentMessage).toContain('迭代规则（系统自动附加）：');
-    expect(sentMessage).toContain('始终在同一会话中，基于上一版草稿继续迭代优化。');
-    expect(sentMessage).toContain('输出格式必须始终为 JSON 的 files 数组');
+    expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
+    expect(sentMessage).toContain('{"files":[{"name","content","reason","confidence"}]}');
+    expect(sentMessage).toContain('JSON');
 
     const draft = useSubagentsStore.getState().draftByFile;
     expect(draft['AGENTS.md']?.content).toBe('global rules');
@@ -78,11 +79,18 @@ describe('subagents prompt pipeline', () => {
       result: {
         output: 'not-json',
       },
+    }).mockResolvedValueOnce({
+      success: true,
+      result: {
+        output: 'not-json',
+      },
     });
 
     await expect(
       useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案')
     ).rejects.toThrow('Invalid JSON output from model');
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(useSubagentsStore.getState().draftRawOutputByAgent.writer).toBe('not-json');
   });
 
   it('parses draft JSON wrapped in markdown code fence', async () => {
@@ -347,7 +355,7 @@ describe('subagents prompt pipeline', () => {
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续优化');
 
     const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
-    expect(sentMessage).toContain('当前已落盘文件内容（作为本轮基线）:');
+    expect(sentMessage).toContain('### SOUL.md');
     expect(sentMessage).toContain('### AGENTS.md');
     expect(sentMessage).toContain('saved agents baseline');
   });
@@ -384,7 +392,7 @@ describe('subagents prompt pipeline', () => {
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续润色');
 
     const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
-    expect(sentMessage).not.toContain('当前已落盘文件内容（作为本轮基线）:');
+    expect(sentMessage).not.toContain('### SOUL.md');
     expect(sentMessage).not.toContain('saved agents baseline');
   });
 
