@@ -10,6 +10,7 @@ sidebarTitle: Gateway RPC API
 
 - 用途: 作为后续开发和联调用的长期参考文档。
 - 范围: `openclaw` 网关 WebSocket RPC（不是 HTTP REST）。
+- 事件流参考: 见同目录 [gateway-events-api.md](./gateway-events-api.md)（事件名全集、payload 与 `dropIfSlow` 策略）。
 - 完整性边界:
   - 本文覆盖 `coreGatewayHandlers` 的内置 RPC（`src/gateway/server-methods.ts`）。
   - 不包含运行时插件动态注入的方法（`listChannelPlugins().flatMap(plugin.gatewayMethods)`）。

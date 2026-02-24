@@ -96,7 +96,8 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ## 5. IPC 与协议规则
 
-- 继续开发时，先参考 `Matcha-claw/doc/gateway-rpc-api.md`，以其为 OpenClaw RPC 接口协议基准。
+- 继续开发时，先参考 `Matcha-claw/doc/gateway-rpc-api.md`（RPC）与 `Matcha-claw/doc/gateway-events-api.md`（事件），作为 OpenClaw 协议基准。
+- 涉及流式/订阅开发时，优先以 `Matcha-claw/doc/gateway-events-api.md` 的事件名、payload 与 `dropIfSlow` 语义为准。
 - 所有 IPC 入参与返回值必须有明确 TypeScript 类型。
 - 错误语义统一：返回结构化错误（`code`/`message`），不要仅返回模糊字符串。
 - `gateway:rpc` 调用必须设置合理超时，超时后可见地反馈给 UI。
