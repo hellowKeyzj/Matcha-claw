@@ -32,6 +32,13 @@ asar: true
 asarUnpack:
   - "**/*.node"
 
+# Disable native module rebuilding.
+# The Electron renderer/main process has no native (.node) dependencies.
+# All native modules (opus, sharp, koffi …) belong to openclaw, which is
+# bundled separately (bundle-openclaw.mjs → extraResources) and runs in its
+# own process — @electron/rebuild must NOT touch them.
+npmRebuild: false
+
 # Auto-update configuration
 # Primary: Alibaba Cloud OSS (fast for Chinese users, used for auto-update)
 # Fallback: GitHub Releases (backup, used when OSS is unavailable)
