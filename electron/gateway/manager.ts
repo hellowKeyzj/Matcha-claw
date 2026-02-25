@@ -1146,7 +1146,6 @@ export class GatewayManager extends EventEmitter {
       return;
     }
     
-    // Emit generic message for other handlers
     this.emit('message', message);
   }
   
@@ -1154,19 +1153,34 @@ export class GatewayManager extends EventEmitter {
    * Handle OpenClaw protocol events
    */
   private handleProtocolEvent(event: string, payload: unknown): void {
-    // Map OpenClaw events to our internal event types
     switch (event) {
       case 'tick':
-        // Heartbeat tick, ignore
         break;
       case 'chat':
         this.emit('chat:message', { message: payload });
         break;
+      case 'agent': {
+        // Agent events may carry chat streaming data inside payload.data,
+        // or be lifecycle events (phase=started/completed) with no message.
+        const p = payload as Record<string, unknown>;
+        const data = (p.data && typeof p.data === 'object') ? p.data as Record<string, unknown> : {};
+        const chatEvent: Record<string, unknown> = {
+          ...data,
+          runId: p.runId ?? data.runId,
+          sessionKey: p.sessionKey ?? data.sessionKey,
+          state: p.state ?? data.state,
+          message: p.message ?? data.message,
+        };
+        if (chatEvent.state || chatEvent.message) {
+          this.emit('chat:message', { message: chatEvent });
+        }
+        this.emit('notification', { method: event, params: payload });
+        break;
+      }
       case 'channel.status':
         this.emit('channel:status', payload as { channelId: string; status: string });
         break;
       default:
-        // Forward unknown events as generic notifications
         this.emit('notification', { method: event, params: payload });
     }
   }
