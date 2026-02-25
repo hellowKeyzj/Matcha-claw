@@ -52,7 +52,7 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
   },
   google: {
     envVar: 'GEMINI_API_KEY',
-    defaultModel: 'google/gemini-3-pro-preview',
+    defaultModel: 'google/gemini-3.1-pro-preview',
     // google is built-in to OpenClaw's pi-ai catalog, no providerConfig needed.
     // Adding models.providers.google overrides the built-in and can break Gemini.
   },
@@ -93,6 +93,9 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
       api: 'openai-completions',
       apiKeyEnv: 'SILICONFLOW_API_KEY',
     },
+  },
+  custom: {
+    envVar: 'CUSTOM_API_KEY',
   },
   // Additional providers with env var mappings but no default model
   groq: { envVar: 'GROQ_API_KEY' },
