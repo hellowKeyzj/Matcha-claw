@@ -27,7 +27,7 @@ import { getOpenClawCliCommand, installOpenClawCliMac } from '../utils/openclaw-
 import { getSetting } from '../utils/store';
 import {
   saveProviderKeyToOpenClaw,
-  removeProviderKeyFromOpenClaw,
+  removeProviderFromOpenClaw,
   setOpenClawDefaultModel,
   setOpenClawDefaultModelWithOverride,
   updateAgentModelProvider,
@@ -47,6 +47,7 @@ import { checkUvInstalled, installUv, setupManagedPython } from '../utils/uv-set
 import { updateSkillConfig, getSkillConfig, getAllSkillConfigs } from '../utils/skill-config';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
+import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
 
 /**
  * Register all IPC handlers
@@ -94,6 +95,9 @@ export function registerIpcHandlers(
 
   // WhatsApp handlers
   registerWhatsAppHandlers(mainWindow);
+
+  // Device OAuth handlers (Code Plan)
+  registerDeviceOAuthHandlers(mainWindow);
 
   // File staging handlers (upload/send separation)
   registerFileHandlers();
@@ -777,6 +781,35 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
   });
 }
 
+/**
+ * Device OAuth Handlers (Code Plan)
+ */
+function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
+  deviceOAuthManager.setWindow(mainWindow);
+
+  // Request Provider OAuth initialization
+  ipcMain.handle('provider:requestOAuth', async (_, provider: OAuthProviderType, region?: 'global' | 'cn') => {
+    try {
+      logger.info(`provider:requestOAuth for ${provider}`);
+      await deviceOAuthManager.startFlow(provider, region);
+      return { success: true };
+    } catch (error) {
+      logger.error('provider:requestOAuth failed', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Cancel Provider OAuth
+  ipcMain.handle('provider:cancelOAuth', async () => {
+    try {
+      await deviceOAuthManager.stopFlow();
+      return { success: true };
+    } catch (error) {
+      logger.error('provider:cancelOAuth failed', error);
+      return { success: false, error: String(error) };
+    }
+  });
+}
 
 /**
  * Provider-related IPC handlers
@@ -822,12 +855,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       const existing = await getProvider(providerId);
       await deleteProvider(providerId);
 
-      // Best-effort cleanup in OpenClaw auth profiles
+      // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
       if (existing?.type) {
         try {
-          removeProviderKeyFromOpenClaw(existing.type);
+          removeProviderFromOpenClaw(existing.type);
         } catch (err) {
-          console.warn('Failed to remove key from OpenClaw auth-profiles:', err);
+          console.warn('Failed to completely remove provider from OpenClaw:', err);
         }
       }
 
@@ -891,7 +924,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
             saveProviderKeyToOpenClaw(nextConfig.type, trimmedKey);
           } else {
             await deleteApiKey(providerId);
-            removeProviderKeyFromOpenClaw(nextConfig.type);
+            removeProviderFromOpenClaw(nextConfig.type);
           }
         }
 
@@ -942,7 +975,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
             saveProviderKeyToOpenClaw(previousProviderType, previousKey);
           } else {
             await deleteApiKey(providerId);
-            removeProviderKeyFromOpenClaw(previousProviderType);
+            removeProviderFromOpenClaw(previousProviderType);
           }
         } catch (rollbackError) {
           console.warn('Failed to rollback provider updateWithKey:', rollbackError);
@@ -962,9 +995,11 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       const provider = await getProvider(providerId);
       const providerType = provider?.type || providerId;
       try {
-        removeProviderKeyFromOpenClaw(providerType);
+        if (providerType) {
+          removeProviderFromOpenClaw(providerType);
+        }
       } catch (err) {
-        console.warn('Failed to remove key from OpenClaw auth-profiles:', err);
+        console.warn('Failed to completely remove provider from OpenClaw:', err);
       }
 
       return { success: true };
@@ -992,29 +1027,66 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       const provider = await getProvider(providerId);
       if (provider) {
         try {
-          // If the provider has a user-specified model (e.g. siliconflow),
-          // build the full model string: "providerType/modelId"
-          const modelOverride = provider.model
-            ? `${provider.type}/${provider.model}`
-            : undefined;
+          // OAuth providers (qwen-portal, minimax-portal) have their openclaw.json
+          // model config already written by `openclaw models auth login --set-default`.
+          // Non-OAuth providers need us to write it here.
+          const OAUTH_PROVIDER_TYPES = ['qwen-portal', 'minimax-portal'];
+          const isOAuthProvider = OAUTH_PROVIDER_TYPES.includes(provider.type);
 
-          if (provider.type === 'custom' || provider.type === 'ollama') {
-            // For runtime-configured providers, use user-entered base URL/api.
-            // Do NOT set apiKeyEnv — the OpenClaw gateway resolves custom
-            // provider keys via auth-profiles, not the config apiKey field.
-            setOpenClawDefaultModelWithOverride(provider.type, modelOverride, {
-              baseUrl: provider.baseUrl,
-              api: 'openai-completions',
-            });
+          if (!isOAuthProvider) {
+            // If the provider has a user-specified model (e.g. siliconflow),
+            // build the full model string: "providerType/modelId"
+            // Guard against double-prefixing: provider.model may already
+            // include the provider type (e.g. "siliconflow/DeepSeek-V3").
+            const modelOverride = provider.model
+              ? (provider.model.startsWith(`${provider.type}/`)
+                ? provider.model
+                : `${provider.type}/${provider.model}`)
+              : undefined;
+
+            if (provider.type === 'custom' || provider.type === 'ollama') {
+              // For runtime-configured providers, use user-entered base URL/api.
+              // Do NOT set apiKeyEnv — the OpenClaw gateway resolves custom
+              // provider keys via auth-profiles, not the config apiKey field.
+              setOpenClawDefaultModelWithOverride(provider.type, modelOverride, {
+                baseUrl: provider.baseUrl,
+                api: 'openai-completions',
+              });
+            } else {
+              setOpenClawDefaultModel(provider.type, modelOverride);
+            }
+
+            // Keep auth-profiles in sync with the default provider instance.
+            // This is especially important when multiple custom providers exist.
+            const providerKey = await getApiKey(providerId);
+            if (providerKey) {
+              saveProviderKeyToOpenClaw(provider.type, providerKey);
+            }
           } else {
-            setOpenClawDefaultModel(provider.type, modelOverride);
-          }
+            // OAuth providers (minimax-portal, qwen-portal): write the provider config
+            // using the model and baseUrl stored by device-oauth.ts at login time.
+            // These providers use their own API format (not standard OpenAI completions).
+            const defaultBaseUrl = provider.type === 'minimax-portal'
+              ? 'https://api.minimax.io/anthropic'
+              : 'https://portal.qwen.ai/v1';
+            const api: 'anthropic-messages' | 'openai-completions' = provider.type === 'minimax-portal'
+              ? 'anthropic-messages'
+              : 'openai-completions';
 
-          // Keep auth-profiles in sync with the default provider instance.
-          // This is especially important when multiple custom providers exist.
-          const providerKey = await getApiKey(providerId);
-          if (providerKey) {
-            saveProviderKeyToOpenClaw(provider.type, providerKey);
+            let baseUrl = provider.baseUrl || defaultBaseUrl;
+            if (provider.type === 'minimax-portal' && baseUrl && !baseUrl.endsWith('/anthropic')) {
+              baseUrl = baseUrl.replace(/\/$/, '') + '/anthropic';
+            }
+
+            setOpenClawDefaultModelWithOverride(provider.type, undefined, {
+              baseUrl,
+              api,
+              // OAuth placeholder — Gateway uses this to look up OAuth credentials
+              // from auth-profiles.json instead of a static API key.
+              apiKeyEnv: provider.type === 'minimax-portal' ? 'minimax-oauth' : 'qwen-oauth',
+            });
+
+            logger.info(`Configured openclaw.json for OAuth provider "${provider.type}"`);
           }
 
           // For custom/ollama providers, also update the per-agent models.json
@@ -1055,6 +1127,8 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       return { success: false, error: String(error) };
     }
   });
+
+
 
   // Get default provider
   ipcMain.handle('provider:getDefault', async () => {

@@ -4,6 +4,9 @@
  * Keys are stored in plain text alongside provider configs in a single electron-store.
  */
 
+import type { ProviderType } from './provider-registry';
+import { getActiveOpenClawProviders } from './openclaw-auth';
+
 // Lazy-load electron-store (ESM module)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let providerStore: any = null;
@@ -29,7 +32,7 @@ async function getProviderStore() {
 export interface ProviderConfig {
   id: string;
   name: string;
-  type: 'anthropic' | 'openai' | 'google' | 'openrouter' | 'moonshot' | 'siliconflow' | 'ollama' | 'custom';
+  type: ProviderType;
   baseUrl?: string;
   model?: string;
   enabled: boolean;
@@ -204,14 +207,32 @@ export async function getProviderWithKeyInfo(
 
 /**
  * Get all providers with key info (for UI display)
+ * Also synchronizes ClawX local provider list with OpenClaw's actual config.
  */
 export async function getAllProvidersWithKeyInfo(): Promise<
   Array<ProviderConfig & { hasKey: boolean; keyMasked: string | null }>
 > {
   const providers = await getAllProviders();
   const results: Array<ProviderConfig & { hasKey: boolean; keyMasked: string | null }> = [];
+  const activeOpenClawProviders = getActiveOpenClawProviders();
+
+  // We need to avoid deleting native ones like 'anthropic' or 'google'
+  // that don't need to exist in openclaw.json models.providers
+  const OpenClawBuiltinList = [
+    'anthropic', 'openai', 'google', 'moonshot', 'siliconflow', 'ollama'
+  ];
 
   for (const provider of providers) {
+    // Sync check: If it's a custom/OAuth provider and it no longer exists in OpenClaw config
+    // (e.g. wiped by Gateway due to missing plugin, or manually deleted by user)
+    // we should remove it from ClawX UI to stay consistent.
+    const isBuiltin = OpenClawBuiltinList.includes(provider.type);
+    if (!isBuiltin && !activeOpenClawProviders.has(provider.type) && !activeOpenClawProviders.has(provider.id)) {
+      console.log(`[Sync] Provider ${provider.id} (${provider.type}) missing from OpenClaw, dropping from ClawX UI`);
+      await deleteProvider(provider.id);
+      continue;
+    }
+
     const apiKey = await getApiKey(provider.id);
     let keyMasked: string | null = null;
 
@@ -232,3 +253,4 @@ export async function getAllProvidersWithKeyInfo(): Promise<
 
   return results;
 }
+
