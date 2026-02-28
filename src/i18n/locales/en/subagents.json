@@ -54,7 +54,8 @@
     "actions": {
       "edit": "Edit",
       "delete": "Delete",
-      "manage": "Manage"
+      "manage": "Manage",
+      "chat": "Chat"
     }
   }
 }

@@ -8,6 +8,7 @@ interface SubagentCardProps {
   onEdit: () => void;
   onDelete: () => void;
   onManage: () => void;
+  onChat: () => void;
 }
 
 export function SubagentCard({
@@ -16,6 +17,7 @@ export function SubagentCard({
   onEdit,
   onDelete,
   onManage,
+  onChat,
 }: SubagentCardProps) {
   const { t } = useTranslation('subagents');
   const displayEmoji = agent.identityEmoji || (agent.id === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16');
@@ -68,6 +70,14 @@ export function SubagentCard({
           onClick={onManage}
         >
           {t('card.actions.manage')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-label={`Chat ${agent.id}`}
+          onClick={onChat}
+        >
+          {t('card.actions.chat')}
         </Button>
       </div>
     </article>
