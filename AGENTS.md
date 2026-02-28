@@ -34,7 +34,7 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ---
 
-# ClawX Agent 开发规范
+# Matcha-claw 开发规范
 
 本文件用于约束在 `Matcha-claw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
 

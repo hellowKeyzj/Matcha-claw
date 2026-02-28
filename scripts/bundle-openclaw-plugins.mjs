@@ -31,6 +31,19 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
+function realpathSafe(p) {
+  const normalized = normWin(p);
+  try {
+    return fs.realpathSync(normalized);
+  } catch (error) {
+    // Fallback to non-extended path form for environments that mishandle \\?\
+    if (process.platform === 'win32' && normalized !== p) {
+      return fs.realpathSync(p);
+    }
+    throw error;
+  }
+}
+
 const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
 ];
@@ -81,7 +94,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
   }
 
-  const realPluginPath = fs.realpathSync(normWin(pkgPath));
+  const realPluginPath = realpathSafe(pkgPath);
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
 
   echo`📦 Bundling plugin ${npmName} -> ${outputDir}`;
@@ -121,7 +134,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
 
       let realPath;
       try {
-        realPath = fs.realpathSync(normWin(fullPath));
+        realPath = realpathSafe(fullPath);
       } catch {
         continue;
       }

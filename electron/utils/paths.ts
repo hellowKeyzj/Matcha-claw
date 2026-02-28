@@ -26,11 +26,29 @@ export function expandPath(path: string): string {
   return path;
 }
 
+let openClawConfigDirOverride: string | null = null;
+
+/**
+ * Get OpenClaw default config directory (without runtime override)
+ */
+export function getDefaultOpenClawConfigDir(): string {
+  return join(homedir(), '.openclaw');
+}
+
+/**
+ * Override OpenClaw config directory for current process runtime.
+ * Pass empty/undefined to clear override.
+ */
+export function setOpenClawConfigDirOverride(path?: string): void {
+  const trimmed = typeof path === 'string' ? path.trim() : '';
+  openClawConfigDirOverride = trimmed ? expandPath(trimmed) : null;
+}
+
 /**
  * Get OpenClaw config directory
  */
 export function getOpenClawConfigDir(): string {
-  return join(homedir(), '.openclaw');
+  return openClawConfigDirOverride ?? getDefaultOpenClawConfigDir();
 }
 
 /**
