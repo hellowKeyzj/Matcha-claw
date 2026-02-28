@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
@@ -16,8 +17,18 @@ import { ChatToolbar } from './ChatToolbar';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
 
+function buildAgentChatSessionKey(agentId: string): string {
+  const normalized = agentId.trim();
+  if (!normalized) {
+    return '';
+  }
+  return `agent:${normalized}:${normalized}`;
+}
+
 export function Chat() {
   const { t } = useTranslation('chat');
+  const location = useLocation();
+  const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
@@ -31,6 +42,7 @@ export function Chat() {
   const pendingFinal = useChatStore((s) => s.pendingFinal);
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);
+  const switchSession = useChatStore((s) => s.switchSession);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abortRun = useChatStore((s) => s.abortRun);
   const clearError = useChatStore((s) => s.clearError);
@@ -47,15 +59,24 @@ export function Chat() {
     if (!isGatewayRunning) return;
     let cancelled = false;
     const hasExistingMessages = useChatStore.getState().messages.length > 0;
+    const params = new URLSearchParams(location.search);
+    const sessionParam = params.get('session')?.trim() ?? '';
+    const agentParam = params.get('agent')?.trim() ?? '';
+    const targetSessionKey = sessionParam || buildAgentChatSessionKey(agentParam);
     (async () => {
       await loadSessions();
       if (cancelled) return;
+      if (targetSessionKey) {
+        switchSession(targetSessionKey);
+        navigate('/', { replace: true });
+        return;
+      }
       await loadHistory(hasExistingMessages);
     })();
     return () => {
       cancelled = true;
     };
-  }, [isGatewayRunning, loadHistory, loadSessions]);
+  }, [isGatewayRunning, loadHistory, loadSessions, location.search, navigate, switchSession]);
 
   // Auto-scroll on new messages, streaming, or activity changes
   useEffect(() => {

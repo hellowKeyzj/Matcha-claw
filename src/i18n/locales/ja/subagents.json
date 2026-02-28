@@ -51,7 +51,8 @@
     "actions": {
       "edit": "編集",
       "delete": "削除",
-      "manage": "管理"
+      "manage": "管理",
+      "chat": "会話"
     }
   }
 }

@@ -646,6 +646,17 @@ function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null 
   return `${parts[0]}:${parts[1]}`;
 }
 
+function isCanonicalAgentSessionKey(key: string): boolean {
+  if (!key.startsWith('agent:')) {
+    return false;
+  }
+  const parts = key.split(':');
+  if (parts.length < 3) {
+    return false;
+  }
+  return parts[1].trim().length > 0 && parts.slice(2).join(':').trim().length > 0;
+}
+
 function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   if (!message) return false;
   if (isToolResultRole(message.role)) return true;
@@ -965,7 +976,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             nextSessionKey = canonicalMatch;
           }
         }
-        if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
+        if (
+          !dedupedSessions.find((s) => s.key === nextSessionKey)
+          && dedupedSessions.length > 0
+          && !isCanonicalAgentSessionKey(nextSessionKey)
+        ) {
           // Current session not found at all — switch to the first available session
           nextSessionKey = dedupedSessions[0].key;
         }

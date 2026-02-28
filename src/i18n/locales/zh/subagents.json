@@ -54,7 +54,8 @@
     "actions": {
       "edit": "编辑",
       "delete": "删除",
-      "manage": "人设配置"
+      "manage": "人设配置",
+      "chat": "会话"
     }
   }
 }
