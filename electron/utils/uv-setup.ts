@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { getUvMirrorEnv } from './uv-env';
@@ -41,7 +41,12 @@ function resolveUvBin(): { bin: string; source: 'bundled' | 'path' | 'bundled-fa
 
   // Dev mode or missing bundled binary — check system PATH
   const found = findUvInPathSync();
-  if (found) return { bin: 'uv', source: 'path' };
+  if (found) {
+    if (canRunUvSync('uv')) {
+      return { bin: 'uv', source: 'path' };
+    }
+    logger.warn('uv found in PATH but cannot be executed, trying bundled fallback');
+  }
 
   if (existsSync(bundled)) {
     return { bin: bundled, source: 'bundled-fallback' };
@@ -60,15 +65,30 @@ function findUvInPathSync(): boolean {
   }
 }
 
+function canRunUvSync(bin: string): boolean {
+  const useShell = needsWinShell(bin);
+  try {
+    const result = spawnSync(useShell ? quoteForCmd(bin) : bin, ['--version'], {
+      shell: useShell,
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Check if uv is available (either bundled or in system PATH)
  */
 export async function checkUvInstalled(): Promise<boolean> {
   const { bin, source } = resolveUvBin();
-  if (source === 'bundled' || source === 'bundled-fallback') {
-    return existsSync(bin);
+  if (source === 'path') {
+    return canRunUvSync('uv');
   }
-  return findUvInPathSync();
+  return existsSync(bin) && canRunUvSync(bin);
 }
 
 /**
@@ -165,24 +185,12 @@ async function runPythonInstall(
   });
 }
 
-/**
- * Use bundled uv to install a managed Python version (default 3.12).
- *
- * Tries with mirror env first (for CN region), then retries without mirror
- * if the first attempt fails, to rule out mirror-specific issues.
- */
-export async function setupManagedPython(): Promise<void> {
-  const { bin: uvBin, source } = resolveUvBin();
-  const uvEnv = await getUvMirrorEnv();
-  const hasMirror = Object.keys(uvEnv).length > 0;
-
-  logger.info(
-    `Setting up managed Python 3.12 ` +
-    `(uv=${uvBin}, source=${source}, arch=${process.arch}, mirror=${hasMirror})`
-  );
-
-  const baseEnv: Record<string, string | undefined> = { ...process.env };
-
+async function installPythonWithMirrorFallback(
+  uvBin: string,
+  baseEnv: Record<string, string | undefined>,
+  uvEnv: Record<string, string | undefined>,
+  hasMirror: boolean,
+): Promise<void> {
   // Attempt 1: with mirror (if applicable)
   try {
     await runPythonInstall(uvBin, { ...baseEnv, ...uvEnv }, hasMirror ? 'mirror' : 'default');
@@ -202,24 +210,69 @@ export async function setupManagedPython(): Promise<void> {
       throw firstError;
     }
   }
+}
 
-  // After installation, verify and log the Python path
-  const verifyShell = needsWinShell(uvBin);
-  try {
-    const findPath = await new Promise<string>((resolve) => {
-      const child = spawn(verifyShell ? quoteForCmd(uvBin) : uvBin, ['python', 'find', '3.12'], {
-        shell: verifyShell,
-        env: { ...process.env, ...uvEnv },
-      });
-      let output = '';
-      child.stdout?.on('data', (data) => { output += data; });
-      child.on('close', () => resolve(output.trim()));
-    });
-    
-    if (findPath) {
-      logger.info(`Managed Python 3.12 installed at: ${findPath}`);
-    }
-  } catch (err) {
-    logger.warn('Could not determine Python path after install:', err);
+/**
+ * Use bundled uv to install a managed Python version (default 3.12).
+ *
+ * Tries with mirror env first (for CN region), then retries without mirror
+ * if the first attempt fails, to rule out mirror-specific issues.
+ */
+export async function setupManagedPython(): Promise<void> {
+  const { bin: preferredBin, source: preferredSource } = resolveUvBin();
+  const bundledUv = getBundledUvPath();
+  const candidates: Array<{ bin: string; source: string }> = [{ bin: preferredBin, source: preferredSource }];
+  if (
+    preferredSource === 'path' &&
+    existsSync(bundledUv) &&
+    bundledUv !== preferredBin
+  ) {
+    candidates.push({ bin: bundledUv, source: 'bundled-fallback' });
   }
+
+  const uvEnv = await getUvMirrorEnv();
+  const hasMirror = Object.keys(uvEnv).length > 0;
+  const baseEnv: Record<string, string | undefined> = { ...process.env };
+  let lastError: unknown;
+
+  for (const [index, candidate] of candidates.entries()) {
+    logger.info(
+      `Setting up managed Python 3.12 ` +
+      `(uv=${candidate.bin}, source=${candidate.source}, arch=${process.arch}, mirror=${hasMirror})`
+    );
+
+    try {
+      await installPythonWithMirrorFallback(candidate.bin, baseEnv, uvEnv, hasMirror);
+      const verifyShell = needsWinShell(candidate.bin);
+      try {
+        const findPath = await new Promise<string>((resolve) => {
+          const child = spawn(verifyShell ? quoteForCmd(candidate.bin) : candidate.bin, ['python', 'find', '3.12'], {
+            shell: verifyShell,
+            env: { ...process.env, ...uvEnv },
+          });
+          let output = '';
+          child.stdout?.on('data', (data) => { output += data; });
+          child.on('close', () => resolve(output.trim()));
+        });
+
+        if (findPath) {
+          logger.info(`Managed Python 3.12 installed at: ${findPath}`);
+        }
+      } catch (err) {
+        logger.warn('Could not determine Python path after install:', err);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      const isLast = index === candidates.length - 1;
+      if (!isLast) {
+        logger.warn(
+          `Python setup failed with uv source=${candidate.source}, retrying with fallback uv binary...`,
+          error,
+        );
+      }
+    }
+  }
+
+  throw lastError;
 }

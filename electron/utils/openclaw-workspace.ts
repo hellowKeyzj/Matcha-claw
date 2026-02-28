@@ -5,7 +5,7 @@
  * main thread.
  */
 import { access, readFile, writeFile, readdir, mkdir, unlink } from 'fs/promises';
-import { constants, Dirent } from 'fs';
+import { constants } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { logger } from './logger';
@@ -47,8 +47,12 @@ export function mergeClawXSection(existing: string, section: string): string {
 
 /**
  * Collect all unique workspace directories from the openclaw config:
- * the defaults workspace, each agent's workspace, and any workspace-*
- * directories that already exist under ~/.openclaw/.
+ * the defaults workspace and each agent's workspace.
+ *
+ * We intentionally do not glob all `workspace-*` directories because some
+ * auxiliary workspaces (for example `workspace-subagents`) are not seeded
+ * with OpenClaw bootstrap files (AGENTS.md/TOOLS.md), which would cause
+ * noisy retries and misleading warnings.
  */
 async function resolveAllWorkspaceDirs(): Promise<string[]> {
   const openclawDir = join(homedir(), '.openclaw');
@@ -76,17 +80,6 @@ async function resolveAllWorkspaceDirs(): Promise<string[]> {
     }
   } catch {
     // ignore config parse errors
-  }
-
-  try {
-    const entries: Dirent[] = await readdir(openclawDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name.startsWith('workspace')) {
-        dirs.add(join(openclawDir, entry.name));
-      }
-    }
-  } catch {
-    // ignore read errors
   }
 
   if (dirs.size === 0) {
