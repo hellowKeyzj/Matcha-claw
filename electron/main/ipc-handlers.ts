@@ -181,13 +181,11 @@ function transformCronJob(job: GatewayCronJob) {
   // Extract message from payload
   const message = job.payload?.message || job.payload?.text || '';
 
-  // Build target from delivery info
-  const channelType = job.delivery?.channel || 'unknown';
-  const target = {
-    channelType,
-    channelId: channelType,
-    channelName: channelType,
-  };
+  // Build target from delivery info — only if a delivery channel is specified
+  const channelType = job.delivery?.channel;
+  const target = channelType
+    ? { channelType, channelId: channelType, channelName: channelType }
+    : undefined;
 
   // Build lastRun from state
   const lastRun = job.state?.lastRunAtMs
@@ -241,21 +239,16 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
   });
 
   // Create a new cron job
+  // UI-created tasks have no delivery target — results go to the ClawX chat page.
+  // Tasks created via external channels (Feishu, Discord, etc.) are handled
+  // directly by the OpenClaw Gateway and do not pass through this IPC handler.
   ipcMain.handle('cron:create', async (_, input: {
     name: string;
     message: string;
     schedule: string;
-    target: { channelType: string; channelId: string; channelName: string };
     enabled?: boolean;
   }) => {
     try {
-      // Transform frontend input to Gateway cron.add format
-      // For Discord, the recipient must be prefixed with "channel:" or "user:"
-      const recipientId = input.target.channelId;
-      const deliveryTo = input.target.channelType === 'discord' && recipientId
-        ? `channel:${recipientId}`
-        : recipientId;
-
       const gatewayInput = {
         name: input.name,
         schedule: { kind: 'cron', expr: input.schedule },
@@ -263,11 +256,6 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
         enabled: input.enabled ?? true,
         wakeMode: 'next-heartbeat',
         sessionTarget: 'isolated',
-        delivery: {
-          mode: 'announce',
-          channel: input.target.channelType,
-          to: deliveryTo,
-        },
       };
       const result = await gatewayManager.rpc('cron.add', gatewayInput);
       // Transform the returned job to frontend format
