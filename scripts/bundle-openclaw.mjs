@@ -17,6 +17,8 @@
  */
 
 import 'zx/globals';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
@@ -29,6 +31,19 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
+function realpathSafe(p) {
+  const normalized = normWin(p);
+  try {
+    return fs.realpathSync(normalized);
+  } catch (error) {
+    // Fallback to non-extended path form for environments that mishandle \\?\
+    if (process.platform === 'win32' && normalized !== p) {
+      return fs.realpathSync(p);
+    }
+    throw error;
+  }
+}
+
 echo`📦 Bundling openclaw for electron-builder...`;
 
 // 1. Resolve the real path of node_modules/openclaw (follows pnpm symlink)
@@ -38,7 +53,7 @@ if (!fs.existsSync(openclawLink)) {
   process.exit(1);
 }
 
-const openclawReal = fs.realpathSync(normWin(openclawLink));
+const openclawReal = realpathSafe(openclawLink);
 echo`   openclaw resolved: ${openclawReal}`;
 
 // 2. Clean and create output directory
@@ -152,7 +167,7 @@ while (queue.length > 0) {
 
     let realPath;
     try {
-      realPath = fs.realpathSync(normWin(fullPath));
+      realPath = realpathSafe(fullPath);
     } catch {
       continue; // broken symlink, skip
     }
