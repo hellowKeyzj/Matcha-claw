@@ -1,8 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { SubAgents } from '@/pages/SubAgents';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="router-location">{`${location.pathname}${location.search}`}</div>;
+}
+
+function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <LocationProbe />
+      <SubAgents />
+    </MemoryRouter>,
+  );
+}
 
 describe('subagents page', () => {
   const createAgent = vi.fn().mockResolvedValue(undefined);
@@ -78,7 +93,7 @@ describe('subagents page', () => {
   });
 
   it('renders agents in a card grid', () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     expect(screen.getByTestId('subagent-card-grid')).toBeInTheDocument();
     expect(screen.getByText('Alpha')).toBeInTheDocument();
@@ -88,7 +103,7 @@ describe('subagents page', () => {
   });
 
   it('opens create dialog when clicking add button', () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
 
@@ -96,7 +111,7 @@ describe('subagents page', () => {
   });
 
   it('submits create form and calls createAgent', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
@@ -116,7 +131,7 @@ describe('subagents page', () => {
   });
 
   it('passes selected emoji when creating subagent', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
@@ -134,7 +149,7 @@ describe('subagents page', () => {
   });
 
   it('supports emoji quick-pick grid selection', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
@@ -153,7 +168,7 @@ describe('subagents page', () => {
   });
 
   it('prefills manage prompt from create dialog initial prompt', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
@@ -175,7 +190,7 @@ describe('subagents page', () => {
   });
 
   it('opens detail view when clicking manage button', () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
 
@@ -184,7 +199,7 @@ describe('subagents page', () => {
   });
 
   it('submits prompt to generate subagent draft', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'draft policy docs' } });
@@ -213,7 +228,7 @@ describe('subagents page', () => {
       draftError: null,
     });
 
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     expect(screen.getByRole('button', { name: 'Generating...' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm Apply Draft' })).toBeInTheDocument();
@@ -221,7 +236,7 @@ describe('subagents page', () => {
   });
 
   it('calls edit/delete actions for non-main agent', async () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alpha v2' } });
@@ -244,14 +259,14 @@ describe('subagents page', () => {
   });
 
   it('does not render set-default action buttons', () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     expect(screen.queryByRole('button', { name: 'Set default main' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Set default agent-alpha' })).toBeNull();
   });
 
   it('blocks create when name conflicts with existing slug', () => {
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'agent alpha' } });
@@ -260,22 +275,23 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('disables all actions for main agent', () => {
-    render(<SubAgents />);
+  it('disables edit/delete/manage but keeps chat available for main agent', () => {
+    renderSubagentsPage();
 
     expect(screen.getByRole('button', { name: 'Edit main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Manage main' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
   });
 
   it('keeps managed panel visible after page remount', () => {
-    const { unmount } = render(<SubAgents />);
+    const { unmount } = renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage agent-alpha' }));
     expect(screen.getByText('Managing: agent-alpha')).toBeInTheDocument();
 
     unmount();
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     expect(screen.getByText('Managing: agent-alpha')).toBeInTheDocument();
   });
@@ -289,7 +305,7 @@ describe('subagents page', () => {
       draftError: null,
     });
 
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     expect(screen.getByText('Draft applied successfully.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Generate Diff Preview' })).toBeNull();
@@ -311,12 +327,20 @@ describe('subagents page', () => {
       previewDiffByFile: {},
     });
 
-    render(<SubAgents />);
+    renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
       expect(cancelDraft).toHaveBeenCalledWith('agent-alpha');
     });
     expect(screen.queryByRole('dialog', { name: 'Managing: agent-alpha' })).toBeNull();
+  });
+
+  it('navigates to chat with selected agent when clicking chat button', () => {
+    renderSubagentsPage(['/subagents']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chat agent-alpha' }));
+
+    expect(screen.getByTestId('router-location')).toHaveTextContent('/?agent=agent-alpha');
   });
 });

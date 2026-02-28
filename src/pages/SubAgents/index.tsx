@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { normalizeSubagentNameToSlug } from '@/lib/subagent/workspace';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -15,6 +16,7 @@ const MAIN_AGENT_ID = 'main';
 
 export function SubAgents() {
   const { t } = useTranslation('subagents');
+  const navigate = useNavigate();
   const agents = useSubagentsStore((state) => state.agents);
   const loading = useSubagentsStore((state) => state.loading);
   const error = useSubagentsStore((state) => state.error);
@@ -127,6 +129,10 @@ export function SubAgents() {
             }}
             onManage={() => {
               setManagedAgentId(agent.id);
+            }}
+            onChat={() => {
+              const query = new URLSearchParams({ agent: agent.id }).toString();
+              navigate(`/?${query}`);
             }}
           />
         ))}
