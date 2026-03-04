@@ -3,6 +3,19 @@
 ; Install: enables long paths, adds resources\cli to user PATH for openclaw CLI.
 ; Uninstall: removes the PATH entry and optionally deletes user data.
 
+; When customCheckAppRunning is defined, electron-builder skips its conditional
+; !include for getProcessInfo.nsh and the "Var pid" declaration. We must do
+; both ourselves so ${GetProcessInfo} and $pid are available.
+!ifndef getProcessInfo_included
+  !define getProcessInfo_included
+  !include "getProcessInfo.nsh"
+  Var pid
+!endif
+!ifndef nsProcess_included
+  !define nsProcess_included
+  !include "nsProcess.nsh"
+!endif
+
 !macro customCheckAppRunning
   ${GetProcessInfo} 0 $pid $1 $2 $3 $4
   ${if} $3 != "${APP_EXECUTABLE_FILENAME}"
