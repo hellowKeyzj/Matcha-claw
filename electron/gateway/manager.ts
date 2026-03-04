@@ -33,16 +33,19 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { shouldAttemptConfigAutoRepair } from './startup-recovery';
 import {
+  type GatewayLifecycleState,
+  getDeferredRestartAction,
   getReconnectSkipReason,
   isLifecycleSuperseded,
   nextLifecycleEpoch,
+  shouldDeferRestart,
 } from './process-policy';
 
 /**
  * Gateway connection status
  */
 export interface GatewayStatus {
-  state: 'stopped' | 'starting' | 'running' | 'error' | 'reconnecting';
+  state: GatewayLifecycleState;
   port: number;
   pid?: number;
   uptime?: number;
@@ -218,6 +221,8 @@ export class GatewayManager extends EventEmitter {
   private deviceIdentity: DeviceIdentity | null = null;
   private restartDebounceTimer: NodeJS.Timeout | null = null;
   private lifecycleEpoch = 0;
+  private deferredRestartPending = false;
+  private restartInFlight: Promise<void> | null = null;
 
   constructor(config?: Partial<ReconnectConfig>) {
     super();
@@ -290,6 +295,56 @@ export class GatewayManager extends EventEmitter {
         `Gateway ${phase} superseded (expectedEpoch=${expectedEpoch}, currentEpoch=${this.lifecycleEpoch})`
       );
     }
+  }
+
+  private isRestartDeferred(): boolean {
+    return shouldDeferRestart({
+      state: this.status.state,
+      startLock: this.startLock,
+    });
+  }
+
+  private markDeferredRestart(reason: string): void {
+    if (!this.deferredRestartPending) {
+      logger.info(
+        `Deferring Gateway restart (${reason}) until startup/reconnect settles (state=${this.status.state}, startLock=${this.startLock})`
+      );
+    } else {
+      logger.debug(
+        `Gateway restart already deferred; keeping pending request (${reason}, state=${this.status.state}, startLock=${this.startLock})`
+      );
+    }
+    this.deferredRestartPending = true;
+  }
+
+  private flushDeferredRestart(trigger: string): void {
+    const action = getDeferredRestartAction({
+      hasPendingRestart: this.deferredRestartPending,
+      state: this.status.state,
+      startLock: this.startLock,
+      shouldReconnect: this.shouldReconnect,
+    });
+
+    if (action === 'none') return;
+    if (action === 'wait') {
+      logger.debug(
+        `Deferred Gateway restart still waiting (${trigger}, state=${this.status.state}, startLock=${this.startLock})`
+      );
+      return;
+    }
+
+    this.deferredRestartPending = false;
+    if (action === 'drop') {
+      logger.info(
+        `Dropping deferred Gateway restart (${trigger}) because lifecycle already recovered (state=${this.status.state}, shouldReconnect=${this.shouldReconnect})`
+      );
+      return;
+    }
+
+    logger.info(`Executing deferred Gateway restart now (${trigger})`);
+    void this.restart().catch((error) => {
+      logger.warn('Deferred Gateway restart failed:', error);
+    });
   }
 
   /**
@@ -445,6 +500,7 @@ export class GatewayManager extends EventEmitter {
       throw error;
     } finally {
       this.startLock = false;
+      this.flushDeferredRestart('start:finally');
     }
   }
 
@@ -521,6 +577,7 @@ export class GatewayManager extends EventEmitter {
     }
     this.pendingRequests.clear();
 
+    this.deferredRestartPending = false;
     this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined });
   }
 
@@ -528,9 +585,29 @@ export class GatewayManager extends EventEmitter {
    * Restart Gateway process
    */
   async restart(): Promise<void> {
+    if (this.isRestartDeferred()) {
+      this.markDeferredRestart('restart');
+      return;
+    }
+
+    if (this.restartInFlight) {
+      logger.debug('Gateway restart already in progress, joining existing request');
+      await this.restartInFlight;
+      return;
+    }
+
     logger.debug('Gateway restart requested');
-    await this.stop();
-    await this.start();
+    this.restartInFlight = (async () => {
+      await this.stop();
+      await this.start();
+    })();
+
+    try {
+      await this.restartInFlight;
+    } finally {
+      this.restartInFlight = null;
+      this.flushDeferredRestart('restart:finally');
+    }
   }
 
   /**
@@ -1639,6 +1716,7 @@ export class GatewayManager extends EventEmitter {
     // Log state transitions
     if (previousState !== this.status.state) {
       logger.debug(`Gateway state changed: ${previousState} -> ${this.status.state}`);
+      this.flushDeferredRestart(`status:${previousState}->${this.status.state}`);
     }
   }
 }
