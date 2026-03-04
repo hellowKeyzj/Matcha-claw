@@ -1882,8 +1882,8 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
 function registerUsageHandlers(): void {
   ipcMain.handle('usage:recentTokenHistory', async (_, limit?: number) => {
     const safeLimit = typeof limit === 'number' && Number.isFinite(limit)
-      ? Math.min(Math.max(Math.floor(limit), 1), 100)
-      : 20;
+      ? Math.max(Math.floor(limit), 1)
+      : undefined;
     return await getRecentTokenUsageHistory(safeLimit);
   });
 }

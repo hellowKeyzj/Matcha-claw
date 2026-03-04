@@ -103,7 +103,15 @@ const defaultSkills: DefaultSkill[] = [
   { id: 'terminal', name: 'Terminal', description: 'Shell command execution' },
 ];
 
-import { SETUP_PROVIDERS, type ProviderTypeInfo, getProviderIconUrl, resolveProviderApiKeyForSave, shouldInvertInDark } from '@/lib/providers';
+import {
+  SETUP_PROVIDERS,
+  type ProviderTypeInfo,
+  getProviderIconUrl,
+  resolveProviderApiKeyForSave,
+  resolveProviderModelForSave,
+  shouldInvertInDark,
+  shouldShowProviderModelId,
+} from '@/lib/providers';
 import clawxIcon from '@/assets/logo.svg';
 
 // Use the shared provider registry for setup providers
@@ -707,6 +715,7 @@ function ProviderContent({
   onConfiguredChange,
 }: ProviderContentProps) {
   const { t } = useTranslation(['setup', 'settings']);
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [keyValid, setKeyValid] = useState<boolean | null>(null);
@@ -910,7 +919,7 @@ function ProviderContent({
     ? getProviderIconUrl(selectedProviderData.id)
     : undefined;
   const showBaseUrlField = selectedProviderData?.showBaseUrl ?? false;
-  const showModelIdField = selectedProviderData?.showModelId ?? false;
+  const showModelIdField = shouldShowProviderModelId(selectedProviderData, devModeUnlocked);
   const requiresKey = selectedProviderData?.requiresApiKey ?? false;
   const isOAuth = selectedProviderData?.isOAuth ?? false;
   const supportsApiKey = selectedProviderData?.supportsApiKey ?? false;
@@ -958,10 +967,11 @@ function ProviderContent({
         setKeyValid(true);
       }
 
-      const effectiveModelId =
-        selectedProviderData?.defaultModelId ||
-        modelId.trim() ||
-        undefined;
+      const effectiveModelId = resolveProviderModelForSave(
+        selectedProviderData,
+        modelId,
+        devModeUnlocked
+      );
 
       const providerIdForSave =
         selectedProvider === 'custom'
