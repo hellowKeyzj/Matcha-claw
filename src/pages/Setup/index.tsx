@@ -948,7 +948,8 @@ function ProviderContent({
 
     try {
       // Validate key if the provider requires one and a key was entered
-      if (requiresKey && apiKey) {
+      const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
+      if (isApiKeyRequired && apiKey) {
         const result = await window.electron.ipcRenderer.invoke(
           'provider:validateKey',
           selectedProviderConfigId || selectedProvider,
@@ -1024,9 +1025,10 @@ function ProviderContent({
   };
 
   // Can the user submit?
+  const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
   const canSubmit =
     selectedProvider
-    && (requiresKey ? apiKey.length > 0 : true)
+    && (isApiKeyRequired ? apiKey.length > 0 : true)
     && (showModelIdField ? modelId.trim().length > 0 : true)
     && !useOAuthFlow;
 
@@ -1197,7 +1199,7 @@ function ProviderContent({
           )}
 
           {/* API Key field (hidden for ollama) */}
-          {(!isOAuth || (supportsApiKey && authMode === 'apikey')) && requiresKey && (
+          {(!isOAuth || (supportsApiKey && authMode === 'apikey')) && (
             <div className="space-y-2">
               <Label htmlFor="apiKey">{t('provider.apiKey')}</Label>
               <div className="relative">
