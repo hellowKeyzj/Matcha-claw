@@ -1421,6 +1421,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       let result: { success: boolean; result?: { runId?: string }; error?: string };
 
+      // Longer timeout for chat sends to tolerate high-latency networks (avoids connect error)
+      const CHAT_SEND_TIMEOUT_MS = 120_000;
+
       if (hasMedia) {
         result = await window.electron.ipcRenderer.invoke(
           'chat:sendWithMedia',
@@ -1446,6 +1449,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             deliver: false,
             idempotencyKey,
           },
+          CHAT_SEND_TIMEOUT_MS,
         ) as { success: boolean; result?: { runId?: string }; error?: string };
       }
 
