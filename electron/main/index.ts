@@ -37,6 +37,14 @@ import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
 // set `"disable-hardware-acceleration": false` in the app config (future).
 app.disableHardwareAcceleration();
 
+// On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
+// On Wayland this maps the running window to clawx.desktop (→ icon + app grouping);
+// on X11 it supplements the StartupWMClass matching.
+// Must be called before app.whenReady() / before any window is created.
+if (process.platform === 'linux') {
+  app.setDesktopName('clawx.desktop');
+}
+
 // Prevent multiple instances of the app from running simultaneously.
 // Without this, two instances each spawn their own gateway process on the
 // same port, then each treats the other's gateway as "orphaned" and kills
