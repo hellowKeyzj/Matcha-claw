@@ -83,8 +83,17 @@ const DEFAULT_RECONNECT_CONFIG: ReconnectConfig = {
   maxDelay: 30000,
 };
 
-// getNodeExecutablePath() removed: utilityProcess.fork() handles process isolation
-// natively on all platforms (no dock icon on macOS, no console on Windows).
+const FAST_ATTACH_HANDSHAKE_TIMEOUT_MS = 1200;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10000;
+const ATTACH_TOTAL_BUDGET_MS = 3000;
+const ATTACH_RETRY_INTERVAL_MS = 200;
+const FAST_ATTACH_TOTAL_BUDGET_MS = 1200;
+const PORT_OWNER_PROBE_TIMEOUT_MS = 3500;
+const CONNECT_CHALLENGE_WAIT_MS = 150;
+const DEFAULT_DEBOUNCED_RESTART_DELAY_MS = 600;
+const OPERATOR_CONNECT_SCOPES = ['operator.read', 'operator.write', 'operator.admin'] as const;
+
+export type GatewayHostRuntime = 'linux' | 'wsl' | 'windows' | 'macos';
 
 /**
  * Ensure the gateway fetch-preload script exists in userData and return
@@ -207,6 +216,7 @@ export class GatewayManager extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private restartDebounceTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
   private reconnectConfig: ReconnectConfig;
   private shouldReconnect = true;
@@ -621,25 +631,24 @@ export class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Debounced restart — coalesces multiple rapid restart requests into a
-   * single restart after `delayMs` of inactivity.  This prevents the
-   * cascading stop/start cycles that occur when provider:save,
-   * provider:setDefault and channel:saveConfig all fire within seconds
-   * of each other during setup.
+   * Debounced restart for high-frequency config updates.
+   * Multiple calls in a short time window will coalesce into one restart.
    */
-  debouncedRestart(delayMs = 2000): void {
+  debouncedRestart(delayMs = DEFAULT_DEBOUNCED_RESTART_DELAY_MS): void {
     if (this.restartDebounceTimer) {
       clearTimeout(this.restartDebounceTimer);
+      this.restartDebounceTimer = null;
     }
-    logger.debug(`Gateway restart debounced (will fire in ${delayMs}ms)`);
+
+    const waitMs = Math.max(0, delayMs);
+    logger.debug(`Gateway restart debounced (will fire in ${waitMs}ms)`);
     this.restartDebounceTimer = setTimeout(() => {
       this.restartDebounceTimer = null;
-      void this.restart().catch((err) => {
-        logger.warn('Debounced Gateway restart failed:', err);
+      void this.restart().catch((error) => {
+        logger.warn('Debounced Gateway restart failed:', error);
       });
-    }, delayMs);
+    }, waitMs);
   }
-
   /**
    * Clear all active timers
    */

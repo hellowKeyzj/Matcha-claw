@@ -1,0 +1,35 @@
+{
+  "title": "Task Center",
+  "subtitle": "Monitor and recover long-running tasks",
+  "workspace": "Workspace",
+  "installPlugin": "Install Task Plugin",
+  "refresh": "Refresh",
+  "gatewayNotRunning": "Gateway is not running. Task updates may not be real-time.",
+  "listTitle": "Task List",
+  "detailTitle": "Task Details",
+  "selectTask": "Select a task from the left panel.",
+  "empty": "No tasks yet.",
+  "noMarkdown": "No plan markdown yet.",
+  "plugin": {
+    "title": "Task Manager plugin is not enabled",
+    "description": "Install and enable the task-manager plugin before using this page."
+  },
+  "stats": {
+    "running": "Running",
+    "waiting": "Waiting",
+    "completed": "Completed"
+  },
+  "blocked": {
+    "title": "Task needs confirmation",
+    "pendingCount": "{{count}} task(s) waiting for confirmation",
+    "close": "Close",
+    "reject": "Reject",
+    "confirm": "Confirm",
+    "inputPlaceholder": "Enter the required task input",
+    "submitInput": "Submit Input"
+  },
+  "toast": {
+    "pluginInstalled": "Task plugin installed. Gateway will restart.",
+    "resumed": "Task resumed."
+  }
+}

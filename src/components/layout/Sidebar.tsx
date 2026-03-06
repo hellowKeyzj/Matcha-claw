@@ -19,6 +19,7 @@ import {
   Trash2,
   Bot,
   Users,
+  ListTodo,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
@@ -118,6 +119,7 @@ export function Sidebar() {
 
   const navItems = [
     { to: '/cron', icon: <Clock className="h-5 w-5" />, label: t('sidebar.cronTasks') },
+    { to: '/tasks', icon: <ListTodo className="h-5 w-5" />, label: t('sidebar.tasks') },
     { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
     { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
     { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },

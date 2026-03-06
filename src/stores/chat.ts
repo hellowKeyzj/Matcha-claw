@@ -4,6 +4,7 @@
  * Communicates with OpenClaw Gateway via gateway:rpc IPC.
  */
 import { create } from 'zustand';
+import { wakeTaskSession, type Task as TaskManagerTask } from '@/lib/openclaw/task-manager-client';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -147,6 +148,276 @@ function clearHistoryPoll(): void {
 
 const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
+const TASK_ID_REGEX = /\btask-[\w-]+\b/i;
+const CONFIRM_ID_REGEX = /\bconfirm-[\w-]+\b/i;
+
+type TaskDecision = 'approve' | 'reject';
+
+type GatewayRpcResponse<T> = {
+  success: boolean;
+  result?: T;
+  error?: unknown;
+};
+
+function extractTaskIdToken(text: string): string | null {
+  const matched = text.match(TASK_ID_REGEX);
+  return matched?.[0] ?? null;
+}
+
+function extractConfirmIdToken(text: string): string | null {
+  const matched = text.match(CONFIRM_ID_REGEX);
+  return matched?.[0] ?? null;
+}
+
+function extractTaskDecision(text: string): TaskDecision | null {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  const rejectRegex = /\b(no|reject|den(?:y|ied))\b|拒绝|驳回|不同意|不批准|不通过|否/i;
+  if (rejectRegex.test(normalized)) {
+    return 'reject';
+  }
+  const approveRegex = /\b(yes|approve|accept|confirm|ok)\b|同意|批准|确认|通过|是/i;
+  if (approveRegex.test(normalized)) {
+    return 'approve';
+  }
+  return null;
+}
+
+function parseTaskListResult(raw: unknown): TaskManagerTask[] {
+  if (Array.isArray(raw)) {
+    return raw as TaskManagerTask[];
+  }
+  if (raw && typeof raw === 'object') {
+    const result = raw as { tasks?: unknown };
+    if (Array.isArray(result.tasks)) {
+      return result.tasks as TaskManagerTask[];
+    }
+  }
+  return [];
+}
+
+function getWaitingTasks(tasks: TaskManagerTask[]): TaskManagerTask[] {
+  return tasks.filter((task) => task.status === 'waiting_for_input' || task.status === 'waiting_approval');
+}
+
+function extractRpcErrorMessage(error: unknown): string {
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+  if (error && typeof error === 'object') {
+    const record = error as { message?: unknown; code?: unknown };
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message.trim();
+    }
+    if (typeof record.code === 'string' && record.code.trim()) {
+      return record.code.trim();
+    }
+  }
+  return '未知错误';
+}
+
+function buildAmbiguousTaskPrompt(waitingTasks: TaskManagerTask[]): string {
+  const preview = waitingTasks
+    .slice(0, 5)
+    .map((task) => {
+      const prompt = task.blocked_info?.question ?? task.blocked_info?.description ?? '待确认';
+      const confirmId = task.blocked_info?.confirm_id ?? '未知 confirmId';
+      return `- ${task.id} (${confirmId}): ${prompt}`;
+    })
+    .join('\n');
+  return [
+    '检测到多个待确认任务，请明确指定 taskId 或 confirmId 后再确认。',
+    preview,
+    '示例：`批准 task-xxxx`、`拒绝 confirm-xxxx`、`task-xxxx: 补充信息...`。',
+  ].join('\n');
+}
+
+function isDecisionOnlyMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return /^(approve|approved|accept|accepted|yes|y|ok|confirm|confirmed|reject|rejected|deny|denied|no|n|同意|批准|确认|通过|拒绝|驳回|不通过|是|否)$/.test(normalized);
+}
+
+function inferInputModeFromPrompt(prompt: string): 'decision' | 'free_text' {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return 'free_text';
+  }
+  const decisionHint = /(是否|批准|拒绝|approve|reject|yes|no|同意|驳回|通过|不通过)/i.test(trimmed);
+  const detailHint = /(请提供|请输入|填写|金额|期限|利率|原因|信息|资料|姓名|手机号|身份证|邮箱)/i.test(trimmed);
+  if (decisionHint && !detailHint) {
+    return 'decision';
+  }
+  return 'free_text';
+}
+
+function resolveTaskInputMode(task: TaskManagerTask): 'decision' | 'free_text' {
+  const configured = task.blocked_info?.input_mode;
+  if (configured === 'decision' || configured === 'free_text') {
+    return configured;
+  }
+  const prompt = task.blocked_info?.question ?? task.blocked_info?.description ?? '';
+  return inferInputModeFromPrompt(prompt);
+}
+
+function stripRoutingTokens(text: string, taskId?: string, confirmId?: string): string {
+  let output = text;
+  if (taskId) {
+    output = output.replace(taskId, ' ');
+  }
+  if (confirmId) {
+    output = output.replace(confirmId, ' ');
+  }
+  output = output.replace(/^[\s:：,-]+/, '').replace(/\s+/g, ' ').trim();
+  return output;
+}
+
+async function tryRouteTaskDecisionFromChatText(text: string): Promise<{ handled: boolean; reply?: string }> {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { handled: false };
+  }
+  const decision = extractTaskDecision(text);
+  const taskIdToken = extractTaskIdToken(trimmed);
+  const confirmIdToken = extractConfirmIdToken(trimmed);
+  if (!decision && !taskIdToken && !confirmIdToken) {
+    return { handled: false };
+  }
+
+  let listResult: GatewayRpcResponse<{ tasks?: TaskManagerTask[] } | TaskManagerTask[]>;
+  try {
+    listResult = await window.electron.ipcRenderer.invoke(
+      'gateway:rpc',
+      'task_list',
+      {},
+      15_000,
+    ) as GatewayRpcResponse<{ tasks?: TaskManagerTask[] } | TaskManagerTask[]>;
+  } catch {
+    return { handled: false };
+  }
+
+  if (!listResult.success) {
+    return { handled: false };
+  }
+
+  const waitingTasks = getWaitingTasks(parseTaskListResult(listResult.result));
+  if (waitingTasks.length === 0) {
+    return { handled: false };
+  }
+
+  let targetTask: TaskManagerTask | undefined;
+
+  if (taskIdToken) {
+    targetTask = waitingTasks.find((task) => task.id === taskIdToken);
+  }
+  if (!targetTask && confirmIdToken) {
+    targetTask = waitingTasks.find((task) => task.blocked_info?.confirm_id === confirmIdToken);
+  }
+
+  if (!targetTask && !taskIdToken && !confirmIdToken) {
+    if (waitingTasks.length > 1) {
+      return {
+        handled: true,
+        reply: buildAmbiguousTaskPrompt(waitingTasks),
+      };
+    }
+    if (decision) {
+      targetTask = waitingTasks[0];
+    }
+  }
+
+  if (!targetTask) {
+    return {
+      handled: Boolean(taskIdToken || confirmIdToken),
+      reply: taskIdToken || confirmIdToken
+        ? '未找到对应的待确认任务，请检查 taskId / confirmId 是否正确。'
+        : undefined,
+    };
+  }
+
+  const confirmId = targetTask.blocked_info?.confirm_id?.trim() ?? '';
+  if (!confirmId) {
+    return {
+      handled: true,
+      reply: `任务 ${targetTask.id} 缺少 confirmId，无法恢复，请重新触发阻塞确认。`,
+    };
+  }
+
+  const inputMode = resolveTaskInputMode(targetTask);
+  const decisionOnlyText = isDecisionOnlyMessage(trimmed);
+  const strippedInput = stripRoutingTokens(trimmed, targetTask.id, confirmId);
+  let payload: { decision?: TaskDecision; userInput?: string };
+
+  if (inputMode === 'decision') {
+    if (!decision) {
+      return {
+        handled: true,
+        reply: `任务 ${targetTask.id} 仅接受“批准/拒绝”决策，请明确输入。`,
+      };
+    }
+    payload = {
+      decision,
+      userInput: decision === 'approve' ? 'yes' : 'no',
+    };
+  } else {
+    if (decision && decisionOnlyText) {
+      return {
+        handled: true,
+        reply: `任务 ${targetTask.id} 需要补充输入信息，不是仅“批准/拒绝”。请在消息中提供具体内容。`,
+      };
+    }
+    const freeTextInput = strippedInput || trimmed;
+    if (!freeTextInput) {
+      return {
+        handled: true,
+        reply: `任务 ${targetTask.id} 需要输入具体信息，请补充后再提交。`,
+      };
+    }
+    payload = { userInput: freeTextInput };
+  }
+
+  const resumeResult = await window.electron.ipcRenderer.invoke(
+    'gateway:rpc',
+    'task_resume',
+    {
+      taskId: targetTask.id,
+      confirmId,
+      ...(payload.decision ? { decision: payload.decision } : {}),
+      ...(payload.userInput ? { userInput: payload.userInput } : {}),
+    },
+    15_000,
+  ) as GatewayRpcResponse<{ task?: TaskManagerTask }>;
+
+  if (!resumeResult.success) {
+    return {
+      handled: true,
+      reply: `恢复任务失败：${extractRpcErrorMessage(resumeResult.error)}`,
+    };
+  }
+
+  const resumedTask = (resumeResult.result && typeof resumeResult.result === 'object')
+    ? (resumeResult.result as { task?: TaskManagerTask }).task
+    : undefined;
+  try {
+    await wakeTaskSession(targetTask.id, {
+      message: payload.userInput,
+      assignedSession: resumedTask?.assigned_session ?? targetTask.assigned_session,
+    });
+  } catch (error) {
+    return {
+      handled: true,
+      reply: `已记录决策并更新任务 ${targetTask.id}，但唤醒执行会话失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  return {
+    handled: true,
+    reply: payload.decision
+      ? `已将你的决策（${payload.decision === 'approve' ? '批准' : '拒绝'}）路由到任务 ${targetTask.id}。`
+      : `已将你的输入路由到任务 ${targetTask.id}。`,
+  };
+}
 
 // ── Local image cache ─────────────────────────────────────────
 // The Gateway doesn't store image attachments in session content blocks,
@@ -1343,15 +1614,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         filePath: a.stagedPath,
       })),
     };
+
     set((s) => ({
       messages: [...s.messages, userMsg],
-      sending: true,
       error: null,
       streamingText: '',
       streamingMessage: null,
       streamingTools: [],
       pendingFinal: false,
-      lastUserMessageAt: nowMs,
     }));
 
     // Update session label with first user message text as soon as it's sent
@@ -1364,6 +1634,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Mark this session as most recently active
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
+
+    if (!attachments || attachments.length === 0) {
+      const routed = await tryRouteTaskDecisionFromChatText(trimmed);
+      if (routed.handled) {
+        if (routed.reply) {
+          const replyMessage: RawMessage = {
+            role: 'assistant',
+            content: routed.reply,
+            timestamp: Date.now() / 1000,
+            id: crypto.randomUUID(),
+          };
+          set((s) => ({
+            messages: [...s.messages, replyMessage],
+          }));
+        }
+        set({
+          sending: false,
+          activeRunId: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+        });
+        return;
+      }
+    }
+
+    set({
+      sending: true,
+      lastUserMessageAt: nowMs,
+    });
 
     // Start the history poll and safety timeout IMMEDIATELY (before the
     // RPC await) because the gateway's chat.send RPC may block until the

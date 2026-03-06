@@ -119,6 +119,22 @@
     "proxySaved": "代理设置已保存",
     "proxySaveFailed": "保存代理设置失败"
   },
+  "taskPlugin": {
+    "title": "Task Manager 插件",
+    "description": "用于长任务创建、阻塞恢复与进度追踪。",
+    "status": "安装状态",
+    "version": "版本",
+    "path": "安装路径",
+    "installedEnabled": "已安装并启用",
+    "installedDisabled": "已安装但未启用",
+    "notInstalled": "未安装",
+    "install": "安装并启用",
+    "reinstall": "重新安装",
+    "refresh": "刷新状态",
+    "toastInstallSuccess": "Task Manager 插件安装成功，网关即将重启。",
+    "toastInstallFailed": "Task Manager 插件安装失败：{{error}}",
+    "toastStatusFailed": "读取插件状态失败：{{error}}"
+  },
   "updates": {
     "title": "更新",
     "description": "保持 ClawX 最新",

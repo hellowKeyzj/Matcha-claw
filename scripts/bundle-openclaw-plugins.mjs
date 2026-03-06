@@ -6,6 +6,7 @@
  * Build a self-contained mirror of OpenClaw third-party plugins for packaging.
  * Current plugins:
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
+ *   - local packages/openclaw-task-manager-plugin -> build/openclaw-plugins/task-manager
  *
  * The output plugin directory contains:
  *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)
@@ -46,6 +47,7 @@ function realpathSafe(p) {
 
 const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
+  { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {
@@ -181,11 +183,40 @@ function bundleOnePlugin({ npmName, pluginId }) {
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
+function bundleLocalPlugin({ localPath, pluginId }) {
+  const sourceDir = normWin(localPath);
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Missing local plugin source "${localPath}".`);
+  }
+
+  const outputDir = path.join(OUTPUT_ROOT, pluginId);
+  echo`📦 Bundling local plugin ${localPath} -> ${outputDir}`;
+
+  if (fs.existsSync(outputDir)) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.cpSync(sourceDir, outputDir, { recursive: true, dereference: true });
+
+  const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
+  }
+  echo`   ✅ ${pluginId}: copied local source`;
+}
+
 echo`📦 Bundling OpenClaw plugin mirrors...`;
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {
-  bundleOnePlugin(plugin);
+  if (plugin.npmName) {
+    bundleOnePlugin(plugin);
+    continue;
+  }
+  if (plugin.localPath) {
+    bundleLocalPlugin(plugin);
+    continue;
+  }
 }
 
 echo`✅ Plugin mirrors ready: ${OUTPUT_ROOT}`;
