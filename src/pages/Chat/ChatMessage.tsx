@@ -16,6 +16,8 @@ import { extractText, extractThinking, extractImages, extractToolUse, formatTime
 interface ChatMessageProps {
   message: RawMessage;
   showThinking: boolean;
+  assistantAvatarEmoji?: string;
+  userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
   streamingTools?: Array<{
     id?: string;
@@ -39,6 +41,8 @@ function imageSrc(img: ExtractedImage): string | null {
 export const ChatMessage = memo(function ChatMessage({
   message,
   showThinking,
+  assistantAvatarEmoji,
+  userAvatarImageUrl,
   isStreaming = false,
   streamingTools = [],
 }: ChatMessageProps) {
@@ -78,7 +82,23 @@ export const ChatMessage = memo(function ChatMessage({
             : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
         )}
       >
-        {isUser ? <User className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+        {isUser ? (
+          userAvatarImageUrl ? (
+            <img
+              src={userAvatarImageUrl}
+              alt="User avatar"
+              className="h-full w-full rounded-full object-cover"
+            />
+          ) : (
+            <User className="h-4 w-4" />
+          )
+        ) : (
+          assistantAvatarEmoji ? (
+            <span className="text-sm leading-none">{assistantAvatarEmoji}</span>
+          ) : (
+            <Sparkles className="h-4 w-4" />
+          )
+        )}
       </div>
 
       {/* Content */}

@@ -255,3 +255,83 @@ Matcha-claw/
 - `task-manager` Hook 改为“复杂度评估框架 + 动态切换建议”，移除执行期工具硬拦截策略。
 - Task 插件安装流程新增 `skills.entries.task-manager.enabled = true` 对齐，避免“插件启用但 Skill 未加载”。
 - 任务中心改为聚合“主 workspace + agents.list 配置的子 workspace”任务源，修复 `business-expert` 等子 Agent 创建任务在任务中心不可见的问题。
+
+## 14. Chat 任务收件箱架构变更（2026-03-06）
+
+### 14.1 新增目录树
+
+```text
+Matcha-claw/
+├─ src/
+│  ├─ lib/task-inbox.ts
+│  ├─ stores/task-inbox-store.ts
+│  └─ pages/Chat/
+│     ├─ components/TaskInboxPanel.tsx
+│     └─ index.tsx (双栏布局接入)
+├─ src/i18n/locales/{zh,en,ja}/chat.json
+├─ tests/unit/
+│  ├─ task-inbox-domain.test.ts
+│  ├─ task-inbox-store.test.ts
+│  ├─ chat-task-inbox-panel.test.tsx
+│  └─ chat-page-task-inbox.integration.test.tsx
+└─ doc/task-manager-plugin.md
+```
+
+### 14.2 文件职责（一句话）
+
+- `src/lib/task-inbox.ts`：封装未完成任务过滤、`assigned_session` 解析、`decision/free_text` 推断规则。
+- `src/stores/task-inbox-store.ts`：聚合跨 workspace 未完成任务，处理 `task_resume -> wakeTaskSession` 与会话跳转动作。
+- `src/pages/Chat/components/TaskInboxPanel.tsx`：右侧任务收件箱 UI，按输入模式渲染“按钮决策/文本提交”。
+- `src/pages/Chat/index.tsx`：将 Chat 页面改为左聊天右任务收件箱双栏结构。
+- `tests/unit/task-inbox-*.test.ts*`：覆盖领域规则、store 动作和 Chat 接入行为。
+
+### 14.3 模块依赖与边界
+
+- Chat 右栏不直接拼装 `gateway:rpc`，统一经 `src/lib/openclaw/task-manager-client.ts`。
+- `task-inbox-store` 可以调用 `useChatStore.getState().switchSession`，但不反向依赖页面组件。
+- UI 组件仅做交互分发与反馈（toast），任务事实源仍以 `task_list + task_*` 事件为准。
+
+### 14.4 关键决策与原因
+
+- 未完成任务状态统一为 `pending/running/waiting_for_input/waiting_approval`，与用户场景一致，避免“看不到运行中任务”。
+- 会话跳转采用“优先 `assigned_session`，缺失即提示”，避免隐式建会话导致错误路由。
+- `waiting_for_input` 强制按 `decision/free_text` 分流，降低并发任务恢复误判。
+- 恢复动作固定为 `task_resume` 成功后立即 `wakeTaskSession`，保证提交后自动继续执行。
+
+### 14.5 本次变更日志
+
+- 新增 Chat 右侧任务收件箱及跨 Agent 未完成任务聚合能力。
+- 新增任务卡片点击跳转子会话能力，并补齐“未绑定会话”显式提示。
+- 新增 `decision/free_text` 分流交互，提交后自动唤醒目标子会话。
+- 新增 4 组测试覆盖领域、状态层、组件与页面集成。
+- 同步 `chat` 三语文案与 task-manager 运维文档说明。
+
+### 14.6 布局补充变更（2026-03-07）
+
+#### 14.6.1 目录树增量
+
+```text
+Matcha-claw/
+└─ src/
+   └─ components/layout/
+      ├─ AgentSessionsPane.tsx   # 新增：聊天页独立 Agent 会话栏（位于 Sidebar 右侧）
+      ├─ MainLayout.tsx          # 调整：聊天路由插入 AgentSessionsPane
+      └─ Sidebar.tsx             # 调整：只保留菜单导航，不再承载 Agent 会话树
+```
+
+#### 14.6.2 文件职责（增量）
+
+- `src/components/layout/AgentSessionsPane.tsx`：独立渲染“全部 Agent + 各自会话”，支持点击 Agent/会话切换到目标 chat session。
+- `src/components/layout/MainLayout.tsx`：在聊天路由 `/` 下，把 Agent 会话栏插入到左侧菜单与主内容之间。
+- `src/components/layout/Sidebar.tsx`：回归纯导航职责，避免菜单与会话树耦合。
+
+#### 14.6.3 模块依赖与边界（增量）
+
+- Agent 会话数据读取和会话切换统一在 `AgentSessionsPane` 内完成（`useSubagentsStore` + `useChatStore`）。
+- `Sidebar` 不再依赖 chat/subagents store，降低菜单层职责复杂度。
+- `MainLayout` 负责路由级布局编排，不承载会话业务逻辑。
+
+#### 14.6.4 关键决策与原因（增量）
+
+- 将会话树从菜单内嵌改为独立栏位，是为了匹配“红框区域”的信息密度和交互预期（导航与会话浏览分区）。
+- 主 Agent (`main`) 强制纳入会话栏，确保“显示全部 Agent”的一致性。

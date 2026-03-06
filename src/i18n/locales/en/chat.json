@@ -14,5 +14,36 @@
         "refresh": "Refresh chat",
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
+    },
+    "taskInbox": {
+        "title": "Task Inbox",
+        "unfinishedCount": "{{count}} unfinished task(s)",
+        "refresh": "Refresh tasks",
+        "collapse": "Collapse task inbox",
+        "expand": "Expand task inbox",
+        "workspaceScope": "Scope: {{scope}}",
+        "gatewayStopped": "Gateway is not running. Task list and resume actions are disabled.",
+        "empty": "No unfinished tasks in this workspace",
+        "openSession": "Open Session",
+        "approve": "Approve",
+        "reject": "Reject",
+        "submitInput": "Submit Input",
+        "inputPlaceholder": "Enter additional input",
+        "unboundSession": "Session is not bound. Resume task first.",
+        "taskNotFound": "Task not found or updated. Refresh and try again.",
+        "assignedSessionReady": "Session bound",
+        "assignedSessionMissing": "Session not bound",
+        "untitledTask": "Untitled task",
+        "status": {
+            "pending": "Pending",
+            "running": "Running",
+            "waiting_for_input": "Waiting Input",
+            "waiting_approval": "Waiting Approval",
+            "completed": "Completed",
+            "failed": "Failed"
+        },
+        "toast": {
+            "resumed": "Task resumed"
+        }
     }
 }
