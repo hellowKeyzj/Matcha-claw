@@ -188,3 +188,70 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 ---
 
 如与更高优先级指令冲突，以系统/开发者/用户实时指令为准；本文件用于项目内默认协作规范。
+
+## 13. 任务中心架构变更（2026-03-04）
+
+### 13.1 新增目录树
+
+```text
+Matcha-claw/
+├─ packages/
+│  └─ openclaw-task-manager-plugin/
+│     ├─ openclaw.plugin.json
+│     ├─ package.json
+│     ├─ tsconfig.json
+│     ├─ skills/task-manager/SKILL.md
+│     └─ src/
+│        ├─ index.ts
+│        ├─ progress-parser.ts
+│        ├─ task-store.ts
+│        └─ hooks/before-agent-start.ts
+├─ src/
+│  ├─ lib/openclaw/task-manager-client.ts
+│  ├─ stores/task-center-store.ts
+│  ├─ pages/Tasks/index.tsx
+│  └─ i18n/locales/{zh,en,ja}/tasks.json
+└─ tests/unit/
+   ├─ task-manager-progress-parser.test.ts
+   └─ task-manager-store.test.ts
+```
+
+### 13.2 文件职责（一句话）
+
+- `packages/openclaw-task-manager-plugin/src/index.ts`：注册 task 工具、RPC、HTTP webhook 与事件发布。
+- `packages/openclaw-task-manager-plugin/src/task-store.ts`：维护 `<workspace>/.task-manager/tasks.json`，提供原子读写、锁与状态迁移。
+- `packages/openclaw-task-manager-plugin/src/progress-parser.ts`：解析 Markdown 勾选项进度，忽略 fenced code block。
+- `packages/openclaw-task-manager-plugin/src/hooks/before-agent-start.ts`：主/子会话恢复注入与 session 重绑。
+- `src/lib/openclaw/task-manager-client.ts`：Renderer 的 task-manager 兼容层，封装 Gateway RPC 与插件安装 IPC。
+- `src/stores/task-center-store.ts`：任务中心页面状态管理与 `task_*` 事件处理。
+- `src/pages/Tasks/index.tsx`：任务中心 UI（列表/详情/阻塞确认/恢复闭环）。
+- `electron/main/ipc-handlers.ts`：task 插件安装与状态 IPC、OpenClaw 运行路径 IPC。
+- `tests/unit/task-manager-*.test.ts`：覆盖进度解析与存储关键行为（schema 修复、token 过期/一次性消费）。
+
+### 13.3 模块依赖与边界
+
+- Renderer 不直接调用 Node/OpenClaw 内核，统一走 `window.electron.ipcRenderer` 与 `src/lib/openclaw/task-manager-client.ts`。
+- 插件安装/启用属于主进程职责：`electron/main/ipc-handlers.ts` 负责镜像复制、`openclaw.json` 插件启用与网关重启。
+- 任务执行状态事实源固定在 OpenClaw workspace：`<workspace>/.task-manager/tasks.json`。
+- Gateway 事件通过 `gateway:notification` 下发，页面只消费 `task_*` 事件，不侵入 chat/channel 流程。
+
+### 13.4 关键决策与原因
+
+- 采用“OpenClaw 插件 + Matcha-claw 适配层”而非改 OpenClaw 内核：降低升级耦合和回归风险。
+- 任务状态机落盘 JSON 并加文件锁：确保崩溃恢复与多会话并发下的一致性。
+- webhook 使用一次性 token + TTL：控制审批回调暴露风险，避免重复消费。
+- 在设置页与任务页都提供安装入口：一方面满足首次接入路径，另一方面降低故障恢复门槛。
+
+### 13.5 本次变更日志
+
+- 新增 `openclaw-task-manager-plugin` 包并完成 task 工具/RPC/事件/恢复 Hook。
+- 打包链路支持 task-manager 本地插件镜像（`scripts/bundle-openclaw-plugins.mjs`、`scripts/after-pack.cjs`）。
+- 主进程新增 `task:pluginStatus`、`task:pluginInstall` 及 OpenClaw 运行路径 IPC。
+- Renderer 新增任务中心页面、状态 store、任务插件客户端适配层、侧边栏 `/tasks` 入口。
+- 设置页新增 Task Manager 插件状态与安装卡片。
+- i18n 新增 `tasks` 命名空间（中/英/日）并接入资源注册。
+- 新增任务插件单元测试：Markdown 进度解析与任务存储行为。
+- 新增运维文档：`doc/task-manager-plugin.md`（安装、回滚、故障排查）。
+- `task-manager` Hook 改为“复杂度评估框架 + 动态切换建议”，移除执行期工具硬拦截策略。
+- Task 插件安装流程新增 `skills.entries.task-manager.enabled = true` 对齐，避免“插件启用但 Skill 未加载”。
+- 任务中心改为聚合“主 workspace + agents.list 配置的子 workspace”任务源，修复 `business-expert` 等子 Agent 创建任务在任务中心不可见的问题。

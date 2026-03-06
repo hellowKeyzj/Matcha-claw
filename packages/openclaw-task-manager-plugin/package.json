@@ -1,0 +1,15 @@
+{
+  "name": "@clawx/task-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Task manager plugin for OpenClaw",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

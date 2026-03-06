@@ -119,6 +119,22 @@
     "proxySaved": "Proxy settings saved",
     "proxySaveFailed": "Failed to save proxy settings"
   },
+  "taskPlugin": {
+    "title": "Task Manager Plugin",
+    "description": "Provides long-task creation, blocking recovery, and progress tracking.",
+    "status": "Install Status",
+    "version": "Version",
+    "path": "Install Path",
+    "installedEnabled": "Installed and enabled",
+    "installedDisabled": "Installed but disabled",
+    "notInstalled": "Not installed",
+    "install": "Install & Enable",
+    "reinstall": "Reinstall",
+    "refresh": "Refresh Status",
+    "toastInstallSuccess": "Task Manager plugin installed. Gateway will restart.",
+    "toastInstallFailed": "Failed to install Task Manager plugin: {{error}}",
+    "toastStatusFailed": "Failed to load plugin status: {{error}}"
+  },
   "updates": {
     "title": "Updates",
     "description": "Keep ClawX up to date",

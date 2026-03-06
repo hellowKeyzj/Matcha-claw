@@ -1,0 +1,35 @@
+{
+  "title": "タスクセンター",
+  "subtitle": "長時間タスクの実行状況を監視・復旧します",
+  "workspace": "ワークスペース",
+  "installPlugin": "タスクプラグインをインストール",
+  "refresh": "更新",
+  "gatewayNotRunning": "ゲートウェイが停止中のため、タスク更新がリアルタイムで反映されない可能性があります。",
+  "listTitle": "タスク一覧",
+  "detailTitle": "タスク詳細",
+  "selectTask": "左側からタスクを選択してください。",
+  "empty": "タスクはありません。",
+  "noMarkdown": "プラン Markdown はまだありません。",
+  "plugin": {
+    "title": "Task Manager プラグインが有効ではありません",
+    "description": "このページを利用する前に task-manager プラグインをインストールして有効化してください。"
+  },
+  "stats": {
+    "running": "実行中",
+    "waiting": "待機中",
+    "completed": "完了"
+  },
+  "blocked": {
+    "title": "タスク確認待ち",
+    "pendingCount": "{{count}} 件のタスクが確認待ちです",
+    "close": "後で対応",
+    "reject": "拒否",
+    "confirm": "確認",
+    "inputPlaceholder": "このタスクに必要な追加情報を入力してください",
+    "submitInput": "入力を送信"
+  },
+  "toast": {
+    "pluginInstalled": "タスクプラグインをインストールしました。ゲートウェイを再起動します。",
+    "resumed": "タスクを再開しました。"
+  }
+}

@@ -118,6 +118,22 @@
     "proxySaved": "プロキシ設定を保存しました",
     "proxySaveFailed": "プロキシ設定の保存に失敗しました"
   },
+  "taskPlugin": {
+    "title": "Task Manager プラグイン",
+    "description": "長時間タスクの作成、ブロッキング復旧、進捗追跡を提供します。",
+    "status": "インストール状態",
+    "version": "バージョン",
+    "path": "インストール先",
+    "installedEnabled": "インストール済み・有効",
+    "installedDisabled": "インストール済み・無効",
+    "notInstalled": "未インストール",
+    "install": "インストールして有効化",
+    "reinstall": "再インストール",
+    "refresh": "状態を更新",
+    "toastInstallSuccess": "Task Manager プラグインをインストールしました。ゲートウェイを再起動します。",
+    "toastInstallFailed": "Task Manager プラグインのインストールに失敗しました: {{error}}",
+    "toastStatusFailed": "プラグイン状態の取得に失敗しました: {{error}}"
+  },
   "updates": {
     "title": "アップデート",
     "description": "ClawX を最新に保つ",

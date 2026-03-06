@@ -14,6 +14,7 @@ import {
   Download,
   Copy,
   FileText,
+  Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -30,10 +31,19 @@ import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
+import { getTaskPluginStatus, installTaskPlugin } from '@/lib/openclaw/task-manager-client';
 type ControlUiInfo = {
   url: string;
   token: string;
   port: number;
+};
+
+type TaskPluginInfo = {
+  installed: boolean;
+  enabled: boolean;
+  skillEnabled: boolean;
+  version?: string;
+  pluginDir: string;
 };
 
 export function Settings() {
@@ -83,6 +93,8 @@ export function Settings() {
   const showCliTools = true;
   const [showLogs, setShowLogs] = useState(false);
   const [logContent, setLogContent] = useState('');
+  const [taskPluginInfo, setTaskPluginInfo] = useState<TaskPluginInfo | null>(null);
+  const [taskPluginBusy, setTaskPluginBusy] = useState(false);
 
   const handleShowLogs = async () => {
     try {
@@ -103,6 +115,33 @@ export function Settings() {
       }
     } catch {
       // ignore
+    }
+  };
+  const loadTaskPluginStatus = async (silent = true) => {
+    try {
+      const status = await getTaskPluginStatus();
+      setTaskPluginInfo(status);
+    } catch (error) {
+      if (!silent) {
+        toast.error(t('taskPlugin.toastStatusFailed', { error: String(error) }));
+      }
+    }
+  };
+
+  const handleInstallTaskPlugin = async () => {
+    setTaskPluginBusy(true);
+    try {
+      const result = await installTaskPlugin();
+      if (!result.success) {
+        toast.error(t('taskPlugin.toastInstallFailed', { error: result.error || 'unknown error' }));
+        return;
+      }
+      toast.success(t('taskPlugin.toastInstallSuccess'));
+      await loadTaskPluginStatus(true);
+    } catch (error) {
+      toast.error(t('taskPlugin.toastInstallFailed', { error: String(error) }));
+    } finally {
+      setTaskPluginBusy(false);
     }
   };
 
@@ -258,6 +297,24 @@ export function Settings() {
       setSavingProxy(false);
     }
   };
+
+  useEffect(() => {
+    void loadTaskPluginStatus(true);
+  }, []);
+
+  const taskPluginReady = Boolean(taskPluginInfo?.installed && taskPluginInfo?.enabled && taskPluginInfo?.skillEnabled);
+
+  const taskPluginBadgeVariant = !taskPluginInfo?.installed
+    ? 'secondary'
+    : taskPluginReady
+      ? 'success'
+      : 'destructive';
+
+  const taskPluginStatusLabel = !taskPluginInfo?.installed
+    ? t('taskPlugin.notInstalled')
+    : taskPluginReady
+      ? t('taskPlugin.installedEnabled')
+      : t('taskPlugin.installedDisabled');
 
   return (
     <div className="space-y-6 p-6">
@@ -507,6 +564,58 @@ export function Settings() {
               </Button>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Updates */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wrench className="h-5 w-5" />
+            {t('taskPlugin.title')}
+          </CardTitle>
+          <CardDescription>{t('taskPlugin.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <Label>{t('taskPlugin.status')}</Label>
+              <div className="flex items-center gap-2">
+                <Badge variant={taskPluginBadgeVariant}>{taskPluginStatusLabel}</Badge>
+                {taskPluginInfo?.version ? (
+                  <span className="text-xs text-muted-foreground">
+                    {t('taskPlugin.version')}: {taskPluginInfo.version}
+                  </span>
+                ) : null}
+              </div>
+              {taskPluginInfo?.installed ? (
+                <p className="text-xs text-muted-foreground">
+                  Skill `task-manager`: {taskPluginInfo.skillEnabled ? 'enabled' : 'disabled'}
+                </p>
+              ) : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => void loadTaskPluginStatus(false)}
+                disabled={taskPluginBusy}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                {t('taskPlugin.refresh')}
+              </Button>
+              <Button onClick={handleInstallTaskPlugin} disabled={taskPluginBusy}>
+                <Wrench className="mr-2 h-4 w-4" />
+                {taskPluginInfo?.installed ? t('taskPlugin.reinstall') : t('taskPlugin.install')}
+              </Button>
+            </div>
+          </div>
+
+          {taskPluginInfo?.pluginDir ? (
+            <div className="space-y-1">
+              <Label>{t('taskPlugin.path')}</Label>
+              <Input readOnly value={taskPluginInfo.pluginDir} className="font-mono" />
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

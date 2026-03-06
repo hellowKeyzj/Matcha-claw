@@ -146,8 +146,12 @@ const electronAPI = {
         'openclaw:getConfigDir',
         'openclaw:getSkillsDir',
         'openclaw:getWorkspaceDir',
+        'openclaw:getTaskWorkspaceDirs',
         'openclaw:getRuntimeInfo',
         'openclaw:getCliCommand',
+        // Task manager plugin
+        'task:pluginStatus',
+        'task:pluginInstall',
       ];
 
       if (validChannels.includes(channel)) {

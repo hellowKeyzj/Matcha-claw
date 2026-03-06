@@ -140,7 +140,7 @@ export function registerIpcHandlers(
   registerClawHubHandlers(clawHubService);
 
   // OpenClaw handlers
-  registerOpenClawHandlers();
+  registerOpenClawHandlers(gatewayManager);
 
   // Provider handlers
   registerProviderHandlers(gatewayManager);
@@ -752,55 +752,233 @@ function registerGatewayHandlers(
  * OpenClaw-related IPC handlers
  * For checking package status and channel configuration
  */
-function registerOpenClawHandlers(): void {
-  async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
-    const targetDir = join(homedir(), '.openclaw', 'extensions', 'dingtalk');
+function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
+  type PluginInstallResult = {
+    installed: boolean;
+    warning?: string;
+    installedPath?: string;
+    sourcePath?: string;
+    version?: string;
+  };
+
+  type OpenClawJson = {
+    plugins?: {
+      enabled?: boolean;
+      allow?: string[];
+      entries?: Record<string, Record<string, unknown> & { enabled?: boolean }>;
+      [key: string]: unknown;
+    };
+    skills?: {
+      entries?: Record<string, Record<string, unknown> & { enabled?: boolean }>;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+
+  const openclawConfigPath = join(homedir(), '.openclaw', 'openclaw.json');
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function readOpenClawConfigJson(): OpenClawJson {
+    try {
+      if (!existsSync(openclawConfigPath)) {
+        return {};
+      }
+      const parsed = JSON.parse(readFileSync(openclawConfigPath, 'utf-8')) as OpenClawJson;
+      return isRecord(parsed) ? parsed : {};
+    } catch (error) {
+      logger.warn('Failed to read openclaw.json while handling plugin config:', error);
+      return {};
+    }
+  }
+
+  function writeOpenClawConfigJson(config: OpenClawJson): void {
+    mkdirSync(dirname(openclawConfigPath), { recursive: true });
+    writeFileSync(openclawConfigPath, JSON.stringify(config, null, 2), 'utf-8');
+  }
+
+  function getInstalledPluginVersion(pluginId: string): string | undefined {
+    const pluginPkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
+    try {
+      if (!existsSync(pluginPkgPath)) {
+        return undefined;
+      }
+      const parsed = JSON.parse(readFileSync(pluginPkgPath, 'utf-8')) as { version?: unknown };
+      return typeof parsed.version === 'string' ? parsed.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isPluginEnabled(pluginId: string): boolean {
+    const config = readOpenClawConfigJson();
+    const plugins = isRecord(config.plugins) ? config.plugins : undefined;
+    const entries = isRecord(plugins?.entries) ? plugins?.entries : undefined;
+    const entry = entries && isRecord(entries[pluginId]) ? entries[pluginId] : undefined;
+    const enabledByEntry = typeof entry?.enabled === 'boolean' ? entry.enabled : false;
+    const allowList = Array.isArray(plugins?.allow) ? plugins.allow.filter((item): item is string => typeof item === 'string') : [];
+    const allowed = allowList.length === 0 ? false : allowList.includes(pluginId);
+    const pluginsEnabled = typeof plugins?.enabled === 'boolean' ? plugins.enabled : true;
+    return pluginsEnabled && (enabledByEntry || allowed);
+  }
+
+  function ensurePluginEnabledInConfig(pluginId: string): boolean {
+    const config = readOpenClawConfigJson();
+    const plugins = isRecord(config.plugins) ? config.plugins : {};
+    const entries = isRecord(plugins.entries) ? plugins.entries as Record<string, Record<string, unknown>> : {};
+    const entry = isRecord(entries[pluginId]) ? entries[pluginId] : {};
+    const allow = Array.isArray(plugins.allow) ? plugins.allow.filter((item): item is string => typeof item === 'string') : [];
+
+    plugins.enabled = true;
+    if (!allow.includes(pluginId)) {
+      allow.push(pluginId);
+    }
+    plugins.allow = allow;
+    entries[pluginId] = {
+      ...entry,
+      enabled: true,
+    };
+    plugins.entries = entries;
+    config.plugins = plugins;
+
+    writeOpenClawConfigJson(config);
+    return true;
+  }
+
+  function isSkillEnabled(skillId: string): boolean {
+    const config = readOpenClawConfigJson();
+    const skills = isRecord(config.skills) ? config.skills : undefined;
+    const entries = isRecord(skills?.entries) ? skills.entries as Record<string, Record<string, unknown>> : undefined;
+    const entry = entries && isRecord(entries[skillId]) ? entries[skillId] : undefined;
+    return typeof entry?.enabled === 'boolean' ? entry.enabled : false;
+  }
+
+  function ensureSkillEnabledInConfig(skillId: string): boolean {
+    const config = readOpenClawConfigJson();
+    const skills = isRecord(config.skills) ? config.skills : {};
+    const entries = isRecord(skills.entries) ? skills.entries as Record<string, Record<string, unknown>> : {};
+    const entry = isRecord(entries[skillId]) ? entries[skillId] : {};
+
+    entries[skillId] = {
+      ...entry,
+      enabled: true,
+    };
+    skills.entries = entries;
+    config.skills = skills;
+
+    writeOpenClawConfigJson(config);
+    return true;
+  }
+
+  interface EnsureBundledPluginOptions {
+    extraDevSources?: string[];
+    forceReinstall?: boolean;
+    preferExtraDevSourcesInDev?: boolean;
+  }
+
+  async function ensureBundledPluginInstalled(
+    pluginId: string,
+    options: EnsureBundledPluginOptions = {},
+  ): Promise<PluginInstallResult> {
+    const extraDevSources = options.extraDevSources ?? [];
+    const forceReinstall = options.forceReinstall === true;
+    const preferExtraDevSourcesInDev = options.preferExtraDevSourcesInDev === true;
+    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
-    if (existsSync(targetManifest)) {
-      logger.info('DingTalk plugin already installed from local mirror');
-      return { installed: true };
+    if (!forceReinstall && existsSync(targetManifest)) {
+      logger.info(`${pluginId} plugin already installed from local mirror`);
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
     }
+
+    const packagedCandidates = [
+      join(process.resourcesPath, 'openclaw-plugins', pluginId),
+      join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginId),
+      join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId)
+    ];
+    const baseDevCandidates = [
+      join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
+      join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
+      join(__dirname, `../../build/openclaw-plugins/${pluginId}`),
+    ];
+    const devCandidates = preferExtraDevSourcesInDev
+      ? [...extraDevSources, ...baseDevCandidates]
+      : [...baseDevCandidates, ...extraDevSources];
 
     const candidateSources = app.isPackaged
       ? [
-        join(process.resourcesPath, 'openclaw-plugins', 'dingtalk'),
-        join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', 'dingtalk'),
-        join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', 'dingtalk')
+        ...packagedCandidates,
       ]
       : [
-        join(app.getAppPath(), 'build', 'openclaw-plugins', 'dingtalk'),
-        join(process.cwd(), 'build', 'openclaw-plugins', 'dingtalk'),
-        join(__dirname, '../../build/openclaw-plugins/dingtalk'),
+        ...devCandidates,
       ];
 
     const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
     if (!sourceDir) {
-      logger.warn('Bundled DingTalk plugin mirror not found in candidate paths', { candidateSources });
+      logger.warn(`Bundled ${pluginId} plugin mirror not found in candidate paths`, { candidateSources });
       return {
         installed: false,
-        warning: `Bundled DingTalk plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
+        warning: `Bundled ${pluginId} plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
       };
     }
 
     try {
       mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
-      rmSync(targetDir, { recursive: true, force: true });
+      try {
+        rmSync(targetDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 8,
+          retryDelay: 120,
+        });
+      } catch (removeError) {
+        // Windows 上扩展目录偶发被占用，删除失败时降级为原地覆盖复制。
+        logger.warn(`Failed to remove existing ${pluginId} plugin directory, fallback to in-place overwrite:`, removeError);
+      }
       cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
 
       if (!existsSync(targetManifest)) {
-        return { installed: false, warning: 'Failed to install DingTalk plugin mirror (manifest missing).' };
+        return { installed: false, warning: `Failed to install ${pluginId} plugin mirror (manifest missing).` };
       }
 
-      logger.info(`Installed DingTalk plugin from bundled mirror: ${sourceDir}`);
-      return { installed: true };
+      logger.info(`Installed ${pluginId} plugin from bundled mirror: ${sourceDir}`);
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
     } catch (error) {
-      logger.warn('Failed to install DingTalk plugin from bundled mirror:', error);
+      logger.warn(`Failed to install ${pluginId} plugin from bundled mirror:`, error);
       return {
         installed: false,
-        warning: 'Failed to install bundled DingTalk plugin mirror',
+        warning: `Failed to install bundled ${pluginId} plugin mirror`,
       };
     }
+  }
+
+  async function ensureDingTalkPluginInstalled(): Promise<PluginInstallResult> {
+    return ensureBundledPluginInstalled('dingtalk');
+  }
+
+  async function ensureTaskManagerPluginInstalled(): Promise<PluginInstallResult> {
+    return ensureBundledPluginInstalled('task-manager', {
+      extraDevSources: [
+        join(process.cwd(), 'packages', 'openclaw-task-manager-plugin'),
+        join(app.getAppPath(), 'packages', 'openclaw-task-manager-plugin'),
+        join(__dirname, '../../packages/openclaw-task-manager-plugin'),
+      ],
+      forceReinstall: true,
+      // dev 环境优先使用 build/openclaw-plugins 镜像，packages 仅作为兜底来源，
+      // 避免重装时误装回陈旧 package 副本。
+      preferExtraDevSourcesInDev: false,
+    });
   }
 
   // Get OpenClaw package status
@@ -826,6 +1004,47 @@ function registerOpenClawHandlers(): void {
     return getOpenClawConfigDir();
   });
 
+  // Get OpenClaw workspace directory currently used by the Gateway.
+  ipcMain.handle('openclaw:getWorkspaceDir', () => {
+    return gatewayManager.getRuntimePaths().workspaceDir || null;
+  });
+
+  // Get all task-relevant workspace directories (main + agent-specific workspaces).
+  ipcMain.handle('openclaw:getTaskWorkspaceDirs', () => {
+    const dirs = new Set<string>();
+    const runtimeWorkspace = gatewayManager.getRuntimePaths().workspaceDir;
+    if (typeof runtimeWorkspace === 'string' && runtimeWorkspace.trim()) {
+      const resolved = resolve(expandPath(runtimeWorkspace.trim()));
+      if (existsSync(resolved)) {
+        dirs.add(resolved);
+      }
+    }
+
+    const config = readOpenClawConfigJson();
+    const agents = isRecord(config.agents) ? config.agents : undefined;
+    const agentList = Array.isArray(agents?.list) ? agents.list : [];
+    for (const entry of agentList) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      const workspace = typeof entry.workspace === 'string' ? entry.workspace.trim() : '';
+      if (!workspace) {
+        continue;
+      }
+      const resolved = resolve(expandPath(workspace));
+      if (existsSync(resolved)) {
+        dirs.add(resolved);
+      }
+    }
+
+    return Array.from(dirs);
+  });
+
+  // Get runtime path details for diagnostics.
+  ipcMain.handle('openclaw:getRuntimeInfo', () => {
+    return gatewayManager.getRuntimePaths();
+  });
+
   // Get the OpenClaw skills directory (~/.openclaw/skills)
   ipcMain.handle('openclaw:getSkillsDir', () => {
     const dir = getOpenClawSkillsDir();
@@ -846,6 +1065,51 @@ function registerOpenClawHandlers(): void {
       return { success: true, command: getOpenClawCliCommand() };
     } catch (error) {
       return { success: false, error: String(error) };
+    }
+  });
+
+  // Task manager plugin status
+  ipcMain.handle('task:pluginStatus', async () => {
+    const pluginId = 'task-manager';
+    const pluginDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+    return {
+      installed: existsSync(manifestPath),
+      enabled: isPluginEnabled(pluginId),
+      skillEnabled: isSkillEnabled('task-manager'),
+      version: getInstalledPluginVersion(pluginId),
+      pluginDir,
+    };
+  });
+
+  // Install task manager plugin from bundled mirror/local source and restart Gateway
+  ipcMain.handle('task:pluginInstall', async () => {
+    try {
+      const result = await ensureTaskManagerPluginInstalled();
+      if (!result.installed) {
+        return {
+          success: false,
+          error: result.warning || 'Task manager plugin install failed',
+        };
+      }
+      ensurePluginEnabledInConfig('task-manager');
+      ensureSkillEnabledInConfig('task-manager');
+      gatewayManager.debouncedRestart();
+      return {
+        success: true,
+        installed: true,
+        enabled: true,
+        skillEnabled: true,
+        installedPath: result.installedPath,
+        sourcePath: result.sourcePath,
+        version: result.version,
+      };
+    } catch (error) {
+      logger.error('Failed to install task-manager plugin:', error);
+      return {
+        success: false,
+        error: String(error),
+      };
     }
   });
 

@@ -302,6 +302,20 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
   return true;
 }
 
+function copyPluginFromLocalCandidates(pluginId, candidates, destDir) {
+  const sourceDir = candidates.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+  if (!sourceDir) {
+    console.warn(`[after-pack] ⚠️  Local plugin mirror not found: ${pluginId}. Checked: ${candidates.join(' | ')}`);
+    return false;
+  }
+
+  if (existsSync(normWin(destDir))) rmSync(normWin(destDir), { recursive: true, force: true });
+  mkdirSync(normWin(dirname(destDir)), { recursive: true });
+  cpSync(normWin(sourceDir), normWin(destDir), { recursive: true, dereference: true });
+  console.log(`[after-pack] ✅ Plugin ${pluginId}: copied local source from ${sourceDir}`);
+  return true;
+}
+
 // ── Main hook ────────────────────────────────────────────────────────────────
 
 exports.default = async function afterPack(context) {
@@ -351,13 +365,27 @@ exports.default = async function afterPack(context) {
   //     - node_modules/ is excluded by .gitignore so the deps copy must be manual
   const BUNDLED_PLUGINS = [
     { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
+    {
+      pluginId: 'task-manager',
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'task-manager'),
+        join(__dirname, '..', 'packages', 'openclaw-task-manager-plugin'),
+      ],
+    },
   ];
 
   mkdirSync(pluginsDestRoot, { recursive: true });
-  for (const { npmName, pluginId } of BUNDLED_PLUGINS) {
+  for (const plugin of BUNDLED_PLUGINS) {
+    const { npmName, pluginId } = plugin;
     const pluginDestDir = join(pluginsDestRoot, pluginId);
-    console.log(`[after-pack] Bundling plugin ${npmName} -> ${pluginDestDir}`);
-    const ok = bundlePlugin(nodeModulesRoot, npmName, pluginDestDir);
+    let ok = false;
+    if (npmName) {
+      console.log(`[after-pack] Bundling plugin ${npmName} -> ${pluginDestDir}`);
+      ok = bundlePlugin(nodeModulesRoot, npmName, pluginDestDir);
+    }
+    if (!ok && Array.isArray(plugin.localSourceCandidates)) {
+      ok = copyPluginFromLocalCandidates(pluginId, plugin.localSourceCandidates, pluginDestDir);
+    }
     if (ok) {
       const pluginNM = join(pluginDestDir, 'node_modules');
       cleanupUnnecessaryFiles(pluginDestDir);
