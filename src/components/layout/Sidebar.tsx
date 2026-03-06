@@ -70,7 +70,12 @@ function NavItem({ to, icon, label, badge, collapsed, onClick }: NavItemProps) {
   );
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  expandedWidth?: number;
+  collapsedWidth?: number;
+}
+
+export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarProps) {
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
@@ -131,9 +136,9 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex shrink-0 flex-col border-r bg-background transition-all duration-300',
-        sidebarCollapsed ? 'w-16' : 'w-64'
+        'flex shrink-0 flex-col border-r bg-background transition-all duration-300'
       )}
+      style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
     >
       {/* Navigation */}
       <nav className="flex-1 overflow-hidden flex flex-col p-2 gap-1">

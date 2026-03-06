@@ -13,6 +13,7 @@ interface SettingsState {
   // General
   theme: Theme;
   language: string;
+  userAvatarDataUrl: string | null;
   startMinimized: boolean;
   launchAtStartup: boolean;
 
@@ -42,6 +43,8 @@ interface SettingsState {
   init: () => Promise<void>;
   setTheme: (theme: Theme) => void;
   setLanguage: (language: string) => void;
+  setUserAvatarDataUrl: (dataUrl: string | null) => void;
+  clearUserAvatar: () => void;
   setStartMinimized: (value: boolean) => void;
   setLaunchAtStartup: (value: boolean) => void;
   setGatewayAutoStart: (value: boolean) => void;
@@ -69,6 +72,7 @@ const defaultSettings = {
     if (lang.startsWith('ja')) return 'ja';
     return 'en';
   })(),
+  userAvatarDataUrl: null,
   startMinimized: false,
   launchAtStartup: false,
   gatewayAutoStart: true,
@@ -107,6 +111,8 @@ export const useSettingsStore = create<SettingsState>()(
 
       setTheme: (theme) => set({ theme }),
       setLanguage: (language) => { i18n.changeLanguage(language); set({ language }); void window.electron.ipcRenderer.invoke('settings:set', 'language', language).catch(() => {}); },
+      setUserAvatarDataUrl: (userAvatarDataUrl) => set({ userAvatarDataUrl }),
+      clearUserAvatar: () => set({ userAvatarDataUrl: null }),
       setStartMinimized: (startMinimized) => set({ startMinimized }),
       setLaunchAtStartup: (launchAtStartup) => set({ launchAtStartup }),
       setGatewayAutoStart: (gatewayAutoStart) => { set({ gatewayAutoStart }); void window.electron.ipcRenderer.invoke('settings:set', 'gatewayAutoStart', gatewayAutoStart).catch(() => {}); },
