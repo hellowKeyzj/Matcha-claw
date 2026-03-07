@@ -38,6 +38,7 @@ interface SettingsState {
 
   // Setup
   setupComplete: boolean;
+  initialized: boolean;
 
   // Actions
   init: () => Promise<void>;
@@ -89,6 +90,7 @@ const defaultSettings = {
   sidebarCollapsed: false,
   devModeUnlocked: false,
   setupComplete: false,
+  initialized: false,
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -99,13 +101,27 @@ export const useSettingsStore = create<SettingsState>()(
       init: async () => {
         try {
           const settings = await window.electron.ipcRenderer.invoke('settings:getAll') as Partial<typeof defaultSettings>;
-          set((state) => ({ ...state, ...settings }));
+          let shouldSyncSetupComplete = false;
+          set((state) => {
+            const mergedSetupComplete = Boolean(state.setupComplete || settings.setupComplete);
+            shouldSyncSetupComplete = mergedSetupComplete && !Boolean(settings.setupComplete);
+            return {
+              ...state,
+              ...settings,
+              setupComplete: mergedSetupComplete,
+              initialized: true,
+            };
+          });
+          if (shouldSyncSetupComplete) {
+            void window.electron.ipcRenderer.invoke('settings:set', 'setupComplete', true).catch(() => {});
+          }
           if (settings.language) {
             i18n.changeLanguage(settings.language);
           }
         } catch {
           // Keep renderer-persisted settings as a fallback when the main
           // process store is not reachable.
+          set({ initialized: true });
         }
       },
 
@@ -128,8 +144,11 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoDownloadUpdate: (autoDownloadUpdate) => set({ autoDownloadUpdate }),
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
       setDevModeUnlocked: (devModeUnlocked) => set({ devModeUnlocked }),
-      markSetupComplete: () => set({ setupComplete: true }),
-      resetSettings: () => set(defaultSettings),
+      markSetupComplete: () => {
+        set({ setupComplete: true });
+        void window.electron.ipcRenderer.invoke('settings:set', 'setupComplete', true).catch(() => {});
+      },
+      resetSettings: () => set({ ...defaultSettings, initialized: true }),
     }),
     {
       name: 'clawx-settings',

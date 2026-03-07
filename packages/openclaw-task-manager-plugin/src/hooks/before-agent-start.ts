@@ -32,6 +32,20 @@ type HistoryEntry = {
   text: string;
 };
 
+const CONTINUATION_PROMPT_HINTS = [
+  /^继续(?:执行|推进|处理)?/i,
+  /^接着/i,
+  /^然后/i,
+  /下一步/i,
+  /按上面/i,
+  /按照上面/i,
+  /照着上面/i,
+  /\bcontinue\b/i,
+  /\bresume\b/i,
+  /\bgo on\b/i,
+  /\bcarry on\b/i,
+];
+
 function parseTaskIdFromPrompt(prompt: string): string | null {
   return parseTaskIdFromText(prompt);
 }
@@ -155,7 +169,25 @@ function extractHistoryEntries(source: unknown): HistoryEntry[] {
   return entries;
 }
 
-function buildTriggerProbeText(event: BeforeAgentStartEvent, context: BeforeAgentStartContext): string {
+function shouldUseAssistantProbe(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return CONTINUATION_PROMPT_HINTS.some((pattern) => pattern.test(trimmed));
+}
+
+function buildTriggerProbeText(
+  event: BeforeAgentStartEvent,
+  context: BeforeAgentStartContext,
+  prompt: string,
+): string {
+  // 仅在“续接上下文”类用户输入时参考 assistant 历史，
+  // 避免普通问句被旧清单误判为复杂任务。
+  if (!shouldUseAssistantProbe(prompt)) {
+    return "";
+  }
+
   const historySources = [
     event.history,
     event.messages,
@@ -224,7 +256,7 @@ export function createBeforeAgentStartHandler(resolveStore: StoreResolver) {
   ): Promise<BeforeAgentStartResult> => {
     const store = resolveStore(context.workspaceDir);
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
-    const assistantProbeText = buildTriggerProbeText(event, context);
+    const assistantProbeText = buildTriggerProbeText(event, context, prompt);
     const triggerAssessment = assessTaskComplexity({
       promptText: prompt,
       assistantText: assistantProbeText,

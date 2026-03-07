@@ -5,13 +5,16 @@
 import { app, utilityProcess } from 'electron';
 import path from 'path';
 import { EventEmitter } from 'events';
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { cp, readFile, rm, writeFile } from 'fs/promises';
 import WebSocket from 'ws';
 import { PORTS } from '../utils/config';
 import {
   getOpenClawDir,
   getOpenClawEntryPath,
+  getOpenClawConfigDir,
   isOpenClawPresent,
+  expandPath,
   appendNodeRequireToNodeOptions,
 } from '../utils/paths';
 import { getAllSettings, getSetting } from '../utils/store';
@@ -28,7 +31,12 @@ import {
   buildDeviceAuthPayload,
   type DeviceIdentity,
 } from '../utils/device-identity';
-import { syncGatewayTokenToConfig, syncBrowserConfigToOpenClaw, sanitizeOpenClawConfig } from '../utils/openclaw-auth';
+import {
+  syncGatewayTokenToConfig,
+  syncBrowserConfigToOpenClaw,
+  sanitizeOpenClawConfig,
+  syncControlUiRootToConfig,
+} from '../utils/openclaw-auth';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { shouldAttemptConfigAutoRepair } from './startup-recovery';
@@ -92,8 +100,133 @@ const PORT_OWNER_PROBE_TIMEOUT_MS = 3500;
 const CONNECT_CHALLENGE_WAIT_MS = 150;
 const DEFAULT_DEBOUNCED_RESTART_DELAY_MS = 600;
 const OPERATOR_CONNECT_SCOPES = ['operator.read', 'operator.write', 'operator.admin'] as const;
+const SAFE_BUNDLED_PLUGINS_DIR = 'bundled-extensions';
+const SAFE_BUNDLED_PLUGINS_META = '.mirror-meta.json';
+const SAFE_CONTROL_UI_DIR = 'bundled-control-ui';
+const SAFE_CONTROL_UI_META = '.mirror-meta.json';
 
 export type GatewayHostRuntime = 'linux' | 'wsl' | 'windows' | 'macos';
+
+export interface GatewayRuntimePaths {
+  configDir: string;
+  workspaceDir: string;
+  hostRuntime: GatewayHostRuntime;
+}
+
+interface BundledPluginsMirrorMeta {
+  openclawVersion: string;
+  sourceDir: string;
+}
+
+interface BundledControlUiMirrorMeta {
+  openclawVersion: string;
+  sourceDir: string;
+}
+
+async function readOpenClawPackageVersion(openclawDir: string): Promise<string> {
+  try {
+    const raw = await readFile(path.join(openclawDir, 'package.json'), 'utf-8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.trim()) {
+      return parsed.version.trim();
+    }
+  } catch {
+    // fall through
+  }
+  return 'unknown';
+}
+
+/**
+ * pnpm installs package files as hardlinks; OpenClaw 2026.3.x rejects hardlinked
+ * plugin manifests for safety, which breaks gateway startup in dev.
+ *
+ * Build a userData-local mirror (regular files) and point OpenClaw to it via
+ * OPENCLAW_BUNDLED_PLUGINS_DIR so plugin manifest validation can pass.
+ */
+async function resolveSafeBundledPluginsDir(openclawDir: string): Promise<string | null> {
+  const sourceDir = path.join(openclawDir, 'extensions');
+  if (!existsSync(sourceDir)) return null;
+
+  const mirrorDir = path.join(app.getPath('userData'), SAFE_BUNDLED_PLUGINS_DIR);
+  const mirrorMetaPath = path.join(mirrorDir, SAFE_BUNDLED_PLUGINS_META);
+  const sourceDirResolved = path.resolve(sourceDir);
+  const openclawVersion = await readOpenClawPackageVersion(openclawDir);
+
+  try {
+    const raw = await readFile(mirrorMetaPath, 'utf-8');
+    const meta = JSON.parse(raw) as Partial<BundledPluginsMirrorMeta>;
+    if (
+      meta.openclawVersion === openclawVersion &&
+      meta.sourceDir === sourceDirResolved
+    ) {
+      return mirrorDir;
+    }
+  } catch {
+    // fall through and rebuild mirror
+  }
+
+  try {
+    await rm(mirrorDir, { recursive: true, force: true });
+    await cp(sourceDir, mirrorDir, { recursive: true, force: true, dereference: true });
+    const meta: BundledPluginsMirrorMeta = {
+      openclawVersion,
+      sourceDir: sourceDirResolved,
+    };
+    await writeFile(mirrorMetaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    logger.info(`Prepared bundled plugin mirror for OpenClaw (version=${openclawVersion}, dir=${mirrorDir})`);
+    return mirrorDir;
+  } catch (error) {
+    logger.warn('Failed to prepare bundled plugin mirror for OpenClaw:', error);
+    return null;
+  }
+}
+
+/**
+ * OpenClaw 2026.3.x 在 Control UI 静态文件读取链路中会拒绝 hardlink 文件。
+ * pnpm 的 node_modules 文件在开发环境通常是 hardlink，导致 `GET /` 返回 404。
+ *
+ * 这里把 dist/control-ui 镜像到 userData（普通文件）并通过 openclaw.json 的
+ * gateway.controlUi.root 指向镜像目录，绕开 hardlink 拒绝逻辑。
+ */
+async function resolveSafeBundledControlUiDir(openclawDir: string): Promise<string | null> {
+  const sourceDir = path.join(openclawDir, 'dist', 'control-ui');
+  const sourceIndex = path.join(sourceDir, 'index.html');
+  if (!existsSync(sourceIndex)) return null;
+
+  const mirrorDir = path.join(app.getPath('userData'), SAFE_CONTROL_UI_DIR);
+  const mirrorMetaPath = path.join(mirrorDir, SAFE_CONTROL_UI_META);
+  const sourceDirResolved = path.resolve(sourceDir);
+  const openclawVersion = await readOpenClawPackageVersion(openclawDir);
+
+  try {
+    const raw = await readFile(mirrorMetaPath, 'utf-8');
+    const meta = JSON.parse(raw) as Partial<BundledControlUiMirrorMeta>;
+    if (
+      meta.openclawVersion === openclawVersion &&
+      meta.sourceDir === sourceDirResolved &&
+      existsSync(path.join(mirrorDir, 'index.html'))
+    ) {
+      return mirrorDir;
+    }
+  } catch {
+    // fall through and rebuild mirror
+  }
+
+  try {
+    await rm(mirrorDir, { recursive: true, force: true });
+    await cp(sourceDir, mirrorDir, { recursive: true, force: true, dereference: true });
+    const meta: BundledControlUiMirrorMeta = {
+      openclawVersion,
+      sourceDir: sourceDirResolved,
+    };
+    await writeFile(mirrorMetaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    logger.info(`Prepared Control UI mirror for OpenClaw (version=${openclawVersion}, dir=${mirrorDir})`);
+    return mirrorDir;
+  } catch (error) {
+    logger.warn('Failed to prepare Control UI mirror for OpenClaw:', error);
+    return null;
+  }
+}
 
 /**
  * Ensure the gateway fetch-preload script exists in userData and return
@@ -229,7 +362,6 @@ export class GatewayManager extends EventEmitter {
     timeout: NodeJS.Timeout;
   }> = new Map();
   private deviceIdentity: DeviceIdentity | null = null;
-  private restartDebounceTimer: NodeJS.Timeout | null = null;
   private lifecycleEpoch = 0;
   private deferredRestartPending = false;
   private restartInFlight: Promise<void> | null = null;
@@ -371,6 +503,52 @@ export class GatewayManager extends EventEmitter {
    */
   isConnected(): boolean {
     return this.status.state === 'running' && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * 返回当前网关运行时使用的关键目录信息。
+   * 约定：
+   * - configDir：OpenClaw 配置目录（通常为 ~/.openclaw）
+   * - workspaceDir：默认工作区目录（来自 openclaw.json agents.defaults.workspace，缺省回退到 configDir/workspace）
+   */
+  getRuntimePaths(): GatewayRuntimePaths {
+    const configDir = getOpenClawConfigDir();
+    const workspaceDir = this.resolveWorkspaceDir(configDir);
+    return {
+      configDir,
+      workspaceDir,
+      hostRuntime: this.resolveHostRuntime(),
+    };
+  }
+
+  private resolveHostRuntime(): GatewayHostRuntime {
+    if (process.platform === 'win32') return 'windows';
+    if (process.platform === 'darwin') return 'macos';
+    const isWsl = Boolean(process.env.WSL_INTEROP || process.env.WSL_DISTRO_NAME);
+    return isWsl ? 'wsl' : 'linux';
+  }
+
+  private resolveWorkspaceDir(configDir: string): string {
+    const configPath = path.join(configDir, 'openclaw.json');
+    try {
+      if (existsSync(configPath)) {
+        const raw = readFileSync(configPath, 'utf-8');
+        const parsed = JSON.parse(raw) as {
+          agents?: {
+            defaults?: {
+              workspace?: unknown;
+            };
+          };
+        };
+        const configured = parsed?.agents?.defaults?.workspace;
+        if (typeof configured === 'string' && configured.trim()) {
+          return expandPath(configured.trim());
+        }
+      }
+    } catch (error) {
+      logger.debug(`Failed to resolve OpenClaw workspace from config: ${String(error)}`);
+    }
+    return path.join(configDir, 'workspace');
   }
 
   /**
@@ -938,6 +1116,7 @@ export class GatewayManager extends EventEmitter {
   private async runOpenClawDoctorRepair(): Promise<boolean> {
     const openclawDir = getOpenClawDir();
     const entryScript = getOpenClawEntryPath();
+    const bundledPluginsDir = await resolveSafeBundledPluginsDir(openclawDir);
     if (!existsSync(entryScript)) {
       logger.error(`Cannot run OpenClaw doctor repair: entry script not found at ${entryScript}`);
       return false;
@@ -957,7 +1136,7 @@ export class GatewayManager extends EventEmitter {
     const uvEnv = await getUvMirrorEnv();
     const doctorArgs = ['doctor', '--fix', '--yes', '--non-interactive'];
     logger.info(
-      `Running OpenClaw doctor repair (entry="${entryScript}", args="${doctorArgs.join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'})`
+      `Running OpenClaw doctor repair (entry="${entryScript}", args="${doctorArgs.join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'}, bundledPluginsMirror=${bundledPluginsDir ? 'yes' : 'no'})`
     );
 
     return new Promise<boolean>((resolve) => {
@@ -966,6 +1145,7 @@ export class GatewayManager extends EventEmitter {
         PATH: finalPath,
         ...uvEnv,
         OPENCLAW_NO_RESPAWN: '1',
+        ...(bundledPluginsDir ? { OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir } : {}),
       };
 
       const child = utilityProcess.fork(entryScript, doctorArgs, {
@@ -1077,6 +1257,11 @@ export class GatewayManager extends EventEmitter {
 
     const openclawDir = getOpenClawDir();
     const entryScript = getOpenClawEntryPath();
+    const bundledPluginsDir = await resolveSafeBundledPluginsDir(openclawDir);
+    // Control UI hardlink mirror workaround is only needed in development (pnpm hardlinks).
+    const bundledControlUiDir = app.isPackaged
+      ? null
+      : await resolveSafeBundledControlUiDir(openclawDir);
 
     // Verify OpenClaw package exists
     if (!isOpenClawPresent()) {
@@ -1110,6 +1295,19 @@ export class GatewayManager extends EventEmitter {
       await syncGatewayTokenToConfig(gatewayToken);
     } catch (err) {
       logger.warn('Failed to sync gateway token to openclaw.json:', err);
+    }
+
+    try {
+      if (bundledControlUiDir) {
+        const controlUiSync = await syncControlUiRootToConfig(bundledControlUiDir);
+        if (controlUiSync === 'updated') {
+          logger.info(`Synced Control UI root to OpenClaw config (${bundledControlUiDir})`);
+        } else if (controlUiSync === 'skipped-existing-root') {
+          logger.debug('Skipped Control UI root sync because a custom root is already configured');
+        }
+      }
+    } catch (err) {
+      logger.warn('Failed to sync Control UI root to openclaw.json:', err);
     }
 
     try {
@@ -1185,7 +1383,7 @@ export class GatewayManager extends EventEmitter {
     const proxyEnv = buildProxyEnv(appSettings);
     const resolvedProxy = resolveProxySettings(appSettings);
     logger.info(
-      `Starting Gateway process (mode=${mode}, port=${this.status.port}, entry="${entryScript}", args="${this.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'}, providerKeys=${loadedProviderKeyCount}, proxy=${appSettings.proxyEnabled ? `http=${resolvedProxy.httpProxy || '-'}, https=${resolvedProxy.httpsProxy || '-'}, all=${resolvedProxy.allProxy || '-'}` : 'disabled'})`
+      `Starting Gateway process (mode=${mode}, port=${this.status.port}, entry="${entryScript}", args="${this.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'}, bundledPluginsMirror=${bundledPluginsDir ? 'yes' : 'no'}, controlUiMirror=${bundledControlUiDir ? 'yes' : 'no'}, providerKeys=${loadedProviderKeyCount}, proxy=${appSettings.proxyEnabled ? `http=${resolvedProxy.httpProxy || '-'}, https=${resolvedProxy.httpsProxy || '-'}, all=${resolvedProxy.allProxy || '-'}` : 'disabled'})`
     );
     this.lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${this.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
 
@@ -1204,6 +1402,7 @@ export class GatewayManager extends EventEmitter {
         CLAWDBOT_SKIP_CHANNELS: '',
         // Prevent OpenClaw from respawning itself inside the utility process
         OPENCLAW_NO_RESPAWN: '1',
+        ...(bundledPluginsDir ? { OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir } : {}),
       };
 
       // Inject fetch preload so OpenRouter requests carry ClawX headers.

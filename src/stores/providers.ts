@@ -4,6 +4,9 @@
  */
 import { create } from 'zustand';
 import type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
+import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
+import { useSubagentsStore } from '@/stores/subagents';
+import type { ConfigGetResult } from '@/types/subagent';
 
 // Re-export types for consumers that imported from here
 export type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
@@ -33,6 +36,70 @@ interface ProviderState {
     options?: { baseUrl?: string }
   ) => Promise<{ valid: boolean; error?: string }>;
   getApiKey: (providerId: string) => Promise<string | null>;
+}
+
+interface GatewayRpcSuccess<T> {
+  success: true;
+  result: T;
+}
+
+interface GatewayRpcFailure {
+  success: false;
+  error?: string;
+}
+
+type GatewayRpcResult<T> = GatewayRpcSuccess<T> | GatewayRpcFailure;
+
+interface ConfiguredModelSnapshot {
+  ok: boolean;
+  modelIds: string[];
+  cfg?: ConfigGetResult;
+}
+
+function calculateRemovedModelIds(before: string[], after: string[]): string[] {
+  const afterSet = new Set(after);
+  return before.filter((modelId) => !afterSet.has(modelId));
+}
+
+async function fetchConfiguredModelSnapshot(): Promise<ConfiguredModelSnapshot> {
+  try {
+    const response = await window.electron.ipcRenderer.invoke(
+      'gateway:rpc',
+      'config.get',
+      {}
+    ) as GatewayRpcResult<ConfigGetResult>;
+
+    if (!response.success) {
+      return { ok: false, modelIds: [] };
+    }
+
+    return {
+      ok: true,
+      modelIds: collectConfiguredModelIdsFromConfig(response.result),
+      cfg: response.result,
+    };
+  } catch {
+    return { ok: false, modelIds: [] };
+  }
+}
+
+async function synchronizeAgentModelsAfterProviderChange(
+  options: { beforeSnapshot?: ConfiguredModelSnapshot; checkRemovedModels?: boolean } = {}
+): Promise<void> {
+  const { beforeSnapshot, checkRemovedModels = true } = options;
+  const afterSnapshot = await fetchConfiguredModelSnapshot();
+  const removedModelIds = checkRemovedModels && beforeSnapshot?.ok && afterSnapshot.ok
+    ? calculateRemovedModelIds(beforeSnapshot.modelIds, afterSnapshot.modelIds)
+    : [];
+
+  const subagents = useSubagentsStore.getState();
+  const changed = removedModelIds.length > 0
+    ? await subagents.reconcileAgentModels({ removedModelIds, cfg: afterSnapshot.cfg })
+    : false;
+  await subagents.loadAvailableModels(afterSnapshot.cfg);
+  if (changed) {
+    await subagents.loadAgents();
+  }
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
@@ -74,6 +141,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
+      await synchronizeAgentModelsAfterProviderChange({ checkRemovedModels: false });
     } catch (error) {
       console.error('Failed to add provider:', error);
       throw error;
@@ -82,6 +150,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   
   updateProvider: async (providerId, updates, apiKey) => {
     try {
+      const beforeSnapshot = await fetchConfiguredModelSnapshot();
       const existing = get().providers.find((p) => p.id === providerId);
       if (!existing) {
         throw new Error('Provider not found');
@@ -103,6 +172,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
+      await synchronizeAgentModelsAfterProviderChange({ beforeSnapshot });
     } catch (error) {
       console.error('Failed to update provider:', error);
       throw error;
@@ -111,6 +181,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   
   deleteProvider: async (providerId) => {
     try {
+      const beforeSnapshot = await fetchConfiguredModelSnapshot();
       const result = await window.electron.ipcRenderer.invoke('provider:delete', providerId) as { success: boolean; error?: string };
       
       if (!result.success) {
@@ -119,6 +190,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
+      await synchronizeAgentModelsAfterProviderChange({ beforeSnapshot });
     } catch (error) {
       console.error('Failed to delete provider:', error);
       throw error;
@@ -143,6 +215,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   updateProviderWithKey: async (providerId, updates, apiKey) => {
     try {
+      const beforeSnapshot = await fetchConfiguredModelSnapshot();
       const result = await window.electron.ipcRenderer.invoke(
         'provider:updateWithKey',
         providerId,
@@ -155,6 +228,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       }
 
       await get().fetchProviders();
+      await synchronizeAgentModelsAfterProviderChange({ beforeSnapshot });
     } catch (error) {
       console.error('Failed to update provider with key:', error);
       throw error;

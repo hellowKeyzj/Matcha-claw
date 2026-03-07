@@ -7,6 +7,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { AgentSessionsPane } from './AgentSessionsPane';
 import { TitleBar } from './TitleBar';
+import { VerticalPaneResizer } from './VerticalPaneResizer';
 import { useSettingsStore } from '@/stores/settings';
 
 const SIDEBAR_MIN_WIDTH = 200;
@@ -208,16 +209,11 @@ export function MainLayout() {
       <div ref={layoutRef} className="flex flex-1 overflow-hidden">
         <Sidebar expandedWidth={sidebarWidth} />
         {!sidebarCollapsed && (
-          <div
-            data-testid="layout-left-resizer"
-            className="group relative w-1.5 shrink-0 cursor-col-resize bg-transparent"
+          <VerticalPaneResizer
+            testId="layout-left-resizer"
             onMouseDown={startSidebarResize}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize sidebar"
-          >
-            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary/60" />
-          </div>
+            ariaLabel="Resize sidebar"
+          />
         )}
         {isChatRoute && (
           <AgentSessionsPane
@@ -228,16 +224,12 @@ export function MainLayout() {
           />
         )}
         {isChatRoute && !agentSessionsCollapsed && (
-          <div
-            data-testid="layout-agent-sessions-resizer"
-            className="group relative w-1.5 shrink-0 cursor-col-resize bg-transparent"
+          <VerticalPaneResizer
+            testId="layout-agent-sessions-resizer"
             onMouseDown={startAgentSessionsResize}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize agent sessions pane"
-          >
-            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary/60" />
-          </div>
+            ariaLabel="Resize agent sessions pane"
+            variant="subtle-border"
+          />
         )}
         <main className="min-w-0 flex-1 overflow-auto p-6">
           <Outlet />

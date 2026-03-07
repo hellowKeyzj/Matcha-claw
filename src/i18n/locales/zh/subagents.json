@@ -1,8 +1,13 @@
 {
-  "title": "子Agent工作台",
-  "subtitle": "管理子Agent与模型配置。",
-  "newSubagent": "新增子Agent",
-  "createDialogTitle": "新增子Agent",
+  "title": "智能体管理台",
+  "subtitle": "管理智能体与模型配置",
+  "newSubagent": "新增智能体",
+  "empty": "暂无智能体",
+  "modelGuide": {
+    "description": "请先到 设置 > AI 模型提供商 添加模型",
+    "action": "前往设置"
+  },
+  "createDialogTitle": "新增智能体",
   "editDialogTitle": "编辑子Agent",
   "manageTitle": "配置人设：{{agentId}}",
   "manage": {
@@ -49,7 +54,8 @@
   },
   "card": {
     "default": "默认",
-    "modelFallback": "-",
+    "modelFallback": "未配置模型",
+    "modelMissingHint": "未配置模型，暂不可会话或运行。",
     "lockedHint": "main agent 为系统保留，禁止操作。",
     "actions": {
       "edit": "编辑",

@@ -7,16 +7,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
+import { buildSettingsSectionLink } from '@/lib/settings/sections';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { TaskInboxPanel } from './components/TaskInboxPanel';
+import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -24,6 +27,7 @@ import { cn } from '@/lib/utils';
 const TASK_INBOX_MIN_WIDTH = 260;
 const TASK_INBOX_MAX_WIDTH = 560;
 const TASK_INBOX_DEFAULT_WIDTH = 360;
+const TASK_INBOX_RESIZER_WIDTH = 6;
 const CHAT_MAIN_MIN_WIDTH = 520;
 
 function clamp(value: number, min: number, max: number): number {
@@ -43,7 +47,10 @@ function loadTaskInboxWidth(): number {
 }
 
 function clampTaskInboxWidth(width: number, containerWidth: number): number {
-  const maxWidth = Math.max(TASK_INBOX_MIN_WIDTH, containerWidth - CHAT_MAIN_MIN_WIDTH);
+  const maxWidth = Math.max(
+    TASK_INBOX_MIN_WIDTH,
+    containerWidth - CHAT_MAIN_MIN_WIDTH - TASK_INBOX_RESIZER_WIDTH,
+  );
   return clamp(width, TASK_INBOX_MIN_WIDTH, Math.min(TASK_INBOX_MAX_WIDTH, maxWidth));
 }
 
@@ -52,7 +59,7 @@ function buildAgentChatSessionKey(agentId: string): string {
   if (!normalized) {
     return '';
   }
-  return `agent:${normalized}:${normalized}`;
+  return `agent:${normalized}:main`;
 }
 
 function parseAgentIdFromSessionKey(sessionKey: string): string {
@@ -142,7 +149,7 @@ export function Chat() {
       if (!rect) {
         return;
       }
-      const rawWidth = rect.right - moveEvent.clientX;
+      const rawWidth = rect.right - moveEvent.clientX - TASK_INBOX_RESIZER_WIDTH;
       const next = clampTaskInboxWidth(rawWidth, rect.width);
       setTaskInboxWidth(next);
     };
@@ -235,21 +242,48 @@ export function Chat() {
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
+  const mainAgent = agents.find((item) => item.id === 'main');
+  const blockedByMainAgentModel = Boolean(mainAgent) && !Boolean(mainAgent?.model?.trim());
   const assistantAvatarEmoji = resolveAgentEmoji(
     currentAgentId,
     currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
   );
 
+  if (blockedByMainAgentModel) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center p-8 text-center">
+        <AlertCircle className="mb-4 h-12 w-12 text-yellow-500" />
+        <h2 className="mb-2 text-xl font-semibold">{t('mainModelBlocked.title')}</h2>
+        <p className="max-w-xl text-muted-foreground">
+          {t('mainModelBlocked.description')}
+        </p>
+        <div className="mt-4">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(buildSettingsSectionLink('aiProviders'))}
+            >
+              {t('common:sidebar.settings')}
+            </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={chatLayoutRef}
       className={cn(
-        'relative grid h-full min-h-0 grid-cols-1 overflow-hidden xl:[grid-template-columns:minmax(0,1fr)_var(--task-inbox-width)]',
+        'relative grid h-full min-h-0 grid-cols-1 overflow-hidden xl:[grid-template-columns:minmax(0,1fr)_var(--task-inbox-resizer-width)_var(--task-inbox-width)]',
         taskInboxCollapsed
           ? 'xl:[grid-template-columns:minmax(0,1fr)_52px]'
           : '',
       )}
-      style={{ ['--task-inbox-width' as string]: `${taskInboxWidth}px` }}
+      style={{
+        ['--task-inbox-width' as string]: `${taskInboxWidth}px`,
+        ['--task-inbox-resizer-width' as string]: `${TASK_INBOX_RESIZER_WIDTH}px`,
+      }}
     >
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {/* Toolbar */}
@@ -345,23 +379,19 @@ export function Chat() {
         />
       </div>
 
+      {!taskInboxCollapsed && (
+        <VerticalPaneResizer
+          testId="chat-right-resizer"
+          className="hidden xl:block"
+          onMouseDown={startTaskInboxResize}
+          ariaLabel="Resize task inbox"
+          variant="subtle-border"
+        />
+      )}
       <TaskInboxPanel
         collapsed={taskInboxCollapsed}
         onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
       />
-      {!taskInboxCollapsed && (
-        <div
-          data-testid="chat-right-resizer"
-          className="absolute bottom-0 top-0 z-20 hidden w-2 cursor-col-resize xl:block"
-          style={{ right: `${taskInboxWidth - 4}px` }}
-          onMouseDown={startTaskInboxResize}
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize task inbox"
-        >
-          <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors hover:bg-primary/60" />
-        </div>
-      )}
     </div>
   );
 }

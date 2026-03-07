@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { normalizeSubagentNameToSlug } from '@/lib/subagent/workspace';
+import { buildSettingsSectionLink } from '@/lib/settings/sections';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
@@ -57,6 +58,8 @@ export function SubAgents() {
   const applySucceeded = managedAgentId ? Boolean(draftApplySuccessByAgent[managedAgentId]) : false;
   const applyingDraft = managedAgentId ? Boolean(draftApplyingByAgent[managedAgentId]) : false;
   const draftRawOutput = managedAgentId ? (draftRawOutputByAgent[managedAgentId] ?? '') : '';
+  const hasAvailableModels = availableModels.length > 0;
+  const showNoModelGuide = !modelsLoading && !hasAvailableModels;
 
   useEffect(() => {
     loadAgents();
@@ -116,6 +119,21 @@ export function SubAgents() {
           {error}
         </p>
       )}
+      {showNoModelGuide && (
+        <div className="rounded-md border border-amber-300/60 bg-amber-50/70 p-3 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+          <p>{t('modelGuide.description')}</p>
+          <div className="mt-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => navigate(buildSettingsSectionLink('aiProviders'))}
+            >
+              {t('modelGuide.action')}
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {agents.map((agent) => (
@@ -123,6 +141,7 @@ export function SubAgents() {
             key={agent.id}
             agent={agent}
             locked={agent.id === MAIN_AGENT_ID}
+            modelReady={Boolean(agent.model?.trim())}
             onEdit={() => openEditDialog(agent.id)}
             onDelete={() => {
               setDeletingAgentId(agent.id);
@@ -139,7 +158,7 @@ export function SubAgents() {
       </div>
 
       {!loading && agents.length === 0 && (
-        <p className="text-sm text-muted-foreground">No subagents found.</p>
+        <p className="text-sm text-muted-foreground">{t('empty')}</p>
       )}
       <SubagentDeleteDialog
         open={Boolean(deletingAgentId)}

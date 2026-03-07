@@ -1,12 +1,12 @@
 {
     "sidebar": {
         "chat": "聊天",
-        "newChat": "新对话",
+        "newChat": "会话",
         "cronTasks": "定时任务",
         "tasks": "任务中心",
         "skills": "技能",
         "channels": "频道",
-        "subagents": "子Agent",
+        "subagents": "智能体",
         "agentSessions": "Agent 会话",
         "collapseAgentSessions": "收起 Agent 会话栏",
         "expandAgentSessions": "展开 Agent 会话栏",
@@ -19,7 +19,7 @@
         "noSubagents": "暂无 Agent",
         "noAgentSessions": "暂无会话",
         "mainAgent": "主 Agent",
-        "agentsWorkspace": "Agents 工作空间",
+        "agentsWorkspace": "智能体协作空间",
         "dashboard": "仪表盘",
         "settings": "设置",
         "devConsole": "开发者控制台"

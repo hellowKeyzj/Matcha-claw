@@ -86,7 +86,7 @@ interface ChatState {
   // Sessions
   sessions: ChatSession[];
   currentSessionKey: string;
-  /** First user message text per session key, used as display label */
+  /** 会话标题（优先用户首条有效消息；无用户消息时回退 assistant 首条有效消息） */
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
@@ -451,6 +451,13 @@ function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
 }
 
 const _imageCache = loadImageCache();
+const SESSION_LABEL_MAX_LENGTH = 50;
+const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
+  /^a new session was started via\b/i,
+  /^##\s*task manager\b/i,
+  /^task manager.*(恢复提示|动态切换建议)/i,
+  /^检测到多个待确认任务/i,
+];
 
 /** Extract plain text from message content (string or content blocks) */
 function getMessageText(content: unknown): string {
@@ -462,6 +469,49 @@ function getMessageText(content: unknown): string {
       .join('\n');
   }
   return '';
+}
+
+function normalizeSessionLabelText(text: string): string {
+  const cleaned = text
+    .replace(/\[media attached:[^\]]+\]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned || cleaned === '(file attached)') {
+    return '';
+  }
+  if (cleaned.length <= SESSION_LABEL_MAX_LENGTH) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, SESSION_LABEL_MAX_LENGTH)}…`;
+}
+
+function shouldIgnoreAssistantSessionLabel(text: string): boolean {
+  if (!text) {
+    return true;
+  }
+  return ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function resolveSessionLabelFromMessages(messages: RawMessage[]): string | null {
+  for (const message of messages) {
+    if (message.role !== 'user') {
+      continue;
+    }
+    const candidate = normalizeSessionLabelText(getMessageText(message.content));
+    if (candidate) {
+      return candidate;
+    }
+  }
+  for (const message of messages) {
+    if (message.role !== 'assistant') {
+      continue;
+    }
+    const candidate = normalizeSessionLabelText(getMessageText(message.content));
+    if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 /** Extract media file refs from [media attached: <path> (<mime>) | ...] patterns */
@@ -1227,21 +1277,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           model: s.model ? String(s.model) : undefined,
         })).filter((s: ChatSession) => s.key);
 
-        const canonicalBySuffix = new Map<string, string>();
-        for (const session of sessions) {
-          if (!session.key.startsWith('agent:')) continue;
-          const parts = session.key.split(':');
-          if (parts.length < 3) continue;
-          const suffix = parts.slice(2).join(':');
-          if (suffix && !canonicalBySuffix.has(suffix)) {
-            canonicalBySuffix.set(suffix, session.key);
-          }
-        }
-
-        // Deduplicate: if both short and canonical existed, keep canonical only
         const seen = new Set<string>();
         const dedupedSessions = sessions.filter((s) => {
-          if (!s.key.startsWith('agent:') && canonicalBySuffix.has(s.key)) return false;
           if (seen.has(s.key)) return false;
           seen.add(s.key);
           return true;
@@ -1249,12 +1286,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const { currentSessionKey } = get();
         let nextSessionKey = currentSessionKey || DEFAULT_SESSION_KEY;
-        if (!nextSessionKey.startsWith('agent:')) {
-          const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
-          if (canonicalMatch) {
-            nextSessionKey = canonicalMatch;
-          }
-        }
         if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
           // 保留“新建但尚未发送消息”的空会话，以及 canonical agent 会话。
           const isNewEmptySession = get().messages.length === 0;
@@ -1277,8 +1308,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           get().loadHistory();
         }
 
-        // Background: fetch first user message for every non-main session to populate labels upfront.
-        // Uses a small limit so it's cheap; runs in parallel and doesn't block anything.
+        // Background: hydrate session titles + activity from history (single source for list UI).
         const sessionsToLabel = sessionsWithCurrent.filter((s) => !s.key.endsWith(':main'));
         if (sessionsToLabel.length > 0) {
           void Promise.all(
@@ -1291,16 +1321,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ) as { success: boolean; result?: Record<string, unknown> };
                 if (!r.success || !r.result) return;
                 const msgs = Array.isArray(r.result.messages) ? r.result.messages as RawMessage[] : [];
-                const firstUser = msgs.find((m) => m.role === 'user');
                 const lastMsg = msgs[msgs.length - 1];
+                const resolvedLabel = resolveSessionLabelFromMessages(msgs);
                 set((s) => {
                   const next: Partial<typeof s> = {};
-                  if (firstUser) {
-                    const labelText = getMessageText(firstUser.content).trim();
-                    if (labelText) {
-                      const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
-                      next.sessionLabels = { ...s.sessionLabels, [session.key]: truncated };
-                    }
+                  if (resolvedLabel) {
+                    next.sessionLabels = { ...s.sessionLabels, [session.key]: resolvedLabel };
                   }
                   if (lastMsg?.timestamp) {
                     next.sessionLastActivity = { ...s.sessionLastActivity, [session.key]: toMs(lastMsg.timestamp) };
@@ -1464,15 +1490,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Load chat history ──
 
   loadHistory: async (quiet = false) => {
-    const { currentSessionKey } = get();
+    const requestedSessionKey = get().currentSessionKey;
     if (!quiet) set({ loading: true, error: null });
 
     try {
       const result = await window.electron.ipcRenderer.invoke(
         'gateway:rpc',
         'chat.history',
-        { sessionKey: currentSessionKey, limit: 200 }
+        { sessionKey: requestedSessionKey, limit: 200 }
       ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+
+      // 防止异步竞态：若请求返回时用户已切换到其它会话，丢弃本次结果。
+      if (get().currentSessionKey !== requestedSessionKey) {
+        if (!quiet) {
+          set({ loading: false });
+        }
+        return;
+      }
 
       if (result.success && result.result) {
         const data = result.result;
@@ -1508,20 +1542,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         set({ messages: finalMessages, thinkingLevel, loading: false });
 
-        // Extract first user message text as a session label for display in the toolbar.
-        // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
-        // displayName (e.g. the configured agent name "ClawX") instead.
-        const isMainSession = currentSessionKey.endsWith(':main');
+        // 统一会话标题提取：优先用户首条有效消息；无用户消息时回退 assistant 首条有效消息（过滤模板句）。
+        const isMainSession = requestedSessionKey.endsWith(':main');
         if (!isMainSession) {
-          const firstUserMsg = finalMessages.find((m) => m.role === 'user');
-          if (firstUserMsg) {
-            const labelText = getMessageText(firstUserMsg.content).trim();
-            if (labelText) {
-              const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
-              set((s) => ({
-                sessionLabels: { ...s.sessionLabels, [currentSessionKey]: truncated },
-              }));
-            }
+          const resolvedLabel = resolveSessionLabelFromMessages(finalMessages);
+          if (resolvedLabel) {
+            set((s) => ({
+              sessionLabels: { ...s.sessionLabels, [requestedSessionKey]: resolvedLabel },
+            }));
           }
         }
 
@@ -1530,7 +1558,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (lastMsg?.timestamp) {
           const lastAt = toMs(lastMsg.timestamp);
           set((s) => ({
-            sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: lastAt },
+            sessionLastActivity: { ...s.sessionLastActivity, [requestedSessionKey]: lastAt },
           }));
         }
 
@@ -1583,11 +1611,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
       } else {
-        set({ messages: [], loading: false });
+        if (!quiet) {
+          set({ messages: [], loading: false });
+        }
       }
     } catch (err) {
       console.warn('Failed to load chat history:', err);
-      set({ messages: [], loading: false });
+      if (!quiet) {
+        set({ messages: [], loading: false });
+      }
     }
   },
 
@@ -1628,8 +1660,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { sessionLabels, messages } = get();
     const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');
     if (!currentSessionKey.endsWith(':main') && isFirstMessage && !sessionLabels[currentSessionKey] && trimmed) {
-      const truncated = trimmed.length > 50 ? `${trimmed.slice(0, 50)}…` : trimmed;
-      set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: truncated } }));
+      const normalized = normalizeSessionLabelText(trimmed);
+      if (normalized) {
+        set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: normalized } }));
+      }
     }
 
     // Mark this session as most recently active

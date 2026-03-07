@@ -8,7 +8,18 @@
     "light": "ライト",
     "dark": "ダーク",
     "system": "システム",
-    "language": "言語"
+    "language": "言語",
+    "userAvatar": "ユーザーアバター",
+    "userAvatarDesc": "チャットのユーザーアバターとして写真をアップロードします。",
+    "uploadAvatar": "アバターをアップロード",
+    "uploadAvatarInputLabel": "ユーザーアバターをアップロード",
+    "clearAvatar": "アバターをクリア",
+    "userAvatarPreviewAlt": "ユーザーアバターのプレビュー",
+    "userAvatarHint": "アップロード後は 128x128 の正方形アバターに自動トリミングしてローカル保存します。",
+    "avatarInvalidType": "画像ファイルを選択してください",
+    "avatarUpdated": "ユーザーアバターを更新しました",
+    "avatarCleared": "ユーザーアバターをクリアしました",
+    "avatarUpdateFailed": "ユーザーアバターの更新に失敗しました: {{error}}"
   },
   "aiProviders": {
     "title": "AI プロバイダー",

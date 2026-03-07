@@ -134,6 +134,54 @@ async function writeOpenClawJson(config: Record<string, unknown>): Promise<void>
   await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
 }
 
+export type ControlUiRootSyncOutcome = 'updated' | 'unchanged' | 'skipped-existing-root';
+
+export function applyControlUiRootOverride(
+  config: Record<string, unknown>,
+  controlUiRoot: string,
+  options: { force?: boolean } = {},
+): { nextConfig: Record<string, unknown>; outcome: ControlUiRootSyncOutcome } {
+  const normalizedRoot = typeof controlUiRoot === 'string' ? controlUiRoot.trim() : '';
+  if (!normalizedRoot) {
+    return { nextConfig: config, outcome: 'unchanged' };
+  }
+
+  const gateway = (
+    config.gateway && typeof config.gateway === 'object'
+      ? { ...(config.gateway as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  const controlUi = (
+    gateway.controlUi && typeof gateway.controlUi === 'object'
+      ? { ...(gateway.controlUi as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  const existingRoot =
+    typeof controlUi.root === 'string' ? controlUi.root.trim() : '';
+
+  if (existingRoot === normalizedRoot) {
+    return { nextConfig: config, outcome: 'unchanged' };
+  }
+
+  if (existingRoot && !options.force) {
+    return { nextConfig: config, outcome: 'skipped-existing-root' };
+  }
+
+  controlUi.root = normalizedRoot;
+  gateway.controlUi = controlUi;
+  if (!gateway.mode) gateway.mode = 'local';
+
+  return {
+    nextConfig: {
+      ...config,
+      gateway,
+    },
+    outcome: 'updated',
+  };
+}
+
 // ── Exported Functions (all async) ───────────────────────────────
 
 /**
@@ -619,6 +667,25 @@ export async function getActiveOpenClawProviders(): Promise<Set<string>> {
   }
 
   return activeProviders;
+}
+
+/**
+ * 将 gateway.controlUi.root 同步到 openclaw.json。
+ * 默认不覆盖用户已设置的自定义 root，除非 force=true。
+ */
+export async function syncControlUiRootToConfig(
+  controlUiRoot: string,
+  options: { force?: boolean } = {},
+): Promise<ControlUiRootSyncOutcome> {
+  const config = await readOpenClawJson();
+  const { nextConfig, outcome } = applyControlUiRootOverride(config, controlUiRoot, options);
+  if (outcome !== 'updated') {
+    return outcome;
+  }
+
+  await writeOpenClawJson(nextConfig);
+  console.log(`Synced Control UI root to openclaw.json (${controlUiRoot})`);
+  return outcome;
 }
 
 /**

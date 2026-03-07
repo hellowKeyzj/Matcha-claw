@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
+import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 
 interface AgentSessionsPaneProps {
   expandedWidth?: number;
@@ -22,7 +23,6 @@ interface AgentSessionNode {
 }
 
 const AGENT_GROUP_COLLAPSE_STORAGE_KEY = 'layout:agent-session-group-collapsed';
-const SESSION_TOPIC_CACHE_STORAGE_KEY = 'layout:agent-session-topic-cache';
 const SESSION_TITLE_MAX_LENGTH = 48;
 
 function parseAgentIdFromSessionKey(key: string): string | null {
@@ -31,7 +31,7 @@ function parseAgentIdFromSessionKey(key: string): string | null {
 }
 
 function buildDefaultAgentSessionKey(agentId: string): string {
-  return `agent:${agentId}:${agentId}`;
+  return `agent:${agentId}:main`;
 }
 
 function readSessionSuffix(sessionKey: string): string {
@@ -39,30 +39,8 @@ function readSessionSuffix(sessionKey: string): string {
   return suffix || sessionKey;
 }
 
-function isGenericSessionName(name: string): boolean {
-  const normalized = name.trim().toLowerCase();
-  if (!normalized) {
-    return true;
-  }
-  return normalized === 'clawx' || normalized === 'main';
-}
-
-function extractContentText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return (content as Array<{ type?: string; text?: string }>)
-    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
-    .map((item) => item.text as string)
-    .join('\n');
-}
-
-function normalizeSessionTopic(text: string): string {
+function normalizeSessionTitle(text: string): string {
   const cleaned = text
-    .replace(/\[media attached:[^\]]+\]/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!cleaned) {
@@ -72,27 +50,6 @@ function normalizeSessionTopic(text: string): string {
     return cleaned;
   }
   return `${cleaned.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
-}
-
-function loadSessionTopicCache(): Record<string, string> {
-  try {
-    const raw = window.localStorage.getItem(SESSION_TOPIC_CACHE_STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-    return Object.entries(parsed as Record<string, unknown>).reduce<Record<string, string>>((acc, [key, value]) => {
-      if (typeof value === 'string' && value.trim()) {
-        acc[key] = value.trim();
-      }
-      return acc;
-    }, {});
-  } catch {
-    return {};
-  }
 }
 
 function isTechnicalSessionName(name: string, sessionKey: string, agentId: string): boolean {
@@ -107,7 +64,7 @@ function isTechnicalSessionName(name: string, sessionKey: string, agentId: strin
   if (normalized === agentId.trim().toLowerCase()) {
     return true;
   }
-  if (isGenericSessionName(normalized)) {
+  if (normalized === 'clawx' || normalized === 'main') {
     return true;
   }
   if (normalized.startsWith('subagent:')) {
@@ -131,7 +88,7 @@ function resolvePreferredExplicitTitle(session: ChatSession, siblingSessions: Ch
   if (sameNameCount > 1) {
     return null;
   }
-  return normalizeSessionTopic(candidate);
+  return normalizeSessionTitle(candidate);
 }
 
 function inferUntitledSessionLabel(session: ChatSession, agentId: string, t: (key: string, options?: Record<string, unknown>) => string): string {
@@ -143,7 +100,7 @@ function inferUntitledSessionLabel(session: ChatSession, agentId: string, t: (ke
   if (/^session-\d{8,16}$/i.test(lowerSuffix)) {
     return t('sidebar.newSession', { defaultValue: '新会话' });
   }
-  if (lowerSuffix === agentId.toLowerCase() || lowerSuffix === 'main') {
+  if (lowerSuffix === 'main') {
     return t('sidebar.defaultSession', { defaultValue: '默认会话' });
   }
   return t('sidebar.untitledSession', { defaultValue: '未命名会话' });
@@ -177,21 +134,6 @@ function formatSessionMeta(sessionKey: string, locale: string): string {
   }
   const suffix = readSessionSuffix(sessionKey);
   return suffix.length > 36 ? `${suffix.slice(0, 36)}...` : suffix;
-}
-
-function extractTopicFromMessages(messages: Array<{ role?: string; content?: unknown }>): string {
-  for (const role of ['user', 'assistant']) {
-    for (const message of messages) {
-      if ((message.role || '').toLowerCase() !== role) {
-        continue;
-      }
-      const candidate = normalizeSessionTopic(extractContentText(message.content));
-      if (candidate) {
-        return candidate;
-      }
-    }
-  }
-  return '';
 }
 
 function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): string {
@@ -245,15 +187,13 @@ export function AgentSessionsPane({
   const agents = useSubagentsStore((state) => state.agents);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const sessions = useChatStore((state) => state.sessions);
-  const messages = useChatStore((state) => state.messages);
+  const sessionLabels = useChatStore((state) => state.sessionLabels);
+  const sessionLastActivity = useChatStore((state) => state.sessionLastActivity);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const switchSession = useChatStore((state) => state.switchSession);
   const newSession = useChatStore((state) => state.newSession);
   const loadSessions = useChatStore((state) => state.loadSessions);
   const [collapsedAgentGroups, setCollapsedAgentGroups] = useState<Record<string, true>>(() => loadCollapsedAgentGroupMap());
-  const [sessionTopicCache, setSessionTopicCache] = useState<Record<string, string>>(() => loadSessionTopicCache());
-  const resolvingSessionKeysRef = useRef<Set<string>>(new Set());
-  const attemptedSessionKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     void loadAgents();
@@ -300,88 +240,44 @@ export function AgentSessionsPane({
           ? t('sidebar.mainAgent', { defaultValue: 'Main Agent' })
           : agentId;
         const emoji = resolveAgentEmoji(agentId, agent?.identityEmoji ?? agent?.identity?.emoji);
+        const sortedSessions = [...(sessionsByAgent.get(agentId) ?? [])].sort((left, right) => {
+          const leftActivity = sessionLastActivity[left.key] ?? parseSessionTimestamp(left.key) ?? 0;
+          const rightActivity = sessionLastActivity[right.key] ?? parseSessionTimestamp(right.key) ?? 0;
+          if (leftActivity !== rightActivity) {
+            return rightActivity - leftActivity;
+          }
+          return left.key.localeCompare(right.key);
+        });
         return {
           agentId,
           agentName: agent?.name?.trim() || fallbackName,
           identityEmoji: emoji,
-          sessions: (sessionsByAgent.get(agentId) ?? []).sort((left, right) => left.key.localeCompare(right.key)),
+          sessions: sortedSessions,
         };
       });
-  }, [agents, sessions, t]);
+  }, [agents, sessions, sessionLastActivity, t]);
+
+  const collapsedAgentGroupsInView = useMemo<Record<string, true>>(() => {
+    const activeAgentIds = new Set(agentSessionNodes.map((item) => item.agentId));
+    const next: Record<string, true> = {};
+    for (const agentId of Object.keys(collapsedAgentGroups)) {
+      if (activeAgentIds.has(agentId)) {
+        next[agentId] = true;
+      }
+    }
+    return next;
+  }, [agentSessionNodes, collapsedAgentGroups]);
 
   useEffect(() => {
     try {
       window.localStorage.setItem(
         AGENT_GROUP_COLLAPSE_STORAGE_KEY,
-        JSON.stringify(Object.keys(collapsedAgentGroups)),
+        JSON.stringify(Object.keys(collapsedAgentGroupsInView)),
       );
     } catch {
       // ignore localStorage failures
     }
-  }, [collapsedAgentGroups]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        SESSION_TOPIC_CACHE_STORAGE_KEY,
-        JSON.stringify(sessionTopicCache),
-      );
-    } catch {
-      // ignore localStorage failures
-    }
-  }, [sessionTopicCache]);
-
-  useEffect(() => {
-    const activeAgentIds = new Set(agentSessionNodes.map((item) => item.agentId));
-    setCollapsedAgentGroups((prev) => {
-      const next: Record<string, true> = {};
-      let changed = false;
-      for (const agentId of Object.keys(prev)) {
-        if (activeAgentIds.has(agentId)) {
-          next[agentId] = true;
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [agentSessionNodes]);
-
-  useEffect(() => {
-    attemptedSessionKeysRef.current.delete(currentSessionKey);
-  }, [currentSessionKey]);
-
-  useEffect(() => {
-    if (collapsed || !currentSessionKey || messages.length === 0) {
-      return;
-    }
-    const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
-    if (!currentAgentId) {
-      return;
-    }
-    const currentSession = sessions.find((item) => item.key === currentSessionKey);
-    if (!currentSession) {
-      return;
-    }
-    const siblingSessions = sessions.filter((item) => parseAgentIdFromSessionKey(item.key) === currentAgentId);
-    const explicitTitle = resolvePreferredExplicitTitle(currentSession, siblingSessions, currentAgentId);
-    if (explicitTitle) {
-      return;
-    }
-    const topic = extractTopicFromMessages(messages as Array<{ role?: string; content?: unknown }>);
-    if (!topic) {
-      return;
-    }
-    setSessionTopicCache((prev) => {
-      if (prev[currentSessionKey] === topic) {
-        return prev;
-      }
-      return {
-        ...prev,
-        [currentSessionKey]: topic,
-      };
-    });
-  }, [collapsed, currentSessionKey, messages, sessions]);
+  }, [collapsedAgentGroupsInView]);
 
   const handleSwitchSession = (sessionKey: string) => {
     switchSession(sessionKey);
@@ -399,117 +295,39 @@ export function AgentSessionsPane({
     });
   };
 
-  const unresolvedSessions = useMemo(() => {
-    if (collapsed) {
-      return [] as Array<{ sessionKey: string; agentId: string; siblings: ChatSession[] }>;
-    }
-    const items: Array<{ sessionKey: string; agentId: string; siblings: ChatSession[] }> = [];
-    for (const node of agentSessionNodes) {
-      for (const session of node.sessions) {
-        const explicitTitle = resolvePreferredExplicitTitle(session, node.sessions, node.agentId);
-        if (explicitTitle) {
-          continue;
-        }
-        if (sessionTopicCache[session.key]) {
-          continue;
-        }
-        if (attemptedSessionKeysRef.current.has(session.key)) {
-          continue;
-        }
-        items.push({
-          sessionKey: session.key,
-          agentId: node.agentId,
-          siblings: node.sessions,
-        });
+  const expandAgentGroup = (agentId: string) => {
+    setCollapsedAgentGroups((prev) => {
+      if (!prev[agentId]) {
+        return prev;
       }
-    }
-    return items;
-  }, [agentSessionNodes, collapsed, sessionTopicCache]);
+      const next = { ...prev };
+      delete next[agentId];
+      return next;
+    });
+  };
 
-  useEffect(() => {
-    if (collapsed || unresolvedSessions.length === 0) {
+  const handleAgentRowClick = (params: {
+    agentId: string;
+    preferredSessionKey: string;
+    activeAgent: boolean;
+  }) => {
+    const { agentId, preferredSessionKey, activeAgent } = params;
+    if (!activeAgent) {
+      expandAgentGroup(agentId);
+      handleSwitchSession(preferredSessionKey);
       return;
     }
-    let cancelled = false;
-    const pendingBatch = unresolvedSessions
-      .filter((item) => !resolvingSessionKeysRef.current.has(item.sessionKey))
-      .slice(0, 8);
-    if (pendingBatch.length === 0) {
-      return;
-    }
-
-    const fetchSessionTopic = async (sessionKey: string): Promise<string | null> => {
-      try {
-        const rawResult = await window.electron.ipcRenderer.invoke(
-          'gateway:rpc',
-          'chat.history',
-          { sessionKey, limit: 60 },
-        ) as unknown;
-        if (!rawResult || typeof rawResult !== 'object' || !('success' in rawResult)) {
-          return null;
-        }
-        const result = rawResult as { success: boolean; result?: Record<string, unknown> };
-        if (!result.success || !result.result) {
-          return null;
-        }
-        const rawMessages = Array.isArray(result.result.messages) ? result.result.messages : [];
-        const messages = rawMessages as Array<{ role?: string; content?: unknown }>;
-        for (const role of ['user', 'assistant']) {
-          for (const message of messages) {
-            if ((message.role || '').toLowerCase() !== role) {
-              continue;
-            }
-            const candidate = normalizeSessionTopic(extractContentText(message.content));
-            if (candidate) {
-              return candidate;
-            }
-          }
-        }
-        return null;
-      } catch {
-        return null;
-      }
-    };
-
-    const resolveTopics = async () => {
-      for (const item of pendingBatch) {
-        if (cancelled) {
-          return;
-        }
-        attemptedSessionKeysRef.current.add(item.sessionKey);
-        resolvingSessionKeysRef.current.add(item.sessionKey);
-        const topic = await fetchSessionTopic(item.sessionKey);
-        resolvingSessionKeysRef.current.delete(item.sessionKey);
-        if (cancelled || !topic) {
-          continue;
-        }
-        setSessionTopicCache((prev) => {
-          if (prev[item.sessionKey] === topic) {
-            return prev;
-          }
-          return {
-            ...prev,
-            [item.sessionKey]: topic,
-          };
-        });
-      }
-    };
-
-    void resolveTopics();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [collapsed, unresolvedSessions]);
+    toggleAgentGroup(agentId);
+  };
 
   const resolveSessionTitle = (session: ChatSession, siblingSessions: ChatSession[], agentId: string): string => {
+    const topicTitle = sessionLabels[session.key]?.trim();
+    if (topicTitle) {
+      return topicTitle;
+    }
     const explicitTitle = resolvePreferredExplicitTitle(session, siblingSessions, agentId);
     if (explicitTitle) {
       return explicitTitle;
-    }
-    const topicTitle = sessionTopicCache[session.key];
-    if (topicTitle) {
-      return topicTitle;
     }
     return inferUntitledSessionLabel(session, agentId, t);
   };
@@ -517,7 +335,7 @@ export function AgentSessionsPane({
   return (
     <aside
       data-testid="agent-sessions-pane"
-      className="flex shrink-0 flex-col border-r bg-background"
+      className="relative flex shrink-0 flex-col border-r bg-background"
       style={{ width: collapsed ? collapsedWidth : expandedWidth }}
     >
       {collapsed ? (
@@ -526,18 +344,6 @@ export function AgentSessionsPane({
             <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
               {t('sidebar.agentSessions')}
             </span>
-          </div>
-          <div className="p-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="w-full"
-              onClick={onToggleCollapse}
-              aria-label={t('sidebar.expandAgentSessions')}
-              title={t('sidebar.expandAgentSessions')}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </Button>
           </div>
         </>
       ) : null}
@@ -559,107 +365,102 @@ export function AgentSessionsPane({
               <Plus className="h-4 w-4" />
             </Button>
           </div>
-        <div className="flex-1 space-y-2 overflow-auto p-2">
-        {agentSessionNodes.length === 0 ? (
-          <p className="px-3 py-2 text-xs text-muted-foreground">
-            {t('sidebar.noSubagents')}
-          </p>
-        ) : (
-          agentSessionNodes.map((node) => {
-            const preferredSessionKey = resolvePreferredSessionKey(node.agentId, node.sessions);
-            const activeAgent = currentSessionKey === preferredSessionKey
-              || node.sessions.some((session) => session.key === currentSessionKey);
-            const groupCollapsed = Boolean(collapsedAgentGroups[node.agentId]);
-            return (
-              <div key={node.agentId} className="space-y-1">
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    className={cn(
-                      'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[15px] font-medium transition-colors',
-                      'hover:bg-accent hover:text-accent-foreground',
-                      activeAgent
-                        ? 'bg-accent text-accent-foreground'
-                        : 'text-muted-foreground',
-                    )}
-                    onClick={() => handleSwitchSession(preferredSessionKey)}
-                  >
-                    <span
-                      aria-hidden
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs leading-none"
+          <div className="flex-1 space-y-2 overflow-auto p-2">
+            {agentSessionNodes.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                {t('sidebar.noSubagents')}
+              </p>
+            ) : (
+              agentSessionNodes.map((node) => {
+                const preferredSessionKey = resolvePreferredSessionKey(node.agentId, node.sessions);
+                const childSessions = node.sessions.filter((session) => session.key !== preferredSessionKey);
+                const isMainSessionActive = currentSessionKey === preferredSessionKey;
+                const groupCollapsed = Boolean(collapsedAgentGroupsInView[node.agentId]);
+                return (
+                  <div key={node.agentId} className="space-y-1">
+                    <button
+                      type="button"
+                      className={cn(
+                        'flex min-w-0 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[15px] font-medium transition-colors',
+                        'hover:bg-accent hover:text-accent-foreground',
+                        isMainSessionActive
+                          ? 'bg-accent text-accent-foreground'
+                          : 'text-muted-foreground',
+                      )}
+                      onClick={() => handleAgentRowClick({
+                        agentId: node.agentId,
+                        preferredSessionKey,
+                        activeAgent: isMainSessionActive,
+                      })}
+                      aria-expanded={!groupCollapsed}
+                      aria-label={isMainSessionActive
+                        ? (groupCollapsed ? t('sidebar.expandAgentGroup') : t('sidebar.collapseAgentGroup'))
+                        : t('sidebar.openMainSession', { defaultValue: '进入主会话' })}
+                      title={isMainSessionActive
+                        ? (groupCollapsed ? t('sidebar.expandAgentGroup') : t('sidebar.collapseAgentGroup'))
+                        : t('sidebar.openMainSession', { defaultValue: '进入主会话' })}
                     >
-                      {node.identityEmoji}
-                    </span>
-                    <span className="truncate">{node.agentName}</span>
-                  </button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
-                    onClick={() => toggleAgentGroup(node.agentId)}
-                    aria-label={groupCollapsed ? t('sidebar.expandAgentGroup') : t('sidebar.collapseAgentGroup')}
-                    title={groupCollapsed ? t('sidebar.expandAgentGroup') : t('sidebar.collapseAgentGroup')}
-                  >
-                    {groupCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                  </Button>
-                </div>
+                      <span
+                        aria-hidden
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs leading-none"
+                      >
+                        {node.identityEmoji}
+                      </span>
+                      <span className="truncate">{node.agentName}</span>
+                    </button>
 
-                {!groupCollapsed ? (
-                  <div className="ml-5 space-y-1">
-                    {node.sessions.length === 0 ? (
-                      <p className="px-2 py-1 text-xs text-muted-foreground">
-                        {t('sidebar.noAgentSessions')}
-                      </p>
-                    ) : (
-                    node.sessions.map((session) => (
-                        <button
-                          key={session.key}
-                          type="button"
-                          className={cn(
-                            'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors',
-                            currentSessionKey === session.key
-                              ? 'bg-accent text-accent-foreground'
-                              : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
-                          )}
-                          onClick={() => handleSwitchSession(session.key)}
-                          title={session.key}
-                        >
-                          <span
-                            aria-hidden
-                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted/80 text-[10px] leading-none"
-                          >
-                            {node.identityEmoji}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate">{resolveSessionTitle(session, node.sessions, node.agentId)}</span>
-                            <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
-                              {formatSessionMeta(session.key, i18n.language)}
-                            </span>
-                          </span>
-                        </button>
-                      ))
-                    )}
+                    {!groupCollapsed ? (
+                      <div className="ml-5 space-y-1">
+                        {childSessions.length === 0 ? (
+                          <p className="px-2 py-1 text-xs text-muted-foreground">
+                            {t('sidebar.noAgentSessions')}
+                          </p>
+                        ) : (
+                          childSessions.map((session) => (
+                            <button
+                              key={session.key}
+                              type="button"
+                              className={cn(
+                                'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors',
+                                currentSessionKey === session.key
+                                  ? 'bg-accent text-accent-foreground'
+                                  : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
+                              )}
+                              onClick={() => handleSwitchSession(session.key)}
+                              title={session.key}
+                            >
+                              <span
+                                aria-hidden
+                                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted/80 text-[10px] leading-none"
+                              >
+                                {node.identityEmoji}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate">{resolveSessionTitle(session, node.sessions, node.agentId)}</span>
+                                <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
+                                  {formatSessionMeta(session.key, i18n.language)}
+                                </span>
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
-            );
-          })
-        )}
-        </div>
-        <div className="p-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="w-full"
-            onClick={onToggleCollapse}
-            aria-label={t('sidebar.collapseAgentSessions')}
-            title={t('sidebar.collapseAgentSessions')}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-        </div>
-      </>
+                );
+              })
+            )}
+          </div>
+        </>
       ) : null}
+
+      <PaneEdgeToggle
+        side="right"
+        onClick={onToggleCollapse}
+        ariaLabel={collapsed ? t('sidebar.expandAgentSessions') : t('sidebar.collapseAgentSessions')}
+        title={collapsed ? t('sidebar.expandAgentSessions') : t('sidebar.collapseAgentSessions')}
+        icon={collapsed ? <ChevronRight className="h-2.5 w-2.5" /> : <ChevronLeft className="h-2.5 w-2.5" />}
+      />
     </aside>
   );
 }

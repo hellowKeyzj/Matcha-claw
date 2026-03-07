@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
+import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { cn } from '@/lib/utils';
 import { getBlockedPrompt, resolveTaskInputMode } from '@/lib/task-inbox';
 import { useGatewayStore } from '@/stores/gateway';
@@ -162,7 +163,7 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
     return (
       <aside
         data-testid="chat-task-inbox-panel"
-        className="flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0"
       >
         <div className="flex flex-1 flex-col items-center gap-2 px-1 py-3">
           <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
@@ -172,24 +173,20 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
             {unfinishedCount}
           </span>
         </div>
-        <div className="p-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="w-full"
-            onClick={onToggleCollapse}
-            title={t('taskInbox.expand', { defaultValue: '展开任务收件箱' })}
-            aria-label={t('taskInbox.expand', { defaultValue: '展开任务收件箱' })}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-        </div>
+
+        <PaneEdgeToggle
+          side="left"
+          onClick={onToggleCollapse}
+          title={t('taskInbox.expand', { defaultValue: '展开任务收件箱' })}
+          ariaLabel={t('taskInbox.expand', { defaultValue: '展开任务收件箱' })}
+          icon={<ChevronLeft className="h-2.5 w-2.5" />}
+        />
       </aside>
     );
   }
 
   return (
-    <aside data-testid="chat-task-inbox-panel" className="flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0">
+    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0">
       <div className="px-4 py-3">
         <div className="flex items-center justify-between">
           <div>
@@ -348,18 +345,13 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
           );
         })}
       </div>
-      <div className="p-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="w-full"
-          onClick={onToggleCollapse}
-          title={t('taskInbox.collapse', { defaultValue: '收起任务收件箱' })}
-          aria-label={t('taskInbox.collapse', { defaultValue: '收起任务收件箱' })}
-        >
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      </div>
+      <PaneEdgeToggle
+        side="left"
+        onClick={onToggleCollapse}
+        title={t('taskInbox.collapse', { defaultValue: '收起任务收件箱' })}
+        ariaLabel={t('taskInbox.collapse', { defaultValue: '收起任务收件箱' })}
+        icon={<ChevronRight className="h-2.5 w-2.5" />}
+      />
     </aside>
   );
 }

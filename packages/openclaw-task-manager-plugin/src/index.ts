@@ -92,20 +92,17 @@ const markFailedParameters = {
 
 const storeCache = new Map<string, TaskStore>();
 const triggerArmedSessions = new Map<string, number>();
-const triggerArmedAgents = new Map<string, number>();
 let eventPublisher: ((event: string, payload: Record<string, unknown>) => void) | null = null;
 
 type TriggerGuardState = {
   version: 1;
   sessions: Record<string, number>;
-  agents: Record<string, number>;
 };
 
 function createEmptyGuardState(): TriggerGuardState {
   return {
     version: 1,
     sessions: {},
-    agents: {},
   };
 }
 
@@ -203,7 +200,6 @@ function normalizeGuardState(raw: unknown): TriggerGuardState {
   return {
     version: 1,
     sessions: normalizeBucket(record.sessions),
-    agents: normalizeBucket(record.agents),
   };
 }
 
@@ -229,33 +225,22 @@ function cleanupExpiredGuards(state: TriggerGuardState, now = Date.now()): boole
       changed = true;
     }
   }
-  for (const [agentId, armedAt] of Object.entries(state.agents)) {
-    if (now - armedAt > TASK_MANAGER_ARM_TTL_MS) {
-      delete state.agents[agentId];
-      changed = true;
-    }
-  }
   return changed;
 }
 
-async function armPersistentGuard(sessionKey?: string, agentId?: string): Promise<void> {
-  if (!sessionKey && !agentId) {
+async function armPersistentGuard(sessionKey?: string): Promise<void> {
+  if (!sessionKey) {
     return;
   }
   const state = await readGuardState();
   cleanupExpiredGuards(state);
   const now = Date.now();
-  if (sessionKey) {
-    state.sessions[sessionKey] = now;
-  }
-  if (agentId) {
-    state.agents[agentId] = now;
-  }
+  state.sessions[sessionKey] = now;
   await writeGuardState(state);
 }
 
-async function disarmPersistentGuard(sessionKey?: string, agentId?: string): Promise<void> {
-  if (!sessionKey && !agentId) {
+async function disarmPersistentGuard(sessionKey?: string): Promise<void> {
+  if (!sessionKey) {
     return;
   }
   const state = await readGuardState();
@@ -265,23 +250,18 @@ async function disarmPersistentGuard(sessionKey?: string, agentId?: string): Pro
     delete state.sessions[sessionKey];
     changed = true;
   }
-  if (agentId && state.agents[agentId] !== undefined) {
-    delete state.agents[agentId];
-    changed = true;
-  }
   if (changed) {
     await writeGuardState(state);
   }
 }
 
-async function hasPersistentGuard(sessionKey?: string, agentId?: string): Promise<boolean> {
-  if (!sessionKey && !agentId) {
+async function hasPersistentGuard(sessionKey?: string): Promise<boolean> {
+  if (!sessionKey) {
     return false;
   }
   const state = await readGuardState();
   const changed = cleanupExpiredGuards(state);
-  const armed = (sessionKey ? state.sessions[sessionKey] !== undefined : false)
-    || (agentId ? state.agents[agentId] !== undefined : false);
+  const armed = state.sessions[sessionKey] !== undefined;
   if (changed) {
     await writeGuardState(state);
   }
@@ -307,11 +287,6 @@ function cleanupTriggerArmedSessions(now = Date.now()): void {
   for (const [sessionKey, armedAt] of triggerArmedSessions.entries()) {
     if (now - armedAt > TASK_MANAGER_ARM_TTL_MS) {
       triggerArmedSessions.delete(sessionKey);
-    }
-  }
-  for (const [agentId, armedAt] of triggerArmedAgents.entries()) {
-    if (now - armedAt > TASK_MANAGER_ARM_TTL_MS) {
-      triggerArmedAgents.delete(agentId);
     }
   }
 }
@@ -816,7 +791,7 @@ const plugin = {
     api.on("before_agent_start", async (event, ctx) => {
       cleanupTriggerArmedSessions();
       const result = await beforeAgentStartHandler(event, ctx);
-      const persistentArmed = await hasPersistentGuard(ctx.sessionKey, ctx.agentId);
+      const persistentArmed = await hasPersistentGuard(ctx.sessionKey);
       let prepend = result?.prependContext ?? "";
 
       if (persistentArmed && !prepend.includes(TASK_MANAGER_TRIGGER_HEADER) && !prepend.includes(TASK_MANAGER_DYNAMIC_SWITCH_HEADER)) {
@@ -828,13 +803,10 @@ const plugin = {
         if (ctx.sessionKey) {
           triggerArmedSessions.set(ctx.sessionKey, armedAt);
         }
-        if (ctx.agentId) {
-          triggerArmedAgents.set(ctx.agentId, armedAt);
-        }
-        await armPersistentGuard(ctx.sessionKey, ctx.agentId);
+        await armPersistentGuard(ctx.sessionKey);
         safeLogInfo(
           api.logger,
-          `[task-manager] guard armed: session=${ctx.sessionKey ?? "none"}, agent=${ctx.agentId ?? "none"}`,
+          `[task-manager] guard armed: session=${ctx.sessionKey ?? "none"}`,
         );
       }
       if (prepend !== (result?.prependContext ?? "")) {
@@ -863,24 +835,19 @@ const plugin = {
       if (ctx.sessionKey) {
         triggerArmedSessions.set(ctx.sessionKey, armedAt);
       }
-      if (ctx.agentId) {
-        triggerArmedAgents.set(ctx.agentId, armedAt);
-      }
-      await armPersistentGuard(ctx.sessionKey, ctx.agentId);
+      await armPersistentGuard(ctx.sessionKey);
       safeLogInfo(
         api.logger,
-        `[task-manager] dynamic switch armed from llm_output: session=${ctx.sessionKey ?? "none"}, agent=${ctx.agentId ?? "none"}`,
+        `[task-manager] dynamic switch armed from llm_output: session=${ctx.sessionKey ?? "none"}`,
       );
     });
 
     api.on("before_tool_call", async (event, ctx) => {
       cleanupTriggerArmedSessions();
       const sessionKey = ctx.sessionKey;
-      const agentId = ctx.agentId;
       const armedBySession = sessionKey ? triggerArmedSessions.get(sessionKey) : undefined;
-      const armedByAgent = agentId ? triggerArmedAgents.get(agentId) : undefined;
-      const armedByPersistent = await hasPersistentGuard(sessionKey, agentId);
-      if (!armedBySession && !armedByAgent && !armedByPersistent) {
+      const armedByPersistent = await hasPersistentGuard(sessionKey);
+      if (!armedBySession && !armedByPersistent) {
         return;
       }
       const toolName = event.toolName;
@@ -888,18 +855,15 @@ const plugin = {
         if (sessionKey) {
           triggerArmedSessions.delete(sessionKey);
         }
-        if (agentId) {
-          triggerArmedAgents.delete(agentId);
-        }
-        await disarmPersistentGuard(sessionKey, agentId);
+        await disarmPersistentGuard(sessionKey);
         safeLogInfo(
           api.logger,
-          `[task-manager] guard disarmed by workflow tool: tool=${toolName}, session=${sessionKey ?? "none"}, agent=${agentId ?? "none"}`,
+          `[task-manager] guard disarmed by workflow tool: tool=${toolName}, session=${sessionKey ?? "none"}`,
         );
       } else {
         safeLogInfo(
           api.logger,
-          `[task-manager] guard observed non-workflow tool: tool=${toolName}, session=${sessionKey ?? "none"}, agent=${agentId ?? "none"}`,
+          `[task-manager] guard observed non-workflow tool: tool=${toolName}, session=${sessionKey ?? "none"}`,
         );
       }
     });
