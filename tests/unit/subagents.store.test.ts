@@ -24,7 +24,7 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().agents.length).toBe(1);
   });
 
-  it('hydrates workspace/model from config.get for edit form usage', async () => {
+  it('hydrates workspace/model from config snapshot for edit form usage', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -83,7 +83,7 @@ describe('subagents store', () => {
     ]);
   });
 
-  it('loadAvailableModels 读取 config.get 中的 providers.models', async () => {
+  it('loadAvailableModels 读取 config 快照中的 providers.models', async () => {
     vi.mocked(window.electron.ipcRenderer.invoke).mockResolvedValueOnce({
       success: true,
       result: {
@@ -105,9 +105,7 @@ describe('subagents store', () => {
     await useSubagentsStore.getState().loadAvailableModels();
 
     expect(window.electron.ipcRenderer.invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.get',
-      {}
+      'openclaw:getConfigJson'
     );
     expect(useSubagentsStore.getState().availableModels).toEqual([
       { id: 'custom/gpt-4o-mini', provider: 'custom' },

@@ -336,6 +336,45 @@ Matcha-claw/
 - 将会话树从菜单内嵌改为独立栏位，是为了匹配“红框区域”的信息密度和交互预期（导航与会话浏览分区）。
 - 主 Agent (`main`) 强制纳入会话栏，确保“显示全部 Agent”的一致性。
 
+### 14.7 配置快照链路调整（2026-03-07）
+
+#### 14.7.1 目录树增量
+
+```text
+Matcha-claw/
+├─ electron/
+│  ├─ main/ipc-handlers.ts        # 新增 openclaw:getConfigJson IPC
+│  └─ preload/index.ts            # 暴露 openclaw:getConfigJson 白名单
+├─ src/stores/
+│  ├─ subagents.ts                # 优先走主进程配置快照读取，降低 gateway config.get 依赖
+│  └─ providers.ts                # provider 变更前后模型快照优先读取本地配置
+└─ electron/gateway/stderr-policy.ts # Gateway stderr 分类策略抽离
+```
+
+#### 14.7.2 文件职责（增量）
+
+- `electron/main/ipc-handlers.ts`：提供 `openclaw:getConfigJson`，返回本地 `~/.openclaw/openclaw.json` 快照。
+- `electron/preload/index.ts`：把 `openclaw:getConfigJson` 纳入 renderer 可调用白名单。
+- `src/stores/subagents.ts`：模型展示/清理逻辑优先使用本地配置快照，`gateway:rpc config.get` 仅保留兜底。
+- `src/stores/providers.ts`：provider 同步前后模型集合对比优先使用本地配置快照，`gateway:rpc config.get` 仅保留兜底。
+- `electron/gateway/stderr-policy.ts`：集中管理 gateway stderr 分类，避免分类规则散落在 manager 内。
+
+#### 14.7.3 模块依赖与边界（增量）
+
+- Renderer 不直接拼 `config.get` 作为主路径，改为通过 preload 白名单 IPC 向主进程读取配置快照。
+- Gateway RPC 仍作为兼容兜底，避免在 `openclaw:getConfigJson` 异常时功能不可用。
+
+#### 14.7.4 关键决策与原因（增量）
+
+- 近期模型清理改造后，`config.get` 调用频率上升会触发 OpenClaw `config/schema` 诊断日志放大。
+- 采用“主进程配置快照优先 + gateway RPC 兜底”可降低噪音触发源，同时保持兼容性和回退路径。
+
+#### 14.7.5 本次变更日志（增量）
+
+- 新增 `openclaw:getConfigJson` IPC 与 preload 暴露。
+- `subagents/providers` 模型同步流程切换为配置快照优先读取。
+- 保留 `gateway:rpc config.get` 兜底路径，避免硬切换导致回归。
+
 ## 15. 模型同步与设置路由收敛（2026-03-07）
 
 ### 15.1 目录树增量

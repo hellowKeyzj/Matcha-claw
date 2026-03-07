@@ -144,6 +144,7 @@ const electronAPI = {
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',
+        'openclaw:getConfigJson',
         'openclaw:getSkillsDir',
         'openclaw:getWorkspaceDir',
         'openclaw:getTaskWorkspaceDirs',
