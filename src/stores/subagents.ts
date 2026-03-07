@@ -21,6 +21,10 @@ import {
 } from '@/lib/subagent/prompt';
 import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
 import {
+  patchConfigConsistently,
+  readConfigForDisplay,
+} from '@/lib/openclaw/config-repository';
+import {
   mergeRolesFromAgents,
   readRolesMetadata,
   resolveRolesMetadataRoot,
@@ -360,7 +364,6 @@ async function persistInvalidAgentModelCleanup(
     return false;
   }
 
-  const hash = getOptionalString(cfg.hash) ?? getOptionalString(cfg.baseHash);
   const patchRaw = {
     agents: {
       ...(shouldPatchDefaults
@@ -376,9 +379,8 @@ async function persistInvalidAgentModelCleanup(
         : {}),
     },
   };
-  await rpc('config.patch', {
-    raw: JSON.stringify(patchRaw),
-    ...(hash ? { baseHash: hash } : {}),
+  await patchConfigConsistently(patchRaw, {
+    baseSnapshot: cfg,
   });
 
   return true;
@@ -641,12 +643,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const result = await rpc<AgentsListResult>('agents.list');
-      let cfg: ConfigGetResult | undefined;
-      try {
-        cfg = await rpc<ConfigGetResult>('config.get', {});
-      } catch {
-        cfg = undefined;
-      }
+      const cfg = await readConfigForDisplay();
       const normalizedAgents = normalizeAgents(result, cfg);
       const agents = await hydrateAgentIdentityEmoji(normalizedAgents);
       const selectedAgentId = get().selectedAgentId;
@@ -678,11 +675,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
     let cfg: ConfigGetResult | undefined = options?.cfg;
     if (!cfg) {
-      try {
-        cfg = await rpc<ConfigGetResult>('config.get', {});
-      } catch (error) {
+      cfg = await readConfigForDisplay();
+      if (!cfg) {
         set({
-          error: getErrorMessage(error) || 'Failed to load config for model reconciliation',
+          error: 'Failed to load config for model reconciliation',
         });
         return false;
       }
@@ -701,7 +697,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   loadAvailableModels: async (cfg) => {
     set({ modelsLoading: true });
     try {
-      const result = cfg ?? await rpc<ConfigGetResult>('config.get', {});
+      const result = cfg ?? await readConfigForDisplay();
+      if (!result) {
+        throw new Error('Failed to load config snapshot');
+      }
       set({
         availableModels: normalizeConfiguredModelsFromConfig(result),
         modelsLoading: false,

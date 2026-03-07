@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
 import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
+import { readConfigForDisplay } from '@/lib/openclaw/config-repository';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ConfigGetResult } from '@/types/subagent';
 
@@ -38,18 +39,6 @@ interface ProviderState {
   getApiKey: (providerId: string) => Promise<string | null>;
 }
 
-interface GatewayRpcSuccess<T> {
-  success: true;
-  result: T;
-}
-
-interface GatewayRpcFailure {
-  success: false;
-  error?: string;
-}
-
-type GatewayRpcResult<T> = GatewayRpcSuccess<T> | GatewayRpcFailure;
-
 interface ConfiguredModelSnapshot {
   ok: boolean;
   modelIds: string[];
@@ -62,25 +51,18 @@ function calculateRemovedModelIds(before: string[], after: string[]): string[] {
 }
 
 async function fetchConfiguredModelSnapshot(): Promise<ConfiguredModelSnapshot> {
-  try {
-    const response = await window.electron.ipcRenderer.invoke(
-      'gateway:rpc',
-      'config.get',
-      {}
-    ) as GatewayRpcResult<ConfigGetResult>;
-
-    if (!response.success) {
-      return { ok: false, modelIds: [] };
-    }
-
+  const cfg = await readConfigForDisplay();
+  if (!cfg) {
     return {
-      ok: true,
-      modelIds: collectConfiguredModelIdsFromConfig(response.result),
-      cfg: response.result,
+      ok: false,
+      modelIds: [],
     };
-  } catch {
-    return { ok: false, modelIds: [] };
   }
+  return {
+    ok: true,
+    modelIds: collectConfiguredModelIdsFromConfig(cfg),
+    cfg,
+  };
 }
 
 async function synchronizeAgentModelsAfterProviderChange(

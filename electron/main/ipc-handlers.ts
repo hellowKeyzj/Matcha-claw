@@ -56,6 +56,7 @@ import { applyProxySettings } from './proxy';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { registerTeamFsHandlers } from './team-fs-handlers';
+import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -766,6 +767,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       enabled?: boolean;
       allow?: string[];
       entries?: Record<string, Record<string, unknown> & { enabled?: boolean }>;
+      installs?: Record<string, Record<string, unknown>>;
       [key: string]: unknown;
     };
     skills?: {
@@ -845,6 +847,44 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
 
     writeOpenClawConfigJson(config);
     return true;
+  }
+
+  function ensurePluginInstallRecordInConfig(
+    pluginId: string,
+    params: {
+      source: InstallSource;
+      installPath?: string;
+      sourcePath?: string;
+      spec?: string;
+      version?: string;
+    },
+  ): boolean {
+    const config = readOpenClawConfigJson() as Record<string, unknown>;
+    const { nextConfig, changed } = upsertPluginInstallRecord(config, {
+      pluginId,
+      source: params.source,
+      installPath: params.installPath,
+      sourcePath: params.sourcePath,
+      spec: params.spec,
+      version: params.version,
+    });
+    if (!changed) return false;
+    writeOpenClawConfigJson(nextConfig as OpenClawJson);
+    return true;
+  }
+
+  function backfillManagedPluginInstallRecord(pluginId: string): void {
+    const installedPath = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const manifestPath = join(installedPath, 'openclaw.plugin.json');
+    if (!existsSync(manifestPath)) return;
+    const changed = ensurePluginInstallRecordInConfig(pluginId, {
+      source: 'path',
+      installPath: installedPath,
+      version: getInstalledPluginVersion(pluginId),
+    });
+    if (changed) {
+      logger.info(`Backfilled plugins.installs record for ${pluginId}`);
+    }
   }
 
   function isSkillEnabled(skillId: string): boolean {
@@ -981,6 +1021,10 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     });
   }
 
+  for (const pluginId of ['task-manager', 'dingtalk']) {
+    backfillManagedPluginInstallRecord(pluginId);
+  }
+
   // Get OpenClaw package status
   ipcMain.handle('openclaw:status', () => {
     const status = getOpenClawStatus();
@@ -1002,6 +1046,14 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
   // Get the OpenClaw config directory (~/.openclaw)
   ipcMain.handle('openclaw:getConfigDir', () => {
     return getOpenClawConfigDir();
+  });
+
+  // Read the raw OpenClaw JSON config from disk without going through gateway config RPC.
+  ipcMain.handle('openclaw:getConfigJson', () => {
+    return {
+      config: readOpenClawConfigJson(),
+      path: openclawConfigPath,
+    };
   });
 
   // Get OpenClaw workspace directory currently used by the Gateway.
@@ -1093,6 +1145,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
         };
       }
       ensurePluginEnabledInConfig('task-manager');
+      ensurePluginInstallRecordInConfig('task-manager', {
+        source: 'path',
+        installPath: result.installedPath,
+        sourcePath: result.sourcePath,
+        version: result.version,
+      });
       ensureSkillEnabledInConfig('task-manager');
       gatewayManager.debouncedRestart();
       return {
@@ -1128,6 +1186,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
             error: installResult.warning || 'DingTalk plugin install failed',
           };
         }
+        ensurePluginInstallRecordInConfig('dingtalk', {
+          source: 'path',
+          installPath: installResult.installedPath,
+          sourcePath: installResult.sourcePath,
+          version: installResult.version,
+        });
         await saveChannelConfig(channelType, config);
         logger.info(
           `Skipping app-forced Gateway restart after channel:saveConfig (${channelType}); Gateway handles channel config reload/restart internally`
