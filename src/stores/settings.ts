@@ -151,7 +151,7 @@ export const useSettingsStore = create<SettingsState>()(
       resetSettings: () => set({ ...defaultSettings, initialized: true }),
     }),
     {
-      name: 'clawx-settings',
+      name: 'matchaclaw-settings',
     }
   )
 );

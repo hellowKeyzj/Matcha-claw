@@ -6,7 +6,7 @@
         "description": "请先到 设置 > AI 模型提供商 添加模型，并在智能体管理台完成模型配置后再继续聊天。"
     },
     "welcome": {
-        "title": "ClawX 聊天",
+        "title": "MatchaClaw 聊天",
         "subtitle": "您的 AI 助手已就绪。在下方开始对话。",
         "askQuestions": "提问",
         "askQuestionsDesc": "获取任何话题的答案",

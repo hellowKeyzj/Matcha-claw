@@ -14,7 +14,7 @@
  * they are pure Node.js HTTP functions, no TTY, no prompter needed.
  *
  * We provide our own callbacks (openUrl/note/progress) that hook into
- * the Electron IPC system to display UI in the ClawX frontend.
+ * the Electron IPC system to display UI in the MatchaClaw frontend.
  */
 import { EventEmitter } from 'events';
 import { BrowserWindow, shell } from 'electron';
@@ -99,14 +99,14 @@ class DeviceOAuthManager extends EventEmitter {
 
         const token: MiniMaxOAuthToken = await loginMiniMaxPortalOAuth({
             region,
-            openUrl: async (url) => {
+            openUrl: async (url: string) => {
                 logger.info(`[DeviceOAuth] MiniMax opening browser: ${url}`);
                 // Open the authorization URL in the system browser
                 shell.openExternal(url).catch((err) =>
                     logger.warn(`[DeviceOAuth] Failed to open browser:`, err)
                 );
             },
-            note: async (message, _title) => {
+            note: async (message: string, _title?: string) => {
                 if (!this.active) return;
                 // The extension calls note() with a message containing
                 // the user_code and verification_uri — parse them for the UI
@@ -118,8 +118,8 @@ class DeviceOAuthManager extends EventEmitter {
                 }
             },
             progress: {
-                update: (msg) => logger.info(`[DeviceOAuth] MiniMax progress: ${msg}`),
-                stop: (msg) => logger.info(`[DeviceOAuth] MiniMax progress done: ${msg ?? ''}`),
+                update: (msg: string) => logger.info(`[DeviceOAuth] MiniMax progress: ${msg}`),
+                stop: (msg?: string) => logger.info(`[DeviceOAuth] MiniMax progress done: ${msg ?? ''}`),
             },
         });
 
@@ -148,13 +148,13 @@ class DeviceOAuthManager extends EventEmitter {
         const provider = this.activeProvider!;
 
         const token: QwenOAuthToken = await loginQwenPortalOAuth({
-            openUrl: async (url) => {
+            openUrl: async (url: string) => {
                 logger.info(`[DeviceOAuth] Qwen opening browser: ${url}`);
                 shell.openExternal(url).catch((err) =>
                     logger.warn(`[DeviceOAuth] Failed to open browser:`, err)
                 );
             },
-            note: async (message, _title) => {
+            note: async (message: string, _title?: string) => {
                 if (!this.active) return;
                 const { verificationUri, userCode } = this.parseNote(message);
                 if (verificationUri && userCode) {
@@ -164,8 +164,8 @@ class DeviceOAuthManager extends EventEmitter {
                 }
             },
             progress: {
-                update: (msg) => logger.info(`[DeviceOAuth] Qwen progress: ${msg}`),
-                stop: (msg) => logger.info(`[DeviceOAuth] Qwen progress done: ${msg ?? ''}`),
+                update: (msg: string) => logger.info(`[DeviceOAuth] Qwen progress: ${msg}`),
+                stop: (msg?: string) => logger.info(`[DeviceOAuth] Qwen progress done: ${msg ?? ''}`),
             },
         });
 
@@ -253,7 +253,7 @@ class DeviceOAuthManager extends EventEmitter {
             logger.warn(`[DeviceOAuth] Failed to configure openclaw models:`, err);
         }
 
-        // 3. Save provider record in ClawX's own store so UI shows it as configured
+        // 3. Save provider record in MatchaClaw's own store so UI shows it as configured
         const existing = await getProvider(providerType);
         const nameMap: Record<OAuthProviderType, string> = {
             'minimax-portal': 'MiniMax (Global)',

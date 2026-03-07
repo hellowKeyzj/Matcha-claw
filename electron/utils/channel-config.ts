@@ -8,7 +8,7 @@ import { access, mkdir, readFile, writeFile, readdir, stat, rm } from 'fs/promis
 import { constants } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { getOpenClawResolvedDir } from './paths';
+import { getOpenClawEntryPath, getOpenClawResolvedDir } from './paths';
 import * as logger from './logger';
 import { proxyAwareFetch } from './proxy-fetch';
 
@@ -203,9 +203,14 @@ export async function saveChannelConfig(
         const existingConfig = currentConfig.channels[channelType] || {};
         transformedConfig.dmPolicy = transformedConfig.dmPolicy ?? existingConfig.dmPolicy ?? 'open';
 
-        let allowFrom = transformedConfig.allowFrom ?? existingConfig.allowFrom ?? ['*'];
-        if (!Array.isArray(allowFrom)) {
-            allowFrom = [allowFrom];
+        const rawAllowFrom = transformedConfig.allowFrom ?? existingConfig.allowFrom ?? ['*'];
+        let allowFrom: string[];
+        if (Array.isArray(rawAllowFrom)) {
+            allowFrom = rawAllowFrom.filter((value): value is string => typeof value === 'string');
+        } else if (typeof rawAllowFrom === 'string') {
+            allowFrom = [rawAllowFrom];
+        } else {
+            allowFrom = ['*'];
         }
 
         if (transformedConfig.dmPolicy === 'open' && !allowFrom.includes('*')) {
@@ -516,12 +521,14 @@ export async function validateChannelConfig(channelType: string): Promise<Valida
 
     try {
         const openclawPath = getOpenClawResolvedDir();
+        const entryPath = getOpenClawEntryPath();
+        const entryName = entryPath.split(/[\\/]/).pop() ?? 'openclaw.mjs';
 
         // Run openclaw doctor command to validate config (async to avoid
         // blocking the main thread).
         const output = await new Promise<string>((resolve, reject) => {
             exec(
-                `node openclaw.mjs doctor --json 2>&1`,
+                `node "${entryName}" doctor --json 2>&1`,
                 {
                     cwd: openclawPath,
                     encoding: 'utf-8',

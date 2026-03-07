@@ -6,7 +6,7 @@
         "description": "設定 > AI モデルプロバイダー でモデルを追加し、スマートエージェント管理台でモデル設定を完了してからチャットしてください。"
     },
     "welcome": {
-        "title": "ClawX チャット",
+        "title": "MatchaClaw チャット",
         "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
         "askQuestions": "質問する",
         "askQuestionsDesc": "あらゆるトピックについて回答を得る",

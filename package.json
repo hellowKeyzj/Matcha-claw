@@ -1,5 +1,5 @@
 {
-    "name": "clawx",
+    "name": "matchaclaw",
     "version": "0.1.23",
     "pnpm": {
         "onlyBuiltDependencies": [
@@ -11,9 +11,9 @@
             "sharp"
         ]
     },
-    "description": "ClawX - Graphical AI Assistant based on OpenClaw",
+    "description": "MatchaClaw - Graphical AI Assistant based on OpenClaw",
     "main": "dist-electron/main/index.js",
-    "author": "ClawX Team",
+    "author": "MatchaClaw Team",
     "license": "MIT",
     "private": true,
     "scripts": {
@@ -42,7 +42,7 @@
         "postversion": "git push && git push --tags"
     },
     "dependencies": {
-        "clawhub": "^0.5.0",
+        "matchaclawhub": "npm:clawhub@0.5.0",
         "electron-store": "^11.0.2",
         "electron-updater": "^6.8.3",
         "ws": "^8.19.0"

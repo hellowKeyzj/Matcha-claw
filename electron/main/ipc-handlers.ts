@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { join, extname, basename, dirname, resolve, relative, isAbsolute } from 'node:path';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
-import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
+import { MatchaClawHubService, MatchaClawHubSearchParams, MatchaClawHubInstallParams, MatchaClawHubUninstallParams } from '../gateway/clawhub';
 import {
   storeApiKey,
   getApiKey,
@@ -57,6 +57,7 @@ import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { registerTeamFsHandlers } from './team-fs-handlers';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
+import { validateLicenseKey } from '../utils/license';
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -131,14 +132,14 @@ async function getProviderFallbackModelRefs(config: ProviderConfig): Promise<str
  */
 export function registerIpcHandlers(
   gatewayManager: GatewayManager,
-  clawHubService: ClawHubService,
+  matchaclawHubService: MatchaClawHubService,
   mainWindow: BrowserWindow
 ): void {
   // Gateway handlers
   registerGatewayHandlers(gatewayManager, mainWindow);
 
-  // ClawHub handlers
-  registerClawHubHandlers(clawHubService);
+  // MatchaClawHub handlers
+  registerMatchaClawHubHandlers(matchaclawHubService);
 
   // OpenClaw handlers
   registerOpenClawHandlers(gatewayManager);
@@ -160,6 +161,9 @@ export function registerIpcHandlers(
 
   // Settings handlers
   registerSettingsHandlers(gatewayManager);
+
+  // License handlers
+  registerLicenseHandlers();
 
   // UV handlers
   registerUvHandlers();
@@ -392,7 +396,7 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
   });
 
   // Create a new cron job
-  // UI-created tasks have no delivery target — results go to the ClawX chat page.
+  // UI-created tasks have no delivery target — results go to the MatchaClaw chat page.
   // Tasks created via external channels (Feishu, Discord, etc.) are handled
   // directly by the OpenClaw Gateway and do not pass through this IPC handler.
   ipcMain.handle('cron:create', async (_, input: {
@@ -409,7 +413,7 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
         enabled: input.enabled ?? true,
         wakeMode: 'next-heartbeat',
         sessionTarget: 'isolated',
-        // UI-created jobs deliver results via ClawX WebSocket chat events,
+        // UI-created jobs deliver results via MatchaClaw WebSocket chat events,
         // not external messaging channels.  Setting mode='none' prevents
         // the Gateway from attempting channel delivery (which would fail
         // with "Channel is required" when no channels are configured).
@@ -1809,7 +1813,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
         // This ensures Setup/Settings validation reflects unsaved edits immediately.
         const resolvedBaseUrl = options?.baseUrl || provider?.baseUrl || registryBaseUrl;
 
-        console.log(`[clawx-validate] validating provider type: ${providerType}`);
+        console.log(`[matchaclaw-validate] validating provider type: ${providerType}`);
         return await validateApiKeyWithProvider(providerType, apiKey, { baseUrl: resolvedBaseUrl });
       } catch (error) {
         console.error('Validation error:', error);
@@ -1863,7 +1867,7 @@ async function validateApiKeyWithProvider(
 }
 
 function logValidationStatus(provider: string, status: number): void {
-  console.log(`[clawx-validate] ${provider} HTTP ${status}`);
+  console.log(`[matchaclaw-validate] ${provider} HTTP ${status}`);
 }
 
 function maskSecret(secret: string): string {
@@ -1910,7 +1914,7 @@ function logValidationRequest(
   headers: Record<string, string>
 ): void {
   console.log(
-    `[clawx-validate] ${provider} request ${method} ${sanitizeValidationUrl(url)} headers=${JSON.stringify(sanitizeHeaders(headers))}`
+    `[matchaclaw-validate] ${provider} request ${method} ${sanitizeValidationUrl(url)} headers=${JSON.stringify(sanitizeHeaders(headers))}`
   );
 }
 
@@ -1988,7 +1992,7 @@ async function validateOpenAiCompatibleKey(
   // Fall back to a minimal /chat/completions POST which almost all providers support.
   if (modelsResult.error?.includes('API error: 404')) {
     console.log(
-      `[clawx-validate] ${providerType} /models returned 404, falling back to /chat/completions probe`
+      `[matchaclaw-validate] ${providerType} /models returned 404, falling back to /chat/completions probe`
     );
     const base = normalizeBaseUrl(trimmedBaseUrl);
     const chatUrl = `${base}/chat/completions`;
@@ -2113,13 +2117,13 @@ function registerShellHandlers(): void {
 }
 
 /**
- * ClawHub-related IPC handlers
+ * MatchaClawHub-related IPC handlers
  */
-function registerClawHubHandlers(clawHubService: ClawHubService): void {
+function registerMatchaClawHubHandlers(matchaclawHubService: MatchaClawHubService): void {
   // Search skills
-  ipcMain.handle('clawhub:search', async (_, params: ClawHubSearchParams) => {
+  ipcMain.handle('matchaclawhub:search', async (_, params: MatchaClawHubSearchParams) => {
     try {
-      const results = await clawHubService.search(params);
+      const results = await matchaclawHubService.search(params);
       return { success: true, results };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -2127,9 +2131,9 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   });
 
   // Install skill
-  ipcMain.handle('clawhub:install', async (_, params: ClawHubInstallParams) => {
+  ipcMain.handle('matchaclawhub:install', async (_, params: MatchaClawHubInstallParams) => {
     try {
-      await clawHubService.install(params);
+      await matchaclawHubService.install(params);
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -2137,9 +2141,9 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   });
 
   // Uninstall skill
-  ipcMain.handle('clawhub:uninstall', async (_, params: ClawHubUninstallParams) => {
+  ipcMain.handle('matchaclawhub:uninstall', async (_, params: MatchaClawHubUninstallParams) => {
     try {
-      await clawHubService.uninstall(params);
+      await matchaclawHubService.uninstall(params);
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -2147,9 +2151,9 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   });
 
   // List installed skills
-  ipcMain.handle('clawhub:list', async () => {
+  ipcMain.handle('matchaclawhub:list', async () => {
     try {
-      const results = await clawHubService.listInstalled();
+      const results = await matchaclawHubService.listInstalled();
       return { success: true, results };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -2157,9 +2161,9 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   });
 
   // Open skill readme
-  ipcMain.handle('clawhub:openSkillReadme', async (_, slug: string) => {
+  ipcMain.handle('matchaclawhub:openSkillReadme', async (_, slug: string) => {
     try {
-      await clawHubService.openSkillReadme(slug);
+      await matchaclawHubService.openSkillReadme(slug);
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -2287,6 +2291,13 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
     return { success: true, settings };
   });
 }
+
+function registerLicenseHandlers(): void {
+  ipcMain.handle('license:validate', async (_, rawKey: string) => {
+    return validateLicenseKey(typeof rawKey === 'string' ? rawKey : '');
+  });
+}
+
 function registerUsageHandlers(): void {
   ipcMain.handle('usage:recentTokenHistory', async (_, limit?: number) => {
     const safeLimit = typeof limit === 'number' && Number.isFinite(limit)

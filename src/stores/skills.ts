@@ -29,7 +29,7 @@ type GatewayRpcResponse<T> = {
   error?: string;
 };
 
-type ClawHubListResult = {
+type MatchaClawHubListResult = {
   slug: string;
   version?: string;
 };
@@ -75,10 +75,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         'skills.status'
       ) as GatewayRpcResponse<GatewaySkillsStatusResult>;
 
-      // 2. Fetch from ClawHub (installed on disk)
-      const clawhubResult = await window.electron.ipcRenderer.invoke(
-        'clawhub:list'
-      ) as { success: boolean; results?: ClawHubListResult[]; error?: string };
+      // 2. Fetch from MatchaClawHub (installed on disk)
+      const matchaclawhubResult = await window.electron.ipcRenderer.invoke(
+        'matchaclawhub:list'
+      ) as { success: boolean; results?: MatchaClawHubListResult[]; error?: string };
 
       // 3. Fetch configurations directly from Electron (since Gateway doesn't return them)
       const configResult = await window.electron.ipcRenderer.invoke(
@@ -116,9 +116,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         combinedSkills = [...currentSkills];
       }
 
-      // Merge with ClawHub results
-      if (clawhubResult.success && clawhubResult.results) {
-        clawhubResult.results.forEach((cs: ClawHubListResult) => {
+      // Merge with MatchaClawHub results
+      if (matchaclawhubResult.success && matchaclawhubResult.results) {
+        matchaclawhubResult.results.forEach((cs: MatchaClawHubListResult) => {
           const existing = combinedSkills.find(s => s.id === cs.slug);
           if (!existing) {
             const directConfig = configResult[cs.slug] || {};
@@ -155,7 +155,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   searchSkills: async (query: string) => {
     set({ searching: true, searchError: null });
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:search', { query }) as { success: boolean; results?: MarketplaceSkill[]; error?: string };
+      const result = await window.electron.ipcRenderer.invoke('matchaclawhub:search', { query }) as { success: boolean; results?: MarketplaceSkill[]; error?: string };
       if (result.success) {
         set({ searchResults: result.results || [] });
       } else {
@@ -177,7 +177,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installSkill: async (slug: string, version?: string) => {
     set((state) => ({ installing: { ...state.installing, [slug]: true } }));
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:install', { slug, version }) as { success: boolean; error?: string };
+      const result = await window.electron.ipcRenderer.invoke('matchaclawhub:install', { slug, version }) as { success: boolean; error?: string };
       if (!result.success) {
         if (result.error?.includes('Timeout')) {
           throw new Error('installTimeoutError');
@@ -204,7 +204,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   uninstallSkill: async (slug: string) => {
     set((state) => ({ installing: { ...state.installing, [slug]: true } }));
     try {
-      const result = await window.electron.ipcRenderer.invoke('clawhub:uninstall', { slug }) as { success: boolean; error?: string };
+      const result = await window.electron.ipcRenderer.invoke('matchaclawhub:uninstall', { slug }) as { success: boolean; error?: string };
       if (!result.success) {
         throw new Error(result.error || 'Uninstall failed');
       }

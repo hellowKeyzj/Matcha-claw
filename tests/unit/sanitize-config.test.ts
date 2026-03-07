@@ -60,7 +60,7 @@ async function sanitizeConfig(filePath: string): Promise<boolean> {
 }
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'clawx-test-'));
+  tempDir = await mkdtemp(join(tmpdir(), 'matchaclaw-test-'));
   configPath = join(tempDir, 'openclaw.json');
 });
 

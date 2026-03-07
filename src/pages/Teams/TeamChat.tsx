@@ -78,7 +78,7 @@ interface ConvergenceIssue {
 
 const CONTROLLER_DECISION_MAX_RETRY = 2;
 const CONTROLLER_DRIFT_MAX_ROUNDS = 3;
-const TEAM_DISCUSSION_MAX_ROUNDS_STORAGE_KEY = 'clawx.team.discussion.maxRounds';
+const TEAM_DISCUSSION_MAX_ROUNDS_STORAGE_KEY = 'matchaclaw.team.discussion.maxRounds';
 const DEFAULT_CONTROLLER_DISCUSSION_MAX_ROUNDS = 5;
 const CONTROLLER_DISCUSSION_MAX_ROUNDS_OPTIONS = [3, 5, 8, 12];
 const CONVERGENCE_MAX_ROUNDS = 3;

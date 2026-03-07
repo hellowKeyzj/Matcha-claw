@@ -1,5 +1,5 @@
 {
-  "name": "@clawx/task-manager",
+  "name": "@matchaclaw/task-manager",
   "version": "1.0.0",
   "private": true,
   "description": "Task manager plugin for OpenClaw",
