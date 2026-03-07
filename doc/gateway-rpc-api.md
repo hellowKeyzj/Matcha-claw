@@ -1,4 +1,4 @@
-﻿---
+---
 title: Gateway RPC 接口协议（开发参考）
 summary: OpenClaw 网关 WebSocket RPC 的方法清单、入参、返回、权限和关键行为。
 sidebarTitle: Gateway RPC API

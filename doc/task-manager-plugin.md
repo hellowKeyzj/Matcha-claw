@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本文档用于指导在 Matcha-claw 中启用 `task-manager` 插件，并说明回滚与常见故障处理。
+本文档用于指导在 Matcha-matchaclaw 中启用 `task-manager` 插件，并说明回滚与常见故障处理。
 
 ## 2. 安装方式
 
@@ -19,7 +19,7 @@
 
 本地开发插件源路径：
 
-`E:/code/Matcha-claw/packages/openclaw-task-manager-plugin`
+`E:/code/Matcha-matchaclaw/packages/openclaw-task-manager-plugin`
 
 主进程会按以下顺序寻找插件镜像并复制到 `~/.openclaw/extensions/task-manager`：
 

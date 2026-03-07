@@ -69,7 +69,7 @@ describe('subagents navigation', () => {
       { key: 'agent:main:main', displayName: 'Main Session' },
       { key: 'agent:risk-expert:risk-expert', displayName: 'Risk Home' },
       { key: 'agent:risk-expert:loan-review', displayName: 'Loan Review' },
-      { key: 'agent:risk-expert:session-123', displayName: 'ClawX' },
+      { key: 'agent:risk-expert:session-123', displayName: 'MatchaClaw' },
     ];
 
     useSubagentsStore.setState({

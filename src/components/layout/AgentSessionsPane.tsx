@@ -64,7 +64,7 @@ function isTechnicalSessionName(name: string, sessionKey: string, agentId: strin
   if (normalized === agentId.trim().toLowerCase()) {
     return true;
   }
-  if (normalized === 'clawx' || normalized === 'main') {
+  if (normalized === 'matchaclaw' || normalized === 'main') {
     return true;
   }
   if (normalized.startsWith('subagent:')) {
@@ -91,7 +91,7 @@ function resolvePreferredExplicitTitle(session: ChatSession, siblingSessions: Ch
   return normalizeSessionTitle(candidate);
 }
 
-function inferUntitledSessionLabel(session: ChatSession, agentId: string, t: (key: string, options?: Record<string, unknown>) => string): string {
+function inferUntitledSessionLabel(session: ChatSession, t: (key: string, options?: Record<string, unknown>) => string): string {
   const suffix = readSessionSuffix(session.key).trim();
   const lowerSuffix = suffix.toLowerCase();
   if (lowerSuffix.startsWith('subagent:')) {
@@ -329,7 +329,7 @@ export function AgentSessionsPane({
     if (explicitTitle) {
       return explicitTitle;
     }
-    return inferUntitledSessionLabel(session, agentId, t);
+    return inferUntitledSessionLabel(session, t);
   };
 
   return (

@@ -105,7 +105,7 @@ function resolveLayout(input: TeamFsBaseInput) {
   for (const [rawAgentId, rawWorkspace] of Object.entries(workspaceByAgent)) {
     const agentId = sanitizeSegment(rawAgentId, 'agentId');
     const workspaceRoot = resolveWorkspaceRoot(rawWorkspace, agentId);
-    const mirrorRoot = join(workspaceRoot, '.clawx', 'teams', teamId);
+    const mirrorRoot = join(workspaceRoot, '.matchaclaw', 'teams', teamId);
     if (!isPathInside(workspaceRoot, mirrorRoot)) {
       throw new Error(`Unsafe mirror path for ${agentId}`);
     }
@@ -280,7 +280,7 @@ function resolveDeleteLayout(input: TeamFsBaseInput): {
       continue;
     }
     const workspaceRoot = resolve(expandPath(workspaceValue));
-    const mirrorRoot = join(workspaceRoot, '.clawx', 'teams', teamId);
+    const mirrorRoot = join(workspaceRoot, '.matchaclaw', 'teams', teamId);
     if (!isPathInside(workspaceRoot, mirrorRoot)) {
       throw new Error(`Unsafe mirror path for ${rawAgentId}`);
     }

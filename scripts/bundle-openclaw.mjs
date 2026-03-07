@@ -424,8 +424,15 @@ function patchBrokenModules(nodeModulesDir) {
 
 patchBrokenModules(outputNodeModules);
 
+const legacyEntryPath = path.join(OUTPUT, 'openclaw.mjs');
+const renamedEntryPath = path.join(OUTPUT, 'openclaw.mjs');
+if (!fs.existsSync(legacyEntryPath) && fs.existsSync(renamedEntryPath)) {
+  fs.copyFileSync(renamedEntryPath, legacyEntryPath);
+  echo`   🩹 Added compatibility entry: openclaw.mjs -> openclaw.mjs`;
+}
+
 // 8. Verify the bundle
-const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));
+const entryExists = fs.existsSync(legacyEntryPath) || fs.existsSync(renamedEntryPath);
 const distExists = fs.existsSync(path.join(OUTPUT, 'dist', 'entry.js'));
 
 echo``;
@@ -434,7 +441,7 @@ echo`   Unique packages copied: ${copiedCount}`;
 echo`   Dev-only packages skipped: ${skippedDevCount}`;
 echo`   Duplicate versions skipped: ${skippedDupes}`;
 echo`   Total discovered: ${collected.size}`;
-echo`   openclaw.mjs: ${entryExists ? '✓' : '✗'}`;
+echo`   entry script: ${entryExists ? '✓' : '✗'} (openclaw.mjs/openclaw.mjs)`;
 echo`   dist/entry.js: ${distExists ? '✓' : '✗'}`;
 
 if (!entryExists || !distExists) {

@@ -357,6 +357,6 @@ export const useTeamsStore = create<TeamsState>()(
         },
       })),
     }),
-    { name: 'clawx-teams' }
+    { name: 'matchaclaw-teams' }
   )
 );

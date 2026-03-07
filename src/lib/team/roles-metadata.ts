@@ -1,4 +1,4 @@
-﻿import { resolveSubagentWorkspaceRoot } from '@/lib/subagent/workspace';
+import { resolveSubagentWorkspaceRoot } from '@/lib/subagent/workspace';
 import { extractChatSendOutput } from '@/lib/subagent/prompt';
 import { sendChatMessage } from '@/lib/openclaw/session-runtime';
 import type { SubagentSummary } from '@/types/subagent';

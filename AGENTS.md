@@ -4,7 +4,7 @@
 
 ### Overview
 
-ClawX is a cross-platform **Electron desktop app** (React 19 + Vite + TypeScript) providing a GUI for the OpenClaw AI agent runtime. It uses pnpm as its package manager (pinned version in `package.json`'s `packageManager` field).
+MatchaClaw is a cross-platform **Electron desktop app** (React 19 + Vite + TypeScript) providing a GUI for the OpenClaw AI agent runtime. It uses pnpm as its package manager (pinned version in `package.json`'s `packageManager` field).
 
 ### Quick reference
 
@@ -34,13 +34,13 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ---
 
-# Matcha-claw 开发规范
+# Matcha-matchaclaw 开发规范
 
-本文件用于约束在 `Matcha-claw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
+本文件用于约束在 `Matcha-matchaclaw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
 
 ## 0. 角色定义
 
-你是 Matcha-claw 项目的世界顶级架构编码助手。
+你是 Matcha-matchaclaw 项目的世界顶级架构编码助手。
 
 - 核心职责：
   - 守护架构边界与依赖方向，避免局部修补破坏整体结构。
@@ -97,8 +97,8 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ## 5. IPC 与协议规则
 
-- 继续开发时，先参考 `Matcha-claw/doc/gateway-rpc-api.md`（RPC）与 `Matcha-claw/doc/gateway-events-api.md`（事件），作为 OpenClaw 协议基准。
-- 涉及流式/订阅开发时，优先以 `Matcha-claw/doc/gateway-events-api.md` 的事件名、payload 与 `dropIfSlow` 语义为准。
+- 继续开发时，先参考 `Matcha-matchaclaw/doc/gateway-rpc-api.md`（RPC）与 `Matcha-matchaclaw/doc/gateway-events-api.md`（事件），作为 OpenClaw 协议基准。
+- 涉及流式/订阅开发时，优先以 `Matcha-matchaclaw/doc/gateway-events-api.md` 的事件名、payload 与 `dropIfSlow` 语义为准。
 - 所有 IPC 入参与返回值必须有明确 TypeScript 类型。
 - 错误语义统一：返回结构化错误（`code`/`message`），不要仅返回模糊字符串。
 - `gateway:rpc` 调用必须设置合理超时，超时后可见地反馈给 UI。
@@ -194,7 +194,7 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 ### 13.1 新增目录树
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 ├─ packages/
 │  └─ openclaw-task-manager-plugin/
 │     ├─ openclaw.plugin.json
@@ -237,7 +237,7 @@ Matcha-claw/
 
 ### 13.4 关键决策与原因
 
-- 采用“OpenClaw 插件 + Matcha-claw 适配层”而非改 OpenClaw 内核：降低升级耦合和回归风险。
+- 采用“OpenClaw 插件 + Matcha-matchaclaw 适配层”而非改 OpenClaw 内核：降低升级耦合和回归风险。
 - 任务状态机落盘 JSON 并加文件锁：确保崩溃恢复与多会话并发下的一致性。
 - webhook 使用一次性 token + TTL：控制审批回调暴露风险，避免重复消费。
 - 在设置页与任务页都提供安装入口：一方面满足首次接入路径，另一方面降低故障恢复门槛。
@@ -261,7 +261,7 @@ Matcha-claw/
 ### 14.1 新增目录树
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 ├─ src/
 │  ├─ lib/task-inbox.ts
 │  ├─ stores/task-inbox-store.ts
@@ -311,7 +311,7 @@ Matcha-claw/
 #### 14.6.1 目录树增量
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 └─ src/
    └─ components/layout/
       ├─ AgentSessionsPane.tsx   # 新增：聊天页独立 Agent 会话栏（位于 Sidebar 右侧）
@@ -341,7 +341,7 @@ Matcha-claw/
 #### 14.7.1 目录树增量
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 ├─ electron/
 │  ├─ main/ipc-handlers.ts        # 新增 openclaw:getConfigJson IPC
 │  └─ preload/index.ts            # 暴露 openclaw:getConfigJson 白名单
@@ -380,7 +380,7 @@ Matcha-claw/
 ### 15.1 目录树增量
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 └─ src/
    └─ lib/
       ├─ openclaw/
@@ -410,3 +410,56 @@ Matcha-claw/
 - `reconcileAgentModels` 写回策略调整为“对象形态优先，仅替换 `primary`，无可用模型再清空”。
 - 新增设置分区路由工具，收敛 AI 提供商分区跳转路径构造。
 - 补充 `subagents` 空状态文案并替换页面硬编码文本。
+
+## 16. License 商用校验链路（2026-03-07）
+
+### 16.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+├─ electron/
+│  ├─ utils/license.ts
+│  ├─ utils/license-config.ts
+│  ├─ preload/index.ts
+│  └─ main/ipc-handlers.ts
+├─ src/
+│  ├─ pages/Setup/index.tsx
+│  ├─ i18n/locales/{zh,en,ja}/setup.json
+│  └─ types/electron.d.ts
+├─ scripts/
+│  └─ license_server.py
+├─ tests/unit/license-validation.test.ts
+└─ doc/license-release.md
+```
+
+### 16.2 文件职责（一句话）
+
+- `electron/utils/license-config.ts`：内置固定授权地址/模式/产品标识配置。
+- `electron/utils/license.ts`：统一 License 校验策略（在线优先、缓存宽限、离线本地兜底）与本地激活缓存管理。
+- `electron/main/ipc-handlers.ts`：注册 `license:validate` 主进程 IPC 入口。
+- `electron/preload/index.ts`：暴露 `license:validate` 白名单通道给 renderer。
+- `src/pages/Setup/index.tsx`：向导第 1 步强制 License 校验，未通过不可继续。
+- `src/i18n/locales/*/setup.json`：维护 License 校验状态与错误语义文案。
+- `scripts/license_server.py`：单文件 Python 版 License 工具（gen/add/import/export/serve）。
+- `tests/unit/license-validation.test.ts`：覆盖本地校验与策略分支行为。
+- `doc/license-release.md`：商用部署、环境变量与联调流程说明。
+
+### 16.3 模块依赖与边界
+
+- Renderer 层只通过 `window.electron.ipcRenderer.invoke('license:validate')` 校验授权，不直连 Node/网络。
+- 在线授权请求由主进程执行并复用 `proxyAwareFetch`，避免前端暴露授权细节。
+- 设备身份与授权缓存均在主进程维护，页面层只消费结构化结果码。
+
+### 16.4 关键决策与原因
+
+- 内置固定授权地址与 `online-required` 策略：避免每台机器手工配置环境变量，满足商用统一部署需求。
+- 允许短期离线缓存宽限：降低授权服务瞬时故障造成的不可用风险。
+- 保留 `online-optional/offline-local`：用于开发联调，不作为商用默认路径。
+
+### 16.5 本次变更日志
+
+- 新增 License 在线校验策略与缓存宽限机制，扩展错误语义（网络失败、服务未配置、设备不匹配、过期等）。
+- 向导第 1 步接入 License 输入与校验闸门；未通过不可进入后续步骤。
+- License 工具收敛为 `license_server.py` 单文件入口，移除冗余 `.mjs` 脚本。
+- 新增 `license_server.py` 单文件部署方案，支持批量生成与批量录入 key。
+- 修复 `AgentSessionsPane.tsx` 未使用参数导致的 typecheck 报错，恢复全量类型检查通过。

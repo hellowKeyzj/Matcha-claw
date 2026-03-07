@@ -1,7 +1,7 @@
 {
     "steps": {
         "welcome": {
-            "title": "欢迎使用 ClawX",
+            "title": "欢迎使用 MatchaClaw",
             "description": "您的 AI 助手已准备好进行配置"
         },
         "runtime": {
@@ -22,17 +22,39 @@
         },
         "complete": {
             "title": "准备就绪！",
-            "description": "ClawX 已准备好使用"
+            "description": "MatchaClaw 已准备好使用"
         }
     },
     "welcome": {
-        "title": "欢迎使用 ClawX",
-        "description": "ClawX 是 OpenClaw 的图形界面，让您可以在喜爱的消息平台上轻松使用 AI 助手。",
+        "title": "欢迎使用 MatchaClaw",
+        "description": "MatchaClaw 是 OpenClaw 的图形界面，让您可以在喜爱的消息平台上轻松使用 AI 助手。",
         "features": {
             "noCommand": "无需命令行",
             "modernUI": "现代美观的界面",
             "bundles": "预装技能包",
             "crossPlatform": "跨平台支持"
+        }
+    },
+    "license": {
+        "label": "License Key",
+        "placeholder": "请输入 License Key（示例：MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+        "validate": "校验",
+        "hint": "请先输入并校验 License Key，校验通过后才能进入下一步。",
+        "messages": {
+            "idle": "等待输入 License Key",
+            "valid": "License 校验通过",
+            "cache_grace_valid": "离线宽限中，使用本地授权缓存通过校验",
+            "empty": "请输入 License Key",
+            "format_invalid": "License Key 格式不正确",
+            "service_unconfigured": "授权服务未配置",
+            "network_error": "授权服务连接失败，请检查网络后重试",
+            "server_rejected": "License 被授权服务拒绝",
+            "expired": "License 已过期",
+            "device_mismatch": "License 与当前设备不匹配",
+            "not_allowed": "License Key 未授权",
+            "checksum_invalid": "License Key 无效",
+            "unknown": "License 校验失败，请稍后重试",
+            "requiredBeforeSkip": "请先完成 License 校验"
         }
     },
     "runtime": {
@@ -108,7 +130,7 @@
     },
     "complete": {
         "title": "设置完成！",
-        "subtitle": "ClawX 已配置并准备就绪。您现在可以开始与您的 AI 助手聊天了。",
+        "subtitle": "MatchaClaw 已配置并准备就绪。您现在可以开始与您的 AI 助手聊天了。",
         "provider": "AI 提供商",
         "components": "组件",
         "gateway": "网关",

@@ -9,7 +9,7 @@ describe('upsertPluginInstallRecord', () => {
         pluginId: 'task-manager',
         source: 'path',
         installPath: 'C:\\Users\\tester\\.openclaw\\extensions\\task-manager',
-        sourcePath: 'E:\\code\\Matcha-claw\\packages\\openclaw-task-manager-plugin',
+        sourcePath: 'E:\\code\\Matcha-matchaclaw\\packages\\openclaw-task-manager-plugin',
         version: '1.2.3',
         now: () => '2026-03-07T00:00:00.000Z',
       },
@@ -22,7 +22,7 @@ describe('upsertPluginInstallRecord', () => {
           'task-manager': {
             source: 'path',
             installPath: 'C:\\Users\\tester\\.openclaw\\extensions\\task-manager',
-            sourcePath: 'E:\\code\\Matcha-claw\\packages\\openclaw-task-manager-plugin',
+            sourcePath: 'E:\\code\\Matcha-matchaclaw\\packages\\openclaw-task-manager-plugin',
             version: '1.2.3',
             installedAt: '2026-03-07T00:00:00.000Z',
             resolvedAt: '2026-03-07T00:00:00.000Z',
@@ -39,7 +39,7 @@ describe('upsertPluginInstallRecord', () => {
           'task-manager': {
             source: 'path',
             installPath: 'C:\\Users\\tester\\.openclaw\\extensions\\task-manager',
-            sourcePath: 'E:\\code\\Matcha-claw\\packages\\openclaw-task-manager-plugin',
+            sourcePath: 'E:\\code\\Matcha-matchaclaw\\packages\\openclaw-task-manager-plugin',
             version: '1.2.3',
             installedAt: '2026-03-07T00:00:00.000Z',
             resolvedAt: '2026-03-07T00:00:00.000Z',
@@ -54,7 +54,7 @@ describe('upsertPluginInstallRecord', () => {
         pluginId: 'task-manager',
         source: 'path',
         installPath: 'C:\\Users\\tester\\.openclaw\\extensions\\task-manager',
-        sourcePath: 'E:\\code\\Matcha-claw\\packages\\openclaw-task-manager-plugin',
+        sourcePath: 'E:\\code\\Matcha-matchaclaw\\packages\\openclaw-task-manager-plugin',
         version: '1.2.3',
       },
     );

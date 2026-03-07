@@ -92,15 +92,7 @@ const DEFAULT_RECONNECT_CONFIG: ReconnectConfig = {
   maxDelay: 30000,
 };
 
-const FAST_ATTACH_HANDSHAKE_TIMEOUT_MS = 1200;
-const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10000;
-const ATTACH_TOTAL_BUDGET_MS = 3000;
-const ATTACH_RETRY_INTERVAL_MS = 200;
-const FAST_ATTACH_TOTAL_BUDGET_MS = 1200;
-const PORT_OWNER_PROBE_TIMEOUT_MS = 3500;
-const CONNECT_CHALLENGE_WAIT_MS = 150;
 const DEFAULT_DEBOUNCED_RESTART_DELAY_MS = 600;
-const OPERATOR_CONNECT_SCOPES = ['operator.read', 'operator.write', 'operator.admin'] as const;
 const SAFE_BUNDLED_PLUGINS_DIR = 'bundled-extensions';
 const SAFE_BUNDLED_PLUGINS_META = '.mirror-meta.json';
 const SAFE_CONTROL_UI_DIR = 'bundled-control-ui';
@@ -232,7 +224,7 @@ async function resolveSafeBundledControlUiDir(openclawDir: string): Promise<stri
 /**
  * Ensure the gateway fetch-preload script exists in userData and return
  * its absolute path.  The script patches globalThis.fetch to inject
- * ClawX app-attribution headers (HTTP-Referer, X-Title) for OpenRouter
+ * MatchaClaw app-attribution headers (HTTP-Referer, X-Title) for OpenRouter
  * API requests, overriding the OpenClaw runner's hardcoded defaults.
  *
  * Inlined here so it works in dev, packaged, and asar modes without
@@ -243,10 +235,10 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
 (function () {
   var _f = globalThis.fetch;
   if (typeof _f !== 'function') return;
-  if (globalThis.__clawxFetchPatched) return;
-  globalThis.__clawxFetchPatched = true;
+  if (globalThis.__matchaclawFetchPatched) return;
+  globalThis.__matchaclawFetchPatched = true;
 
-  globalThis.fetch = function clawxFetch(input, init) {
+  globalThis.fetch = function matchaclawFetch(input, init) {
     var url =
       typeof input === 'string' ? input
         : input && typeof input === 'object' && typeof input.url === 'string'
@@ -265,8 +257,8 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
       delete flat['HTTP-Referer'];
       delete flat['x-title'];
       delete flat['X-Title'];
-      flat['HTTP-Referer'] = 'https://claw-x.com';
-      flat['X-Title'] = 'ClawX';
+      flat['HTTP-Referer'] = 'https://matchaclaw-x.com';
+      flat['X-Title'] = 'MatchaClaw';
       init.headers = flat;
     }
     return _f.call(globalThis, input, init);
@@ -288,8 +280,8 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
   if (process.platform === 'win32') {
     try {
       var cp = require('child_process');
-      if (!cp.__clawxPatched) {
-        cp.__clawxPatched = true;
+      if (!cp.__matchaclawPatched) {
+        cp.__matchaclawPatched = true;
         ['spawn', 'exec', 'execFile', 'fork', 'spawnSync', 'execSync', 'execFileSync'].forEach(function(method) {
           var original = cp[method];
           if (typeof original !== 'function') return;
@@ -377,7 +369,7 @@ export class GatewayManager extends EventEmitter {
   private async initDeviceIdentity(): Promise<void> {
     if (this.deviceIdentity) return; // already loaded
     try {
-      const identityPath = path.join(app.getPath('userData'), 'clawx-device-identity.json');
+      const identityPath = path.join(app.getPath('userData'), 'matchaclaw-device-identity.json');
       this.deviceIdentity = await loadOrCreateDeviceIdentity(identityPath);
       logger.debug(`Device identity loaded (deviceId=${this.deviceIdentity.deviceId})`);
     } catch (err) {
@@ -392,12 +384,6 @@ export class GatewayManager extends EventEmitter {
       sanitized[tokenIdx + 1] = '[redacted]';
     }
     return sanitized;
-  }
-
-  private formatExit(code: number | null, signal: NodeJS.Signals | null): string {
-    if (code !== null) return `code=${code}`;
-    if (signal) return `signal=${signal}`;
-    return 'code=null signal=null';
   }
 
   private classifyStderrMessage(message: string): { level: 'drop' | 'debug' | 'warn'; normalized: string } {
@@ -1386,13 +1372,13 @@ export class GatewayManager extends EventEmitter {
         ...proxyEnv,
         OPENCLAW_GATEWAY_TOKEN: gatewayToken,
         OPENCLAW_SKIP_CHANNELS: '',
-        CLAWDBOT_SKIP_CHANNELS: '',
+        MATCHACLAWDBOT_SKIP_CHANNELS: '',
         // Prevent OpenClaw from respawning itself inside the utility process
         OPENCLAW_NO_RESPAWN: '1',
         ...(bundledPluginsDir ? { OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir } : {}),
       };
 
-      // Inject fetch preload so OpenRouter requests carry ClawX headers.
+      // Inject fetch preload so OpenRouter requests carry MatchaClaw headers.
       // The preload patches globalThis.fetch before any module loads.
       // NODE_OPTIONS --require is blocked by Electron in packaged apps, so skip
       // this injection when packaged to avoid the "NODE_OPTIONs not supported"
@@ -1623,7 +1609,7 @@ export class GatewayManager extends EventEmitter {
             maxProtocol: 3,
             client: {
               id: clientId,
-              displayName: 'ClawX',
+              displayName: 'MatchaClaw',
               version: '0.1.0',
               platform: process.platform,
               mode: clientMode,

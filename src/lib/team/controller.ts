@@ -3,7 +3,7 @@ import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 export const TEAM_CONTROLLER_ID = 'team-controller';
 export const TEAM_CONTROLLER_NAME = 'team-controller';
 export const TEAM_CONTROLLER_EMOJI = '\uD83E\uDDED';
-export const TEAM_CONTROLLER_PROMPT_STORAGE_KEY = 'clawx.teamControllerPromptTemplate';
+export const TEAM_CONTROLLER_PROMPT_STORAGE_KEY = 'matchaclaw.teamControllerPromptTemplate';
 
 export const DEFAULT_TEAM_CONTROLLER_PROMPT = [
   '# 角色',

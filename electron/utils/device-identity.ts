@@ -60,16 +60,16 @@ async function fileExists(p: string): Promise<boolean> {
 
 /** Generate a new Ed25519 identity (async key generation). */
 async function generateIdentity(): Promise<DeviceIdentity> {
-  const { publicKey, privateKey } = await new Promise<crypto.KeyPairKeyObjectResult>(
+  const { publicKey, privateKey } = await new Promise<{ publicKey: crypto.KeyObject; privateKey: crypto.KeyObject }>(
     (resolve, reject) => {
-      crypto.generateKeyPair('ed25519', (err, publicKey, privateKey) => {
+      crypto.generateKeyPair('ed25519', {}, (err: Error | null, publicKey: crypto.KeyObject, privateKey: crypto.KeyObject) => {
         if (err) reject(err);
         else resolve({ publicKey, privateKey });
       });
     },
   );
-  const publicKeyPem = (publicKey.export({ type: 'spki', format: 'pem' }) as Buffer).toString();
-  const privateKeyPem = (privateKey.export({ type: 'pkcs8', format: 'pem' }) as Buffer).toString();
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   return {
     deviceId: fingerprintPublicKey(publicKeyPem),
     publicKeyPem,
