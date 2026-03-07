@@ -73,12 +73,8 @@ export function SubagentFormDialog({
         byId.set(model.id, model);
       }
     }
-    const current = values.model.trim();
-    if (current && !byId.has(current)) {
-      byId.set(current, { id: current, name: current });
-    }
     return Array.from(byId.values());
-  }, [modelOptions, values.model]);
+  }, [modelOptions]);
 
   useEffect(() => {
     if (!open) {
@@ -100,11 +96,25 @@ export function SubagentFormDialog({
   }, [existingAgents, initialValues, mode, modelOptions, open]);
 
   useEffect(() => {
-    if (!open || mode !== 'create' || values.model || modelOptions.length === 0) {
+    if (!open || values.model || modelOptions.length !== 1) {
       return;
     }
     setValues((prev) => ({ ...prev, model: modelOptions[0].id }));
-  }, [mode, modelOptions, open, values.model]);
+  }, [modelOptions, open, values.model]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const current = values.model.trim();
+    if (!current) {
+      return;
+    }
+    const exists = resolvedModelOptions.some((entry) => entry.id === current);
+    if (!exists) {
+      setValues((prev) => ({ ...prev, model: modelOptions.length === 1 ? modelOptions[0].id : '' }));
+    }
+  }, [modelOptions, open, resolvedModelOptions, values.model]);
 
   if (!open) {
     return null;
@@ -295,4 +305,3 @@ export function SubagentFormDialog({
 }
 
 export default SubagentFormDialog;
-

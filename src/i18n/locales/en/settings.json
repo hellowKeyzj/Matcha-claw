@@ -8,7 +8,18 @@
     "light": "Light",
     "dark": "Dark",
     "system": "System",
-    "language": "Language"
+    "language": "Language",
+    "userAvatar": "User Avatar",
+    "userAvatarDesc": "Upload your photo to use as the chat user avatar.",
+    "uploadAvatar": "Upload Avatar",
+    "uploadAvatarInputLabel": "Upload User Avatar",
+    "clearAvatar": "Clear Avatar",
+    "userAvatarPreviewAlt": "User avatar preview",
+    "userAvatarHint": "Uploaded images are cropped to a 128x128 square avatar and stored locally.",
+    "avatarInvalidType": "Please choose an image file",
+    "avatarUpdated": "User avatar updated",
+    "avatarCleared": "User avatar cleared",
+    "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
   "aiProviders": {
     "title": "AI Providers",

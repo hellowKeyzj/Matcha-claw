@@ -68,6 +68,7 @@ export interface ConfigGetResult {
       defaults?: {
         workspace?: string;
         model?: AgentModelValue;
+        models?: Record<string, unknown>;
       };
       list?: AgentConfigEntry[];
     };

@@ -19,6 +19,7 @@ import {
   extractChatSendOutput,
   parseDraftPayload,
 } from '@/lib/subagent/prompt';
+import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
 import {
   mergeRolesFromAgents,
   readRolesMetadata,
@@ -27,6 +28,7 @@ import {
 } from '@/lib/team/roles-metadata';
 import type {
   AgentConfigEntry,
+  AgentModelValue,
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
@@ -74,6 +76,11 @@ interface AgentIdentityGetResult {
   emoji?: unknown;
 }
 
+interface ReconcileAgentModelsOptions {
+  removedModelIds?: string[];
+  cfg?: ConfigGetResult;
+}
+
 interface SubagentsState {
   agents: SubagentSummary[];
   availableModels: ModelCatalogEntry[];
@@ -94,7 +101,8 @@ interface SubagentsState {
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
   loadAgents: () => Promise<void>;
-  loadAvailableModels: () => Promise<void>;
+  loadAvailableModels: (cfg?: ConfigGetResult) => Promise<void>;
+  reconcileAgentModels: (options?: ReconcileAgentModelsOptions) => Promise<boolean>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
   loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
@@ -161,6 +169,81 @@ function extractModelId(value: unknown): string | undefined {
   return getOptionalString((value as { primary?: unknown }).primary);
 }
 
+function extractFallbackModelIds(value: unknown): string[] {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  const rawFallbacks = (value as { fallbacks?: unknown }).fallbacks;
+  if (!Array.isArray(rawFallbacks)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const entry of rawFallbacks) {
+    const id = getOptionalString(entry);
+    if (id) {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+function collectAutoFillModelCandidates(cfg?: ConfigGetResult): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (modelId: string | undefined) => {
+    if (!modelId || seen.has(modelId)) {
+      return;
+    }
+    seen.add(modelId);
+    ordered.push(modelId);
+  };
+
+  const defaultsModel = cfg?.config?.agents?.defaults?.model;
+  push(extractModelId(defaultsModel));
+  for (const fallback of extractFallbackModelIds(defaultsModel)) {
+    push(fallback);
+  }
+
+  const configList = cfg?.config?.agents?.list ?? [];
+  for (const entry of configList) {
+    push(extractModelId(entry?.model));
+    for (const fallback of extractFallbackModelIds(entry?.model)) {
+      push(fallback);
+    }
+  }
+
+  return ordered;
+}
+function resolveAutoFillModelFromConfiguredModels(
+  cfg: ConfigGetResult | undefined,
+  configuredModelIds: string[],
+): string | undefined {
+  const availableModelIds = new Set(configuredModelIds);
+  const candidates = collectAutoFillModelCandidates(cfg);
+  for (const candidate of candidates) {
+    if (availableModelIds.has(candidate)) {
+      return candidate;
+    }
+  }
+  return configuredModelIds[0];
+}
+
+function parseProviderFromModelId(modelId: string): string | undefined {
+  const idx = modelId.indexOf('/');
+  if (idx <= 0) {
+    return undefined;
+  }
+  return modelId.slice(0, idx);
+}
+
+function normalizeConfiguredModelsFromConfig(cfg: ConfigGetResult): ModelCatalogEntry[] {
+  const modelIds = collectConfiguredModelIdsFromConfig(cfg);
+  return modelIds.map((modelId) => ({
+    id: modelId,
+    provider: parseProviderFromModelId(modelId),
+  }));
+}
+
 function resolveDefaultAgentId(
   result: AgentsListResult,
   cfg?: ConfigGetResult,
@@ -187,7 +270,10 @@ function resolveDefaultAgentId(
   return firstConfigId || MAIN_AGENT_ID;
 }
 
-function normalizeAgents(result: AgentsListResult, cfg?: ConfigGetResult): SubagentSummary[] {
+function normalizeAgents(
+  result: AgentsListResult,
+  cfg?: ConfigGetResult,
+): SubagentSummary[] {
   const defaultId = resolveDefaultAgentId(result, cfg);
   const configList = cfg?.config?.agents?.list ?? [];
   const configById = new Map<string, AgentConfigEntry>();
@@ -218,6 +304,86 @@ function normalizeAgents(result: AgentsListResult, cfg?: ConfigGetResult): Subag
   });
 }
 
+function buildPatchedModelValue(
+  currentModelValue: unknown,
+  replacementModel: string | null,
+): AgentModelValue | null {
+  if (replacementModel == null) {
+    return null;
+  }
+  if (currentModelValue && typeof currentModelValue === 'object' && !Array.isArray(currentModelValue)) {
+    return {
+      ...(currentModelValue as Record<string, unknown>),
+      primary: replacementModel,
+    } as AgentModelValue;
+  }
+  return replacementModel;
+}
+
+async function persistInvalidAgentModelCleanup(
+  cfg: ConfigGetResult,
+  options?: ReconcileAgentModelsOptions,
+): Promise<boolean> {
+  const removedModelIds = Array.isArray(options?.removedModelIds)
+    ? options.removedModelIds.map((value) => getOptionalString(value)).filter((value): value is string => Boolean(value))
+    : [];
+  if (removedModelIds.length === 0) {
+    return false;
+  }
+  const removedModelIdSet = new Set(removedModelIds);
+  const configuredModelIds = collectConfiguredModelIdsFromConfig(cfg)
+    .filter((modelId) => !removedModelIdSet.has(modelId));
+  const replacementModel = resolveAutoFillModelFromConfiguredModels(cfg, configuredModelIds) ?? null;
+
+  const defaultsModelValue = cfg.config?.agents?.defaults?.model;
+  const defaultsModelId = extractModelId(defaultsModelValue);
+  const shouldPatchDefaults = Boolean(defaultsModelId && removedModelIdSet.has(defaultsModelId));
+
+  const listModelPatchByAgent = new Map<string, AgentModelValue | null>();
+  const configList = cfg.config?.agents?.list ?? [];
+  for (const entry of configList) {
+    const agentId = getOptionalString(entry?.id);
+    if (!agentId) {
+      continue;
+    }
+    const modelId = extractModelId(entry?.model);
+    if (!modelId || !removedModelIdSet.has(modelId)) {
+      continue;
+    }
+    listModelPatchByAgent.set(
+      agentId,
+      buildPatchedModelValue(entry?.model, replacementModel),
+    );
+  }
+
+  if (!shouldPatchDefaults && listModelPatchByAgent.size === 0) {
+    return false;
+  }
+
+  const hash = getOptionalString(cfg.hash) ?? getOptionalString(cfg.baseHash);
+  const patchRaw = {
+    agents: {
+      ...(shouldPatchDefaults
+        ? { defaults: { model: buildPatchedModelValue(defaultsModelValue, replacementModel) } }
+        : {}),
+      ...(listModelPatchByAgent.size > 0
+        ? {
+          list: Array.from(listModelPatchByAgent.entries()).map(([agentId, model]) => ({
+            id: agentId,
+            model,
+          })),
+        }
+        : {}),
+    },
+  };
+  await rpc('config.patch', {
+    raw: JSON.stringify(patchRaw),
+    ...(hash ? { baseHash: hash } : {}),
+  });
+
+  return true;
+}
+
 function assertMutableAgent(agentId: string): void {
   if (agentId === MAIN_AGENT_ID) {
     throw new Error('Main agent is read-only');
@@ -226,97 +392,6 @@ function assertMutableAgent(agentId: string): void {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseProviderFromModelId(modelId: string): string | undefined {
-  const idx = modelId.indexOf('/');
-  if (idx <= 0) {
-    return undefined;
-  }
-  return modelId.slice(0, idx);
-}
-
-function collectConfiguredModel(
-  modelsById: Map<string, ModelCatalogEntry>,
-  rawModelId: unknown,
-  providerHint?: string,
-): void {
-  if (typeof rawModelId !== 'string') {
-    return;
-  }
-  const trimmed = rawModelId.trim();
-  if (!trimmed) {
-    return;
-  }
-  const modelId = providerHint
-    ? (trimmed.startsWith(`${providerHint}/`) ? trimmed : `${providerHint}/${trimmed}`)
-    : trimmed;
-  if (modelsById.has(modelId)) {
-    return;
-  }
-  modelsById.set(modelId, {
-    id: modelId,
-    provider: providerHint ?? parseProviderFromModelId(modelId),
-  });
-}
-
-function collectConfiguredModelValue(
-  modelsById: Map<string, ModelCatalogEntry>,
-  value: unknown,
-  providerHint?: string,
-): void {
-  if (typeof value === 'string') {
-    collectConfiguredModel(modelsById, value, providerHint);
-    return;
-  }
-  if (!value || typeof value !== 'object') {
-    return;
-  }
-  const model = value as { primary?: unknown; fallbacks?: unknown };
-  collectConfiguredModel(modelsById, model.primary, providerHint);
-  if (!Array.isArray(model.fallbacks)) {
-    return;
-  }
-  for (const fallback of model.fallbacks) {
-    collectConfiguredModel(modelsById, fallback, providerHint);
-  }
-}
-
-function normalizeConfiguredModelsFromConfig(result: ConfigGetResult): ModelCatalogEntry[] {
-  const modelsById = new Map<string, ModelCatalogEntry>();
-
-  collectConfiguredModelValue(modelsById, result.config?.agents?.defaults?.model);
-
-  const agentList = result.config?.agents?.list ?? [];
-  for (const agent of agentList) {
-    collectConfiguredModelValue(modelsById, agent?.model);
-  }
-
-  const providers = result.config?.models?.providers;
-  if (providers && typeof providers === 'object') {
-    for (const [providerId, providerConfig] of Object.entries(providers)) {
-      if (!providerConfig || typeof providerConfig !== 'object') {
-        continue;
-      }
-      const modelList = (providerConfig as { models?: unknown }).models;
-      if (!Array.isArray(modelList)) {
-        continue;
-      }
-      for (const entry of modelList) {
-        if (typeof entry === 'string') {
-          collectConfiguredModel(modelsById, entry, providerId);
-          continue;
-        }
-        if (!entry || typeof entry !== 'object') {
-          continue;
-        }
-        collectConfiguredModel(modelsById, (entry as { id?: unknown }).id, providerId);
-      }
-    }
-  }
-
-  return Array.from(modelsById.values())
-    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function isLikelyEmojiToken(value: string): boolean {
@@ -583,6 +658,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         agents,
         selectedAgentId: hasSelected ? selectedAgentId : (agents[0]?.id ?? null),
         managedAgentId: hasManaged ? managedAgentId : null,
+        error: null,
         loading: false,
       });
     } catch (error) {
@@ -593,17 +669,46 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  loadAvailableModels: async () => {
+  reconcileAgentModels: async (options) => {
+    const removedModelIds = Array.isArray(options?.removedModelIds)
+      ? options.removedModelIds.map((value) => getOptionalString(value)).filter((value): value is string => Boolean(value))
+      : [];
+    if (removedModelIds.length === 0) {
+      return false;
+    }
+    let cfg: ConfigGetResult | undefined = options?.cfg;
+    if (!cfg) {
+      try {
+        cfg = await rpc<ConfigGetResult>('config.get', {});
+      } catch (error) {
+        set({
+          error: getErrorMessage(error) || 'Failed to load config for model reconciliation',
+        });
+        return false;
+      }
+    }
+    try {
+      const changed = await persistInvalidAgentModelCleanup(cfg, { removedModelIds });
+      return changed;
+    } catch (error) {
+      set({
+        error: getErrorMessage(error) || 'Failed to reconcile invalid agent models',
+      });
+      return false;
+    }
+  },
+
+  loadAvailableModels: async (cfg) => {
     set({ modelsLoading: true });
     try {
-      const result = await rpc<ConfigGetResult>('config.get', {});
+      const result = cfg ?? await rpc<ConfigGetResult>('config.get', {});
       set({
         availableModels: normalizeConfiguredModelsFromConfig(result),
         modelsLoading: false,
+        error: null,
       });
     } catch (error) {
       set({
-        availableModels: [],
         modelsLoading: false,
         error: getErrorMessage(error) || 'Failed to load models',
       });
@@ -1000,5 +1105,3 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 }));
-
-

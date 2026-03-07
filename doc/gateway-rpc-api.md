@@ -21,6 +21,7 @@ sidebarTitle: Gateway RPC API
   - `src/gateway/protocol/schema/*.ts`
   - `src/gateway/server-methods/*.ts`
 - 协议版本: `PROTOCOL_VERSION = 3`（见 `src/gateway/protocol/schema/protocol-schemas.ts`）。
+- 本次核对基线: `e:/code/openclaw`（版本 `2026.3.1`）。
 
 ## 2. 通信模型
 
@@ -89,20 +90,21 @@ sidebarTitle: Gateway RPC API
 
 ## 4.1 BASE_METHODS（握手会广播给客户端）
 
-- 连接/状态: `health` `status` `logs.tail`
+- 连接/状态: `health` `status` `logs.tail` `doctor.memory.status`
 - 渠道: `channels.status` `channels.logout`
 - 用量: `usage.status` `usage.cost`
 - TTS: `tts.status` `tts.providers` `tts.enable` `tts.disable` `tts.convert` `tts.setProvider`
-- 配置: `config.get` `config.set` `config.apply` `config.patch` `config.schema`
+- 配置: `config.get` `config.set` `config.apply` `config.patch` `config.schema` `config.schema.lookup`
 - 审批: `exec.approvals.get` `exec.approvals.set` `exec.approvals.node.get` `exec.approvals.node.set` `exec.approval.request` `exec.approval.waitDecision` `exec.approval.resolve`
 - 向导: `wizard.start` `wizard.next` `wizard.cancel` `wizard.status`
 - Talk: `talk.config` `talk.mode`
-- 模型/技能: `models.list` `skills.status` `skills.bins` `skills.install` `skills.update`
+- 模型/技能: `models.list` `tools.catalog` `skills.status` `skills.bins` `skills.install` `skills.update`
+- 密钥: `secrets.reload` `secrets.resolve`
 - Agent 管理: `agents.list` `agents.create` `agents.update` `agents.delete` `agents.files.list` `agents.files.get` `agents.files.set`
 - 更新/唤醒: `update.run` `voicewake.get` `voicewake.set` `wake`
 - 会话: `sessions.list` `sessions.preview` `sessions.patch` `sessions.reset` `sessions.delete` `sessions.compact`
 - 心跳/系统: `last-heartbeat` `set-heartbeats` `system-presence` `system-event`
-- 节点/设备: `node.pair.*` `device.pair.*` `device.token.*` `node.rename` `node.list` `node.describe` `node.invoke` `node.invoke.result` `node.event`
+- 节点/设备: `node.pair.*` `device.pair.*` `device.token.*` `node.rename` `node.list` `node.describe` `node.invoke` `node.invoke.result` `node.event` `node.canvas.capability.refresh`
 - 定时任务: `cron.list` `cron.status` `cron.add` `cron.update` `cron.remove` `cron.run` `cron.runs`
 - 消息与对话: `send` `agent` `agent.identity.get` `agent.wait` `browser.request` `chat.history` `chat.abort` `chat.send`
 
@@ -111,6 +113,7 @@ sidebarTitle: Gateway RPC API
 - `connect`
 - `poll`
 - `push.test`
+- `sessions.get`
 - `sessions.resolve`
 - `sessions.usage`
 - `sessions.usage.timeseries`

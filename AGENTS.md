@@ -335,3 +335,39 @@ Matcha-claw/
 
 - 将会话树从菜单内嵌改为独立栏位，是为了匹配“红框区域”的信息密度和交互预期（导航与会话浏览分区）。
 - 主 Agent (`main`) 强制纳入会话栏，确保“显示全部 Agent”的一致性。
+
+## 15. 模型同步与设置路由收敛（2026-03-07）
+
+### 15.1 目录树增量
+
+```text
+Matcha-claw/
+└─ src/
+   └─ lib/
+      ├─ openclaw/
+      │  └─ model-catalog.ts   # 新增：统一解析配置中的模型集合（providers + defaults.models）
+      └─ settings/
+         └─ sections.ts         # 新增：设置分区 key、query 解析与路由构造
+```
+
+### 15.2 文件职责（增量）
+
+- `src/lib/openclaw/model-catalog.ts`：统一生成“配置中的模型 ID 集合”，供 providers/subagents 双侧复用。
+- `src/lib/settings/sections.ts`：提供设置分区常量、`section` 查询参数解析和分区跳转链接构造。
+
+### 15.3 模块依赖与边界（增量）
+
+- `src/stores/providers.ts` 与 `src/stores/subagents.ts` 不再各自维护模型集合解析逻辑，统一依赖 `model-catalog`。
+- 页面层（Chat/SubAgents）不再硬编码 `"/settings?section=aiProviders"`，统一依赖 `settings/sections` 构造链接。
+
+### 15.4 关键决策与原因（增量）
+
+- 模型集合来源合并 `config.models.providers` 与 `config.agents.defaults.models`，降低“配置有值但被误判不可用”的风险。
+- Agent 模型清理写回时保留对象形态（仅替换 `primary`），避免丢失 `fallbacks` 等结构化字段。
+
+### 15.5 本次变更日志
+
+- 新增统一模型集合解析器并接入 providers/subagents。
+- `reconcileAgentModels` 写回策略调整为“对象形态优先，仅替换 `primary`，无可用模型再清空”。
+- 新增设置分区路由工具，收敛 AI 提供商分区跳转路径构造。
+- 补充 `subagents` 空状态文案并替换页面硬编码文本。

@@ -161,6 +161,36 @@ describe('before-agent-start hook', () => {
     }
   });
 
+  it('does not inject trigger hint from old assistant checklist when prompt is plain question', async () => {
+    const workspace = await createWorkspace('task-hook-plain-question-');
+    try {
+      const handler = createBeforeAgentStartHandler((workspaceDir?: unknown) => new TaskStore(String(workspaceDir)));
+      const result = await handler(
+        {
+          prompt: '你能做什么？',
+          history: [
+            { role: 'user', content: '执行贷款审批流程' },
+            {
+              role: 'assistant',
+              content: [
+                '以下是执行清单：',
+                '- 步骤1：初审',
+                '- 步骤2：征信查询',
+                '- 步骤3：风险评估',
+                '- 步骤4：审批决策',
+              ].join('\n'),
+            },
+          ],
+        },
+        { workspaceDir: workspace, sessionKey: 'agent:business-expert:main' },
+      );
+
+      expect(result).toBeUndefined();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('injects trigger hint for ontology authoring/spec writing prompts', async () => {
     const workspace = await createWorkspace('task-hook-ontology-authoring-');
     try {

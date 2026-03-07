@@ -8,7 +8,18 @@
     "light": "浅色",
     "dark": "深色",
     "system": "跟随系统",
-    "language": "语言"
+    "language": "语言",
+    "userAvatar": "用户头像",
+    "userAvatarDesc": "上传你的照片作为聊天中的用户头像。",
+    "uploadAvatar": "上传头像",
+    "uploadAvatarInputLabel": "上传用户头像",
+    "clearAvatar": "清除头像",
+    "userAvatarPreviewAlt": "用户头像预览",
+    "userAvatarHint": "上传后会自动裁剪为 128x128 的方形头像并本地保存。",
+    "avatarInvalidType": "请选择图片文件",
+    "avatarUpdated": "用户头像已更新",
+    "avatarCleared": "用户头像已清除",
+    "avatarUpdateFailed": "更新用户头像失败：{{error}}"
   },
   "aiProviders": {
     "title": "AI 模型提供商",

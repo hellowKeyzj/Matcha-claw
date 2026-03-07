@@ -102,6 +102,19 @@ describe('subagents page', () => {
     expect(screen.getByTestId('agent-emoji-agent-alpha')).toHaveTextContent('📊');
   });
 
+  it('shows top guide when there is no available model', () => {
+    useSubagentsStore.setState({
+      availableModels: [],
+      modelsLoading: false,
+    });
+
+    renderSubagentsPage(['/subagents']);
+
+    expect(screen.getByText('Please go to Settings > AI Providers to add a model first.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Settings' }));
+    expect(screen.getByTestId('router-location')).toHaveTextContent('/settings?section=aiProviders');
+  });
+
   it('opens create dialog when clicking add button', () => {
     renderSubagentsPage();
 
@@ -258,6 +271,41 @@ describe('subagents page', () => {
     expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
   });
 
+  it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/home/dev/.openclaw/workspace',
+          model: 'gpt-main',
+          identityEmoji: '⚙️',
+          isDefault: true,
+        },
+        {
+          id: 'agent-alpha',
+          name: 'Alpha',
+          workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
+          model: 'legacy/removed-model',
+          identityEmoji: '📊',
+          isDefault: false,
+        },
+      ],
+      availableModels: [
+        { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+      ],
+      modelsLoading: false,
+    });
+
+    renderSubagentsPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+
+    const modelSelect = screen.getByLabelText('Model');
+    expect(screen.queryByRole('option', { name: 'legacy/removed-model' })).toBeNull();
+    expect(modelSelect).toHaveValue('openai/gpt-4.1-mini');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('does not render set-default action buttons', () => {
     renderSubagentsPage();
 
@@ -282,6 +330,34 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Manage main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
+  });
+
+  it('disables manage/chat actions when model is missing', () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/home/dev/.openclaw/workspace',
+          model: 'gpt-main',
+          identityEmoji: '⚙️',
+          isDefault: true,
+        },
+        {
+          id: 'agent-no-model',
+          name: 'NoModel',
+          workspace: '/home/dev/.openclaw/workspace-subagents/no-model',
+          model: undefined,
+          identityEmoji: '📉',
+          isDefault: false,
+        },
+      ],
+    });
+
+    renderSubagentsPage();
+
+    expect(screen.getByRole('button', { name: 'Manage agent-no-model' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
   });
 
   it('keeps managed panel visible after page remount', () => {

@@ -19,6 +19,7 @@ sidebarTitle: Gateway Events API
 ## 2. 完整性口径（源码真相源）
 
 - 事件总表: `openclaw/src/gateway/server-methods-list.ts` 中 `GATEWAY_EVENTS`。
+- 本次核对基线: `e:/code/openclaw`（版本 `2026.3.1`）。
 - 广播行为与慢连接策略: `openclaw/src/gateway/server-broadcast.ts`。
 - 各事件 payload 来源:
   - `chat`: `openclaw/src/gateway/protocol/schema/logs-chat.ts` + `openclaw/src/gateway/server-chat.ts` + `openclaw/src/gateway/server-methods/chat.ts` + `openclaw/src/gateway/chat-abort.ts`
@@ -129,6 +130,7 @@ sidebarTitle: Gateway Events API
 
 - `voice.transcript`
 - `agent.request`
+- `notifications.changed`
 - `chat.subscribe`
 - `chat.unsubscribe`
 - `exec.started`
@@ -138,6 +140,9 @@ sidebarTitle: Gateway Events API
 
 来源: `openclaw/src/gateway/server-node-events.ts` 的 `switch(evt.event)`。
 
+补充说明:
+- `notifications.changed` 目前支持 `change=posted|removed`，可携带 `key/packageName/title/text/sessionKey` 等字段，用于把系统通知变更转成会话内系统事件。
+
 ## 9. 升级后核对清单
 
 每次升级 OpenClaw 后建议至少核对:
@@ -146,4 +151,3 @@ sidebarTitle: Gateway Events API
 - `openclaw/src/gateway/server-broadcast.ts`（慢连接策略是否变更）
 - `openclaw/src/infra/agent-events.ts` + `openclaw/src/agents/pi-embedded-subscribe*.ts`（`agent.stream` 是否新增）
 - `openclaw/src/gateway/server-node-events.ts`（node 上报事件是否新增）
-

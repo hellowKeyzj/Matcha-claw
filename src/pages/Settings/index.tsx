@@ -2,7 +2,8 @@
  * Settings Page
  * Application configuration
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
   Moon,
@@ -15,6 +16,9 @@ import {
   Copy,
   FileText,
   Wrench,
+  Upload,
+  Trash2,
+  User,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -32,6 +36,11 @@ import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { getTaskPluginStatus, installTaskPlugin } from '@/lib/openclaw/task-manager-client';
+import {
+  DEFAULT_SETTINGS_SECTION,
+  parseSettingsSectionFromSearch,
+  type SettingsSectionKey,
+} from '@/lib/settings/sections';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -46,13 +55,63 @@ type TaskPluginInfo = {
   pluginDir: string;
 };
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string' || !reader.result) {
+        reject(new Error('avatar_invalid_data_url'));
+        return;
+      }
+      resolve(reader.result);
+    };
+    reader.onerror = () => reject(new Error('avatar_file_read_failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('avatar_image_decode_failed'));
+    image.src = src;
+  });
+}
+
+async function cropImageToSquareDataUrl(src: string, size = 128): Promise<string> {
+  const image = await loadImageElement(src);
+  const cropSize = Math.min(image.width, image.height);
+  const sx = (image.width - cropSize) / 2;
+  const sy = (image.height - cropSize) / 2;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('avatar_canvas_unavailable');
+  }
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.clearRect(0, 0, size, size);
+  context.drawImage(image, sx, sy, cropSize, cropSize, 0, 0, size, size);
+  return canvas.toDataURL('image/png');
+}
+
 export function Settings() {
   const { t } = useTranslation('settings');
+  const location = useLocation();
+  const navigate = useNavigate();
   const {
     theme,
     setTheme,
     language,
     setLanguage,
+    userAvatarDataUrl,
+    setUserAvatarDataUrl,
+    clearUserAvatar,
     gatewayAutoStart,
     setGatewayAutoStart,
     proxyEnabled,
@@ -93,6 +152,10 @@ export function Settings() {
   const showCliTools = true;
   const [showLogs, setShowLogs] = useState(false);
   const [logContent, setLogContent] = useState('');
+  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(
+    () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
+  );
+  const userAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const [taskPluginInfo, setTaskPluginInfo] = useState<TaskPluginInfo | null>(null);
   const [taskPluginBusy, setTaskPluginBusy] = useState(false);
 
@@ -231,6 +294,36 @@ export function Settings() {
     }
   };
 
+  const handleAvatarFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
+    // 允许重复选择同一文件
+    event.target.value = '';
+    if (!selectedFile) {
+      return;
+    }
+    if (!selectedFile.type.startsWith('image/')) {
+      toast.error(t('appearance.avatarInvalidType'));
+      return;
+    }
+
+    try {
+      const sourceDataUrl = await readFileAsDataUrl(selectedFile);
+      const squareAvatarDataUrl = await cropImageToSquareDataUrl(sourceDataUrl, 128);
+      setUserAvatarDataUrl(squareAvatarDataUrl);
+      toast.success(t('appearance.avatarUpdated'));
+    } catch (error) {
+      toast.error(t('appearance.avatarUpdateFailed', { error: String(error) }));
+    }
+  };
+
+  const handleClearAvatar = () => {
+    clearUserAvatar();
+    if (userAvatarInputRef.current) {
+      userAvatarInputRef.current.value = '';
+    }
+    toast.success(t('appearance.avatarCleared'));
+  };
+
   useEffect(() => {
     const unsubscribe = window.electron.ipcRenderer.on(
       'openclaw:cli-installed',
@@ -302,6 +395,14 @@ export function Settings() {
     void loadTaskPluginStatus(true);
   }, []);
 
+  useEffect(() => {
+    const sectionFromQuery = parseSettingsSectionFromSearch(location.search);
+    if (!sectionFromQuery) {
+      return;
+    }
+    setActiveSection((prev) => (prev === sectionFromQuery ? prev : sectionFromQuery));
+  }, [location.search]);
+
   const taskPluginReady = Boolean(taskPluginInfo?.installed && taskPluginInfo?.enabled && taskPluginInfo?.skillEnabled);
 
   const taskPluginBadgeVariant = !taskPluginInfo?.installed
@@ -316,6 +417,16 @@ export function Settings() {
       ? t('taskPlugin.installedEnabled')
       : t('taskPlugin.installedDisabled');
 
+  const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
+    { key: 'gateway', label: t('gateway.title') },
+    { key: 'appearance', label: t('appearance.title') },
+    { key: 'aiProviders', label: t('aiProviders.title') },
+    { key: 'taskPlugin', label: t('taskPlugin.title') },
+    { key: 'updates', label: t('updates.title') },
+    { key: 'advanced', label: t('advanced.title') },
+    { key: 'about', label: t('about.title') },
+  ];
+
   return (
     <div className="space-y-6 p-6">
       <div>
@@ -325,7 +436,54 @@ export function Settings() {
         </p>
       </div>
 
+      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <Card className="h-fit border-border/60 bg-card/80">
+          <CardContent className="p-2.5">
+            <p className="px-2.5 pb-2 text-xs font-medium tracking-wide text-muted-foreground">
+              {t('title')}
+            </p>
+            <nav className="space-y-1" aria-label={t('title')}>
+              {sectionItems.map((section) => (
+                <Button
+                  key={section.key}
+                  type="button"
+                  variant="ghost"
+                  className={`w-full h-10 justify-start rounded-lg px-2.5 text-sm font-medium transition-colors border border-transparent ${
+                    activeSection === section.key
+                      ? 'bg-primary/12 text-primary hover:bg-primary/18'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/70'
+                  }`}
+                  onClick={() => {
+                    setActiveSection(section.key);
+                    const params = new URLSearchParams(location.search);
+                    params.set('section', section.key);
+                    const nextSearch = params.toString();
+                    navigate(
+                      {
+                        pathname: location.pathname,
+                        search: nextSearch ? `?${nextSearch}` : '',
+                      },
+                      { replace: true },
+                    );
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    className={`mr-2 h-1.5 w-1.5 rounded-full transition-colors ${
+                      activeSection === section.key ? 'bg-primary' : 'bg-transparent'
+                    }`}
+                  />
+                  <span className="truncate">{section.label}</span>
+                </Button>
+              ))}
+            </nav>
+          </CardContent>
+        </Card>
+
+        <div>
+
       {/* Appearance */}
+      {activeSection === 'appearance' && (
       <Card>
         <CardHeader>
           <CardTitle>{t('appearance.title')}</CardTitle>
@@ -376,10 +534,68 @@ export function Settings() {
               ))}
             </div>
           </div>
+          <Separator />
+          <div className="space-y-3">
+            <div>
+              <Label>{t('appearance.userAvatar')}</Label>
+              <p className="text-sm text-muted-foreground">
+                {t('appearance.userAvatarDesc')}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-muted">
+                {userAvatarDataUrl ? (
+                  <img
+                    src={userAvatarDataUrl}
+                    alt={t('appearance.userAvatarPreviewAlt')}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <User className="h-6 w-6 text-muted-foreground" />
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={userAvatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  aria-label={t('appearance.uploadAvatarInputLabel')}
+                  onChange={(event) => {
+                    void handleAvatarFileSelect(event);
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => userAvatarInputRef.current?.click()}
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  {t('appearance.uploadAvatar')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={!userAvatarDataUrl}
+                  onClick={handleClearAvatar}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {t('appearance.clearAvatar')}
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t('appearance.userAvatarHint')}
+            </p>
+          </div>
         </CardContent>
       </Card>
+      )}
 
       {/* AI Providers */}
+      {activeSection === 'aiProviders' && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -392,8 +608,10 @@ export function Settings() {
           <ProvidersSettings />
         </CardContent>
       </Card>
+      )}
 
       {/* Gateway */}
+      {activeSection === 'gateway' && (
       <Card>
         <CardHeader>
           <CardTitle>{t('gateway.title')}</CardTitle>
@@ -566,8 +784,10 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
 
-      {/* Updates */}
+      {/* Task Plugin */}
+      {activeSection === 'taskPlugin' && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -618,8 +838,10 @@ export function Settings() {
           ) : null}
         </CardContent>
       </Card>
+      )}
 
       {/* Updates */}
+      {activeSection === 'updates' && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -663,8 +885,10 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       {/* Advanced */}
+      {activeSection === 'advanced' && (
       <Card>
         <CardHeader>
           <CardTitle>{t('advanced.title')}</CardTitle>
@@ -683,17 +907,15 @@ export function Settings() {
               onCheckedChange={setDevModeUnlocked}
             />
           </div>
-        </CardContent>
-      </Card>
+          {devModeUnlocked && (
+            <>
+              <Separator />
+              <div className="space-y-1">
+                <h3 className="text-base font-semibold">{t('developer.title')}</h3>
+                <p className="text-sm text-muted-foreground">{t('developer.description')}</p>
+              </div>
 
-      {/* Developer */}
-      {devModeUnlocked && (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('developer.title')}</CardTitle>
-            <CardDescription>{t('developer.description')}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
+              <div className="space-y-4">
             <div className="space-y-2">
               <Label>{t('developer.console')}</Label>
               <p className="text-sm text-muted-foreground">
@@ -773,11 +995,15 @@ export function Settings() {
                 </div>
               </>
             )}
-          </CardContent>
-        </Card>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
       )}
 
       {/* About */}
+      {activeSection === 'about' && (
       <Card>
         <CardHeader>
           <CardTitle>{t('about.title')}</CardTitle>
@@ -806,6 +1032,9 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
+        </div>
+      </div>
     </div>
   );
 }
