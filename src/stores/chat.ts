@@ -973,6 +973,21 @@ function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null 
   return `${parts[0]}:${parts[1]}`;
 }
 
+function getCanonicalPrefixFromSessionKey(sessionKey: string): string | null {
+  if (!sessionKey.startsWith('agent:')) {
+    return null;
+  }
+  const parts = sessionKey.split(':');
+  if (parts.length < 2) {
+    return null;
+  }
+  const agentId = parts[1]?.trim();
+  if (!agentId) {
+    return null;
+  }
+  return `agent:${agentId}`;
+}
+
 function isCanonicalAgentSessionKey(key: string): boolean {
   if (!key.startsWith('agent:')) {
     return false;
@@ -1439,7 +1454,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // conversation history inaccessible when the user switches back to it.
     const { currentSessionKey, messages } = get();
     const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
-    const prefix = getCanonicalPrefixFromSessions(get().sessions) ?? DEFAULT_CANONICAL_PREFIX;
+    const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
+      ?? getCanonicalPrefixFromSessions(get().sessions)
+      ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
     set((s) => ({

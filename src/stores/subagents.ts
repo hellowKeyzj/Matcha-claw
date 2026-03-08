@@ -21,7 +21,6 @@ import {
 } from '@/lib/subagent/prompt';
 import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
 import {
-  patchConfigConsistently,
   readConfigForDisplay,
 } from '@/lib/openclaw/config-repository';
 import {
@@ -32,7 +31,6 @@ import {
 } from '@/lib/team/roles-metadata';
 import type {
   AgentConfigEntry,
-  AgentModelValue,
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
@@ -61,11 +59,9 @@ const DRAFT_CHAT_SEND_RPC_TIMEOUT_MS = 30000;
 const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
-const CREATE_AGENT_CONFIG_VISIBILITY_TIMEOUT_MS = 5000;
-const CREATE_AGENT_CONFIG_VISIBILITY_POLL_MS = 150;
-const CREATE_AGENT_UPDATE_RETRY_COUNT = 4;
-const CREATE_AGENT_UPDATE_RETRY_INTERVAL_MS = 200;
 const IDENTITY_EMOJI_CACHE_TTL_MS = 5 * 60 * 1000;
+const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
+const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -91,9 +87,8 @@ interface AgentsCreateResult {
   workspace?: unknown;
 }
 
-interface ReconcileAgentModelsOptions {
-  removedModelIds?: string[];
-  cfg?: ConfigGetResult;
+interface ConfigChangedPayload {
+  revision?: unknown;
 }
 
 interface SubagentsState {
@@ -115,10 +110,9 @@ interface SubagentsState {
   draftError: string | null;
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
+  bindConfigChangedListener: () => void;
   loadAgents: () => Promise<void>;
-  loadAgentsForDisplay: () => Promise<void>;
   loadAvailableModels: (cfg?: ConfigGetResult) => Promise<void>;
-  reconcileAgentModels: (options?: ReconcileAgentModelsOptions) => Promise<boolean>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
   loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
@@ -183,65 +177,6 @@ function extractModelId(value: unknown): string | undefined {
     return undefined;
   }
   return getOptionalString((value as { primary?: unknown }).primary);
-}
-
-function extractFallbackModelIds(value: unknown): string[] {
-  if (!value || typeof value !== 'object') {
-    return [];
-  }
-  const rawFallbacks = (value as { fallbacks?: unknown }).fallbacks;
-  if (!Array.isArray(rawFallbacks)) {
-    return [];
-  }
-  const ids: string[] = [];
-  for (const entry of rawFallbacks) {
-    const id = getOptionalString(entry);
-    if (id) {
-      ids.push(id);
-    }
-  }
-  return ids;
-}
-
-function collectAutoFillModelCandidates(cfg?: ConfigGetResult): string[] {
-  const ordered: string[] = [];
-  const seen = new Set<string>();
-  const push = (modelId: string | undefined) => {
-    if (!modelId || seen.has(modelId)) {
-      return;
-    }
-    seen.add(modelId);
-    ordered.push(modelId);
-  };
-
-  const defaultsModel = cfg?.config?.agents?.defaults?.model;
-  push(extractModelId(defaultsModel));
-  for (const fallback of extractFallbackModelIds(defaultsModel)) {
-    push(fallback);
-  }
-
-  const configList = cfg?.config?.agents?.list ?? [];
-  for (const entry of configList) {
-    push(extractModelId(entry?.model));
-    for (const fallback of extractFallbackModelIds(entry?.model)) {
-      push(fallback);
-    }
-  }
-
-  return ordered;
-}
-function resolveAutoFillModelFromConfiguredModels(
-  cfg: ConfigGetResult | undefined,
-  configuredModelIds: string[],
-): string | undefined {
-  const availableModelIds = new Set(configuredModelIds);
-  const candidates = collectAutoFillModelCandidates(cfg);
-  for (const candidate of candidates) {
-    if (availableModelIds.has(candidate)) {
-      return candidate;
-    }
-  }
-  return configuredModelIds[0];
 }
 
 function parseProviderFromModelId(modelId: string): string | undefined {
@@ -325,7 +260,6 @@ function normalizeAgents(
     seen.add(normalizedId);
     displayIds.push(normalizedId);
   };
-  push(MAIN_AGENT_ID);
   for (const runtimeId of runtimeOrderedIds) {
     push(runtimeId);
   }
@@ -356,87 +290,14 @@ function normalizeAgents(
   });
 }
 
-function buildPatchedModelValue(
-  currentModelValue: unknown,
-  replacementModel: string | null,
-): AgentModelValue | null {
-  if (replacementModel == null) {
-    return null;
-  }
-  if (currentModelValue && typeof currentModelValue === 'object' && !Array.isArray(currentModelValue)) {
-    return {
-      ...(currentModelValue as Record<string, unknown>),
-      primary: replacementModel,
-    } as AgentModelValue;
-  }
-  return replacementModel;
+function resolveDefaultAgentFromState(agents: SubagentSummary[]): SubagentSummary | undefined {
+  return agents.find((agent) => agent.isDefault);
 }
 
-async function persistInvalidAgentModelCleanup(
-  cfg: ConfigGetResult,
-  options?: ReconcileAgentModelsOptions,
-): Promise<boolean> {
-  const removedModelIds = Array.isArray(options?.removedModelIds)
-    ? options.removedModelIds.map((value) => getOptionalString(value)).filter((value): value is string => Boolean(value))
-    : [];
-  if (removedModelIds.length === 0) {
-    return false;
-  }
-  const removedModelIdSet = new Set(removedModelIds);
-  const configuredModelIds = collectConfiguredModelIdsFromConfig(cfg)
-    .filter((modelId) => !removedModelIdSet.has(modelId));
-  const replacementModel = resolveAutoFillModelFromConfiguredModels(cfg, configuredModelIds) ?? null;
-
-  const defaultsModelValue = cfg.config?.agents?.defaults?.model;
-  const defaultsModelId = extractModelId(defaultsModelValue);
-  const shouldPatchDefaults = Boolean(defaultsModelId && removedModelIdSet.has(defaultsModelId));
-
-  const listModelPatchByAgent = new Map<string, AgentModelValue | null>();
-  const configList = cfg.config?.agents?.list ?? [];
-  for (const entry of configList) {
-    const agentId = getOptionalString(entry?.id);
-    if (!agentId) {
-      continue;
-    }
-    const modelId = extractModelId(entry?.model);
-    if (!modelId || !removedModelIdSet.has(modelId)) {
-      continue;
-    }
-    listModelPatchByAgent.set(
-      agentId,
-      buildPatchedModelValue(entry?.model, replacementModel),
-    );
-  }
-
-  if (!shouldPatchDefaults && listModelPatchByAgent.size === 0) {
-    return false;
-  }
-
-  const patchRaw = {
-    agents: {
-      ...(shouldPatchDefaults
-        ? { defaults: { model: buildPatchedModelValue(defaultsModelValue, replacementModel) } }
-        : {}),
-      ...(listModelPatchByAgent.size > 0
-        ? {
-          list: Array.from(listModelPatchByAgent.entries()).map(([agentId, model]) => ({
-            id: agentId,
-            model,
-          })),
-        }
-        : {}),
-    },
-  };
-  await patchConfigConsistently(patchRaw, {
-    baseSnapshot: cfg,
-  });
-
-  return true;
-}
-
-function assertMutableAgent(agentId: string): void {
-  if (agentId === MAIN_AGENT_ID) {
-    throw new Error('Main agent is read-only');
+function assertMutableAgent(agentId: string, agents: SubagentSummary[]): void {
+  const defaultAgent = resolveDefaultAgentFromState(agents);
+  if (defaultAgent && defaultAgent.id === agentId) {
+    throw new Error('Default agent is read-only');
   }
 }
 
@@ -452,35 +313,61 @@ function isAgentNotFoundErrorForId(error: unknown, agentId: string): boolean {
   }
   const quotedPattern = new RegExp(`agent\\s+["']${normalizedId}["']\\s+not\\s+found`);
   const plainPattern = new RegExp(`agent\\s+${normalizedId}\\s+not\\s+found`);
-  return quotedPattern.test(message) || plainPattern.test(message);
+  if (quotedPattern.test(message) || plainPattern.test(message)) {
+    return true;
+  }
+  return message.includes('not found') && message.includes(normalizedId);
 }
 
-function hasAgentIdInConfigSnapshot(cfg: ConfigGetResult | undefined, agentId: string): boolean {
-  if (!cfg) {
+function runtimeListContainsAgent(result: AgentsListResult, agentId: string): boolean {
+  const normalizedAgentId = normalizeSubagentNameToSlug(agentId);
+  if (!normalizedAgentId) {
     return false;
   }
-  const normalizedId = normalizeSubagentNameToSlug(agentId).toLowerCase();
-  if (!normalizedId) {
-    return false;
-  }
-  const configList = cfg.config?.agents?.list ?? [];
-  return configList.some((entry) => normalizeSubagentNameToSlug(getOptionalString(entry?.id) ?? '') === normalizedId);
+  return result.agents.some((agent) => {
+    const runtimeId = getOptionalString(agent?.id);
+    return runtimeId != null && normalizeSubagentNameToSlug(runtimeId) === normalizedAgentId;
+  });
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForAgentVisibleInConfigSnapshot(agentId: string): Promise<boolean> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < CREATE_AGENT_CONFIG_VISIBILITY_TIMEOUT_MS) {
-    const cfg = await readConfigForDisplay();
-    if (hasAgentIdInConfigSnapshot(cfg, agentId)) {
-      return true;
-    }
-    await sleep(CREATE_AGENT_CONFIG_VISIBILITY_POLL_MS);
+async function waitUntilAgentVisibleInRuntimeList(
+  agentId: string,
+  timeoutMs: number = CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS,
+): Promise<void> {
+  const normalizedAgentId = normalizeSubagentNameToSlug(agentId);
+  if (!normalizedAgentId) {
+    throw new Error('Invalid agentId');
   }
-  return false;
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutMs) {
+    const result = await rpc<AgentsListResult>('agents.list', {});
+    if (runtimeListContainsAgent(result, normalizedAgentId)) {
+      return;
+    }
+    await sleep(CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS);
+  }
+  throw new Error(`Timed out waiting for agent "${normalizedAgentId}" to appear in agents.list`);
+}
+
+async function updateAgentWithCreateBarrier(params: {
+  agentId: string;
+  model?: string;
+}): Promise<void> {
+  await waitUntilAgentVisibleInRuntimeList(params.agentId);
+  try {
+    await rpc('agents.update', params);
+    return;
+  } catch (error) {
+    if (!isAgentNotFoundErrorForId(error, params.agentId)) {
+      throw error;
+    }
+  }
+  await waitUntilAgentVisibleInRuntimeList(params.agentId);
+  await rpc('agents.update', params);
 }
 
 function isLikelyEmojiToken(value: string): boolean {
@@ -741,6 +628,72 @@ async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Rec
 
 const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentTargetFile, string>>>>();
 let latestLoadAgentsRequestId = 0;
+let agentsStateMutationVersion = 0;
+let agentMutationChain: Promise<void> = Promise.resolve();
+const CONFIG_CHANGED_REFRESH_DEBOUNCE_MS = 180;
+let subagentsConfigChangedListenerBound = false;
+let subagentsConfigChangedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let subagentsConfigChangedRefreshTask: Promise<void> | null = null;
+let latestHandledConfigRevision = 0;
+const pendingDeletedAgentIds = new Set<string>();
+
+function bumpAgentsStateMutationVersion(): number {
+  agentsStateMutationVersion += 1;
+  return agentsStateMutationVersion;
+}
+
+function normalizeAgentIdForComparison(agentId: string): string {
+  return normalizeSubagentNameToSlug(agentId).trim().toLowerCase();
+}
+
+function isAgentPendingDeletion(agentId: string): boolean {
+  const normalized = normalizeAgentIdForComparison(agentId);
+  return normalized !== '' && pendingDeletedAgentIds.has(normalized);
+}
+
+function collectRuntimeAgentIdSet(result: AgentsListResult): Set<string> {
+  const runtimeAgentIds = new Set<string>();
+  for (const agent of result.agents) {
+    const runtimeId = getOptionalString(agent?.id);
+    if (!runtimeId) {
+      continue;
+    }
+    const normalized = normalizeAgentIdForComparison(runtimeId);
+    if (normalized) {
+      runtimeAgentIds.add(normalized);
+    }
+  }
+  return runtimeAgentIds;
+}
+
+function settlePendingDeletedAgentIds(runtimeAgentIds: Set<string>): void {
+  for (const pendingId of [...pendingDeletedAgentIds]) {
+    if (!runtimeAgentIds.has(pendingId)) {
+      pendingDeletedAgentIds.delete(pendingId);
+    }
+  }
+}
+
+function filterOutPendingDeletedAgents(agents: SubagentSummary[]): SubagentSummary[] {
+  return agents.filter((agent) => !isAgentPendingDeletion(agent.id));
+}
+
+function runSerializedAgentMutation<T>(task: () => Promise<T>): Promise<T> {
+  const run = agentMutationChain.then(task, task);
+  agentMutationChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function parseConfigChangedRevision(payload: unknown): number | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const revision = (payload as ConfigChangedPayload).revision;
+  if (typeof revision !== 'number' || !Number.isFinite(revision) || revision <= 0) {
+    return null;
+  }
+  return revision;
+}
 
 async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
   const activeTask = persistedFilesLoadTasks.get(agentId);
@@ -753,6 +706,45 @@ async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<R
     });
   persistedFilesLoadTasks.set(agentId, task);
   return task;
+}
+
+function scheduleConfigChangedDrivenRefresh(getState: () => SubagentsState): void {
+  if (subagentsConfigChangedRefreshTimer) {
+    clearTimeout(subagentsConfigChangedRefreshTimer);
+  }
+  subagentsConfigChangedRefreshTimer = setTimeout(() => {
+    subagentsConfigChangedRefreshTimer = null;
+    if (subagentsConfigChangedRefreshTask) {
+      return;
+    }
+    subagentsConfigChangedRefreshTask = (async () => {
+      const state = getState();
+      await state.loadAgents();
+      await getState().loadAvailableModels();
+    })().finally(() => {
+      subagentsConfigChangedRefreshTask = null;
+    });
+  }, CONFIG_CHANGED_REFRESH_DEBOUNCE_MS);
+}
+
+function bindSubagentsConfigChangedListener(getState: () => SubagentsState): void {
+  if (subagentsConfigChangedListenerBound) {
+    return;
+  }
+  if (typeof window === 'undefined' || !window.electron?.ipcRenderer?.on) {
+    return;
+  }
+  window.electron.ipcRenderer.on('config:changed', (payload: unknown) => {
+    const revision = parseConfigChangedRevision(payload);
+    if (revision != null) {
+      if (revision <= latestHandledConfigRevision) {
+        return;
+      }
+      latestHandledConfigRevision = revision;
+    }
+    scheduleConfigChangedDrivenRefresh(getState);
+  });
+  subagentsConfigChangedListenerBound = true;
 }
 
 export const useSubagentsStore = create<SubagentsState>((set, get) => ({
@@ -775,50 +767,24 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   previewDiffByFile: {},
   selectedAgentId: null,
 
-  loadAgents: async () => {
-    const requestId = ++latestLoadAgentsRequestId;
-    set({ loading: true, error: null });
-    try {
-      const result = await rpc<AgentsListResult>('agents.list', {});
-      const runtimeAgents = normalizeAgents(result);
-      if (requestId !== latestLoadAgentsRequestId) {
-        return;
-      }
-      const selectedAgentId = get().selectedAgentId;
-      const hasSelected = selectedAgentId && runtimeAgents.some((agent) => agent.id === selectedAgentId);
-      const managedAgentId = get().managedAgentId;
-      const hasManaged = managedAgentId && runtimeAgents.some((agent) => agent.id === managedAgentId);
-
-      set({
-        agents: runtimeAgents,
-        selectedAgentId: hasSelected ? selectedAgentId : (runtimeAgents[0]?.id ?? null),
-        managedAgentId: hasManaged ? managedAgentId : null,
-        error: null,
-        loading: false,
-      });
-    } catch (error) {
-      if (requestId !== latestLoadAgentsRequestId) {
-        return;
-      }
-      set({
-        loading: false,
-        error: error instanceof Error ? error.message : 'Failed to load subagents',
-      });
-    }
+  bindConfigChangedListener: () => {
+    bindSubagentsConfigChangedListener(get);
   },
 
-  loadAgentsForDisplay: async () => {
+  loadAgents: async () => {
+    bindSubagentsConfigChangedListener(get);
     const requestId = ++latestLoadAgentsRequestId;
     set({ loading: true, error: null });
     try {
       const result = await rpc<AgentsListResult>('agents.list', {});
+      settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
       let cfg: ConfigGetResult | undefined;
       try {
         cfg = await readConfigForDisplay();
       } catch {
         cfg = undefined;
       }
-      const normalizedAgents = normalizeAgents(result, cfg);
+      const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, cfg));
       if (requestId !== latestLoadAgentsRequestId) {
         return;
       }
@@ -826,6 +792,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
       const managedAgentId = get().managedAgentId;
       const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
+      const hydrationSourceVersion = bumpAgentsStateMutationVersion();
 
       set({
         agents: normalizedAgents,
@@ -840,14 +807,40 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           if (requestId !== latestLoadAgentsRequestId) {
             return;
           }
-          const nextSelected = get().selectedAgentId;
-          const hasNextSelected = nextSelected && hydratedAgents.some((agent) => agent.id === nextSelected);
-          const nextManaged = get().managedAgentId;
-          const hasNextManaged = nextManaged && hydratedAgents.some((agent) => agent.id === nextManaged);
-          set({
-            agents: hydratedAgents,
-            selectedAgentId: hasNextSelected ? nextSelected : (hydratedAgents[0]?.id ?? null),
-            managedAgentId: hasNextManaged ? nextManaged : null,
+          const emojiByAgentId = new Map<string, string>();
+          for (const agent of hydratedAgents) {
+            const emoji = getOptionalString(agent.identityEmoji);
+            if (!emoji) {
+              continue;
+            }
+            emojiByAgentId.set(agent.id, emoji);
+          }
+          set((state) => {
+            if (requestId !== latestLoadAgentsRequestId) {
+              return {};
+            }
+            if (agentsStateMutationVersion !== hydrationSourceVersion) {
+              return {};
+            }
+            let changed = false;
+            const nextAgents = state.agents.map((agent) => {
+              const nextEmoji = emojiByAgentId.get(agent.id);
+              if (!nextEmoji || nextEmoji === agent.identityEmoji || isAgentPendingDeletion(agent.id)) {
+                return agent;
+              }
+              changed = true;
+              return {
+                ...agent,
+                identityEmoji: nextEmoji,
+              };
+            });
+            if (!changed) {
+              return {};
+            }
+            bumpAgentsStateMutationVersion();
+            return {
+              agents: nextAgents,
+            };
           });
         })
         .catch(() => {
@@ -861,34 +854,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         loading: false,
         error: error instanceof Error ? error.message : 'Failed to load subagents',
       });
-    }
-  },
-
-  reconcileAgentModels: async (options) => {
-    const removedModelIds = Array.isArray(options?.removedModelIds)
-      ? options.removedModelIds.map((value) => getOptionalString(value)).filter((value): value is string => Boolean(value))
-      : [];
-    if (removedModelIds.length === 0) {
-      return false;
-    }
-    let cfg: ConfigGetResult | undefined = options?.cfg;
-    if (!cfg) {
-      cfg = await readConfigForDisplay();
-      if (!cfg) {
-        set({
-          error: 'Failed to load config for model reconciliation',
-        });
-        return false;
-      }
-    }
-    try {
-      const changed = await persistInvalidAgentModelCleanup(cfg, { removedModelIds });
-      return changed;
-    } catch (error) {
-      set({
-        error: getErrorMessage(error) || 'Failed to reconcile invalid agent models',
-      });
-      return false;
     }
   },
 
@@ -945,7 +910,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     },
   })),
   cancelDraft: async (agentId) => {
-    assertMutableAgent(agentId);
+    assertMutableAgent(agentId, get().agents);
     try {
       await cleanupDraftSessionForAgent(agentId, get);
     } catch (error) {
@@ -980,7 +945,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  createAgent: async ({ name, workspace, model, emoji }) => {
+  createAgent: async ({ name, workspace, model, emoji }) => runSerializedAgentMutation(async () => {
     set({ loading: true, error: null });
     try {
       void workspace;
@@ -992,11 +957,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (!modelId) {
         throw new Error('Model is required');
       }
+      const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
+      if (predictedAgentId) {
+        pendingDeletedAgentIds.delete(predictedAgentId);
+      }
       const emojiValue = getOptionalString(emoji);
       if (hasSubagentNameConflict(trimmedName, get().agents)) {
         throw new Error('Invalid subagent name: duplicate');
       }
-      const expectedAgentId = normalizeSubagentNameToSlug(trimmedName);
       const resolvedWorkspace = buildSubagentWorkspacePath({
         name: trimmedName,
         agents: get().agents,
@@ -1006,39 +974,24 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         workspace: resolvedWorkspace,
         ...(emojiValue ? { emoji: emojiValue } : {}),
       });
-      const createdAgentId = getOptionalString(createResult?.agentId) ?? expectedAgentId;
+      const createdAgentId = getOptionalString(createResult?.agentId);
+      if (!createdAgentId) {
+        throw new Error('agents.create returned missing agentId');
+      }
+      const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
+      if (normalizedCreatedAgentId) {
+        pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
+      }
       let partialFailureMessage: string | null = null;
       try {
-        const visibleInConfig = await waitForAgentVisibleInConfigSnapshot(createdAgentId);
-        if (!visibleInConfig) {
-          throw new Error(`Agent "${createdAgentId}" is not visible in config snapshot yet`);
-        }
-        let updateError: unknown = null;
-        for (let retry = 0; retry < CREATE_AGENT_UPDATE_RETRY_COUNT; retry += 1) {
-          try {
-            await rpc('agents.update', {
-              agentId: createdAgentId,
-              model: modelId,
-            });
-            updateError = null;
-            break;
-          } catch (error) {
-            updateError = error;
-            if (!isAgentNotFoundErrorForId(error, createdAgentId)) {
-              throw error;
-            }
-            if (retry < CREATE_AGENT_UPDATE_RETRY_COUNT - 1) {
-              await sleep(CREATE_AGENT_UPDATE_RETRY_INTERVAL_MS);
-            }
-          }
-        }
-        if (updateError) {
-          throw updateError;
-        }
-      } catch (error) {
+        await updateAgentWithCreateBarrier({
+          agentId: createdAgentId,
+          model: modelId,
+        });
+      } catch {
         partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
       }
-      await get().loadAgentsForDisplay();
+      await get().loadAgents();
       await syncRoleMetadataFromAgents(get().agents);
       if (partialFailureMessage) {
         set({ error: partialFailureMessage });
@@ -1055,9 +1008,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       throw new Error(message, { cause: error });
     }
-  },
+  }),
 
-  updateAgent: async ({ agentId, name, workspace, model }) => {
+  updateAgent: async ({ agentId, name, workspace, model }) => runSerializedAgentMutation(async () => {
     const current = get().agents.find((agent) => agent.id === agentId);
     if (
       current
@@ -1074,14 +1027,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
-      assertMutableAgent(agentId);
+      assertMutableAgent(agentId, get().agents);
       await rpc('agents.update', {
         agentId,
         name: nextName,
         workspace: nextWorkspace,
         model: nextModel,
       });
-      await get().loadAgentsForDisplay();
+      await get().loadAgents();
       await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
       set({
@@ -1089,11 +1042,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         error: getErrorMessage(error) || 'Failed to update subagent',
       });
     }
-  },
+  }),
 
-  deleteAgent: async (agentId) => {
+  deleteAgent: async (agentId) => runSerializedAgentMutation(async () => {
     try {
-      assertMutableAgent(agentId);
+      assertMutableAgent(agentId, get().agents);
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to delete subagent',
@@ -1102,9 +1055,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     set({ loading: true, error: null });
+    const agentsSnapshot = get().agents;
+    const selectedAgentIdSnapshot = get().selectedAgentId;
+    const managedAgentIdSnapshot = get().managedAgentId;
     try {
-      const agentsSnapshot = get().agents;
-      await rpc('agents.delete', { agentId, deleteFiles: true });
+      const normalizedAgentId = normalizeAgentIdForComparison(agentId);
+      if (normalizedAgentId) {
+        pendingDeletedAgentIds.add(normalizedAgentId);
+      }
+      bumpAgentsStateMutationVersion();
       set((state) => {
         const nextAgents = state.agents.filter((entry) => entry.id !== agentId);
         const selectedAgentId = state.selectedAgentId === agentId
@@ -1119,18 +1078,27 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           managedAgentId,
         };
       });
+      await rpc('agents.delete', { agentId, deleteFiles: true });
       await removeRoleMetadataForAgent(agentId, agentsSnapshot);
       set({ loading: false, error: null });
     } catch (error) {
+      const normalizedAgentId = normalizeAgentIdForComparison(agentId);
+      if (normalizedAgentId) {
+        pendingDeletedAgentIds.delete(normalizedAgentId);
+      }
+      bumpAgentsStateMutationVersion();
       set({
+        agents: agentsSnapshot,
+        selectedAgentId: selectedAgentIdSnapshot,
+        managedAgentId: managedAgentIdSnapshot,
         loading: false,
         error: getErrorMessage(error) || 'Failed to delete subagent',
       });
     }
-  },
+  }),
 
   generateDraftFromPrompt: async (agentId, prompt) => {
-    assertMutableAgent(agentId);
+    assertMutableAgent(agentId, get().agents);
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       throw new Error('Prompt cannot be empty');
@@ -1286,7 +1254,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   applyDraft: async (agentId) => {
-    assertMutableAgent(agentId);
+    assertMutableAgent(agentId, get().agents);
     const draftEntries = Object.entries(get().draftByFile)
       .filter(([, draft]) => draft && !draft.needsReview) as [SubagentTargetFile, NonNullable<DraftByFile[SubagentTargetFile]>][];
 
@@ -1316,7 +1284,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
       }
       await rpc('agents.files.list', { agentId });
-      await get().loadAgentsForDisplay();
+      await get().loadAgents();
       await upsertRoleMetadataFromDraft(agentId, roleMetadata, get().agents);
       set((state) => ({
         loading: false,

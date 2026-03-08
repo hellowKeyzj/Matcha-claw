@@ -568,3 +568,58 @@ Matcha-matchaclaw/
 - 设置页新增 License 分区与二次确认交互（覆盖和清除）。
 - 新增本地密文文件 `license-secret.enc.json` 与自动续校调度。
 - `license_server.py` 新增 `hardwareId/installId` 兼容绑定策略与 `unbind` 命令。
+
+## 19. 配置一致性事件总线（2026-03-08）
+
+### 19.1 目录树增量
+
+```text
+Matcha-claw/
+├─ electron/
+│  ├─ main/
+│  │  ├─ config-domain-service.ts   # 新增：配置 revision/事件总线/外部写监听
+│  │  └─ ipc-handlers.ts            # 接入配置写入口打点与 config:changed 广播
+│  └─ preload/index.ts              # 新增 config:changed 事件白名单
+├─ src/
+│  ├─ stores/
+│  │  ├─ subagents.ts               # 新增 bindConfigChangedListener 去抖刷新
+│  │  └─ providers.ts               # 移除跨域强刷 subagents 模型目录
+│  ├─ App.tsx                        # 配置事件监听单点绑定
+│  ├─ pages/
+│  │  ├─ SubAgents/index.tsx        # 初始化改为“无数据才加载”
+│  │  └─ Teams/{index.tsx,TeamChat.tsx}
+│  ├─ components/layout/AgentSessionsPane.tsx
+│  └─ types/electron.d.ts           # 增加 ConfigChangedPayload 类型声明
+└─ tests/unit/providers.store.sync.test.ts    # 断言改为“依赖 config:changed 驱动刷新”
+```
+
+### 19.2 文件职责（一句话）
+
+- `electron/main/config-domain-service.ts`：维护配置 revision，监听 `openclaw.json` 外部变更并广播 `config:changed`。
+- `electron/main/ipc-handlers.ts`：对 `gateway:rpc` 写方法与本地配置写入口统一触发 `config:changed`。
+- `src/stores/subagents.ts`：提供幂等 `bindConfigChangedListener`，统一去抖执行 `loadAgentsForDisplay + loadAvailableModels`。
+- `src/App.tsx`：作为渲染层唯一配置监听绑定点，避免多页面重复订阅。
+- `src/stores/providers.ts`：provider 写成功后仅刷新 provider 列表，不再直接跨域强刷 subagents。
+
+### 19.3 模块依赖与边界
+
+- 配置变更事实源收敛到主进程：Renderer 不再自己猜测“何时该强刷”。
+- Subagents 展示刷新由事件驱动，不由 provider store 直接调用跨域 action。
+- 监听绑定收敛到 `App` 单点；页面层只做读取初始化，避免重复监听导致并发刷新抖动。
+- `loadAgents/loadAgentsForDisplay` 仍保持纯读取职责，不承担写修复语义。
+
+### 19.4 关键决策与原因
+
+- 用 `revision + hash` 去重，避免文件监听和写入口重复触发导致事件风暴。
+- 写入口成功即发事件，外部写入通过 watcher 补发，确保两类变更都能同步到 UI。
+- 页面初始化改为“无数据才拉取”，降低高频切页时不必要的全量请求。
+
+### 19.5 本次变更日志
+
+- 新增 `config:changed` 事件链路（主进程/预加载/渲染层订阅闭环）。
+- `gateway:rpc` 对 `config.set/patch/apply`、`agents.create/update/delete`、`skills.update` 等写方法自动打点。
+- provider/plugin/skill 本地写配置路径接入事件打点。
+- providers store 去除对 subagents 的直接模型刷新调用，改为事件驱动。
+- 清理 `subagents` 旧前端模型回填写链路（`reconcileAgentModels`），统一由主进程写入口处理一致性。
+- 移除 `config-repository` 前端写函数（`readConfigForCommit` / `patchConfigConsistently`），保留读取职责。
+- 移除 SubAgents/Teams/AgentSessionsPane 的重复 `config:changed` 订阅，改为 `App` 单点订阅。

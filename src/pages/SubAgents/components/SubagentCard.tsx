@@ -22,7 +22,7 @@ export function SubagentCard({
   onChat,
 }: SubagentCardProps) {
   const { t } = useTranslation('subagents');
-  const displayEmoji = agent.identityEmoji || (agent.id === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16');
+  const displayEmoji = agent.identityEmoji || (agent.isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16');
   const runDisabled = !modelReady;
 
   return (

@@ -67,11 +67,11 @@ function parseAgentIdFromSessionKey(sessionKey: string): string {
   return matched?.[1] ?? 'main';
 }
 
-function resolveAgentEmoji(agentId: string, explicitEmoji?: string): string {
+function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
   if (explicitEmoji && explicitEmoji.trim()) {
     return explicitEmoji;
   }
-  return agentId === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16';
+  return isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16';
 }
 
 export function Chat() {
@@ -242,14 +242,14 @@ export function Chat() {
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
-  const mainAgent = agents.find((item) => item.id === 'main');
-  const blockedByMainAgentModel = Boolean(mainAgent) && !Boolean(mainAgent?.model?.trim());
+  const defaultAgent = agents.find((item) => item.isDefault);
+  const blockedByDefaultAgentModel = Boolean(defaultAgent) && !Boolean(defaultAgent?.model?.trim());
   const assistantAvatarEmoji = resolveAgentEmoji(
-    currentAgentId,
     currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
+    Boolean(currentAgent?.isDefault),
   );
 
-  if (blockedByMainAgentModel) {
+  if (blockedByDefaultAgentModel) {
     return (
       <div className="flex h-full min-h-0 flex-col items-center justify-center p-8 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-yellow-500" />

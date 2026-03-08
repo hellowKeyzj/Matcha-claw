@@ -227,6 +227,33 @@
     "errorDetails": "Error Details:",
     "help": "When auto-update is enabled, updates are downloaded and installed automatically."
   },
+  "diagnostics": {
+    "title": "Log Collection",
+    "description": "Collect troubleshooting logs with one click and export as a compressed bundle.",
+    "masking": "Before export, token / API key / proxy account fields in openclaw.json, settings.json, and diagnostics.json are masked automatically.",
+    "includesTitle": "Bundle includes",
+    "collect": "Collect & Export",
+    "collecting": "Collecting...",
+    "openFolder": "Open Bundle Location",
+    "lastBundle": "Last Export",
+    "lastMeta": "Generated: {{generatedAt}}, files: {{count}}",
+    "includes": {
+      "userDataLogs": "<userData>/logs/* (last 3 days)",
+      "openclawLogs": "<openclawConfigDir>/logs/* (last 3 days)",
+      "sessions": "<openclawConfigDir>/agents/*/sessions/*.jsonl (last 3 days) and sessions.json",
+      "workspace": "<openclawConfigDir>/workspace/** (whitelisted files)",
+      "subagents": "<openclawConfigDir>/workspace-subagents/** (whitelisted files)",
+      "pluginManifest": "<openclawConfigDir>/extensions/*/openclaw.plugin.json",
+      "settings": "<userData>/settings.json (masked)",
+      "openclawConfig": "<openclawConfigDir>/openclaw.json (masked)",
+      "generated": "diagnostics.json (auto-generated, masked)"
+    },
+    "toast": {
+      "success": "Diagnostics bundle generated ({{count}} files)",
+      "failed": "Failed to generate diagnostics bundle: {{error}}",
+      "openFailed": "Failed to open bundle location: {{error}}"
+    }
+  },
   "advanced": {
     "title": "Advanced",
     "description": "Power-user options",

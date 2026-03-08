@@ -23,6 +23,8 @@ describe('subagents page', () => {
   const createAgent = vi.fn().mockResolvedValue('writer');
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
+  const loadAgents = vi.fn().mockResolvedValue(undefined);
+  const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
   const generateDraftFromPrompt = vi.fn().mockResolvedValue(undefined);
   const cancelDraft = vi.fn().mockResolvedValue(undefined);
   const loadPersistedFilesForAgent = vi.fn().mockResolvedValue({});
@@ -31,6 +33,8 @@ describe('subagents page', () => {
     createAgent.mockClear();
     updateAgent.mockClear();
     deleteAgent.mockClear();
+    loadAgents.mockClear();
+    loadAvailableModels.mockClear();
     generateDraftFromPrompt.mockClear();
     cancelDraft.mockClear();
     loadPersistedFilesForAgent.mockClear();
@@ -80,8 +84,8 @@ describe('subagents page', () => {
       draftError: null,
       previewDiffByFile: {},
       selectedAgentId: null,
-      loadAgents: vi.fn().mockResolvedValue(undefined),
-      loadAvailableModels: vi.fn().mockResolvedValue(undefined),
+      loadAgents,
+      loadAvailableModels,
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
       createAgent,
@@ -100,6 +104,16 @@ describe('subagents page', () => {
     expect(screen.getByText('agent-alpha')).toBeInTheDocument();
     expect(screen.getByTestId('agent-emoji-main')).toHaveTextContent('⚙️');
     expect(screen.getByTestId('agent-emoji-agent-alpha')).toHaveTextContent('📊');
+  });
+
+  it('挂载时触发初始化加载', () => {
+    useSubagentsStore.setState({
+      agents: [],
+      availableModels: [],
+    });
+    renderSubagentsPage();
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
   });
 
   it('shows top guide when there is no available model', () => {

@@ -74,7 +74,7 @@ export function TeamsPage() {
   const agents = useSubagentsStore((state) => state.agents);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
-  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const createAgent = useSubagentsStore((state) => state.createAgent);
   const setDraftPromptForAgent = useSubagentsStore((state) => state.setDraftPromptForAgent);
@@ -111,14 +111,12 @@ export function TeamsPage() {
   }, []);
 
   useEffect(() => {
-    if (agents.length === 0) {
-      void loadAgentsForDisplay();
-    }
+    void loadAgents();
     if (availableModels.length === 0) {
       void loadAvailableModels();
     }
     void refreshControllerStatus();
-  }, [agents.length, availableModels.length, loadAgentsForDisplay, loadAvailableModels, refreshControllerStatus]);
+  }, [availableModels.length, loadAgents, loadAvailableModels, refreshControllerStatus]);
 
   useEffect(() => {
     if (!createOpen || agents.length === 0) {

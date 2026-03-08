@@ -2,7 +2,7 @@
     "gatewayNotRunning": "Gateway Not Running",
     "gatewayRequired": "The OpenClaw Gateway needs to be running to use chat. It will start automatically, or you can start it from Settings.",
     "mainModelBlocked": {
-        "title": "Main Agent Model Is Not Configured",
+        "title": "Default Agent Model Is Not Configured",
         "description": "Go to Settings > AI Providers to add a model, then finish agent model setup before chatting."
     },
     "welcome": {

@@ -92,6 +92,12 @@ interface LicenseGateSnapshot {
   renewalAlert?: 'near_expiry_renew_failed' | null;
 }
 
+interface DiagnosticsBundleResponse {
+  zipPath: string;
+  generatedAt: string;
+  fileCount: number;
+}
+
 function maskLicenseKeyForDisplay(raw: string): string {
   const text = raw.trim();
   if (!text) {
@@ -212,6 +218,10 @@ export function Settings() {
   const showCliTools = true;
   const [showLogs, setShowLogs] = useState(false);
   const [logContent, setLogContent] = useState('');
+  const [collectingDiagnostics, setCollectingDiagnostics] = useState(false);
+  const [lastDiagnosticsZipPath, setLastDiagnosticsZipPath] = useState('');
+  const [lastDiagnosticsGeneratedAt, setLastDiagnosticsGeneratedAt] = useState('');
+  const [lastDiagnosticsFileCount, setLastDiagnosticsFileCount] = useState(0);
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>(
     () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
   );
@@ -383,6 +393,36 @@ export function Settings() {
       // ignore
     }
   };
+
+  const handleCollectDiagnosticsBundle = useCallback(async () => {
+    setCollectingDiagnostics(true);
+    try {
+      const result = await window.electron.ipcRenderer.invoke('diagnostics:collectBundle') as DiagnosticsBundleResponse;
+      if (!result || typeof result.zipPath !== 'string' || !result.zipPath.trim()) {
+        throw new Error('invalid diagnostics bundle result');
+      }
+      setLastDiagnosticsZipPath(result.zipPath);
+      setLastDiagnosticsGeneratedAt(result.generatedAt);
+      setLastDiagnosticsFileCount(result.fileCount);
+      toast.success(t('diagnostics.toast.success', { count: result.fileCount }));
+    } catch (error) {
+      toast.error(t('diagnostics.toast.failed', { error: String(error) }));
+    } finally {
+      setCollectingDiagnostics(false);
+    }
+  }, [t]);
+
+  const handleOpenDiagnosticsBundleFolder = useCallback(async () => {
+    if (!lastDiagnosticsZipPath) {
+      return;
+    }
+    try {
+      await window.electron.ipcRenderer.invoke('shell:showItemInFolder', lastDiagnosticsZipPath);
+    } catch (error) {
+      toast.error(t('diagnostics.toast.openFailed', { error: String(error) }));
+    }
+  }, [lastDiagnosticsZipPath, t]);
+
   const loadTaskPluginStatus = async (silent = true) => {
     try {
       const status = await getTaskPluginStatus();
@@ -644,6 +684,7 @@ export function Settings() {
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
     { key: 'license', label: t('license.title') },
+    { key: 'diagnostics', label: t('diagnostics.title') },
   ];
 
   return (
@@ -1210,6 +1251,59 @@ export function Settings() {
               }}
             />
           </div>
+        </CardContent>
+      </Card>
+      )}
+
+      {/* Diagnostics */}
+      {activeSection === 'diagnostics' && (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            {t('diagnostics.title')}
+          </CardTitle>
+          <CardDescription>{t('diagnostics.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              onClick={() => {
+                void handleCollectDiagnosticsBundle();
+              }}
+              disabled={collectingDiagnostics}
+            >
+              {collectingDiagnostics ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-2 h-4 w-4" />
+              )}
+              {collectingDiagnostics ? t('diagnostics.collecting') : t('diagnostics.collect')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                void handleOpenDiagnosticsBundleFolder();
+              }}
+              disabled={!lastDiagnosticsZipPath}
+            >
+              <ExternalLink className="mr-2 h-4 w-4" />
+              {t('diagnostics.openFolder')}
+            </Button>
+          </div>
+
+          {lastDiagnosticsZipPath ? (
+            <div className="space-y-2 rounded-lg border border-border/60 bg-background/40 p-3">
+              <Label>{t('diagnostics.lastBundle')}</Label>
+              <Input readOnly value={lastDiagnosticsZipPath} className="font-mono" />
+              <p className="text-xs text-muted-foreground">
+                {t('diagnostics.lastMeta', {
+                  generatedAt: lastDiagnosticsGeneratedAt || '-',
+                  count: lastDiagnosticsFileCount,
+                })}
+              </p>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
       )}

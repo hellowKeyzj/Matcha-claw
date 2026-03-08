@@ -22,6 +22,7 @@ import { TeamChatPage } from './pages/Teams/TeamChat';
 import { TasksPage } from './pages/Tasks';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
+import { useSubagentsStore } from './stores/subagents';
 
 
 /**
@@ -106,6 +107,7 @@ function App() {
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
+  const bindSubagentsConfigChangedListener = useSubagentsStore((state) => state.bindConfigChangedListener);
   const [, setLicenseGate] = useState<LicenseGateSnapshot>({
     state: 'checking',
     reason: 'init',
@@ -147,7 +149,14 @@ function App() {
   }, [initGateway]);
 
   useEffect(() => {
-    void refreshLicenseGate();
+    bindSubagentsConfigChangedListener();
+  }, [bindSubagentsConfigChangedListener]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshLicenseGate();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [refreshLicenseGate, location.pathname]);
 
   useEffect(() => {

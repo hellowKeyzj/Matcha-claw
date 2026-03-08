@@ -195,11 +195,11 @@ function parseDirectMemberReplyCommand(message: string): { target: string; promp
   };
 }
 
-function getAgentDisplayEmoji(agent: SubagentSummary | undefined, agentId: string): string {
+function getAgentDisplayEmoji(agent: SubagentSummary | undefined): string {
   if (agent?.identityEmoji) {
     return agent.identityEmoji;
   }
-  return agentId === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16';
+  return agent?.isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16';
 }
 
 function buildWorkspaceMapForTeam(input: {
@@ -451,7 +451,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
   const agentsError = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const createAgent = useSubagentsStore((state) => state.createAgent);
-  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const generateDraftFromPrompt = useSubagentsStore((state) => state.generateDraftFromPrompt);
   const applyDraft = useSubagentsStore((state) => state.applyDraft);
@@ -559,13 +559,11 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
   };
 
   useEffect(() => {
-    if (agents.length === 0) {
-      void loadAgentsForDisplay();
-    }
+    void loadAgents();
     if (availableModels.length === 0) {
       void loadAvailableModels();
     }
-  }, [agents.length, availableModels.length, loadAgentsForDisplay, loadAvailableModels]);
+  }, [availableModels.length, loadAgents, loadAvailableModels]);
 
   useEffect(() => {
     if (!team) {
@@ -2810,7 +2808,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                 ? agents.find((item) => item.id === message.agentId)
                 : undefined;
               const agentAvatar = message.agentId
-                ? getAgentDisplayEmoji(agent, message.agentId)
+                ? getAgentDisplayEmoji(agent)
                 : '\uD83E\uDD16';
 
               return (
@@ -2911,7 +2909,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                     <optgroup label={t('panel.addAvailableGroup')}>
                       {availableAgentsToAdd.map((agent) => (
                         <option key={agent.id} value={agent.id}>
-                          {`${getAgentDisplayEmoji(agent, agent.id)} ${agent.name ?? agent.id}`}
+                          {`${getAgentDisplayEmoji(agent)} ${agent.name ?? agent.id}`}
                         </option>
                       ))}
                     </optgroup>
@@ -2922,7 +2920,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                     <optgroup label={t('panel.addExistingGroup')}>
                       {existingTeamAgents.map((agent) => (
                         <option key={`existing-${agent.id}`} disabled value={`existing:${agent.id}`}>
-                          {`${getAgentDisplayEmoji(agent, agent.id)} ${agent.name ?? agent.id}`}
+                          {`${getAgentDisplayEmoji(agent)} ${agent.name ?? agent.id}`}
                         </option>
                       ))}
                     </optgroup>
@@ -2970,7 +2968,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 text-xs font-medium">
                           <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[12px]">
-                            {getAgentDisplayEmoji(agent, agentId)}
+                            {getAgentDisplayEmoji(agent)}
                           </span>
                           <span>{agent?.name ?? agentId}</span>
                         </div>
@@ -3231,7 +3229,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                   className="flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-base"
                   title={agent?.name ?? agentId}
                 >
-                  {getAgentDisplayEmoji(agent, agentId)}
+                  {getAgentDisplayEmoji(agent)}
                 </div>
               );
             })}

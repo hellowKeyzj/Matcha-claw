@@ -13,8 +13,6 @@ import { SubagentManageDialog } from './components/SubagentManageDialog';
 
 type DialogMode = 'create' | 'edit';
 
-const MAIN_AGENT_ID = 'main';
-
 export function SubAgents() {
   const { t } = useTranslation('subagents');
   const navigate = useNavigate();
@@ -33,7 +31,7 @@ export function SubAgents() {
   const draftRawOutputByAgent = useSubagentsStore((state) => state.draftRawOutputByAgent);
   const persistedFilesByAgent = useSubagentsStore((state) => state.persistedFilesByAgent);
   const previewDiffByFile = useSubagentsStore((state) => state.previewDiffByFile);
-  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const setManagedAgentId = useSubagentsStore((state) => state.setManagedAgentId);
   const loadPersistedFilesForAgent = useSubagentsStore((state) => state.loadPersistedFilesForAgent);
@@ -62,9 +60,9 @@ export function SubAgents() {
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
 
   useEffect(() => {
-    loadAgentsForDisplay();
-    loadAvailableModels();
-  }, [loadAgentsForDisplay, loadAvailableModels]);
+    void loadAgents();
+    void loadAvailableModels();
+  }, [loadAgents, loadAvailableModels]);
 
   useEffect(() => {
     if (!managedAgentId) {
@@ -140,7 +138,7 @@ export function SubAgents() {
           <SubagentCard
             key={agent.id}
             agent={agent}
-            locked={agent.id === MAIN_AGENT_ID}
+            locked={Boolean(agent.isDefault)}
             modelReady={Boolean(agent.model?.trim())}
             onEdit={() => openEditDialog(agent.id)}
             onDelete={() => {
