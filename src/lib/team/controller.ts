@@ -74,7 +74,10 @@ export type TeamControllerReadiness = {
 };
 
 async function rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  const response = await window.electron.ipcRenderer.invoke('gateway:rpc', method, params, timeoutMs) as RpcResult<T>;
+  const response = await (timeoutMs == null
+    ? window.electron.ipcRenderer.invoke('gateway:rpc', method, params)
+    : window.electron.ipcRenderer.invoke('gateway:rpc', method, params, timeoutMs)
+  ) as RpcResult<T>;
   if (!response.success) {
     throw new Error(response.error || `RPC failed: ${method}`);
   }

@@ -61,6 +61,11 @@ const DRAFT_CHAT_SEND_RPC_TIMEOUT_MS = 30000;
 const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
+const CREATE_AGENT_CONFIG_VISIBILITY_TIMEOUT_MS = 5000;
+const CREATE_AGENT_CONFIG_VISIBILITY_POLL_MS = 150;
+const CREATE_AGENT_UPDATE_RETRY_COUNT = 4;
+const CREATE_AGENT_UPDATE_RETRY_INTERVAL_MS = 200;
+const IDENTITY_EMOJI_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -78,6 +83,12 @@ interface AgentIdentityGetResult {
   name?: unknown;
   avatar?: unknown;
   emoji?: unknown;
+}
+
+interface AgentsCreateResult {
+  agentId?: unknown;
+  name?: unknown;
+  workspace?: unknown;
 }
 
 interface ReconcileAgentModelsOptions {
@@ -105,6 +116,7 @@ interface SubagentsState {
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
   loadAgents: () => Promise<void>;
+  loadAgentsForDisplay: () => Promise<void>;
   loadAvailableModels: (cfg?: ConfigGetResult) => Promise<void>;
   reconcileAgentModels: (options?: ReconcileAgentModelsOptions) => Promise<boolean>;
   selectAgent: (agentId: string | null) => void;
@@ -117,7 +129,7 @@ interface SubagentsState {
     workspace: string;
     model?: string;
     emoji?: string;
-  }) => Promise<void>;
+  }) => Promise<string>;
   updateAgent: (input: {
     agentId: string;
     name: string;
@@ -252,26 +264,31 @@ function resolveDefaultAgentId(
   result: AgentsListResult,
   cfg?: ConfigGetResult,
 ): string {
-  if (result.agents.some((agent) => agent.id === MAIN_AGENT_ID)) {
-    return MAIN_AGENT_ID;
-  }
-
-  const configList = cfg?.config?.agents?.list ?? [];
-  if (configList.some((agent) => getOptionalString(agent?.id) === MAIN_AGENT_ID)) {
-    return MAIN_AGENT_ID;
-  }
-
   const fromResult = getOptionalString(result.defaultId);
   if (fromResult) {
     return fromResult;
   }
+
+  const configList = cfg?.config?.agents?.list ?? [];
   const explicitDefault = configList.find((agent) => agent?.default === true);
   const explicitDefaultId = getOptionalString(explicitDefault?.id);
   if (explicitDefaultId) {
     return explicitDefaultId;
   }
+
   const firstConfigId = getOptionalString(configList[0]?.id);
-  return firstConfigId || MAIN_AGENT_ID;
+  if (firstConfigId) {
+    return firstConfigId;
+  }
+
+  for (const agent of result.agents) {
+    const id = getOptionalString(agent?.id);
+    if (id) {
+      return id;
+    }
+  }
+
+  return MAIN_AGENT_ID;
 }
 
 function normalizeAgents(
@@ -288,22 +305,53 @@ function normalizeAgents(
     }
     configById.set(id, entry);
   }
+  const runtimeById = new Map<string, SubagentSummary>();
+  const runtimeOrderedIds: string[] = [];
+  for (const agent of result.agents) {
+    const id = getOptionalString(agent?.id);
+    if (!id) {
+      continue;
+    }
+    runtimeById.set(id, agent);
+    runtimeOrderedIds.push(id);
+  }
+  const displayIds: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string | undefined) => {
+    const normalizedId = getOptionalString(id);
+    if (!normalizedId || seen.has(normalizedId)) {
+      return;
+    }
+    seen.add(normalizedId);
+    displayIds.push(normalizedId);
+  };
+  push(MAIN_AGENT_ID);
+  for (const runtimeId of runtimeOrderedIds) {
+    push(runtimeId);
+  }
+  push(defaultId);
   const defaultsWorkspace = getOptionalString(cfg?.config?.agents?.defaults?.workspace);
   const defaultsModel = extractModelId(cfg?.config?.agents?.defaults?.model);
 
-  return result.agents.map((agent) => {
-    const configEntry = configById.get(agent.id);
-    const workspace = getOptionalString(agent.workspace)
+  return displayIds.map((agentId) => {
+    const runtimeAgent = runtimeById.get(agentId);
+    const configEntry = configById.get(agentId);
+    const workspace = getOptionalString(runtimeAgent?.workspace)
       ?? getOptionalString(configEntry?.workspace)
-      ?? (agent.id === MAIN_AGENT_ID ? defaultsWorkspace : undefined);
-    const model = getOptionalString(agent.model)
+      ?? (agentId === defaultId ? defaultsWorkspace : undefined);
+    const model = getOptionalString(runtimeAgent?.model)
       ?? extractModelId(configEntry?.model)
-      ?? (agent.id === MAIN_AGENT_ID ? defaultsModel : undefined);
+      ?? (agentId === defaultId ? defaultsModel : undefined);
+    const runtimeName = getOptionalString(runtimeAgent?.name);
+    const configName = getOptionalString(configEntry?.name);
+    const fallbackName = agentId;
     return {
-      ...agent,
+      ...(runtimeAgent ?? { id: agentId }),
+      id: agentId,
+      name: runtimeName ?? configName ?? fallbackName,
       workspace,
       model,
-      isDefault: agent.isDefault ?? (agent.id === defaultId),
+      isDefault: runtimeAgent?.isDefault ?? (agentId === defaultId),
     };
   });
 }
@@ -396,6 +444,45 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isAgentNotFoundErrorForId(error: unknown, agentId: string): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  const normalizedId = normalizeSubagentNameToSlug(agentId).toLowerCase();
+  if (!normalizedId) {
+    return false;
+  }
+  const quotedPattern = new RegExp(`agent\\s+["']${normalizedId}["']\\s+not\\s+found`);
+  const plainPattern = new RegExp(`agent\\s+${normalizedId}\\s+not\\s+found`);
+  return quotedPattern.test(message) || plainPattern.test(message);
+}
+
+function hasAgentIdInConfigSnapshot(cfg: ConfigGetResult | undefined, agentId: string): boolean {
+  if (!cfg) {
+    return false;
+  }
+  const normalizedId = normalizeSubagentNameToSlug(agentId).toLowerCase();
+  if (!normalizedId) {
+    return false;
+  }
+  const configList = cfg.config?.agents?.list ?? [];
+  return configList.some((entry) => normalizeSubagentNameToSlug(getOptionalString(entry?.id) ?? '') === normalizedId);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForAgentVisibleInConfigSnapshot(agentId: string): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < CREATE_AGENT_CONFIG_VISIBILITY_TIMEOUT_MS) {
+    const cfg = await readConfigForDisplay();
+    if (hasAgentIdInConfigSnapshot(cfg, agentId)) {
+      return true;
+    }
+    await sleep(CREATE_AGENT_CONFIG_VISIBILITY_POLL_MS);
+  }
+  return false;
+}
+
 function isLikelyEmojiToken(value: string): boolean {
   const text = value.trim();
   if (!text || text.length > 16) {
@@ -456,16 +543,64 @@ async function fetchIdentityEmojiFromAgentIdentity(agentId: string): Promise<str
   }
 }
 
+interface IdentityEmojiCacheEntry {
+  checkedAt: number;
+  emoji?: string;
+}
+
+const identityEmojiCache = new Map<string, IdentityEmojiCacheEntry>();
+const identityEmojiLoadTasks = new Map<string, Promise<string | undefined>>();
+
+function readIdentityEmojiFromCache(agentId: string): string | undefined | null {
+  const entry = identityEmojiCache.get(agentId);
+  if (!entry) {
+    return null;
+  }
+  if ((Date.now() - entry.checkedAt) > IDENTITY_EMOJI_CACHE_TTL_MS) {
+    identityEmojiCache.delete(agentId);
+    return null;
+  }
+  return entry.emoji;
+}
+
+async function resolveIdentityEmojiWithCache(agentId: string): Promise<string | undefined> {
+  const cached = readIdentityEmojiFromCache(agentId);
+  if (cached !== null) {
+    return cached;
+  }
+  const existingTask = identityEmojiLoadTasks.get(agentId);
+  if (existingTask) {
+    return existingTask;
+  }
+  const task = fetchIdentityEmojiFromAgentIdentity(agentId)
+    .then((emoji) => {
+      identityEmojiCache.set(agentId, {
+        checkedAt: Date.now(),
+        emoji,
+      });
+      return emoji;
+    })
+    .finally(() => {
+      identityEmojiLoadTasks.delete(agentId);
+    });
+  identityEmojiLoadTasks.set(agentId, task);
+  return task;
+}
+
 async function hydrateAgentIdentityEmoji(agents: SubagentSummary[]): Promise<SubagentSummary[]> {
   const hydrated = await Promise.all(agents.map(async (agent) => {
     const fromMeta = resolveIdentityEmojiFromAgentMeta(agent);
     if (fromMeta) {
+      identityEmojiCache.set(agent.id, {
+        checkedAt: Date.now(),
+        emoji: fromMeta,
+      });
       return {
         ...agent,
         identityEmoji: fromMeta,
       };
     }
-    const fromIdentity = await fetchIdentityEmojiFromAgentIdentity(agent.id);
+    const fromIdentity = await resolveIdentityEmojiWithCache(agent.id);
     if (!fromIdentity) {
       return agent;
     }
@@ -605,6 +740,7 @@ async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Rec
 }
 
 const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentTargetFile, string>>>>();
+let latestLoadAgentsRequestId = 0;
 
 async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
   const activeTask = persistedFilesLoadTasks.get(agentId);
@@ -640,25 +776,87 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   selectedAgentId: null,
 
   loadAgents: async () => {
+    const requestId = ++latestLoadAgentsRequestId;
     set({ loading: true, error: null });
     try {
-      const result = await rpc<AgentsListResult>('agents.list');
-      const cfg = await readConfigForDisplay();
-      const normalizedAgents = normalizeAgents(result, cfg);
-      const agents = await hydrateAgentIdentityEmoji(normalizedAgents);
+      const result = await rpc<AgentsListResult>('agents.list', {});
+      const runtimeAgents = normalizeAgents(result);
+      if (requestId !== latestLoadAgentsRequestId) {
+        return;
+      }
       const selectedAgentId = get().selectedAgentId;
-      const hasSelected = selectedAgentId && agents.some((agent) => agent.id === selectedAgentId);
+      const hasSelected = selectedAgentId && runtimeAgents.some((agent) => agent.id === selectedAgentId);
       const managedAgentId = get().managedAgentId;
-      const hasManaged = managedAgentId && agents.some((agent) => agent.id === managedAgentId);
+      const hasManaged = managedAgentId && runtimeAgents.some((agent) => agent.id === managedAgentId);
 
       set({
-        agents,
-        selectedAgentId: hasSelected ? selectedAgentId : (agents[0]?.id ?? null),
+        agents: runtimeAgents,
+        selectedAgentId: hasSelected ? selectedAgentId : (runtimeAgents[0]?.id ?? null),
         managedAgentId: hasManaged ? managedAgentId : null,
         error: null,
         loading: false,
       });
     } catch (error) {
+      if (requestId !== latestLoadAgentsRequestId) {
+        return;
+      }
+      set({
+        loading: false,
+        error: error instanceof Error ? error.message : 'Failed to load subagents',
+      });
+    }
+  },
+
+  loadAgentsForDisplay: async () => {
+    const requestId = ++latestLoadAgentsRequestId;
+    set({ loading: true, error: null });
+    try {
+      const result = await rpc<AgentsListResult>('agents.list', {});
+      let cfg: ConfigGetResult | undefined;
+      try {
+        cfg = await readConfigForDisplay();
+      } catch {
+        cfg = undefined;
+      }
+      const normalizedAgents = normalizeAgents(result, cfg);
+      if (requestId !== latestLoadAgentsRequestId) {
+        return;
+      }
+      const selectedAgentId = get().selectedAgentId;
+      const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
+      const managedAgentId = get().managedAgentId;
+      const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
+
+      set({
+        agents: normalizedAgents,
+        selectedAgentId: hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null),
+        managedAgentId: hasManaged ? managedAgentId : null,
+        error: null,
+        loading: false,
+      });
+
+      void hydrateAgentIdentityEmoji(normalizedAgents)
+        .then((hydratedAgents) => {
+          if (requestId !== latestLoadAgentsRequestId) {
+            return;
+          }
+          const nextSelected = get().selectedAgentId;
+          const hasNextSelected = nextSelected && hydratedAgents.some((agent) => agent.id === nextSelected);
+          const nextManaged = get().managedAgentId;
+          const hasNextManaged = nextManaged && hydratedAgents.some((agent) => agent.id === nextManaged);
+          set({
+            agents: hydratedAgents,
+            selectedAgentId: hasNextSelected ? nextSelected : (hydratedAgents[0]?.id ?? null),
+            managedAgentId: hasNextManaged ? nextManaged : null,
+          });
+        })
+        .catch(() => {
+          // identity hydration is best-effort; keep core list path deterministic.
+        });
+    } catch (error) {
+      if (requestId !== latestLoadAgentsRequestId) {
+        return;
+      }
       set({
         loading: false,
         error: error instanceof Error ? error.message : 'Failed to load subagents',
@@ -798,27 +996,64 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (hasSubagentNameConflict(trimmedName, get().agents)) {
         throw new Error('Invalid subagent name: duplicate');
       }
-      const agentId = normalizeSubagentNameToSlug(trimmedName);
+      const expectedAgentId = normalizeSubagentNameToSlug(trimmedName);
       const resolvedWorkspace = buildSubagentWorkspacePath({
         name: trimmedName,
         agents: get().agents,
       });
-      await rpc('agents.create', {
+      const createResult = await rpc<AgentsCreateResult>('agents.create', {
         name: trimmedName,
         workspace: resolvedWorkspace,
         ...(emojiValue ? { emoji: emojiValue } : {}),
       });
-      await rpc('agents.update', {
-        agentId,
-        model: modelId,
-      });
-      await get().loadAgents();
+      const createdAgentId = getOptionalString(createResult?.agentId) ?? expectedAgentId;
+      let partialFailureMessage: string | null = null;
+      try {
+        const visibleInConfig = await waitForAgentVisibleInConfigSnapshot(createdAgentId);
+        if (!visibleInConfig) {
+          throw new Error(`Agent "${createdAgentId}" is not visible in config snapshot yet`);
+        }
+        let updateError: unknown = null;
+        for (let retry = 0; retry < CREATE_AGENT_UPDATE_RETRY_COUNT; retry += 1) {
+          try {
+            await rpc('agents.update', {
+              agentId: createdAgentId,
+              model: modelId,
+            });
+            updateError = null;
+            break;
+          } catch (error) {
+            updateError = error;
+            if (!isAgentNotFoundErrorForId(error, createdAgentId)) {
+              throw error;
+            }
+            if (retry < CREATE_AGENT_UPDATE_RETRY_COUNT - 1) {
+              await sleep(CREATE_AGENT_UPDATE_RETRY_INTERVAL_MS);
+            }
+          }
+        }
+        if (updateError) {
+          throw updateError;
+        }
+      } catch (error) {
+        partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
+      }
+      await get().loadAgentsForDisplay();
       await syncRoleMetadataFromAgents(get().agents);
+      if (partialFailureMessage) {
+        set({ error: partialFailureMessage });
+      }
+      return createdAgentId;
     } catch (error) {
+      const message = getErrorMessage(error) || 'Failed to create subagent';
       set({
         loading: false,
-        error: getErrorMessage(error) || 'Failed to create subagent',
+        error: message,
       });
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(message, { cause: error });
     }
   },
 
@@ -846,7 +1081,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         workspace: nextWorkspace,
         model: nextModel,
       });
-      await get().loadAgents();
+      await get().loadAgentsForDisplay();
       await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
       set({
@@ -870,8 +1105,22 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     try {
       const agentsSnapshot = get().agents;
       await rpc('agents.delete', { agentId, deleteFiles: true });
+      set((state) => {
+        const nextAgents = state.agents.filter((entry) => entry.id !== agentId);
+        const selectedAgentId = state.selectedAgentId === agentId
+          ? (nextAgents[0]?.id ?? null)
+          : state.selectedAgentId;
+        const managedAgentId = state.managedAgentId === agentId
+          ? null
+          : state.managedAgentId;
+        return {
+          agents: nextAgents,
+          selectedAgentId,
+          managedAgentId,
+        };
+      });
       await removeRoleMetadataForAgent(agentId, agentsSnapshot);
-      await get().loadAgents();
+      set({ loading: false, error: null });
     } catch (error) {
       set({
         loading: false,
@@ -1005,7 +1254,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           [agentId]: lastModelOutput,
         },
       }));
-      throw new Error(message);
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(message, { cause: error });
     } finally {
       set((state) => {
         const nextDraftGeneratingByAgent = { ...state.draftGeneratingByAgent };
@@ -1064,7 +1316,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
       }
       await rpc('agents.files.list', { agentId });
-      await get().loadAgents();
+      await get().loadAgentsForDisplay();
       await upsertRoleMetadataFromDraft(agentId, roleMetadata, get().agents);
       set((state) => ({
         loading: false,

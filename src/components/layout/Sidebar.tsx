@@ -3,7 +3,7 @@
  * Navigation sidebar with menu items.
  * No longer fixed - sits inside the flex layout below the title bar.
  */
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
   MessageSquare,
@@ -86,6 +86,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   const newSession = useChatStore((s) => s.newSession);
 
   const navigate = useNavigate();
+  const location = useLocation();
 
   const openDevConsole = async () => {
     try {
@@ -126,11 +127,13 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     >
       {/* Navigation */}
       <nav className="flex-1 overflow-hidden flex flex-col p-2 gap-1">
-        {/* Chat nav item: acts as "New Chat" button, never highlighted as active */}
+        {/* Chat nav item: from non-chat routes it only navigates to chat;
+            on chat route it acts as "New Chat". */}
         <button
           onClick={() => {
             const { messages } = useChatStore.getState();
-            if (messages.length > 0) newSession();
+            const isChatRoute = location.pathname === '/';
+            if (isChatRoute && messages.length > 0) newSession();
             navigate('/');
           }}
           className={cn(

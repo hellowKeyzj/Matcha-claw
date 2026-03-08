@@ -185,7 +185,7 @@ export function AgentSessionsPane({
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const agents = useSubagentsStore((state) => state.agents);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
   const sessions = useChatStore((state) => state.sessions);
   const sessionLabels = useChatStore((state) => state.sessionLabels);
   const sessionLastActivity = useChatStore((state) => state.sessionLastActivity);
@@ -196,9 +196,9 @@ export function AgentSessionsPane({
   const [collapsedAgentGroups, setCollapsedAgentGroups] = useState<Record<string, true>>(() => loadCollapsedAgentGroupMap());
 
   useEffect(() => {
-    void loadAgents();
+    void loadAgentsForDisplay();
     void loadSessions();
-  }, [loadAgents, loadSessions]);
+  }, [loadAgentsForDisplay, loadSessions]);
 
   const agentSessionNodes = useMemo<AgentSessionNode[]>(() => {
     const agentById = new Map(agents.map((agent) => [agent.id, agent] as const));

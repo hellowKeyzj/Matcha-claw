@@ -33,7 +33,7 @@ export function SubAgents() {
   const draftRawOutputByAgent = useSubagentsStore((state) => state.draftRawOutputByAgent);
   const persistedFilesByAgent = useSubagentsStore((state) => state.persistedFilesByAgent);
   const previewDiffByFile = useSubagentsStore((state) => state.previewDiffByFile);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const setManagedAgentId = useSubagentsStore((state) => state.setManagedAgentId);
   const loadPersistedFilesForAgent = useSubagentsStore((state) => state.loadPersistedFilesForAgent);
@@ -62,9 +62,9 @@ export function SubAgents() {
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
 
   useEffect(() => {
-    loadAgents();
+    loadAgentsForDisplay();
     loadAvailableModels();
-  }, [loadAgents, loadAvailableModels]);
+  }, [loadAgentsForDisplay, loadAvailableModels]);
 
   useEffect(() => {
     if (!managedAgentId) {
@@ -234,17 +234,21 @@ export function SubAgents() {
         initialValues={editingAgent}
         onSubmit={async (values) => {
           if (dialogMode === 'create') {
-            await createAgent({
-              name: values.name,
-              workspace: values.workspace,
-              model: values.model,
-              ...(values.emoji ? { emoji: values.emoji } : {}),
-            });
-            const createdAgentId = normalizeSubagentNameToSlug(values.name);
-            setManagedAgentId(createdAgentId);
-            void loadPersistedFilesForAgent(createdAgentId);
-            setDraftPromptForAgent(createdAgentId, values.prompt);
-            setDialogOpen(false);
+            try {
+              const createdAgentId = await createAgent({
+                name: values.name,
+                workspace: values.workspace,
+                model: values.model,
+                ...(values.emoji ? { emoji: values.emoji } : {}),
+              });
+              const resolvedAgentId = createdAgentId || normalizeSubagentNameToSlug(values.name);
+              setManagedAgentId(resolvedAgentId);
+              void loadPersistedFilesForAgent(resolvedAgentId);
+              setDraftPromptForAgent(resolvedAgentId, values.prompt);
+              setDialogOpen(false);
+            } catch {
+              // Error state is already set by store; keep dialog open for user correction/retry.
+            }
             return;
           }
           if (!editingAgentId) {

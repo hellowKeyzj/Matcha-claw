@@ -24,6 +24,7 @@ function enableMainAppRoutes() {
     error: null,
     selectedAgentId: null,
     loadAgents: vi.fn().mockResolvedValue(undefined),
+    loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     loadAvailableModels: vi.fn().mockResolvedValue(undefined),
     selectAgent: vi.fn(),
   });
@@ -78,10 +79,11 @@ describe('subagents navigation', () => {
         { id: 'risk-expert', name: 'Risk Expert', identityEmoji: '🧠' },
       ],
       loadAgents: vi.fn().mockResolvedValue(undefined),
+      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions,
-      currentSessionKey: 'agent:main:main',
+      currentSessionKey: 'agent:other:main',
       switchSession: switchSession as never,
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -92,19 +94,25 @@ describe('subagents navigation', () => {
       </MemoryRouter>,
     );
 
-    const mainButton = screen.getByRole('button', { name: /Main Agent/i });
-    const agentButton = screen.getByRole('button', { name: /Risk Expert/i });
-    const sessionButton = screen.getByRole('button', { name: /Loan Review/i });
+    const mainButton = screen.getByText('Main Agent').closest('button');
+    if (!mainButton) {
+      throw new Error('main agent button not found');
+    }
+    const agentButton = screen.getByText('Risk Expert').closest('button');
+    if (!agentButton) {
+      throw new Error('risk expert button not found');
+    }
+    const sessionButton = screen.getByRole('button', { name: /Risk Home/i });
     const fallbackSessionButton = screen.getByRole('button', { name: /session-123/i });
 
     fireEvent.click(mainButton);
-    expect(switchSession).toHaveBeenCalledWith('agent:main:main');
+    expect(switchSession).toHaveBeenNthCalledWith(1, 'agent:main:main');
 
     fireEvent.click(agentButton);
-    expect(switchSession).toHaveBeenCalledWith('agent:risk-expert:risk-expert');
+    expect(switchSession).toHaveBeenNthCalledWith(2, 'agent:risk-expert:loan-review');
 
     fireEvent.click(sessionButton);
-    expect(switchSession).toHaveBeenCalledWith('agent:risk-expert:loan-review');
+    expect(switchSession).toHaveBeenNthCalledWith(3, 'agent:risk-expert:risk-expert');
     expect(fallbackSessionButton).toBeInTheDocument();
 
     const emojiNodes = screen.getAllByText('🧠');
@@ -119,6 +127,7 @@ describe('subagents navigation', () => {
         { id: 'risk-expert', name: 'Risk Expert', identityEmoji: '🧠' },
       ],
       loadAgents: vi.fn().mockResolvedValue(undefined),
+      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions: [
@@ -137,18 +146,21 @@ describe('subagents navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole('button', { name: /Loan Review/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Risk Home/i })).toBeInTheDocument();
 
-    const riskAgentButton = screen.getByRole('button', { name: /Risk Expert/i });
+    const riskAgentButton = screen.getByText('Risk Expert').closest('button');
+    if (!riskAgentButton) {
+      throw new Error('risk expert button not found');
+    }
     const riskGroupHeader = riskAgentButton.parentElement;
     if (!riskGroupHeader) {
       throw new Error('risk group header not found');
     }
     fireEvent.click(within(riskGroupHeader).getByRole('button', { name: 'Collapse session group' }));
-    expect(screen.queryByRole('button', { name: /Loan Review/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Risk Home/i })).not.toBeInTheDocument();
 
     fireEvent.click(within(riskGroupHeader).getByRole('button', { name: 'Expand session group' }));
-    expect(screen.getByRole('button', { name: /Loan Review/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Risk Home/i })).toBeInTheDocument();
   });
 
   it('支持收缩/展开 Agent 会话栏', () => {
@@ -157,6 +169,7 @@ describe('subagents navigation', () => {
     useSubagentsStore.setState({
       agents: [{ id: 'main', name: 'Main Agent' }],
       loadAgents: vi.fn().mockResolvedValue(undefined),
+      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions: [{ key: 'agent:main:main', displayName: 'Main Session' }],

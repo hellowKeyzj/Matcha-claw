@@ -28,6 +28,11 @@ describe('team controller readiness', () => {
 
     const status = await checkTeamControllerReadiness('team-controller');
     expect(status.ready).toBe(true);
+    expect(invoke).toHaveBeenCalledWith(
+      'gateway:rpc',
+      'agents.list',
+      {}
+    );
   });
 
   it('returns missing-agent when controller does not exist', async () => {

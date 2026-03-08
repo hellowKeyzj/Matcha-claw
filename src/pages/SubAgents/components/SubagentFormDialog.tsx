@@ -75,6 +75,10 @@ export function SubagentFormDialog({
     }
     return Array.from(byId.values());
   }, [modelOptions]);
+  const resolvedEmojiOptions = useMemo(
+    () => Array.from(new Set(EMOJI_OPTIONS)),
+    []
+  );
 
   useEffect(() => {
     if (!open) {
@@ -246,7 +250,7 @@ export function SubagentFormDialog({
               {emojiPanelOpen && (
                 <div className="rounded-md border p-2">
                   <div className="grid max-h-40 grid-cols-10 gap-1 overflow-y-auto pr-1">
-                    {EMOJI_OPTIONS.map((emoji) => {
+                    {resolvedEmojiOptions.map((emoji) => {
                       const selected = values.emoji === emoji;
                       return (
                         <button
