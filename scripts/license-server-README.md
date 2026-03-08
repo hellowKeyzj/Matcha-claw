@@ -2,7 +2,7 @@
 
 本文档提供一套可直接复制执行的命令，分为：
 
-1. 执行命令（发码、录入、导出、启动）
+1. 执行命令（发码、录入、导出、解绑、启动）
 2. 定位命令（排障、日志、连通性、权限）
 3. 部署命令（systemd 常驻、Caddy 反代）
 
@@ -51,7 +51,16 @@ python3 /opt/claw-license/license_server.py serve \
   --refresh-after-sec 604800
 ```
 
-### 1.5 审计摘要（可选）
+### 1.5 人工解绑（按 key 清空绑定）
+
+```bash
+python3 /opt/claw-license/license_server.py unbind \
+  --db /opt/claw-license/license-db.json \
+  --key MATCHACLAW-AAAA-BBBB-CCCC-DDDD \
+  --audit /opt/claw-license/audit.jsonl
+```
+
+### 1.6 审计摘要（可选）
 
 ```bash
 python3 /opt/claw-license/license_audit_summary.py --db /opt/claw-license/license-db.json --pretty
@@ -81,7 +90,7 @@ sudo journalctl -u caddy -f -n 200
 curl -i http://127.0.0.1:3187/health
 curl -i -X POST http://127.0.0.1:3187/v1/activate \
   -H "content-type: application/json" \
-  -d '{"licenseKey":"MATCHACLAW-AAAA-BBBB-CCCC-DDDD","deviceId":"debug-device-1"}'
+  -d '{"licenseKey":"MATCHACLAW-AAAA-BBBB-CCCC-DDDD","deviceId":"debug-install-1","installId":"debug-install-1","hardwareId":"debug-hardware-1"}'
 ```
 
 ### 2.4 公网连通性（经过 Caddy）
@@ -90,7 +99,7 @@ curl -i -X POST http://127.0.0.1:3187/v1/activate \
 curl -i https://www.supercnm.top/claw-license/health
 curl -i -X POST https://www.supercnm.top/claw-license/activate \
   -H "content-type: application/json" \
-  -d '{"licenseKey":"MATCHACLAW-AAAA-BBBB-CCCC-DDDD","deviceId":"debug-device-1"}'
+  -d '{"licenseKey":"MATCHACLAW-AAAA-BBBB-CCCC-DDDD","deviceId":"debug-install-1","installId":"debug-install-1","hardwareId":"debug-hardware-1"}'
 ```
 
 ### 2.5 审计日志与数据库观察
@@ -227,3 +236,4 @@ export const BUILTIN_LICENSE_MODE = 'online-required' as const;
 
 3. `device_limit`
    - 已达到 `maxDevices` 上限；检查该 key 的 `devices` 数组。
+   - 新版本也可检查该 key 的 `bindings`（`hardwareId/installId`）并执行 `unbind` 清空绑定后重试。

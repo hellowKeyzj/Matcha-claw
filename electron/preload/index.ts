@@ -55,6 +55,10 @@ const electronAPI = {
         'settings:reset',
         // License
         'license:validate',
+        'license:getGateState',
+        'license:getStoredKey',
+        'license:forceRevalidate',
+        'license:clearStoredKey',
         'usage:recentTokenHistory',
         // Update
         'update:status',

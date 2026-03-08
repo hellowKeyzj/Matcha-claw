@@ -20,6 +20,7 @@ import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
+import { ensureLicenseGateBootstrapped } from '../utils/license';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -185,6 +186,7 @@ async function initialize(): Promise<void> {
 
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, matchaclawHubService, mainWindow);
+  ensureLicenseGateBootstrapped();
 
   // Register update handlers
   registerUpdateHandlers(appUpdater, mainWindow);

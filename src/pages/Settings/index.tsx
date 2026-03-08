@@ -2,13 +2,16 @@
  * Settings Page
  * Application configuration
  */
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
   Moon,
   Monitor,
   RefreshCw,
+  Loader2,
+  Eye,
+  EyeOff,
   Terminal,
   ExternalLink,
   Key,
@@ -27,6 +30,7 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
@@ -54,6 +58,63 @@ type TaskPluginInfo = {
   version?: string;
   pluginDir: string;
 };
+
+type LicenseValidationCode =
+  | 'valid'
+  | 'empty'
+  | 'format_invalid'
+  | 'service_unconfigured'
+  | 'network_error'
+  | 'server_rejected'
+  | 'cache_grace_valid'
+  | 'expired'
+  | 'device_mismatch'
+  | 'not_allowed'
+  | 'checksum_invalid';
+
+type LicenseValidationCodeWithUnknown = LicenseValidationCode | 'unknown';
+
+interface LicenseValidationResponse {
+  valid: boolean;
+  code: LicenseValidationCode;
+  normalizedKey?: string;
+  message?: string;
+}
+
+interface LicenseGateSnapshot {
+  state: 'checking' | 'granted' | 'blocked';
+  reason: string;
+  checkedAtMs: number;
+  hasStoredKey: boolean;
+  hasUsableCache: boolean;
+  nextRevalidateAtMs: number | null;
+  lastValidation?: LicenseValidationResponse | null;
+  renewalAlert?: 'near_expiry_renew_failed' | null;
+}
+
+function maskLicenseKeyForDisplay(raw: string): string {
+  const text = raw.trim();
+  if (!text) {
+    return '';
+  }
+  const visiblePrefix = 4;
+  const visibleSuffix = 4;
+  const plainChars = text.replace(/-/g, '').length;
+  let shownPlainChars = 0;
+  return text.split('').map((char) => {
+    if (char === '-') {
+      return '-';
+    }
+    shownPlainChars += 1;
+    if (plainChars <= visiblePrefix + visibleSuffix) {
+      return '*';
+    }
+    if (shownPlainChars <= visiblePrefix || shownPlainChars > plainChars - visibleSuffix) {
+      return char;
+    }
+    return '*';
+  }).join('');
+}
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -135,7 +196,6 @@ export function Settings() {
   } = useSettingsStore();
 
   const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
-  const currentVersion = useUpdateStore((state) => state.currentVersion);
   const updateSetAutoDownload = useUpdateStore((state) => state.setAutoDownload);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
@@ -158,6 +218,149 @@ export function Settings() {
   const userAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const [taskPluginInfo, setTaskPluginInfo] = useState<TaskPluginInfo | null>(null);
   const [taskPluginBusy, setTaskPluginBusy] = useState(false);
+  const [licenseKeyInput, setLicenseKeyInput] = useState('');
+  const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCodeWithUnknown | null>(null);
+  const [licenseValidationMessage, setLicenseValidationMessage] = useState('');
+  const [licenseBusy, setLicenseBusy] = useState(false);
+  const [showLicenseKeyPlain, setShowLicenseKeyPlain] = useState(false);
+  const [showClearLicenseConfirm, setShowClearLicenseConfirm] = useState(false);
+  const [showReplaceLicenseConfirm, setShowReplaceLicenseConfirm] = useState(false);
+  const [licenseGateSnapshot, setLicenseGateSnapshot] = useState<LicenseGateSnapshot>({
+    state: 'checking',
+    reason: 'init',
+    checkedAtMs: 0,
+    hasStoredKey: false,
+    hasUsableCache: false,
+    nextRevalidateAtMs: null,
+    lastValidation: null,
+    renewalAlert: null,
+  });
+
+  const refreshLicenseGateSnapshot = useCallback(async () => {
+    try {
+      const snapshot = await window.electron.ipcRenderer.invoke('license:getGateState') as LicenseGateSnapshot;
+      if (snapshot && typeof snapshot === 'object' && typeof snapshot.state === 'string') {
+        setLicenseGateSnapshot(snapshot);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const loadStoredLicenseKey = useCallback(async () => {
+    try {
+      const storedKey = await window.electron.ipcRenderer.invoke('license:getStoredKey') as string | null;
+      if (typeof storedKey === 'string' && storedKey.trim()) {
+        setLicenseKeyInput(storedKey.trim());
+        return;
+      }
+      const snapshot = await window.electron.ipcRenderer.invoke('license:getGateState') as LicenseGateSnapshot;
+      const latestValidatedKey = snapshot?.lastValidation?.normalizedKey;
+      if (typeof latestValidatedKey === 'string' && latestValidatedKey.trim()) {
+        setLicenseKeyInput((prev) => prev.trim() ? prev : latestValidatedKey.trim());
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const resolveLicenseMessage = useCallback((code: LicenseValidationCodeWithUnknown | null, fallbackMessage?: string) => {
+    if (!code) {
+      return '';
+    }
+    const localized = t(`license.messages.${code}`, { defaultValue: '' });
+    if (localized) {
+      return fallbackMessage ? `${localized}: ${fallbackMessage}` : localized;
+    }
+    if (fallbackMessage) {
+      return fallbackMessage;
+    }
+    return t('license.messages.unknown');
+  }, [t]);
+
+  const applyLicenseResult = useCallback((result: LicenseValidationResponse | null) => {
+    if (!result) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(t('license.messages.unknown'));
+      return;
+    }
+
+    const nextCode: LicenseValidationCodeWithUnknown = result.code ?? 'unknown';
+    setLicenseValidationCode(nextCode);
+    const message = resolveLicenseMessage(nextCode, result.message);
+    setLicenseValidationMessage(message);
+    if (result.normalizedKey) {
+      setLicenseKeyInput(result.normalizedKey);
+    }
+    if (result.valid) {
+      if (result.code === 'cache_grace_valid') {
+        toast.success(t('license.messages.cache_grace_valid'));
+      } else {
+        toast.success(t('license.messages.valid'));
+      }
+    } else {
+      toast.error(message || t('license.messages.unknown'));
+    }
+  }, [resolveLicenseMessage, t]);
+
+  const runValidateLicense = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      const result = await window.electron.ipcRenderer.invoke(
+        'license:validate',
+        licenseKeyInput,
+      ) as LicenseValidationResponse;
+      applyLicenseResult(result);
+      await refreshLicenseGateSnapshot();
+    } catch (error) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(resolveLicenseMessage('unknown', String(error)));
+      toast.error(resolveLicenseMessage('unknown', String(error)));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [applyLicenseResult, licenseKeyInput, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+
+  const handleValidateLicense = useCallback(() => {
+    if (licenseGateSnapshot.hasStoredKey) {
+      setShowReplaceLicenseConfirm(true);
+      return;
+    }
+    void runValidateLicense();
+  }, [licenseGateSnapshot.hasStoredKey, runValidateLicense]);
+
+  const handleForceRevalidate = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      const result = await window.electron.ipcRenderer.invoke('license:forceRevalidate') as LicenseValidationResponse;
+      applyLicenseResult(result);
+      await refreshLicenseGateSnapshot();
+    } catch (error) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(resolveLicenseMessage('unknown', String(error)));
+      toast.error(resolveLicenseMessage('unknown', String(error)));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [applyLicenseResult, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+
+  const handleClearStoredLicense = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      await window.electron.ipcRenderer.invoke('license:clearStoredKey');
+      setLicenseKeyInput('');
+      setLicenseValidationCode(null);
+      setLicenseValidationMessage('');
+      setShowLicenseKeyPlain(false);
+      await refreshLicenseGateSnapshot();
+      toast.success(t('license.toast.cleared'));
+    } catch (error) {
+      toast.error(t('license.toast.clearFailed', { error: String(error) }));
+    } finally {
+      setLicenseBusy(false);
+      setShowClearLicenseConfirm(false);
+    }
+  }, [refreshLicenseGateSnapshot, t]);
 
   const handleShowLogs = async () => {
     try {
@@ -396,6 +599,22 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
+    void refreshLicenseGateSnapshot();
+    void loadStoredLicenseKey();
+  }, [refreshLicenseGateSnapshot, loadStoredLicenseKey]);
+
+  useEffect(() => {
+    if (activeSection !== 'license') {
+      return;
+    }
+    void loadStoredLicenseKey();
+    const timer = window.setInterval(() => {
+      void refreshLicenseGateSnapshot();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [activeSection, refreshLicenseGateSnapshot, loadStoredLicenseKey]);
+
+  useEffect(() => {
     const sectionFromQuery = parseSettingsSectionFromSearch(location.search);
     if (!sectionFromQuery) {
       return;
@@ -424,7 +643,7 @@ export function Settings() {
     { key: 'taskPlugin', label: t('taskPlugin.title') },
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
-    { key: 'about', label: t('about.title') },
+    { key: 'license', label: t('license.title') },
   ];
 
   return (
@@ -481,6 +700,114 @@ export function Settings() {
         </Card>
 
         <div>
+
+      {/* License */}
+      {activeSection === 'license' && (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('license.title')}</CardTitle>
+          <CardDescription>{t('license.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 p-3">
+            <div>
+              <Label>{t('license.gateStatus')}</Label>
+              {licenseGateSnapshot.renewalAlert ? (
+                <p className="mt-1 text-xs text-amber-600">
+                  {t(`license.renewAlert.${licenseGateSnapshot.renewalAlert}`)}
+                </p>
+              ) : null}
+            </div>
+            <Badge
+              variant={
+                licenseGateSnapshot.state === 'granted'
+                  ? 'success'
+                  : licenseGateSnapshot.state === 'blocked'
+                    ? 'destructive'
+                    : 'secondary'
+              }
+            >
+              {t(`license.gateState.${licenseGateSnapshot.state}`)}
+            </Badge>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="settings-license-key">{t('license.inputLabel')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="settings-license-key"
+                value={showLicenseKeyPlain ? licenseKeyInput : maskLicenseKeyForDisplay(licenseKeyInput)}
+                placeholder={t('license.placeholder')}
+                readOnly={!showLicenseKeyPlain && licenseGateSnapshot.hasStoredKey && Boolean(licenseKeyInput)}
+                onChange={(event) => {
+                  setLicenseKeyInput(event.target.value);
+                  setLicenseValidationCode(null);
+                  setLicenseValidationMessage('');
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handleValidateLicense();
+                  }
+                }}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setShowLicenseKeyPlain((prev) => !prev)}
+                title={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
+                aria-label={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
+              >
+                {showLicenseKeyPlain ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
+            </div>
+            {(licenseValidationMessage || licenseValidationCode) ? (
+              <p
+                className={
+                  licenseValidationCode === 'valid' || licenseValidationCode === 'cache_grace_valid'
+                    ? 'text-xs text-green-500'
+                    : licenseValidationCode
+                      ? 'text-xs text-destructive'
+                      : 'text-xs text-muted-foreground'
+                }
+              >
+                {licenseValidationMessage || resolveLicenseMessage(licenseValidationCode)}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" onClick={handleValidateLicense} disabled={licenseBusy}>
+              {licenseBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {t('license.validate')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                void handleForceRevalidate();
+              }}
+              disabled={licenseBusy || !licenseGateSnapshot.hasStoredKey}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              {t('license.revalidate')}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => setShowClearLicenseConfirm(true)}
+              disabled={licenseBusy || (!licenseGateSnapshot.hasStoredKey && !licenseGateSnapshot.hasUsableCache)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {t('license.clear')}
+            </Button>
+          </div>
+
+        </CardContent>
+      </Card>
+      )}
 
       {/* Appearance */}
       {activeSection === 'appearance' && (
@@ -1002,37 +1329,31 @@ export function Settings() {
       </Card>
       )}
 
-      {/* About */}
-      {activeSection === 'about' && (
-      <Card>
-        <CardHeader>
-          <CardTitle>{t('about.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm text-muted-foreground">
-          <p>
-            <strong>{t('about.appName')}</strong> - {t('about.tagline')}
-          </p>
-          <p>{t('about.basedOn')}</p>
-          <p>{t('about.version', { version: currentVersion })}</p>
-          <div className="flex gap-4 pt-2">
-            <Button
-              variant="link"
-              className="h-auto p-0"
-              onClick={() => window.electron.openExternal('https://matchaclaw-x.com')}
-            >
-              {t('about.docs')}
-            </Button>
-            <Button
-              variant="link"
-              className="h-auto p-0"
-              onClick={() => window.electron.openExternal('https://github.com/ValueCell-ai/MatchaClaw')}
-            >
-              {t('about.github')}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      )}
+      <ConfirmDialog
+        open={showReplaceLicenseConfirm}
+        title={t('license.confirmReplace.title')}
+        message={t('license.confirmReplace.message')}
+        confirmLabel={t('license.confirmReplace.confirm')}
+        cancelLabel={t('license.confirmReplace.cancel')}
+        onCancel={() => setShowReplaceLicenseConfirm(false)}
+        onConfirm={() => {
+          setShowReplaceLicenseConfirm(false);
+          void runValidateLicense();
+        }}
+      />
+
+      <ConfirmDialog
+        open={showClearLicenseConfirm}
+        title={t('license.confirmClear.title')}
+        message={t('license.confirmClear.message')}
+        confirmLabel={t('license.confirmClear.confirm')}
+        cancelLabel={t('license.confirmClear.cancel')}
+        variant="destructive"
+        onCancel={() => setShowClearLicenseConfirm(false)}
+        onConfirm={() => {
+          void handleClearStoredLicense();
+        }}
+      />
         </div>
       </div>
     </div>

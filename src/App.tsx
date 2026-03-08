@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
-import { Component, useEffect } from 'react';
+import { Component, useCallback, useEffect, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -88,6 +88,15 @@ class ErrorBoundary extends Component<
   }
 }
 
+interface LicenseGateSnapshot {
+  state: 'checking' | 'granted' | 'blocked';
+  reason: string;
+  checkedAtMs: number;
+  hasStoredKey: boolean;
+  hasUsableCache: boolean;
+  nextRevalidateAtMs: number | null;
+}
+
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -97,6 +106,29 @@ function App() {
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
+  const [, setLicenseGate] = useState<LicenseGateSnapshot>({
+    state: 'checking',
+    reason: 'init',
+    checkedAtMs: 0,
+    hasStoredKey: false,
+    hasUsableCache: false,
+    nextRevalidateAtMs: null,
+  });
+
+  const refreshLicenseGate = useCallback(async () => {
+    try {
+      const result = await window.electron.ipcRenderer.invoke('license:getGateState') as LicenseGateSnapshot;
+      if (result && typeof result === 'object' && typeof result.state === 'string') {
+        setLicenseGate((prev) => (
+          prev.checkedAtMs === result.checkedAtMs && prev.state === result.state
+            ? prev
+            : result
+        ));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     initSettings();
@@ -114,18 +146,63 @@ function App() {
     initGateway();
   }, [initGateway]);
 
-  // Redirect to setup wizard if not complete
+  useEffect(() => {
+    void refreshLicenseGate();
+  }, [refreshLicenseGate, location.pathname]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshLicenseGate();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [refreshLicenseGate]);
+
+  // Route guard: 未授权时只允许留在设置页
   useEffect(() => {
     if (!settingsInitialized) {
       return;
     }
-    if (!setupComplete && !location.pathname.startsWith('/setup')) {
-      navigate('/setup');
-      return;
-    }
-    if (setupComplete && location.pathname.startsWith('/setup')) {
-      navigate('/');
-    }
+    let cancelled = false;
+
+    const enforceGuard = async () => {
+      let latestState: LicenseGateSnapshot['state'] = 'checking';
+      try {
+        const latest = await window.electron.ipcRenderer.invoke('license:getGateState') as LicenseGateSnapshot;
+        if (!cancelled && latest && typeof latest.state === 'string') {
+          latestState = latest.state;
+          setLicenseGate(latest);
+        }
+      } catch {
+        // ignore
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      if (latestState !== 'granted' && !location.pathname.startsWith('/settings')) {
+        navigate('/settings?section=license', { replace: true });
+        return;
+      }
+
+      if (latestState !== 'granted') {
+        return;
+      }
+
+      if (!setupComplete && !location.pathname.startsWith('/setup')) {
+        navigate('/setup', { replace: true });
+        return;
+      }
+
+      if (setupComplete && location.pathname.startsWith('/setup')) {
+        navigate('/', { replace: true });
+      }
+    };
+
+    void enforceGuard();
+    return () => {
+      cancelled = true;
+    };
   }, [settingsInitialized, setupComplete, location.pathname, navigate]);
 
   // Listen for navigation events from main process
