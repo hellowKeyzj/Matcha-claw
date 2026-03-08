@@ -2,7 +2,7 @@
     "gatewayNotRunning": "网关未运行",
     "gatewayRequired": "OpenClaw 网关需要运行才能使用聊天。它将自动启动，或者您可以从设置中启动。",
     "mainModelBlocked": {
-        "title": "主 Agent 未配置模型",
+        "title": "默认 Agent 未配置模型",
         "description": "请先到 设置 > AI 模型提供商 添加模型，并在智能体管理台完成模型配置后再继续聊天。"
     },
     "welcome": {

@@ -6,6 +6,7 @@ export const SETTINGS_SECTIONS = [
   'updates',
   'advanced',
   'license',
+  'diagnostics',
 ] as const;
 
 export type SettingsSectionKey = (typeof SETTINGS_SECTIONS)[number];

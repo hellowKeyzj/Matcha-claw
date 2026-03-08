@@ -29,7 +29,7 @@ describe('subagents store', () => {
     );
   });
 
-  it('loadAgentsForDisplay 会从配置快照补全 workspace/model 供编辑表单使用', async () => {
+  it('loadAgents 会从配置快照补全 workspace/model 供编辑表单使用', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -66,7 +66,7 @@ describe('subagents store', () => {
         },
       });
 
-    await useSubagentsStore.getState().loadAgentsForDisplay();
+    await useSubagentsStore.getState().loadAgents();
 
     expect(useSubagentsStore.getState().agents).toMatchObject([
       {
@@ -306,68 +306,6 @@ describe('subagents store', () => {
     );
   });
 
-  it('reconcileAgentModels 按 defaults.primary/defaults.fallbacks/agents.list 顺序回填并写回配置', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke
-      .mockResolvedValueOnce({
-        success: true,
-        result: {
-          hash: 'hash-reconcile-multi',
-          config: {
-            agents: {
-              defaults: {
-                model: { primary: 'custom/removed-default' },
-              },
-              list: [
-                { id: 'main', model: 'custom/removed-main-model' },
-                { id: 'writer', model: 'anthropic/removed-writer-model' },
-              ],
-            },
-            models: {
-              providers: {
-                openai: {
-                  models: [{ id: 'gpt-4.1-mini' }],
-                },
-                anthropic: {
-                  models: [{ id: 'claude-3-7-sonnet' }],
-                },
-              },
-            },
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        success: true,
-        result: { ok: true },
-      });
-
-    const changed = await useSubagentsStore.getState().reconcileAgentModels({
-      removedModelIds: [
-        'custom/removed-default',
-        'custom/removed-main-model',
-        'anthropic/removed-writer-model',
-      ],
-    });
-
-    expect(changed).toBe(true);
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.patch',
-      {
-        raw: JSON.stringify({
-          agents: {
-            defaults: { model: { primary: 'openai/gpt-4.1-mini' } },
-            list: [
-              { id: 'main', model: 'openai/gpt-4.1-mini' },
-              { id: 'writer', model: 'openai/gpt-4.1-mini' },
-            ],
-          },
-        }),
-        baseHash: 'hash-reconcile-multi',
-      },
-    );
-  });
-
   it('loadAgents 不应用 defaults.model.fallbacks 的运行时回填', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
@@ -463,193 +401,6 @@ describe('subagents store', () => {
     expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.patch', expect.anything());
   });
 
-  it('reconcileAgentModels 在仅有一个可用模型时会写回配置', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke
-      .mockResolvedValueOnce({
-        success: true,
-        result: {
-          hash: 'hash-reconcile-single',
-          config: {
-            agents: {
-              defaults: {
-                model: { primary: 'custom/removed-main-model' },
-              },
-              list: [
-                { id: 'main', model: 'custom/removed-main-model' },
-                { id: 'writer', model: 'openai/gpt-4.1-mini' },
-              ],
-            },
-            models: {
-              providers: {
-                openai: {
-                  models: [{ id: 'gpt-4.1-mini' }],
-                },
-              },
-            },
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        success: true,
-        result: { ok: true },
-      });
-
-    const changed = await useSubagentsStore.getState().reconcileAgentModels({
-      removedModelIds: ['custom/removed-main-model'],
-    });
-
-    expect(changed).toBe(true);
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.patch',
-      {
-        raw: JSON.stringify({
-          agents: {
-            defaults: { model: { primary: 'openai/gpt-4.1-mini' } },
-            list: [{ id: 'main', model: 'openai/gpt-4.1-mini' }],
-          },
-        }),
-        baseHash: 'hash-reconcile-single',
-      }
-    );
-  });
-
-  it('reconcileAgentModels 保留 model 对象形态并仅替换 primary', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke
-      .mockResolvedValueOnce({
-        success: true,
-        result: {
-          hash: 'hash-reconcile-object-shape',
-          config: {
-            agents: {
-              defaults: {
-                model: {
-                  primary: 'custom/removed-main-model',
-                  fallbacks: ['openai/gpt-4.1-mini'],
-                },
-              },
-              list: [
-                {
-                  id: 'main',
-                  model: {
-                    primary: 'custom/removed-main-model',
-                    fallbacks: ['openai/gpt-4.1-mini'],
-                  },
-                },
-              ],
-            },
-            models: {
-              providers: {
-                openai: {
-                  models: [{ id: 'gpt-4.1-mini' }],
-                },
-              },
-            },
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        success: true,
-        result: { ok: true },
-      });
-
-    const changed = await useSubagentsStore.getState().reconcileAgentModels({
-      removedModelIds: ['custom/removed-main-model'],
-    });
-
-    expect(changed).toBe(true);
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.patch',
-      {
-        raw: JSON.stringify({
-          agents: {
-            defaults: {
-              model: {
-                primary: 'openai/gpt-4.1-mini',
-                fallbacks: ['openai/gpt-4.1-mini'],
-              },
-            },
-            list: [
-              {
-                id: 'main',
-                model: {
-                  primary: 'openai/gpt-4.1-mini',
-                  fallbacks: ['openai/gpt-4.1-mini'],
-                },
-              },
-            ],
-          },
-        }),
-        baseHash: 'hash-reconcile-object-shape',
-      },
-    );
-  });
-
-  it('reconcileAgentModels 传入预取配置时不再重复调用 config.get', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    const preloadedConfig = {
-      hash: 'hash-reconcile-preloaded',
-      config: {
-        agents: {
-          defaults: {
-            model: { primary: 'custom/removed-main-model' },
-          },
-          list: [
-            { id: 'main', model: 'custom/removed-main-model' },
-          ],
-        },
-        models: {
-          providers: {
-            openai: {
-              models: [{ id: 'gpt-4.1-mini' }],
-            },
-          },
-        },
-      },
-    };
-
-    invoke.mockResolvedValueOnce({
-      success: true,
-      result: { ok: true },
-    });
-
-    const changed = await useSubagentsStore.getState().reconcileAgentModels({
-      removedModelIds: ['custom/removed-main-model'],
-      cfg: preloadedConfig as ConfigGetResult,
-    });
-
-    expect(changed).toBe(true);
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.get', {});
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.patch',
-      {
-        raw: JSON.stringify({
-          agents: {
-            defaults: { model: { primary: 'openai/gpt-4.1-mini' } },
-            list: [{ id: 'main', model: 'openai/gpt-4.1-mini' }],
-          },
-        }),
-        baseHash: 'hash-reconcile-preloaded',
-      },
-    );
-  });
-
-  it('reconcileAgentModels 在 removedModelIds 为空时直接 no-op', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-
-    const changed = await useSubagentsStore.getState().reconcileAgentModels({
-      removedModelIds: [],
-    });
-
-    expect(changed).toBe(false);
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.get', {});
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.patch', expect.anything());
-  });
-
   it('loadAgents 不依赖运行时模型目录', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
@@ -722,6 +473,38 @@ describe('subagents store', () => {
     expect(agents.map((item) => item.id)).toEqual(['main', 'test4']);
   });
 
+  it('loadAgents 不强制注入 main，仅按运行时 agents.list 集合渲染', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          agents: [{ id: 'ontology-expert', name: 'Ontology-Expert' }],
+          defaultId: 'ontology-expert',
+          mainKey: 'main',
+          scope: 'per-sender',
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          config: {
+            agents: {
+              list: [
+                { id: 'ontology-expert', name: 'Ontology-Expert' },
+                { id: 'business-expert', name: 'Business-expert' },
+              ],
+            },
+          },
+        },
+      });
+
+    await useSubagentsStore.getState().loadAgents();
+
+    const agents = useSubagentsStore.getState().agents;
+    expect(agents.map((item) => item.id)).toEqual(['ontology-expert']);
+  });
+
   it('loadAgents 在运行时列表缺失 agent 时，不从配置列表补齐', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
@@ -754,7 +537,7 @@ describe('subagents store', () => {
     expect(agents.map((item) => item.id)).toEqual(['main']);
   });
 
-  it('loadAgentsForDisplay 在运行时列表缺失 agent 时，不从配置列表补齐', async () => {
+  it('loadAgents 在运行时列表缺失 agent 时，不从配置列表补齐（配置补水路径）', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, method) => {
       if (channel === 'gateway:rpc' && method === 'agents.list') {
@@ -783,13 +566,13 @@ describe('subagents store', () => {
       throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().loadAgentsForDisplay();
+    await useSubagentsStore.getState().loadAgents();
 
     const agents = useSubagentsStore.getState().agents;
     expect(agents.map((item) => item.id)).toEqual(['main']);
   });
 
-  it('loadAgentsForDisplay 默认模型/工作区补全只作用于 defaultAgentId，不写死 main', async () => {
+  it('loadAgents 默认模型/工作区补全只作用于 defaultAgentId，不写死 main', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -822,7 +605,7 @@ describe('subagents store', () => {
         },
       });
 
-    await useSubagentsStore.getState().loadAgentsForDisplay();
+    await useSubagentsStore.getState().loadAgents();
 
     const agents = useSubagentsStore.getState().agents;
     const dev = agents.find((item) => item.id === 'dev');
@@ -899,7 +682,7 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().loading).toBe(false);
   });
 
-  it('loadAgentsForDisplay 会先用 agents.list.identity，再回退 agent.identity.get 补齐 emoji', async () => {
+  it('loadAgents 会先用 agents.list.identity，再回退 agent.identity.get 补齐 emoji', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, method, params) => {
       if (channel === 'gateway:rpc' && method === 'agents.list') {
@@ -933,7 +716,7 @@ describe('subagents store', () => {
       throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().loadAgentsForDisplay();
+    await useSubagentsStore.getState().loadAgents();
 
     await vi.waitFor(() => {
       const agents = useSubagentsStore.getState().agents;
@@ -953,7 +736,144 @@ describe('subagents store', () => {
     });
   });
 
-  it('deleteAgent 后即使遇到短暂陈旧 agents.list，也不应回显已删除 agent', async () => {
+  it('deleteAgent 后，晚到的 identity hydrate 不会把已删 agent 回写到列表', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    let resolveGhostIdentity: ((value: unknown) => void) | null = null;
+    const ghostIdentityPromise = new Promise((resolve) => {
+      resolveGhostIdentity = resolve;
+    });
+
+    invoke.mockImplementation(async (channel, method, params) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+              { id: 'ghost-delete-002', name: 'ghost-delete-002' },
+            ],
+            defaultId: 'main',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          success: true,
+          result: {
+            config: {
+              agents: {
+                list: [
+                  { id: 'main', name: 'Main' },
+                  { id: 'ghost-delete-002', name: 'ghost-delete-002', model: 'local/claude-sonnet-4.5' },
+                ],
+              },
+            },
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agent.identity.get') {
+        const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
+        if (agentId === 'ghost-delete-002') {
+          return ghostIdentityPromise;
+        }
+        return { success: true, result: { agentId } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.delete') {
+        return { success: true, result: { ok: true } };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().loadAgents();
+    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main', 'ghost-delete-002']);
+
+    await useSubagentsStore.getState().deleteAgent('ghost-delete-002');
+    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
+
+    resolveGhostIdentity?.({
+      success: true,
+      result: {
+        agentId: 'ghost-delete-002',
+        emoji: '🏁',
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
+    });
+  });
+
+  it('deleteAgent 后，旧的 agents.list 结果不会把待删 agent 回显', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/workspace/main',
+          model: 'openai/gpt-4.1-mini',
+          isDefault: true,
+          identity: { emoji: '⚙️' },
+        },
+        {
+          id: 'ghost-delete-003',
+          name: 'ghost-delete-003',
+          workspace: '/workspace/ghost-delete-003',
+          model: 'local/claude-sonnet-4.5',
+          isDefault: false,
+          identity: { emoji: '🏁' },
+        },
+      ],
+    });
+
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, method, params) => {
+      if (channel === 'gateway:rpc' && method === 'agents.delete') {
+        expect(params).toEqual({ agentId: 'ghost-delete-003', deleteFiles: true });
+        return { success: true, result: { ok: true } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+              { id: 'ghost-delete-003', name: 'ghost-delete-003', identity: { emoji: '🏁' } },
+            ],
+            defaultId: 'main',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          success: true,
+          result: {
+            config: {
+              agents: {
+                list: [
+                  { id: 'main', name: 'Main' },
+                  { id: 'ghost-delete-003', name: 'ghost-delete-003', model: 'local/claude-sonnet-4.5' },
+                ],
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().deleteAgent('ghost-delete-003');
+    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
+
+    await useSubagentsStore.getState().loadAgents();
+
+    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
+  });
+
+  it('deleteAgent 成功后立即从前端列表移除，不阻塞等待 runtime 刷新', async () => {
     useSubagentsStore.setState({
       agents: [
         {
@@ -981,29 +901,6 @@ describe('subagents store', () => {
         expect(params).toEqual({ agentId: 'ghost-delete-001', deleteFiles: true });
         return { success: true, result: { ok: true } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [
-              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-              { id: 'ghost-delete-001', name: 'ghost-delete-001', identity: { emoji: '🏁' } },
-            ],
-            defaultId: 'main',
-            mainKey: 'main',
-            scope: 'per-sender',
-          },
-        };
-      }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          config: {
-            agents: {
-              list: [{ id: 'main', name: 'Main' }],
-            },
-          },
-        };
-      }
       throw new Error(`Unexpected invoke call: ${channel} ${String(method)}`);
     });
 
@@ -1011,5 +908,6 @@ describe('subagents store', () => {
 
     const agents = useSubagentsStore.getState().agents;
     expect(agents.map((item) => item.id)).toEqual(['main']);
+    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'agents.list', {});
   });
 });

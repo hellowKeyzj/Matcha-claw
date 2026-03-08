@@ -59,6 +59,7 @@ const electronAPI = {
         'license:getStoredKey',
         'license:forceRevalidate',
         'license:clearStoredKey',
+        'diagnostics:collectBundle',
         'usage:recentTokenHistory',
         // Update
         'update:status',
@@ -197,6 +198,7 @@ const electronAPI = {
         'oauth:success',
         'oauth:error',
         'openclaw:cli-installed',
+        'config:changed',
       ];
 
       if (validChannels.includes(channel)) {
@@ -239,6 +241,7 @@ const electronAPI = {
         'oauth:code',
         'oauth:success',
         'oauth:error',
+        'config:changed',
       ];
 
       if (validChannels.includes(channel)) {

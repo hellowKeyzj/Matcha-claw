@@ -3,7 +3,9 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
-import { existsSync, cpSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, type Stats } from 'node:fs';
+import { access, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, extname, basename, dirname, resolve, relative, isAbsolute } from 'node:path';
 import crypto from 'node:crypto';
@@ -56,6 +58,7 @@ import { applyProxySettings } from './proxy';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { registerTeamFsHandlers } from './team-fs-handlers';
+import { ConfigDomainService } from './config-domain-service';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 import {
   clearStoredLicenseData,
@@ -65,6 +68,34 @@ import {
   getStoredLicenseKey,
   validateLicenseKey,
 } from '../utils/license';
+
+type MarkConfigChanged = (reason: string) => Promise<void>;
+
+const CONFIG_MUTATION_RPC_METHODS = new Set<string>([
+  'config.set',
+  'config.patch',
+  'config.apply',
+  'agents.create',
+  'agents.update',
+  'agents.delete',
+  'skills.update',
+  'voicewake.set',
+]);
+
+function shouldEmitConfigChangedForRpcMethod(method: string): boolean {
+  return CONFIG_MUTATION_RPC_METHODS.has(method.trim());
+}
+
+async function markConfigChangedSafely(
+  markConfigChanged: MarkConfigChanged,
+  reason: string,
+): Promise<void> {
+  try {
+    await markConfigChanged(reason);
+  } catch (error) {
+    logger.warn(`Failed to emit config:changed (${reason})`, error);
+  }
+}
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -142,17 +173,31 @@ export function registerIpcHandlers(
   matchaclawHubService: MatchaClawHubService,
   mainWindow: BrowserWindow
 ): void {
+  const configDomainService = new ConfigDomainService(mainWindow);
+  configDomainService.start();
+  const markConfigChanged: MarkConfigChanged = async (reason) => {
+    await configDomainService.markConfigPossiblyChanged(reason);
+  };
+
+  app.once('before-quit', () => {
+    configDomainService.dispose();
+  });
+
+  mainWindow.on('closed', () => {
+    configDomainService.dispose();
+  });
+
   // Gateway handlers
-  registerGatewayHandlers(gatewayManager, mainWindow);
+  registerGatewayHandlers(gatewayManager, mainWindow, markConfigChanged);
 
   // MatchaClawHub handlers
   registerMatchaClawHubHandlers(matchaclawHubService);
 
   // OpenClaw handlers
-  registerOpenClawHandlers(gatewayManager);
+  registerOpenClawHandlers(gatewayManager, markConfigChanged);
 
   // Provider handlers
-  registerProviderHandlers(gatewayManager);
+  registerProviderHandlers(gatewayManager, markConfigChanged);
 
   // Shell handlers
   registerShellHandlers();
@@ -177,12 +222,13 @@ export function registerIpcHandlers(
 
   // Log handlers (for UI to read gateway/app logs)
   registerLogHandlers();
+  registerDiagnosticsHandlers(gatewayManager);
 
   // Usage handlers
   registerUsageHandlers();
 
   // Skill config handlers (direct file access, no Gateway RPC)
-  registerSkillConfigHandlers();
+  registerSkillConfigHandlers(markConfigChanged);
 
   // Cron task handlers (proxy to Gateway RPC)
   registerCronHandlers(gatewayManager);
@@ -259,17 +305,21 @@ function registerRolesMetadataHandlers(gatewayManager: GatewayManager): void {
  * Skill config IPC handlers
  * Direct read/write to ~/.openclaw/openclaw.json (bypasses Gateway RPC)
  */
-function registerSkillConfigHandlers(): void {
+function registerSkillConfigHandlers(markConfigChanged: MarkConfigChanged): void {
   // Update skill config (apiKey and env)
   ipcMain.handle('skill:updateConfig', async (_, params: {
     skillKey: string;
     apiKey?: string;
     env?: Record<string, string>;
   }) => {
-    return await updateSkillConfig(params.skillKey, {
+    const result = await updateSkillConfig(params.skillKey, {
       apiKey: params.apiKey,
       env: params.env,
     });
+    if (result.success) {
+      await markConfigChangedSafely(markConfigChanged, 'skill:updateConfig');
+    }
+    return result;
   });
 
   // Get skill config
@@ -556,12 +606,475 @@ function registerLogHandlers(): void {
   });
 }
 
+const DIAGNOSTICS_RECENT_WINDOW_MS = 72 * 60 * 60 * 1000;
+const DIAGNOSTICS_WORKSPACE_FILE_WHITELIST = new Set<string>([
+  'AGENTS.md',
+  'TOOLS.md',
+  'BOOTSTRAP.md',
+  'HEARTBEAT.md',
+  'IDENTITY.md',
+  'SOUL.md',
+  'USER.md',
+  'MEMORY.md',
+]);
+const SENSITIVE_KEY_PATTERN = /(token|api[_-]?key|secret|password|authorization|auth[_-]?token|auth[_-]?header)/i;
+
+interface DiagnosticsBundleEntry {
+  sourcePath: string;
+  destinationPath: string;
+  redactJson: boolean;
+}
+
+interface DiagnosticsBundleCounts {
+  userDataLogs: number;
+  openclawLogs: number;
+  sessionJsonl: number;
+  sessionIndexes: number;
+  workspaceFiles: number;
+  workspaceSubagentFiles: number;
+  pluginManifests: number;
+  settingsJson: number;
+  openclawJson: number;
+}
+
+interface DiagnosticsBundleResult {
+  zipPath: string;
+  generatedAt: string;
+  fileCount: number;
+  counts: DiagnosticsBundleCounts;
+}
+
+function createEmptyDiagnosticsCounts(): DiagnosticsBundleCounts {
+  return {
+    userDataLogs: 0,
+    openclawLogs: 0,
+    sessionJsonl: 0,
+    sessionIndexes: 0,
+    workspaceFiles: 0,
+    workspaceSubagentFiles: 0,
+    pluginManifests: 0,
+    settingsJson: 0,
+    openclawJson: 0,
+  };
+}
+
+function normalizeBundleDestination(relativePathValue: string): string {
+  return relativePathValue
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\.\.(\/|\\)/g, '');
+}
+
+function isRecentFile(fileStats: Stats, cutoffMs: number): boolean {
+  return fileStats.mtimeMs >= cutoffMs;
+}
+
+function isSensitiveKeyName(key: string): boolean {
+  return SENSITIVE_KEY_PATTERN.test(key) || key === 'gatewayToken';
+}
+
+function maskStringValue(raw: string, forceMask = false): string {
+  if (!raw) {
+    return raw;
+  }
+
+  if (forceMask) {
+    return '***';
+  }
+
+  let masked = raw;
+  masked = masked.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/\s@]+)@/g, '$1***:***@');
+  masked = masked.replace(/(^|[\s])(Bearer\s+)([A-Za-z0-9._~+/=-]+)/gi, '$1$2***');
+  masked = masked.replace(/((?:api[_-]?key|token|secret|password)\s*[:=]\s*)(["']?)[^"'\s,]+/gi, '$1$2***');
+  return masked;
+}
+
+function sanitizeStructuredValue(value: unknown, parentKey = ''): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeStructuredValue(item, parentKey));
+  }
+
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+      if (isSensitiveKeyName(key)) {
+        if (typeof nestedValue === 'string') {
+          result[key] = maskStringValue(nestedValue, true);
+        } else if (nestedValue == null) {
+          result[key] = nestedValue;
+        } else {
+          result[key] = '***';
+        }
+        continue;
+      }
+      result[key] = sanitizeStructuredValue(nestedValue, key);
+    }
+    return result;
+  }
+
+  if (typeof value === 'string') {
+    return maskStringValue(value, isSensitiveKeyName(parentKey));
+  }
+
+  return value;
+}
+
+async function pathExists(pathname: string): Promise<boolean> {
+  try {
+    await access(pathname);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function walkFilesRecursively(
+  rootDir: string,
+  visit: (filePath: string, fileName: string, fileStats: Stats) => Promise<void>,
+): Promise<void> {
+  let entries: Array<import('node:fs').Dirent>;
+  try {
+    entries = await readdir(rootDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(rootDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      await walkFilesRecursively(fullPath, visit);
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    let fileStats: Stats;
+    try {
+      fileStats = await stat(fullPath);
+    } catch {
+      continue;
+    }
+    await visit(fullPath, entry.name, fileStats);
+  }
+}
+
+function addDiagnosticsEntry(
+  entryMap: Map<string, DiagnosticsBundleEntry>,
+  entry: DiagnosticsBundleEntry,
+): void {
+  const normalizedDestination = normalizeBundleDestination(entry.destinationPath);
+  if (!normalizedDestination) {
+    return;
+  }
+  entryMap.set(normalizedDestination.toLowerCase(), {
+    ...entry,
+    destinationPath: normalizedDestination,
+  });
+}
+
+function formatBundleTimestamp(date: Date): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+}
+
+function execFileAsync(command: string, args: string[], cwd?: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        cwd,
+        windowsHide: true,
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024 * 10,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const detail = `${stderr || ''}\n${stdout || ''}`.trim();
+          reject(new Error(detail ? `${error.message}\n${detail}` : error.message));
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+function escapePowerShellLiteral(input: string): string {
+  return input.replace(/'/g, "''");
+}
+
+async function compressDiagnosticsStagingDir(stagingDir: string, outputZipPath: string): Promise<void> {
+  await rm(outputZipPath, { force: true });
+
+  if (process.platform === 'win32') {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `Compress-Archive -Path '${escapePowerShellLiteral(join(stagingDir, '*'))}' -DestinationPath '${escapePowerShellLiteral(outputZipPath)}' -Force`,
+    ].join('; ');
+    await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      script,
+    ]);
+    return;
+  }
+
+  await execFileAsync('zip', ['-qr', outputZipPath, '.'], stagingDir);
+}
+
+async function readAndMaskJsonFile(filePath: string): Promise<string> {
+  const raw = await readFile(filePath, 'utf8');
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const masked = sanitizeStructuredValue(parsed);
+    return `${JSON.stringify(masked, null, 2)}\n`;
+  } catch {
+    return maskStringValue(raw);
+  }
+}
+
+async function copyDiagnosticsEntryToStaging(
+  stagingDir: string,
+  entry: DiagnosticsBundleEntry,
+): Promise<void> {
+  const destinationPath = join(stagingDir, entry.destinationPath);
+  await mkdir(dirname(destinationPath), { recursive: true });
+
+  if (entry.redactJson) {
+    const maskedContent = await readAndMaskJsonFile(entry.sourcePath);
+    await writeFile(destinationPath, maskedContent, 'utf8');
+    return;
+  }
+
+  await copyFile(entry.sourcePath, destinationPath);
+}
+
+async function collectDiagnosticsBundle(gatewayManager: GatewayManager): Promise<DiagnosticsBundleResult> {
+  const generatedAtDate = new Date();
+  const generatedAt = generatedAtDate.toISOString();
+  const cutoffMs = Date.now() - DIAGNOSTICS_RECENT_WINDOW_MS;
+  const userDataDir = app.getPath('userData');
+  const openclawConfigDir = getOpenClawConfigDir();
+  const bundleRootDir = join(userDataDir, 'diagnostics-bundles');
+  const bundleStamp = formatBundleTimestamp(generatedAtDate);
+  const stagingDir = join(bundleRootDir, `staging-${bundleStamp}-${process.pid}`);
+  const outputZipPath = join(bundleRootDir, `matchaclaw-diagnostics-${bundleStamp}.zip`);
+
+  const counts = createEmptyDiagnosticsCounts();
+  const entryMap = new Map<string, DiagnosticsBundleEntry>();
+
+  const userDataLogsDir = join(userDataDir, 'logs');
+  await walkFilesRecursively(userDataLogsDir, async (filePath, _fileName, fileStats) => {
+    if (!isRecentFile(fileStats, cutoffMs)) {
+      return;
+    }
+    counts.userDataLogs += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: filePath,
+      destinationPath: join('userdata', relative(userDataDir, filePath)),
+      redactJson: false,
+    });
+  });
+
+  const openclawLogsDir = join(openclawConfigDir, 'logs');
+  await walkFilesRecursively(openclawLogsDir, async (filePath, _fileName, fileStats) => {
+    if (!isRecentFile(fileStats, cutoffMs)) {
+      return;
+    }
+    counts.openclawLogs += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: filePath,
+      destinationPath: join('openclaw', relative(openclawConfigDir, filePath)),
+      redactJson: false,
+    });
+  });
+
+  const agentsDir = join(openclawConfigDir, 'agents');
+  let agentEntries: Array<import('node:fs').Dirent> = [];
+  try {
+    agentEntries = await readdir(agentsDir, { withFileTypes: true });
+  } catch {
+    agentEntries = [];
+  }
+  for (const agentEntry of agentEntries) {
+    if (!agentEntry.isDirectory()) {
+      continue;
+    }
+    const sessionsDir = join(agentsDir, agentEntry.name, 'sessions');
+    const sessionsIndexPath = join(sessionsDir, 'sessions.json');
+    if (await pathExists(sessionsIndexPath)) {
+      counts.sessionIndexes += 1;
+      addDiagnosticsEntry(entryMap, {
+        sourcePath: sessionsIndexPath,
+        destinationPath: join('openclaw', relative(openclawConfigDir, sessionsIndexPath)),
+        redactJson: false,
+      });
+    }
+
+    await walkFilesRecursively(sessionsDir, async (filePath, fileName, fileStats) => {
+      if (!fileName.endsWith('.jsonl')) {
+        return;
+      }
+      if (!isRecentFile(fileStats, cutoffMs)) {
+        return;
+      }
+      counts.sessionJsonl += 1;
+      addDiagnosticsEntry(entryMap, {
+        sourcePath: filePath,
+        destinationPath: join('openclaw', relative(openclawConfigDir, filePath)),
+        redactJson: false,
+      });
+    });
+  }
+
+  const workspaceDir = join(openclawConfigDir, 'workspace');
+  await walkFilesRecursively(workspaceDir, async (filePath, fileName) => {
+    if (!DIAGNOSTICS_WORKSPACE_FILE_WHITELIST.has(fileName)) {
+      return;
+    }
+    counts.workspaceFiles += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: filePath,
+      destinationPath: join('openclaw', relative(openclawConfigDir, filePath)),
+      redactJson: false,
+    });
+  });
+
+  const subagentsWorkspaceDir = join(openclawConfigDir, 'workspace-subagents');
+  await walkFilesRecursively(subagentsWorkspaceDir, async (filePath, fileName) => {
+    if (!DIAGNOSTICS_WORKSPACE_FILE_WHITELIST.has(fileName)) {
+      return;
+    }
+    counts.workspaceSubagentFiles += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: filePath,
+      destinationPath: join('openclaw', relative(openclawConfigDir, filePath)),
+      redactJson: false,
+    });
+  });
+
+  const extensionsDir = join(openclawConfigDir, 'extensions');
+  let extensionEntries: Array<import('node:fs').Dirent> = [];
+  try {
+    extensionEntries = await readdir(extensionsDir, { withFileTypes: true });
+  } catch {
+    extensionEntries = [];
+  }
+  for (const extensionEntry of extensionEntries) {
+    if (!extensionEntry.isDirectory()) {
+      continue;
+    }
+    const manifestPath = join(extensionsDir, extensionEntry.name, 'openclaw.plugin.json');
+    if (!(await pathExists(manifestPath))) {
+      continue;
+    }
+    counts.pluginManifests += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: manifestPath,
+      destinationPath: join('openclaw', relative(openclawConfigDir, manifestPath)),
+      redactJson: false,
+    });
+  }
+
+  const settingsPath = join(userDataDir, 'settings.json');
+  if (await pathExists(settingsPath)) {
+    counts.settingsJson += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: settingsPath,
+      destinationPath: join('userdata', 'settings.json'),
+      redactJson: true,
+    });
+  }
+
+  const openclawConfigPath = join(openclawConfigDir, 'openclaw.json');
+  if (await pathExists(openclawConfigPath)) {
+    counts.openclawJson += 1;
+    addDiagnosticsEntry(entryMap, {
+      sourcePath: openclawConfigPath,
+      destinationPath: join('openclaw', 'openclaw.json'),
+      redactJson: true,
+    });
+  }
+
+  const selectedEntries = Array.from(entryMap.values());
+  await mkdir(bundleRootDir, { recursive: true });
+  await rm(stagingDir, { recursive: true, force: true });
+  await mkdir(stagingDir, { recursive: true });
+
+  try {
+    for (const entry of selectedEntries) {
+      await copyDiagnosticsEntryToStaging(stagingDir, entry);
+    }
+
+    const diagnosticsPayload = sanitizeStructuredValue({
+      generatedAt,
+      app: {
+        name: app.getName(),
+        version: app.getVersion(),
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        arch: process.arch,
+        electron: process.versions.electron,
+        node: process.versions.node,
+      },
+      runtime: {
+        userDataDir,
+        openclawConfigDir,
+        cutoffIso: new Date(cutoffMs).toISOString(),
+      },
+      gateway: {
+        status: gatewayManager.getStatus(),
+        runtimePaths: gatewayManager.getRuntimePaths(),
+      },
+      license: {
+        gateSnapshot: getLicenseGateSnapshot(),
+      },
+      bundle: {
+        fileCount: selectedEntries.length,
+        counts,
+      },
+    });
+    await writeFile(join(stagingDir, 'diagnostics.json'), `${JSON.stringify(diagnosticsPayload, null, 2)}\n`, 'utf8');
+
+    await compressDiagnosticsStagingDir(stagingDir, outputZipPath);
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
+  }
+
+  return {
+    zipPath: outputZipPath,
+    generatedAt,
+    fileCount: selectedEntries.length + 1,
+    counts,
+  };
+}
+
+function registerDiagnosticsHandlers(gatewayManager: GatewayManager): void {
+  ipcMain.handle('diagnostics:collectBundle', async () => {
+    return await collectDiagnosticsBundle(gatewayManager);
+  });
+}
+
 /**
  * Gateway-related IPC handlers
  */
 function registerGatewayHandlers(
   gatewayManager: GatewayManager,
-  mainWindow: BrowserWindow
+  mainWindow: BrowserWindow,
+  markConfigChanged: MarkConfigChanged,
 ): void {
   // Get Gateway status
   ipcMain.handle('gateway:status', () => {
@@ -607,6 +1120,9 @@ function registerGatewayHandlers(
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {
     try {
       const result = await gatewayManager.rpc(method, params, timeoutMs);
+      if (shouldEmitConfigChangedForRpcMethod(method)) {
+        await markConfigChangedSafely(markConfigChanged, `gateway:rpc:${method}`);
+      }
       return { success: true, result };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -770,7 +1286,10 @@ function registerGatewayHandlers(
  * OpenClaw-related IPC handlers
  * For checking package status and channel configuration
  */
-function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
+function registerOpenClawHandlers(
+  gatewayManager: GatewayManager,
+  markConfigChanged: MarkConfigChanged,
+): void {
   type PluginInstallResult = {
     installed: boolean;
     warning?: string;
@@ -1169,6 +1688,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
         version: result.version,
       });
       ensureSkillEnabledInConfig('task-manager');
+      await markConfigChangedSafely(markConfigChanged, 'task:pluginInstall');
       gatewayManager.debouncedRestart();
       return {
         success: true,
@@ -1209,6 +1729,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           sourcePath: installResult.sourcePath,
           version: installResult.version,
         });
+        await markConfigChangedSafely(markConfigChanged, 'channel:dingtalk:pluginInstall');
         await saveChannelConfig(channelType, config);
         logger.info(
           `Skipping app-forced Gateway restart after channel:saveConfig (${channelType}); Gateway handles channel config reload/restart internally`
@@ -1396,7 +1917,10 @@ function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
 /**
  * Provider-related IPC handlers
  */
-function registerProviderHandlers(gatewayManager: GatewayManager): void {
+function registerProviderHandlers(
+  gatewayManager: GatewayManager,
+  markConfigChanged: MarkConfigChanged,
+): void {
   const openclawConfigPath = join(homedir(), '.openclaw', 'openclaw.json');
 
   function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1747,6 +2271,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           }
 
           runProviderMutationReconcileIfNeeded();
+          await markConfigChangedSafely(markConfigChanged, 'provider:save');
 
           // Debounced restart so the gateway picks up new config/env vars.
           // Multiple rapid provider saves (e.g. during setup) are coalesced.
@@ -1775,6 +2300,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           const ock = getOpenClawProviderKey(existing.type, providerId);
           await removeProviderFromOpenClaw(ock);
           runProviderMutationReconcileIfNeeded();
+          await markConfigChangedSafely(markConfigChanged, 'provider:delete');
 
           // Debounced restart so the gateway stops loading the deleted provider.
           logger.info(`Scheduling Gateway restart after deleting provider "${ock}"`);
@@ -1897,6 +2423,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           }
 
           runProviderMutationReconcileIfNeeded();
+          await markConfigChangedSafely(markConfigChanged, 'provider:updateWithKey');
 
           // Debounced restart so the gateway picks up updated config/env vars.
           logger.info(`Scheduling Gateway restart after updating provider "${ock}" config`);
@@ -1938,6 +2465,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       try {
         if (ock) {
           await removeProviderFromOpenClaw(ock);
+          await markConfigChangedSafely(markConfigChanged, 'provider:deleteApiKey');
         }
       } catch (err) {
         console.warn('Failed to completely remove provider from OpenClaw:', err);
@@ -2061,6 +2589,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           }
 
           runProviderMutationReconcileIfNeeded();
+          await markConfigChangedSafely(markConfigChanged, 'provider:setDefault');
 
           // Debounced restart so the gateway picks up the new default provider.
           // Because OAuth success triggers a debounced restart, the gateway might not be

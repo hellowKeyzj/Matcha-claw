@@ -182,7 +182,7 @@ export function createMenu(): void {
         {
           label: 'Report Issue',
           click: async () => {
-            await shell.openExternal('https://github.com/ValueCell-ai/MatchaClaw/issues');
+            await shell.openExternal('https://github.com/hellowKeyzj/Matcha-claw/issues');
           },
         },
         { type: 'separator' },

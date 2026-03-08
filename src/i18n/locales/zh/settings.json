@@ -227,6 +227,33 @@
     "errorDetails": "错误详情：",
     "help": "开启自动更新后，更新将自动下载并安装。"
   },
+  "diagnostics": {
+    "title": "日志收集",
+    "description": "一键收集定位问题所需日志并打包压缩。",
+    "masking": "导出前会自动对 openclaw.json、settings.json、diagnostics.json 中的 token / API Key / 代理账号信息做掩码。",
+    "includesTitle": "日志包包含",
+    "collect": "收集并导出",
+    "collecting": "收集中...",
+    "openFolder": "打开压缩包位置",
+    "lastBundle": "最近一次导出",
+    "lastMeta": "导出时间：{{generatedAt}}，文件数：{{count}}",
+    "includes": {
+      "userDataLogs": "<userData>/logs/*（最近 3 天）",
+      "openclawLogs": "<openclawConfigDir>/logs/*（最近 3 天）",
+      "sessions": "<openclawConfigDir>/agents/*/sessions/*.jsonl（最近 3 天）及 sessions.json",
+      "workspace": "<openclawConfigDir>/workspace/**（白名单文件）",
+      "subagents": "<openclawConfigDir>/workspace-subagents/**（白名单文件）",
+      "pluginManifest": "<openclawConfigDir>/extensions/*/openclaw.plugin.json",
+      "settings": "<userData>/settings.json（脱敏）",
+      "openclawConfig": "<openclawConfigDir>/openclaw.json（脱敏）",
+      "generated": "diagnostics.json（自动生成，已脱敏）"
+    },
+    "toast": {
+      "success": "日志包已生成（{{count}} 个文件）",
+      "failed": "日志包生成失败：{{error}}",
+      "openFailed": "打开压缩包位置失败：{{error}}"
+    }
+  },
   "advanced": {
     "title": "高级",
     "description": "高级选项",

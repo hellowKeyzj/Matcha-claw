@@ -5,6 +5,7 @@ import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
 import { useChatStore, type ChatSession } from '@/stores/chat';
+import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
@@ -24,7 +25,6 @@ function enableMainAppRoutes() {
     error: null,
     selectedAgentId: null,
     loadAgents: vi.fn().mockResolvedValue(undefined),
-    loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     loadAvailableModels: vi.fn().mockResolvedValue(undefined),
     selectAgent: vi.fn(),
   });
@@ -33,6 +33,9 @@ function enableMainAppRoutes() {
     currentSessionKey: 'agent:main:main',
     switchSession: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
+  } as never);
+  useGatewayStore.setState({
+    status: { state: 'running', port: 18789 },
   } as never);
   i18n.changeLanguage('en');
 }
@@ -79,7 +82,6 @@ describe('subagents navigation', () => {
         { id: 'risk-expert', name: 'Risk Expert', identityEmoji: '🧠' },
       ],
       loadAgents: vi.fn().mockResolvedValue(undefined),
-      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions,
@@ -127,7 +129,6 @@ describe('subagents navigation', () => {
         { id: 'risk-expert', name: 'Risk Expert', identityEmoji: '🧠' },
       ],
       loadAgents: vi.fn().mockResolvedValue(undefined),
-      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions: [
@@ -169,7 +170,6 @@ describe('subagents navigation', () => {
     useSubagentsStore.setState({
       agents: [{ id: 'main', name: 'Main Agent' }],
       loadAgents: vi.fn().mockResolvedValue(undefined),
-      loadAgentsForDisplay: vi.fn().mockResolvedValue(undefined),
     });
     useChatStore.setState({
       sessions: [{ key: 'agent:main:main', displayName: 'Main Session' }],
@@ -187,5 +187,91 @@ describe('subagents navigation', () => {
     expect(screen.queryByText('Main Agent')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Expand agent sessions pane/i }));
     expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it('AgentSessionsPane 挂载时触发初始化加载', () => {
+    enableMainAppRoutes();
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      agents: [{ id: 'main', name: 'Main Agent' }],
+      loadAgents,
+    });
+    useChatStore.setState({
+      sessions: [{ key: 'agent:main:main', displayName: 'Main Session' }],
+      currentSessionKey: 'agent:main:main',
+      switchSession: vi.fn(),
+      loadSessions,
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AgentSessionsPane />
+      </MemoryRouter>,
+    );
+
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('AgentSessionsPane 不显示仅存在于历史会话中的已删除 Agent', () => {
+    enableMainAppRoutes();
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'main', name: 'Main Agent' },
+        { id: 'business-expert', name: 'Business-expert' },
+      ],
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+    });
+    useChatStore.setState({
+      sessions: [
+        { key: 'agent:main:main', displayName: 'Main Session' },
+        { key: 'agent:business-expert:main', displayName: 'Biz Session' },
+        { key: 'agent:atest:main', displayName: 'Ghost Session' },
+      ],
+      currentSessionKey: 'agent:atest:main',
+      switchSession: vi.fn(),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AgentSessionsPane />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Main Agent')).toBeInTheDocument();
+    expect(screen.getByText('Business-expert')).toBeInTheDocument();
+    expect(screen.queryByText('atest')).toBeNull();
+  });
+
+  it('AgentSessionsPane 不强制注入 main 分组', () => {
+    enableMainAppRoutes();
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'ontology-expert', name: 'Ontology-Expert' },
+        { id: 'business-expert', name: 'Business-expert' },
+      ],
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+    });
+    useChatStore.setState({
+      sessions: [
+        { key: 'agent:ontology-expert:main', displayName: 'Ontology Session' },
+      ],
+      currentSessionKey: 'agent:ontology-expert:main',
+      switchSession: vi.fn(),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AgentSessionsPane />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Ontology-Expert')).toBeInTheDocument();
+    expect(screen.getByText('Business-expert')).toBeInTheDocument();
+    expect(screen.queryByText('Main Agent')).toBeNull();
+    expect(screen.queryByText(/^main$/i)).toBeNull();
   });
 });

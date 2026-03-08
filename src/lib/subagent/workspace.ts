@@ -42,20 +42,22 @@ function getParentDir(pathname: string): string {
   return normalized.slice(0, index);
 }
 
-export function resolveSubagentWorkspaceRoot(agents: Pick<SubagentSummary, 'id' | 'workspace'>[]): string {
+export function resolveSubagentWorkspaceRoot(agents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[]): string {
+  const defaultWorkspace = agents.find((agent) => agent.isDefault)?.workspace?.trim();
   const mainWorkspace = agents.find((agent) => agent.id === MAIN_AGENT_ID)?.workspace?.trim();
-  if (!mainWorkspace) {
+  const baseWorkspace = defaultWorkspace || mainWorkspace;
+  if (!baseWorkspace) {
     return FALLBACK_ROOT;
   }
-  const separator = detectSeparator(mainWorkspace);
-  const parent = getParentDir(mainWorkspace);
+  const separator = detectSeparator(baseWorkspace);
+  const parent = getParentDir(baseWorkspace);
   const base = trimTrailingSeparator(parent, separator);
   return base ? `${base}${separator}workspace-subagents` : `${separator}workspace-subagents`;
 }
 
 export function buildSubagentWorkspacePath(input: {
   name: string;
-  agents: Pick<SubagentSummary, 'id' | 'workspace'>[];
+  agents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[];
 }): string {
   const root = resolveSubagentWorkspaceRoot(input.agents);
   const separator = detectSeparator(root);

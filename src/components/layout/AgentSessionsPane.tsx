@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useChatStore, type ChatSession } from '@/stores/chat';
+import { useGatewayStore } from '@/stores/gateway';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
@@ -148,11 +149,11 @@ function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): s
   return canonical;
 }
 
-function resolveAgentEmoji(agentId: string, explicitEmoji?: string): string {
+function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
   if (explicitEmoji && explicitEmoji.trim()) {
     return explicitEmoji;
   }
-  return agentId === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16';
+  return isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16';
 }
 
 function loadCollapsedAgentGroupMap(): Record<string, true> {
@@ -185,7 +186,7 @@ export function AgentSessionsPane({
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const agents = useSubagentsStore((state) => state.agents);
-  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const sessions = useChatStore((state) => state.sessions);
   const sessionLabels = useChatStore((state) => state.sessionLabels);
   const sessionLastActivity = useChatStore((state) => state.sessionLastActivity);
@@ -193,12 +194,16 @@ export function AgentSessionsPane({
   const switchSession = useChatStore((state) => state.switchSession);
   const newSession = useChatStore((state) => state.newSession);
   const loadSessions = useChatStore((state) => state.loadSessions);
+  const isGatewayRunning = useGatewayStore((state) => state.status.state === 'running');
   const [collapsedAgentGroups, setCollapsedAgentGroups] = useState<Record<string, true>>(() => loadCollapsedAgentGroupMap());
 
   useEffect(() => {
-    void loadAgentsForDisplay();
+    if (!isGatewayRunning) {
+      return;
+    }
+    void loadAgents();
     void loadSessions();
-  }, [loadAgentsForDisplay, loadSessions]);
+  }, [isGatewayRunning, loadAgents, loadSessions]);
 
   const agentSessionNodes = useMemo<AgentSessionNode[]>(() => {
     const agentById = new Map(agents.map((agent) => [agent.id, agent] as const));
@@ -215,18 +220,11 @@ export function AgentSessionsPane({
       sessionsByAgent.set(agentId, bucket);
     }
 
-    const allAgentIds = new Set<string>([
-      ...agents.map((agent) => agent.id),
-      ...sessionsByAgent.keys(),
-    ]);
-    if (!allAgentIds.has('main')) {
-      allAgentIds.add('main');
-    }
+    // 只按当前 Agent 真相源渲染分组，避免已删除 Agent 仅因历史会话残留而回显。
+    const allAgentIds = new Set<string>(agents.map((agent) => agent.id));
 
     return [...allAgentIds]
       .sort((left, right) => {
-        if (left === 'main' && right !== 'main') return -1;
-        if (right === 'main' && left !== 'main') return 1;
         const leftOrder = agentOrder.get(left) ?? Number.MAX_SAFE_INTEGER;
         const rightOrder = agentOrder.get(right) ?? Number.MAX_SAFE_INTEGER;
         if (leftOrder !== rightOrder) {
@@ -236,10 +234,8 @@ export function AgentSessionsPane({
       })
       .map((agentId) => {
         const agent = agentById.get(agentId);
-        const fallbackName = agentId === 'main'
-          ? t('sidebar.mainAgent', { defaultValue: 'Main Agent' })
-          : agentId;
-        const emoji = resolveAgentEmoji(agentId, agent?.identityEmoji ?? agent?.identity?.emoji);
+        const fallbackName = agentId;
+        const emoji = resolveAgentEmoji(agent?.identityEmoji ?? agent?.identity?.emoji, Boolean(agent?.isDefault));
         const sortedSessions = [...(sessionsByAgent.get(agentId) ?? [])].sort((left, right) => {
           const leftActivity = sessionLastActivity[left.key] ?? parseSessionTimestamp(left.key) ?? 0;
           const rightActivity = sessionLastActivity[right.key] ?? parseSessionTimestamp(right.key) ?? 0;

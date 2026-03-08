@@ -4,7 +4,6 @@
  */
 import { create } from 'zustand';
 import type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
-import { useSubagentsStore } from '@/stores/subagents';
 
 // Re-export types for consumers that imported from here
 export type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
@@ -34,10 +33,6 @@ interface ProviderState {
     options?: { baseUrl?: string }
   ) => Promise<{ valid: boolean; error?: string }>;
   getApiKey: (providerId: string) => Promise<string | null>;
-}
-
-async function refreshSubagentModelCatalog(): Promise<void> {
-  await useSubagentsStore.getState().loadAvailableModels();
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
@@ -79,7 +74,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
-      await refreshSubagentModelCatalog();
     } catch (error) {
       console.error('Failed to add provider:', error);
       throw error;
@@ -109,7 +103,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
-      await refreshSubagentModelCatalog();
     } catch (error) {
       console.error('Failed to update provider:', error);
       throw error;
@@ -126,7 +119,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       
       // Refresh the list
       await get().fetchProviders();
-      await refreshSubagentModelCatalog();
     } catch (error) {
       console.error('Failed to delete provider:', error);
       throw error;
@@ -163,7 +155,6 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       }
 
       await get().fetchProviders();
-      await refreshSubagentModelCatalog();
     } catch (error) {
       console.error('Failed to update provider with key:', error);
       throw error;

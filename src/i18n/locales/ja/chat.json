@@ -2,7 +2,7 @@
     "gatewayNotRunning": "ゲートウェイが停止中",
     "gatewayRequired": "チャットを使用するには OpenClaw ゲートウェイが実行されている必要があります。自動的に起動するか、設定から起動できます。",
     "mainModelBlocked": {
-        "title": "主Agentのモデルが未設定です",
+        "title": "デフォルトAgentのモデルが未設定です",
         "description": "設定 > AI モデルプロバイダー でモデルを追加し、スマートエージェント管理台でモデル設定を完了してからチャットしてください。"
     },
     "welcome": {
