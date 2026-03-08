@@ -22,9 +22,14 @@ describe('subagents store', () => {
     await useSubagentsStore.getState().loadAgents();
 
     expect(useSubagentsStore.getState().agents.length).toBe(1);
+    expect(window.electron.ipcRenderer.invoke).toHaveBeenCalledWith(
+      'gateway:rpc',
+      'agents.list',
+      {}
+    );
   });
 
-  it('hydrates workspace/model from config snapshot for edit form usage', async () => {
+  it('loadAgentsForDisplay 会从配置快照补全 workspace/model 供编辑表单使用', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -61,7 +66,7 @@ describe('subagents store', () => {
         },
       });
 
-    await useSubagentsStore.getState().loadAgents();
+    await useSubagentsStore.getState().loadAgentsForDisplay();
 
     expect(useSubagentsStore.getState().agents).toMatchObject([
       {
@@ -70,7 +75,6 @@ describe('subagents store', () => {
         workspace: '~/.openclaw/workspace-main',
         model: 'openai/gpt-5',
         isDefault: true,
-        identityEmoji: '⚙️',
       },
       {
         id: 'writer',
@@ -78,7 +82,6 @@ describe('subagents store', () => {
         workspace: '~/.openclaw/workspace-subagents/writer',
         model: 'openai/gpt-4.1-mini',
         isDefault: false,
-        identityEmoji: '📊',
       },
     ]);
   });
@@ -687,7 +690,7 @@ describe('subagents store', () => {
     ]);
   });
 
-  it('hydrates identity emoji from agents.list.identity and agent.identity.get fallback', async () => {
+  it('loadAgents 在配置列表与运行时列表不一致时，以运行时列表为真相源', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -695,9 +698,11 @@ describe('subagents store', () => {
         result: {
           agents: [
             { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer' },
+            { id: 'test4', name: 'test4', model: 'local/claude-sonnet-4.5' },
           ],
           defaultId: 'main',
+          mainKey: 'main',
+          scope: 'per-sender',
         },
       })
       .mockResolvedValueOnce({
@@ -705,38 +710,306 @@ describe('subagents store', () => {
         result: {
           config: {
             agents: {
-              list: [{ id: 'main', default: true }, { id: 'writer' }],
+              list: [{ id: 'main', name: 'Main' }],
             },
           },
         },
       });
 
-    invoke.mockImplementation(async (_channel, method, params) => {
-      if (method === 'agent.identity.get') {
+    await useSubagentsStore.getState().loadAgents();
+
+    const agents = useSubagentsStore.getState().agents;
+    expect(agents.map((item) => item.id)).toEqual(['main', 'test4']);
+  });
+
+  it('loadAgents 在运行时列表缺失 agent 时，不从配置列表补齐', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+          defaultId: 'main',
+          mainKey: 'main',
+          scope: 'per-sender',
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          config: {
+            agents: {
+              list: [
+                { id: 'main', name: 'Main' },
+                { id: 'test6', name: 'test6', model: 'local/claude-sonnet-4.5' },
+              ],
+            },
+          },
+        },
+      });
+
+    await useSubagentsStore.getState().loadAgents();
+
+    const agents = useSubagentsStore.getState().agents;
+    expect(agents.map((item) => item.id)).toEqual(['main']);
+  });
+
+  it('loadAgentsForDisplay 在运行时列表缺失 agent 时，不从配置列表补齐', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            defaultId: 'main',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          config: {
+            agents: {
+              list: [
+                { id: 'main', name: 'Main' },
+                { id: 'ghost-delete-001', name: 'ghost-delete-001', model: 'local/claude-sonnet-4.5' },
+              ],
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().loadAgentsForDisplay();
+
+    const agents = useSubagentsStore.getState().agents;
+    expect(agents.map((item) => item.id)).toEqual(['main']);
+  });
+
+  it('loadAgentsForDisplay 默认模型/工作区补全只作用于 defaultAgentId，不写死 main', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          agents: [
+            { id: 'dev', name: 'Dev' },
+            { id: 'main', name: 'Main' },
+          ],
+          defaultId: 'dev',
+          mainKey: 'main',
+          scope: 'per-sender',
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          config: {
+            agents: {
+              defaults: {
+                workspace: '/workspace/default',
+                model: { primary: 'openai/gpt-4.1-mini' },
+              },
+              list: [
+                { id: 'main', name: 'Main' },
+                { id: 'dev', name: 'Dev' },
+              ],
+            },
+          },
+        },
+      });
+
+    await useSubagentsStore.getState().loadAgentsForDisplay();
+
+    const agents = useSubagentsStore.getState().agents;
+    const dev = agents.find((item) => item.id === 'dev');
+    const main = agents.find((item) => item.id === 'main');
+    expect(dev).toMatchObject({
+      id: 'dev',
+      workspace: '/workspace/default',
+      model: 'openai/gpt-4.1-mini',
+      isDefault: true,
+    });
+    expect(main).toMatchObject({
+      id: 'main',
+      workspace: undefined,
+      model: undefined,
+      isDefault: false,
+    });
+  });
+
+  it('loadAgents 并发请求时，仅最后一次结果可以落库', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    let resolveFirstList: ((value: unknown) => void) | null = null;
+    const firstListPromise = new Promise((resolve) => {
+      resolveFirstList = resolve;
+    });
+    let agentsListCallCount = 0;
+
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        agentsListCallCount += 1;
+        if (agentsListCallCount === 1) {
+          return firstListPromise as Promise<unknown>;
+        }
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'main', name: 'Main-new' }],
+            defaultId: 'main',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          config: {
+            agents: {
+              defaults: {
+                model: { primary: 'openai/gpt-4.1-mini' },
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    const firstLoadTask = useSubagentsStore.getState().loadAgents();
+    const secondLoadTask = useSubagentsStore.getState().loadAgents();
+
+    resolveFirstList?.({
+      success: true,
+      result: {
+        agents: [{ id: 'main', name: 'Main-old' }],
+        defaultId: 'main',
+        mainKey: 'main',
+        scope: 'per-sender',
+      },
+    });
+
+    await Promise.all([firstLoadTask, secondLoadTask]);
+
+    const agents = useSubagentsStore.getState().agents;
+    expect(agents).toMatchObject([{ id: 'main', name: 'Main-new' }]);
+    expect(useSubagentsStore.getState().loading).toBe(false);
+  });
+
+  it('loadAgentsForDisplay 会先用 agents.list.identity，再回退 agent.identity.get 补齐 emoji', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, method, params) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+              { id: 'writer', name: 'Writer' },
+            ],
+            defaultId: 'main',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          config: {
+            agents: {
+              list: [{ id: 'main', default: true }, { id: 'writer' }],
+            },
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agent.identity.get') {
         const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
         return {
           success: true,
           result: agentId === 'writer' ? { agentId, emoji: '📊' } : { agentId },
         };
       }
-      return { success: false, error: `Unexpected method: ${String(method)}` };
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
-    await useSubagentsStore.getState().loadAgents();
+    await useSubagentsStore.getState().loadAgentsForDisplay();
+
+    await vi.waitFor(() => {
+      const agents = useSubagentsStore.getState().agents;
+      expect(agents).toHaveLength(2);
+      expect(agents[0]).toMatchObject({
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        identityEmoji: '⚙️',
+      });
+      expect(agents[1]).toMatchObject({
+        id: 'writer',
+        name: 'Writer',
+        isDefault: false,
+        identityEmoji: '📊',
+      });
+    });
+  });
+
+  it('deleteAgent 后即使遇到短暂陈旧 agents.list，也不应回显已删除 agent', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/workspace/main',
+          model: 'openai/gpt-4.1-mini',
+          isDefault: true,
+          identity: { emoji: '⚙️' },
+        },
+        {
+          id: 'ghost-delete-001',
+          name: 'ghost-delete-001',
+          workspace: '/workspace/ghost-delete-001',
+          model: 'local/claude-sonnet-4.5',
+          isDefault: false,
+          identity: { emoji: '🏁' },
+        },
+      ],
+    });
+
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel: string, method: unknown, params: unknown) => {
+      if (channel === 'gateway:rpc' && method === 'agents.delete') {
+        expect(params).toEqual({ agentId: 'ghost-delete-001', deleteFiles: true });
+        return { success: true, result: { ok: true } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+              { id: 'ghost-delete-001', name: 'ghost-delete-001', identity: { emoji: '🏁' } },
+            ],
+            defaultId: 'main',
+            mainKey: 'main',
+            scope: 'per-sender',
+          },
+        };
+      }
+      if (channel === 'openclaw:getConfigJson') {
+        return {
+          config: {
+            agents: {
+              list: [{ id: 'main', name: 'Main' }],
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${channel} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().deleteAgent('ghost-delete-001');
 
     const agents = useSubagentsStore.getState().agents;
-    expect(agents).toHaveLength(2);
-    expect(agents[0]).toMatchObject({
-      id: 'main',
-      name: 'Main',
-      isDefault: true,
-      identityEmoji: '⚙️',
-    });
-    expect(agents[1]).toMatchObject({
-      id: 'writer',
-      name: 'Writer',
-      isDefault: false,
-      identityEmoji: '📊',
-    });
+    expect(agents.map((item) => item.id)).toEqual(['main']);
   });
 });

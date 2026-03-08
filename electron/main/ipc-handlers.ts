@@ -360,6 +360,7 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
       // delivery: { mode: 'none' }.  The Gateway auto-normalizes them
       // to delivery: { mode: 'announce' } which then fails with
       // "Channel is required" when no external channels are configured.
+      const repairTasks: Promise<unknown>[] = [];
       for (const job of jobs) {
         const isIsolatedAgent =
           (job.sessionTarget === 'isolated' || !job.sessionTarget) &&
@@ -370,25 +371,30 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
           !job.delivery?.channel;
 
         if (needsRepair) {
-          try {
-            await gatewayManager.rpc('cron.update', {
+          // 先就地修正返回给前端的视图，避免阻塞读取流程。
+          job.delivery = { mode: 'none' };
+          if (job.state?.lastError?.includes('Channel is required')) {
+            job.state.lastError = undefined;
+            job.state.lastStatus = 'ok';
+          }
+
+          const task = gatewayManager.rpc('cron.update', {
               id: job.id,
               patch: { delivery: { mode: 'none' } },
+            })
+            .catch((e) => {
+              console.warn(`Failed to auto-repair cron job ${job.id}:`, e);
             });
-            job.delivery = { mode: 'none' };
-            // Clear stale channel-resolution error from the last run
-            if (job.state?.lastError?.includes('Channel is required')) {
-              job.state.lastError = undefined;
-              job.state.lastStatus = 'ok';
-            }
-          } catch (e) {
-            console.warn(`Failed to auto-repair cron job ${job.id}:`, e);
-          }
+          repairTasks.push(task);
         }
       }
 
       // Transform Gateway format to frontend format
-      return jobs.map(transformCronJob);
+      const transformed = jobs.map(transformCronJob);
+      if (repairTasks.length > 0) {
+        void Promise.allSettled(repairTasks);
+      }
+      return transformed;
     } catch (error) {
       console.error('Failed to list cron jobs:', error);
       throw error;
@@ -1384,6 +1390,283 @@ function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
  * Provider-related IPC handlers
  */
 function registerProviderHandlers(gatewayManager: GatewayManager): void {
+  const openclawConfigPath = join(homedir(), '.openclaw', 'openclaw.json');
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function getOptionalString(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+      return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+
+  function normalizeModelIdWithProviderHint(
+    rawModelId: string | undefined,
+    providerHint?: string,
+  ): string | undefined {
+    const normalizedRawModelId = getOptionalString(rawModelId);
+    if (!normalizedRawModelId) {
+      return undefined;
+    }
+    const normalizedProviderHint = getOptionalString(providerHint);
+    if (!normalizedProviderHint) {
+      return normalizedRawModelId;
+    }
+    if (normalizedRawModelId.includes('/')) {
+      return normalizedRawModelId;
+    }
+    return `${normalizedProviderHint}/${normalizedRawModelId}`;
+  }
+
+  function pushUniqueModelId(
+    modelId: string | undefined,
+    ordered: string[],
+    seen: Set<string>,
+  ): void {
+    if (!modelId || seen.has(modelId)) {
+      return;
+    }
+    seen.add(modelId);
+    ordered.push(modelId);
+  }
+
+  function extractModelId(value: unknown): string | undefined {
+    if (typeof value === 'string') {
+      return getOptionalString(value);
+    }
+    if (!isRecord(value)) {
+      return undefined;
+    }
+    return getOptionalString(value.primary);
+  }
+
+  function extractFallbackModelIds(value: unknown): string[] {
+    if (!isRecord(value) || !Array.isArray(value.fallbacks)) {
+      return [];
+    }
+    return value.fallbacks
+      .map((entry) => getOptionalString(entry))
+      .filter((entry): entry is string => Boolean(entry));
+  }
+
+  function buildPatchedModelValue(
+    currentModelValue: unknown,
+    replacementModel: string | null,
+  ): Record<string, unknown> | string | null {
+    if (replacementModel == null) {
+      return null;
+    }
+    if (isRecord(currentModelValue)) {
+      return {
+        ...currentModelValue,
+        primary: replacementModel,
+      };
+    }
+    return replacementModel;
+  }
+
+  function readOpenClawConfigForProviderSync(): Record<string, unknown> {
+    try {
+      if (!existsSync(openclawConfigPath)) {
+        return {};
+      }
+      const parsed = JSON.parse(readFileSync(openclawConfigPath, 'utf-8')) as unknown;
+      return isRecord(parsed) ? parsed : {};
+    } catch (error) {
+      logger.warn('Failed to read openclaw.json for provider sync', error);
+      return {};
+    }
+  }
+
+  function writeOpenClawConfigForProviderSync(config: Record<string, unknown>): void {
+    mkdirSync(dirname(openclawConfigPath), { recursive: true });
+    writeFileSync(openclawConfigPath, JSON.stringify(config, null, 2), 'utf-8');
+  }
+
+  function collectConfiguredModelIdsFromOpenClawConfig(
+    config: Record<string, unknown>,
+  ): { modelIds: string[]; unsafeShape: boolean } {
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    let unsafeShape = false;
+
+    const models = isRecord(config.models) ? config.models : undefined;
+    const providers = isRecord(models?.providers)
+      ? models.providers as Record<string, unknown>
+      : undefined;
+
+    if (providers) {
+      for (const [providerId, providerEntry] of Object.entries(providers)) {
+        const providerHint = getOptionalString(providerId);
+        if (!isRecord(providerEntry)) {
+          unsafeShape = true;
+          continue;
+        }
+        if (!Object.prototype.hasOwnProperty.call(providerEntry, 'models')) {
+          unsafeShape = true;
+          continue;
+        }
+        const providerModels = providerEntry.models;
+        if (!Array.isArray(providerModels)) {
+          unsafeShape = true;
+          continue;
+        }
+        for (const modelEntry of providerModels) {
+          if (typeof modelEntry === 'string') {
+            pushUniqueModelId(
+              normalizeModelIdWithProviderHint(modelEntry, providerHint),
+              ordered,
+              seen,
+            );
+            continue;
+          }
+          if (!isRecord(modelEntry)) {
+            continue;
+          }
+          const rawModelId = getOptionalString(modelEntry.id);
+          pushUniqueModelId(
+            normalizeModelIdWithProviderHint(rawModelId, providerHint),
+            ordered,
+            seen,
+          );
+        }
+      }
+    }
+
+    const agents = isRecord(config.agents) ? config.agents : undefined;
+    const defaults = isRecord(agents?.defaults) ? agents.defaults : undefined;
+    const defaultsModels = isRecord(defaults?.models) ? defaults.models : undefined;
+    if (defaultsModels) {
+      for (const [rawModelId] of Object.entries(defaultsModels)) {
+        pushUniqueModelId(getOptionalString(rawModelId), ordered, seen);
+      }
+    }
+
+    return {
+      modelIds: ordered,
+      unsafeShape,
+    };
+  }
+
+  function collectAutoFillModelCandidatesFromOpenClawConfig(config: Record<string, unknown>): string[] {
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    const push = (modelId: string | undefined) => {
+      pushUniqueModelId(modelId, ordered, seen);
+    };
+
+    const agents = isRecord(config.agents) ? config.agents : undefined;
+    const defaults = isRecord(agents?.defaults) ? agents.defaults : undefined;
+    const defaultsModel = defaults?.model;
+    push(extractModelId(defaultsModel));
+    for (const fallbackId of extractFallbackModelIds(defaultsModel)) {
+      push(fallbackId);
+    }
+
+    const list = Array.isArray(agents?.list) ? agents.list : [];
+    for (const entry of list) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      push(extractModelId(entry.model));
+      for (const fallbackId of extractFallbackModelIds(entry.model)) {
+        push(fallbackId);
+      }
+    }
+
+    return ordered;
+  }
+
+  function resolveReplacementModel(
+    config: Record<string, unknown>,
+    configuredModelIds: string[],
+  ): string | null {
+    const configuredModelIdSet = new Set(configuredModelIds);
+    const candidates = collectAutoFillModelCandidatesFromOpenClawConfig(config);
+    for (const candidate of candidates) {
+      if (configuredModelIdSet.has(candidate)) {
+        return candidate;
+      }
+    }
+    return configuredModelIds[0] ?? null;
+  }
+
+  function reconcileAgentModelsAfterProviderMutation(): {
+    changed: boolean;
+    skippedByUnknownShape: boolean;
+  } {
+    const config = readOpenClawConfigForProviderSync();
+    const { modelIds, unsafeShape } = collectConfiguredModelIdsFromOpenClawConfig(config);
+    if (unsafeShape) {
+      return {
+        changed: false,
+        skippedByUnknownShape: true,
+      };
+    }
+
+    const configuredModelIdSet = new Set(modelIds);
+    const replacementModel = resolveReplacementModel(config, modelIds);
+    const agents = isRecord(config.agents) ? config.agents : undefined;
+    if (!agents) {
+      return {
+        changed: false,
+        skippedByUnknownShape: false,
+      };
+    }
+
+    let changed = false;
+
+    const defaults = isRecord(agents.defaults) ? agents.defaults : undefined;
+    if (defaults) {
+      const defaultsModelId = extractModelId(defaults.model);
+      if (defaultsModelId && !configuredModelIdSet.has(defaultsModelId)) {
+        defaults.model = buildPatchedModelValue(defaults.model, replacementModel);
+        agents.defaults = defaults;
+        changed = true;
+      }
+    }
+
+    const list = Array.isArray(agents.list) ? agents.list : [];
+    for (const entry of list) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      const modelId = extractModelId(entry.model);
+      if (!modelId || configuredModelIdSet.has(modelId)) {
+        continue;
+      }
+      entry.model = buildPatchedModelValue(entry.model, replacementModel);
+      changed = true;
+    }
+
+    if (changed) {
+      config.agents = agents;
+      writeOpenClawConfigForProviderSync(config);
+    }
+
+    return {
+      changed,
+      skippedByUnknownShape: false,
+    };
+  }
+
+  function runProviderMutationReconcileIfNeeded(): void {
+    const result = reconcileAgentModelsAfterProviderMutation();
+    if (result.skippedByUnknownShape) {
+      logger.warn(
+        'Skip provider model reconciliation: detected unknown models.providers[*].models shape in openclaw.json'
+      );
+      return;
+    }
+    if (result.changed) {
+      logger.info('Reconciled invalid agent model references after provider mutation');
+    }
+  }
+
   // Listen for OAuth success to automatically restart the Gateway with new tokens/configs.
   // Use a longer debounce (8s) so that provider:setDefault — which writes the full config
   // and then calls debouncedRestart(2s) — has time to fire and coalesce into a single
@@ -1456,6 +1739,8 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
             }
           }
 
+          runProviderMutationReconcileIfNeeded();
+
           // Debounced restart so the gateway picks up new config/env vars.
           // Multiple rapid provider saves (e.g. during setup) are coalesced.
           logger.info(`Scheduling Gateway restart after saving provider "${ock}" config`);
@@ -1482,6 +1767,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
         try {
           const ock = getOpenClawProviderKey(existing.type, providerId);
           await removeProviderFromOpenClaw(ock);
+          runProviderMutationReconcileIfNeeded();
 
           // Debounced restart so the gateway stops loading the deleted provider.
           logger.info(`Scheduling Gateway restart after deleting provider "${ock}"`);
@@ -1602,6 +1888,8 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
               }, fallbackModels);
             }
           }
+
+          runProviderMutationReconcileIfNeeded();
 
           // Debounced restart so the gateway picks up updated config/env vars.
           logger.info(`Scheduling Gateway restart after updating provider "${ock}" config`);
@@ -1764,6 +2052,8 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
               apiKey: providerKey,
             });
           }
+
+          runProviderMutationReconcileIfNeeded();
 
           // Debounced restart so the gateway picks up the new default provider.
           // Because OAuth success triggers a debounced restart, the gateway might not be

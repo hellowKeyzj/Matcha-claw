@@ -451,7 +451,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
   const agentsError = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const createAgent = useSubagentsStore((state) => state.createAgent);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const loadAgentsForDisplay = useSubagentsStore((state) => state.loadAgentsForDisplay);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const generateDraftFromPrompt = useSubagentsStore((state) => state.generateDraftFromPrompt);
   const applyDraft = useSubagentsStore((state) => state.applyDraft);
@@ -559,9 +559,13 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
   };
 
   useEffect(() => {
-    void loadAgents();
-    void loadAvailableModels();
-  }, [loadAgents, loadAvailableModels]);
+    if (agents.length === 0) {
+      void loadAgentsForDisplay();
+    }
+    if (availableModels.length === 0) {
+      void loadAvailableModels();
+    }
+  }, [agents.length, availableModels.length, loadAgentsForDisplay, loadAvailableModels]);
 
   useEffect(() => {
     if (!team) {
@@ -862,7 +866,6 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
       agents: latestAgents,
       getAgents: () => useSubagentsStore.getState().agents,
       createAgent,
-      loadAgents,
       defaultModel: availableModels[0]?.id ?? latestAgents[0]?.model,
       allowCreate: false,
     });
@@ -985,20 +988,6 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
     return status;
   };
 
-  const detectCreatedAgentId = (input: {
-    beforeIds: Set<string>;
-    suggestedName: string;
-  }): string | null => {
-    const latestAgents = useSubagentsStore.getState().agents;
-    const expectedId = normalizeSubagentNameToSlug(input.suggestedName);
-    const exact = latestAgents.find((agent) => !input.beforeIds.has(agent.id) && agent.id === expectedId);
-    if (exact) {
-      return exact.id;
-    }
-    const fallback = latestAgents.find((agent) => !input.beforeIds.has(agent.id) && normalizeSubagentNameToSlug(agent.name ?? agent.id) === expectedId);
-    return fallback?.id ?? null;
-  };
-
   const handleConfirmPendingBootstrap = async () => {
     if (!team || !pendingBootstrap) {
       return;
@@ -1012,19 +1001,12 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
       for (const request of pendingBootstrap.requests) {
         const requestKey = bootstrapRequestKey(request);
         try {
-          const beforeIds = new Set(useSubagentsStore.getState().agents.map((agent) => agent.id));
           setBootstrapProgress((state) => ({ ...state, [requestKey]: 'creating' }));
-          await createAgent({
+          const createdAgentId = await createAgent({
             name: request.suggestedName,
             workspace: '',
             model: defaultModel,
             emoji: '\uD83E\uDD16',
-          });
-          await loadAgents();
-
-          const createdAgentId = detectCreatedAgentId({
-            beforeIds,
-            suggestedName: request.suggestedName,
           });
           if (!createdAgentId) {
             throw new Error(t('flow.bootstrapCreateFailed', { name: request.suggestedName }));

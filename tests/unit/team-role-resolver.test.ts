@@ -64,7 +64,7 @@ describe('resolvePlanAssignmentsForTeam', () => {
 
   it('returns pending creations when allowCreate=false', async () => {
     const agents: SubagentSummary[] = [createAgent('controller')];
-    const createSpy = vi.fn(async () => undefined);
+    const createSpy = vi.fn(async () => 'unused-agent-id');
 
     const result = await resolvePlanAssignmentsForTeam({
       team,
@@ -72,7 +72,6 @@ describe('resolvePlanAssignmentsForTeam', () => {
       agents,
       getAgents: () => agents,
       createAgent: createSpy,
-      loadAgents: async () => undefined,
       allowCreate: false,
     });
 
@@ -88,6 +87,7 @@ describe('resolvePlanAssignmentsForTeam', () => {
     const createSpy = vi.fn(async ({ name }: { name: string }) => {
       const agentId = normalizeSubagentNameToSlug(name);
       agents.push(createAgent(agentId));
+      return agentId;
     });
 
     const result = await resolvePlanAssignmentsForTeam({
@@ -96,7 +96,6 @@ describe('resolvePlanAssignmentsForTeam', () => {
       agents,
       getAgents: () => agents,
       createAgent: createSpy,
-      loadAgents: async () => undefined,
       allowCreate: true,
     });
 
@@ -141,8 +140,7 @@ describe('resolvePlanAssignmentsForTeam', () => {
       },
       agents,
       getAgents: () => agents,
-      createAgent: async () => undefined,
-      loadAgents: async () => undefined,
+      createAgent: async () => 'unused-agent-id',
       allowCreate: false,
     });
 

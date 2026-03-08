@@ -20,7 +20,7 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
 }
 
 describe('subagents page', () => {
-  const createAgent = vi.fn().mockResolvedValue(undefined);
+  const createAgent = vi.fn().mockResolvedValue('writer');
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
   const generateDraftFromPrompt = vi.fn().mockResolvedValue(undefined);
@@ -141,6 +141,26 @@ describe('subagents page', () => {
         model: 'gpt-4.1-mini',
       });
     });
+  });
+
+  it('createAgent 失败时保持弹窗打开，不进入管理态', async () => {
+    createAgent.mockRejectedValueOnce(new Error('RPC timeout: agents.create'));
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledWith({
+        name: 'writer',
+        workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+        model: 'gpt-4.1-mini',
+      });
+    });
+
+    expect(screen.getByRole('dialog', { name: 'Create Subagent' })).toBeInTheDocument();
+    expect(screen.queryByText('Managing: writer')).toBeNull();
   });
 
   it('passes selected emoji when creating subagent', async () => {

@@ -2,25 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useProviderStore } from '@/stores/providers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ProviderWithKeyInfo } from '@/lib/providers';
-import type { ConfigGetResult } from '@/types/subagent';
-
-function buildModelConfig(modelIdsByProvider: Record<string, string[]>): ConfigGetResult {
-  return {
-    hash: 'hash-model-config',
-    config: {
-      models: {
-        providers: Object.fromEntries(
-          Object.entries(modelIdsByProvider).map(([providerId, modelIds]) => [
-            providerId,
-            {
-              models: modelIds.map((id) => ({ id })),
-            },
-          ])
-        ),
-      },
-    },
-  } as ConfigGetResult;
-}
 
 function mockSubagentsActions() {
   const reconcileAgentModels = vi.fn(async () => false);
@@ -44,11 +25,8 @@ describe('providers store sync optimization', () => {
     useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
   });
 
-  it('addProvider 只读取一次 config.get 且不触发 reconcileAgentModels', async () => {
+  it('addProvider 不触发前端 config.get/reconcile/loadAgents，仅刷新模型目录', async () => {
     const subagents = mockSubagentsActions();
-    const afterConfig = buildModelConfig({
-      custom: ['claude-sonnet-4.5'],
-    });
 
     vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(
       async (channel: string, ...args: unknown[]) => {
@@ -60,9 +38,6 @@ describe('providers store sync optimization', () => {
         }
         if (channel === 'provider:getDefault') {
           return null;
-        }
-        if (channel === 'gateway:rpc' && args[0] === 'config.get') {
-          return { success: true, result: afterConfig };
         }
         throw new Error(`Unexpected invoke call: ${channel} ${String(args[0])}`);
       }
@@ -82,13 +57,14 @@ describe('providers store sync optimization', () => {
 
     const configGetCalls = vi.mocked(window.electron.ipcRenderer.invoke).mock.calls
       .filter(([channel, method]) => channel === 'gateway:rpc' && method === 'config.get');
-    expect(configGetCalls).toHaveLength(1);
+    expect(configGetCalls).toHaveLength(0);
     expect(subagents.reconcileAgentModels).not.toHaveBeenCalled();
-    expect(subagents.loadAvailableModels).toHaveBeenCalledWith(afterConfig);
+    expect(subagents.loadAvailableModels).toHaveBeenCalledTimes(1);
+    expect(subagents.loadAvailableModels).toHaveBeenCalledWith();
     expect(subagents.loadAgents).not.toHaveBeenCalled();
   });
 
-  it('updateProvider 复用后快照，config.get 调用降为两次', async () => {
+  it('updateProvider 不再做 before/after 快照与前端 reconcile', async () => {
     const subagents = mockSubagentsActions();
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
 
@@ -110,22 +86,7 @@ describe('providers store sync optimization', () => {
       providers: [existingProvider],
     }, true);
 
-    const beforeConfig = buildModelConfig({
-      custom: ['old-model'],
-    });
-    const afterConfig = buildModelConfig({
-      custom: ['new-model'],
-    });
-
-    let configGetCount = 0;
     invoke.mockImplementation(async (channel: string, ...args: unknown[]) => {
-      if (channel === 'gateway:rpc' && args[0] === 'config.get') {
-        configGetCount += 1;
-        return {
-          success: true,
-          result: configGetCount === 1 ? beforeConfig : afterConfig,
-        };
-      }
       if (channel === 'provider:save') {
         return { success: true };
       }
@@ -144,11 +105,10 @@ describe('providers store sync optimization', () => {
 
     const configGetCalls = invoke.mock.calls
       .filter(([channel, method]) => channel === 'gateway:rpc' && method === 'config.get');
-    expect(configGetCalls).toHaveLength(2);
-    expect(subagents.reconcileAgentModels).toHaveBeenCalledWith({
-      removedModelIds: ['custom/old-model'],
-      cfg: afterConfig,
-    });
-    expect(subagents.loadAvailableModels).toHaveBeenCalledWith(afterConfig);
+    expect(configGetCalls).toHaveLength(0);
+    expect(subagents.reconcileAgentModels).not.toHaveBeenCalled();
+    expect(subagents.loadAvailableModels).toHaveBeenCalledTimes(1);
+    expect(subagents.loadAvailableModels).toHaveBeenCalledWith();
+    expect(subagents.loadAgents).not.toHaveBeenCalled();
   });
 });

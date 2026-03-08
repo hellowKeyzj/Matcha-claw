@@ -118,6 +118,15 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 - 注释只解释“为什么”，不解释显而易见的“做了什么”。
 - 优先小步重构，不做无边界大改。
 
+### 7.1 根因优先排障（强约束）
+
+- 处理故障时必须先定位根因，再提交修复；禁止只做表层“止痛”处理后结束任务。
+- `兜底`、`延长超时`、`重试`、`硬编码` 只能作为临时缓解，不能替代根因修复。
+- 若确需先上临时缓解，必须同时满足：
+  - 明确标注为临时方案与适用边界；
+  - 记录未解决的根因与风险；
+  - 同步给出后续根因修复计划（含触发条件与验证方式）。
+
 ## 8. 测试与验证（必做）
 
 - 改动前后至少执行与范围匹配的验证：
@@ -336,6 +345,26 @@ Matcha-matchaclaw/
 - 将会话树从菜单内嵌改为独立栏位，是为了匹配“红框区域”的信息密度和交互预期（导航与会话浏览分区）。
 - 主 Agent (`main`) 强制纳入会话栏，确保“显示全部 Agent”的一致性。
 
+## 15. Provider/Agent 一致性链路调整（2026-03-08）
+
+### 15.1 边界调整
+
+- `src/stores/providers.ts` 不再负责 provider 变更后的 before/after 配置快照与 `reconcileAgentModels` 编排。
+- provider 变更后 `agent.model` 一致性清理下沉到 `electron/main/ipc-handlers.ts`（主进程单点执行，避免前端 RPC 串联）。
+
+### 15.2 关键决策
+
+- Agent 列表渲染集合改为以 `agents.list` 运行时结果为真相源，配置快照只用于补充字段（不再反向驱动集合）。
+- `loadAgents` 增加请求版本戳，旧请求结果不得覆盖新请求，降低并发加载导致的 UI 回跳/残影。
+- provider 变更后仅刷新前端 provider 列表与模型目录，避免额外触发 `loadAgents` 风暴。
+
+### 15.3 本次变更日志
+
+- `src/stores/subagents.ts`：默认 Agent 语义改为 `defaultAgentId` 驱动，移除写死 `main` 的 defaults 补全逻辑。
+- `src/stores/providers.ts`：删除前端一致性同步链路，收敛为最小刷新动作。
+- `electron/main/ipc-handlers.ts`：新增 provider 变更后的 `agent.model` 统一清理与落盘逻辑。
+- `src/pages/SubAgents/components/SubagentFormDialog.tsx`：emoji 快选去重，修复重复 key 警告。
+
 ### 14.7 配置快照链路调整（2026-03-07）
 
 #### 14.7.1 目录树增量
@@ -463,3 +492,23 @@ Matcha-matchaclaw/
 - License 工具收敛为 `license_server.py` 单文件入口，移除冗余 `.mjs` 脚本。
 - 新增 `license_server.py` 单文件部署方案，支持批量生成与批量录入 key。
 - 修复 `AgentSessionsPane.tsx` 未使用参数导致的 typecheck 报错，恢复全量类型检查通过。
+
+## 17. Teams 调用分层收敛（2026-03-08）
+
+### 17.1 变更范围
+
+- `src/pages/Teams/index.tsx`
+- `src/pages/Teams/TeamChat.tsx`
+- `src/lib/team/role-resolver.ts`
+- `tests/unit/team-role-resolver.test.ts`
+
+### 17.2 关键决策与原因
+
+- Teams 页面首次展示改为优先走 `loadAgentsForDisplay`，不再直接触发 `loadAgents`，统一“展示读取”语义。
+- `createAgent` 完成后不再额外手动 `loadAgents`，改为消费 `createAgent` 返回的 `agentId`，避免重复刷新链路。
+- `resolvePlanAssignmentsForTeam` 去掉 `loadAgents` 依赖，角色补齐流程不再要求外部二次拉取 agent 列表。
+
+### 17.3 不变量
+
+- `loadAgents` 保留为运行时最小读取能力，不用于 Teams 页面默认首屏刷新。
+- Teams 侧 agent 创建后，后续流程必须以 `createAgent` 返回 `agentId` 作为主锚点，不依赖“先刷新再差集探测”的时序。
