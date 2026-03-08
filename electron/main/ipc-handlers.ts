@@ -57,7 +57,14 @@ import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { registerTeamFsHandlers } from './team-fs-handlers';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
-import { validateLicenseKey } from '../utils/license';
+import {
+  clearStoredLicenseData,
+  ensureLicenseGateBootstrapped,
+  forceRevalidateStoredLicense,
+  getLicenseGateSnapshot,
+  getStoredLicenseKey,
+  validateLicenseKey,
+} from '../utils/license';
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -2583,8 +2590,29 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
 }
 
 function registerLicenseHandlers(): void {
+  ensureLicenseGateBootstrapped();
+
   ipcMain.handle('license:validate', async (_, rawKey: string) => {
     return validateLicenseKey(typeof rawKey === 'string' ? rawKey : '');
+  });
+
+  ipcMain.handle('license:getGateState', async () => {
+    ensureLicenseGateBootstrapped();
+    return getLicenseGateSnapshot();
+  });
+
+  ipcMain.handle('license:getStoredKey', async () => {
+    ensureLicenseGateBootstrapped();
+    return getStoredLicenseKey();
+  });
+
+  ipcMain.handle('license:forceRevalidate', async () => {
+    return forceRevalidateStoredLicense('manual');
+  });
+
+  ipcMain.handle('license:clearStoredKey', async () => {
+    await clearStoredLicenseData();
+    return getLicenseGateSnapshot();
   });
 }
 

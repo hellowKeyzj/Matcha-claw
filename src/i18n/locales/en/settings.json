@@ -1,6 +1,56 @@
 {
   "title": "Settings",
   "subtitle": "Configure your MatchaClaw experience",
+  "license": {
+    "title": "License",
+    "description": "License management",
+    "gateStatus": "Gate Status",
+    "gateState": {
+      "checking": "Checking",
+      "granted": "Granted",
+      "blocked": "Blocked"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+    "showKey": "Show license key",
+    "hideKey": "Hide license key",
+    "validate": "Validate & Save",
+    "revalidate": "Revalidate",
+    "clear": "Clear Local License",
+    "renewAlert": {
+      "near_expiry_renew_failed": "License cache has less than 1 day remaining and auto-renew failed. Please revalidate here soon."
+    },
+    "messages": {
+      "valid": "License validation passed",
+      "cache_grace_valid": "Validation passed from cached offline grace period",
+      "empty": "Please enter a license key",
+      "format_invalid": "License key format is invalid",
+      "service_unconfigured": "License service is not configured",
+      "network_error": "Cannot reach license service, please check network and retry",
+      "server_rejected": "License was rejected by license service",
+      "expired": "License has expired",
+      "device_mismatch": "License does not match this device",
+      "not_allowed": "License key is not authorized",
+      "checksum_invalid": "License key is invalid",
+      "unknown": "License validation failed, please try again"
+    },
+    "confirmReplace": {
+      "title": "Replace Current License",
+      "message": "This device already has a stored license. Continue to overwrite and rebind it?",
+      "confirm": "Replace",
+      "cancel": "Cancel"
+    },
+    "confirmClear": {
+      "title": "Clear Local License",
+      "message": "This will remove encrypted key storage and validation cache, and the app will be blocked again until revalidated.",
+      "confirm": "Clear",
+      "cancel": "Cancel"
+    },
+    "toast": {
+      "cleared": "Local license cleared",
+      "clearFailed": "Failed to clear local license: {{error}}"
+    }
+  },
   "appearance": {
     "title": "Appearance",
     "description": "Customize the look and feel",
@@ -204,14 +254,5 @@
     "installTitle": "Install OpenClaw Command",
     "installMessage": "Install the \"openclaw\" command?",
     "installDetail": "This will create ~/.local/bin/openclaw. Ensure ~/.local/bin is on your PATH if you want to run it globally."
-  },
-  "about": {
-    "title": "About",
-    "appName": "MatchaClaw",
-    "tagline": "Graphical AI Assistant",
-    "basedOn": "Based on OpenClaw",
-    "version": "Version {{version}}",
-    "docs": "Website",
-    "github": "GitHub"
   }
 }

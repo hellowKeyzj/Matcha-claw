@@ -1,6 +1,56 @@
 {
   "title": "設定",
   "subtitle": "MatchaClaw の体験をカスタマイズ",
+  "license": {
+    "title": "ライセンス",
+    "description": "ライセンス管理",
+    "gateStatus": "ゲート状態",
+    "gateState": {
+      "checking": "検証中",
+      "granted": "許可",
+      "blocked": "ブロック"
+    },
+    "inputLabel": "ライセンスキー",
+    "placeholder": "ライセンスキーを入力（例: MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+    "showKey": "ライセンスキーを表示",
+    "hideKey": "ライセンスキーを非表示",
+    "validate": "検証して保存",
+    "revalidate": "再検証",
+    "clear": "ローカルライセンスを削除",
+    "renewAlert": {
+      "near_expiry_renew_failed": "ライセンスキャッシュの残りが 1 日未満で、自動更新に失敗しました。この画面で再検証してください。"
+    },
+    "messages": {
+      "valid": "ライセンス検証に成功しました",
+      "cache_grace_valid": "オフライン猶予期間のキャッシュで検証に成功しました",
+      "empty": "ライセンスキーを入力してください",
+      "format_invalid": "ライセンスキーの形式が正しくありません",
+      "service_unconfigured": "ライセンスサービスが未設定です",
+      "network_error": "ライセンスサービスに接続できません。ネットワークを確認してください",
+      "server_rejected": "ライセンスサービスに拒否されました",
+      "expired": "ライセンスの有効期限が切れています",
+      "device_mismatch": "このライセンスは現在のデバイスと一致しません",
+      "not_allowed": "このライセンスキーは許可されていません",
+      "checksum_invalid": "ライセンスキーが無効です",
+      "unknown": "ライセンス検証に失敗しました。再試行してください"
+    },
+    "confirmReplace": {
+      "title": "現在のライセンスを置き換えますか",
+      "message": "この端末には既存のライセンスが保存されています。上書きして再バインドしますか？",
+      "confirm": "置き換える",
+      "cancel": "キャンセル"
+    },
+    "confirmClear": {
+      "title": "ローカルライセンスを削除",
+      "message": "削除すると暗号化キー保存と検証キャッシュが消去され、再検証までアプリがブロックされます。",
+      "confirm": "削除",
+      "cancel": "キャンセル"
+    },
+    "toast": {
+      "cleared": "ローカルライセンスを削除しました",
+      "clearFailed": "ローカルライセンスの削除に失敗しました: {{error}}"
+    }
+  },
   "appearance": {
     "title": "外観",
     "description": "外観とスタイルをカスタマイズ",
@@ -203,14 +253,5 @@
     "installTitle": "OpenClaw コマンドをインストール",
     "installMessage": "\"openclaw\" コマンドをインストールしますか？",
     "installDetail": "~/.local/bin/openclaw が作成されます。グローバルに実行するには ~/.local/bin が PATH に含まれていることを確認してください。"
-  },
-  "about": {
-    "title": "バージョン情報",
-    "appName": "MatchaClaw",
-    "tagline": "グラフィカル AI アシスタント",
-    "basedOn": "OpenClaw ベース",
-    "version": "バージョン {{version}}",
-    "docs": "公式サイト",
-    "github": "GitHub"
   }
 }

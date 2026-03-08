@@ -5,7 +5,7 @@ export const SETTINGS_SECTIONS = [
   'taskPlugin',
   'updates',
   'advanced',
-  'about',
+  'license',
 ] as const;
 
 export type SettingsSectionKey = (typeof SETTINGS_SECTIONS)[number];
@@ -27,4 +27,3 @@ export function buildSettingsSectionLink(section: SettingsSectionKey): string {
   const params = new URLSearchParams({ section });
   return `/settings?${params.toString()}`;
 }
-

@@ -2,6 +2,12 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { loadOrCreateDeviceIdentity } from './device-identity';
 import { proxyAwareFetch } from './proxy-fetch';
+import { resolveHardwareId } from './hardware-id';
+import {
+  readEncryptedLicenseKey,
+  removeEncryptedLicenseFile,
+  writeEncryptedLicenseKey,
+} from './license-secret';
 import { BUILTIN_LICENSE_ENDPOINT, BUILTIN_LICENSE_MODE, BUILTIN_LICENSE_PRODUCT } from './license-config';
 
 const LICENSE_PREFIX = 'MATCHACLAW';
@@ -9,6 +15,11 @@ const LICENSE_PATTERN = /^MATCHACLAW-[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$/;
 const CHECKSUM_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const CHECKSUM_CONTEXT = 'matchaclaw-license-v1';
 const LICENSE_CACHE_VERSION = 1;
+const LICENSE_SECRET_FILE_NAME = 'license-secret.enc.json';
+const REVALIDATE_RETRY_BASE_SEC = 30 * 60;
+const REVALIDATE_RETRY_MAX_SEC = 6 * 60 * 60;
+const REVALIDATE_RETRY_JITTER_RATIO = 0.2;
+const STARTUP_PROACTIVE_RENEW_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 export type LicenseValidationCode =
   | 'valid'
@@ -23,6 +34,8 @@ export type LicenseValidationCode =
   | 'not_allowed'
   | 'checksum_invalid';
 
+export type LicenseGateState = 'checking' | 'granted' | 'blocked';
+
 export interface LicenseValidationResult {
   valid: boolean;
   code: LicenseValidationCode;
@@ -31,6 +44,19 @@ export interface LicenseValidationResult {
   source?: 'server' | 'cache' | 'local';
   message?: string;
   expiresAt?: string | null;
+  refreshAfterSec?: number;
+  offlineGraceUntilMs?: number;
+}
+
+export interface LicenseGateSnapshot {
+  state: LicenseGateState;
+  reason: string;
+  checkedAtMs: number;
+  hasStoredKey: boolean;
+  hasUsableCache: boolean;
+  nextRevalidateAtMs: number | null;
+  lastValidation: LicenseValidationResult | null;
+  renewalAlert: 'near_expiry_renew_failed' | null;
 }
 
 type LicensePolicyMode = 'online-required' | 'online-optional' | 'offline-local';
@@ -48,10 +74,13 @@ interface CachedLicenseState {
   version: number;
   keyHash: string;
   deviceId: string;
+  installId?: string;
+  hardwareId?: string | null;
   activatedAtMs: number;
   lastValidatedAtMs: number;
   offlineGraceUntilMs: number;
   expiresAtMs: number | null;
+  refreshAfterSec?: number;
   licenseId?: string;
   plan?: string;
 }
@@ -60,6 +89,8 @@ interface LicenseServerPayload {
   licenseKey: string;
   product: string;
   deviceId: string;
+  installId: string;
+  hardwareId?: string;
   appVersion: string;
   platform: string;
   machineName: string;
@@ -76,8 +107,89 @@ interface LicenseServerResponse {
   offlineGraceHours?: number;
 }
 
+interface RuntimeInfo {
+  packaged: boolean;
+  version: string;
+  machineName: string;
+  userDataDir: string | null;
+}
+
+interface ClientIdentity {
+  installId: string;
+  hardwareId: string | null;
+}
+
+const licenseGateSnapshot: LicenseGateSnapshot = {
+  state: 'checking',
+  reason: 'init',
+  checkedAtMs: Date.now(),
+  hasStoredKey: false,
+  hasUsableCache: false,
+  nextRevalidateAtMs: null,
+  lastValidation: null,
+  renewalAlert: null,
+};
+
+let gateBootstrapStarted = false;
+let gateBootstrapPromise: Promise<void> | null = null;
+let revalidateTimer: NodeJS.Timeout | null = null;
+let hardwareIdPromise: Promise<string | null> | null = null;
+let revalidateFailureCount = 0;
+
+function setGateSnapshot(patch: Partial<LicenseGateSnapshot>): void {
+  Object.assign(licenseGateSnapshot, patch, {
+    checkedAtMs: Date.now(),
+  });
+}
+
+function clearRevalidateTimer(): void {
+  if (revalidateTimer) {
+    clearTimeout(revalidateTimer);
+    revalidateTimer = null;
+  }
+}
+
+function armRevalidateTimer(afterSec: number): void {
+  clearRevalidateTimer();
+  const delayMs = Math.max(60, Math.floor(afterSec)) * 1000;
+  licenseGateSnapshot.nextRevalidateAtMs = Date.now() + delayMs;
+  revalidateTimer = setTimeout(() => {
+    void forceRevalidateStoredLicense('timer');
+  }, delayMs);
+}
+
+function resetRevalidateRetryState(): void {
+  revalidateFailureCount = 0;
+}
+
+function computeRetryDelaySec(): number {
+  const exponent = Math.min(revalidateFailureCount, 4);
+  const baseDelaySec = Math.min(REVALIDATE_RETRY_BASE_SEC * (2 ** exponent), REVALIDATE_RETRY_MAX_SEC);
+  const jitterRange = Math.max(1, Math.floor(baseDelaySec * REVALIDATE_RETRY_JITTER_RATIO));
+  const jitter = Math.floor((Math.random() * ((jitterRange * 2) + 1)) - jitterRange);
+  return Math.max(60, baseDelaySec + jitter);
+}
+
+function scheduleRevalidateRetry(): void {
+  const delaySec = computeRetryDelaySec();
+  revalidateFailureCount = Math.min(revalidateFailureCount + 1, 32);
+  armRevalidateTimer(delaySec);
+}
+
+function getLicenseSecretFilePath(userDataDir: string): string {
+  return path.join(userDataDir, LICENSE_SECRET_FILE_NAME);
+}
+
+function buildSecretMaterial(identity: ClientIdentity, product: string): string {
+  return `${product}|${identity.installId}|${CHECKSUM_CONTEXT}`;
+}
+
 export function normalizeLicenseKey(rawKey: string): string {
   return rawKey.trim().toUpperCase();
+}
+
+function normalizeDeviceId(rawDeviceId: string): string {
+  return (rawDeviceId || '').trim().toLowerCase();
 }
 
 function parseAllowlist(rawAllowlist: string): Set<string> {
@@ -122,7 +234,7 @@ export function buildLicenseKey(payloadSeed: string): string {
 
 export function validateLicenseKeyLocally(
   rawKey: string,
-  options?: { allowlistEnv?: string }
+  options?: { allowlistEnv?: string },
 ): LicenseValidationResult {
   const normalizedKey = normalizeLicenseKey(rawKey);
   if (!normalizedKey) {
@@ -207,7 +319,7 @@ function hashLicenseKey(normalizedKey: string): string {
     .digest('hex');
 }
 
-async function getAppRuntimeInfo(): Promise<{ packaged: boolean; version: string; machineName: string; userDataDir: string | null }> {
+async function getAppRuntimeInfo(): Promise<RuntimeInfo> {
   if (!process.versions.electron) {
     return {
       packaged: process.env.MATCHACLAW_APP_PACKAGED === '1',
@@ -235,6 +347,28 @@ async function getAppRuntimeInfo(): Promise<{ packaged: boolean; version: string
   }
 }
 
+async function getHardwareIdCached(): Promise<string | null> {
+  if (!hardwareIdPromise) {
+    hardwareIdPromise = resolveHardwareId().catch(() => null);
+  }
+  return hardwareIdPromise;
+}
+
+async function readClientIdentity(userDataDir: string | null): Promise<ClientIdentity> {
+  if (!userDataDir) {
+    return {
+      installId: 'unknown-device',
+      hardwareId: await getHardwareIdCached(),
+    };
+  }
+  const identityFilePath = path.join(userDataDir, 'matchaclaw-license-device-identity.json');
+  const identity = await loadOrCreateDeviceIdentity(identityFilePath);
+  return {
+    installId: normalizeDeviceId(identity.deviceId),
+    hardwareId: await getHardwareIdCached(),
+  };
+}
+
 async function getLicenseStore() {
   const Store = (await import('electron-store')).default;
   return new Store<{ cachedState?: CachedLicenseState | null }>({
@@ -252,10 +386,14 @@ async function loadCachedState(): Promise<CachedLicenseState | null> {
     if (!state || typeof state !== 'object') {
       return null;
     }
-    if ((state as CachedLicenseState).version !== LICENSE_CACHE_VERSION) {
+    const typed = state as CachedLicenseState;
+    if (typed.version !== LICENSE_CACHE_VERSION) {
       return null;
     }
-    return state as CachedLicenseState;
+    if (!typed.deviceId || !typed.keyHash) {
+      return null;
+    }
+    return typed;
   } catch {
     return null;
   }
@@ -266,19 +404,95 @@ async function saveCachedState(state: CachedLicenseState): Promise<void> {
   store.set('cachedState', state);
 }
 
-async function readOrCreateDeviceId(userDataDir: string | null): Promise<string> {
-  if (!userDataDir) {
-    return 'unknown-device';
+async function clearCachedState(): Promise<void> {
+  const store = await getLicenseStore();
+  store.set('cachedState', null);
+}
+
+function isCacheUsable(
+  cache: CachedLicenseState,
+  options: {
+    expectedKeyHash?: string;
+    currentInstallId: string;
+    nowMs: number;
+  },
+): LicenseValidationResult | null {
+  if (options.expectedKeyHash && cache.keyHash !== options.expectedKeyHash) {
+    return null;
   }
-  const identityFilePath = path.join(userDataDir, 'matchaclaw-license-device-identity.json');
-  const identity = await loadOrCreateDeviceIdentity(identityFilePath);
-  return identity.deviceId;
+
+  const cacheInstallId = normalizeDeviceId(cache.installId || cache.deviceId);
+  if (cacheInstallId !== options.currentInstallId) {
+    return {
+      valid: false,
+      code: 'device_mismatch',
+      mode: 'cache',
+      source: 'cache',
+    };
+  }
+
+  if (cache.expiresAtMs != null && options.nowMs > cache.expiresAtMs) {
+    return {
+      valid: false,
+      code: 'expired',
+      mode: 'cache',
+      source: 'cache',
+      expiresAt: new Date(cache.expiresAtMs).toISOString(),
+    };
+  }
+
+  if (options.nowMs <= cache.offlineGraceUntilMs) {
+    const remainingMs = cache.offlineGraceUntilMs - options.nowMs;
+    return {
+      valid: true,
+      code: 'cache_grace_valid',
+      mode: 'cache',
+      source: 'cache',
+      expiresAt: cache.expiresAtMs ? new Date(cache.expiresAtMs).toISOString() : null,
+      refreshAfterSec: Math.max(60, Math.ceil(remainingMs / 1000)),
+      offlineGraceUntilMs: cache.offlineGraceUntilMs,
+    };
+  }
+
+  return null;
+}
+
+function isNearExpiryWindow(cache: CachedLicenseState | null, installId: string, nowMs: number): boolean {
+  if (!cache) {
+    return false;
+  }
+  const cacheInstallId = normalizeDeviceId(cache.installId || cache.deviceId);
+  if (cacheInstallId !== installId) {
+    return false;
+  }
+  return (cache.offlineGraceUntilMs - nowMs) <= STARTUP_PROACTIVE_RENEW_THRESHOLD_MS;
+}
+
+function didOnlineRenewSucceed(result: LicenseValidationResult): boolean {
+  return result.valid && result.code === 'valid' && result.source === 'server';
+}
+
+function shouldShowRenewalAlert(result: LicenseValidationResult, nearExpiryWindow: boolean): boolean {
+  if (!nearExpiryWindow) {
+    return false;
+  }
+  return !didOnlineRenewSucceed(result);
+}
+
+function shouldScheduleRenewRetry(result: LicenseValidationResult, nearExpiryWindow: boolean): boolean {
+  if (result.code === 'network_error') {
+    return true;
+  }
+  if (result.code === 'cache_grace_valid') {
+    return nearExpiryWindow;
+  }
+  return false;
 }
 
 async function callLicenseServer(
   endpoint: string,
   payload: LicenseServerPayload,
-  timeoutMs: number
+  timeoutMs: number,
 ): Promise<LicenseServerResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -292,7 +506,20 @@ async function callLicenseServer(
       signal: controller.signal,
     });
 
-    const body = await response.json() as LicenseServerResponse;
+    const rawText = await response.text();
+    let body: LicenseServerResponse = {};
+    if (rawText.trim()) {
+      try {
+        body = JSON.parse(rawText) as LicenseServerResponse;
+      } catch {
+        body = {
+          valid: false,
+          code: 'invalid_response',
+          message: rawText.trim(),
+        };
+      }
+    }
+
     if (!response.ok) {
       return {
         valid: false,
@@ -300,56 +527,131 @@ async function callLicenseServer(
         message: body.message || `HTTP ${response.status}`,
       };
     }
+
+    if (typeof body.valid !== 'boolean') {
+      return {
+        valid: false,
+        code: 'invalid_response',
+        message: body.message || 'invalid response from license service',
+      };
+    }
+
     return body;
   } finally {
     clearTimeout(timer);
   }
 }
 
-function isCacheEntryUsable(
-  cache: CachedLicenseState,
-  expectedKeyHash: string,
-  currentDeviceId: string,
-  nowMs: number
-): LicenseValidationResult | null {
-  if (cache.keyHash !== expectedKeyHash) {
+async function persistLicenseSecret(
+  runtime: RuntimeInfo,
+  config: LicenseRuntimeConfig,
+  identity: ClientIdentity,
+  normalizedKey: string,
+): Promise<boolean> {
+  if (!runtime.userDataDir) {
+    return false;
+  }
+  const filePath = getLicenseSecretFilePath(runtime.userDataDir);
+  const material = buildSecretMaterial(identity, config.product);
+  try {
+    await writeEncryptedLicenseKey(filePath, normalizedKey, material);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readStoredLicenseKey(
+  runtime: RuntimeInfo,
+  config: LicenseRuntimeConfig,
+  identity: ClientIdentity,
+): Promise<string | null> {
+  if (!runtime.userDataDir) {
     return null;
   }
-  if (cache.deviceId !== currentDeviceId) {
-    return {
-      valid: false,
-      code: 'device_mismatch',
-      mode: 'cache',
-      source: 'cache',
-    };
+  const filePath = getLicenseSecretFilePath(runtime.userDataDir);
+  const material = buildSecretMaterial(identity, config.product);
+  return readEncryptedLicenseKey(filePath, material);
+}
+
+function getRecentValidatedLicenseKeyFromSnapshot(): string | null {
+  const candidate = licenseGateSnapshot.lastValidation;
+  if (!candidate?.valid) {
+    return null;
   }
-  if (cache.expiresAtMs != null && nowMs > cache.expiresAtMs) {
-    return {
-      valid: false,
-      code: 'expired',
-      mode: 'cache',
-      source: 'cache',
-      expiresAt: new Date(cache.expiresAtMs).toISOString(),
-    };
+  if (!candidate.normalizedKey) {
+    return null;
   }
-  if (nowMs <= cache.offlineGraceUntilMs) {
-    return {
-      valid: true,
-      code: 'cache_grace_valid',
-      mode: 'cache',
-      source: 'cache',
-      expiresAt: cache.expiresAtMs ? new Date(cache.expiresAtMs).toISOString() : null,
-    };
+  const normalized = normalizeLicenseKey(candidate.normalizedKey);
+  if (!LICENSE_PATTERN.test(normalized)) {
+    return null;
   }
-  return null;
+  return normalized;
+}
+
+async function readStoredLicenseKeyWithRecovery(
+  runtime: RuntimeInfo,
+  config: LicenseRuntimeConfig,
+  identity: ClientIdentity,
+): Promise<string | null> {
+  const stored = await readStoredLicenseKey(runtime, config, identity);
+  if (stored) {
+    return stored;
+  }
+
+  const fallback = getRecentValidatedLicenseKeyFromSnapshot();
+  if (!fallback) {
+    return null;
+  }
+
+  // 本地密文损坏/不可读时，用最近一次成功授权的 key 自愈重建密文文件。
+  await persistLicenseSecret(runtime, config, identity, fallback);
+  return fallback;
+}
+
+function markGateFromValidation(
+  validation: LicenseValidationResult,
+  options: {
+    hasStoredKey: boolean;
+    hasUsableCache: boolean;
+  },
+): void {
+  if (validation.valid) {
+    if (validation.code === 'valid') {
+      resetRevalidateRetryState();
+    }
+    setGateSnapshot({
+      state: 'granted',
+      reason: validation.code,
+      hasStoredKey: options.hasStoredKey,
+      hasUsableCache: options.hasUsableCache,
+      lastValidation: validation,
+      renewalAlert: validation.code === 'valid' ? null : licenseGateSnapshot.renewalAlert,
+    });
+    if (validation.refreshAfterSec) {
+      armRevalidateTimer(validation.refreshAfterSec);
+    }
+    return;
+  }
+
+  setGateSnapshot({
+    state: 'blocked',
+    reason: validation.code,
+    hasStoredKey: options.hasStoredKey,
+    hasUsableCache: options.hasUsableCache,
+    lastValidation: validation,
+    nextRevalidateAtMs: null,
+  });
+  clearRevalidateTimer();
 }
 
 export async function validateLicenseKey(
   rawKey: string,
-  options?: { packagedOverride?: boolean }
+  options?: { packagedOverride?: boolean },
 ): Promise<LicenseValidationResult> {
   const localEarly = validateLicenseKeyLocally(rawKey, { allowlistEnv: '' });
   if (localEarly.code === 'empty' || localEarly.code === 'format_invalid') {
+    markGateFromValidation(localEarly, { hasStoredKey: licenseGateSnapshot.hasStoredKey, hasUsableCache: false });
     return localEarly;
   }
 
@@ -358,24 +660,40 @@ export async function validateLicenseKey(
   const config = resolveLicenseRuntimeConfig(typeof options?.packagedOverride === 'boolean'
     ? options.packagedOverride
     : runtime.packaged);
+  const identity = await readClientIdentity(runtime.userDataDir);
 
   if (config.policyMode === 'offline-local') {
-    return validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+    const local = validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+    if (local.valid) {
+      const stored = await persistLicenseSecret(runtime, config, identity, normalizedKey);
+      markGateFromValidation(local, { hasStoredKey: stored, hasUsableCache: false });
+    } else {
+      markGateFromValidation(local, { hasStoredKey: licenseGateSnapshot.hasStoredKey, hasUsableCache: false });
+    }
+    return local;
   }
 
   if (!config.endpoint) {
     if (config.policyMode === 'online-required') {
-      return {
+      const result: LicenseValidationResult = {
         valid: false,
         code: 'service_unconfigured',
         normalizedKey,
         mode: 'none',
       };
+      markGateFromValidation(result, { hasStoredKey: licenseGateSnapshot.hasStoredKey, hasUsableCache: false });
+      return result;
     }
-    return validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+    const local = validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+    if (local.valid) {
+      const stored = await persistLicenseSecret(runtime, config, identity, normalizedKey);
+      markGateFromValidation(local, { hasStoredKey: stored, hasUsableCache: false });
+    } else {
+      markGateFromValidation(local, { hasStoredKey: licenseGateSnapshot.hasStoredKey, hasUsableCache: false });
+    }
+    return local;
   }
 
-  const deviceId = await readOrCreateDeviceId(runtime.userDataDir);
   const keyHash = hashLicenseKey(normalizedKey);
   const nowMs = Date.now();
 
@@ -385,16 +703,18 @@ export async function validateLicenseKey(
       {
         licenseKey: normalizedKey,
         product: config.product,
-        deviceId,
+        deviceId: identity.installId,
+        installId: identity.installId,
+        ...(identity.hardwareId ? { hardwareId: identity.hardwareId } : {}),
         appVersion: runtime.version,
         platform: process.platform,
         machineName: runtime.machineName,
       },
-      config.timeoutMs
+      config.timeoutMs,
     );
 
     if (!serverResult.valid) {
-      return {
+      const rejected: LicenseValidationResult = {
         valid: false,
         code: 'server_rejected',
         normalizedKey,
@@ -402,11 +722,16 @@ export async function validateLicenseKey(
         source: 'server',
         message: serverResult.message || serverResult.code || 'license rejected',
       };
+      markGateFromValidation(rejected, {
+        hasStoredKey: licenseGateSnapshot.hasStoredKey,
+        hasUsableCache: false,
+      });
+      return rejected;
     }
 
     const expiresAtMs = parseIsoDateToMs(serverResult.expiresAt);
     if (expiresAtMs != null && nowMs > expiresAtMs) {
-      return {
+      const expired: LicenseValidationResult = {
         valid: false,
         code: 'expired',
         normalizedKey,
@@ -414,6 +739,11 @@ export async function validateLicenseKey(
         source: 'server',
         expiresAt: new Date(expiresAtMs).toISOString(),
       };
+      markGateFromValidation(expired, {
+        hasStoredKey: licenseGateSnapshot.hasStoredKey,
+        hasUsableCache: false,
+      });
+      return expired;
     }
 
     const offlineGraceHours = serverResult.offlineGraceHours != null
@@ -427,45 +757,224 @@ export async function validateLicenseKey(
     await saveCachedState({
       version: LICENSE_CACHE_VERSION,
       keyHash,
-      deviceId,
+      deviceId: identity.installId,
+      installId: identity.installId,
+      hardwareId: identity.hardwareId,
       activatedAtMs: nowMs,
       lastValidatedAtMs: nowMs,
       offlineGraceUntilMs,
       expiresAtMs,
+      refreshAfterSec,
       licenseId: serverResult.licenseId,
       plan: serverResult.plan,
     });
 
-    return {
+    const stored = await persistLicenseSecret(runtime, config, identity, normalizedKey);
+    const success: LicenseValidationResult = {
       valid: true,
       code: 'valid',
       normalizedKey,
       mode: 'online',
       source: 'server',
       expiresAt: expiresAtMs ? new Date(expiresAtMs).toISOString() : null,
+      refreshAfterSec,
+      offlineGraceUntilMs,
     };
+    markGateFromValidation(success, { hasStoredKey: stored, hasUsableCache: true });
+    return success;
   } catch (error) {
     const cachedState = await loadCachedState();
     if (cachedState) {
-      const cachedDecision = isCacheEntryUsable(cachedState, keyHash, deviceId, nowMs);
+      const cachedDecision = isCacheUsable(cachedState, {
+        expectedKeyHash: keyHash,
+        currentInstallId: identity.installId,
+        nowMs,
+      });
       if (cachedDecision) {
-        return {
+        const stored = await persistLicenseSecret(runtime, config, identity, normalizedKey);
+        const cachedResult = {
           ...cachedDecision,
           normalizedKey,
         };
+        markGateFromValidation(cachedResult, { hasStoredKey: stored, hasUsableCache: true });
+        return cachedResult;
       }
     }
 
     if (config.policyMode === 'online-optional') {
-      return validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+      const local = validateLicenseKeyLocally(normalizedKey, { allowlistEnv: config.allowlistEnv });
+      if (local.valid) {
+        const stored = await persistLicenseSecret(runtime, config, identity, normalizedKey);
+        markGateFromValidation(local, { hasStoredKey: stored, hasUsableCache: false });
+      } else {
+        markGateFromValidation(local, { hasStoredKey: licenseGateSnapshot.hasStoredKey, hasUsableCache: false });
+      }
+      return local;
     }
 
-    return {
+    const networkError: LicenseValidationResult = {
       valid: false,
       code: 'network_error',
       normalizedKey,
       mode: 'online',
       message: error instanceof Error ? error.message : String(error),
     };
+    markGateFromValidation(networkError, {
+      hasStoredKey: licenseGateSnapshot.hasStoredKey,
+      hasUsableCache: false,
+    });
+    return networkError;
   }
+}
+
+export function getLicenseGateSnapshot(): LicenseGateSnapshot {
+  return { ...licenseGateSnapshot };
+}
+
+async function bootstrapLicenseGateInternal(): Promise<void> {
+  const runtime = await getAppRuntimeInfo();
+  const config = resolveLicenseRuntimeConfig(runtime.packaged);
+  const identity = await readClientIdentity(runtime.userDataDir);
+  const nowMs = Date.now();
+  const cachedState = await loadCachedState();
+  const usableCache = cachedState
+    ? isCacheUsable(cachedState, {
+      currentInstallId: identity.installId,
+      nowMs,
+    })
+    : null;
+
+  const storedKey = await readStoredLicenseKeyWithRecovery(runtime, config, identity);
+  const hasStoredKey = Boolean(storedKey);
+
+  if (usableCache?.valid) {
+    const remainingGraceMs = cachedState
+      ? Math.max(0, cachedState.offlineGraceUntilMs - nowMs)
+      : (usableCache.offlineGraceUntilMs ? Math.max(0, usableCache.offlineGraceUntilMs - nowMs) : 0);
+
+    markGateFromValidation(usableCache, {
+      hasStoredKey,
+      hasUsableCache: true,
+    });
+
+    if (storedKey && remainingGraceMs <= STARTUP_PROACTIVE_RENEW_THRESHOLD_MS) {
+      void forceRevalidateStoredLicense('startup-near-expiry');
+    } else if (usableCache.refreshAfterSec) {
+      armRevalidateTimer(usableCache.refreshAfterSec);
+    }
+    return;
+  }
+
+  if (!storedKey) {
+    const blocked: LicenseValidationResult = {
+      valid: false,
+      code: 'empty',
+      mode: 'none',
+      message: 'missing stored license key',
+    };
+    markGateFromValidation(blocked, { hasStoredKey: false, hasUsableCache: false });
+    return;
+  }
+
+  setGateSnapshot({
+    state: 'checking',
+    reason: 'startup_revalidate',
+    hasStoredKey: true,
+    hasUsableCache: false,
+  });
+  const result = await validateLicenseKey(storedKey);
+  if (shouldScheduleRenewRetry(result, false)) {
+    scheduleRevalidateRetry();
+  }
+}
+
+export function ensureLicenseGateBootstrapped(): void {
+  if (gateBootstrapStarted) {
+    return;
+  }
+  gateBootstrapStarted = true;
+  gateBootstrapPromise = bootstrapLicenseGateInternal()
+    .catch((error) => {
+      const failure: LicenseValidationResult = {
+        valid: false,
+        code: 'network_error',
+        mode: 'none',
+        message: error instanceof Error ? error.message : String(error),
+      };
+      markGateFromValidation(failure, {
+        hasStoredKey: licenseGateSnapshot.hasStoredKey,
+        hasUsableCache: false,
+      });
+      scheduleRevalidateRetry();
+    })
+    .finally(() => {
+      gateBootstrapPromise = null;
+    });
+}
+
+export async function forceRevalidateStoredLicense(reason: 'manual' | 'timer' | 'startup' | 'startup-near-expiry' = 'manual'): Promise<LicenseValidationResult> {
+  const runtime = await getAppRuntimeInfo();
+  const config = resolveLicenseRuntimeConfig(runtime.packaged);
+  const identity = await readClientIdentity(runtime.userDataDir);
+  const nowMs = Date.now();
+  const cacheBeforeRevalidate = await loadCachedState();
+  const nearExpiryWindow = isNearExpiryWindow(cacheBeforeRevalidate, identity.installId, nowMs);
+  const storedKey = await readStoredLicenseKeyWithRecovery(runtime, config, identity);
+  if (!storedKey) {
+    const result: LicenseValidationResult = {
+      valid: false,
+      code: 'empty',
+      mode: 'none',
+      message: reason === 'manual' ? 'missing stored license key' : 'no stored key for auto revalidate',
+    };
+    markGateFromValidation(result, { hasStoredKey: false, hasUsableCache: false });
+    clearRevalidateTimer();
+    return result;
+  }
+
+  setGateSnapshot({
+    state: 'checking',
+    reason: `revalidate_${reason}`,
+    hasStoredKey: true,
+  });
+  const result = await validateLicenseKey(storedKey);
+  setGateSnapshot({
+    renewalAlert: shouldShowRenewalAlert(result, nearExpiryWindow) ? 'near_expiry_renew_failed' : null,
+  });
+  if (shouldScheduleRenewRetry(result, nearExpiryWindow)) {
+    scheduleRevalidateRetry();
+  }
+  return result;
+}
+
+export async function clearStoredLicenseData(): Promise<void> {
+  clearRevalidateTimer();
+  resetRevalidateRetryState();
+  const runtime = await getAppRuntimeInfo();
+  if (runtime.userDataDir) {
+    const filePath = getLicenseSecretFilePath(runtime.userDataDir);
+    await removeEncryptedLicenseFile(filePath);
+  }
+  await clearCachedState();
+  setGateSnapshot({
+    state: 'blocked',
+    reason: 'cleared',
+    hasStoredKey: false,
+    hasUsableCache: false,
+    nextRevalidateAtMs: null,
+    lastValidation: null,
+    renewalAlert: null,
+  });
+}
+
+export async function getStoredLicenseKey(): Promise<string | null> {
+  const runtime = await getAppRuntimeInfo();
+  const config = resolveLicenseRuntimeConfig(runtime.packaged);
+  const identity = await readClientIdentity(runtime.userDataDir);
+  return readStoredLicenseKeyWithRecovery(runtime, config, identity);
+}
+
+export async function waitForLicenseGateBootstrap(): Promise<void> {
+  ensureLicenseGateBootstrapped();
+  await gateBootstrapPromise;
 }

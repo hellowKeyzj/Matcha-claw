@@ -8,7 +8,8 @@ MatchaClaw License 单文件工具
 2) 单个录入: add
 3) 批量录入: import
 4) 导出 key: export
-5) 启动授权服务: serve
+5) 清空绑定: unbind
+6) 启动授权服务: serve
 
 数据库结构：
 {
@@ -20,6 +21,7 @@ MatchaClaw License 单文件工具
       "expiresAt": "2027-12-31T23:59:59Z",
       "maxDevices": 2,
       "devices": [],
+      "bindings": [],
       "createdAt": "...",
       "updatedAt": "..."
     }
@@ -37,7 +39,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 LICENSE_PREFIX = "MATCHACLAW"
 LICENSE_PATTERN = re.compile(r"^MATCHACLAW-[A-Z0-9]{4}(?:-[A-Z0-9]{4}){3}$")
@@ -72,6 +74,82 @@ def normalize_seed(raw_seed: str) -> str:
 
 def normalize_device_id(raw_device_id: str) -> str:
     return (raw_device_id or "").strip().lower()
+
+
+def normalize_hardware_id(raw_hardware_id: str) -> str:
+    return normalize_device_id(raw_hardware_id)
+
+
+def normalize_install_id(raw_install_id: str) -> str:
+    return normalize_device_id(raw_install_id)
+
+
+def normalize_binding_entry(raw: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(raw, dict):
+        return None
+    install_id = normalize_install_id(str(raw.get("installId", "")))
+    device_id = normalize_device_id(str(raw.get("deviceId", "")))
+    hardware_id = normalize_hardware_id(str(raw.get("hardwareId", "")))
+    bound_at = str(raw.get("boundAt", "")).strip() or utc_now_iso()
+
+    if not install_id and not device_id:
+        return None
+
+    return {
+        "installId": install_id or device_id,
+        "deviceId": device_id or install_id,
+        "hardwareId": hardware_id,
+        "boundAt": bound_at,
+    }
+
+
+def get_bindings_from_item(item: Dict[str, Any]) -> List[Dict[str, str]]:
+    raw_bindings = item.get("bindings")
+    bindings: List[Dict[str, str]] = []
+    if isinstance(raw_bindings, list):
+        for raw in raw_bindings:
+            normalized = normalize_binding_entry(raw)
+            if normalized:
+                bindings.append(normalized)
+
+    if bindings:
+        return bindings
+
+    raw_devices = item.get("devices")
+    if isinstance(raw_devices, list):
+        for raw_device in raw_devices:
+            normalized_device = normalize_device_id(str(raw_device))
+            if not normalized_device:
+                continue
+            bindings.append({
+                "installId": normalized_device,
+                "deviceId": normalized_device,
+                "hardwareId": "",
+                "boundAt": item.get("updatedAt") or item.get("createdAt") or utc_now_iso(),
+            })
+
+    return bindings
+
+
+def apply_bindings_to_item(item: Dict[str, Any], bindings: List[Dict[str, str]]) -> None:
+    normalized_bindings: List[Dict[str, str]] = []
+    seen = set()
+    for raw in bindings:
+        normalized = normalize_binding_entry(raw)
+        if not normalized:
+            continue
+        dedupe_key = (
+            normalized.get("hardwareId", ""),
+            normalized.get("installId", ""),
+            normalized.get("deviceId", ""),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized_bindings.append(normalized)
+
+    item["bindings"] = normalized_bindings
+    item["devices"] = [binding["installId"] for binding in normalized_bindings if binding.get("installId")]
 
 
 def compute_checksum_segment(payload: str) -> str:
@@ -149,11 +227,15 @@ def append_audit_event(
     ip: str,
     license_key: str = "",
     device_id: str = "",
+    install_id: str = "",
+    hardware_id: str = "",
 ) -> None:
     record = {
         "time": utc_now_iso(),
         "key": license_key,
         "deviceId": device_id,
+        "installId": install_id,
+        "hardwareId": hardware_id,
         "ip": ip,
         "code": code,
     }
@@ -227,16 +309,17 @@ def add_or_update_license(
 
     created_at = existing.get("createdAt") if isinstance(existing, dict) else utc_now_iso()
     resolved_id = license_id or (existing.get("id") if isinstance(existing, dict) else None) or next_license_id(licenses)
+    existing_bindings = get_bindings_from_item(existing) if isinstance(existing, dict) else []
     record = {
         "id": resolved_id,
         "status": status,
         "plan": plan,
         "expiresAt": expires_at,
         "maxDevices": int(max_devices),
-        "devices": existing.get("devices", []) if isinstance(existing, dict) else [],
         "createdAt": created_at,
         "updatedAt": utc_now_iso(),
     }
+    apply_bindings_to_item(record, existing_bindings)
     licenses[key] = record
     return (resolved_id, True)
 
@@ -342,7 +425,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             writer.writerow(["licenseKey", "id", "status", "plan", "expiresAt", "maxDevices", "deviceCount"])
             for key in keys:
                 item = licenses.get(key) or {}
-                devices = item.get("devices") if isinstance(item.get("devices"), list) else []
+                bindings = get_bindings_from_item(item if isinstance(item, dict) else {})
                 writer.writerow([
                     key,
                     item.get("id", ""),
@@ -350,11 +433,38 @@ def cmd_export(args: argparse.Namespace) -> None:
                     item.get("plan", ""),
                     item.get("expiresAt", ""),
                     item.get("maxDevices", ""),
-                    len(devices),
+                    len(bindings),
                 ])
     else:
         raise ValueError(f"不支持的导出格式: {args.format}")
     print(f"已导出 {len(keys)} 条 -> {args.out}")
+
+
+def cmd_unbind(args: argparse.Namespace) -> None:
+    key = normalize_license_key(args.key)
+    if not validate_license_key_format(key):
+        raise ValueError("key 格式无效")
+
+    audit_file = args.audit or os.path.join(os.path.dirname(os.path.abspath(args.db)), "audit.jsonl")
+
+    with db_lock:
+        db = load_db(args.db)
+        item = db.get("licenses", {}).get(key)
+        if not isinstance(item, dict):
+            raise ValueError(f"license 不存在: {key}")
+
+        item["updatedAt"] = utc_now_iso()
+        apply_bindings_to_item(item, [])
+        db["licenses"][key] = item
+        save_db(args.db, db)
+
+    append_audit_event(
+        audit_file,
+        code="manual_unbind",
+        ip="local-cli",
+        license_key=key,
+    )
+    print(f"已清空绑定: {key}")
 
 
 def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
@@ -381,6 +491,8 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
             ip = resolve_client_ip(self)
             license_key = ""
             device_id = ""
+            install_id = ""
+            hardware_id = ""
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -393,15 +505,19 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
 
             license_key = normalize_license_key(str(payload.get("licenseKey", "")))
             device_id = normalize_device_id(str(payload.get("deviceId", "")))
-            if not license_key or not device_id:
+            install_id = normalize_install_id(str(payload.get("installId", ""))) or device_id
+            hardware_id = normalize_hardware_id(str(payload.get("hardwareId", "")))
+            if not license_key or not install_id:
                 append_audit_event(
                     audit_file,
                     code="bad_request",
                     ip=ip,
                     license_key=license_key,
                     device_id=device_id,
+                    install_id=install_id,
+                    hardware_id=hardware_id,
                 )
-                self.send_json(400, {"valid": False, "code": "bad_request", "message": "licenseKey/deviceId required"})
+                self.send_json(400, {"valid": False, "code": "bad_request", "message": "licenseKey/installId required"})
                 return
 
             if not validate_license_key_format(license_key):
@@ -411,6 +527,8 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
                     ip=ip,
                     license_key=license_key,
                     device_id=device_id,
+                    install_id=install_id,
+                    hardware_id=hardware_id,
                 )
                 self.send_json(200, {"valid": False, "code": "format_invalid", "message": "invalid license format"})
                 return
@@ -425,6 +543,8 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
                         ip=ip,
                         license_key=license_key,
                         device_id=device_id,
+                        install_id=install_id,
+                        hardware_id=hardware_id,
                     )
                     self.send_json(200, {"valid": False, "code": "not_found", "message": "license not found"})
                     return
@@ -436,6 +556,8 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
                         ip=ip,
                         license_key=license_key,
                         device_id=device_id,
+                        install_id=install_id,
+                        hardware_id=hardware_id,
                     )
                     self.send_json(200, {"valid": False, "code": "revoked", "message": "license not active"})
                     return
@@ -449,28 +571,59 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
                         ip=ip,
                         license_key=license_key,
                         device_id=device_id,
+                        install_id=install_id,
+                        hardware_id=hardware_id,
                     )
                     self.send_json(200, {"valid": False, "code": "expired", "message": "license expired"})
                     return
 
                 max_devices = int(item.get("maxDevices", 1))
-                devices = [normalize_device_id(str(d)) for d in item.get("devices", []) if str(d).strip()]
-                if device_id not in devices:
-                    if len(devices) >= max_devices:
+                bindings = get_bindings_from_item(item)
+                matched = False
+
+                for binding in bindings:
+                    if binding.get("installId") == install_id:
+                        matched = True
+                        if device_id and binding.get("deviceId") != device_id:
+                            binding["deviceId"] = device_id
+                        if hardware_id and binding.get("hardwareId") != hardware_id:
+                            binding["hardwareId"] = hardware_id
+                        break
+
+                if (not matched) and hardware_id:
+                    for binding in bindings:
+                        if binding.get("hardwareId") == hardware_id:
+                            binding["installId"] = install_id
+                            binding["deviceId"] = device_id or install_id
+                            binding["hardwareId"] = hardware_id
+                            binding["boundAt"] = utc_now_iso()
+                            matched = True
+                            break
+
+                if not matched:
+                    if len(bindings) >= max_devices:
                         append_audit_event(
                             audit_file,
                             code="device_limit",
                             ip=ip,
                             license_key=license_key,
                             device_id=device_id,
+                            install_id=install_id,
+                            hardware_id=hardware_id,
                         )
                         self.send_json(200, {"valid": False, "code": "device_limit", "message": "device limit reached"})
                         return
-                    devices.append(device_id)
-                    item["devices"] = devices
-                    item["updatedAt"] = utc_now_iso()
-                    db["licenses"][license_key] = item
-                    save_db(db_file, db)
+                    bindings.append({
+                        "installId": install_id,
+                        "deviceId": device_id or install_id,
+                        "hardwareId": hardware_id,
+                        "boundAt": utc_now_iso(),
+                    })
+
+                apply_bindings_to_item(item, bindings)
+                item["updatedAt"] = utc_now_iso()
+                db["licenses"][license_key] = item
+                save_db(db_file, db)
 
             append_audit_event(
                 audit_file,
@@ -478,6 +631,8 @@ def make_http_handler(db_file: str, refresh_after_sec: int, audit_file: str):
                 ip=ip,
                 license_key=license_key,
                 device_id=device_id,
+                install_id=install_id,
+                hardware_id=hardware_id,
             )
 
             self.send_json(200, {
@@ -546,6 +701,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--out", type=str, required=True, help="导出文件路径")
     p_export.add_argument("--format", type=str, default="csv", choices=["txt", "json", "csv"], help="导出格式")
     p_export.set_defaults(func=cmd_export)
+
+    p_unbind = sub.add_parser("unbind", help="按 key 清空绑定")
+    p_unbind.add_argument("--db", type=str, default="./license-db.json", help="数据库文件路径")
+    p_unbind.add_argument("--key", type=str, required=True, help="license key")
+    p_unbind.add_argument("--audit", type=str, default="", help="审计日志文件路径（默认与 db 同目录下 audit.jsonl）")
+    p_unbind.set_defaults(func=cmd_unbind)
 
     p_serve = sub.add_parser("serve", help="启动授权服务")
     p_serve.add_argument("--host", type=str, default="0.0.0.0", help="监听地址")

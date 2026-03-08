@@ -512,3 +512,59 @@ Matcha-matchaclaw/
 
 - `loadAgents` 保留为运行时最小读取能力，不用于 Teams 页面默认首屏刷新。
 - Teams 侧 agent 创建后，后续流程必须以 `createAgent` 返回 `agentId` 作为主锚点，不依赖“先刷新再差集探测”的时序。
+
+## 18. License 门禁与换绑增强（2026-03-08）
+
+### 18.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+├─ electron/
+│  ├─ utils/
+│  │  ├─ license.ts
+│  │  ├─ license-secret.ts        # 新增：本地 AES 密文读写
+│  │  └─ hardware-id.ts           # 新增：稳定硬件指纹采集与哈希
+│  ├─ main/ipc-handlers.ts        # 新增 license:getGateState/forceRevalidate/clearStoredKey
+│  ├─ main/index.ts               # 启动即 bootstrap 授权门禁
+│  └─ preload/index.ts            # 暴露新增 license IPC 白名单
+├─ src/
+│  ├─ App.tsx                     # 全局路由门禁：未授权仅允许 /settings
+│  ├─ pages/Settings/index.tsx    # 新增 License 区块（校验/重校/清除+二次确认）
+│  ├─ lib/settings/sections.ts    # 新增 settings section=license
+│  ├─ types/electron.d.ts         # 新增 license IPC 声明注释
+│  └─ i18n/locales/{zh,en,ja}/settings.json
+└─ scripts/
+   ├─ license_server.py           # 支持 hardwareId/installId 同硬件换绑 + unbind
+   ├─ license-server-README.md
+   └─ license-release.md
+```
+
+### 18.2 文件职责（一句话）
+
+- `electron/utils/license.ts`：统一门禁状态、自动续校调度、在线校验、缓存读写与本地密文联动。
+- `electron/utils/license-secret.ts`：实现 `license-secret.enc.json` 的 AES-256-GCM 加解密与落盘。
+- `electron/utils/hardware-id.ts`：提供跨平台硬件标识读取与哈希。
+- `src/App.tsx`：根据主进程门禁状态执行“仅设置页可访问”的路由收敛。
+- `src/pages/Settings/index.tsx`：提供 License 输入、覆盖确认、重校、清除确认入口。
+- `scripts/license_server.py`：兼容旧 `deviceId`，扩展 `hardwareId/installId` 与人工解绑命令。
+
+### 18.3 模块依赖与边界
+
+- Renderer 不直连授权服务，统一经 `window.electron.ipcRenderer` 调主进程 License IPC。
+- 门禁事实源在主进程（`electron/utils/license.ts`），前端仅消费快照并执行路由限制。
+- 服务端保持 `/v1/activate` 不变，新增字段走“可选兼容”，旧客户端无需改动。
+
+### 18.4 关键决策与原因
+
+- 门禁统一到主进程，避免前端页面各自判断导致绕过。
+- 本地密文采用自定义 AES 方案（不依赖系统钥匙串），满足部署一致性要求。
+- 同硬件换绑通过 `hardwareId` 命中替换 `installId`，降低重装/升级后占用新席位的用户摩擦。
+- 人工解绑最小化实现为 `unbind --key`，用于运维兜底。
+
+### 18.5 本次变更日志
+
+- 新增 License 门禁状态 IPC：`license:getGateState`、`license:forceRevalidate`、`license:clearStoredKey`。
+- 路由守卫调整为“未授权仅允许设置页”，支持升级后统一拦截。
+- 设置页新增 License 分区与二次确认交互（覆盖和清除）。
+- 新增本地密文文件 `license-secret.enc.json` 与自动续校调度。
+- `license_server.py` 新增 `hardwareId/installId` 兼容绑定策略与 `unbind` 命令。
