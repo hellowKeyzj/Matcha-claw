@@ -26,8 +26,7 @@ interface ResolvePlanAssignmentsInput {
     workspace: string;
     model?: string;
     emoji?: string;
-  }) => Promise<void>;
-  loadAgents: () => Promise<void>;
+  }) => Promise<string>;
   defaultModel?: string;
   allowCreate?: boolean;
 }
@@ -207,17 +206,16 @@ export async function resolvePlanAssignmentsForTeam(
     }
 
     const newName = buildUniqueAgentName(roleHint, agents, reservedSlugs);
-    await input.createAgent({
+    const createdAgentId = await input.createAgent({
       name: newName,
       workspace: '',
       model: defaultModel,
       emoji: '\uD83E\uDD16',
     });
-    await input.loadAgents();
     agents = input.getAgents();
 
-    const createdId = normalizeSubagentNameToSlug(newName);
-    const createdAgent = findAgentById(agents, createdId);
+    const createdAgent = findAgentById(agents, createdAgentId)
+      ?? findAgentById(agents, normalizeSubagentNameToSlug(newName));
     if (!createdAgent) {
       continue;
     }

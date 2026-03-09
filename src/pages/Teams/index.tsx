@@ -112,9 +112,11 @@ export function TeamsPage() {
 
   useEffect(() => {
     void loadAgents();
-    void loadAvailableModels();
+    if (availableModels.length === 0) {
+      void loadAvailableModels();
+    }
     void refreshControllerStatus();
-  }, [loadAgents, loadAvailableModels, refreshControllerStatus]);
+  }, [availableModels.length, loadAgents, loadAvailableModels, refreshControllerStatus]);
 
   useEffect(() => {
     if (!createOpen || agents.length === 0) {
@@ -176,18 +178,18 @@ export function TeamsPage() {
     }
 
     const beforeCreate = await checkTeamControllerReadiness(TEAM_CONTROLLER_ID);
+    let createdControllerId = TEAM_CONTROLLER_ID;
     if (!beforeCreate.exists) {
-      await createAgent({
+      createdControllerId = await createAgent({
         name: TEAM_CONTROLLER_NAME,
         workspace: values.workspace,
         model: values.model,
         emoji: values.emoji || TEAM_CONTROLLER_EMOJI,
       });
     }
-    const createdControllerId = normalizeSubagentNameToSlug(TEAM_CONTROLLER_NAME);
-    setDraftPromptForAgent(createdControllerId, prompt || DEFAULT_TEAM_CONTROLLER_PROMPT);
-    setManagedAgentId(createdControllerId);
-    await loadAgents();
+    const resolvedControllerId = createdControllerId || normalizeSubagentNameToSlug(TEAM_CONTROLLER_NAME);
+    setDraftPromptForAgent(resolvedControllerId, prompt || DEFAULT_TEAM_CONTROLLER_PROMPT);
+    setManagedAgentId(resolvedControllerId);
     const status = await refreshControllerStatus();
     if (status?.ready) {
       setControllerDialogOpen(false);

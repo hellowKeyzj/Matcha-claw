@@ -78,7 +78,7 @@ interface ConvergenceIssue {
 
 const CONTROLLER_DECISION_MAX_RETRY = 2;
 const CONTROLLER_DRIFT_MAX_ROUNDS = 3;
-const TEAM_DISCUSSION_MAX_ROUNDS_STORAGE_KEY = 'clawx.team.discussion.maxRounds';
+const TEAM_DISCUSSION_MAX_ROUNDS_STORAGE_KEY = 'matchaclaw.team.discussion.maxRounds';
 const DEFAULT_CONTROLLER_DISCUSSION_MAX_ROUNDS = 5;
 const CONTROLLER_DISCUSSION_MAX_ROUNDS_OPTIONS = [3, 5, 8, 12];
 const CONVERGENCE_MAX_ROUNDS = 3;
@@ -195,11 +195,11 @@ function parseDirectMemberReplyCommand(message: string): { target: string; promp
   };
 }
 
-function getAgentDisplayEmoji(agent: SubagentSummary | undefined, agentId: string): string {
+function getAgentDisplayEmoji(agent: SubagentSummary | undefined): string {
   if (agent?.identityEmoji) {
     return agent.identityEmoji;
   }
-  return agentId === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16';
+  return agent?.isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16';
 }
 
 function buildWorkspaceMapForTeam(input: {
@@ -560,8 +560,10 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
 
   useEffect(() => {
     void loadAgents();
-    void loadAvailableModels();
-  }, [loadAgents, loadAvailableModels]);
+    if (availableModels.length === 0) {
+      void loadAvailableModels();
+    }
+  }, [availableModels.length, loadAgents, loadAvailableModels]);
 
   useEffect(() => {
     if (!team) {
@@ -862,7 +864,6 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
       agents: latestAgents,
       getAgents: () => useSubagentsStore.getState().agents,
       createAgent,
-      loadAgents,
       defaultModel: availableModels[0]?.id ?? latestAgents[0]?.model,
       allowCreate: false,
     });
@@ -985,20 +986,6 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
     return status;
   };
 
-  const detectCreatedAgentId = (input: {
-    beforeIds: Set<string>;
-    suggestedName: string;
-  }): string | null => {
-    const latestAgents = useSubagentsStore.getState().agents;
-    const expectedId = normalizeSubagentNameToSlug(input.suggestedName);
-    const exact = latestAgents.find((agent) => !input.beforeIds.has(agent.id) && agent.id === expectedId);
-    if (exact) {
-      return exact.id;
-    }
-    const fallback = latestAgents.find((agent) => !input.beforeIds.has(agent.id) && normalizeSubagentNameToSlug(agent.name ?? agent.id) === expectedId);
-    return fallback?.id ?? null;
-  };
-
   const handleConfirmPendingBootstrap = async () => {
     if (!team || !pendingBootstrap) {
       return;
@@ -1012,19 +999,12 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
       for (const request of pendingBootstrap.requests) {
         const requestKey = bootstrapRequestKey(request);
         try {
-          const beforeIds = new Set(useSubagentsStore.getState().agents.map((agent) => agent.id));
           setBootstrapProgress((state) => ({ ...state, [requestKey]: 'creating' }));
-          await createAgent({
+          const createdAgentId = await createAgent({
             name: request.suggestedName,
             workspace: '',
             model: defaultModel,
             emoji: '\uD83E\uDD16',
-          });
-          await loadAgents();
-
-          const createdAgentId = detectCreatedAgentId({
-            beforeIds,
-            suggestedName: request.suggestedName,
           });
           if (!createdAgentId) {
             throw new Error(t('flow.bootstrapCreateFailed', { name: request.suggestedName }));
@@ -2828,7 +2808,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                 ? agents.find((item) => item.id === message.agentId)
                 : undefined;
               const agentAvatar = message.agentId
-                ? getAgentDisplayEmoji(agent, message.agentId)
+                ? getAgentDisplayEmoji(agent)
                 : '\uD83E\uDD16';
 
               return (
@@ -2929,7 +2909,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                     <optgroup label={t('panel.addAvailableGroup')}>
                       {availableAgentsToAdd.map((agent) => (
                         <option key={agent.id} value={agent.id}>
-                          {`${getAgentDisplayEmoji(agent, agent.id)} ${agent.name ?? agent.id}`}
+                          {`${getAgentDisplayEmoji(agent)} ${agent.name ?? agent.id}`}
                         </option>
                       ))}
                     </optgroup>
@@ -2940,7 +2920,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                     <optgroup label={t('panel.addExistingGroup')}>
                       {existingTeamAgents.map((agent) => (
                         <option key={`existing-${agent.id}`} disabled value={`existing:${agent.id}`}>
-                          {`${getAgentDisplayEmoji(agent, agent.id)} ${agent.name ?? agent.id}`}
+                          {`${getAgentDisplayEmoji(agent)} ${agent.name ?? agent.id}`}
                         </option>
                       ))}
                     </optgroup>
@@ -2988,7 +2968,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 text-xs font-medium">
                           <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[12px]">
-                            {getAgentDisplayEmoji(agent, agentId)}
+                            {getAgentDisplayEmoji(agent)}
                           </span>
                           <span>{agent?.name ?? agentId}</span>
                         </div>
@@ -3249,7 +3229,7 @@ export function TeamChat({ teamId }: TeamChatProps = {}) {
                   className="flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-base"
                   title={agent?.name ?? agentId}
                 >
-                  {getAgentDisplayEmoji(agent, agentId)}
+                  {getAgentDisplayEmoji(agent)}
                 </div>
               );
             })}

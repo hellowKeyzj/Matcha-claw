@@ -1,5 +1,5 @@
 ﻿{
-  "title": "Agents 工作空间",
+  "title": "智能体协作空间",
   "actions": {
     "newTeam": "新建团队",
     "defaultTeamName": "团队 {{count}}"
@@ -65,7 +65,7 @@
     "missingMembers": "缺少团队成员：{{ids}}",
     "recheckMembers": "重新校验",
     "removeMissingMembers": "移除缺失成员",
-    "goSubagents": "前往子Agent工作台",
+    "goSubagents": "前往智能体管理台",
     "memberBackfilled": "已为新成员 {{agentId}} 回填历史任务共享结果。",
     "removedMissingMembers": "已从团队移除 {{count}} 个缺失成员。",
     "resolveMissingEmpty": "当前成员全部缺失，请先补齐团队成员。",
@@ -217,15 +217,15 @@
     }
   },
   "bootstrap": {
-    "checking": "正在检查主控 Agent 初始化状态...",
-    "blockedTitle": "需先完成主控 Agent 初始化",
-    "missingAgent": "未找到主控 Agent，请先创建后再进入团队协作。",
-    "missingFiles": "主控 Agent 缺少必需文件：{{files}}",
-    "agentsMdEmpty": "主控 Agent 的 AGENTS.md 为空，请先完善后再继续。",
-    "checkFailed": "检查主控 Agent 状态失败，请重试。",
-    "createController": "创建主控 Agent",
-    "goSubagents": "前往子Agent工作台",
+    "checking": "正在检查主控智能体初始化状态...",
+    "blockedTitle": "需先完成主控智能体初始化",
+    "missingAgent": "未找到主控智能体，请先创建后再进入团队协作。",
+    "missingFiles": "主控智能体缺少必需文件：{{files}}",
+    "agentsMdEmpty": "主控智能体的 AGENTS.md 为空，请先完善后再继续。",
+    "checkFailed": "检查主控智能体状态失败，请重试。",
+    "createController": "创建主控智能体",
+    "goSubagents": "前往智能体管理台",
     "recheck": "重新检测",
-    "dialogTitle": "初始化主控 Agent"
+    "dialogTitle": "初始化主控智能体"
   }
 }
