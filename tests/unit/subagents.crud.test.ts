@@ -56,6 +56,48 @@ describe('subagents crud', () => {
     );
   });
 
+  it('create 在缺少主工作区时，优先用 openclaw:getConfigDir 生成 fallback 工作区', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    useSubagentsStore.setState({
+      agents: [{ id: 'main', isDefault: true }],
+    });
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'openclaw:getConfigDir') {
+        return 'C:\\Users\\Dev\\.openclaw';
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.create') {
+        return { success: true, result: { agentId: 'writer' } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer' }],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.update') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().createAgent({
+      name: 'writer',
+      workspace: '',
+      model: 'gpt-4.1-mini',
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      'openclaw:getConfigDir',
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      'gateway:rpc',
+      'agents.create',
+      { name: 'writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
+    );
+  });
+
   it('passes emoji to agents.create when provided', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke.mockImplementation(async (channel, method) => {

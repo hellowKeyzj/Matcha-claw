@@ -11,6 +11,7 @@ import {
 } from '@/lib/openclaw/session-runtime';
 import {
   buildSubagentWorkspacePath,
+  buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
   normalizeSubagentNameToSlug,
 } from '@/lib/subagent/workspace';
@@ -57,6 +58,8 @@ const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
 const IDENTITY_EMOJI_CACHE_TTL_MS = 5 * 60 * 1000;
 const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
+let workspaceFallbackRootCache: string | undefined;
+let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -358,6 +361,34 @@ async function readConfigForDisplay(): Promise<ConfigDisplaySnapshot> {
       configuredModelIds: [],
     };
   }
+}
+
+async function resolveWorkspaceFallbackRoot(): Promise<string | undefined> {
+  if (workspaceFallbackRootCache) {
+    return workspaceFallbackRootCache;
+  }
+  if (workspaceFallbackRootTask) {
+    return workspaceFallbackRootTask;
+  }
+  workspaceFallbackRootTask = (async () => {
+    try {
+      const rawConfigDir = await Promise.resolve(
+        window.electron?.ipcRenderer?.invoke?.('openclaw:getConfigDir')
+      );
+      const configDir = getOptionalString(rawConfigDir);
+      if (!configDir) {
+        return undefined;
+      }
+      const fallbackRoot = buildWorkspaceSubagentsRootFromConfigDir(configDir);
+      workspaceFallbackRootCache = fallbackRoot;
+      return fallbackRoot;
+    } catch {
+      return undefined;
+    } finally {
+      workspaceFallbackRootTask = null;
+    }
+  })();
+  return workspaceFallbackRootTask;
 }
 
 function normalizeModelsListResult(result: ModelsListResult): ModelCatalogEntry[] {
@@ -1107,9 +1138,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (hasSubagentNameConflict(trimmedName, get().agents)) {
         throw new Error('Invalid subagent name: duplicate');
       }
+      const fallbackRoot = await resolveWorkspaceFallbackRoot();
       const resolvedWorkspace = buildSubagentWorkspacePath({
         name: trimmedName,
         agents: get().agents,
+        fallbackRoot,
       });
       const createResult = await rpc<AgentsCreateResult>('agents.create', {
         name: trimmedName,
