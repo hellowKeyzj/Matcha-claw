@@ -10,6 +10,7 @@
     },
     "filter": {
         "all": "すべて ({{count}})",
+        "eligible": "利用可能 ({{count}})",
         "builtIn": "内蔵 ({{count}})",
         "marketplace": "マーケットプレイス ({{count}})"
     },
@@ -26,6 +27,7 @@
         "version": "バージョン",
         "author": "作者",
         "source": "ソース",
+        "availability": "可用性",
         "coreSystem": "コアシステム",
         "bundled": "内蔵",
         "userInstalled": "ユーザーインストール",
@@ -46,6 +48,14 @@
         "openManual": "マニュアルを開く",
         "configurable": "設定可能"
     },
+    "availability": {
+        "eligible": "利用可能",
+        "blocked": "ブロック",
+        "missing": "依存不足",
+        "unknown": "不明",
+        "blockedByAllowlist": "allowlist によってブロック",
+        "missingPrefix": "Missing: {{items}}"
+    },
     "toast": {
         "enabled": "スキルを有効にしました",
         "disabled": "スキルを無効にしました",
@@ -58,20 +68,20 @@
         "failedInstall": "インストールに失敗しました",
         "failedUninstall": "アンインストールに失敗しました",
         "failedFolderNotFound": "スキルフォルダがまだ存在しません。先にスキルをインストールしてください。",
-        "searchTimeoutError": "検索がタイムアウトしました。MatchaClawHub.aiで検索してZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
-        "installTimeoutError": "インストールがタイムアウトしました。MatchaClawHub.aiでZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
-        "searchRateLimitError": "検索リクエストの制限を超過しました。MatchaClawHub.aiで検索してZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
-        "installRateLimitError": "インストールリクエストの制限を超過しました。MatchaClawHub.aiからZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
+        "searchTimeoutError": "検索がタイムアウトしました。ClawHub.aiで検索してZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
+        "installTimeoutError": "インストールがタイムアウトしました。ClawHub.aiでZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
+        "searchRateLimitError": "検索リクエストの制限を超過しました。ClawHub.aiで検索してZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
+        "installRateLimitError": "インストールリクエストの制限を超過しました。ClawHub.aiからZIPをダウンロードし、\"{{path}}\" に展開することも可能です",
         "fetchTimeoutError": "スキルリストの取得がタイムアウトしました。ネットワークを確認してください。",
         "fetchRateLimitError": "スキルリスト取得のリクエスト制限を超過しました。後でお試しください。"
     },
     "marketplace": {
         "title": "マーケットプレイス",
-        "securityNote": "インストール前にスキルカードをクリックして、MatchaClawHubでドキュメントとセキュリティ情報を確認してください。",
-        "manualInstallHint": "ネットワークに問題がありますか？いつでもMatchaClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
-        "searching": "MatchaClawHubを検索中...",
+        "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
+        "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
+        "searching": "ClawHubを検索中...",
         "noResults": "検索に一致するスキルが見つかりません。",
         "emptyPrompt": "新しいスキルを検索して機能を拡張しましょう。",
-        "searchError": "MatchaClawHub検索に失敗しました。接続またはインストールを確認してください。"
+        "searchError": "ClawHub検索に失敗しました。接続またはインストールを確認してください。"
     }
 }

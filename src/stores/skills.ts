@@ -3,7 +3,15 @@
  * Manages skill/plugin state
  */
 import { create } from 'zustand';
-import type { Skill, MarketplaceSkill } from '../types/skill';
+import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
+
+type GatewaySkillMissing = {
+  bins?: string[];
+  anyBins?: string[];
+  env?: string[];
+  config?: string[];
+  os?: string[];
+};
 
 type GatewaySkillStatus = {
   skillKey: string;
@@ -17,6 +25,9 @@ type GatewaySkillStatus = {
   config?: Record<string, unknown>;
   bundled?: boolean;
   always?: boolean;
+  eligible?: boolean;
+  blockedByAllowlist?: boolean;
+  missing?: GatewaySkillMissing;
 };
 
 type GatewaySkillsStatusResult = {
@@ -33,6 +44,21 @@ type MatchaClawHubListResult = {
   slug: string;
   version?: string;
 };
+
+function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissingRequirements | undefined {
+  if (!missing) return undefined;
+
+  const normalized: SkillMissingRequirements = {
+    bins: Array.isArray(missing.bins) ? missing.bins : [],
+    anyBins: Array.isArray(missing.anyBins) ? missing.anyBins : [],
+    env: Array.isArray(missing.env) ? missing.env : [],
+    config: Array.isArray(missing.config) ? missing.config : [],
+    os: Array.isArray(missing.os) ? missing.os : [],
+  };
+
+  const hasMissing = Object.values(normalized).some((values) => Array.isArray(values) && values.length > 0);
+  return hasMissing ? normalized : undefined;
+}
 
 interface SkillsState {
   skills: Skill[];
@@ -103,6 +129,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             icon: s.emoji || '📦',
             version: s.version || '1.0.0',
             author: s.author,
+            eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
+            blockedByAllowlist: s.blockedByAllowlist === true,
+            missing: normalizeMissingRequirements(s.missing),
             config: {
               ...(s.config || {}),
               ...directConfig,

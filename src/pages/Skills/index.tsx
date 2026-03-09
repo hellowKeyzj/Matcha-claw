@@ -39,9 +39,45 @@ import { useGatewayStore } from '@/stores/gateway';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
-import type { Skill, MarketplaceSkill } from '@/types/skill';
+import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/skill';
 import { useTranslation } from 'react-i18next';
 
+type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
+
+function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
+  if (!skill.enabled) return 'disabled';
+  if (skill.eligible === true) return 'eligible';
+  if (skill.blockedByAllowlist) return 'blocked';
+  if (skill.eligible === false) return 'missing';
+  return 'unknown';
+}
+
+function getAvailabilityBadgeClass(kind: SkillAvailabilityKind): string {
+  switch (kind) {
+    case 'eligible':
+      return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400';
+    case 'blocked':
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400';
+    case 'missing':
+      return 'border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-400';
+    case 'disabled':
+      return 'border-muted bg-muted/20 text-muted-foreground';
+    default:
+      return 'border-muted bg-muted/10 text-muted-foreground';
+  }
+}
+
+function formatMissingSummary(missing?: SkillMissingRequirements): string {
+  if (!missing) return '';
+
+  const parts: string[] = [];
+  if (missing.bins?.length) parts.push(...missing.bins.map((value) => `bin:${value}`));
+  if (missing.anyBins?.length) parts.push(`any-bin:${missing.anyBins.join('|')}`);
+  if (missing.env?.length) parts.push(...missing.env.map((value) => `env:${value}`));
+  if (missing.config?.length) parts.push(...missing.config.map((value) => `config:${value}`));
+  if (missing.os?.length) parts.push(...missing.os.map((value) => `os:${value}`));
+  return parts.join(', ');
+}
 
 
 
@@ -60,6 +96,11 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
   const [apiKey, setApiKey] = useState('');
   const [isEnvExpanded, setIsEnvExpanded] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const availabilityKind = getSkillAvailabilityKind(skill);
+  const missingSummary = formatMissingSummary(skill.missing);
+  const availabilityLabel = availabilityKind === 'disabled'
+    ? t('detail.disabled')
+    : t(`availability.${availabilityKind}`);
 
   // Initialize config from skill
   useEffect(() => {
@@ -84,7 +125,7 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
 
   const handleOpenClawhub = async () => {
     if (skill.slug) {
-      await window.electron.ipcRenderer.invoke('shell:openExternal', `https://matchaclawhub.ai/s/${skill.slug}`);
+      await window.electron.ipcRenderer.invoke('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
     }
   };
 
@@ -174,7 +215,7 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
                   <>
                     <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenClawhub}>
                       <Globe className="h-3 w-3" />
-                      MatchaClawHub
+                      ClawHub
                     </Button>
                     <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenEditor}>
                       <FileCode className="h-3 w-3" />
@@ -225,6 +266,25 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
                     <Badge variant="secondary" className="mt-1 font-normal">
                       {skill.isCore ? t('detail.coreSystem') : skill.isBundled ? t('detail.bundled') : t('detail.userInstalled')}
                     </Badge>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-medium text-muted-foreground">{t('detail.availability')}</h3>
+                    <div className="mt-1 flex items-center gap-2 flex-wrap">
+                      <Badge variant="outline" className={cn('font-normal', getAvailabilityBadgeClass(availabilityKind))}>
+                        {availabilityLabel}
+                      </Badge>
+                    </div>
+                    {availabilityKind === 'blocked' && (
+                      <p className="text-xs text-muted-foreground mt-2">
+                        {t('availability.blockedByAllowlist')}
+                      </p>
+                    )}
+                    {missingSummary && availabilityKind !== 'eligible' && (
+                      <p className="text-xs text-muted-foreground mt-2 break-all">
+                        {t('availability.missingPrefix', { items: missingSummary })}
+                      </p>
+                    )}
                   </div>
                 </div>
               </TabsContent>
@@ -381,7 +441,7 @@ function MarketplaceSkillCard({
   onUninstall
 }: MarketplaceSkillCardProps) {
   const handleCardClick = () => {
-    window.electron.ipcRenderer.invoke('shell:openExternal', `https://matchaclawhub.ai/s/${skill.slug}`);
+    window.electron.ipcRenderer.invoke('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
   };
 
   return (
@@ -540,7 +600,7 @@ export function Skills() {
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
-  const [selectedSource, setSelectedSource] = useState<'all' | 'built-in' | 'marketplace'>('all');
+  const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('all');
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -576,7 +636,9 @@ export function Skills() {
       skill.description.toLowerCase().includes(searchQuery.toLowerCase());
 
     let matchesSource = true;
-    if (selectedSource === 'built-in') {
+    if (selectedSource === 'eligible') {
+      matchesSource = skill.eligible === true;
+    } else if (selectedSource === 'built-in') {
       matchesSource = !!skill.isBundled;
     } else if (selectedSource === 'marketplace') {
       matchesSource = !skill.isBundled;
@@ -596,6 +658,7 @@ export function Skills() {
 
   const sourceStats = {
     all: skills.length,
+    eligible: skills.filter(s => s.eligible === true).length,
     builtIn: skills.filter(s => s.isBundled).length,
     marketplace: skills.filter(s => !s.isBundled).length,
   };
@@ -784,7 +847,16 @@ export function Skills() {
                 size="sm"
                 onClick={() => setSelectedSource('all')}
               >
-                All ({sourceStats.all})
+                {t('filter.all', { count: sourceStats.all })}
+              </Button>
+              <Button
+                variant={selectedSource === 'eligible' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setSelectedSource('eligible')}
+                className="gap-2"
+              >
+                <CheckCircle2 className="h-3 w-3" />
+                {t('filter.eligible', { count: sourceStats.eligible })}
               </Button>
               <Button
                 variant={selectedSource === 'built-in' ? 'default' : 'outline'}
@@ -834,80 +906,96 @@ export function Skills() {
             </Card>
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {filteredSkills.map((skill) => (
-                <Card
-                  key={skill.id}
-                  className={cn(
-                    'cursor-pointer hover:border-primary/50 transition-colors',
-                    skill.enabled && 'border-primary/50 bg-primary/5'
-                  )}
-                  onClick={() => setSelectedSkill(skill)}
-                >
-                  <CardHeader className="pb-3">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className="text-2xl">{skill.icon || '🧩'}</span>
-                        <div>
-                          <CardTitle className="text-base flex items-center gap-2">
-                            {skill.name}
-                            {skill.isCore ? (
-                              <Lock className="h-3 w-3 text-muted-foreground" />
-                            ) : skill.isBundled ? (
-                              <Puzzle className="h-3 w-3 text-blue-500/70" />
-                            ) : (
-                              <Globe className="h-3 w-3 text-purple-500/70" />
-                            )}
-                          </CardTitle>
+              {filteredSkills.map((skill) => {
+                const availabilityKind = getSkillAvailabilityKind(skill);
+                const missingSummary = formatMissingSummary(skill.missing);
+                const availabilityLabel = availabilityKind === 'disabled'
+                  ? t('detail.disabled')
+                  : t(`availability.${availabilityKind}`);
+
+                return (
+                  <Card
+                    key={skill.id}
+                    className={cn(
+                      'cursor-pointer hover:border-primary/50 transition-colors',
+                      skill.enabled && 'border-primary/50 bg-primary/5'
+                    )}
+                    onClick={() => setSelectedSkill(skill)}
+                  >
+                    <CardHeader className="pb-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{skill.icon || '🧩'}</span>
+                          <div>
+                            <CardTitle className="text-base flex items-center gap-2">
+                              {skill.name}
+                              {skill.isCore ? (
+                                <Lock className="h-3 w-3 text-muted-foreground" />
+                              ) : skill.isBundled ? (
+                                <Puzzle className="h-3 w-3 text-blue-500/70" />
+                              ) : (
+                                <Globe className="h-3 w-3 text-purple-500/70" />
+                              )}
+                            </CardTitle>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {!skill.isBundled && !skill.isCore && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleUninstall(skill.id);
+                              }}
+                              asChild
+                            >
+                              <motion.button whileTap={{ scale: 0.9 }}>
+                                <Trash2 className="h-4 w-4" />
+                              </motion.button>
+                            </Button>
+                          )}
+                          <Switch
+                            checked={skill.enabled}
+                            onCheckedChange={(checked) => {
+                              handleToggle(skill.id, checked);
+                            }}
+                            disabled={skill.isCore}
+                            onClick={(e) => e.stopPropagation()}
+                          />
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        {!skill.isBundled && !skill.isCore && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleUninstall(skill.id);
-                            }}
-                            asChild
-                          >
-                            <motion.button whileTap={{ scale: 0.9 }}>
-                              <Trash2 className="h-4 w-4" />
-                            </motion.button>
-                          </Button>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-muted-foreground line-clamp-2">
+                        {skill.description}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <Badge variant="outline" className={cn('text-xs', getAvailabilityBadgeClass(availabilityKind))}>
+                          {availabilityLabel}
+                        </Badge>
+                        {skill.version && (
+                          <Badge variant="outline" className="text-xs">
+                            v{skill.version}
+                          </Badge>
                         )}
-                        <Switch
-                          checked={skill.enabled}
-                          onCheckedChange={(checked) => {
-                            handleToggle(skill.id, checked);
-                          }}
-                          disabled={skill.isCore}
-                          onClick={(e) => e.stopPropagation()}
-                        />
+                        {skill.configurable && (
+                          <Badge variant="secondary" className="text-xs">
+                            <Settings className="h-3 w-3 mr-1" />
+                            {t('detail.configurable')}
+                          </Badge>
+                        )}
                       </div>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-muted-foreground line-clamp-2">
-                      {skill.description}
-                    </p>
-                    <div className="flex items-center gap-2 mt-2">
-                      {skill.version && (
-                        <Badge variant="outline" className="text-xs">
-                          v{skill.version}
-                        </Badge>
+                      {missingSummary && availabilityKind !== 'eligible' && (
+                        <p className="text-xs text-muted-foreground mt-2 line-clamp-2 break-all">
+                          {t('availability.missingPrefix', { items: missingSummary })}
+                        </p>
                       )}
-                      {skill.configurable && (
-                        <Badge variant="secondary" className="text-xs">
-                          <Settings className="h-3 w-3 mr-1" />
-                          {t('detail.configurable')}
-                        </Badge>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+                    </CardContent>
+                  </Card>
+                );
+              })}
             </div>
           )}
         </TabsContent>
