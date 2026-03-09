@@ -1,6 +1,56 @@
 {
   "title": "設定",
-  "subtitle": "ClawX の体験をカスタマイズ",
+  "subtitle": "MatchaClaw の体験をカスタマイズ",
+  "license": {
+    "title": "ライセンス",
+    "description": "ライセンス管理",
+    "gateStatus": "ゲート状態",
+    "gateState": {
+      "checking": "検証中",
+      "granted": "許可",
+      "blocked": "ブロック"
+    },
+    "inputLabel": "ライセンスキー",
+    "placeholder": "ライセンスキーを入力（例: MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+    "showKey": "ライセンスキーを表示",
+    "hideKey": "ライセンスキーを非表示",
+    "validate": "検証して保存",
+    "revalidate": "再検証",
+    "clear": "ローカルライセンスを削除",
+    "renewAlert": {
+      "near_expiry_renew_failed": "ライセンスキャッシュの残りが 1 日未満で、自動更新に失敗しました。この画面で再検証してください。"
+    },
+    "messages": {
+      "valid": "ライセンス検証に成功しました",
+      "cache_grace_valid": "オフライン猶予期間のキャッシュで検証に成功しました",
+      "empty": "ライセンスキーを入力してください",
+      "format_invalid": "ライセンスキーの形式が正しくありません",
+      "service_unconfigured": "ライセンスサービスが未設定です",
+      "network_error": "ライセンスサービスに接続できません。ネットワークを確認してください",
+      "server_rejected": "ライセンスサービスに拒否されました",
+      "expired": "ライセンスの有効期限が切れています",
+      "device_mismatch": "このライセンスは現在のデバイスと一致しません",
+      "not_allowed": "このライセンスキーは許可されていません",
+      "checksum_invalid": "ライセンスキーが無効です",
+      "unknown": "ライセンス検証に失敗しました。再試行してください"
+    },
+    "confirmReplace": {
+      "title": "現在のライセンスを置き換えますか",
+      "message": "この端末には既存のライセンスが保存されています。上書きして再バインドしますか？",
+      "confirm": "置き換える",
+      "cancel": "キャンセル"
+    },
+    "confirmClear": {
+      "title": "ローカルライセンスを削除",
+      "message": "削除すると暗号化キー保存と検証キャッシュが消去され、再検証までアプリがブロックされます。",
+      "confirm": "削除",
+      "cancel": "キャンセル"
+    },
+    "toast": {
+      "cleared": "ローカルライセンスを削除しました",
+      "clearFailed": "ローカルライセンスの削除に失敗しました: {{error}}"
+    }
+  },
   "appearance": {
     "title": "外観",
     "description": "外観とスタイルをカスタマイズ",
@@ -8,7 +58,18 @@
     "light": "ライト",
     "dark": "ダーク",
     "system": "システム",
-    "language": "言語"
+    "language": "言語",
+    "userAvatar": "ユーザーアバター",
+    "userAvatarDesc": "チャットのユーザーアバターとして写真をアップロードします。",
+    "uploadAvatar": "アバターをアップロード",
+    "uploadAvatarInputLabel": "ユーザーアバターをアップロード",
+    "clearAvatar": "アバターをクリア",
+    "userAvatarPreviewAlt": "ユーザーアバターのプレビュー",
+    "userAvatarHint": "アップロード後は 128x128 の正方形アバターに自動トリミングしてローカル保存します。",
+    "avatarInvalidType": "画像ファイルを選択してください",
+    "avatarUpdated": "ユーザーアバターを更新しました",
+    "avatarCleared": "ユーザーアバターをクリアしました",
+    "avatarUpdateFailed": "ユーザーアバターの更新に失敗しました: {{error}}"
   },
   "aiProviders": {
     "title": "AI プロバイダー",
@@ -22,7 +83,7 @@
     "notRequired": "不要",
     "empty": {
       "title": "プロバイダーが構成されていません",
-      "desc": "ClawX の使用を開始するには AI プロバイダーを追加してください",
+      "desc": "MatchaClaw の使用を開始するには AI プロバイダーを追加してください",
       "cta": "最初のプロバイダーを追加"
     },
     "dialog": {
@@ -101,7 +162,7 @@
     "appLogs": "アプリケーションログ",
     "openFolder": "フォルダーを開く",
     "autoStart": "ゲートウェイ自動起動",
-    "autoStartDesc": "ClawX 起動時にゲートウェイを自動起動",
+    "autoStartDesc": "MatchaClaw 起動時にゲートウェイを自動起動",
     "proxyTitle": "プロキシ",
     "proxyDesc": "Electron と Gateway の通信をローカルプロキシ経由にします。",
     "proxyServer": "プロキシサーバー",
@@ -136,7 +197,7 @@
   },
   "updates": {
     "title": "アップデート",
-    "description": "ClawX を最新に保つ",
+    "description": "MatchaClaw を最新に保つ",
     "autoCheck": "自動更新チェック",
     "autoCheckDesc": "起動時に更新を確認",
     "autoDownload": "自動アップデート",
@@ -165,6 +226,33 @@
     "errorDetails": "エラー詳細：",
     "help": "自動アップデートが有効な場合、更新は自動的にダウンロードされインストールされます。"
   },
+  "diagnostics": {
+    "title": "ログ収集",
+    "description": "問題切り分けに必要なログをワンクリックで収集し、圧縮して出力します。",
+    "masking": "エクスポート前に openclaw.json、settings.json、diagnostics.json 内の token / API key / プロキシアカウント情報を自動マスクします。",
+    "includesTitle": "バンドル内容",
+    "collect": "収集してエクスポート",
+    "collecting": "収集中...",
+    "openFolder": "出力先を開く",
+    "lastBundle": "前回の出力",
+    "lastMeta": "生成時刻: {{generatedAt}}、ファイル数: {{count}}",
+    "includes": {
+      "userDataLogs": "<userData>/logs/*（直近 3 日）",
+      "openclawLogs": "<openclawConfigDir>/logs/*（直近 3 日）",
+      "sessions": "<openclawConfigDir>/agents/*/sessions/*.jsonl（直近 3 日）と sessions.json",
+      "workspace": "<openclawConfigDir>/workspace/**（ホワイトリスト対象）",
+      "subagents": "<openclawConfigDir>/workspace-subagents/**（ホワイトリスト対象）",
+      "pluginManifest": "<openclawConfigDir>/extensions/*/openclaw.plugin.json",
+      "settings": "<userData>/settings.json（マスク済み）",
+      "openclawConfig": "<openclawConfigDir>/openclaw.json（マスク済み）",
+      "generated": "diagnostics.json（自動生成・マスク済み）"
+    },
+    "toast": {
+      "success": "ログバンドルを生成しました（{{count}} ファイル）",
+      "failed": "ログバンドルの生成に失敗しました: {{error}}",
+      "openFailed": "出力先を開けませんでした: {{error}}"
+    }
+  },
   "advanced": {
     "title": "詳細設定",
     "description": "上級ユーザー向けオプション",
@@ -192,14 +280,5 @@
     "installTitle": "OpenClaw コマンドをインストール",
     "installMessage": "\"openclaw\" コマンドをインストールしますか？",
     "installDetail": "~/.local/bin/openclaw が作成されます。グローバルに実行するには ~/.local/bin が PATH に含まれていることを確認してください。"
-  },
-  "about": {
-    "title": "バージョン情報",
-    "appName": "ClawX",
-    "tagline": "グラフィカル AI アシスタント",
-    "basedOn": "OpenClaw ベース",
-    "version": "バージョン {{version}}",
-    "docs": "公式サイト",
-    "github": "GitHub"
   }
 }

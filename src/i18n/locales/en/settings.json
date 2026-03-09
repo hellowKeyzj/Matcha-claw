@@ -1,6 +1,56 @@
 {
   "title": "Settings",
-  "subtitle": "Configure your ClawX experience",
+  "subtitle": "Configure your MatchaClaw experience",
+  "license": {
+    "title": "License",
+    "description": "License management",
+    "gateStatus": "Gate Status",
+    "gateState": {
+      "checking": "Checking",
+      "granted": "Granted",
+      "blocked": "Blocked"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+    "showKey": "Show license key",
+    "hideKey": "Hide license key",
+    "validate": "Validate & Save",
+    "revalidate": "Revalidate",
+    "clear": "Clear Local License",
+    "renewAlert": {
+      "near_expiry_renew_failed": "License cache has less than 1 day remaining and auto-renew failed. Please revalidate here soon."
+    },
+    "messages": {
+      "valid": "License validation passed",
+      "cache_grace_valid": "Validation passed from cached offline grace period",
+      "empty": "Please enter a license key",
+      "format_invalid": "License key format is invalid",
+      "service_unconfigured": "License service is not configured",
+      "network_error": "Cannot reach license service, please check network and retry",
+      "server_rejected": "License was rejected by license service",
+      "expired": "License has expired",
+      "device_mismatch": "License does not match this device",
+      "not_allowed": "License key is not authorized",
+      "checksum_invalid": "License key is invalid",
+      "unknown": "License validation failed, please try again"
+    },
+    "confirmReplace": {
+      "title": "Replace Current License",
+      "message": "This device already has a stored license. Continue to overwrite and rebind it?",
+      "confirm": "Replace",
+      "cancel": "Cancel"
+    },
+    "confirmClear": {
+      "title": "Clear Local License",
+      "message": "This will remove encrypted key storage and validation cache, and the app will be blocked again until revalidated.",
+      "confirm": "Clear",
+      "cancel": "Cancel"
+    },
+    "toast": {
+      "cleared": "Local license cleared",
+      "clearFailed": "Failed to clear local license: {{error}}"
+    }
+  },
   "appearance": {
     "title": "Appearance",
     "description": "Customize the look and feel",
@@ -8,7 +58,18 @@
     "light": "Light",
     "dark": "Dark",
     "system": "System",
-    "language": "Language"
+    "language": "Language",
+    "userAvatar": "User Avatar",
+    "userAvatarDesc": "Upload your photo to use as the chat user avatar.",
+    "uploadAvatar": "Upload Avatar",
+    "uploadAvatarInputLabel": "Upload User Avatar",
+    "clearAvatar": "Clear Avatar",
+    "userAvatarPreviewAlt": "User avatar preview",
+    "userAvatarHint": "Uploaded images are cropped to a 128x128 square avatar and stored locally.",
+    "avatarInvalidType": "Please choose an image file",
+    "avatarUpdated": "User avatar updated",
+    "avatarCleared": "User avatar cleared",
+    "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
   "aiProviders": {
     "title": "AI Providers",
@@ -22,7 +83,7 @@
     "notRequired": "Not required",
     "empty": {
       "title": "No providers configured",
-      "desc": "Add an AI provider to start using ClawX",
+      "desc": "Add an AI provider to start using MatchaClaw",
       "cta": "Add Your First Provider"
     },
     "dialog": {
@@ -102,7 +163,7 @@
     "appLogs": "Application Logs",
     "openFolder": "Open Folder",
     "autoStart": "Auto-start Gateway",
-    "autoStartDesc": "Start Gateway when ClawX launches",
+    "autoStartDesc": "Start Gateway when MatchaClaw launches",
     "proxyTitle": "Proxy",
     "proxyDesc": "Route Electron and Gateway traffic through your local proxy client.",
     "proxyServer": "Proxy Server",
@@ -137,7 +198,7 @@
   },
   "updates": {
     "title": "Updates",
-    "description": "Keep ClawX up to date",
+    "description": "Keep MatchaClaw up to date",
     "autoCheck": "Auto-check for updates",
     "autoCheckDesc": "Check for updates on startup",
     "autoDownload": "Auto-update",
@@ -166,6 +227,33 @@
     "errorDetails": "Error Details:",
     "help": "When auto-update is enabled, updates are downloaded and installed automatically."
   },
+  "diagnostics": {
+    "title": "Log Collection",
+    "description": "Collect troubleshooting logs with one click and export as a compressed bundle.",
+    "masking": "Before export, token / API key / proxy account fields in openclaw.json, settings.json, and diagnostics.json are masked automatically.",
+    "includesTitle": "Bundle includes",
+    "collect": "Collect & Export",
+    "collecting": "Collecting...",
+    "openFolder": "Open Bundle Location",
+    "lastBundle": "Last Export",
+    "lastMeta": "Generated: {{generatedAt}}, files: {{count}}",
+    "includes": {
+      "userDataLogs": "<userData>/logs/* (last 3 days)",
+      "openclawLogs": "<openclawConfigDir>/logs/* (last 3 days)",
+      "sessions": "<openclawConfigDir>/agents/*/sessions/*.jsonl (last 3 days) and sessions.json",
+      "workspace": "<openclawConfigDir>/workspace/** (whitelisted files)",
+      "subagents": "<openclawConfigDir>/workspace-subagents/** (whitelisted files)",
+      "pluginManifest": "<openclawConfigDir>/extensions/*/openclaw.plugin.json",
+      "settings": "<userData>/settings.json (masked)",
+      "openclawConfig": "<openclawConfigDir>/openclaw.json (masked)",
+      "generated": "diagnostics.json (auto-generated, masked)"
+    },
+    "toast": {
+      "success": "Diagnostics bundle generated ({{count}} files)",
+      "failed": "Failed to generate diagnostics bundle: {{error}}",
+      "openFailed": "Failed to open bundle location: {{error}}"
+    }
+  },
   "advanced": {
     "title": "Advanced",
     "description": "Power-user options",
@@ -193,14 +281,5 @@
     "installTitle": "Install OpenClaw Command",
     "installMessage": "Install the \"openclaw\" command?",
     "installDetail": "This will create ~/.local/bin/openclaw. Ensure ~/.local/bin is on your PATH if you want to run it globally."
-  },
-  "about": {
-    "title": "About",
-    "appName": "ClawX",
-    "tagline": "Graphical AI Assistant",
-    "basedOn": "Based on OpenClaw",
-    "version": "Version {{version}}",
-    "docs": "Website",
-    "github": "GitHub"
   }
 }
