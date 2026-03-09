@@ -23,7 +23,7 @@ describe('providers store sync optimization', () => {
     useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
   });
 
-  it('addProvider 不触发前端 config.get/reconcile/loadAgents，模型刷新由 config:changed 驱动', async () => {
+  it('addProvider 不触发前端 config.get/reconcile/loadAgents，模型刷新由页面显式触发', async () => {
     const subagents = mockSubagentsActions();
 
     vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(

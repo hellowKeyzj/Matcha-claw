@@ -58,7 +58,6 @@ import { applyProxySettings } from './proxy';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { registerTeamFsHandlers } from './team-fs-handlers';
-import { ConfigDomainService } from './config-domain-service';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 import {
   clearStoredLicenseData,
@@ -68,34 +67,6 @@ import {
   getStoredLicenseKey,
   validateLicenseKey,
 } from '../utils/license';
-
-type MarkConfigChanged = (reason: string) => Promise<void>;
-
-const CONFIG_MUTATION_RPC_METHODS = new Set<string>([
-  'config.set',
-  'config.patch',
-  'config.apply',
-  'agents.create',
-  'agents.update',
-  'agents.delete',
-  'skills.update',
-  'voicewake.set',
-]);
-
-function shouldEmitConfigChangedForRpcMethod(method: string): boolean {
-  return CONFIG_MUTATION_RPC_METHODS.has(method.trim());
-}
-
-async function markConfigChangedSafely(
-  markConfigChanged: MarkConfigChanged,
-  reason: string,
-): Promise<void> {
-  try {
-    await markConfigChanged(reason);
-  } catch (error) {
-    logger.warn(`Failed to emit config:changed (${reason})`, error);
-  }
-}
 
 /**
  * For custom/ollama providers, derive a unique key for OpenClaw config files
@@ -173,31 +144,17 @@ export function registerIpcHandlers(
   matchaclawHubService: MatchaClawHubService,
   mainWindow: BrowserWindow
 ): void {
-  const configDomainService = new ConfigDomainService(mainWindow);
-  configDomainService.start();
-  const markConfigChanged: MarkConfigChanged = async (reason) => {
-    await configDomainService.markConfigPossiblyChanged(reason);
-  };
-
-  app.once('before-quit', () => {
-    configDomainService.dispose();
-  });
-
-  mainWindow.on('closed', () => {
-    configDomainService.dispose();
-  });
-
   // Gateway handlers
-  registerGatewayHandlers(gatewayManager, mainWindow, markConfigChanged);
+  registerGatewayHandlers(gatewayManager, mainWindow);
 
   // MatchaClawHub handlers
   registerMatchaClawHubHandlers(matchaclawHubService);
 
   // OpenClaw handlers
-  registerOpenClawHandlers(gatewayManager, markConfigChanged);
+  registerOpenClawHandlers(gatewayManager);
 
   // Provider handlers
-  registerProviderHandlers(gatewayManager, markConfigChanged);
+  registerProviderHandlers(gatewayManager);
 
   // Shell handlers
   registerShellHandlers();
@@ -228,7 +185,7 @@ export function registerIpcHandlers(
   registerUsageHandlers();
 
   // Skill config handlers (direct file access, no Gateway RPC)
-  registerSkillConfigHandlers(markConfigChanged);
+  registerSkillConfigHandlers();
 
   // Cron task handlers (proxy to Gateway RPC)
   registerCronHandlers(gatewayManager);
@@ -305,21 +262,17 @@ function registerRolesMetadataHandlers(gatewayManager: GatewayManager): void {
  * Skill config IPC handlers
  * Direct read/write to ~/.openclaw/openclaw.json (bypasses Gateway RPC)
  */
-function registerSkillConfigHandlers(markConfigChanged: MarkConfigChanged): void {
+function registerSkillConfigHandlers(): void {
   // Update skill config (apiKey and env)
   ipcMain.handle('skill:updateConfig', async (_, params: {
     skillKey: string;
     apiKey?: string;
     env?: Record<string, string>;
   }) => {
-    const result = await updateSkillConfig(params.skillKey, {
+    return await updateSkillConfig(params.skillKey, {
       apiKey: params.apiKey,
       env: params.env,
     });
-    if (result.success) {
-      await markConfigChangedSafely(markConfigChanged, 'skill:updateConfig');
-    }
-    return result;
   });
 
   // Get skill config
@@ -1074,7 +1027,6 @@ function registerDiagnosticsHandlers(gatewayManager: GatewayManager): void {
 function registerGatewayHandlers(
   gatewayManager: GatewayManager,
   mainWindow: BrowserWindow,
-  markConfigChanged: MarkConfigChanged,
 ): void {
   // Get Gateway status
   ipcMain.handle('gateway:status', () => {
@@ -1120,9 +1072,6 @@ function registerGatewayHandlers(
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {
     try {
       const result = await gatewayManager.rpc(method, params, timeoutMs);
-      if (shouldEmitConfigChangedForRpcMethod(method)) {
-        await markConfigChangedSafely(markConfigChanged, `gateway:rpc:${method}`);
-      }
       return { success: true, result };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1288,7 +1237,6 @@ function registerGatewayHandlers(
  */
 function registerOpenClawHandlers(
   gatewayManager: GatewayManager,
-  markConfigChanged: MarkConfigChanged,
 ): void {
   type PluginInstallResult = {
     installed: boolean;
@@ -1584,14 +1532,6 @@ function registerOpenClawHandlers(
     return getOpenClawConfigDir();
   });
 
-  // Read the raw OpenClaw JSON config from disk without going through gateway config RPC.
-  ipcMain.handle('openclaw:getConfigJson', () => {
-    return {
-      config: readOpenClawConfigJson(),
-      path: openclawConfigPath,
-    };
-  });
-
   // Get OpenClaw workspace directory currently used by the Gateway.
   ipcMain.handle('openclaw:getWorkspaceDir', () => {
     return gatewayManager.getRuntimePaths().workspaceDir || null;
@@ -1688,7 +1628,6 @@ function registerOpenClawHandlers(
         version: result.version,
       });
       ensureSkillEnabledInConfig('task-manager');
-      await markConfigChangedSafely(markConfigChanged, 'task:pluginInstall');
       gatewayManager.debouncedRestart();
       return {
         success: true,
@@ -1729,7 +1668,6 @@ function registerOpenClawHandlers(
           sourcePath: installResult.sourcePath,
           version: installResult.version,
         });
-        await markConfigChangedSafely(markConfigChanged, 'channel:dingtalk:pluginInstall');
         await saveChannelConfig(channelType, config);
         logger.info(
           `Skipping app-forced Gateway restart after channel:saveConfig (${channelType}); Gateway handles channel config reload/restart internally`
@@ -1919,7 +1857,6 @@ function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
  */
 function registerProviderHandlers(
   gatewayManager: GatewayManager,
-  markConfigChanged: MarkConfigChanged,
 ): void {
   const openclawConfigPath = join(homedir(), '.openclaw', 'openclaw.json');
 
@@ -2271,7 +2208,6 @@ function registerProviderHandlers(
           }
 
           runProviderMutationReconcileIfNeeded();
-          await markConfigChangedSafely(markConfigChanged, 'provider:save');
 
           // Debounced restart so the gateway picks up new config/env vars.
           // Multiple rapid provider saves (e.g. during setup) are coalesced.
@@ -2300,7 +2236,6 @@ function registerProviderHandlers(
           const ock = getOpenClawProviderKey(existing.type, providerId);
           await removeProviderFromOpenClaw(ock);
           runProviderMutationReconcileIfNeeded();
-          await markConfigChangedSafely(markConfigChanged, 'provider:delete');
 
           // Debounced restart so the gateway stops loading the deleted provider.
           logger.info(`Scheduling Gateway restart after deleting provider "${ock}"`);
@@ -2423,7 +2358,6 @@ function registerProviderHandlers(
           }
 
           runProviderMutationReconcileIfNeeded();
-          await markConfigChangedSafely(markConfigChanged, 'provider:updateWithKey');
 
           // Debounced restart so the gateway picks up updated config/env vars.
           logger.info(`Scheduling Gateway restart after updating provider "${ock}" config`);
@@ -2465,7 +2399,6 @@ function registerProviderHandlers(
       try {
         if (ock) {
           await removeProviderFromOpenClaw(ock);
-          await markConfigChangedSafely(markConfigChanged, 'provider:deleteApiKey');
         }
       } catch (err) {
         console.warn('Failed to completely remove provider from OpenClaw:', err);
@@ -2589,7 +2522,6 @@ function registerProviderHandlers(
           }
 
           runProviderMutationReconcileIfNeeded();
-          await markConfigChangedSafely(markConfigChanged, 'provider:setDefault');
 
           // Debounced restart so the gateway picks up the new default provider.
           // Because OAuth success triggers a debounced restart, the gateway might not be

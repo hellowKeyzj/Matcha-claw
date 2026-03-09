@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSubagentsStore } from '@/stores/subagents';
-import type { ConfigGetResult } from '@/types/subagent';
 
 describe('subagents store', () => {
   beforeEach(() => {
@@ -29,8 +28,24 @@ describe('subagents store', () => {
     );
   });
 
-  it('loadAgents 会从配置快照补全 workspace/model 供编辑表单使用', async () => {
+  it('loadAgents 使用 config.get 补齐 workspace/model，且不使用旧 store 回填', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main-old',
+          workspace: '~/.openclaw/workspace-main',
+          model: 'openai/gpt-5',
+        },
+        {
+          id: 'writer',
+          name: 'Writer-old',
+          workspace: '~/.openclaw/workspace-subagents/writer',
+          model: 'openai/gpt-4.1-mini',
+        },
+      ],
+    });
     invoke
       .mockResolvedValueOnce({
         success: true,
@@ -47,18 +62,18 @@ describe('subagents store', () => {
       .mockResolvedValueOnce({
         success: true,
         result: {
-          hash: 'hash-load',
           config: {
             agents: {
-              defaults: {
-                workspace: '~/.openclaw/workspace-main',
-                model: { primary: 'openai/gpt-5' },
-              },
               list: [
                 {
+                  id: 'main',
+                  workspace: '~/.openclaw/workspace-main-config',
+                  model: { primary: 'openai/gpt-4.1-mini' },
+                },
+                {
                   id: 'writer',
-                  workspace: '~/.openclaw/workspace-subagents/writer',
-                  model: 'openai/gpt-4.1-mini',
+                  workspace: '~/.openclaw/workspace-subagents/writer-config',
+                  model: 'anthropic/claude-3-7-sonnet',
                 },
               ],
             },
@@ -72,85 +87,114 @@ describe('subagents store', () => {
       {
         id: 'main',
         name: 'Main',
-        workspace: '~/.openclaw/workspace-main',
-        model: 'openai/gpt-5',
+        workspace: '~/.openclaw/workspace-main-config',
+        model: 'openai/gpt-4.1-mini',
         isDefault: true,
       },
       {
         id: 'writer',
         name: 'Writer',
-        workspace: '~/.openclaw/workspace-subagents/writer',
-        model: 'openai/gpt-4.1-mini',
+        workspace: '~/.openclaw/workspace-subagents/writer-config',
+        model: 'anthropic/claude-3-7-sonnet',
         isDefault: false,
       },
     ]);
   });
 
-  it('loadAvailableModels 读取 config 快照中的 providers.models', async () => {
-    vi.mocked(window.electron.ipcRenderer.invoke).mockResolvedValueOnce({
-      success: true,
-      result: {
-        config: {
-          models: {
-            providers: {
-              custom: {
-                models: [{ id: 'gpt-4o-mini', name: 'GPT-4o Mini' }],
-              },
-              ollama: {
-                models: [{ id: 'qwen3:latest', name: 'Qwen3 Latest' }],
+  it('loadAvailableModels 只显示 config.get 中已配置的模型', async () => {
+    vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'models.list') {
+        return {
+          success: true,
+          result: {
+            models: [
+              { id: 'custom-12345678/gpt-4o-mini', provider: 'custom-12345678' },
+              { id: 'ollama-87654321/qwen3:latest', provider: 'ollama-87654321' },
+              { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+            ],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {
+              models: {
+                providers: {
+                  'custom-12345678': { models: [{ id: 'gpt-4o-mini' }] },
+                  'ollama-87654321': { models: ['qwen3:latest'] },
+                },
               },
             },
           },
-        },
-      },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
 
-    expect(window.electron.ipcRenderer.invoke).toHaveBeenCalledWith(
-      'openclaw:getConfigJson'
-    );
     expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'custom/gpt-4o-mini', provider: 'custom' },
-      { id: 'ollama/qwen3:latest', provider: 'ollama' },
+      { id: 'custom-12345678/gpt-4o-mini', provider: 'custom-12345678' },
+      { id: 'ollama-87654321/qwen3:latest', provider: 'ollama-87654321' },
     ]);
   });
 
-  it('loadAvailableModels 传入预取配置时不再重复调用 config.get', async () => {
-    const preloadedConfig = {
-      config: {
-        models: {
-          providers: {
-            custom: {
-              models: [{ id: 'gpt-4o-mini', name: 'GPT-4o Mini' }],
-            },
+  it('loadAvailableModels 在无配置模型时保留当前 agent 已选模型', async () => {
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'writer', model: 'openai/gpt-4.1-mini' },
+      ],
+    });
+    vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'models.list') {
+        return {
+          success: true,
+          result: {
+            models: [
+              { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+            ],
           },
-        },
-      },
-    };
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {},
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
 
-    await useSubagentsStore.getState().loadAvailableModels(preloadedConfig as ConfigGetResult);
+    await useSubagentsStore.getState().loadAvailableModels();
 
-    expect(window.electron.ipcRenderer.invoke).not.toHaveBeenCalledWith(
-      'gateway:rpc',
-      'config.get',
-      {}
-    );
     expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'custom/gpt-4o-mini', provider: 'custom' },
+      { id: 'openai/gpt-4.1-mini', provider: 'openai' },
     ]);
   });
 
-  it('returns empty model options when config has no providers.models', async () => {
-    vi.mocked(window.electron.ipcRenderer.invoke).mockResolvedValueOnce({
-      success: true,
-      result: {
-        config: {
-          models: {
-            providers: {},
+  it('returns empty model options when config.get 和当前 agents 都没有可见模型', async () => {
+    vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'models.list') {
+        return {
+          success: true,
+          result: {
+            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
           },
-        },
-      },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {},
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
@@ -158,30 +202,25 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
-  it('loadAvailableModels 合并 agents.defaults.models 中的模型', async () => {
-    vi.mocked(window.electron.ipcRenderer.invoke).mockResolvedValueOnce({
-      success: true,
-      result: {
-        config: {
-          agents: {
-            defaults: {
-              models: {
-                'local/claude-sonnet-4.5': {},
-              },
-            },
+  it('loadAvailableModels 在 config.get 失败时安全降级为空', async () => {
+    vi.mocked(window.electron.ipcRenderer.invoke).mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'models.list') {
+        return {
+          success: true,
+          result: {
+            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
           },
-          models: {
-            providers: {},
-          },
-        },
-      },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        throw new Error('config.get failed');
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
 
-    expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'local/claude-sonnet-4.5', provider: 'local' },
-    ]);
+    expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
   it('loadAgents 仅按配置模型显示，不做运行时回填', async () => {
@@ -551,18 +590,6 @@ describe('subagents store', () => {
           },
         };
       }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          config: {
-            agents: {
-              list: [
-                { id: 'main', name: 'Main' },
-                { id: 'ghost-delete-001', name: 'ghost-delete-001', model: 'local/claude-sonnet-4.5' },
-              ],
-            },
-          },
-        };
-      }
       throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
     });
 
@@ -572,7 +599,7 @@ describe('subagents store', () => {
     expect(agents.map((item) => item.id)).toEqual(['main']);
   });
 
-  it('loadAgents 默认模型/工作区补全只作用于 defaultAgentId，不写死 main', async () => {
+  it('loadAgents 默认选中标记只跟随 runtime 的 defaultId，不写死 main', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -586,23 +613,6 @@ describe('subagents store', () => {
           mainKey: 'main',
           scope: 'per-sender',
         },
-      })
-      .mockResolvedValueOnce({
-        success: true,
-        result: {
-          config: {
-            agents: {
-              defaults: {
-                workspace: '/workspace/default',
-                model: { primary: 'openai/gpt-4.1-mini' },
-              },
-              list: [
-                { id: 'main', name: 'Main' },
-                { id: 'dev', name: 'Dev' },
-              ],
-            },
-          },
-        },
       });
 
     await useSubagentsStore.getState().loadAgents();
@@ -612,14 +622,10 @@ describe('subagents store', () => {
     const main = agents.find((item) => item.id === 'main');
     expect(dev).toMatchObject({
       id: 'dev',
-      workspace: '/workspace/default',
-      model: 'openai/gpt-4.1-mini',
       isDefault: true,
     });
     expect(main).toMatchObject({
       id: 'main',
-      workspace: undefined,
-      model: undefined,
       isDefault: false,
     });
   });
@@ -645,17 +651,6 @@ describe('subagents store', () => {
             defaultId: 'main',
             mainKey: 'main',
             scope: 'per-sender',
-          },
-        };
-      }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          config: {
-            agents: {
-              defaults: {
-                model: { primary: 'openai/gpt-4.1-mini' },
-              },
-            },
           },
         };
       }
@@ -694,15 +689,6 @@ describe('subagents store', () => {
               { id: 'writer', name: 'Writer' },
             ],
             defaultId: 'main',
-          },
-        };
-      }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          config: {
-            agents: {
-              list: [{ id: 'main', default: true }, { id: 'writer' }],
-            },
           },
         };
       }
@@ -755,21 +741,6 @@ describe('subagents store', () => {
             defaultId: 'main',
             mainKey: 'main',
             scope: 'per-sender',
-          },
-        };
-      }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          success: true,
-          result: {
-            config: {
-              agents: {
-                list: [
-                  { id: 'main', name: 'Main' },
-                  { id: 'ghost-delete-002', name: 'ghost-delete-002', model: 'local/claude-sonnet-4.5' },
-                ],
-              },
-            },
           },
         };
       }
@@ -844,21 +815,6 @@ describe('subagents store', () => {
             defaultId: 'main',
             mainKey: 'main',
             scope: 'per-sender',
-          },
-        };
-      }
-      if (channel === 'openclaw:getConfigJson') {
-        return {
-          success: true,
-          result: {
-            config: {
-              agents: {
-                list: [
-                  { id: 'main', name: 'Main' },
-                  { id: 'ghost-delete-003', name: 'ghost-delete-003', model: 'local/claude-sonnet-4.5' },
-                ],
-              },
-            },
           },
         };
       }
