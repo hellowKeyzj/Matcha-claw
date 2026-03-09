@@ -71,6 +71,7 @@ describe('chat store sessions', () => {
     mockGatewayRpcWithMainSession();
     useChatStore.setState({
       currentSessionKey: 'legacy-session',
+      messages: [{ role: 'user', content: 'hi' }],
     });
 
     await useChatStore.getState().loadSessions();
@@ -81,4 +82,27 @@ describe('chat store sessions', () => {
       'agent:main:main',
     ]);
   });
+
+  it('newSession follows the currently selected agent prefix', () => {
+    useChatStore.setState({
+      sessions: [
+        { key: 'agent:main:main' },
+        { key: 'agent:business-expert:main' },
+      ],
+      currentSessionKey: 'agent:business-expert:main',
+      messages: [],
+    });
+
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1772973600000);
+    try {
+      useChatStore.getState().newSession();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const state = useChatStore.getState();
+    expect(state.currentSessionKey).toBe('agent:business-expert:session-1772973600000');
+    expect(state.sessions.map((session) => session.key)).toContain('agent:business-expert:session-1772973600000');
+  });
+
 });
