@@ -680,8 +680,9 @@ function AddProviderDialog({
     expiresIn: number;
   } | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
-  // For providers that support both OAuth and API key, let the user choose
-  const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('oauth');
+  // For providers that support both OAuth and API key, let the user choose.
+  // Default to the vendor's declared auth mode instead of hard-coding OAuth.
+  const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('apikey');
 
   const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === selectedType);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
@@ -696,6 +697,13 @@ function AddProviderDialog({
       : (selectedType === 'google' ? 'oauth_browser' : null));
   // Effective OAuth mode: pure OAuth providers, or dual-mode with oauth selected
   const useOAuthFlow = isOAuth && (!supportsApiKey || authMode === 'oauth');
+
+  useEffect(() => {
+    if (!selectedVendor || !isOAuth || !supportsApiKey) {
+      return;
+    }
+    setAuthMode(selectedVendor.defaultAuthMode === 'api_key' ? 'apikey' : 'oauth');
+  }, [selectedVendor, isOAuth, supportsApiKey]);
 
   // Keep refs to the latest values so event handlers see the current dialog state.
   const latestRef = React.useRef({ selectedType, typeInfo, onAdd, onClose, t });
