@@ -12,6 +12,10 @@ const DEFAULT_WEBHOOK_TTL_SECONDS = 900;
 const LOCALHOST_FALLBACK_GATEWAY_PORT = 18789;
 const TASK_MANAGER_TRIGGER_HEADER = "## Task Manager 触发建议";
 const TASK_MANAGER_DYNAMIC_SWITCH_HEADER = "## Task Manager 动态切换建议";
+const TASK_MANAGER_CONTEXT_START_MARKER = "<!-- task-manager:context:start -->";
+const TASK_MANAGER_CONTEXT_END_MARKER = "<!-- task-manager:context:end -->";
+const TASK_MANAGER_LEGACY_HEADER_RE = /##\s*Task Manager(?:\s*(?:恢复提示|动态切换建议|触发建议|Task Packet))?/i;
+const TASK_MANAGER_TIMESTAMP_BOUNDARY_RE = /\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i;
 const TASK_MANAGER_ARM_TTL_MS = 5 * 60 * 1000;
 const TASK_MANAGER_GUARD_STATE_FILE = "task-manager-guard-state.json";
 const TASK_MANAGER_LOADED_PROBE_FILE = "task-manager-plugin-loaded.json";
@@ -437,6 +441,104 @@ function shouldArmFromAssistantOutput(text: string): boolean {
   return signals.stepLabelCount > 0 || signals.listCount >= 3 || signals.sequenceCount >= 2;
 }
 
+function wrapTaskManagerPrependContext(text: string): string {
+  const normalized = text.trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.includes(TASK_MANAGER_CONTEXT_START_MARKER) && normalized.includes(TASK_MANAGER_CONTEXT_END_MARKER)) {
+    return normalized;
+  }
+  return [TASK_MANAGER_CONTEXT_START_MARKER, normalized, TASK_MANAGER_CONTEXT_END_MARKER].join("\n");
+}
+
+function stripTaskManagerMarkerBlocks(text: string): string {
+  const pattern = new RegExp(
+    `${TASK_MANAGER_CONTEXT_START_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?${TASK_MANAGER_CONTEXT_END_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`,
+    "gi",
+  );
+  return text.replace(pattern, "");
+}
+
+function stripLegacyTaskManagerNotice(text: string): string {
+  const headerMatch = TASK_MANAGER_LEGACY_HEADER_RE.exec(text);
+  if (!headerMatch || headerMatch.index == null || headerMatch.index > 4) {
+    return text;
+  }
+  const start = headerMatch.index;
+  const tail = text.slice(start);
+  const boundaryIndex = tail.search(TASK_MANAGER_TIMESTAMP_BOUNDARY_RE);
+  if (boundaryIndex >= 0) {
+    const end = start + boundaryIndex;
+    return `${text.slice(0, start)}${text.slice(end)}`;
+  }
+  const splitIndex = tail.indexOf("\n\n");
+  if (splitIndex >= 0) {
+    const end = start + splitIndex + 2;
+    return `${text.slice(0, start)}${text.slice(end)}`;
+  }
+  return text;
+}
+
+function sanitizeTaskManagerInjectedText(text: string): string {
+  const withoutMarkers = stripTaskManagerMarkerBlocks(text);
+  const withoutLegacy = stripLegacyTaskManagerNotice(withoutMarkers);
+  if (withoutMarkers === text && withoutLegacy === withoutMarkers) {
+    return text;
+  }
+  return withoutLegacy.replace(/^\s+/, "");
+}
+
+function sanitizeTaskManagerInjectedMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object") {
+    return message;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.role !== "user") {
+    return message;
+  }
+
+  let changed = false;
+  const nextMessage: Record<string, unknown> = { ...record };
+  const content = record.content;
+  if (typeof content === "string") {
+    const cleaned = sanitizeTaskManagerInjectedText(content);
+    if (cleaned !== content) {
+      nextMessage.content = cleaned;
+      changed = true;
+    }
+  } else if (Array.isArray(content)) {
+    const nextContent = content.map((block) => {
+      if (!block || typeof block !== "object") {
+        return block;
+      }
+      const blockRecord = block as Record<string, unknown>;
+      if (blockRecord.type !== "text" || typeof blockRecord.text !== "string") {
+        return block;
+      }
+      const cleaned = sanitizeTaskManagerInjectedText(blockRecord.text);
+      if (cleaned === blockRecord.text) {
+        return block;
+      }
+      changed = true;
+      return { ...blockRecord, text: cleaned };
+    });
+    if (changed) {
+      nextMessage.content = nextContent;
+    }
+  }
+
+  if (typeof record.text === "string") {
+    const cleaned = sanitizeTaskManagerInjectedText(record.text);
+    if (cleaned !== record.text) {
+      nextMessage.text = cleaned;
+      changed = true;
+    }
+  }
+
+  return changed ? nextMessage : message;
+}
+
 const plugin = {
   id: PLUGIN_ID,
   name: "Task Manager",
@@ -798,6 +900,10 @@ const plugin = {
         prepend = [prepend, buildDynamicSwitchHint()].filter((chunk) => chunk.trim().length > 0).join("\n\n");
       }
 
+      if (prepend.trim().length > 0) {
+        prepend = wrapTaskManagerPrependContext(prepend);
+      }
+
       if (prepend.includes(TASK_MANAGER_TRIGGER_HEADER)) {
         const armedAt = Date.now();
         if (ctx.sessionKey) {
@@ -816,6 +922,14 @@ const plugin = {
         };
       }
       return result;
+    });
+
+    api.on("before_message_write", (event) => {
+      const sanitized = sanitizeTaskManagerInjectedMessage(event.message);
+      if (sanitized !== event.message) {
+        return { message: sanitized as typeof event.message };
+      }
+      return undefined;
     });
 
     api.on("llm_output", async (event, ctx) => {

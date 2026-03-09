@@ -3,9 +3,9 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
 import { User, Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
@@ -38,6 +38,90 @@ function imageSrc(img: ExtractedImage): string | null {
   return null;
 }
 
+const FILE_LINK_EXTENSIONS = 'md|txt|json|ya?ml|csv|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif|webp|svg|mp4|mov|avi|mkv|webm|mp3|wav|ogg|aac|zip|tar|gz|rar|7z';
+const FILE_HINT_RE = new RegExp(
+  String.raw`(^|[^\p{L}\p{N}_./\\-])((?:\.{1,2}[\\/])?[\p{L}\p{N}_./\\-]+?\.(?:${FILE_LINK_EXTENSIONS}))(?=$|[^\p{L}\p{N}_./\\-])`,
+  'giu',
+);
+const INLINE_FILE_HINT_RE = new RegExp(
+  String.raw`^(?:\.{1,2}[\\/])?[\p{L}\p{N}_./\\-]+?\.(?:${FILE_LINK_EXTENSIONS})$`,
+  'iu',
+);
+const INLINE_MARKDOWN_FILEHINT_RE = /^\[([^\]]+)\]\(filehint:([^)]+)\)$/i;
+
+function linkifyFileHintsInMarkdown(text: string): string {
+  if (!text) return text;
+  // 跳过 fenced code block 与 inline code，避免误伤代码片段
+  const chunks = text.split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+  return chunks.map((chunk) => {
+    if (chunk.startsWith('```') || (chunk.startsWith('`') && chunk.endsWith('`'))) {
+      return chunk;
+    }
+    return chunk.replace(FILE_HINT_RE, (full, prefix: string, path: string) => {
+      if (!path || path.includes('://')) {
+        return full;
+      }
+      const normalized = path.trim();
+      return `${prefix}[${normalized}](filehint:${encodeURIComponent(normalized)})`;
+    });
+  }).join('');
+}
+
+function resolveInlineCodeFileHint(rawInlineCode: string): { label: string; hint: string } | null {
+  const value = rawInlineCode.trim();
+  if (!value) return null;
+
+  const markdownMatch = value.match(INLINE_MARKDOWN_FILEHINT_RE);
+  if (markdownMatch) {
+    const label = markdownMatch[1]?.trim() || '';
+    const encodedHint = markdownMatch[2]?.trim() || '';
+    if (!encodedHint) return null;
+    let decodedHint = encodedHint;
+    try {
+      decodedHint = decodeURIComponent(encodedHint);
+    } catch {
+      // keep original encoded value
+    }
+    return {
+      label: label || decodedHint,
+      hint: decodedHint,
+    };
+  }
+
+  if (!value.includes('://') && INLINE_FILE_HINT_RE.test(value)) {
+    return { label: value, hint: value };
+  }
+
+  return null;
+}
+
+function preserveFileHintUrlTransform(url: string, key: string, node: unknown): string {
+  void key; void node;
+  if (url.startsWith('filehint:')) {
+    return url;
+  }
+  return defaultUrlTransform(url);
+}
+
+function isAbsoluteLikePath(input: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\/|~\/)/.test(input);
+}
+
+function getBaseName(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+function joinPath(base: string, child: string): string {
+  if (!base) return child;
+  if (!child) return base;
+  const useBackslash = base.includes('\\') && !base.includes('/');
+  const sep = useBackslash ? '\\' : '/';
+  const normalizedBase = base.endsWith('/') || base.endsWith('\\') ? base.slice(0, -1) : base;
+  const normalizedChild = child.startsWith('/') || child.startsWith('\\') ? child.slice(1) : child;
+  return `${normalizedBase}${sep}${normalizedChild}`;
+}
+
 export const ChatMessage = memo(function ChatMessage({
   message,
   showThinking,
@@ -59,6 +143,84 @@ export const ChatMessage = memo(function ChatMessage({
 
   const attachedFiles = message._attachedFiles || [];
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
+  const workspaceDirsRef = useRef<string[] | null>(null);
+
+  const getTaskWorkspaceDirs = useCallback(async (): Promise<string[]> => {
+    if (workspaceDirsRef.current) {
+      return workspaceDirsRef.current;
+    }
+    const dirs: string[] = [];
+    try {
+      const list = await window.electron.ipcRenderer.invoke('openclaw:getTaskWorkspaceDirs') as unknown;
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          if (typeof item === 'string' && item.trim()) {
+            dirs.push(item.trim());
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      const mainWorkspace = await window.electron.ipcRenderer.invoke('openclaw:getWorkspaceDir') as unknown;
+      if (typeof mainWorkspace === 'string' && mainWorkspace.trim()) {
+        dirs.push(mainWorkspace.trim());
+      }
+    } catch {
+      // ignore
+    }
+    const unique = Array.from(new Set(dirs));
+    workspaceDirsRef.current = unique;
+    return unique;
+  }, []);
+
+  const tryOpenPath = useCallback(async (targetPath: string): Promise<boolean> => {
+    try {
+      const result = await window.electron.ipcRenderer.invoke('shell:openPath', targetPath) as string;
+      return result === '';
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const openFileHint = useCallback(async (rawHint: string) => {
+    const hint = rawHint.trim().replace(/^["'`]|["'`]$/g, '');
+    if (!hint) return;
+
+    // 1) 优先命中已有附件路径
+    const byExactName = attachedFiles.find((file) => {
+      if (!file.filePath) return false;
+      return getBaseName(file.filePath).toLowerCase() === hint.toLowerCase();
+    });
+    if (byExactName?.filePath) {
+      const opened = await tryOpenPath(byExactName.filePath);
+      if (opened) return;
+      await window.electron.ipcRenderer.invoke('shell:showItemInFolder', byExactName.filePath);
+      return;
+    }
+
+    // 2) 如果已经是绝对路径，直接打开
+    if (isAbsoluteLikePath(hint)) {
+      const opened = await tryOpenPath(hint);
+      if (opened) return;
+      await window.electron.ipcRenderer.invoke('shell:showItemInFolder', hint);
+      return;
+    }
+
+    // 3) 相对路径/纯文件名：在任务工作区里尝试定位
+    const dirs = await getTaskWorkspaceDirs();
+    for (const dir of dirs) {
+      const candidate = joinPath(dir, hint);
+      const opened = await tryOpenPath(candidate);
+      if (opened) return;
+    }
+
+    // 4) 全部失败则至少打开主工作区目录
+    if (dirs.length > 0) {
+      await window.electron.ipcRenderer.invoke('shell:openPath', dirs[0]);
+    }
+  }, [attachedFiles, getTaskWorkspaceDirs, tryOpenPath]);
 
   // Never render tool result messages in chat UI
   if (isToolResult) return null;
@@ -185,6 +347,7 @@ export const ChatMessage = memo(function ChatMessage({
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
+            onOpenFileHint={openFileHint}
           />
         )}
 
@@ -350,11 +513,15 @@ function MessageBubble({
   text,
   isUser,
   isStreaming,
+  onOpenFileHint,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
+  onOpenFileHint?: (fileHint: string) => Promise<void>;
 }) {
+  const markdownText = useMemo(() => linkifyFileHintsInMarkdown(text), [text]);
+
   return (
     <div
       className={cn(
@@ -371,11 +538,31 @@ function MessageBubble({
         <div className="prose prose-sm dark:prose-invert max-w-none break-words break-all">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
+            urlTransform={preserveFileHintUrlTransform}
             components={{
               code({ className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className || '');
                 const isInline = !match && !className;
                 if (isInline) {
+                  const inlineText = Array.isArray(children)
+                    ? children.map((item) => (typeof item === 'string' ? item : String(item))).join('')
+                    : typeof children === 'string'
+                      ? children
+                      : String(children ?? '');
+                  const inlineFileHint = resolveInlineCodeFileHint(inlineText);
+                  if (inlineFileHint) {
+                    return (
+                      <button
+                        type="button"
+                        className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono text-primary hover:underline break-words break-all"
+                        onClick={() => {
+                          void onOpenFileHint?.(inlineFileHint.hint);
+                        }}
+                      >
+                        {inlineFileHint.label}
+                      </button>
+                    );
+                  }
                   return (
                     <code className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono break-words break-all" {...props}>
                       {children}
@@ -391,6 +578,21 @@ function MessageBubble({
                 );
               },
               a({ href, children }) {
+                if (href && href.startsWith('filehint:')) {
+                  const encoded = href.slice('filehint:'.length);
+                  const fileHint = decodeURIComponent(encoded);
+                  return (
+                    <button
+                      type="button"
+                      className="text-primary hover:underline break-words break-all"
+                      onClick={() => {
+                        void onOpenFileHint?.(fileHint);
+                      }}
+                    >
+                      {children}
+                    </button>
+                  );
+                }
                 return (
                   <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
                     {children}
@@ -399,7 +601,7 @@ function MessageBubble({
               },
             }}
           >
-            {text}
+            {markdownText}
           </ReactMarkdown>
           {isStreaming && (
             <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />
