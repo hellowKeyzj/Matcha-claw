@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本文档用于指导在 Matcha-claw 中启用 `task-manager` 插件，并说明回滚与常见故障处理。
+本文档用于指导在 Matcha-matchaclaw 中启用 `task-manager` 插件，并说明回滚与常见故障处理。
 
 ## 2. 安装方式
 
@@ -19,7 +19,7 @@
 
 本地开发插件源路径：
 
-`E:/code/Matcha-claw/packages/openclaw-task-manager-plugin`
+`E:/code/Matcha-matchaclaw/packages/openclaw-task-manager-plugin`
 
 主进程会按以下顺序寻找插件镜像并复制到 `~/.openclaw/extensions/task-manager`：
 
@@ -193,3 +193,25 @@ OpenClaw 的 `sessions_spawn` 默认行为是保留子会话（`cleanup: "keep"`
 1. 若待确认任务数 `> 1` 且用户文本未包含 `taskId/confirmId`，系统仅反问澄清，不自动恢复。
 2. 仅当待确认任务数 `= 1` 时，允许“同意/拒绝”类短文本自动路由恢复。
 3. 若目标任务是 `free_text`，系统会要求提供具体内容，纯“同意/拒绝”不会直接恢复。
+
+### 5.12 Chat 右侧任务收件箱（跨 Agent）
+
+Chat 页面右侧新增“任务收件箱”，用于在主聊天界面直接处理未完成任务。
+
+展示范围：
+
+1. 当前工作区（含主 workspace + 子 Agent workspace）聚合任务。
+2. 仅展示未完成状态：`pending`、`running`、`waiting_for_input`、`waiting_approval`。
+
+交互规则：
+
+1. 点击任务卡片（或“进入会话”）优先跳到 `assigned_session`。
+2. 若任务无 `assigned_session`，提示：`未绑定会话，先恢复任务`。
+3. `waiting_for_input` 且 `inputMode=decision`：展示“批准/拒绝”按钮。
+4. `waiting_for_input` 且 `inputMode=free_text`：展示输入框并提交补充文本。
+5. 提交恢复后立即执行 `task_resume -> wakeTaskSession`，自动唤醒子会话继续执行。
+
+事件同步策略：
+
+1. 通过 `task_progress_update / task_status_changed / task_blocked / task_needs_resume` 实时 patch。
+2. 保留 5 秒轮询兜底刷新，避免事件丢失导致侧栏状态滞后。
