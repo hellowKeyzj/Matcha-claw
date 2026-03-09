@@ -13,13 +13,14 @@ import { appUpdater, registerUpdateHandlers } from './updater';
 import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 
-import { ClawHubService } from '../gateway/clawhub';
-import { ensureClawXContext, repairClawXOnlyBootstrapFiles } from '../utils/openclaw-workspace';
+import { MatchaClawHubService } from '../gateway/clawhub';
+import { ensureMatchaClawContext, repairMatchaClawOnlyBootstrapFiles } from '../utils/openclaw-workspace';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../utils/openclaw-cli';
 import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
+import { ensureLicenseGateBootstrapped } from '../utils/license';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -38,11 +39,12 @@ import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
 app.disableHardwareAcceleration();
 
 // On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
-// On Wayland this maps the running window to clawx.desktop (→ icon + app grouping);
+// On Wayland this maps the running window to matchaclaw.desktop (→ icon + app grouping);
 // on X11 it supplements the StartupWMClass matching.
 // Must be called before app.whenReady() / before any window is created.
 if (process.platform === 'linux') {
-  app.setDesktopName('clawx.desktop');
+  const linuxApp = app as Electron.App & { setDesktopName?: (desktopName: string) => void };
+  linuxApp.setDesktopName?.('matchaclaw.desktop');
 }
 
 // Prevent multiple instances of the app from running simultaneously.
@@ -57,7 +59,7 @@ if (!gotTheLock) {
 // Global references
 let mainWindow: BrowserWindow | null = null;
 const gatewayManager = new GatewayManager();
-const clawHubService = new ClawHubService();
+const matchaclawHubService = new MatchaClawHubService();
 
 /**
  * Resolve the icons directory path (works in both dev and packaged mode)
@@ -139,7 +141,7 @@ function createWindow(): BrowserWindow {
 async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
-  logger.info('=== ClawX Application Starting ===');
+  logger.info('=== MatchaClaw Application Starting ===');
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}`
   );
@@ -183,7 +185,8 @@ async function initialize(): Promise<void> {
   );
 
   // Register IPC handlers
-  registerIpcHandlers(gatewayManager, clawHubService, mainWindow);
+  registerIpcHandlers(gatewayManager, matchaclawHubService, mainWindow);
+  ensureLicenseGateBootstrapped();
 
   // Register update handlers
   registerUpdateHandlers(appUpdater, mainWindow);
@@ -203,10 +206,10 @@ async function initialize(): Promise<void> {
     mainWindow = null;
   });
 
-  // Repair any bootstrap files that only contain ClawX markers (no OpenClaw
-  // template content). This fixes a race condition where ensureClawXContext()
+  // Repair any bootstrap files that only contain MatchaClaw markers (no OpenClaw
+  // template content). This fixes a race condition where ensureMatchaClawContext()
   // previously created the file before the gateway could seed the full template.
-  void repairClawXOnlyBootstrapFiles().catch((error) => {
+  void repairMatchaClawOnlyBootstrapFiles().catch((error) => {
     logger.warn('Failed to repair bootstrap files:', error);
   });
 
@@ -231,11 +234,11 @@ async function initialize(): Promise<void> {
     logger.info('Gateway auto-start disabled in settings');
   }
 
-  // Merge ClawX context snippets into the workspace bootstrap files.
+  // Merge MatchaClaw context snippets into the workspace bootstrap files.
   // The gateway seeds workspace files asynchronously after its HTTP server
-  // is ready, so ensureClawXContext will retry until the target files appear.
-  void ensureClawXContext().catch((error) => {
-    logger.warn('Failed to merge ClawX context into workspace:', error);
+  // is ready, so ensureMatchaClawContext will retry until the target files appear.
+  void ensureMatchaClawContext().catch((error) => {
+    logger.warn('Failed to merge MatchaClaw context into workspace:', error);
   });
 
   // Auto-install openclaw CLI and shell completions (non-blocking).
@@ -248,12 +251,12 @@ async function initialize(): Promise<void> {
     logger.warn('CLI auto-install failed:', error);
   });
 
-  // Re-apply ClawX context after every gateway restart because the gateway
-  // may re-seed workspace files with clean templates (losing ClawX markers).
+  // Re-apply MatchaClaw context after every gateway restart because the gateway
+  // may re-seed workspace files with clean templates (losing MatchaClaw markers).
   gatewayManager.on('status', (status: { state: string }) => {
     if (status.state === 'running') {
-      void ensureClawXContext().catch((error) => {
-        logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
+      void ensureMatchaClawContext().catch((error) => {
+        logger.warn('Failed to re-merge MatchaClaw context after gateway reconnect:', error);
       });
     }
   });

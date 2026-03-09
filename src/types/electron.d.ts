@@ -3,11 +3,20 @@
  * Types for the APIs exposed via contextBridge
  */
 
+export interface ConfigChangedPayload {
+  revision: number;
+  reason: string;
+  ts: number;
+  hash?: string;
+}
+
 export interface IpcRenderer {
   /**
    * Includes gateway/openclaw plus app-specific channels such as:
    * `teamfs:initLayout`, `teamfs:prepareTask`, `teamfs:publishTask`, `teamfs:publishShared`,
-   * `task:pluginStatus`, `task:pluginInstall`.
+   * `task:pluginStatus`, `task:pluginInstall`, `license:validate`,
+   * `license:getGateState`, `license:getStoredKey`, `license:forceRevalidate`, `license:clearStoredKey`,
+   * and event channel `config:changed` (payload shape: `ConfigChangedPayload`).
    */
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
   on(channel: string, callback: (...args: unknown[]) => void): (() => void) | void;

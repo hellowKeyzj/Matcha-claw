@@ -13,7 +13,7 @@ let settingsStoreInstance: any = null;
  * Generate a random token for gateway authentication
  */
 function generateToken(): string {
-  return `clawx-${randomBytes(16).toString('hex')}`;
+  return `matchaclaw-${randomBytes(16).toString('hex')}`;
 }
 
 /**
@@ -46,6 +46,7 @@ export interface AppSettings {
   // UI State
   sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
+  setupComplete: boolean;
   
   // Presets
   selectedBundles: string[];
@@ -83,6 +84,7 @@ const defaults: AppSettings = {
   // UI State
   sidebarCollapsed: false,
   devModeUnlocked: false,
+  setupComplete: false,
   
   // Presets
   selectedBundles: ['productivity', 'developer'],
