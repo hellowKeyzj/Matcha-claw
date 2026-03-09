@@ -1,31 +1,29 @@
 /**
  * Provider Storage
  * Manages provider configurations and API keys.
- * Keys are stored in plain text alongside provider configs in a single electron-store.
+ * This file remains the legacy compatibility layer while the app migrates to
+ * account-based provider storage and a dedicated secret-store abstraction.
  */
 
 import { BUILTIN_PROVIDER_TYPES, type ProviderType } from './provider-registry';
 import { getActiveOpenClawProviders } from './openclaw-auth';
+import {
+  deleteProviderAccount,
+  getProviderAccount,
+  listProviderAccounts,
+  providerAccountToConfig,
+  providerConfigToAccount,
+  saveProviderAccount,
+  setDefaultProviderAccount,
+} from '../services/providers/provider-store';
+import { ensureProviderStoreMigrated } from '../services/providers/provider-migration';
+import { getClawXProviderStore } from '../services/providers/store-instance';
+import {
+  deleteProviderSecret,
+  getProviderSecret,
+  setProviderSecret,
+} from '../services/secrets/secret-store';
 import { getOpenClawProviderKeyForType } from './provider-keys';
-
-// Lazy-load electron-store (ESM module)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let providerStore: any = null;
-
-async function getProviderStore() {
-  if (!providerStore) {
-    const Store = (await import('electron-store')).default;
-    providerStore = new Store({
-      name: 'clawx-providers',
-      defaults: {
-        providers: {} as Record<string, ProviderConfig>,
-        apiKeys: {} as Record<string, string>,
-        defaultProvider: null as string | null,
-      },
-    });
-  }
-  return providerStore;
-}
 
 /**
  * Provider configuration
@@ -50,10 +48,16 @@ export interface ProviderConfig {
  */
 export async function storeApiKey(providerId: string, apiKey: string): Promise<boolean> {
   try {
-    const s = await getProviderStore();
+    await ensureProviderStoreMigrated();
+    const s = await getClawXProviderStore();
     const keys = (s.get('apiKeys') || {}) as Record<string, string>;
     keys[providerId] = apiKey;
     s.set('apiKeys', keys);
+    await setProviderSecret({
+      type: 'api_key',
+      accountId: providerId,
+      apiKey,
+    });
     return true;
   } catch (error) {
     console.error('Failed to store API key:', error);
@@ -66,7 +70,16 @@ export async function storeApiKey(providerId: string, apiKey: string): Promise<b
  */
 export async function getApiKey(providerId: string): Promise<string | null> {
   try {
-    const s = await getProviderStore();
+    await ensureProviderStoreMigrated();
+    const secret = await getProviderSecret(providerId);
+    if (secret?.type === 'api_key') {
+      return secret.apiKey;
+    }
+    if (secret?.type === 'local') {
+      return secret.apiKey ?? null;
+    }
+
+    const s = await getClawXProviderStore();
     const keys = (s.get('apiKeys') || {}) as Record<string, string>;
     return keys[providerId] || null;
   } catch (error) {
@@ -80,10 +93,12 @@ export async function getApiKey(providerId: string): Promise<string | null> {
  */
 export async function deleteApiKey(providerId: string): Promise<boolean> {
   try {
-    const s = await getProviderStore();
+    await ensureProviderStoreMigrated();
+    const s = await getClawXProviderStore();
     const keys = (s.get('apiKeys') || {}) as Record<string, string>;
     delete keys[providerId];
     s.set('apiKeys', keys);
+    await deleteProviderSecret(providerId);
     return true;
   } catch (error) {
     console.error('Failed to delete API key:', error);
@@ -95,7 +110,13 @@ export async function deleteApiKey(providerId: string): Promise<boolean> {
  * Check if an API key exists for a provider
  */
 export async function hasApiKey(providerId: string): Promise<boolean> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const secret = await getProviderSecret(providerId);
+  if (secret?.type === 'api_key') {
+    return true;
+  }
+
+  const s = await getClawXProviderStore();
   const keys = (s.get('apiKeys') || {}) as Record<string, string>;
   return providerId in keys;
 }
@@ -104,7 +125,8 @@ export async function hasApiKey(providerId: string): Promise<boolean> {
  * List all provider IDs that have stored keys
  */
 export async function listStoredKeyIds(): Promise<string[]> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
   const keys = (s.get('apiKeys') || {}) as Record<string, string>;
   return Object.keys(keys);
 }
@@ -115,28 +137,47 @@ export async function listStoredKeyIds(): Promise<string[]> {
  * Save a provider configuration
  */
 export async function saveProvider(config: ProviderConfig): Promise<void> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
   const providers = s.get('providers') as Record<string, ProviderConfig>;
   providers[config.id] = config;
   s.set('providers', providers);
+
+  const defaultProviderId = (s.get('defaultProvider') ?? null) as string | null;
+  await saveProviderAccount(
+    providerConfigToAccount(config, { isDefault: defaultProviderId === config.id }),
+  );
 }
 
 /**
  * Get a provider configuration
  */
 export async function getProvider(providerId: string): Promise<ProviderConfig | null> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
   const providers = s.get('providers') as Record<string, ProviderConfig>;
-  return providers[providerId] || null;
+  if (providers[providerId]) {
+    return providers[providerId];
+  }
+
+  const account = await getProviderAccount(providerId);
+  return account ? providerAccountToConfig(account) : null;
 }
 
 /**
  * Get all provider configurations
  */
 export async function getAllProviders(): Promise<ProviderConfig[]> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
   const providers = s.get('providers') as Record<string, ProviderConfig>;
-  return Object.values(providers);
+  const legacyProviders = Object.values(providers);
+  if (legacyProviders.length > 0) {
+    return legacyProviders;
+  }
+
+  const accounts = await listProviderAccounts();
+  return accounts.map(providerAccountToConfig);
 }
 
 /**
@@ -144,18 +185,21 @@ export async function getAllProviders(): Promise<ProviderConfig[]> {
  */
 export async function deleteProvider(providerId: string): Promise<boolean> {
   try {
+    await ensureProviderStoreMigrated();
     // Delete the API key
     await deleteApiKey(providerId);
 
     // Delete the provider config
-    const s = await getProviderStore();
+    const s = await getClawXProviderStore();
     const providers = s.get('providers') as Record<string, ProviderConfig>;
     delete providers[providerId];
     s.set('providers', providers);
+    await deleteProviderAccount(providerId);
 
     // Clear default if this was the default
     if (s.get('defaultProvider') === providerId) {
       s.delete('defaultProvider');
+      s.delete('defaultProviderAccountId');
     }
 
     return true;
@@ -169,16 +213,20 @@ export async function deleteProvider(providerId: string): Promise<boolean> {
  * Set the default provider
  */
 export async function setDefaultProvider(providerId: string): Promise<void> {
-  const s = await getProviderStore();
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
   s.set('defaultProvider', providerId);
+  await setDefaultProviderAccount(providerId);
 }
 
 /**
  * Get the default provider
  */
 export async function getDefaultProvider(): Promise<string | undefined> {
-  const s = await getProviderStore();
-  return s.get('defaultProvider') as string | undefined;
+  await ensureProviderStoreMigrated();
+  const s = await getClawXProviderStore();
+  return (s.get('defaultProvider') as string | undefined)
+    ?? (s.get('defaultProviderAccountId') as string | undefined);
 }
 
 /**

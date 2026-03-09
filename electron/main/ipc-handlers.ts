@@ -10,17 +10,6 @@ import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
-  storeApiKey,
-  getApiKey,
-  deleteApiKey,
-  hasApiKey,
-  saveProvider,
-  getProvider,
-  getAllProviders,
-  deleteProvider,
-  setDefaultProvider,
-  getDefaultProvider,
-  getAllProvidersWithKeyInfo,
   type ProviderConfig,
 } from '../utils/secure-storage';
 import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
@@ -29,10 +18,6 @@ import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings
 import {
   saveProviderKeyToOpenClaw,
   removeProviderFromOpenClaw,
-  setOpenClawDefaultModel,
-  setOpenClawDefaultModelWithOverride,
-  syncProviderConfigToOpenClaw,
-  updateAgentModelProvider,
 } from '../utils/openclaw-auth';
 import { logger } from '../utils/logger';
 import {
@@ -49,11 +34,21 @@ import { checkUvInstalled, installUv, setupManagedPython } from '../utils/uv-set
 import { updateSkillConfig, getSkillConfig, getAllSkillConfigs } from '../utils/skill-config';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
-import { getProviderDefaultModel } from '../utils/provider-registry';
 import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
+import { browserOAuthManager, type BrowserOAuthProviderType } from '../utils/browser-oauth';
 import { applyProxySettings } from './proxy';
-import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
+import { getProviderService } from '../services/providers/provider-service';
+import {
+  getOpenClawProviderKey,
+  syncDefaultProviderToRuntime,
+  syncDeletedProviderApiKeyToRuntime,
+  syncDeletedProviderToRuntime,
+  syncProviderApiKeyToRuntime,
+  syncSavedProviderToRuntime,
+  syncUpdatedProviderToRuntime,
+} from '../services/providers/provider-runtime-sync';
+import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
 
 type AppRequest = {
@@ -73,79 +68,6 @@ type AppResponse = {
     details?: unknown;
   };
 };
-import {
-  getOpenClawProviderKeyForType,
-  getOAuthApiKeyEnv,
-  getOAuthProviderApi,
-  getOAuthProviderDefaultBaseUrl,
-  getOAuthProviderTargetKey,
-  isOAuthProviderType,
-  normalizeOAuthBaseUrl,
-  usesOAuthAuthHeader,
-} from '../utils/provider-keys';
-
-/**
- * Derive OpenClaw provider key used in openclaw.json / models.json.
- * Some types need remapping to avoid collisions or enforce CN endpoints.
- *
- * @param type - Provider type (e.g. 'custom', 'ollama', 'openrouter')
- * @param providerId - Unique provider ID from secure-storage (UUID-like)
- * @returns A key like 'custom-a1b2c3d4', 'moonshot', or 'openrouter'
- */
-export function getOpenClawProviderKey(type: string, providerId: string): string {
-  return getOpenClawProviderKeyForType(type, providerId);
-}
-
-function getProviderModelRef(config: ProviderConfig): string | undefined {
-  const providerKey = getOpenClawProviderKey(config.type, config.id);
-
-  if (config.model) {
-    return config.model.startsWith(`${providerKey}/`)
-      ? config.model
-      : `${providerKey}/${config.model}`;
-  }
-
-  const defaultModel = getProviderDefaultModel(config.type);
-  if (!defaultModel) return undefined;
-  const modelId = defaultModel.includes('/') ? defaultModel.split('/').slice(1).join('/') : defaultModel;
-  return `${providerKey}/${modelId}`;
-}
-
-async function getProviderFallbackModelRefs(config: ProviderConfig): Promise<string[]> {
-  const allProviders = await getAllProviders();
-  const providerMap = new Map(allProviders.map((provider) => [provider.id, provider]));
-  const seen = new Set<string>();
-  const results: string[] = [];
-  const providerKey = getOpenClawProviderKey(config.type, config.id);
-
-  for (const fallbackModel of config.fallbackModels ?? []) {
-    const normalizedModel = fallbackModel.trim();
-    if (!normalizedModel) continue;
-
-    const modelRef = normalizedModel.startsWith(`${providerKey}/`)
-      ? normalizedModel
-      : `${providerKey}/${normalizedModel}`;
-
-    if (seen.has(modelRef)) continue;
-    seen.add(modelRef);
-    results.push(modelRef);
-  }
-
-  for (const fallbackId of config.fallbackProviderIds ?? []) {
-    if (!fallbackId || fallbackId === config.id) continue;
-
-    const fallbackProvider = providerMap.get(fallbackId);
-    if (!fallbackProvider) continue;
-
-    const modelRef = getProviderModelRef(fallbackProvider);
-    if (!modelRef || seen.has(modelRef)) continue;
-
-    seen.add(modelRef);
-    results.push(modelRef);
-  }
-
-  return results;
-}
 
 /**
  * Register all IPC handlers
@@ -330,50 +252,16 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
 
             try {
               await saveProvider(config);
-              const ock = getOpenClawProviderKey(config.type, config.id);
 
               if (apiKey !== undefined) {
                 const trimmedKey = apiKey.trim();
                 if (trimmedKey) {
                   await storeApiKey(config.id, trimmedKey);
-                  try {
-                    await saveProviderKeyToOpenClaw(ock, trimmedKey);
-                  } catch (err) {
-                    console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-                  }
                 }
               }
 
               try {
-                const meta = getProviderConfig(config.type);
-                const api = config.type === 'custom' || config.type === 'ollama' ? 'openai-completions' : meta?.api;
-
-                if (api) {
-                  await syncProviderConfigToOpenClaw(ock, config.model, {
-                    baseUrl: config.baseUrl || meta?.baseUrl,
-                    api,
-                    apiKeyEnv: meta?.apiKeyEnv,
-                    headers: meta?.headers,
-                  });
-
-                  if (config.type === 'custom' || config.type === 'ollama') {
-                    const resolvedKey = apiKey !== undefined
-                      ? (apiKey.trim() || null)
-                      : await getApiKey(config.id);
-                    if (resolvedKey && config.baseUrl) {
-                      const modelId = config.model;
-                      await updateAgentModelProvider(ock, {
-                        baseUrl: config.baseUrl,
-                        api: 'openai-completions',
-                        models: modelId ? [{ id: modelId, name: modelId }] : [],
-                        apiKey: resolvedKey,
-                      });
-                    }
-                  }
-
-                  logger.info(`Scheduling Gateway restart after saving provider "${ock}" config`);
-                  gatewayManager.debouncedRestart();
-                }
+                await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
               } catch (err) {
                 console.warn('Failed to sync openclaw provider config:', err);
               }
@@ -394,10 +282,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               await deleteProvider(providerId);
               if (existing?.type) {
                 try {
-                  const ock = getOpenClawProviderKey(existing.type, providerId);
-                  await removeProviderFromOpenClaw(ock);
-                  logger.info(`Scheduling Gateway restart after deleting provider "${ock}"`);
-                  gatewayManager.debouncedRestart();
+                  await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
                 } catch (err) {
                   console.warn('Failed to completely remove provider from OpenClaw:', err);
                 }
@@ -473,49 +358,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               }
 
               try {
-                const fallbackModels = await getProviderFallbackModelRefs(nextConfig);
-                const meta = getProviderConfig(nextConfig.type);
-                const api = nextConfig.type === 'custom' || nextConfig.type === 'ollama' ? 'openai-completions' : meta?.api;
-
-                if (api) {
-                  await syncProviderConfigToOpenClaw(ock, nextConfig.model, {
-                    baseUrl: nextConfig.baseUrl || meta?.baseUrl,
-                    api,
-                    apiKeyEnv: meta?.apiKeyEnv,
-                    headers: meta?.headers,
-                  });
-
-                  if (nextConfig.type === 'custom' || nextConfig.type === 'ollama') {
-                    const resolvedKey = apiKey !== undefined
-                      ? (apiKey.trim() || null)
-                      : await getApiKey(providerId);
-                    if (resolvedKey && nextConfig.baseUrl) {
-                      const modelId = nextConfig.model;
-                      await updateAgentModelProvider(ock, {
-                        baseUrl: nextConfig.baseUrl,
-                        api: 'openai-completions',
-                        models: modelId ? [{ id: modelId, name: modelId }] : [],
-                        apiKey: resolvedKey,
-                      });
-                    }
-                  }
-                }
-
-                const defaultProviderId = await getDefaultProvider();
-                if (defaultProviderId === providerId) {
-                  const modelOverride = nextConfig.model ? `${ock}/${nextConfig.model}` : undefined;
-                  if (nextConfig.type !== 'custom' && nextConfig.type !== 'ollama') {
-                    await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
-                  } else {
-                    await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
-                      baseUrl: nextConfig.baseUrl,
-                      api: 'openai-completions',
-                    }, fallbackModels);
-                  }
-                }
-
-                logger.info(`Scheduling Gateway restart after updating provider "${ock}" config`);
-                gatewayManager.debouncedRestart();
+                await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
               } catch (err) {
                 console.warn('Failed to sync openclaw config after provider update:', err);
               }
@@ -571,84 +414,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               const provider = await getProvider(providerId);
               if (provider) {
                 try {
-                  const ock = getOpenClawProviderKey(provider.type, providerId);
-                  const providerKey = await getApiKey(providerId);
-                  const fallbackModels = await getProviderFallbackModelRefs(provider);
-                  const OAUTH_PROVIDER_TYPES = ['qwen-portal', 'minimax-portal', 'minimax-portal-cn'];
-                  const isOAuthProvider = OAUTH_PROVIDER_TYPES.includes(provider.type) && !providerKey;
-
-                  if (!isOAuthProvider) {
-                    const modelOverride = provider.model
-                      ? (provider.model.startsWith(`${ock}/`) ? provider.model : `${ock}/${provider.model}`)
-                      : undefined;
-                    if (provider.type === 'custom' || provider.type === 'ollama') {
-                      await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
-                        baseUrl: provider.baseUrl,
-                        api: 'openai-completions',
-                      }, fallbackModels);
-                    } else {
-                      await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
-                    }
-                    if (providerKey) {
-                      await saveProviderKeyToOpenClaw(ock, providerKey);
-                    }
-                  } else {
-                    const defaultBaseUrl = provider.type === 'minimax-portal'
-                      ? 'https://api.minimax.io/anthropic'
-                      : (provider.type === 'minimax-portal-cn' ? 'https://api.minimaxi.com/anthropic' : 'https://portal.qwen.ai/v1');
-                    const api: 'anthropic-messages' | 'openai-completions' =
-                      (provider.type === 'minimax-portal' || provider.type === 'minimax-portal-cn')
-                        ? 'anthropic-messages'
-                        : 'openai-completions';
-
-                    let baseUrl = provider.baseUrl || defaultBaseUrl;
-                    if ((provider.type === 'minimax-portal' || provider.type === 'minimax-portal-cn') && baseUrl) {
-                      baseUrl = baseUrl.replace(/\/v1$/, '').replace(/\/anthropic$/, '').replace(/\/$/, '') + '/anthropic';
-                    }
-
-                    const targetProviderKey = (provider.type === 'minimax-portal' || provider.type === 'minimax-portal-cn')
-                      ? 'minimax-portal'
-                      : provider.type;
-
-                    await setOpenClawDefaultModelWithOverride(targetProviderKey, getProviderModelRef(provider), {
-                      baseUrl,
-                      api,
-                      authHeader: targetProviderKey === 'minimax-portal' ? true : undefined,
-                      apiKeyEnv: targetProviderKey === 'minimax-portal' ? 'minimax-oauth' : 'qwen-oauth',
-                    }, fallbackModels);
-
-                    try {
-                      const defaultModelId = provider.model?.split('/').pop();
-                      await updateAgentModelProvider(targetProviderKey, {
-                        baseUrl,
-                        api,
-                        authHeader: targetProviderKey === 'minimax-portal' ? true : undefined,
-                        apiKey: targetProviderKey === 'minimax-portal' ? 'minimax-oauth' : 'qwen-oauth',
-                        models: defaultModelId ? [{ id: defaultModelId, name: defaultModelId }] : [],
-                      });
-                    } catch (err) {
-                      logger.warn(`Failed to update models.json for OAuth provider "${targetProviderKey}":`, err);
-                    }
-                  }
-
-                  if (
-                    (provider.type === 'custom' || provider.type === 'ollama') &&
-                    providerKey &&
-                    provider.baseUrl
-                  ) {
-                    const modelId = provider.model;
-                    await updateAgentModelProvider(ock, {
-                      baseUrl: provider.baseUrl,
-                      api: 'openai-completions',
-                      models: modelId ? [{ id: modelId, name: modelId }] : [],
-                      apiKey: providerKey,
-                    });
-                  }
-
-                  if (gatewayManager.getStatus().state !== 'stopped') {
-                    logger.info(`Scheduling Gateway restart after provider switch to "${ock}"`);
-                    gatewayManager.debouncedRestart();
-                  }
+                  await syncDefaultProviderToRuntime(providerId, gatewayManager);
                 } catch (err) {
                   console.warn('Failed to set OpenClaw default model:', err);
                 }
@@ -1777,23 +1543,37 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
  */
 function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
   deviceOAuthManager.setWindow(mainWindow);
+  browserOAuthManager.setWindow(mainWindow);
 
   // Request Provider OAuth initialization
-  ipcMain.handle('provider:requestOAuth', async (_, provider: OAuthProviderType, region?: 'global' | 'cn') => {
-    try {
-      logger.info(`provider:requestOAuth for ${provider}`);
-      await deviceOAuthManager.startFlow(provider, region);
-      return { success: true };
-    } catch (error) {
-      logger.error('provider:requestOAuth failed', error);
-      return { success: false, error: String(error) };
-    }
-  });
+  ipcMain.handle(
+    'provider:requestOAuth',
+    async (
+      _,
+      provider: OAuthProviderType | BrowserOAuthProviderType,
+      region?: 'global' | 'cn',
+      options?: { accountId?: string; label?: string },
+    ) => {
+      try {
+        logger.info(`provider:requestOAuth for ${provider}`);
+        if (provider === 'google') {
+          await browserOAuthManager.startFlow(provider, options);
+        } else {
+          await deviceOAuthManager.startFlow(provider, region, options);
+        }
+        return { success: true };
+      } catch (error) {
+        logger.error('provider:requestOAuth failed', error);
+        return { success: false, error: String(error) };
+      }
+    },
+  );
 
   // Cancel Provider OAuth
   ipcMain.handle('provider:cancelOAuth', async () => {
     try {
       await deviceOAuthManager.stopFlow();
+      await browserOAuthManager.stopFlow();
       return { success: true };
     } catch (error) {
       logger.error('provider:cancelOAuth failed', error);
@@ -1806,44 +1586,60 @@ function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
  * Provider-related IPC handlers
  */
 function registerProviderHandlers(gatewayManager: GatewayManager): void {
+  const providerService = getProviderService();
+
   // Listen for OAuth success to automatically restart the Gateway with new tokens/configs.
   // Use a longer debounce (8s) so that provider:setDefault — which writes the full config
   // and then calls debouncedRestart(2s) — has time to fire and coalesce into a single
   // restart.  Without this, the OAuth restart fires first with stale config, and the
   // subsequent provider:setDefault restart is deferred and dropped.
-  deviceOAuthManager.on('oauth:success', (providerType) => {
-    logger.info(`[IPC] Scheduling Gateway restart after ${providerType} OAuth success...`);
+  deviceOAuthManager.on('oauth:success', ({ provider, accountId }) => {
+    logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
+    gatewayManager.debouncedRestart(8000);
+  });
+  browserOAuthManager.on('oauth:success', ({ provider, accountId }) => {
+    logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
     gatewayManager.debouncedRestart(8000);
   });
 
   // Get all providers with key info
   ipcMain.handle('provider:list', async () => {
-    return await getAllProvidersWithKeyInfo();
+    return await providerService.listLegacyProvidersWithKeyInfo();
+  });
+
+  // New provider-service endpoints used by the account-based refactor.
+  ipcMain.handle('provider:listVendors', async () => {
+    return await providerService.listVendors();
+  });
+
+  ipcMain.handle('provider:listAccounts', async () => {
+    return await providerService.listAccounts();
+  });
+
+  ipcMain.handle('provider:getAccount', async (_, accountId: string) => {
+    return await providerService.getAccount(accountId);
   });
 
   // Get a specific provider
   ipcMain.handle('provider:get', async (_, providerId: string) => {
-    return await getProvider(providerId);
+    return await providerService.getLegacyProvider(providerId);
   });
 
   // Save a provider configuration
   ipcMain.handle('provider:save', async (_, config: ProviderConfig, apiKey?: string) => {
     try {
       // Save the provider config
-      await saveProvider(config);
-
-      // Derive the unique OpenClaw key for this provider instance
-      const ock = getOpenClawProviderKey(config.type, config.id);
+      await providerService.saveLegacyProvider(config);
 
       // Store the API key if provided
       if (apiKey !== undefined) {
         const trimmedKey = apiKey.trim();
         if (trimmedKey) {
-          await storeApiKey(config.id, trimmedKey);
+          await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
 
           // Also write to OpenClaw auth-profiles.json so the gateway can use it
           try {
-            await saveProviderKeyToOpenClaw(ock, trimmedKey);
+            await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
           } catch (err) {
             console.warn('Failed to save key to OpenClaw auth-profiles:', err);
           }
@@ -1852,37 +1648,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
       // Sync the provider configuration to openclaw.json so Gateway knows about it
       try {
-        const meta = getProviderConfig(config.type);
-        const api = config.type === 'custom' || config.type === 'ollama' ? 'openai-completions' : meta?.api;
-
-        if (api) {
-          await syncProviderConfigToOpenClaw(ock, config.model, {
-            baseUrl: config.baseUrl || meta?.baseUrl,
-            api,
-            apiKeyEnv: meta?.apiKeyEnv,
-            headers: meta?.headers,
-          });
-
-          if (config.type === 'custom' || config.type === 'ollama') {
-            const resolvedKey = apiKey !== undefined
-              ? (apiKey.trim() || null)
-              : await getApiKey(config.id);
-            if (resolvedKey && config.baseUrl) {
-              const modelId = config.model;
-              await updateAgentModelProvider(ock, {
-                baseUrl: config.baseUrl,
-                api: 'openai-completions',
-                models: modelId ? [{ id: modelId, name: modelId }] : [],
-                apiKey: resolvedKey,
-              });
-            }
-          }
-
-          // Debounced restart so the gateway picks up new config/env vars.
-          // Multiple rapid provider saves (e.g. during setup) are coalesced.
-          logger.info(`Scheduling Gateway restart after saving provider "${ock}" config`);
-          gatewayManager.debouncedRestart();
-        }
+        await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
       } catch (err) {
         console.warn('Failed to sync openclaw provider config:', err);
       }
@@ -1896,18 +1662,13 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Delete a provider
   ipcMain.handle('provider:delete', async (_, providerId: string) => {
     try {
-      const existing = await getProvider(providerId);
-      await deleteProvider(providerId);
+      const existing = await providerService.getLegacyProvider(providerId);
+      await providerService.deleteLegacyProvider(providerId);
 
       // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
       if (existing?.type) {
         try {
-          const ock = getOpenClawProviderKey(existing.type, providerId);
-          await removeProviderFromOpenClaw(ock);
-
-          // Debounced restart so the gateway stops loading the deleted provider.
-          logger.info(`Scheduling Gateway restart after deleting provider "${ock}"`);
-          gatewayManager.debouncedRestart();
+          await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
         } catch (err) {
           console.warn('Failed to completely remove provider from OpenClaw:', err);
         }
@@ -1922,14 +1683,13 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Update API key for a provider
   ipcMain.handle('provider:setApiKey', async (_, providerId: string, apiKey: string) => {
     try {
-      await storeApiKey(providerId, apiKey);
+      await providerService.setLegacyProviderApiKey(providerId, apiKey);
 
       // Also write to OpenClaw auth-profiles.json
-      const provider = await getProvider(providerId);
+      const provider = await providerService.getLegacyProvider(providerId);
       const providerType = provider?.type || providerId;
-      const ock = getOpenClawProviderKey(providerType, providerId);
       try {
-        await saveProviderKeyToOpenClaw(ock, apiKey);
+        await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
       } catch (err) {
         console.warn('Failed to save key to OpenClaw auth-profiles:', err);
       }
@@ -1949,12 +1709,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       updates: Partial<ProviderConfig>,
       apiKey?: string
     ) => {
-      const existing = await getProvider(providerId);
+      const existing = await providerService.getLegacyProvider(providerId);
       if (!existing) {
         return { success: false, error: 'Provider not found' };
       }
 
-      const previousKey = await getApiKey(providerId);
+      const previousKey = await providerService.getLegacyProviderApiKey(providerId);
       const previousOck = getOpenClawProviderKey(existing.type, providerId);
 
       try {
@@ -1966,72 +1726,22 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
         const ock = getOpenClawProviderKey(nextConfig.type, providerId);
 
-        await saveProvider(nextConfig);
+        await providerService.saveLegacyProvider(nextConfig);
 
         if (apiKey !== undefined) {
           const trimmedKey = apiKey.trim();
           if (trimmedKey) {
-            await storeApiKey(providerId, trimmedKey);
-            await saveProviderKeyToOpenClaw(ock, trimmedKey);
+            await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
+            await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
           } else {
-            await deleteApiKey(providerId);
+            await providerService.deleteLegacyProviderApiKey(providerId);
             await removeProviderFromOpenClaw(ock);
           }
         }
 
         // Sync the provider configuration to openclaw.json so Gateway knows about it
         try {
-          const fallbackModels = await getProviderFallbackModelRefs(nextConfig);
-          const meta = getProviderConfig(nextConfig.type);
-          const api = nextConfig.type === 'custom' || nextConfig.type === 'ollama' ? 'openai-completions' : meta?.api;
-
-          if (api) {
-            await syncProviderConfigToOpenClaw(ock, nextConfig.model, {
-              baseUrl: nextConfig.baseUrl || meta?.baseUrl,
-              api,
-              apiKeyEnv: meta?.apiKeyEnv,
-              headers: meta?.headers,
-            });
-
-            if (nextConfig.type === 'custom' || nextConfig.type === 'ollama') {
-              const resolvedKey = apiKey !== undefined
-                ? (apiKey.trim() || null)
-                : await getApiKey(providerId);
-              if (resolvedKey && nextConfig.baseUrl) {
-                const modelId = nextConfig.model;
-                await updateAgentModelProvider(ock, {
-                  baseUrl: nextConfig.baseUrl,
-                  api: 'openai-completions',
-                  models: modelId ? [{ id: modelId, name: modelId }] : [],
-                  apiKey: resolvedKey,
-                });
-              }
-            }
-          }
-
-          // If this provider is the current default, update the primary model
-          const defaultProviderId = await getDefaultProvider();
-          if (defaultProviderId === providerId) {
-            const modelOverride = getProviderModelRef(nextConfig);
-            const providerKeyIsAliased = ock !== nextConfig.type;
-            if (nextConfig.type === 'custom' || nextConfig.type === 'ollama' || providerKeyIsAliased) {
-              const baseMeta = getProviderConfig(nextConfig.type);
-              await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
-                baseUrl: nextConfig.baseUrl || baseMeta?.baseUrl,
-                api: nextConfig.type === 'custom' || nextConfig.type === 'ollama'
-                  ? 'openai-completions'
-                  : baseMeta?.api,
-                apiKeyEnv: baseMeta?.apiKeyEnv,
-                headers: baseMeta?.headers,
-              }, fallbackModels);
-            } else {
-              await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
-            }
-          }
-
-          // Debounced restart so the gateway picks up updated config/env vars.
-          logger.info(`Scheduling Gateway restart after updating provider "${ock}" config`);
-          gatewayManager.debouncedRestart();
+          await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
         } catch (err) {
           console.warn('Failed to sync openclaw config after provider update:', err);
         }
@@ -2040,12 +1750,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       } catch (error) {
         // Best-effort rollback to keep config/key consistent.
         try {
-          await saveProvider(existing);
+          await providerService.saveLegacyProvider(existing);
           if (previousKey) {
-            await storeApiKey(providerId, previousKey);
+            await providerService.setLegacyProviderApiKey(providerId, previousKey);
             await saveProviderKeyToOpenClaw(previousOck, previousKey);
           } else {
-            await deleteApiKey(providerId);
+            await providerService.deleteLegacyProviderApiKey(providerId);
             await removeProviderFromOpenClaw(previousOck);
           }
         } catch (rollbackError) {
@@ -2060,16 +1770,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Delete API key for a provider
   ipcMain.handle('provider:deleteApiKey', async (_, providerId: string) => {
     try {
-      await deleteApiKey(providerId);
+      await providerService.deleteLegacyProviderApiKey(providerId);
 
       // Keep OpenClaw auth-profiles.json in sync with local key storage
-      const provider = await getProvider(providerId);
-      const providerType = provider?.type || providerId;
-      const ock = getOpenClawProviderKey(providerType, providerId);
+      const provider = await providerService.getLegacyProvider(providerId);
       try {
-        if (ock) {
-          await removeProviderFromOpenClaw(ock);
-        }
+        await syncDeletedProviderApiKeyToRuntime(provider, providerId);
       } catch (err) {
         console.warn('Failed to completely remove provider from OpenClaw:', err);
       }
@@ -2082,116 +1788,24 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
   // Check if a provider has an API key
   ipcMain.handle('provider:hasApiKey', async (_, providerId: string) => {
-    return await hasApiKey(providerId);
+    return await providerService.hasLegacyProviderApiKey(providerId);
   });
 
   // Get the actual API key (for internal use only - be careful!)
   ipcMain.handle('provider:getApiKey', async (_, providerId: string) => {
-    return await getApiKey(providerId);
+    return await providerService.getLegacyProviderApiKey(providerId);
   });
 
   // Set default provider and update OpenClaw default model
   ipcMain.handle('provider:setDefault', async (_, providerId: string) => {
     try {
-      await setDefaultProvider(providerId);
+      await providerService.setDefaultLegacyProvider(providerId);
 
       // Update OpenClaw config to use this provider's default model
-      const provider = await getProvider(providerId);
-      if (provider) {
-        try {
-          const ock = getOpenClawProviderKey(provider.type, providerId);
-          const providerKey = await getApiKey(providerId);
-          const fallbackModels = await getProviderFallbackModelRefs(provider);
-
-          // OAuth providers might use OAuth OR a direct API key.
-          // Treat them as OAuth-only if they don't have a local API key configured.
-          const isOAuthProvider = isOAuthProviderType(provider.type) && !providerKey;
-
-          if (!isOAuthProvider) {
-            // Build the model reference from provider settings/default mapping.
-            const modelOverride = getProviderModelRef(provider);
-            const providerKeyIsAliased = ock !== provider.type;
-            if (provider.type === 'custom' || provider.type === 'ollama' || providerKeyIsAliased) {
-              const baseMeta = getProviderConfig(provider.type);
-              await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
-                baseUrl: provider.baseUrl || baseMeta?.baseUrl,
-                api: provider.type === 'custom' || provider.type === 'ollama'
-                  ? 'openai-completions'
-                  : baseMeta?.api,
-                apiKeyEnv: baseMeta?.apiKeyEnv,
-                headers: baseMeta?.headers,
-              }, fallbackModels);
-            } else {
-              await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);
-            }
-
-            // Keep auth-profiles in sync with the default provider instance.
-            if (providerKey) {
-              await saveProviderKeyToOpenClaw(ock, providerKey);
-            }
-          } else {
-            const defaultBaseUrl = getOAuthProviderDefaultBaseUrl(provider.type);
-            const api = getOAuthProviderApi(provider.type);
-            const targetProviderKey = getOAuthProviderTargetKey(provider.type);
-            const baseUrl = normalizeOAuthBaseUrl(provider.type, provider.baseUrl || defaultBaseUrl);
-            const oauthApiKeyEnv = targetProviderKey ? getOAuthApiKeyEnv(targetProviderKey) : undefined;
-            const oauthUsesAuthHeader = targetProviderKey ? usesOAuthAuthHeader(targetProviderKey) : false;
-            if (!baseUrl || !api || !targetProviderKey || !oauthApiKeyEnv) {
-              throw new Error(`Invalid OAuth provider config for "${provider.type}"`);
-            }
-
-            await setOpenClawDefaultModelWithOverride(targetProviderKey, getProviderModelRef(provider), {
-              baseUrl,
-              api,
-              authHeader: oauthUsesAuthHeader ? true : undefined,
-              // Relies on OpenClaw Gateway native auth-profiles syncing
-              apiKeyEnv: oauthApiKeyEnv,
-            }, fallbackModels);
-
-            logger.info(`Configured openclaw.json for OAuth provider "${provider.type}"`);
-
-            // Also write models.json directly so pi-ai picks up the correct baseUrl and
-            // authHeader immediately, without waiting for Gateway to sync openclaw.json.
-            try {
-              const defaultModelId = provider.model?.split('/').pop();
-              await updateAgentModelProvider(targetProviderKey, {
-                baseUrl,
-                api,
-                authHeader: oauthUsesAuthHeader ? true : undefined,
-                apiKey: oauthApiKeyEnv,
-                models: defaultModelId ? [{ id: defaultModelId, name: defaultModelId }] : [],
-              });
-            } catch (err) {
-              logger.warn(`Failed to update models.json for OAuth provider "${targetProviderKey}":`, err);
-            }
-          }
-
-          // For custom/ollama providers, also update the per-agent models.json
-          if (
-            (provider.type === 'custom' || provider.type === 'ollama') &&
-            providerKey &&
-            provider.baseUrl
-          ) {
-            const modelId = provider.model;
-            await updateAgentModelProvider(ock, {
-              baseUrl: provider.baseUrl,
-              api: 'openai-completions',
-              models: modelId ? [{ id: modelId, name: modelId }] : [],
-              apiKey: providerKey,
-            });
-          }
-
-          // Debounced restart so the gateway picks up the new default provider.
-          // Because OAuth success triggers a debounced restart, the gateway might not be
-          // currently connected ('starting' or 'reconnecting'). Checking if it is simply
-          // not 'stopped' ensures the restart request is correctly queued or coalesced.
-          if (gatewayManager.getStatus().state !== 'stopped') {
-            logger.info(`Scheduling Gateway restart after provider switch to "${ock}"`);
-            gatewayManager.debouncedRestart();
-          }
-        } catch (err) {
-          console.warn('Failed to set OpenClaw default model:', err);
-        }
+      try {
+        await syncDefaultProviderToRuntime(providerId, gatewayManager);
+      } catch (err) {
+        console.warn('Failed to set OpenClaw default model:', err);
       }
 
       return { success: true };
@@ -2204,7 +1818,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
   // Get default provider
   ipcMain.handle('provider:getDefault', async () => {
-    return await getDefaultProvider();
+    return await providerService.getDefaultLegacyProvider();
   });
 
   // Validate API key by making a real test request to the provider.
@@ -2219,7 +1833,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
     ) => {
       try {
         // First try to get existing provider
-        const provider = await getProvider(providerId);
+        const provider = await providerService.getLegacyProvider(providerId);
 
         // Use provider.type if provider exists, otherwise use providerId as the type
         // This allows validation during setup when provider hasn't been saved yet
@@ -2237,266 +1851,6 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       }
     }
   );
-}
-
-type ValidationProfile = 'openai-compatible' | 'google-query-key' | 'anthropic-header' | 'openrouter' | 'none';
-
-/**
- * Validate API key using lightweight model-listing endpoints (zero token cost).
- * Providers are grouped into 3 auth styles:
- * - openai-compatible: Bearer auth + /models
- * - google-query-key: ?key=... + /models
- * - anthropic-header: x-api-key + anthropic-version + /models
- */
-async function validateApiKeyWithProvider(
-  providerType: string,
-  apiKey: string,
-  options?: { baseUrl?: string }
-): Promise<{ valid: boolean; error?: string }> {
-  const profile = getValidationProfile(providerType);
-  if (profile === 'none') {
-    return { valid: true };
-  }
-
-  const trimmedKey = apiKey.trim();
-  if (!trimmedKey) {
-    return { valid: false, error: 'API key is required' };
-  }
-
-  try {
-    switch (profile) {
-      case 'openai-compatible':
-        return await validateOpenAiCompatibleKey(providerType, trimmedKey, options?.baseUrl);
-      case 'google-query-key':
-        return await validateGoogleQueryKey(providerType, trimmedKey, options?.baseUrl);
-      case 'anthropic-header':
-        return await validateAnthropicHeaderKey(providerType, trimmedKey, options?.baseUrl);
-      case 'openrouter':
-        return await validateOpenRouterKey(providerType, trimmedKey);
-      default:
-        return { valid: false, error: `Unsupported validation profile for provider: ${providerType}` };
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { valid: false, error: errorMessage };
-  }
-}
-
-function logValidationStatus(provider: string, status: number): void {
-  console.log(`[clawx-validate] ${provider} HTTP ${status}`);
-}
-
-function maskSecret(secret: string): string {
-  if (!secret) return '';
-  if (secret.length <= 8) return `${secret.slice(0, 2)}***`;
-  return `${secret.slice(0, 4)}***${secret.slice(-4)}`;
-}
-
-function sanitizeValidationUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    const key = url.searchParams.get('key');
-    if (key) url.searchParams.set('key', maskSecret(key));
-    return url.toString();
-  } catch {
-    return rawUrl;
-  }
-}
-
-function sanitizeHeaders(headers: Record<string, string>): Record<string, string> {
-  const next = { ...headers };
-  if (next.Authorization?.startsWith('Bearer ')) {
-    const token = next.Authorization.slice('Bearer '.length);
-    next.Authorization = `Bearer ${maskSecret(token)}`;
-  }
-  if (next['x-api-key']) {
-    next['x-api-key'] = maskSecret(next['x-api-key']);
-  }
-  return next;
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.trim().replace(/\/+$/, '');
-}
-
-function buildOpenAiModelsUrl(baseUrl: string): string {
-  return `${normalizeBaseUrl(baseUrl)}/models?limit=1`;
-}
-
-function logValidationRequest(
-  provider: string,
-  method: string,
-  url: string,
-  headers: Record<string, string>
-): void {
-  console.log(
-    `[clawx-validate] ${provider} request ${method} ${sanitizeValidationUrl(url)} headers=${JSON.stringify(sanitizeHeaders(headers))}`
-  );
-}
-
-function getValidationProfile(providerType: string): ValidationProfile {
-  switch (providerType) {
-    case 'anthropic':
-      return 'anthropic-header';
-    case 'google':
-      return 'google-query-key';
-    case 'openrouter':
-      return 'openrouter';
-    case 'ollama':
-      return 'none';
-    default:
-      return 'openai-compatible';
-  }
-}
-
-async function performProviderValidationRequest(
-  providerLabel: string,
-  url: string,
-  headers: Record<string, string>
-): Promise<{ valid: boolean; error?: string }> {
-  try {
-    logValidationRequest(providerLabel, 'GET', url, headers);
-    const response = await proxyAwareFetch(url, { headers });
-    logValidationStatus(providerLabel, response.status);
-    const data = await response.json().catch(() => ({}));
-    return classifyAuthResponse(response.status, data);
-  } catch (error) {
-    return {
-      valid: false,
-      error: `Connection error: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
-/**
- * Helper: classify an HTTP response as valid / invalid / error.
- * 200 / 429 → valid (key works, possibly rate-limited).
- * 401 / 403 → invalid.
- * Everything else → return the API error message.
- */
-function classifyAuthResponse(
-  status: number,
-  data: unknown
-): { valid: boolean; error?: string } {
-  if (status >= 200 && status < 300) return { valid: true };
-  if (status === 429) return { valid: true }; // rate-limited but key is valid
-  if (status === 401 || status === 403) return { valid: false, error: 'Invalid API key' };
-
-  // Try to extract an error message
-  const obj = data as { error?: { message?: string }; message?: string } | null;
-  const msg = obj?.error?.message || obj?.message || `API error: ${status}`;
-  return { valid: false, error: msg };
-}
-
-async function validateOpenAiCompatibleKey(
-  providerType: string,
-  apiKey: string,
-  baseUrl?: string
-): Promise<{ valid: boolean; error?: string }> {
-  const trimmedBaseUrl = baseUrl?.trim();
-  if (!trimmedBaseUrl) {
-    return { valid: false, error: `Base URL is required for provider "${providerType}" validation` };
-  }
-
-  const headers = { Authorization: `Bearer ${apiKey}` };
-
-  // Try /models first (standard OpenAI-compatible endpoint)
-  const modelsUrl = buildOpenAiModelsUrl(trimmedBaseUrl);
-  const modelsResult = await performProviderValidationRequest(providerType, modelsUrl, headers);
-
-  // If /models returned 404, the provider likely doesn't implement it (e.g. MiniMax).
-  // Fall back to a minimal /chat/completions POST which almost all providers support.
-  if (modelsResult.error?.includes('API error: 404')) {
-    console.log(
-      `[clawx-validate] ${providerType} /models returned 404, falling back to /chat/completions probe`
-    );
-    const base = normalizeBaseUrl(trimmedBaseUrl);
-    const chatUrl = `${base}/chat/completions`;
-    return await performChatCompletionsProbe(providerType, chatUrl, headers);
-  }
-
-  return modelsResult;
-}
-
-/**
- * Fallback validation: send a minimal /chat/completions request.
- * We intentionally use max_tokens=1 to minimise cost. The goal is only to
- * distinguish auth errors (401/403) from a working key (200/400/429).
- * A 400 "invalid model" still proves the key itself is accepted.
- */
-async function performChatCompletionsProbe(
-  providerLabel: string,
-  url: string,
-  headers: Record<string, string>
-): Promise<{ valid: boolean; error?: string }> {
-  try {
-    logValidationRequest(providerLabel, 'POST', url, headers);
-    const response = await proxyAwareFetch(url, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'validation-probe',
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 1,
-      }),
-    });
-    logValidationStatus(providerLabel, response.status);
-    const data = await response.json().catch(() => ({}));
-
-    // 401/403 → invalid key
-    if (response.status === 401 || response.status === 403) {
-      return { valid: false, error: 'Invalid API key' };
-    }
-    // 200, 400 (bad model but key accepted), 429 → key is valid
-    if (
-      (response.status >= 200 && response.status < 300) ||
-      response.status === 400 ||
-      response.status === 429
-    ) {
-      return { valid: true };
-    }
-    return classifyAuthResponse(response.status, data);
-  } catch (error) {
-    return {
-      valid: false,
-      error: `Connection error: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
-async function validateGoogleQueryKey(
-  providerType: string,
-  apiKey: string,
-  baseUrl?: string
-): Promise<{ valid: boolean; error?: string }> {
-  // Default to the official Google Gemini API base URL if none is provided
-  const base = normalizeBaseUrl(baseUrl || 'https://generativelanguage.googleapis.com/v1beta');
-  const url = `${base}/models?pageSize=1&key=${encodeURIComponent(apiKey)}`;
-  return await performProviderValidationRequest(providerType, url, {});
-}
-
-async function validateAnthropicHeaderKey(
-  providerType: string,
-  apiKey: string,
-  baseUrl?: string
-): Promise<{ valid: boolean; error?: string }> {
-  const base = normalizeBaseUrl(baseUrl || 'https://api.anthropic.com/v1');
-  const url = `${base}/models?limit=1`;
-  const headers = {
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-  };
-  return await performProviderValidationRequest(providerType, url, headers);
-}
-
-async function validateOpenRouterKey(
-  providerType: string,
-  apiKey: string
-): Promise<{ valid: boolean; error?: string }> {
-  // Use OpenRouter's auth check endpoint instead of public /models
-  const url = 'https://openrouter.ai/api/v1/auth/key';
-  const headers = { Authorization: `Bearer ${apiKey}` };
-  return await performProviderValidationRequest(providerType, url, headers);
 }
 
 /**

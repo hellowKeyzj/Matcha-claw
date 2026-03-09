@@ -2,48 +2,49 @@
  * Gateway Process Manager
  * Manages the OpenClaw Gateway process lifecycle
  */
-import { app, utilityProcess } from 'electron';
+import { app } from 'electron';
 import path from 'path';
 import { EventEmitter } from 'events';
-import { existsSync, writeFileSync } from 'fs';
 import WebSocket from 'ws';
 import { PORTS } from '../utils/config';
-import {
-  getOpenClawDir,
-  getOpenClawEntryPath,
-  isOpenClawPresent,
-  appendNodeRequireToNodeOptions,
-} from '../utils/paths';
-import { getAllSettings, getSetting } from '../utils/store';
-import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-storage';
-import { getProviderEnvVars, getKeyableProviderTypes } from '../utils/provider-registry';
-import { GatewayEventType, JsonRpcNotification, isNotification, isResponse } from './protocol';
+import { JsonRpcNotification, isNotification, isResponse } from './protocol';
 import { logger } from '../utils/logger';
-import { getUvMirrorEnv } from '../utils/uv-env';
-import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
 import {
   loadOrCreateDeviceIdentity,
-  signDevicePayload,
-  publicKeyRawBase64UrlFromPem,
-  buildDeviceAuthPayload,
   type DeviceIdentity,
 } from '../utils/device-identity';
-import { syncGatewayTokenToConfig, syncBrowserConfigToOpenClaw, sanitizeOpenClawConfig } from '../utils/openclaw-auth';
-import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
-import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
-import { shouldAttemptConfigAutoRepair } from './startup-recovery';
 import {
+  DEFAULT_RECONNECT_CONFIG,
+  type ReconnectConfig,
   type GatewayLifecycleState,
-  getDeferredRestartAction,
+  getReconnectScheduleDecision,
   getReconnectSkipReason,
-  isLifecycleSuperseded,
-  nextLifecycleEpoch,
-  shouldDeferRestart,
 } from './process-policy';
+import {
+  clearPendingGatewayRequests,
+  rejectPendingGatewayRequest,
+  resolvePendingGatewayRequest,
+  type PendingGatewayRequest,
+} from './request-store';
+import { dispatchJsonRpcNotification, dispatchProtocolEvent } from './event-dispatch';
+import { GatewayStateController } from './state';
+import { prepareGatewayLaunchContext } from './config-sync';
+import { connectGatewaySocket, waitForGatewayReady } from './ws-client';
+import {
+  findExistingGatewayProcess,
+  runOpenClawDoctorRepair,
+  terminateOwnedGatewayProcess,
+  unloadLaunchctlGatewayService,
+  waitForPortFree,
+  warmupManagedPythonReadiness,
+} from './supervisor';
+import { GatewayConnectionMonitor } from './connection-monitor';
+import { GatewayLifecycleController, LifecycleSupersededError } from './lifecycle-controller';
+import { launchGatewayProcess } from './process-launcher';
+import { GatewayRestartController } from './restart-controller';
+import { classifyGatewayStderrMessage, recordGatewayStartupStderrLine } from './startup-stderr';
+import { runGatewayStartupSequence } from './startup-orchestrator';
 
-/**
- * Gateway connection status
- */
 export interface GatewayStatus {
   state: GatewayLifecycleState;
   port: number;
@@ -69,140 +70,6 @@ export interface GatewayManagerEvents {
 }
 
 /**
- * Reconnection configuration
- */
-interface ReconnectConfig {
-  maxAttempts: number;
-  baseDelay: number;
-  maxDelay: number;
-}
-
-const DEFAULT_RECONNECT_CONFIG: ReconnectConfig = {
-  maxAttempts: 10,
-  baseDelay: 1000,
-  maxDelay: 30000,
-};
-
-// getNodeExecutablePath() removed: utilityProcess.fork() handles process isolation
-// natively on all platforms (no dock icon on macOS, no console on Windows).
-
-/**
- * Ensure the gateway fetch-preload script exists in userData and return
- * its absolute path.  The script patches globalThis.fetch to inject
- * ClawX app-attribution headers (HTTP-Referer, X-Title) for OpenRouter
- * API requests, overriding the OpenClaw runner's hardcoded defaults.
- *
- * Inlined here so it works in dev, packaged, and asar modes without
- * extra build config.  Loaded by the Gateway child process via
- * NODE_OPTIONS --require.
- */
-const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
-(function () {
-  var _f = globalThis.fetch;
-  if (typeof _f !== 'function') return;
-  if (globalThis.__clawxFetchPatched) return;
-  globalThis.__clawxFetchPatched = true;
-
-  globalThis.fetch = function clawxFetch(input, init) {
-    var url =
-      typeof input === 'string' ? input
-        : input && typeof input === 'object' && typeof input.url === 'string'
-          ? input.url : '';
-
-    if (url.indexOf('openrouter.ai') !== -1) {
-      init = init ? Object.assign({}, init) : {};
-      var prev = init.headers;
-      var flat = {};
-      if (prev && typeof prev.forEach === 'function') {
-        prev.forEach(function (v, k) { flat[k] = v; });
-      } else if (prev && typeof prev === 'object') {
-        Object.assign(flat, prev);
-      }
-      delete flat['http-referer'];
-      delete flat['HTTP-Referer'];
-      delete flat['x-title'];
-      delete flat['X-Title'];
-      flat['HTTP-Referer'] = 'https://claw-x.com';
-      flat['X-Title'] = 'ClawX';
-      init.headers = flat;
-    }
-    return _f.call(globalThis, input, init);
-  };
-
-  // Global monkey-patch for child_process to enforce windowsHide: true on Windows.
-  // This prevents OpenClaw's tools (e.g. Terminal, Python) from flashing black
-  // command boxes during AI conversations, without triggering AVs.
-  //
-  // Node child_process signatures vary:
-  //   spawn(cmd[, args][, options])
-  //   exec(cmd[, options][, callback])
-  //   execFile(file[, args][, options][, callback])
-  //   *Sync variants omit the callback
-  //
-  // Strategy: scan arguments for the first plain-object (the options param).
-  // If found, set windowsHide on it. If absent, insert a new options object
-  // before any trailing callback so the signature stays valid.
-  if (process.platform === 'win32') {
-    try {
-      var cp = require('child_process');
-      if (!cp.__clawxPatched) {
-        cp.__clawxPatched = true;
-        ['spawn', 'exec', 'execFile', 'fork', 'spawnSync', 'execSync', 'execFileSync'].forEach(function(method) {
-          var original = cp[method];
-          if (typeof original !== 'function') return;
-          cp[method] = function() {
-            var args = Array.prototype.slice.call(arguments);
-            var optIdx = -1;
-            for (var i = 1; i < args.length; i++) {
-              var a = args[i];
-              if (a && typeof a === 'object' && !Array.isArray(a)) {
-                optIdx = i;
-                break;
-              }
-            }
-            if (optIdx >= 0) {
-              args[optIdx].windowsHide = true;
-            } else {
-              var opts = { windowsHide: true };
-              if (typeof args[args.length - 1] === 'function') {
-                args.splice(args.length - 1, 0, opts);
-              } else {
-                args.push(opts);
-              }
-            }
-            return original.apply(this, args);
-          };
-        });
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-})();
-`;
-
-function injectMoonshotWebSearchEnv(
-  env: Record<string, string>,
-  apiKey: string
-): void {
-  // OpenClaw web_search(kimi) reads KIMI_API_KEY before provider-specific config.
-  env.KIMI_API_KEY = apiKey;
-}
-
-function ensureGatewayFetchPreload(): string {
-  const dest = path.join(app.getPath('userData'), 'gateway-fetch-preload.cjs');
-  try { writeFileSync(dest, GATEWAY_FETCH_PRELOAD_SOURCE, 'utf-8'); } catch { /* best-effort */ }
-  return dest;
-}
-
-class LifecycleSupersededError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'LifecycleSupersededError';
-  }
-}
-
-/**
  * Gateway Manager
  * Handles starting, stopping, and communicating with the OpenClaw Gateway
  */
@@ -212,30 +79,46 @@ export class GatewayManager extends EventEmitter {
   private ownsProcess = false;
   private ws: WebSocket | null = null;
   private status: GatewayStatus = { state: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
+  private readonly stateController: GatewayStateController;
   private reconnectTimer: NodeJS.Timeout | null = null;
-  private pingInterval: NodeJS.Timeout | null = null;
-  private healthCheckInterval: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
   private reconnectConfig: ReconnectConfig;
   private shouldReconnect = true;
   private startLock = false;
   private lastSpawnSummary: string | null = null;
   private recentStartupStderrLines: string[] = [];
-  private pendingRequests: Map<string, {
-    resolve: (value: unknown) => void;
-    reject: (error: Error) => void;
-    timeout: NodeJS.Timeout;
-  }> = new Map();
+  private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private deviceIdentity: DeviceIdentity | null = null;
-  private restartDebounceTimer: NodeJS.Timeout | null = null;
-  private reloadDebounceTimer: NodeJS.Timeout | null = null;
-  private lifecycleEpoch = 0;
-  private deferredRestartPending = false;
   private restartInFlight: Promise<void> | null = null;
+  private readonly connectionMonitor = new GatewayConnectionMonitor();
+  private readonly lifecycleController = new GatewayLifecycleController();
+  private readonly restartController = new GatewayRestartController();
+  private reloadDebounceTimer: NodeJS.Timeout | null = null;
   private externalShutdownSupported: boolean | null = null;
 
   constructor(config?: Partial<ReconnectConfig>) {
     super();
+    this.stateController = new GatewayStateController({
+      emitStatus: (status) => {
+        this.status = status;
+        this.emit('status', status);
+      },
+      onTransition: (previousState, nextState) => {
+        this.restartController.flushDeferredRestart(
+          `status:${previousState}->${nextState}`,
+          {
+            state: this.status.state,
+            startLock: this.startLock,
+            shouldReconnect: this.shouldReconnect,
+          },
+          () => {
+            void this.restart().catch((error) => {
+              logger.warn('Deferred Gateway restart failed:', error);
+            });
+          },
+        );
+      },
+    });
     this.reconnectConfig = { ...DEFAULT_RECONNECT_CONFIG, ...config };
     // Device identity is loaded lazily in start() — not in the constructor —
     // so that async file I/O and key generation don't block module loading.
@@ -265,125 +148,18 @@ export class GatewayManager extends EventEmitter {
     const message = error instanceof Error ? error.message : String(error);
     return /unknown method:\s*shutdown/i.test(message);
   }
-
-  private formatExit(code: number | null, signal: NodeJS.Signals | null): string {
-    if (code !== null) return `code=${code}`;
-    if (signal) return `signal=${signal}`;
-    return 'code=null signal=null';
-  }
-
-  private classifyStderrMessage(message: string): { level: 'drop' | 'debug' | 'warn'; normalized: string } {
-    const msg = message.trim();
-    if (!msg) return { level: 'drop', normalized: msg };
-
-    // Known noisy lines that are not actionable for Gateway lifecycle debugging.
-    if (msg.includes('openclaw-control-ui') && msg.includes('token_mismatch')) return { level: 'drop', normalized: msg };
-    if (msg.includes('closed before connect') && msg.includes('token mismatch')) return { level: 'drop', normalized: msg };
-    // During renderer refresh / transport switching, loopback websocket probes can time out
-    // while the gateway is reloading. This is expected and not actionable.
-    if (msg.includes('[ws] handshake timeout') && msg.includes('remote=127.0.0.1')) {
-      return { level: 'debug', normalized: msg };
-    }
-    if (msg.includes('[ws] closed before connect') && msg.includes('remote=127.0.0.1')) {
-      return { level: 'debug', normalized: msg };
-    }
-
-    // Downgrade frequent non-fatal noise.
-    if (msg.includes('ExperimentalWarning')) return { level: 'debug', normalized: msg };
-    if (msg.includes('DeprecationWarning')) return { level: 'debug', normalized: msg };
-    if (msg.includes('Debugger attached')) return { level: 'debug', normalized: msg };
-    // Electron restricts NODE_OPTIONS in packaged apps; this is expected and harmless.
-    if (msg.includes('NODE_OPTIONs are not supported in packaged apps')) return { level: 'debug', normalized: msg };
-
-    return { level: 'warn', normalized: msg };
-  }
-
-  private recordStartupStderrLine(line: string): void {
-    const normalized = line.trim();
-    if (!normalized) return;
-    this.recentStartupStderrLines.push(normalized);
-    const MAX_STDERR_LINES = 120;
-    if (this.recentStartupStderrLines.length > MAX_STDERR_LINES) {
-      this.recentStartupStderrLines.splice(0, this.recentStartupStderrLines.length - MAX_STDERR_LINES);
-    }
-  }
-
-  private bumpLifecycleEpoch(reason: string): number {
-    this.lifecycleEpoch = nextLifecycleEpoch(this.lifecycleEpoch);
-    logger.debug(`Gateway lifecycle epoch advanced to ${this.lifecycleEpoch} (${reason})`);
-    return this.lifecycleEpoch;
-  }
-
-  private assertLifecycleEpoch(expectedEpoch: number, phase: string): void {
-    if (isLifecycleSuperseded(expectedEpoch, this.lifecycleEpoch)) {
-      throw new LifecycleSupersededError(
-        `Gateway ${phase} superseded (expectedEpoch=${expectedEpoch}, currentEpoch=${this.lifecycleEpoch})`
-      );
-    }
-  }
-
-  private isRestartDeferred(): boolean {
-    return shouldDeferRestart({
-      state: this.status.state,
-      startLock: this.startLock,
-    });
-  }
-
-  private markDeferredRestart(reason: string): void {
-    if (!this.deferredRestartPending) {
-      logger.info(
-        `Deferring Gateway restart (${reason}) until startup/reconnect settles (state=${this.status.state}, startLock=${this.startLock})`
-      );
-    } else {
-      logger.debug(
-        `Gateway restart already deferred; keeping pending request (${reason}, state=${this.status.state}, startLock=${this.startLock})`
-      );
-    }
-    this.deferredRestartPending = true;
-  }
-
-  private flushDeferredRestart(trigger: string): void {
-    const action = getDeferredRestartAction({
-      hasPendingRestart: this.deferredRestartPending,
-      state: this.status.state,
-      startLock: this.startLock,
-      shouldReconnect: this.shouldReconnect,
-    });
-
-    if (action === 'none') return;
-    if (action === 'wait') {
-      logger.debug(
-        `Deferred Gateway restart still waiting (${trigger}, state=${this.status.state}, startLock=${this.startLock})`
-      );
-      return;
-    }
-
-    this.deferredRestartPending = false;
-    if (action === 'drop') {
-      logger.info(
-        `Dropping deferred Gateway restart (${trigger}) because lifecycle already recovered (state=${this.status.state}, shouldReconnect=${this.shouldReconnect})`
-      );
-      return;
-    }
-
-    logger.info(`Executing deferred Gateway restart now (${trigger})`);
-    void this.restart().catch((error) => {
-      logger.warn('Deferred Gateway restart failed:', error);
-    });
-  }
-
   /**
    * Get current Gateway status
    */
   getStatus(): GatewayStatus {
-    return { ...this.status };
+    return this.stateController.getStatus();
   }
 
   /**
    * Check if Gateway is connected and ready
    */
   isConnected(): boolean {
-    return this.status.state === 'running' && this.ws?.readyState === WebSocket.OPEN;
+    return this.stateController.isConnected(this.ws?.readyState === WebSocket.OPEN);
   }
 
   /**
@@ -401,7 +177,7 @@ export class GatewayManager extends EventEmitter {
     }
 
     this.startLock = true;
-    const startEpoch = this.bumpLifecycleEpoch('start');
+    const startEpoch = this.lifecycleController.bump('start');
     logger.info(`Gateway start requested (port=${this.status.port})`);
     this.lastSpawnSummary = null;
     this.shouldReconnect = true;
@@ -419,107 +195,58 @@ export class GatewayManager extends EventEmitter {
 
     this.reconnectAttempts = 0;
     this.setStatus({ state: 'starting', reconnectAttempts: 0 });
-    let configRepairAttempted = false;
 
     // Check if Python environment is ready (self-healing) asynchronously.
     // Fire-and-forget: only needs to run once, not on every retry.
-    void isPythonReady().then(pythonReady => {
-      if (!pythonReady) {
-        logger.info('Python environment missing or incomplete, attempting background repair...');
-        void setupManagedPython().catch(err => {
-          logger.error('Background Python repair failed:', err);
-        });
-      }
-    }).catch(err => {
-      logger.error('Failed to check Python environment:', err);
-    });
+    warmupManagedPythonReadiness();
 
     try {
-      let startAttempts = 0;
-      const MAX_START_ATTEMPTS = 3;
-
-      while (true) {
-        startAttempts++;
-        this.assertLifecycleEpoch(startEpoch, 'start');
-        this.recentStartupStderrLines = [];
-        try {
-          // Check if Gateway is already running
-          logger.debug('Checking for existing Gateway...');
-          const existing = await this.findExistingGateway();
-          this.assertLifecycleEpoch(startEpoch, 'start/find-existing');
-          if (existing) {
-            logger.debug(`Found existing Gateway on port ${existing.port}`);
-            await this.connect(existing.port, existing.externalToken);
-            this.assertLifecycleEpoch(startEpoch, 'start/connect-existing');
-            this.ownsProcess = false;
-            this.setStatus({ pid: undefined });
-            this.startHealthCheck();
-            return;
-          }
-
-          logger.debug('No existing Gateway found, starting new process...');
-
-          // On Windows, TCP TIME_WAIT can hold the port for up to 2 minutes
-          // after the previous Gateway process exits, preventing the new one
-          // from binding. Wait for the port to be free before proceeding.
-          if (process.platform === 'win32') {
-            await this.waitForPortFree(this.status.port);
-            this.assertLifecycleEpoch(startEpoch, 'start/wait-port');
-          }
-
-          // Start new Gateway process
+      await runGatewayStartupSequence({
+        port: this.status.port,
+        ownedPid: this.process?.pid,
+        shouldWaitForPortFree: process.platform === 'win32',
+        resetStartupStderrLines: () => {
+          this.recentStartupStderrLines = [];
+        },
+        getStartupStderrLines: () => this.recentStartupStderrLines,
+        assertLifecycle: (phase) => {
+          this.lifecycleController.assert(startEpoch, phase);
+        },
+        findExistingGateway: async (port, ownedPid) => {
+          return await findExistingGatewayProcess({ port, ownedPid });
+        },
+        connect: async (port, externalToken) => {
+          await this.connect(port, externalToken);
+        },
+        onConnectedToExistingGateway: () => {
+          this.ownsProcess = false;
+          this.setStatus({ pid: undefined });
+          this.startHealthCheck();
+        },
+        waitForPortFree: async (port) => {
+          await waitForPortFree(port);
+        },
+        startProcess: async () => {
           await this.startProcess();
-          this.assertLifecycleEpoch(startEpoch, 'start/start-process');
-
-          // Wait for Gateway to be ready
-          await this.waitForReady();
-          this.assertLifecycleEpoch(startEpoch, 'start/wait-ready');
-
-          // Connect WebSocket
-          await this.connect(this.status.port);
-          this.assertLifecycleEpoch(startEpoch, 'start/connect');
-
-          // Start health monitoring
+        },
+        waitForReady: async (port) => {
+          await waitForGatewayReady({
+            port,
+            getProcessExitCode: () => this.processExitCode,
+          });
+        },
+        onConnectedToManagedGateway: () => {
           this.startHealthCheck();
           logger.debug('Gateway started successfully');
-          return;
-        } catch (error) {
-          if (error instanceof LifecycleSupersededError) {
-            throw error;
-          }
-          if (shouldAttemptConfigAutoRepair(error, this.recentStartupStderrLines, configRepairAttempted)) {
-            configRepairAttempted = true;
-            logger.warn(
-              'Detected invalid OpenClaw config during Gateway startup; running doctor repair before retry'
-            );
-            const repaired = await this.runOpenClawDoctorRepair();
-            if (repaired) {
-              logger.info('OpenClaw doctor repair completed; retrying Gateway startup');
-              this.setStatus({ state: 'starting', error: undefined, reconnectAttempts: 0 });
-              continue;
-            }
-            logger.error('OpenClaw doctor repair failed; not retrying Gateway startup');
-          }
-
-          // Retry on transient connect errors
-          const errMsg = String(error);
-          const isTransientError =
-            errMsg.includes('WebSocket closed before handshake') ||
-            errMsg.includes('ECONNREFUSED') ||
-            errMsg.includes('Gateway process exited before becoming ready') ||
-            errMsg.includes('Timed out waiting for connect.challenge') ||
-            errMsg.includes('Connect handshake timeout');
-
-          if (startAttempts < MAX_START_ATTEMPTS && isTransientError) {
-            logger.warn(`Transient start error: ${errMsg}. Retrying... (${startAttempts}/${MAX_START_ATTEMPTS})`);
-            await new Promise((r) => setTimeout(r, 1000));
-            continue;
-          }
-
-          throw error;
-        }
-      }
-
+        },
+        runDoctorRepair: async () => await runOpenClawDoctorRepair(),
+        onDoctorRepairSuccess: () => {
+          this.setStatus({ state: 'starting', error: undefined, reconnectAttempts: 0 });
+        },
+        delay: async (ms) => {
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        },
+      });
     } catch (error) {
       if (error instanceof LifecycleSupersededError) {
         logger.debug(error.message);
@@ -533,7 +260,19 @@ export class GatewayManager extends EventEmitter {
       throw error;
     } finally {
       this.startLock = false;
-      this.flushDeferredRestart('start:finally');
+      this.restartController.flushDeferredRestart(
+        'start:finally',
+        {
+          state: this.status.state,
+          startLock: this.startLock,
+          shouldReconnect: this.shouldReconnect,
+        },
+        () => {
+          void this.restart().catch((error) => {
+            logger.warn('Deferred Gateway restart failed:', error);
+          });
+        },
+      );
     }
   }
 
@@ -542,7 +281,7 @@ export class GatewayManager extends EventEmitter {
    */
   async stop(): Promise<void> {
     logger.info('Gateway stop requested');
-    this.bumpLifecycleEpoch('stop');
+    this.lifecycleController.bump('stop');
     // Disable auto-reconnect
     this.shouldReconnect = false;
 
@@ -574,34 +313,7 @@ export class GatewayManager extends EventEmitter {
     // Kill process
     if (this.process && this.ownsProcess) {
       const child = this.process;
-      // UtilityProcess doesn't expose exitCode/signalCode — track exit via event.
-      let exited = false;
-
-      await new Promise<void>((resolve) => {
-        child.once('exit', () => {
-          exited = true;
-          resolve();
-        });
-
-        const pid = child.pid;
-        logger.info(`Sending kill to Gateway process (pid=${pid ?? 'unknown'})`);
-        try { child.kill(); } catch { /* ignore if already exited */ }
-
-        // Force kill after timeout via OS-level kill on the PID
-        const timeout = setTimeout(() => {
-          if (!exited) {
-            logger.warn(`Gateway did not exit in time, force-killing (pid=${pid ?? 'unknown'})`);
-            if (pid) {
-              try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ }
-            }
-          }
-          resolve();
-        }, 5000);
-
-        child.once('exit', () => {
-          clearTimeout(timeout);
-        });
-      });
+      await terminateOwnedGatewayProcess(child);
 
       if (this.process === child) {
         this.process = null;
@@ -609,14 +321,9 @@ export class GatewayManager extends EventEmitter {
     }
     this.ownsProcess = false;
 
-    // Reject all pending requests
-    for (const [, request] of this.pendingRequests) {
-      clearTimeout(request.timeout);
-      request.reject(new Error('Gateway stopped'));
-    }
-    this.pendingRequests.clear();
+    clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
 
-    this.deferredRestartPending = false;
+    this.restartController.resetDeferredRestart();
     this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined });
   }
 
@@ -624,8 +331,14 @@ export class GatewayManager extends EventEmitter {
    * Restart Gateway process
    */
   async restart(): Promise<void> {
-    if (this.isRestartDeferred()) {
-      this.markDeferredRestart('restart');
+    if (this.restartController.isRestartDeferred({
+      state: this.status.state,
+      startLock: this.startLock,
+    })) {
+      this.restartController.markDeferredRestart('restart', {
+        state: this.status.state,
+        startLock: this.startLock,
+      });
       return;
     }
 
@@ -645,7 +358,19 @@ export class GatewayManager extends EventEmitter {
       await this.restartInFlight;
     } finally {
       this.restartInFlight = null;
-      this.flushDeferredRestart('restart:finally');
+      this.restartController.flushDeferredRestart(
+        'restart:finally',
+        {
+          state: this.status.state,
+          startLock: this.startLock,
+          shouldReconnect: this.shouldReconnect,
+        },
+        () => {
+          void this.restart().catch((error) => {
+            logger.warn('Deferred Gateway restart failed:', error);
+          });
+        },
+      );
     }
   }
 
@@ -657,16 +382,11 @@ export class GatewayManager extends EventEmitter {
    * of each other during setup.
    */
   debouncedRestart(delayMs = 2000): void {
-    if (this.restartDebounceTimer) {
-      clearTimeout(this.restartDebounceTimer);
-    }
-    logger.debug(`Gateway restart debounced (will fire in ${delayMs}ms)`);
-    this.restartDebounceTimer = setTimeout(() => {
-      this.restartDebounceTimer = null;
+    this.restartController.debouncedRestart(delayMs, () => {
       void this.restart().catch((err) => {
         logger.warn('Debounced Gateway restart failed:', err);
       });
-    }, delayMs);
+    });
   }
 
   /**
@@ -674,8 +394,14 @@ export class GatewayManager extends EventEmitter {
    * Falls back to restart on unsupported platforms or signaling failures.
    */
   async reload(): Promise<void> {
-    if (this.isRestartDeferred()) {
-      this.markDeferredRestart('reload');
+    if (this.restartController.isRestartDeferred({
+      state: this.status.state,
+      startLock: this.startLock,
+    })) {
+      this.restartController.markDeferredRestart('reload', {
+        state: this.status.state,
+        startLock: this.startLock,
+      });
       return;
     }
 
@@ -742,18 +468,8 @@ export class GatewayManager extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-      this.healthCheckInterval = null;
-    }
-    if (this.restartDebounceTimer) {
-      clearTimeout(this.restartDebounceTimer);
-      this.restartDebounceTimer = null;
-    }
+    this.connectionMonitor.clear();
+    this.restartController.clearDebounceTimer();
     if (this.reloadDebounceTimer) {
       clearTimeout(this.reloadDebounceTimer);
       this.reloadDebounceTimer = null;
@@ -775,8 +491,7 @@ export class GatewayManager extends EventEmitter {
 
       // Set timeout for request
       const timeout = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        reject(new Error(`RPC timeout: ${method}`));
+        rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`RPC timeout: ${method}`));
       }, timeoutMs);
 
       // Store pending request
@@ -797,9 +512,7 @@ export class GatewayManager extends EventEmitter {
       try {
         this.ws.send(JSON.stringify(request));
       } catch (error) {
-        this.pendingRequests.delete(id);
-        clearTimeout(timeout);
-        reject(new Error(`Failed to send RPC request: ${error}`));
+        rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`Failed to send RPC request: ${error}`));
       }
     });
   }
@@ -808,25 +521,16 @@ export class GatewayManager extends EventEmitter {
    * Start health check monitoring
    */
   private startHealthCheck(): void {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-    }
-
-    this.healthCheckInterval = setInterval(async () => {
-      if (this.status.state !== 'running') {
-        return;
-      }
-
-      try {
-        const health = await this.checkHealth();
-        if (!health.ok) {
-          logger.warn(`Gateway health check failed: ${health.error ?? 'unknown'}`);
-          this.emit('error', new Error(health.error || 'Health check failed'));
-        }
-      } catch (error) {
-        logger.error('Gateway health check error:', error);
-      }
-    }, 30000); // Check every 30 seconds
+    this.connectionMonitor.startHealthCheck({
+      shouldCheck: () => this.status.state === 'running',
+      checkHealth: () => this.checkHealth(),
+      onUnhealthy: (errorMessage) => {
+        this.emit('error', new Error(errorMessage));
+      },
+      onError: () => {
+        // The monitor already logged the error; nothing else to do here.
+      },
+    });
   }
 
   /**
@@ -848,506 +552,37 @@ export class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Unload the system-managed openclaw gateway launchctl service if it is
-   * loaded.  Without this, killing the process only causes launchctl to
-   * respawn it, leading to an infinite reconnect loop.
-   */
-  private async unloadLaunchctlService(): Promise<void> {
-    if (process.platform !== 'darwin') return;
-
-    try {
-      const uid = process.getuid?.();
-      if (uid === undefined) return;
-
-      const LAUNCHD_LABEL = 'ai.openclaw.gateway';
-      const serviceTarget = `gui/${uid}/${LAUNCHD_LABEL}`;
-
-      const loaded = await new Promise<boolean>((resolve) => {
-        import('child_process').then(cp => {
-          cp.exec(`launchctl print ${serviceTarget}`, { timeout: 5000 }, (err) => {
-            resolve(!err);
-          });
-        }).catch(() => resolve(false));
-      });
-
-      if (!loaded) return;
-
-      logger.info(`Unloading launchctl service ${serviceTarget} to prevent auto-respawn`);
-      await new Promise<void>((resolve) => {
-        import('child_process').then(cp => {
-          cp.exec(`launchctl bootout ${serviceTarget}`, { timeout: 10000 }, (err) => {
-            if (err) {
-              logger.warn(`Failed to bootout launchctl service: ${err.message}`);
-            } else {
-              logger.info('Successfully unloaded launchctl gateway service');
-            }
-            resolve();
-          });
-        }).catch(() => resolve());
-      });
-
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Remove the plist so the service won't reload on next login.
-      try {
-        const { homedir } = await import('os');
-        const plistPath = path.join(homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
-        const { access, unlink } = await import('fs/promises');
-        await access(plistPath);
-        await unlink(plistPath);
-        logger.info(`Removed legacy launchd plist to prevent reload on next login: ${plistPath}`);
-      } catch {
-        // File doesn't exist or can't be removed -- not fatal
-      }
-    } catch (err) {
-      logger.warn('Error while unloading launchctl gateway service:', err);
-    }
-  }
-
-  /**
-   * Find existing Gateway process by attempting a WebSocket connection
-   */
-  private async findExistingGateway(): Promise<{ port: number, externalToken?: string } | null> {
-    try {
-      const port = PORTS.OPENCLAW_GATEWAY;
-
-      try {
-        // Platform-specific command to find processes listening on the gateway port.
-        // We use native commands (netstat on Windows) to avoid triggering AV blocks
-        // that flag "powershell -WindowStyle Hidden" as malware behavior.
-        // windowsHide: true in cp.exec natively prevents the black command window.
-        const cmd = process.platform === 'win32'
-          ? `netstat -ano | findstr :${port}`
-          : `lsof -i :${port} -sTCP:LISTEN -t`;
-
-        const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
-          import('child_process').then(cp => {
-            cp.exec(cmd, { timeout: 5000, windowsHide: true }, (err, stdout) => {
-              if (err) resolve({ stdout: '' });
-              else resolve({ stdout });
-            });
-          }).catch(reject);
-        });
-
-        if (stdout.trim()) {
-          // Parse netstat or lsof output to extract PIDs
-          let pids: string[] = [];
-          if (process.platform === 'win32') {
-            // netstat -ano output format:
-            //   TCP    127.0.0.1:3000     0.0.0.0:0              LISTENING       12345
-            const lines = stdout.trim().split(/\r?\n/);
-            for (const line of lines) {
-              const parts = line.trim().split(/\s+/);
-              if (parts.length >= 5 && parts[3] === 'LISTENING') {
-                pids.push(parts[4]);
-              }
-            }
-          } else {
-            pids = stdout.trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-          }
-          // Remove duplicate PIDs
-          pids = [...new Set(pids)];
-
-          if (pids.length > 0) {
-            if (!this.process || !pids.includes(String(this.process.pid))) {
-              logger.info(`Found orphaned process listening on port ${port} (PIDs: ${pids.join(', ')}), attempting to kill...`);
-
-              // Unload the launchctl service first so macOS doesn't auto-
-              // respawn the process we're about to kill.
-              if (process.platform === 'darwin') {
-                await this.unloadLaunchctlService();
-              }
-
-              // Terminate orphaned processes
-              for (const pid of pids) {
-                try {
-                  if (process.platform === 'win32') {
-                    // Use taskkill with windowsHide: true. This natively hides the console
-                    // flash without needing PowerShell, avoiding AV alerts.
-                    import('child_process').then(cp => {
-                      cp.exec(
-                        `taskkill /F /PID ${pid} /T`,
-                        { timeout: 5000, windowsHide: true },
-                        () => { }
-                      );
-                    }).catch(() => { });
-                  } else {
-                    // SIGTERM first so the gateway can clean up its lock file.
-                    process.kill(parseInt(pid), 'SIGTERM');
-                  }
-                } catch { /* ignore */ }
-              }
-              await new Promise(r => setTimeout(r, process.platform === 'win32' ? 2000 : 3000));
-
-              // SIGKILL any survivors (Unix only — Windows taskkill /F is already forceful)
-              if (process.platform !== 'win32') {
-                for (const pid of pids) {
-                  try { process.kill(parseInt(pid), 0); process.kill(parseInt(pid), 'SIGKILL'); } catch { /* already exited */ }
-                }
-                await new Promise(r => setTimeout(r, 1000));
-              }
-              return null;
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn('Error checking for existing process on port:', err);
-      }
-
-      // Try a quick WebSocket connection to check if gateway is listening
-      return await new Promise<{ port: number, externalToken?: string } | null>((resolve) => {
-        const testWs = new WebSocket(`ws://localhost:${port}/ws`);
-        const timeout = setTimeout(() => {
-          testWs.close();
-          resolve(null);
-        }, 2000);
-
-        testWs.on('open', () => {
-          clearTimeout(timeout);
-          testWs.close();
-          resolve({ port });
-        });
-
-        testWs.on('error', () => {
-          clearTimeout(timeout);
-          resolve(null);
-        });
-      });
-    } catch {
-      // Gateway not running
-    }
-
-    return null;
-  }
-
-  /**
-   * Attempt to repair invalid OpenClaw config using the built-in doctor command.
-   * Returns true when doctor exits successfully.
-   */
-  private async runOpenClawDoctorRepair(): Promise<boolean> {
-    const openclawDir = getOpenClawDir();
-    const entryScript = getOpenClawEntryPath();
-    if (!existsSync(entryScript)) {
-      logger.error(`Cannot run OpenClaw doctor repair: entry script not found at ${entryScript}`);
-      return false;
-    }
-
-    const platform = process.platform;
-    const arch = process.arch;
-    const target = `${platform}-${arch}`;
-    const binPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'bin')
-      : path.join(process.cwd(), 'resources', 'bin', target);
-    const binPathExists = existsSync(binPath);
-    const finalPath = binPathExists
-      ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
-      : process.env.PATH || '';
-
-    const uvEnv = await getUvMirrorEnv();
-    const doctorArgs = ['doctor', '--fix', '--yes', '--non-interactive'];
-    logger.info(
-      `Running OpenClaw doctor repair (entry="${entryScript}", args="${doctorArgs.join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'})`
-    );
-
-    return new Promise<boolean>((resolve) => {
-      const forkEnv: Record<string, string | undefined> = {
-        ...process.env,
-        PATH: finalPath,
-        ...uvEnv,
-        OPENCLAW_NO_RESPAWN: '1',
-      };
-
-      const child = utilityProcess.fork(entryScript, doctorArgs, {
-        cwd: openclawDir,
-        stdio: 'pipe',
-        env: forkEnv as NodeJS.ProcessEnv,
-      });
-
-      let settled = false;
-      const finish = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        resolve(ok);
-      };
-
-      const timeout = setTimeout(() => {
-        logger.error('OpenClaw doctor repair timed out after 120000ms');
-        try {
-          child.kill();
-        } catch {
-          // ignore
-        }
-        finish(false);
-      }, 120000);
-
-      child.on('error', (err) => {
-        clearTimeout(timeout);
-        logger.error('Failed to spawn OpenClaw doctor repair process:', err);
-        finish(false);
-      });
-
-      child.stdout?.on('data', (data) => {
-        const raw = data.toString();
-        for (const line of raw.split(/\r?\n/)) {
-          const normalized = line.trim();
-          if (!normalized) continue;
-          logger.debug(`[Gateway doctor stdout] ${normalized}`);
-        }
-      });
-
-      child.stderr?.on('data', (data) => {
-        const raw = data.toString();
-        for (const line of raw.split(/\r?\n/)) {
-          const normalized = line.trim();
-          if (!normalized) continue;
-          logger.warn(`[Gateway doctor stderr] ${normalized}`);
-        }
-      });
-
-      child.on('exit', (code: number) => {
-        clearTimeout(timeout);
-        if (code === 0) {
-          logger.info('OpenClaw doctor repair completed successfully');
-          finish(true);
-          return;
-        }
-        logger.warn(`OpenClaw doctor repair exited (code=${code})`);
-        finish(false);
-      });
-    });
-  }
-
-  /**
    * Start Gateway process
    * Uses OpenClaw npm package from node_modules (dev) or resources (production)
    */
-  /**
-   * Wait until the gateway port is no longer held by the OS.
-   * On Windows, TCP TIME_WAIT can keep a port occupied for up to 2 minutes
-   * after the owning process exits, causing the new Gateway to hang on bind.
-   */
-  private async waitForPortFree(port: number, timeoutMs = 30000): Promise<void> {
-    const net = await import('net');
-    const start = Date.now();
-    const pollInterval = 500;
-    let logged = false;
-
-    while (Date.now() - start < timeoutMs) {
-      const available = await new Promise<boolean>((resolve) => {
-        const server = net.createServer();
-        server.once('error', () => resolve(false));
-        server.once('listening', () => {
-          server.close(() => resolve(true));
-        });
-        server.listen(port, '127.0.0.1');
-      });
-
-      if (available) {
-        const elapsed = Date.now() - start;
-        if (elapsed > pollInterval) {
-          logger.info(`Port ${port} became available after ${elapsed}ms`);
-        }
-        return;
-      }
-
-      if (!logged) {
-        logger.info(`Waiting for port ${port} to become available (Windows TCP TIME_WAIT)...`);
-        logged = true;
-      }
-      await new Promise(r => setTimeout(r, pollInterval));
-    }
-
-    logger.warn(`Port ${port} still occupied after ${timeoutMs}ms, proceeding anyway`);
-  }
-
   private async startProcess(): Promise<void> {
-    // Ensure no system-managed gateway service will compete with our process.
-    await this.unloadLaunchctlService();
+    const launchContext = await prepareGatewayLaunchContext(this.status.port);
+    await unloadLaunchctlGatewayService();
+    this.processExitCode = null;
 
-    const openclawDir = getOpenClawDir();
-    const entryScript = getOpenClawEntryPath();
-
-    // Verify OpenClaw package exists
-    if (!isOpenClawPresent()) {
-      const errMsg = `OpenClaw package not found at: ${openclawDir}`;
-      logger.error(errMsg);
-      throw new Error(errMsg);
-    }
-
-    // Get or generate gateway token
-    const appSettings = await getAllSettings();
-    const gatewayToken = appSettings.gatewayToken;
-    await syncProxyConfigToOpenClaw(appSettings);
-
-    // Strip stale/invalid keys from openclaw.json that would cause the
-    // Gateway's strict config validation to reject the file on startup
-    // (e.g. `skills.enabled` left by an older version).
-    // This is a fast file-based pre-check; the reactive auto-repair
-    // mechanism (runOpenClawDoctorRepair) handles any remaining issues.
-    try {
-      await sanitizeOpenClawConfig();
-    } catch (err) {
-      logger.warn('Failed to sanitize openclaw.json:', err);
-    }
-
-    // Write our token into openclaw.json before starting the process.
-    // Without --dev the gateway authenticates using the token in
-    // openclaw.json; if that file has a stale token (e.g. left by the
-    // system-managed launchctl service) the WebSocket handshake will fail
-    // with "token mismatch" even though we pass --token on the CLI.
-    try {
-      await syncGatewayTokenToConfig(gatewayToken);
-    } catch (err) {
-      logger.warn('Failed to sync gateway token to openclaw.json:', err);
-    }
-
-    try {
-      await syncBrowserConfigToOpenClaw();
-    } catch (err) {
-      logger.warn('Failed to sync browser config to openclaw.json:', err);
-    }
-
-    // utilityProcess.fork() works for both dev and packaged — no ELECTRON_RUN_AS_NODE needed.
-    if (!existsSync(entryScript)) {
-      const errMsg = `OpenClaw entry script not found at: ${entryScript}`;
-      logger.error(errMsg);
-      throw new Error(errMsg);
-    }
-
-    const gatewayArgs = ['gateway', '--port', String(this.status.port), '--token', gatewayToken, '--allow-unconfigured'];
-    const mode = app.isPackaged ? 'packaged' : 'dev';
-
-    // Resolve bundled bin path for uv
-    const platform = process.platform;
-    const arch = process.arch;
-    const target = `${platform}-${arch}`;
-
-    const binPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'bin')
-      : path.join(process.cwd(), 'resources', 'bin', target);
-
-    const binPathExists = existsSync(binPath);
-    const finalPath = binPathExists
-      ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
-      : process.env.PATH || '';
-
-    // Load provider API keys from storage to pass as environment variables
-    const providerEnv: Record<string, string> = {};
-    const providerTypes = getKeyableProviderTypes();
-    let loadedProviderKeyCount = 0;
-
-    // Prefer the selected default provider key when provider IDs are instance-based.
-    try {
-      const defaultProviderId = await getDefaultProvider();
-      if (defaultProviderId) {
-        const defaultProvider = await getProvider(defaultProviderId);
-        const defaultProviderType = defaultProvider?.type;
-        const defaultProviderKey = await getApiKey(defaultProviderId);
-        if (defaultProviderType && defaultProviderKey) {
-          const envVars = getProviderEnvVars(defaultProviderType);
-          if (envVars.length > 0) {
-            for (const envVar of envVars) {
-              providerEnv[envVar] = defaultProviderKey;
-            }
-            if (defaultProviderType === 'moonshot') {
-              injectMoonshotWebSearchEnv(providerEnv, defaultProviderKey);
-            }
-            loadedProviderKeyCount++;
-          }
+    const { child, lastSpawnSummary } = await launchGatewayProcess({
+      port: this.status.port,
+      launchContext,
+      sanitizeSpawnArgs: (args) => this.sanitizeSpawnArgs(args),
+      getCurrentState: () => this.status.state,
+      getShouldReconnect: () => this.shouldReconnect,
+      onStderrLine: (line) => {
+        recordGatewayStartupStderrLine(this.recentStartupStderrLines, line);
+        const classified = classifyGatewayStderrMessage(line);
+        if (classified.level === 'drop') return;
+        if (classified.level === 'debug') {
+          logger.debug(`[Gateway stderr] ${classified.normalized}`);
+          return;
         }
-      }
-    } catch (err) {
-      logger.warn('Failed to load default provider key for environment injection:', err);
-    }
-
-    for (const providerType of providerTypes) {
-      try {
-        const key = await getApiKey(providerType);
-        if (key) {
-          const envVars = getProviderEnvVars(providerType);
-          if (envVars.length > 0) {
-            for (const envVar of envVars) {
-              providerEnv[envVar] = key;
-            }
-            if (providerType === 'moonshot') {
-              injectMoonshotWebSearchEnv(providerEnv, key);
-            }
-            loadedProviderKeyCount++;
-          }
-        }
-      } catch (err) {
-        logger.warn(`Failed to load API key for ${providerType}:`, err);
-      }
-    }
-
-    const uvEnv = await getUvMirrorEnv();
-    const proxyEnv = buildProxyEnv(appSettings);
-    const resolvedProxy = resolveProxySettings(appSettings);
-    logger.info(
-      `Starting Gateway process (mode=${mode}, port=${this.status.port}, entry="${entryScript}", args="${this.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'}, providerKeys=${loadedProviderKeyCount}, proxy=${appSettings.proxyEnabled ? `http=${resolvedProxy.httpProxy || '-'}, https=${resolvedProxy.httpsProxy || '-'}, all=${resolvedProxy.allProxy || '-'}` : 'disabled'})`
-    );
-    this.lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${this.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
-
-    return new Promise((resolve, reject) => {
-      // Reset exit tracking for this new process instance.
-      this.processExitCode = null;
-      const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
-      const forkEnv: Record<string, string | undefined> = {
-        ...baseEnv,
-        PATH: finalPath,
-        ...providerEnv,
-        ...uvEnv,
-        ...proxyEnv,
-        OPENCLAW_GATEWAY_TOKEN: gatewayToken,
-        OPENCLAW_SKIP_CHANNELS: '',
-        CLAWDBOT_SKIP_CHANNELS: '',
-        // Prevent OpenClaw from respawning itself inside the utility process
-        OPENCLAW_NO_RESPAWN: '1',
-      };
-
-      // Inject fetch preload so OpenRouter requests carry ClawX headers.
-      // The preload patches globalThis.fetch before any module loads.
-      // NODE_OPTIONS --require is blocked by Electron in packaged apps, so skip
-      // this injection when packaged to avoid the "NODE_OPTIONs not supported"
-      // errors being printed to the gateway's stderr on every startup.
-      if (!app.isPackaged) {
-        try {
-          const preloadPath = ensureGatewayFetchPreload();
-          if (existsSync(preloadPath)) {
-            forkEnv['NODE_OPTIONS'] = appendNodeRequireToNodeOptions(
-              forkEnv['NODE_OPTIONS'],
-              preloadPath,
-            );
-          }
-        } catch (err) {
-          logger.warn('Failed to set up OpenRouter headers preload:', err);
-        }
-      }
-
-      // utilityProcess.fork() runs the .mjs entry directly without spawning a
-      // shell or visible console window. Works identically in dev and packaged.
-      this.process = utilityProcess.fork(entryScript, gatewayArgs, {
-        cwd: openclawDir,
-        stdio: 'pipe',
-        env: forkEnv as NodeJS.ProcessEnv,
-        serviceName: 'OpenClaw Gateway',
-      });
-      const child = this.process;
-      this.ownsProcess = true;
-
-      child.on('error', (error) => {
-        this.ownsProcess = false;
-        logger.error('Gateway process spawn error:', error);
-        reject(error);
-      });
-
-      child.on('exit', (code: number) => {
+        logger.warn(`[Gateway stderr] ${classified.normalized}`);
+      },
+      onSpawn: (pid) => {
+        this.setStatus({ pid });
+      },
+      onExit: (exitedChild, code) => {
         this.processExitCode = code;
-        const expectedExit = !this.shouldReconnect || this.status.state === 'stopped';
-        const level = expectedExit ? logger.info : logger.warn;
-        level(`Gateway process exited (code=${code}, expected=${expectedExit ? 'yes' : 'no'})`);
         this.ownsProcess = false;
-        if (this.process === child) {
+        if (this.process === exitedChild) {
           this.process = null;
         }
         this.emit('exit', code);
@@ -1356,307 +591,48 @@ export class GatewayManager extends EventEmitter {
           this.setStatus({ state: 'stopped' });
           this.scheduleReconnect();
         }
-      });
-
-      // UtilityProcess doesn't emit 'close'; stdout/stderr end naturally on exit.
-
-      // Log stderr
-      child.stderr?.on('data', (data) => {
-        const raw = data.toString();
-        for (const line of raw.split(/\r?\n/)) {
-          this.recordStartupStderrLine(line);
-          const classified = this.classifyStderrMessage(line);
-          if (classified.level === 'drop') continue;
-          if (classified.level === 'debug') {
-            logger.debug(`[Gateway stderr] ${classified.normalized}`);
-            continue;
-          }
-          logger.warn(`[Gateway stderr] ${classified.normalized}`);
+      },
+      onError: () => {
+        this.ownsProcess = false;
+        if (this.process === child) {
+          this.process = null;
         }
-      });
-
-      // PID is only available after the child process has fully spawned.
-      // utilityProcess.fork() is asynchronous — child.pid is undefined if read
-      // synchronously right after fork(). Use the 'spawned' event instead.
-      child.on('spawn', () => {
-        logger.info(`Gateway process started (pid=${child.pid})`);
-        this.setStatus({ pid: child.pid });
-      });
-
-      resolve();
+      },
     });
-  }
 
-  /**
-   * Wait for Gateway to be ready by checking if the port is accepting connections
-   */
-  private async waitForReady(retries = 2400, interval = 250): Promise<void> {
-    const child = this.process;
-    for (let i = 0; i < retries; i++) {
-      // Early exit if the gateway process has already exited.
-      // UtilityProcess has no synchronous exitCode/signalCode — use our tracked flag.
-      if (child && this.processExitCode !== null) {
-        const code = this.processExitCode;
-        logger.error(`Gateway process exited before ready (code=${code})`);
-        throw new Error(`Gateway process exited before becoming ready (code=${code})`);
-      }
-
-      try {
-        const ready = await new Promise<boolean>((resolve) => {
-          const testWs = new WebSocket(`ws://localhost:${this.status.port}/ws`);
-          const timeout = setTimeout(() => {
-            testWs.close();
-            resolve(false);
-          }, 2000);
-
-          testWs.on('open', () => {
-            clearTimeout(timeout);
-            testWs.close();
-            resolve(true);
-          });
-
-          testWs.on('error', () => {
-            clearTimeout(timeout);
-            resolve(false);
-          });
-        });
-
-        if (ready) {
-          logger.debug(`Gateway ready after ${i + 1} attempt(s)`);
-          return;
-        }
-      } catch {
-        // Gateway not ready yet
-      }
-
-      if (i > 0 && i % 10 === 0) {
-        logger.debug(`Still waiting for Gateway... (attempt ${i + 1}/${retries})`);
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, interval));
-    }
-
-    logger.error(`Gateway failed to become ready after ${retries} attempts on port ${this.status.port}`);
-    throw new Error(`Gateway failed to start after ${retries} retries (port ${this.status.port})`);
+    this.process = child;
+    this.ownsProcess = true;
+    this.lastSpawnSummary = lastSpawnSummary;
   }
 
   /**
    * Connect WebSocket to Gateway
    */
   private async connect(port: number, _externalToken?: string): Promise<void> {
-    logger.debug(`Connecting Gateway WebSocket (ws://localhost:${port}/ws)`);
-
-    return new Promise((resolve, reject) => {
-      // WebSocket URL (token will be sent in connect handshake, not URL)
-      const wsUrl = `ws://localhost:${port}/ws`;
-
-      this.ws = new WebSocket(wsUrl);
-      let handshakeComplete = false;
-      let connectId: string | null = null;
-      let handshakeTimeout: NodeJS.Timeout | null = null;
-      let settled = false;
-
-      let challengeTimer: NodeJS.Timeout | null = null;
-
-      const cleanupHandshakeRequest = () => {
-        if (challengeTimer) {
-          clearTimeout(challengeTimer);
-          challengeTimer = null;
-        }
-        if (handshakeTimeout) {
-          clearTimeout(handshakeTimeout);
-          handshakeTimeout = null;
-        }
-        if (connectId && this.pendingRequests.has(connectId)) {
-          const request = this.pendingRequests.get(connectId);
-          if (request) {
-            clearTimeout(request.timeout);
-          }
-          this.pendingRequests.delete(connectId);
-        }
-      };
-
-      const resolveOnce = () => {
-        if (settled) return;
-        settled = true;
-        cleanupHandshakeRequest();
-        resolve();
-      };
-
-      const rejectOnce = (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanupHandshakeRequest();
-        const err = error instanceof Error ? error : new Error(String(error));
-        reject(err);
-      };
-
-      // Sends the connect frame using the server-issued challenge nonce.
-      const sendConnectHandshake = async (challengeNonce: string) => {
-        logger.debug('Sending connect handshake with challenge nonce');
-
-        const currentToken = await getSetting('gatewayToken');
-
-        connectId = `connect-${Date.now()}`;
-        const role = 'operator';
-        const scopes = ['operator.admin'];
-        const signedAtMs = Date.now();
-        const clientId = 'gateway-client';
-        const clientMode = 'ui';
-
-        const device = (() => {
-          if (!this.deviceIdentity) return undefined;
-
-          const payload = buildDeviceAuthPayload({
-            deviceId: this.deviceIdentity.deviceId,
-            clientId,
-            clientMode,
-            role,
-            scopes,
-            signedAtMs,
-            token: currentToken ?? null,
-            nonce: challengeNonce,
-          });
-          const signature = signDevicePayload(this.deviceIdentity.privateKeyPem, payload);
-          return {
-            id: this.deviceIdentity.deviceId,
-            publicKey: publicKeyRawBase64UrlFromPem(this.deviceIdentity.publicKeyPem),
-            signature,
-            signedAt: signedAtMs,
-            nonce: challengeNonce,
-          };
-        })();
-
-        const connectFrame = {
-          type: 'req',
-          id: connectId,
-          method: 'connect',
-          params: {
-            minProtocol: 3,
-            maxProtocol: 3,
-            client: {
-              id: clientId,
-              displayName: 'ClawX',
-              version: '0.1.0',
-              platform: process.platform,
-              mode: clientMode,
-            },
-            auth: {
-              token: currentToken,
-            },
-            caps: [],
-            role,
-            scopes,
-            device,
-          },
-        };
-
-        this.ws?.send(JSON.stringify(connectFrame));
-
-        const requestTimeout = setTimeout(() => {
-          if (!handshakeComplete) {
-            logger.error('Gateway connect handshake timed out');
-            this.ws?.close();
-            rejectOnce(new Error('Connect handshake timeout'));
-          }
-        }, 10000);
-        handshakeTimeout = requestTimeout;
-
-        this.pendingRequests.set(connectId, {
-          resolve: (_result) => {
-            handshakeComplete = true;
-            logger.debug('Gateway connect handshake completed');
-            this.setStatus({
-              state: 'running',
-              port,
-              connectedAt: Date.now(),
-            });
-            this.startPing();
-            resolveOnce();
-          },
-          reject: (error) => {
-            logger.error('Gateway connect handshake failed:', error);
-            rejectOnce(error);
-          },
-          timeout: requestTimeout,
+    this.ws = await connectGatewaySocket({
+      port,
+      deviceIdentity: this.deviceIdentity,
+      platform: process.platform,
+      pendingRequests: this.pendingRequests,
+      getToken: async () => await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken')),
+      onHandshakeComplete: (ws) => {
+        this.ws = ws;
+        this.setStatus({
+          state: 'running',
+          port,
+          connectedAt: Date.now(),
         });
-      };
-
-      // Timeout for receiving the initial connect.challenge from the server.
-      // Without this, if the server never sends the challenge (e.g. orphaned
-      // process from a different version), the connect() promise hangs forever.
-      challengeTimer = setTimeout(() => {
-        if (!challengeReceived && !settled) {
-          logger.error('Gateway connect.challenge not received within timeout');
-          this.ws?.close();
-          rejectOnce(new Error('Timed out waiting for connect.challenge from Gateway'));
-        }
-      }, 10000);
-
-      this.ws.on('open', () => {
-        logger.debug('Gateway WebSocket opened, waiting for connect.challenge...');
-      });
-
-      let challengeReceived = false;
-
-      this.ws.on('message', (data) => {
-        try {
-          const message = JSON.parse(data.toString());
-
-          // Intercept the connect.challenge event before the general handler
-          if (
-            !challengeReceived &&
-            typeof message === 'object' && message !== null &&
-            message.type === 'event' && message.event === 'connect.challenge'
-          ) {
-            challengeReceived = true;
-            if (challengeTimer) {
-              clearTimeout(challengeTimer);
-              challengeTimer = null;
-            }
-            const nonce = message.payload?.nonce as string | undefined;
-            if (!nonce) {
-              rejectOnce(new Error('Gateway connect.challenge missing nonce'));
-              return;
-            }
-            logger.debug('Received connect.challenge, sending handshake');
-            sendConnectHandshake(nonce);
-            return;
-          }
-
-          this.handleMessage(message);
-        } catch (error) {
-          logger.debug('Failed to parse Gateway WebSocket message:', error);
-        }
-      });
-
-      this.ws.on('close', (code, reason) => {
-        const reasonStr = reason?.toString() || 'unknown';
-        logger.warn(`Gateway WebSocket closed (code=${code}, reason=${reasonStr}, handshake=${handshakeComplete ? 'ok' : 'pending'})`);
-        if (!handshakeComplete) {
-          // If the socket closes before the handshake completes, it usually means the server is still starting or restarting.
-          // Rejecting this promise will cause the caller (startProcess/reconnect logic) to retry cleanly.
-          rejectOnce(new Error(`WebSocket closed before handshake: ${reasonStr}`));
-          return;
-        }
-        cleanupHandshakeRequest();
+        this.startPing();
+      },
+      onMessage: (message) => {
+        this.handleMessage(message);
+      },
+      onCloseAfterHandshake: () => {
         if (this.status.state === 'running') {
           this.setStatus({ state: 'stopped' });
           this.scheduleReconnect();
         }
-      });
-
-      this.ws.on('error', (error) => {
-        // Suppress noisy ECONNREFUSED/WebSocket handshake errors that happen during expected Gateway restarts.
-        if (error.message?.includes('closed before handshake') || (error as NodeJS.ErrnoException).code === 'ECONNREFUSED') {
-          logger.debug(`Gateway WebSocket connection error (transient): ${error.message}`);
-        } else {
-          logger.error('Gateway WebSocket error:', error);
-        }
-        if (!handshakeComplete) {
-          rejectOnce(error);
-        }
-      });
+      },
     });
   }
 
@@ -1673,48 +649,39 @@ export class GatewayManager extends EventEmitter {
 
     // Handle OpenClaw protocol response format: { type: "res", id: "...", ok: true/false, ... }
     if (msg.type === 'res' && typeof msg.id === 'string') {
-      if (this.pendingRequests.has(msg.id)) {
-        const request = this.pendingRequests.get(msg.id)!;
-        clearTimeout(request.timeout);
-        this.pendingRequests.delete(msg.id);
-
-        if (msg.ok === false || msg.error) {
-          const errorObj = msg.error as { message?: string; code?: number } | undefined;
-          const errorMsg = errorObj?.message || JSON.stringify(msg.error) || 'Unknown error';
-          request.reject(new Error(errorMsg));
-        } else {
-          request.resolve(msg.payload ?? msg);
+      if (msg.ok === false || msg.error) {
+        const errorObj = msg.error as { message?: string; code?: number } | undefined;
+        const errorMsg = errorObj?.message || JSON.stringify(msg.error) || 'Unknown error';
+        if (rejectPendingGatewayRequest(this.pendingRequests, msg.id, new Error(errorMsg))) {
+          return;
         }
+      } else if (resolvePendingGatewayRequest(this.pendingRequests, msg.id, msg.payload ?? msg)) {
         return;
       }
     }
 
     // Handle OpenClaw protocol event format: { type: "event", event: "...", payload: {...} }
     if (msg.type === 'event' && typeof msg.event === 'string') {
-      this.handleProtocolEvent(msg.event, msg.payload);
+      dispatchProtocolEvent(this, msg.event, msg.payload);
       return;
     }
 
     // Fallback: Check if this is a JSON-RPC 2.0 response (legacy support)
     if (isResponse(message) && message.id && this.pendingRequests.has(String(message.id))) {
-      const request = this.pendingRequests.get(String(message.id))!;
-      clearTimeout(request.timeout);
-      this.pendingRequests.delete(String(message.id));
-
       if (message.error) {
         const errorMsg = typeof message.error === 'object'
           ? (message.error as { message?: string }).message || JSON.stringify(message.error)
           : String(message.error);
-        request.reject(new Error(errorMsg));
+        rejectPendingGatewayRequest(this.pendingRequests, String(message.id), new Error(errorMsg));
       } else {
-        request.resolve(message.result);
+        resolvePendingGatewayRequest(this.pendingRequests, String(message.id), message.result);
       }
       return;
     }
 
     // Check if this is a JSON-RPC notification (server-initiated event)
     if (isNotification(message)) {
-      this.handleNotification(message);
+      dispatchJsonRpcNotification(this, message);
       return;
     }
 
@@ -1722,99 +689,40 @@ export class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Handle OpenClaw protocol events
-   */
-  private handleProtocolEvent(event: string, payload: unknown): void {
-    switch (event) {
-      case 'tick':
-        break;
-      case 'chat':
-        this.emit('chat:message', { message: payload });
-        break;
-      case 'agent': {
-        // Agent events may carry chat streaming data inside payload.data,
-        // or be lifecycle events (phase=started/completed) with no message.
-        const p = payload as Record<string, unknown>;
-        const data = (p.data && typeof p.data === 'object') ? p.data as Record<string, unknown> : {};
-        const chatEvent: Record<string, unknown> = {
-          ...data,
-          runId: p.runId ?? data.runId,
-          sessionKey: p.sessionKey ?? data.sessionKey,
-          state: p.state ?? data.state,
-          message: p.message ?? data.message,
-        };
-        if (chatEvent.state || chatEvent.message) {
-          this.emit('chat:message', { message: chatEvent });
-        }
-        this.emit('notification', { method: event, params: payload });
-        break;
-      }
-      case 'channel.status':
-        this.emit('channel:status', payload as { channelId: string; status: string });
-        break;
-      default:
-        this.emit('notification', { method: event, params: payload });
-    }
-  }
-
-  /**
-   * Handle server-initiated notifications
-   */
-  private handleNotification(notification: JsonRpcNotification): void {
-    this.emit('notification', notification);
-
-    // Route specific events
-    switch (notification.method) {
-      case GatewayEventType.CHANNEL_STATUS_CHANGED:
-        this.emit('channel:status', notification.params as { channelId: string; status: string });
-        break;
-
-      case GatewayEventType.MESSAGE_RECEIVED:
-        this.emit('chat:message', notification.params as { message: unknown });
-        break;
-
-      case GatewayEventType.ERROR: {
-        const errorData = notification.params as { message?: string };
-        this.emit('error', new Error(errorData.message || 'Gateway error'));
-        break;
-      }
-
-      default:
-        // Unknown notification type, just log it
-        logger.debug(`Unknown Gateway notification: ${notification.method}`);
-    }
-  }
-
-  /**
    * Start ping interval to keep connection alive
    */
   private startPing(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-    }
-
-    this.pingInterval = setInterval(() => {
+    this.connectionMonitor.startPing(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.ping();
       }
-    }, 30000);
+    });
   }
 
   /**
    * Schedule reconnection attempt with exponential backoff
    */
   private scheduleReconnect(): void {
-    if (!this.shouldReconnect) {
-      logger.debug('Gateway reconnect skipped (auto-reconnect disabled)');
+    const decision = getReconnectScheduleDecision({
+      shouldReconnect: this.shouldReconnect,
+      hasReconnectTimer: this.reconnectTimer !== null,
+      reconnectAttempts: this.reconnectAttempts,
+      maxAttempts: this.reconnectConfig.maxAttempts,
+      baseDelay: this.reconnectConfig.baseDelay,
+      maxDelay: this.reconnectConfig.maxDelay,
+    });
+
+    if (decision.action === 'skip') {
+      logger.debug(`Gateway reconnect skipped (${decision.reason})`);
       return;
     }
 
-    if (this.reconnectTimer) {
+    if (decision.action === 'already-scheduled') {
       return;
     }
 
-    if (this.reconnectAttempts >= this.reconnectConfig.maxAttempts) {
-      logger.error(`Gateway reconnect failed: max attempts reached (${this.reconnectConfig.maxAttempts})`);
+    if (decision.action === 'fail') {
+      logger.error(`Gateway reconnect failed: max attempts reached (${decision.maxAttempts})`);
       this.setStatus({
         state: 'error',
         error: 'Failed to reconnect after maximum attempts',
@@ -1823,26 +731,21 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
-    // Calculate delay with exponential backoff
-    const delay = Math.min(
-      this.reconnectConfig.baseDelay * Math.pow(2, this.reconnectAttempts),
-      this.reconnectConfig.maxDelay
-    );
-
-    this.reconnectAttempts++;
-    logger.warn(`Scheduling Gateway reconnect attempt ${this.reconnectAttempts}/${this.reconnectConfig.maxAttempts} in ${delay}ms`);
+    const { delay, nextAttempt, maxAttempts } = decision;
+    this.reconnectAttempts = nextAttempt;
+    logger.warn(`Scheduling Gateway reconnect attempt ${nextAttempt}/${maxAttempts} in ${delay}ms`);
 
     this.setStatus({
       state: 'reconnecting',
       reconnectAttempts: this.reconnectAttempts
     });
-    const scheduledEpoch = this.lifecycleEpoch;
+    const scheduledEpoch = this.lifecycleController.getCurrentEpoch();
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       const skipReason = getReconnectSkipReason({
         scheduledEpoch,
-        currentEpoch: this.lifecycleEpoch,
+        currentEpoch: this.lifecycleController.getCurrentEpoch(),
         shouldReconnect: this.shouldReconnect,
       });
       if (skipReason) {
@@ -1865,20 +768,6 @@ export class GatewayManager extends EventEmitter {
    * Update status and emit event
    */
   private setStatus(update: Partial<GatewayStatus>): void {
-    const previousState = this.status.state;
-    this.status = { ...this.status, ...update };
-
-    // Calculate uptime if connected
-    if (this.status.state === 'running' && this.status.connectedAt) {
-      this.status.uptime = Date.now() - this.status.connectedAt;
-    }
-
-    this.emit('status', this.status);
-
-    // Log state transitions
-    if (previousState !== this.status.state) {
-      logger.debug(`Gateway state changed: ${previousState} -> ${this.status.state}`);
-      this.flushDeferredRestart(`status:${previousState}->${this.status.state}`);
-    }
+    this.stateController.setStatus(update);
   }
 }

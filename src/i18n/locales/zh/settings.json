@@ -13,6 +13,19 @@
   "aiProviders": {
     "title": "AI 模型提供商",
     "description": "配置 AI 模型提供商和 API 密钥",
+    "overview": {
+      "title": "提供商账户",
+      "description": "这里汇总当前已配置的 provider 账户与模型信息。",
+      "noModelSelected": "未选择模型",
+      "multiAccountReady": "支持多账户",
+      "singletonVendor": "单例提供商"
+    },
+    "authModes": {
+      "apiKey": "API 密钥",
+      "oauthDevice": "OAuth 设备登录",
+      "oauthBrowser": "OAuth 浏览器登录",
+      "local": "本地"
+    },
     "sections": {
       "model": "模型配置",
       "fallback": "回退配置"
@@ -85,6 +98,7 @@
       "cancel": "取消",
       "codeCopied": "代码已复制到剪贴板",
       "authFailed": "认证失败",
+      "browserFlowUnavailable": "该提供商的浏览器 OAuth 登录链路暂未接通。",
       "tryAgain": "重试",
       "approveLogin": "确认登录",
       "step1": "复制下方的授权码。",

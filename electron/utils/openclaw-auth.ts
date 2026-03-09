@@ -26,6 +26,10 @@ import {
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 
+function getOAuthPluginId(provider: string): string {
+  return `${provider}-auth`;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 /** Non-throwing async existence check (replaces existsSync). */
@@ -76,6 +80,8 @@ interface OAuthProfileEntry {
   access: string;
   refresh: string;
   expires: number;
+  email?: string;
+  projectId?: string;
 }
 
 interface AuthProfilesStore {
@@ -155,7 +161,7 @@ async function writeOpenClawJson(config: Record<string, unknown>): Promise<void>
  */
 export async function saveOAuthTokenToOpenClaw(
   provider: string,
-  token: { access: string; refresh: string; expires: number },
+  token: { access: string; refresh: string; expires: number; email?: string; projectId?: string },
   agentId?: string
 ): Promise<void> {
   const agentIds = agentId ? [agentId] : await discoverAgentIds();
@@ -171,6 +177,8 @@ export async function saveOAuthTokenToOpenClaw(
       access: token.access,
       refresh: token.refresh,
       expires: token.expires,
+      email: token.email,
+      projectId: token.projectId,
     };
 
     if (!store.order) store.order = {};
@@ -378,7 +386,10 @@ export async function setOpenClawDefaultModel(
   const config = await readOpenClawJson();
   ensureMoonshotKimiWebSearchCnBaseUrl(config, provider);
 
-  const model = modelOverride || getProviderDefaultModel(provider);
+  const rawModel = modelOverride || getProviderDefaultModel(provider);
+  const model = rawModel
+    ? (rawModel.startsWith(`${provider}/`) ? rawModel : `${provider}/${rawModel}`)
+    : undefined;
   if (!model) {
     console.warn(`No default model mapping for provider "${provider}"`);
     return;
@@ -542,8 +553,14 @@ export async function syncProviderConfigToOpenClaw(
   // Ensure extension is enabled for oauth providers to prevent gateway wiping config
   if (isOpenClawOAuthPluginProviderKey(provider)) {
     const plugins = (config.plugins || {}) as Record<string, unknown>;
+    const allow = Array.isArray(plugins.allow) ? [...plugins.allow as string[]] : [];
     const pEntries = (plugins.entries || {}) as Record<string, unknown>;
-    pEntries[`${provider}-auth`] = { enabled: true };
+    const pluginId = getOAuthPluginId(provider);
+    if (!allow.includes(pluginId)) {
+      allow.push(pluginId);
+    }
+    pEntries[pluginId] = { enabled: true };
+    plugins.allow = allow;
     plugins.entries = pEntries;
     config.plugins = plugins;
   }
@@ -563,7 +580,10 @@ export async function setOpenClawDefaultModelWithOverride(
   const config = await readOpenClawJson();
   ensureMoonshotKimiWebSearchCnBaseUrl(config, provider);
 
-  const model = modelOverride || getProviderDefaultModel(provider);
+  const rawModel = modelOverride || getProviderDefaultModel(provider);
+  const model = rawModel
+    ? (rawModel.startsWith(`${provider}/`) ? rawModel : `${provider}/${rawModel}`)
+    : undefined;
   if (!model) {
     console.warn(`No default model mapping for provider "${provider}"`);
     return;
@@ -622,8 +642,14 @@ export async function setOpenClawDefaultModelWithOverride(
   // Ensure the extension plugin is marked as enabled in openclaw.json
   if (isOpenClawOAuthPluginProviderKey(provider)) {
     const plugins = (config.plugins || {}) as Record<string, unknown>;
+    const allow = Array.isArray(plugins.allow) ? [...plugins.allow as string[]] : [];
     const pEntries = (plugins.entries || {}) as Record<string, unknown>;
-    pEntries[`${provider}-auth`] = { enabled: true };
+    const pluginId = getOAuthPluginId(provider);
+    if (!allow.includes(pluginId)) {
+      allow.push(pluginId);
+    }
+    pEntries[pluginId] = { enabled: true };
+    plugins.allow = allow;
     plugins.entries = pEntries;
     config.plugins = plugins;
   }
@@ -689,6 +715,22 @@ export async function syncGatewayTokenToConfig(token: string): Promise<void> {
   auth.mode = 'token';
   auth.token = token;
   gateway.auth = auth;
+
+  // Packaged ClawX loads the renderer from file://, so the gateway must allow
+  // that origin for the chat WebSocket handshake.
+  const controlUi = (
+    gateway.controlUi && typeof gateway.controlUi === 'object'
+      ? { ...(gateway.controlUi as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const allowedOrigins = Array.isArray(controlUi.allowedOrigins)
+    ? (controlUi.allowedOrigins as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  if (!allowedOrigins.includes('file://')) {
+    controlUi.allowedOrigins = [...allowedOrigins, 'file://'];
+  }
+  gateway.controlUi = controlUi;
+
   if (!gateway.mode) gateway.mode = 'local';
   config.gateway = gateway;
 

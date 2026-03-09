@@ -24,7 +24,7 @@ import { useChatStore } from '@/stores/chat';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 import { useTranslation } from 'react-i18next';
 
 type SessionBucketKey =
@@ -115,11 +115,11 @@ export function Sidebar() {
 
   const openDevConsole = async () => {
     try {
-      const result = await invokeIpc('gateway:getControlUiUrl') as {
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         error?: string;
-      };
+      }>('/api/gateway/control-ui');
       if (result.success && result.url) {
         window.electron.openExternal(result.url);
       } else {

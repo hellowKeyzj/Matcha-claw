@@ -3,23 +3,53 @@
  * Manages AI provider configurations
  */
 import { create } from 'zustand';
-import type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
-import { invokeIpc } from '@/lib/api-client';
+import type {
+  ProviderAccount,
+  ProviderConfig,
+  ProviderVendorInfo,
+  ProviderWithKeyInfo,
+} from '@/lib/providers';
+import { hostApiFetch } from '@/lib/host-api';
+import {
+  fetchProviderSnapshot,
+} from '@/lib/provider-accounts';
 
 // Re-export types for consumers that imported from here
-export type { ProviderConfig, ProviderWithKeyInfo } from '@/lib/providers';
+export type {
+  ProviderAccount,
+  ProviderConfig,
+  ProviderVendorInfo,
+  ProviderWithKeyInfo,
+} from '@/lib/providers';
+export type { ProviderSnapshot } from '@/lib/provider-accounts';
 
 interface ProviderState {
-  providers: ProviderWithKeyInfo[];
-  defaultProviderId: string | null;
+  statuses: ProviderWithKeyInfo[];
+  accounts: ProviderAccount[];
+  vendors: ProviderVendorInfo[];
+  defaultAccountId: string | null;
   loading: boolean;
   error: string | null;
   
   // Actions
+  refreshProviderSnapshot: () => Promise<void>;
+  createAccount: (account: ProviderAccount, apiKey?: string) => Promise<void>;
+  removeAccount: (accountId: string) => Promise<void>;
+  validateAccountApiKey: (
+    accountId: string,
+    apiKey: string,
+    options?: { baseUrl?: string }
+  ) => Promise<{ valid: boolean; error?: string }>;
+  getAccountApiKey: (accountId: string) => Promise<string | null>;
+
+  // Legacy compatibility aliases
   fetchProviders: () => Promise<void>;
   addProvider: (config: Omit<ProviderConfig, 'createdAt' | 'updatedAt'>, apiKey?: string) => Promise<void>;
+  addAccount: (account: ProviderAccount, apiKey?: string) => Promise<void>;
   updateProvider: (providerId: string, updates: Partial<ProviderConfig>, apiKey?: string) => Promise<void>;
+  updateAccount: (accountId: string, updates: Partial<ProviderAccount>, apiKey?: string) => Promise<void>;
   deleteProvider: (providerId: string) => Promise<void>;
+  deleteAccount: (accountId: string) => Promise<void>;
   setApiKey: (providerId: string, apiKey: string) => Promise<void>;
   updateProviderWithKey: (
     providerId: string,
@@ -28,6 +58,7 @@ interface ProviderState {
   ) => Promise<void>;
   deleteApiKey: (providerId: string) => Promise<void>;
   setDefaultProvider: (providerId: string) => Promise<void>;
+  setDefaultAccount: (accountId: string) => Promise<void>;
   validateApiKey: (
     providerId: string,
     apiKey: string,
@@ -37,27 +68,32 @@ interface ProviderState {
 }
 
 export const useProviderStore = create<ProviderState>((set, get) => ({
-  providers: [],
-  defaultProviderId: null,
+  statuses: [],
+  accounts: [],
+  vendors: [],
+  defaultAccountId: null,
   loading: false,
   error: null,
   
-  fetchProviders: async () => {
+  refreshProviderSnapshot: async () => {
     set({ loading: true, error: null });
     
     try {
-      const providers = await invokeIpc<ProviderWithKeyInfo[]>('provider:list');
-      const defaultId = await invokeIpc<string | null>('provider:getDefault');
+      const snapshot = await fetchProviderSnapshot();
       
       set({ 
-        providers, 
-        defaultProviderId: defaultId,
+        statuses: snapshot.statuses,
+        accounts: snapshot.accounts,
+        vendors: snapshot.vendors,
+        defaultAccountId: snapshot.defaultAccountId,
         loading: false 
       });
     } catch (error) {
       set({ error: String(error), loading: false });
     }
   },
+
+  fetchProviders: async () => get().refreshProviderSnapshot(),
   
   addProvider: async (config, apiKey) => {
     try {
@@ -67,23 +103,46 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         updatedAt: new Date().toISOString(),
       };
       
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:save', fullConfig, apiKey);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/providers', {
+        method: 'POST',
+        body: JSON.stringify({ config: fullConfig, apiKey }),
+      });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to save provider');
       }
       
       // Refresh the list
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to add provider:', error);
       throw error;
     }
   },
+
+  createAccount: async (account, apiKey) => {
+    try {
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/provider-accounts', {
+        method: 'POST',
+        body: JSON.stringify({ account, apiKey }),
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to create provider account');
+      }
+
+      await get().refreshProviderSnapshot();
+    } catch (error) {
+      console.error('Failed to add account:', error);
+      throw error;
+    }
+  },
+
+  addAccount: async (account, apiKey) => get().createAccount(account, apiKey),
   
   updateProvider: async (providerId, updates, apiKey) => {
     try {
-      const existing = get().providers.find((p) => p.id === providerId);
+      const existing = get().statuses.find((p) => p.id === providerId);
       if (!existing) {
         throw new Error('Provider not found');
       }
@@ -96,46 +155,91 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         updatedAt: new Date().toISOString(),
       };
       
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:save', updatedConfig, apiKey);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/providers/${encodeURIComponent(providerId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ updates: updatedConfig, apiKey }),
+      });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to update provider');
       }
       
       // Refresh the list
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to update provider:', error);
+      throw error;
+    }
+  },
+
+  updateAccount: async (accountId, updates, apiKey) => {
+    try {
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/provider-accounts/${encodeURIComponent(accountId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ updates, apiKey }),
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update provider account');
+      }
+
+      await get().refreshProviderSnapshot();
+    } catch (error) {
+      console.error('Failed to update account:', error);
       throw error;
     }
   },
   
   deleteProvider: async (providerId) => {
     try {
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:delete', providerId);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/providers/${encodeURIComponent(providerId)}`, {
+        method: 'DELETE',
+      });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to delete provider');
       }
       
       // Refresh the list
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to delete provider:', error);
       throw error;
     }
   },
+
+  removeAccount: async (accountId) => {
+    try {
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/provider-accounts/${encodeURIComponent(accountId)}`, {
+        method: 'DELETE',
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to delete provider account');
+      }
+
+      await get().refreshProviderSnapshot();
+    } catch (error) {
+      console.error('Failed to delete account:', error);
+      throw error;
+    }
+  },
+
+  deleteAccount: async (accountId) => get().removeAccount(accountId),
   
   setApiKey: async (providerId, apiKey) => {
     try {
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:setApiKey', providerId, apiKey);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/providers/${encodeURIComponent(providerId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ updates: {}, apiKey }),
+      });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to set API key');
       }
       
       // Refresh the list
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to set API key:', error);
       throw error;
@@ -144,18 +248,16 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   updateProviderWithKey: async (providerId, updates, apiKey) => {
     try {
-      const result = await invokeIpc<{ success: boolean; error?: string }>(
-        'provider:updateWithKey',
-        providerId,
-        updates,
-        apiKey
-      );
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/providers/${encodeURIComponent(providerId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ updates, apiKey }),
+      });
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to update provider');
       }
 
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to update provider with key:', error);
       throw error;
@@ -164,14 +266,17 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   
   deleteApiKey: async (providerId) => {
     try {
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:deleteApiKey', providerId);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>(
+        `/api/providers/${encodeURIComponent(providerId)}?apiKeyOnly=1`,
+        { method: 'DELETE' },
+      );
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to delete API key');
       }
       
       // Refresh the list
-      await get().fetchProviders();
+      await get().refreshProviderSnapshot();
     } catch (error) {
       console.error('Failed to delete API key:', error);
       throw error;
@@ -180,38 +285,62 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   
   setDefaultProvider: async (providerId) => {
     try {
-      const result = await invokeIpc<{ success: boolean; error?: string }>('provider:setDefault', providerId);
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/providers/default', {
+        method: 'PUT',
+        body: JSON.stringify({ providerId }),
+      });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to set default provider');
       }
       
-      set({ defaultProviderId: providerId });
+      set({ defaultAccountId: providerId });
     } catch (error) {
       console.error('Failed to set default provider:', error);
       throw error;
     }
   },
-  
-  validateApiKey: async (providerId, apiKey, options) => {
+
+  setDefaultAccount: async (accountId) => {
     try {
-      const result = await invokeIpc<{ valid: boolean; error?: string }>(
-        'provider:validateKey',
-        providerId,
-        apiKey,
-        options
-      );
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/provider-accounts/default', {
+        method: 'PUT',
+        body: JSON.stringify({ accountId }),
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to set default provider account');
+      }
+
+      set({ defaultAccountId: accountId });
+    } catch (error) {
+      console.error('Failed to set default account:', error);
+      throw error;
+    }
+  },
+  
+  validateAccountApiKey: async (providerId, apiKey, options) => {
+    try {
+      const result = await hostApiFetch<{ valid: boolean; error?: string }>('/api/providers/validate', {
+        method: 'POST',
+        body: JSON.stringify({ providerId, apiKey, options }),
+      });
       return result;
     } catch (error) {
       return { valid: false, error: String(error) };
     }
   },
+
+  validateApiKey: async (providerId, apiKey, options) => get().validateAccountApiKey(providerId, apiKey, options),
   
-  getApiKey: async (providerId) => {
+  getAccountApiKey: async (providerId) => {
     try {
-      return await invokeIpc<string | null>('provider:getApiKey', providerId);
+      const result = await hostApiFetch<{ apiKey: string | null }>(`/api/providers/${encodeURIComponent(providerId)}/api-key`);
+      return result.apiKey;
     } catch {
       return null;
     }
   },
+
+  getApiKey: async (providerId) => get().getAccountApiKey(providerId),
 }));

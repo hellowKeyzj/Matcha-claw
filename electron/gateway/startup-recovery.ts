@@ -12,6 +12,14 @@ const INVALID_CONFIG_PATTERNS: RegExp[] = [
   /\brun:\s*openclaw doctor --fix\b/i,
 ];
 
+const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
+  /WebSocket closed before handshake/i,
+  /ECONNREFUSED/i,
+  /Gateway process exited before becoming ready/i,
+  /Timed out waiting for connect\.challenge/i,
+  /Connect handshake timeout/i,
+];
+
 function normalizeLogLine(value: string): string {
   return value.trim();
 }
@@ -56,5 +64,36 @@ export function shouldAttemptConfigAutoRepair(
 ): boolean {
   if (alreadyAttempted) return false;
   return hasInvalidConfigFailureSignal(startupError, startupStderrLines);
+}
+
+export function isTransientGatewayStartError(error: unknown): boolean {
+  const errorText = error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error ?? '');
+  return TRANSIENT_START_ERROR_PATTERNS.some((pattern) => pattern.test(errorText));
+}
+
+export type GatewayStartupRecoveryAction = 'repair' | 'retry' | 'fail';
+
+export function getGatewayStartupRecoveryAction(options: {
+  startupError: unknown;
+  startupStderrLines: string[];
+  configRepairAttempted: boolean;
+  attempt: number;
+  maxAttempts: number;
+}): GatewayStartupRecoveryAction {
+  if (shouldAttemptConfigAutoRepair(
+    options.startupError,
+    options.startupStderrLines,
+    options.configRepairAttempted,
+  )) {
+    return 'repair';
+  }
+
+  if (options.attempt < options.maxAttempts && isTransientGatewayStartError(options.startupError)) {
+    return 'retry';
+  }
+
+  return 'fail';
 }
 

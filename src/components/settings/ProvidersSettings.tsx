@@ -2,7 +2,7 @@
  * Providers Settings Component
  * Manage AI provider configurations and API keys
  */
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Plus,
   Trash2,
@@ -24,7 +24,12 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { useProviderStore, type ProviderConfig, type ProviderWithKeyInfo } from '@/stores/providers';
+import {
+  useProviderStore,
+  type ProviderAccount,
+  type ProviderConfig,
+  type ProviderVendorInfo,
+} from '@/stores/providers';
 import {
   PROVIDER_TYPE_INFO,
   type ProviderType,
@@ -34,11 +39,18 @@ import {
   shouldShowProviderModelId,
   shouldInvertInDark,
 } from '@/lib/providers';
+import {
+  buildProviderAccountId,
+  buildProviderListItems,
+  type ProviderListItem,
+} from '@/lib/provider-accounts';
 import { cn } from '@/lib/utils';
-import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
+import { invokeIpc } from '@/lib/api-client';
 import { useSettingsStore } from '@/stores/settings';
+import { hostApiFetch } from '@/lib/host-api';
+import { subscribeHostEvent } from '@/lib/host-events';
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
@@ -60,55 +72,82 @@ function fallbackModelsEqual(a?: string[], b?: string[]): boolean {
   return left.length === right.length && left.every((model, index) => model === right[index]);
 }
 
+function getAuthModeLabel(
+  authMode: ProviderAccount['authMode'],
+  t: (key: string) => string
+): string {
+  switch (authMode) {
+    case 'api_key':
+      return t('aiProviders.authModes.apiKey');
+    case 'oauth_device':
+      return t('aiProviders.authModes.oauthDevice');
+    case 'oauth_browser':
+      return t('aiProviders.authModes.oauthBrowser');
+    case 'local':
+      return t('aiProviders.authModes.local');
+    default:
+      return authMode;
+  }
+}
+
 export function ProvidersSettings() {
   const { t } = useTranslation('settings');
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const {
-    providers,
-    defaultProviderId,
+    statuses,
+    accounts,
+    vendors,
+    defaultAccountId,
     loading,
-    fetchProviders,
-    addProvider,
-    deleteProvider,
-    updateProviderWithKey,
-    setDefaultProvider,
-    validateApiKey,
+    refreshProviderSnapshot,
+    createAccount,
+    removeAccount,
+    updateAccount,
+    setDefaultAccount,
+    validateAccountApiKey,
   } = useProviderStore();
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
+  const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
+  const displayProviders = useMemo(
+    () => buildProviderListItems(accounts, statuses, vendors, defaultAccountId),
+    [accounts, statuses, vendors, defaultAccountId],
+  );
 
   // Fetch providers on mount
   useEffect(() => {
-    fetchProviders();
-  }, [fetchProviders]);
+    refreshProviderSnapshot();
+  }, [refreshProviderSnapshot]);
 
   const handleAddProvider = async (
     type: ProviderType,
     name: string,
     apiKey: string,
-    options?: { baseUrl?: string; model?: string }
+    options?: { baseUrl?: string; model?: string; authMode?: ProviderAccount['authMode'] }
   ) => {
-    // Only custom supports multiple instances.
-    // Built-in providers remain singleton by type.
-    const id = type === 'custom' ? `custom-${crypto.randomUUID()}` : type;
+    const vendor = vendorMap.get(type);
+    const id = buildProviderAccountId(type, null, vendors);
     const effectiveApiKey = resolveProviderApiKeyForSave(type, apiKey);
     try {
-      await addProvider(
-        {
-          id,
-          type,
-          name,
-          baseUrl: options?.baseUrl,
-          model: options?.model,
-          enabled: true,
-        },
-        effectiveApiKey
-      );
+      await createAccount({
+        id,
+        vendorId: type,
+        label: name,
+        authMode: options?.authMode || vendor?.defaultAuthMode || (type === 'ollama' ? 'local' : 'api_key'),
+        baseUrl: options?.baseUrl,
+        apiProtocol: type === 'custom' || type === 'ollama' ? 'openai-completions' : undefined,
+        model: options?.model,
+        enabled: true,
+        isDefault: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }, effectiveApiKey);
 
       // Auto-set as default if no default is currently configured
-      if (!defaultProviderId) {
-        await setDefaultProvider(id);
+      if (!defaultAccountId) {
+        await setDefaultAccount(id);
       }
 
       setShowAddDialog(false);
@@ -120,7 +159,7 @@ export function ProvidersSettings() {
 
   const handleDeleteProvider = async (providerId: string) => {
     try {
-      await deleteProvider(providerId);
+      await removeAccount(providerId);
       toast.success(t('aiProviders.toast.deleted'));
     } catch (error) {
       toast.error(`${t('aiProviders.toast.failedDelete')}: ${error}`);
@@ -129,7 +168,7 @@ export function ProvidersSettings() {
 
   const handleSetDefault = async (providerId: string) => {
     try {
-      await setDefaultProvider(providerId);
+      await setDefaultAccount(providerId);
       toast.success(t('aiProviders.toast.defaultUpdated'));
     } catch (error) {
       toast.error(`${t('aiProviders.toast.failedDefault')}: ${error}`);
@@ -149,7 +188,7 @@ export function ProvidersSettings() {
         <div className="flex items-center justify-center py-8">
           <Loader2 className="h-6 w-6 animate-spin" />
         </div>
-      ) : providers.length === 0 ? (
+      ) : displayProviders.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Key className="h-12 w-12 text-muted-foreground mb-4" />
@@ -165,26 +204,35 @@ export function ProvidersSettings() {
         </Card>
       ) : (
         <div className="space-y-4">
-          {providers.map((provider) => (
+          {displayProviders.map((item) => (
             <ProviderCard
-              key={provider.id}
-              provider={provider}
-              allProviders={providers}
-              isDefault={provider.id === defaultProviderId}
-              isEditing={editingProvider === provider.id}
-              onEdit={() => setEditingProvider(provider.id)}
+              key={item.account.id}
+              item={item}
+              allProviders={displayProviders}
+              isDefault={item.account.id === defaultAccountId}
+              isEditing={editingProvider === item.account.id}
+              onEdit={() => setEditingProvider(item.account.id)}
               onCancelEdit={() => setEditingProvider(null)}
-              onDelete={() => handleDeleteProvider(provider.id)}
-              onSetDefault={() => handleSetDefault(provider.id)}
+              onDelete={() => handleDeleteProvider(item.account.id)}
+              onSetDefault={() => handleSetDefault(item.account.id)}
               onSaveEdits={async (payload) => {
-                await updateProviderWithKey(
-                  provider.id,
-                  payload.updates || {},
+                const updates: Partial<ProviderAccount> = {};
+                if (payload.updates) {
+                  if (payload.updates.baseUrl !== undefined) updates.baseUrl = payload.updates.baseUrl;
+                  if (payload.updates.model !== undefined) updates.model = payload.updates.model;
+                  if (payload.updates.fallbackModels !== undefined) updates.fallbackModels = payload.updates.fallbackModels;
+                  if (payload.updates.fallbackProviderIds !== undefined) {
+                    updates.fallbackAccountIds = payload.updates.fallbackProviderIds;
+                  }
+                }
+                await updateAccount(
+                  item.account.id,
+                  updates,
                   payload.newApiKey
                 );
                 setEditingProvider(null);
               }}
-              onValidateKey={(key, options) => validateApiKey(provider.id, key, options)}
+              onValidateKey={(key, options) => validateAccountApiKey(item.account.id, key, options)}
               devModeUnlocked={devModeUnlocked}
             />
           ))}
@@ -194,10 +242,11 @@ export function ProvidersSettings() {
       {/* Add Provider Dialog */}
       {showAddDialog && (
         <AddProviderDialog
-          existingTypes={new Set(providers.map((p) => p.type))}
+          existingVendorIds={existingVendorIds}
+          vendors={vendors}
           onClose={() => setShowAddDialog(false)}
           onAdd={handleAddProvider}
-          onValidateKey={(type, key, options) => validateApiKey(type, key, options)}
+          onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
           devModeUnlocked={devModeUnlocked}
         />
       )}
@@ -206,8 +255,8 @@ export function ProvidersSettings() {
 }
 
 interface ProviderCardProps {
-  provider: ProviderWithKeyInfo;
-  allProviders: ProviderWithKeyInfo[];
+  item: ProviderListItem;
+  allProviders: ProviderListItem[];
   isDefault: boolean;
   isEditing: boolean;
   onEdit: () => void;
@@ -225,7 +274,7 @@ interface ProviderCardProps {
 
 
 function ProviderCard({
-  provider,
+  item,
   allProviders,
   isDefault,
   isEditing,
@@ -238,20 +287,21 @@ function ProviderCard({
   devModeUnlocked,
 }: ProviderCardProps) {
   const { t } = useTranslation('settings');
+  const { account, vendor, status } = item;
   const [newKey, setNewKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState(provider.baseUrl || '');
-  const [modelId, setModelId] = useState(provider.model || '');
+  const [baseUrl, setBaseUrl] = useState(account.baseUrl || '');
+  const [modelId, setModelId] = useState(account.model || '');
   const [fallbackModelsText, setFallbackModelsText] = useState(
-    normalizeFallbackModels(provider.fallbackModels).join('\n')
+    normalizeFallbackModels(account.fallbackModels).join('\n')
   );
   const [fallbackProviderIds, setFallbackProviderIds] = useState<string[]>(
-    normalizeFallbackProviderIds(provider.fallbackProviderIds)
+    normalizeFallbackProviderIds(account.fallbackAccountIds)
   );
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === provider.type);
+  const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === account.vendorId);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
   const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
 
@@ -259,14 +309,14 @@ function ProviderCard({
     if (isEditing) {
       setNewKey('');
       setShowKey(false);
-      setBaseUrl(provider.baseUrl || '');
-      setModelId(provider.model || '');
-      setFallbackModelsText(normalizeFallbackModels(provider.fallbackModels).join('\n'));
-      setFallbackProviderIds(normalizeFallbackProviderIds(provider.fallbackProviderIds));
+      setBaseUrl(account.baseUrl || '');
+      setModelId(account.model || '');
+      setFallbackModelsText(normalizeFallbackModels(account.fallbackModels).join('\n'));
+      setFallbackProviderIds(normalizeFallbackProviderIds(account.fallbackAccountIds));
     }
-  }, [isEditing, provider.baseUrl, provider.fallbackModels, provider.fallbackProviderIds, provider.model]);
+  }, [isEditing, account.baseUrl, account.fallbackModels, account.fallbackAccountIds, account.model]);
 
-  const fallbackOptions = allProviders.filter((candidate) => candidate.id !== provider.id);
+  const fallbackOptions = allProviders.filter((candidate) => candidate.account.id !== account.id);
 
   const toggleFallbackProvider = (providerId: string) => {
     setFallbackProviderIds((current) => (
@@ -304,16 +354,16 @@ function ProviderCard({
         }
 
         const updates: Partial<ProviderConfig> = {};
-        if (typeInfo?.showBaseUrl && (baseUrl.trim() || undefined) !== (provider.baseUrl || undefined)) {
+        if (typeInfo?.showBaseUrl && (baseUrl.trim() || undefined) !== (account.baseUrl || undefined)) {
           updates.baseUrl = baseUrl.trim() || undefined;
         }
-        if (showModelIdField && (modelId.trim() || undefined) !== (provider.model || undefined)) {
+        if (showModelIdField && (modelId.trim() || undefined) !== (account.model || undefined)) {
           updates.model = modelId.trim() || undefined;
         }
-        if (!fallbackModelsEqual(normalizedFallbackModels, provider.fallbackModels)) {
+        if (!fallbackModelsEqual(normalizedFallbackModels, account.fallbackModels)) {
           updates.fallbackModels = normalizedFallbackModels;
         }
-        if (!fallbackProviderIdsEqual(fallbackProviderIds, provider.fallbackProviderIds)) {
+        if (!fallbackProviderIdsEqual(fallbackProviderIds, account.fallbackAccountIds)) {
           updates.fallbackProviderIds = normalizeFallbackProviderIds(fallbackProviderIds);
         }
         if (Object.keys(updates).length > 0) {
@@ -323,8 +373,8 @@ function ProviderCard({
 
       // Keep Ollama key optional in UI, but persist a placeholder when
       // editing legacy configs that have no stored key.
-      if (provider.type === 'ollama' && !provider.hasKey && !payload.newApiKey) {
-        payload.newApiKey = resolveProviderApiKeyForSave(provider.type, '') as string;
+      if (account.vendorId === 'ollama' && !status?.hasKey && !payload.newApiKey) {
+        payload.newApiKey = resolveProviderApiKeyForSave(account.vendorId, '') as string;
       }
 
       if (!payload.newApiKey && !payload.updates) {
@@ -350,16 +400,23 @@ function ProviderCard({
         {/* Top row: icon + name */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
-            {getProviderIconUrl(provider.type) ? (
-              <img src={getProviderIconUrl(provider.type)} alt={typeInfo?.name || provider.type} className={cn('h-5 w-5', shouldInvertInDark(provider.type) && 'dark:invert')} />
+            {getProviderIconUrl(account.vendorId) ? (
+              <img src={getProviderIconUrl(account.vendorId)} alt={typeInfo?.name || account.vendorId} className={cn('h-5 w-5', shouldInvertInDark(account.vendorId) && 'dark:invert')} />
             ) : (
-              <span className="text-xl">{typeInfo?.icon || '⚙️'}</span>
+              <span className="text-xl">{vendor?.icon || typeInfo?.icon || '⚙️'}</span>
             )}
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-semibold">{provider.name}</span>
+                <span className="font-semibold">{account.label}</span>
+                <Badge variant="secondary">{vendor?.name || account.vendorId}</Badge>
+                <Badge variant="outline">{getAuthModeLabel(account.authMode, t)}</Badge>
               </div>
-              <span className="text-xs text-muted-foreground capitalize">{provider.type}</span>
+              <div className="mt-1 space-y-0.5">
+                <p className="text-xs text-muted-foreground capitalize">{account.vendorId}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {t('aiProviders.dialog.modelId')}: {account.model || t('aiProviders.card.none')}
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -415,14 +472,16 @@ function ProviderCard({
                 ) : (
                   <div className="space-y-2 rounded-md border p-2">
                     {fallbackOptions.map((candidate) => (
-                      <label key={candidate.id} className="flex items-center gap-2 text-sm">
+                      <label key={candidate.account.id} className="flex items-center gap-2 text-sm">
                         <input
                           type="checkbox"
-                          checked={fallbackProviderIds.includes(candidate.id)}
-                          onChange={() => toggleFallbackProvider(candidate.id)}
+                          checked={fallbackProviderIds.includes(candidate.account.id)}
+                          onChange={() => toggleFallbackProvider(candidate.account.id)}
                         />
-                        <span className="font-medium">{candidate.name}</span>
-                        <span className="text-xs text-muted-foreground">{candidate.model || candidate.type}</span>
+                        <span className="font-medium">{candidate.account.label}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {candidate.account.model || candidate.vendor?.name || candidate.account.vendorId}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -434,12 +493,12 @@ function ProviderCard({
                 <div className="space-y-1">
                   <Label className="text-xs">{t('aiProviders.dialog.apiKey')}</Label>
                   <p className="text-xs text-muted-foreground">
-                    {provider.hasKey
+                    {status?.hasKey
                       ? t('aiProviders.dialog.apiKeyConfigured')
                       : t('aiProviders.dialog.apiKeyMissing')}
                   </p>
                 </div>
-                {provider.hasKey ? (
+                {status?.hasKey ? (
                   <Badge variant="secondary">{t('aiProviders.card.configured')}</Badge>
                 ) : null}
               </div>
@@ -484,10 +543,10 @@ function ProviderCard({
                       || saving
                       || (
                         !newKey.trim()
-                        && (baseUrl.trim() || undefined) === (provider.baseUrl || undefined)
-                        && (modelId.trim() || undefined) === (provider.model || undefined)
-                        && fallbackModelsEqual(normalizeFallbackModels(fallbackModelsText.split('\n')), provider.fallbackModels)
-                        && fallbackProviderIdsEqual(fallbackProviderIds, provider.fallbackProviderIds)
+                        && (baseUrl.trim() || undefined) === (account.baseUrl || undefined)
+                        && (modelId.trim() || undefined) === (account.model || undefined)
+                        && fallbackModelsEqual(normalizeFallbackModels(fallbackModelsText.split('\n')), account.fallbackModels)
+                        && fallbackProviderIdsEqual(fallbackProviderIds, account.fallbackAccountIds)
                       )
                       || Boolean(showModelIdField && !modelId.trim())
                     }
@@ -512,7 +571,7 @@ function ProviderCard({
           <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2">
             <div className="min-w-0 space-y-1">
               <div className="flex items-center gap-2 min-w-0">
-                {typeInfo?.isOAuth ? (
+                {account.authMode === 'oauth_device' || account.authMode === 'oauth_browser' ? (
                   <>
                     <Key className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <Badge variant="secondary" className="text-xs shrink-0">{t('aiProviders.card.configured')}</Badge>
@@ -521,13 +580,13 @@ function ProviderCard({
                   <>
                     <Key className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <span className="text-sm font-mono text-muted-foreground truncate">
-                      {provider.hasKey
-                        ? (provider.keyMasked && provider.keyMasked.length > 12
-                          ? `${provider.keyMasked.substring(0, 4)}...${provider.keyMasked.substring(provider.keyMasked.length - 4)}`
-                          : provider.keyMasked)
+                      {status?.hasKey
+                        ? (status.keyMasked && status.keyMasked.length > 12
+                          ? `${status.keyMasked.substring(0, 4)}...${status.keyMasked.substring(status.keyMasked.length - 4)}`
+                          : status.keyMasked)
                         : t('aiProviders.card.noKey')}
                     </span>
-                    {provider.hasKey && (
+                    {status?.hasKey && (
                       <Badge variant="secondary" className="text-xs shrink-0">{t('aiProviders.card.configured')}</Badge>
                     )}
                   </>
@@ -535,11 +594,11 @@ function ProviderCard({
               </div>
               <p className="text-xs text-muted-foreground truncate">
                 {t('aiProviders.card.fallbacks', {
-                  count: (provider.fallbackModels?.length ?? 0) + (provider.fallbackProviderIds?.length ?? 0),
+                  count: (account.fallbackModels?.length ?? 0) + (account.fallbackAccountIds?.length ?? 0),
                   names: [
-                    ...normalizeFallbackModels(provider.fallbackModels),
-                    ...normalizeFallbackProviderIds(provider.fallbackProviderIds)
-                      .map((fallbackId) => allProviders.find((candidate) => candidate.id === fallbackId)?.name)
+                    ...normalizeFallbackModels(account.fallbackModels),
+                    ...normalizeFallbackProviderIds(account.fallbackAccountIds)
+                      .map((fallbackId) => allProviders.find((candidate) => candidate.account.id === fallbackId)?.account.label)
                       .filter(Boolean),
                   ].join(', ') || t('aiProviders.card.none'),
                 })}
@@ -578,13 +637,14 @@ function ProviderCard({
 }
 
 interface AddProviderDialogProps {
-  existingTypes: Set<string>;
+  existingVendorIds: Set<string>;
+  vendors: ProviderVendorInfo[];
   onClose: () => void;
   onAdd: (
     type: ProviderType,
     name: string,
     apiKey: string,
-    options?: { baseUrl?: string; model?: string }
+    options?: { baseUrl?: string; model?: string; authMode?: ProviderAccount['authMode'] }
   ) => Promise<void>;
   onValidateKey: (
     type: string,
@@ -595,7 +655,8 @@ interface AddProviderDialogProps {
 }
 
 function AddProviderDialog({
-  existingTypes,
+  existingVendorIds,
+  vendors,
   onClose,
   onAdd,
   onValidateKey,
@@ -626,11 +687,19 @@ function AddProviderDialog({
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
   const isOAuth = typeInfo?.isOAuth ?? false;
   const supportsApiKey = typeInfo?.supportsApiKey ?? false;
+  const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
+  const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
+  const preferredOAuthMode = selectedVendor?.supportedAuthModes.includes('oauth_browser')
+    ? 'oauth_browser'
+    : (selectedVendor?.supportedAuthModes.includes('oauth_device')
+      ? 'oauth_device'
+      : (selectedType === 'google' ? 'oauth_browser' : null));
   // Effective OAuth mode: pure OAuth providers, or dual-mode with oauth selected
   const useOAuthFlow = isOAuth && (!supportsApiKey || authMode === 'oauth');
 
-  // Keep a ref to the latest values so the effect closure can access them
+  // Keep refs to the latest values so event handlers see the current dialog state.
   const latestRef = React.useRef({ selectedType, typeInfo, onAdd, onClose, t });
+  const pendingOAuthRef = React.useRef<{ accountId: string; label: string } | null>(null);
   useEffect(() => {
     latestRef.current = { selectedType, typeInfo, onAdd, onClose, t };
   });
@@ -642,12 +711,14 @@ function AddProviderDialog({
       setOauthError(null);
     };
 
-    const handleSuccess = async () => {
+    const handleSuccess = async (data: unknown) => {
       setOauthFlowing(false);
       setOauthData(null);
       setValidationError(null);
 
       const { onClose: close, t: translate } = latestRef.current;
+      const payload = (data as { accountId?: string } | undefined) || undefined;
+      const accountId = payload?.accountId || pendingOAuthRef.current?.accountId;
 
       // device-oauth.ts already saved the provider config to the backend,
       // including the dynamically resolved baseUrl for the region (e.g. CN vs Global).
@@ -655,17 +726,17 @@ function AddProviderDialog({
       // So we just fetch the latest list from the backend to update the UI.
       try {
         const store = useProviderStore.getState();
-        await store.fetchProviders();
+        await store.refreshProviderSnapshot();
 
         // Auto-set as default if no default is currently configured
-        if (!store.defaultProviderId && latestRef.current.selectedType) {
-          // Provider type is expected to match provider ID for built-in OAuth providers
-          await store.setDefaultProvider(latestRef.current.selectedType);
+        if (!store.defaultAccountId && accountId) {
+          await store.setDefaultAccount(accountId);
         }
       } catch (err) {
         console.error('Failed to refresh providers after OAuth:', err);
       }
 
+      pendingOAuthRef.current = null;
       close();
       toast.success(translate('aiProviders.toast.added'));
     };
@@ -673,29 +744,28 @@ function AddProviderDialog({
     const handleError = (data: unknown) => {
       setOauthError((data as { message: string }).message);
       setOauthData(null);
+      pendingOAuthRef.current = null;
     };
 
-    window.electron.ipcRenderer.on('oauth:code', handleCode);
-    window.electron.ipcRenderer.on('oauth:success', handleSuccess);
-    window.electron.ipcRenderer.on('oauth:error', handleError);
+    const offCode = subscribeHostEvent('oauth:code', handleCode);
+    const offSuccess = subscribeHostEvent('oauth:success', handleSuccess);
+    const offError = subscribeHostEvent('oauth:error', handleError);
 
     return () => {
-      if (typeof window.electron.ipcRenderer.off === 'function') {
-        window.electron.ipcRenderer.off('oauth:code', handleCode);
-        window.electron.ipcRenderer.off('oauth:success', handleSuccess);
-        window.electron.ipcRenderer.off('oauth:error', handleError);
-      }
+      offCode();
+      offSuccess();
+      offError();
     };
   }, []);
 
   const handleStartOAuth = async () => {
     if (!selectedType) return;
 
-    if (selectedType === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+    if (selectedType === 'minimax-portal' && existingVendorIds.has('minimax-portal-cn')) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
-    if (selectedType === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+    if (selectedType === 'minimax-portal-cn' && existingVendorIds.has('minimax-portal')) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
@@ -705,10 +775,19 @@ function AddProviderDialog({
     setOauthError(null);
 
     try {
-      await invokeIpc('provider:requestOAuth', selectedType);
+      const vendor = vendorMap.get(selectedType);
+      const supportsMultipleAccounts = vendor?.supportsMultipleAccounts ?? selectedType === 'custom';
+      const accountId = supportsMultipleAccounts ? `${selectedType}-${crypto.randomUUID()}` : selectedType;
+      const label = name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType;
+      pendingOAuthRef.current = { accountId, label };
+      await hostApiFetch('/api/providers/oauth/start', {
+        method: 'POST',
+        body: JSON.stringify({ provider: selectedType, accountId, label }),
+      });
     } catch (e) {
       setOauthError(String(e));
       setOauthFlowing(false);
+      pendingOAuthRef.current = null;
     }
   };
 
@@ -716,22 +795,28 @@ function AddProviderDialog({
     setOauthFlowing(false);
     setOauthData(null);
     setOauthError(null);
-    await invokeIpc('provider:cancelOAuth');
+    pendingOAuthRef.current = null;
+    await hostApiFetch('/api/providers/oauth/cancel', {
+      method: 'POST',
+    });
   };
 
-  // Only custom can be added multiple times.
-  const availableTypes = PROVIDER_TYPE_INFO.filter(
-    (t) => t.id === 'custom' || !existingTypes.has(t.id),
-  );
+  const availableTypes = PROVIDER_TYPE_INFO.filter((type) => {
+    const vendor = vendorMap.get(type.id);
+    if (!vendor) {
+      return !existingVendorIds.has(type.id) || type.id === 'custom';
+    }
+    return vendor.supportsMultipleAccounts || !existingVendorIds.has(type.id);
+  });
 
   const handleAdd = async () => {
     if (!selectedType) return;
 
-    if (selectedType === 'minimax-portal' && existingTypes.has('minimax-portal-cn')) {
+    if (selectedType === 'minimax-portal' && existingVendorIds.has('minimax-portal-cn')) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
-    if (selectedType === 'minimax-portal-cn' && existingTypes.has('minimax-portal')) {
+    if (selectedType === 'minimax-portal-cn' && existingVendorIds.has('minimax-portal')) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
@@ -772,6 +857,11 @@ function AddProviderDialog({
         {
           baseUrl: baseUrl.trim() || undefined,
           model: resolveProviderModelForSave(typeInfo, modelId, devModeUnlocked),
+          authMode: useOAuthFlow ? (preferredOAuthMode || 'oauth_device') : selectedType === 'ollama'
+            ? 'local'
+            : (isOAuth && supportsApiKey && authMode === 'apikey')
+              ? 'api_key'
+              : vendorMap.get(selectedType)?.defaultAuthMode || 'api_key',
         }
       );
     } catch {

@@ -1,10 +1,11 @@
 /**
  * Chat State Store
  * Manages chat messages, sessions, streaming, and thinking state.
- * Communicates with OpenClaw Gateway via gateway:rpc IPC.
+ * Communicates with OpenClaw Gateway via renderer WebSocket RPC.
  */
 import { create } from 'zustand';
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
+import { useGatewayStore } from './gateway';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -597,10 +598,13 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   if (needPreview.length === 0) return false;
 
   try {
-    const thumbnails = await invokeIpc(
-      'media:getThumbnails',
-      needPreview,
-    ) as Record<string, { preview: string | null; fileSize: number }>;
+    const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
+      '/api/files/thumbnails',
+      {
+        method: 'POST',
+        body: JSON.stringify({ paths: needPreview }),
+      },
+    );
 
     let updated = false;
     for (const msg of messages) {
@@ -929,14 +933,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadSessions: async () => {
     try {
-      const result = await invokeIpc(
-        'gateway:rpc',
-        'sessions.list',
-        {}
-      ) as { success: boolean; result?: Record<string, unknown>; error?: string };
-
-      if (result.success && result.result) {
-        const data = result.result;
+      const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
+      if (data) {
         const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
         const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => ({
           key: String(s.key || ''),
@@ -1002,13 +1000,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           void Promise.all(
             sessionsToLabel.map(async (session) => {
               try {
-                const r = await invokeIpc(
-                  'gateway:rpc',
+                const r = await useGatewayStore.getState().rpc<Record<string, unknown>>(
                   'chat.history',
                   { sessionKey: session.key, limit: 1000 },
-                ) as { success: boolean; result?: Record<string, unknown> };
-                if (!r.success || !r.result) return;
-                const msgs = Array.isArray(r.result.messages) ? r.result.messages as RawMessage[] : [];
+                );
+                const msgs = Array.isArray(r.messages) ? r.messages as RawMessage[] : [];
                 const firstUser = msgs.find((m) => m.role === 'user');
                 const lastMsg = msgs[msgs.length - 1];
                 set((s) => {
@@ -1078,10 +1074,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
     // sessions.list and token-usage queries both skip it automatically.
     try {
-      const result = await invokeIpc('session:delete', key) as {
+      const result = await hostApiFetch<{
         success: boolean;
         error?: string;
-      };
+      }>('/api/sessions/delete', {
+        method: 'POST',
+        body: JSON.stringify({ sessionKey: key }),
+      });
       if (!result.success) {
         console.warn(`[deleteSession] IPC reported failure for ${key}:`, result.error);
       }
@@ -1186,14 +1185,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!quiet) set({ loading: true, error: null });
 
     try {
-      const result = await invokeIpc(
-        'gateway:rpc',
+      const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
         'chat.history',
-        { sessionKey: currentSessionKey, limit: 200 }
-      ) as { success: boolean; result?: Record<string, unknown>; error?: string };
-
-      if (result.success && result.result) {
-        const data = result.result;
+        { sessionKey: currentSessionKey, limit: 200 },
+      );
+      if (data) {
         const rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
 
         // Before filtering: attach images/files from tool_result messages to the next assistant message
@@ -1426,23 +1422,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const CHAT_SEND_TIMEOUT_MS = 120_000;
 
       if (hasMedia) {
-        result = await invokeIpc(
-          'chat:sendWithMedia',
+        result = await hostApiFetch<{ success: boolean; result?: { runId?: string }; error?: string }>(
+          '/api/chat/send-with-media',
           {
-            sessionKey: currentSessionKey,
-            message: trimmed || 'Process the attached file(s).',
-            deliver: false,
-            idempotencyKey,
-            media: attachments.map((a) => ({
-              filePath: a.stagedPath,
-              mimeType: a.mimeType,
-              fileName: a.fileName,
-            })),
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: currentSessionKey,
+              message: trimmed || 'Process the attached file(s).',
+              deliver: false,
+              idempotencyKey,
+              media: attachments.map((a) => ({
+                filePath: a.stagedPath,
+                mimeType: a.mimeType,
+                fileName: a.fileName,
+              })),
+            }),
           },
-        ) as { success: boolean; result?: { runId?: string }; error?: string };
+        );
       } else {
-        result = await invokeIpc(
-          'gateway:rpc',
+        const rpcResult = await useGatewayStore.getState().rpc<{ runId?: string }>(
           'chat.send',
           {
             sessionKey: currentSessionKey,
@@ -1451,7 +1449,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             idempotencyKey,
           },
           CHAT_SEND_TIMEOUT_MS,
-        ) as { success: boolean; result?: { runId?: string }; error?: string };
+        );
+        result = { success: true, result: rpcResult };
       }
 
       console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
@@ -1478,8 +1477,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ streamingTools: [] });
 
     try {
-      await invokeIpc(
-        'gateway:rpc',
+      await useGatewayStore.getState().rpc(
         'chat.abort',
         { sessionKey: currentSessionKey },
       );

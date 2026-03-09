@@ -34,6 +34,7 @@ import { invokeIpc, toUserMessage } from '@/lib/api-client';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
+import { hostApiFetch } from '@/lib/host-api';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -103,8 +104,8 @@ export function Settings() {
 
   const handleShowLogs = async () => {
     try {
-      const logs = await invokeIpc<string>('log:readFile', 100);
-      setLogContent(logs);
+      const logs = await hostApiFetch<{ content: string }>('/api/logs?tailLines=100');
+      setLogContent(logs.content);
       setShowLogs(true);
     } catch {
       setLogContent('(Failed to load logs)');
@@ -114,7 +115,7 @@ export function Settings() {
 
   const handleOpenLogDir = async () => {
     try {
-      const logDir = await invokeIpc<string>('log:getDir');
+      const { dir: logDir } = await hostApiFetch<{ dir: string | null }>('/api/logs/dir');
       if (logDir) {
         await invokeIpc('shell:showItemInFolder', logDir);
       }
@@ -126,13 +127,13 @@ export function Settings() {
   // Open developer console
   const openDevConsole = async () => {
     try {
-      const result = await invokeIpc<{
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         token?: string;
         port?: number;
         error?: string;
-      }>('gateway:getControlUiUrl');
+      }>('/api/gateway/control-ui');
       if (result.success && result.url && result.token && typeof result.port === 'number') {
         setControlUiInfo({ url: result.url, token: result.token, port: result.port });
         trackUiEvent('settings.open_dev_console');
@@ -147,12 +148,12 @@ export function Settings() {
 
   const refreshControlUiInfo = async () => {
     try {
-      const result = await invokeIpc<{
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         token?: string;
         port?: number;
-      }>('gateway:getControlUiUrl');
+      }>('/api/gateway/control-ui');
       if (result.success && result.url && result.token && typeof result.port === 'number') {
         setControlUiInfo({ url: result.url, token: result.token, port: result.port });
       }

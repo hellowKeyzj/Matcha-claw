@@ -39,6 +39,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 import { trackUiEvent } from '@/lib/telemetry';
 import { toast } from 'sonner';
 import type { Skill, MarketplaceSkill } from '@/types/skill';
@@ -93,7 +94,10 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
   const handleOpenEditor = async () => {
     if (skill.slug) {
       try {
-        const result = await invokeIpc<{ success: boolean; error?: string }>('clawhub:openSkillReadme', skill.slug);
+        const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/open-readme', {
+          method: 'POST',
+          body: JSON.stringify({ slug: skill.slug }),
+        });
         if (result.success) {
           toast.success(t('toast.openedEditor'));
         } else {
