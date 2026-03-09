@@ -19,10 +19,6 @@ import {
   extractChatSendOutput,
   parseDraftPayload,
 } from '@/lib/subagent/prompt';
-import { collectConfiguredModelIdsFromConfig } from '@/lib/openclaw/model-catalog';
-import {
-  readConfigForDisplay,
-} from '@/lib/openclaw/config-repository';
 import {
   mergeRolesFromAgents,
   readRolesMetadata,
@@ -30,7 +26,6 @@ import {
   writeRolesMetadata,
 } from '@/lib/team/roles-metadata';
 import type {
-  AgentConfigEntry,
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
@@ -87,8 +82,25 @@ interface AgentsCreateResult {
   workspace?: unknown;
 }
 
-interface ConfigChangedPayload {
-  revision?: unknown;
+interface ModelsListResult {
+  models?: Array<{
+    id?: unknown;
+    name?: unknown;
+    provider?: unknown;
+    contextWindow?: unknown;
+  }>;
+}
+
+interface ConfigAgentDisplaySnapshot {
+  workspace?: string;
+  model?: string;
+}
+
+interface ConfigDisplaySnapshot {
+  byAgentId: Map<string, ConfigAgentDisplaySnapshot>;
+  defaultWorkspace?: string;
+  defaultModel?: string;
+  configuredModelIds: string[];
 }
 
 interface SubagentsState {
@@ -110,9 +122,8 @@ interface SubagentsState {
   draftError: string | null;
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
-  bindConfigChangedListener: () => void;
   loadAgents: () => Promise<void>;
-  loadAvailableModels: (cfg?: ConfigGetResult) => Promise<void>;
+  loadAvailableModels: () => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
   loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
@@ -165,6 +176,21 @@ function getOptionalString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function getOptionalStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of value) {
+    const normalized = getOptionalString(item);
+    if (!normalized) {
+      continue;
+    }
+    result.push(normalized);
+  }
+  return result;
+}
+
 function equalOptionalTrimmedString(a: unknown, b: unknown): boolean {
   return (getOptionalString(a) ?? '') === (getOptionalString(b) ?? '');
 }
@@ -187,33 +213,230 @@ function parseProviderFromModelId(modelId: string): string | undefined {
   return modelId.slice(0, idx);
 }
 
-function normalizeConfiguredModelsFromConfig(cfg: ConfigGetResult): ModelCatalogEntry[] {
-  const modelIds = collectConfiguredModelIdsFromConfig(cfg);
-  return modelIds.map((modelId) => ({
-    id: modelId,
-    provider: parseProviderFromModelId(modelId),
-  }));
+function normalizeProviderModelId(providerKey: string, rawModelId: unknown): string | undefined {
+  const modelId = getOptionalString(rawModelId);
+  if (!modelId) {
+    return undefined;
+  }
+  if (modelId.includes('/')) {
+    return modelId;
+  }
+  return `${providerKey}/${modelId}`;
 }
 
-function resolveDefaultAgentId(
-  result: AgentsListResult,
-  cfg?: ConfigGetResult,
-): string {
+function collectModelIdsFromAgentModelValue(value: unknown): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate: unknown) => {
+    const normalized = getOptionalString(candidate);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    ids.push(normalized);
+  };
+  if (typeof value === 'string') {
+    push(value);
+    return ids;
+  }
+  if (!value || typeof value !== 'object') {
+    return ids;
+  }
+  const modelObject = value as { primary?: unknown; fallbacks?: unknown };
+  push(modelObject.primary);
+  for (const fallback of getOptionalStringArray(modelObject.fallbacks)) {
+    push(fallback);
+  }
+  return ids;
+}
+
+function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined): ConfigDisplaySnapshot {
+  const byAgentId = new Map<string, ConfigAgentDisplaySnapshot>();
+  const configuredModelIds: string[] = [];
+  const configuredModelSet = new Set<string>();
+  const config = configGetResult?.config;
+  const agents = (config && typeof config === 'object')
+    ? (config as { agents?: unknown }).agents
+    : undefined;
+  const models = (config && typeof config === 'object')
+    ? (config as { models?: unknown }).models
+    : undefined;
+  const defaults = (agents && typeof agents === 'object')
+    ? (agents as { defaults?: unknown }).defaults
+    : undefined;
+  const defaultWorkspace = defaults && typeof defaults === 'object'
+    ? getOptionalString((defaults as { workspace?: unknown }).workspace)
+    : undefined;
+
+  let defaultModel: string | undefined;
+  if (defaults && typeof defaults === 'object') {
+    for (const modelId of collectModelIdsFromAgentModelValue((defaults as { model?: unknown }).model)) {
+      if (!defaultModel) {
+        defaultModel = modelId;
+      }
+      if (!configuredModelSet.has(modelId)) {
+        configuredModelSet.add(modelId);
+        configuredModelIds.push(modelId);
+      }
+    }
+  }
+
+  const agentsList = (agents && typeof agents === 'object')
+    ? (agents as { list?: unknown }).list
+    : undefined;
+  if (Array.isArray(agentsList)) {
+    for (const item of agentsList) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const id = getOptionalString((item as { id?: unknown }).id);
+      if (!id) {
+        continue;
+      }
+      const normalizedAgentId = normalizeAgentIdForComparison(id);
+      if (!normalizedAgentId) {
+        continue;
+      }
+      const workspace = getOptionalString((item as { workspace?: unknown }).workspace);
+      let model: string | undefined;
+      for (const modelId of collectModelIdsFromAgentModelValue((item as { model?: unknown }).model)) {
+        if (!model) {
+          model = modelId;
+        }
+        if (!configuredModelSet.has(modelId)) {
+          configuredModelSet.add(modelId);
+          configuredModelIds.push(modelId);
+        }
+      }
+      byAgentId.set(normalizedAgentId, {
+        workspace,
+        model,
+      });
+    }
+  }
+
+  const providers = (models && typeof models === 'object')
+    ? (models as { providers?: unknown }).providers
+    : undefined;
+  if (providers && typeof providers === 'object') {
+    for (const [providerKey, providerValue] of Object.entries(providers as Record<string, unknown>)) {
+      if (!providerValue || typeof providerValue !== 'object') {
+        continue;
+      }
+      const providerModels = (providerValue as { models?: unknown }).models;
+      if (!Array.isArray(providerModels)) {
+        continue;
+      }
+      for (const providerModel of providerModels) {
+        const modelId = typeof providerModel === 'string'
+          ? normalizeProviderModelId(providerKey, providerModel)
+          : normalizeProviderModelId(providerKey, (providerModel as { id?: unknown }).id);
+        if (!modelId || configuredModelSet.has(modelId)) {
+          continue;
+        }
+        configuredModelSet.add(modelId);
+        configuredModelIds.push(modelId);
+      }
+    }
+  }
+
+  return {
+    byAgentId,
+    defaultWorkspace,
+    defaultModel,
+    configuredModelIds,
+  };
+}
+
+async function readConfigForDisplay(): Promise<ConfigDisplaySnapshot> {
+  try {
+    const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+    return buildConfigDisplaySnapshot(configGetResult);
+  } catch {
+    return {
+      byAgentId: new Map(),
+      configuredModelIds: [],
+    };
+  }
+}
+
+function normalizeModelsListResult(result: ModelsListResult): ModelCatalogEntry[] {
+  const normalizedModels: ModelCatalogEntry[] = [];
+  const seenModelIds = new Set<string>();
+  const list = Array.isArray(result.models) ? result.models : [];
+  for (const item of list) {
+    const id = getOptionalString(item?.id);
+    if (!id || seenModelIds.has(id)) {
+      continue;
+    }
+    seenModelIds.add(id);
+    const name = getOptionalString(item?.name);
+    const provider = getOptionalString(item?.provider) ?? parseProviderFromModelId(id);
+    const contextWindow = typeof item?.contextWindow === 'number' && Number.isFinite(item.contextWindow)
+      ? item.contextWindow
+      : undefined;
+    normalizedModels.push({
+      id,
+      name,
+      provider,
+      contextWindow,
+    });
+  }
+  return normalizedModels;
+}
+
+function buildVisibleModels(params: {
+  models: ModelCatalogEntry[];
+  configuredModelIds: string[];
+  currentAgents: SubagentSummary[];
+}): ModelCatalogEntry[] {
+  const preferredOrder: string[] = [];
+  const preferredSet = new Set<string>();
+
+  const pushPreferred = (modelId: string | undefined) => {
+    const normalized = getOptionalString(modelId);
+    if (!normalized || preferredSet.has(normalized)) {
+      return;
+    }
+    preferredSet.add(normalized);
+    preferredOrder.push(normalized);
+  };
+
+  for (const configuredModelId of params.configuredModelIds) {
+    pushPreferred(configuredModelId);
+  }
+  for (const agent of params.currentAgents) {
+    pushPreferred(agent.model);
+  }
+
+  const visible: ModelCatalogEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const model of params.models) {
+    if (!preferredSet.has(model.id)) {
+      continue;
+    }
+    visible.push(model);
+    seen.add(model.id);
+  }
+
+  for (const modelId of preferredOrder) {
+    if (seen.has(modelId)) {
+      continue;
+    }
+    visible.push({
+      id: modelId,
+      provider: parseProviderFromModelId(modelId),
+    });
+  }
+
+  return visible;
+}
+
+function resolveDefaultAgentId(result: AgentsListResult): string {
   const fromResult = getOptionalString(result.defaultId);
   if (fromResult) {
     return fromResult;
-  }
-
-  const configList = cfg?.config?.agents?.list ?? [];
-  const explicitDefault = configList.find((agent) => agent?.default === true);
-  const explicitDefaultId = getOptionalString(explicitDefault?.id);
-  if (explicitDefaultId) {
-    return explicitDefaultId;
-  }
-
-  const firstConfigId = getOptionalString(configList[0]?.id);
-  if (firstConfigId) {
-    return firstConfigId;
   }
 
   for (const agent of result.agents) {
@@ -228,64 +451,40 @@ function resolveDefaultAgentId(
 
 function normalizeAgents(
   result: AgentsListResult,
-  cfg?: ConfigGetResult,
+  configSnapshot?: ConfigDisplaySnapshot,
 ): SubagentSummary[] {
-  const defaultId = resolveDefaultAgentId(result, cfg);
-  const configList = cfg?.config?.agents?.list ?? [];
-  const configById = new Map<string, AgentConfigEntry>();
-  for (const entry of configList) {
-    const id = getOptionalString(entry?.id);
-    if (!id) {
-      continue;
-    }
-    configById.set(id, entry);
-  }
+  const defaultId = resolveDefaultAgentId(result);
   const runtimeById = new Map<string, SubagentSummary>();
-  const runtimeOrderedIds: string[] = [];
-  for (const agent of result.agents) {
-    const id = getOptionalString(agent?.id);
-    if (!id) {
-      continue;
-    }
-    runtimeById.set(id, agent);
-    runtimeOrderedIds.push(id);
-  }
   const displayIds: string[] = [];
   const seen = new Set<string>();
-  const push = (id: string | undefined) => {
-    const normalizedId = getOptionalString(id);
-    if (!normalizedId || seen.has(normalizedId)) {
-      return;
+  for (const agent of result.agents) {
+    const id = getOptionalString(agent?.id);
+    if (!id || seen.has(id)) {
+      continue;
     }
-    seen.add(normalizedId);
-    displayIds.push(normalizedId);
-  };
-  for (const runtimeId of runtimeOrderedIds) {
-    push(runtimeId);
+    seen.add(id);
+    runtimeById.set(id, agent);
+    displayIds.push(id);
   }
-  push(defaultId);
-  const defaultsWorkspace = getOptionalString(cfg?.config?.agents?.defaults?.workspace);
-  const defaultsModel = extractModelId(cfg?.config?.agents?.defaults?.model);
 
   return displayIds.map((agentId) => {
     const runtimeAgent = runtimeById.get(agentId);
-    const configEntry = configById.get(agentId);
-    const workspace = getOptionalString(runtimeAgent?.workspace)
-      ?? getOptionalString(configEntry?.workspace)
-      ?? (agentId === defaultId ? defaultsWorkspace : undefined);
-    const model = getOptionalString(runtimeAgent?.model)
-      ?? extractModelId(configEntry?.model)
-      ?? (agentId === defaultId ? defaultsModel : undefined);
     const runtimeName = getOptionalString(runtimeAgent?.name);
-    const configName = getOptionalString(configEntry?.name);
     const fallbackName = agentId;
+    const configAgent = configSnapshot?.byAgentId.get(normalizeAgentIdForComparison(agentId));
+    const workspace = configAgent?.workspace
+      ?? getOptionalString(runtimeAgent?.workspace)
+      ?? (agentId === defaultId ? configSnapshot?.defaultWorkspace : undefined);
+    const model = configAgent?.model
+      ?? extractModelId(runtimeAgent?.model)
+      ?? configSnapshot?.defaultModel;
     return {
       ...(runtimeAgent ?? { id: agentId }),
       id: agentId,
-      name: runtimeName ?? configName ?? fallbackName,
+      name: runtimeName ?? fallbackName,
       workspace,
       model,
-      isDefault: runtimeAgent?.isDefault ?? (agentId === defaultId),
+      isDefault: agentId === defaultId,
     };
   });
 }
@@ -630,11 +829,6 @@ const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentT
 let latestLoadAgentsRequestId = 0;
 let agentsStateMutationVersion = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
-const CONFIG_CHANGED_REFRESH_DEBOUNCE_MS = 180;
-let subagentsConfigChangedListenerBound = false;
-let subagentsConfigChangedRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let subagentsConfigChangedRefreshTask: Promise<void> | null = null;
-let latestHandledConfigRevision = 0;
 const pendingDeletedAgentIds = new Set<string>();
 
 function bumpAgentsStateMutationVersion(): number {
@@ -684,17 +878,6 @@ function runSerializedAgentMutation<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
-function parseConfigChangedRevision(payload: unknown): number | null {
-  if (!payload || typeof payload !== 'object') {
-    return null;
-  }
-  const revision = (payload as ConfigChangedPayload).revision;
-  if (typeof revision !== 'number' || !Number.isFinite(revision) || revision <= 0) {
-    return null;
-  }
-  return revision;
-}
-
 async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
   const activeTask = persistedFilesLoadTasks.get(agentId);
   if (activeTask) {
@@ -706,45 +889,6 @@ async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<R
     });
   persistedFilesLoadTasks.set(agentId, task);
   return task;
-}
-
-function scheduleConfigChangedDrivenRefresh(getState: () => SubagentsState): void {
-  if (subagentsConfigChangedRefreshTimer) {
-    clearTimeout(subagentsConfigChangedRefreshTimer);
-  }
-  subagentsConfigChangedRefreshTimer = setTimeout(() => {
-    subagentsConfigChangedRefreshTimer = null;
-    if (subagentsConfigChangedRefreshTask) {
-      return;
-    }
-    subagentsConfigChangedRefreshTask = (async () => {
-      const state = getState();
-      await state.loadAgents();
-      await getState().loadAvailableModels();
-    })().finally(() => {
-      subagentsConfigChangedRefreshTask = null;
-    });
-  }, CONFIG_CHANGED_REFRESH_DEBOUNCE_MS);
-}
-
-function bindSubagentsConfigChangedListener(getState: () => SubagentsState): void {
-  if (subagentsConfigChangedListenerBound) {
-    return;
-  }
-  if (typeof window === 'undefined' || !window.electron?.ipcRenderer?.on) {
-    return;
-  }
-  window.electron.ipcRenderer.on('config:changed', (payload: unknown) => {
-    const revision = parseConfigChangedRevision(payload);
-    if (revision != null) {
-      if (revision <= latestHandledConfigRevision) {
-        return;
-      }
-      latestHandledConfigRevision = revision;
-    }
-    scheduleConfigChangedDrivenRefresh(getState);
-  });
-  subagentsConfigChangedListenerBound = true;
 }
 
 export const useSubagentsStore = create<SubagentsState>((set, get) => ({
@@ -767,24 +911,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   previewDiffByFile: {},
   selectedAgentId: null,
 
-  bindConfigChangedListener: () => {
-    bindSubagentsConfigChangedListener(get);
-  },
-
   loadAgents: async () => {
-    bindSubagentsConfigChangedListener(get);
     const requestId = ++latestLoadAgentsRequestId;
     set({ loading: true, error: null });
     try {
-      const result = await rpc<AgentsListResult>('agents.list', {});
+      const [result, configSnapshot] = await Promise.all([
+        rpc<AgentsListResult>('agents.list', {}),
+        readConfigForDisplay(),
+      ]);
       settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
-      let cfg: ConfigGetResult | undefined;
-      try {
-        cfg = await readConfigForDisplay();
-      } catch {
-        cfg = undefined;
-      }
-      const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, cfg));
+      const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, configSnapshot));
       if (requestId !== latestLoadAgentsRequestId) {
         return;
       }
@@ -857,15 +993,21 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  loadAvailableModels: async (cfg) => {
+  loadAvailableModels: async () => {
     set({ modelsLoading: true });
     try {
-      const result = cfg ?? await readConfigForDisplay();
-      if (!result) {
-        throw new Error('Failed to load config snapshot');
-      }
+      const [modelsResult, configSnapshot] = await Promise.all([
+        rpc<ModelsListResult>('models.list', {}),
+        readConfigForDisplay(),
+      ]);
+      const normalizedModels = normalizeModelsListResult(modelsResult);
+      const visibleModels = buildVisibleModels({
+        models: normalizedModels,
+        configuredModelIds: configSnapshot.configuredModelIds,
+        currentAgents: get().agents,
+      });
       set({
-        availableModels: normalizeConfiguredModelsFromConfig(result),
+        availableModels: visibleModels,
         modelsLoading: false,
         error: null,
       });
