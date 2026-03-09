@@ -3,7 +3,6 @@
  * Navigation sidebar with menu items.
  * No longer fixed - sits inside the flex layout below the title bar.
  */
-import { useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Home,
@@ -16,7 +15,6 @@ import {
   ChevronRight,
   Terminal,
   ExternalLink,
-  Trash2,
   Bot,
   Users,
   ListTodo,
@@ -27,7 +25,7 @@ import { useChatStore } from '@/stores/chat';
 import { useTeamsStore } from '@/stores/teams';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { useTranslation } from 'react-i18next';
 
 interface NavItemProps {
@@ -70,7 +68,12 @@ function NavItem({ to, icon, label, badge, collapsed, onClick }: NavItemProps) {
   );
 }
 
-export function Sidebar() {
+interface SidebarProps {
+  expandedWidth?: number;
+  collapsedWidth?: number;
+}
+
+export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarProps) {
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
@@ -80,22 +83,10 @@ export function Sidebar() {
     ? `/teams/${activeTeamId}`
     : '/teams';
 
-  const sessions = useChatStore((s) => s.sessions);
-  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
-  const sessionLabels = useChatStore((s) => s.sessionLabels);
-  const sessionLastActivity = useChatStore((s) => s.sessionLastActivity);
-  const switchSession = useChatStore((s) => s.switchSession);
   const newSession = useChatStore((s) => s.newSession);
-  const deleteSession = useChatStore((s) => s.deleteSession);
 
   const navigate = useNavigate();
-  const isOnChat = useLocation().pathname === '/';
-
-  const mainSessions = sessions.filter((s) => s.key.endsWith(':main'));
-  const otherSessions = sessions.filter((s) => !s.key.endsWith(':main'));
-
-  const getSessionLabel = (key: string, displayName?: string, label?: string) =>
-    sessionLabels[key] ?? label ?? displayName ?? key;
+  const location = useLocation();
 
   const openDevConsole = async () => {
     try {
@@ -115,7 +106,6 @@ export function Sidebar() {
   };
 
   const { t } = useTranslation();
-  const [sessionToDelete, setSessionToDelete] = useState<{ key: string; label: string } | null>(null);
 
   const navItems = [
     { to: '/cron', icon: <Clock className="h-5 w-5" />, label: t('sidebar.cronTasks') },
@@ -131,17 +121,19 @@ export function Sidebar() {
   return (
     <aside
       className={cn(
-        'flex shrink-0 flex-col border-r bg-background transition-all duration-300',
-        sidebarCollapsed ? 'w-16' : 'w-64'
+        'relative flex shrink-0 flex-col border-r bg-background transition-all duration-300'
       )}
+      style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
     >
       {/* Navigation */}
       <nav className="flex-1 overflow-hidden flex flex-col p-2 gap-1">
-        {/* Chat nav item: acts as "New Chat" button, never highlighted as active */}
+        {/* Chat nav item: from non-chat routes it only navigates to chat;
+            on chat route it acts as "New Chat". */}
         <button
           onClick={() => {
             const { messages } = useChatStore.getState();
-            if (messages.length > 0) newSession();
+            const isChatRoute = location.pathname === '/';
+            if (isChatRoute && messages.length > 0) newSession();
             navigate('/');
           }}
           className={cn(
@@ -162,49 +154,6 @@ export function Sidebar() {
           />
         ))}
 
-        {/* Session list — below Settings, only when expanded */}
-        {!sidebarCollapsed && sessions.length > 0 && (
-          <div className="mt-1 overflow-y-auto max-h-72 space-y-0.5">
-            {[...mainSessions, ...[...otherSessions].sort((a, b) =>
-              (sessionLastActivity[b.key] ?? 0) - (sessionLastActivity[a.key] ?? 0)
-            )].map((s) => (
-              <div key={s.key} className="group relative flex items-center">
-                <button
-                  onClick={() => { switchSession(s.key); navigate('/'); }}
-                  className={cn(
-                    'w-full text-left rounded-md px-3 py-1.5 text-sm truncate transition-colors',
-                    !s.key.endsWith(':main') && 'pr-7',
-                    'hover:bg-accent hover:text-accent-foreground',
-                    isOnChat && currentSessionKey === s.key
-                      ? 'bg-accent/60 text-accent-foreground font-medium'
-                      : 'text-muted-foreground',
-                  )}
-                >
-                  {getSessionLabel(s.key, s.displayName, s.label)}
-                </button>
-                {!s.key.endsWith(':main') && (
-                  <button
-                    aria-label="Delete session"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSessionToDelete({
-                        key: s.key,
-                        label: getSessionLabel(s.key, s.displayName, s.label),
-                      });
-                    }}
-                    className={cn(
-                      'absolute right-1 flex items-center justify-center rounded p-0.5 transition-opacity',
-                      'opacity-0 group-hover:opacity-100',
-                      'text-muted-foreground hover:text-destructive hover:bg-destructive/10',
-                    )}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
       </nav>
 
       {/* Footer */}
@@ -221,35 +170,18 @@ export function Sidebar() {
             <ExternalLink className="h-3 w-3 ml-auto" />
           </Button>
         )}
-
-        <Button
-          variant="ghost"
-          size="icon"
-          className="w-full"
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-        >
-          {sidebarCollapsed ? (
-            <ChevronRight className="h-4 w-4" />
-          ) : (
-            <ChevronLeft className="h-4 w-4" />
-          )}
-        </Button>
       </div>
 
-      <ConfirmDialog
-        open={!!sessionToDelete}
-        title={t('common.confirm', 'Confirm')}
-        message={sessionToDelete ? t('sidebar.deleteSessionConfirm', `Delete "${sessionToDelete.label}"?`) : ''}
-        confirmLabel={t('common.delete', 'Delete')}
-        cancelLabel={t('common.cancel', 'Cancel')}
-        variant="destructive"
-        onConfirm={async () => {
-          if (!sessionToDelete) return;
-          await deleteSession(sessionToDelete.key);
-          if (currentSessionKey === sessionToDelete.key) navigate('/');
-          setSessionToDelete(null);
-        }}
-        onCancel={() => setSessionToDelete(null)}
+      <PaneEdgeToggle
+        side="right"
+        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+        ariaLabel={sidebarCollapsed
+          ? t('sidebar.expandMenu', { defaultValue: '展开菜单栏' })
+          : t('sidebar.collapseMenu', { defaultValue: '收起菜单栏' })}
+        title={sidebarCollapsed
+          ? t('sidebar.expandMenu', { defaultValue: '展开菜单栏' })
+          : t('sidebar.collapseMenu', { defaultValue: '收起菜单栏' })}
+        icon={sidebarCollapsed ? <ChevronRight className="h-2.5 w-2.5" /> : <ChevronLeft className="h-2.5 w-2.5" />}
       />
     </aside>
   );
