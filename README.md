@@ -187,7 +187,7 @@ Notes:
 
 ## Architecture
 
-ClawX employs a **dual-process architecture** that separates UI concerns from AI runtime operations:
+ClawX employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -201,18 +201,29 @@ ClawX employs a **dual-process architecture** that separates UI concerns from AI
 │  │  • Auto-update orchestration                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                    │
-│                              │ IPC                                │
+│                              │ IPC (authoritative control plane)  │
 │                              ▼                                    │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │              React Renderer Process                         │  │
 │  │  • Modern component-based UI (React 19)                     │  │
 │  │  • State management with Zustand                            │  │
-│  │  • Real-time WebSocket communication                        │  │
+│  │  • Unified host-api/api-client calls                        │  │
 │  │  • Rich Markdown rendering                                  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                               │ WebSocket (JSON-RPC)
+                               │ Main-owned transport strategy
+                               │ (WS first, HTTP then IPC fallback)
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                Host API & Main Process Proxies                  │
+│                                                                  │
+│  • hostapi:fetch (Main proxy, avoids CORS in dev/prod)          │
+│  • gateway:httpProxy (Renderer never calls Gateway HTTP direct)  │
+│  • Unified error mapping & retry/backoff                         │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               │ WS / HTTP / IPC fallback
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     OpenClaw Gateway                             │
@@ -227,9 +238,11 @@ ClawX employs a **dual-process architecture** that separates UI concerns from AI
 ### Design Principles
 
 - **Process Isolation**: The AI runtime operates in a separate process, ensuring UI responsiveness even during heavy computation
-- **Graceful Recovery**: Built-in reconnection logic with exponential backoff handles transient failures automatically
+- **Single Entry for Frontend Calls**: Renderer requests go through host-api/api-client; protocol details are hidden behind a stable interface
+- **Main-Process Transport Ownership**: Electron Main controls WS/HTTP usage and fallback to IPC for reliability
+- **Graceful Recovery**: Built-in reconnect, timeout, and backoff logic handles transient failures automatically
 - **Secure Storage**: API keys and sensitive data leverage the operating system's native secure storage mechanisms
-- **Hot Reload**: Development mode supports instant UI updates without restarting the gateway
+- **CORS-Safe by Design**: Local HTTP access is proxied by Main, preventing renderer-side CORS issues
 
 ---
 

@@ -1,3 +1,5 @@
+import { trackUiEvent } from './telemetry';
+
 export type AppErrorCode =
   | 'TIMEOUT'
   | 'RATE_LIMIT'
@@ -8,12 +10,7 @@ export type AppErrorCode =
   | 'UNKNOWN';
 
 export type TransportKind = 'ipc' | 'ws' | 'http';
-export type GatewayTransportPreference =
-  | 'ws-first'
-  | 'http-first'
-  | 'ws-only'
-  | 'http-only'
-  | 'ipc-only';
+export type GatewayTransportPreference = 'ws-first';
 type TransportInvoker = <T>(channel: string, args: unknown[]) => Promise<T>;
 type TransportRequest = { channel: string; args: unknown[] };
 
@@ -90,6 +87,7 @@ const UNIFIED_CHANNELS = new Set<string>([
 ]);
 
 const customInvokers = new Map<Exclude<TransportKind, 'ipc'>, TransportInvoker>();
+const GATEWAY_WS_DIAG_FLAG = 'clawx:gateway-ws-diagnostic';
 
 let transportConfig: ApiClientTransportConfig = {
   enabled: {
@@ -136,8 +134,21 @@ type GatewayWsTransportOptions = {
   websocketFactory?: (url: string) => WebSocket;
 };
 
+type GatewayControlUiResponse = {
+  success?: boolean;
+  token?: string;
+};
+
+function normalizeGatewayRpcEnvelope(value: unknown): { success: boolean; result?: unknown; error?: string } {
+  if (value && typeof value === 'object' && 'success' in (value as Record<string, unknown>)) {
+    return value as { success: boolean; result?: unknown; error?: string };
+  }
+  return { success: true, result: value };
+}
+
 let cachedGatewayPort: { port: number; expiresAt: number } | null = null;
 const transportBackoffUntil: Partial<Record<Exclude<TransportKind, 'ipc'>, number>> = {};
+const SLOW_REQUEST_THRESHOLD_MS = 800;
 
 async function resolveGatewayPort(): Promise<number> {
   const now = Date.now();
@@ -173,11 +184,13 @@ class TransportUnsupportedError extends Error {
 export class AppError extends Error {
   code: AppErrorCode;
   cause?: unknown;
+  details?: Record<string, unknown>;
 
-  constructor(code: AppErrorCode, message: string, cause?: unknown) {
+  constructor(code: AppErrorCode, message: string, cause?: unknown, details?: Record<string, unknown>) {
     super(message);
     this.code = code;
     this.cause = cause;
+    this.details = details;
   }
 }
 
@@ -198,30 +211,60 @@ function mapUnifiedErrorCode(code?: string): AppErrorCode {
   }
 }
 
-function normalizeError(err: unknown): AppError {
+function normalizeError(err: unknown, details?: Record<string, unknown>): AppError {
+  if (err instanceof AppError) {
+    return new AppError(err.code, err.message, err.cause ?? err, { ...(err.details ?? {}), ...(details ?? {}) });
+  }
+
   const message = err instanceof Error ? err.message : String(err);
   const lower = message.toLowerCase();
 
   if (lower.includes('timeout')) {
-    return new AppError('TIMEOUT', message, err);
+    return new AppError('TIMEOUT', message, err, details);
   }
   if (lower.includes('rate limit')) {
-    return new AppError('RATE_LIMIT', message, err);
+    return new AppError('RATE_LIMIT', message, err, details);
   }
   if (lower.includes('permission') || lower.includes('forbidden') || lower.includes('denied')) {
-    return new AppError('PERMISSION', message, err);
+    return new AppError('PERMISSION', message, err, details);
   }
   if (lower.includes('network') || lower.includes('fetch')) {
-    return new AppError('NETWORK', message, err);
+    return new AppError('NETWORK', message, err, details);
   }
   if (lower.includes('gateway')) {
-    return new AppError('GATEWAY', message, err);
+    return new AppError('GATEWAY', message, err, details);
   }
   if (lower.includes('config') || lower.includes('invalid')) {
-    return new AppError('CONFIG', message, err);
+    return new AppError('CONFIG', message, err, details);
   }
 
-  return new AppError('UNKNOWN', message, err);
+  return new AppError('UNKNOWN', message, err, details);
+}
+
+function shouldLogApiRequests(): boolean {
+  try {
+    return import.meta.env.DEV || window.localStorage.getItem('clawx:api-log') === '1';
+  } catch {
+    return !!import.meta.env.DEV;
+  }
+}
+
+function logApiAttempt(entry: {
+  requestId: string;
+  channel: string;
+  transport: TransportKind;
+  attempt: number;
+  durationMs: number;
+  ok: boolean;
+  error?: unknown;
+}): void {
+  if (!shouldLogApiRequests()) return;
+  const base = `[api-client] id=${entry.requestId} channel=${entry.channel} transport=${entry.transport} attempt=${entry.attempt} durationMs=${entry.durationMs}`;
+  if (entry.ok) {
+    console.info(`${base} result=ok`);
+  } else {
+    console.warn(`${base} result=error`, entry.error);
+  }
 }
 
 function isRuleMatch(matcher: string | RegExp, channel: string): boolean {
@@ -263,53 +306,58 @@ export function clearTransportBackoff(kind?: Exclude<TransportKind, 'ipc'>): voi
   delete transportBackoffUntil.http;
 }
 
-function gatewayRulesForPreference(preference: GatewayTransportPreference): TransportRule[] {
-  switch (preference) {
-    case 'http-first':
-      return [
-        { matcher: /^gateway:rpc$/, order: ['http', 'ws', 'ipc'] },
-        { matcher: /^gateway:/, order: ['ipc'] },
-        { matcher: /.*/, order: ['ipc'] },
-      ];
-    case 'ws-only':
-      return [
-        { matcher: /^gateway:rpc$/, order: ['ws', 'ipc'] },
-        { matcher: /^gateway:/, order: ['ipc'] },
-        { matcher: /.*/, order: ['ipc'] },
-      ];
-    case 'http-only':
-      return [
-        { matcher: /^gateway:rpc$/, order: ['http', 'ipc'] },
-        { matcher: /^gateway:/, order: ['ipc'] },
-        { matcher: /.*/, order: ['ipc'] },
-      ];
-    case 'ipc-only':
-      return [
-        { matcher: /^gateway:rpc$/, order: ['ipc'] },
-        { matcher: /^gateway:/, order: ['ipc'] },
-        { matcher: /.*/, order: ['ipc'] },
-      ];
-    case 'ws-first':
-    default:
-      return [
+export function applyGatewayTransportPreference(): void {
+  const wsDiagnosticEnabled = getGatewayWsDiagnosticEnabled();
+  clearTransportBackoff();
+  if (wsDiagnosticEnabled) {
+    configureApiClient({
+      enabled: {
+        ws: true,
+        http: true,
+      },
+      rules: [
         { matcher: /^gateway:rpc$/, order: ['ws', 'http', 'ipc'] },
         { matcher: /^gateway:/, order: ['ipc'] },
         { matcher: /.*/, order: ['ipc'] },
-      ];
+      ],
+    });
+    return;
+  }
+
+  // Availability-first default:
+  // keep IPC as the authoritative runtime path.
+  configureApiClient({
+    enabled: {
+      ws: false,
+      http: false,
+    },
+    rules: [
+      { matcher: /^gateway:rpc$/, order: ['ipc'] },
+      { matcher: /^gateway:/, order: ['ipc'] },
+      { matcher: /.*/, order: ['ipc'] },
+    ],
+  });
+}
+
+export function getGatewayWsDiagnosticEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(GATEWAY_WS_DIAG_FLAG) === '1';
+  } catch {
+    return false;
   }
 }
 
-export function applyGatewayTransportPreference(preference: GatewayTransportPreference): void {
-  const enableWs = preference === 'ws-first' || preference === 'http-first' || preference === 'ws-only';
-  const enableHttp = preference === 'ws-first' || preference === 'http-first' || preference === 'http-only';
-  clearTransportBackoff();
-  configureApiClient({
-    enabled: {
-      ws: enableWs,
-      http: enableHttp,
-    },
-    rules: gatewayRulesForPreference(preference),
-  });
+export function setGatewayWsDiagnosticEnabled(enabled: boolean): void {
+  try {
+    if (enabled) {
+      window.localStorage.setItem(GATEWAY_WS_DIAG_FLAG, '1');
+    } else {
+      window.localStorage.removeItem(GATEWAY_WS_DIAG_FLAG);
+    }
+  } catch {
+    // ignore localStorage errors
+  }
+  applyGatewayTransportPreference();
 }
 
 function toUnifiedRequest(channel: string, args: unknown[]): UnifiedRequest {
@@ -341,7 +389,7 @@ async function invokeViaIpc<T>(channel: string, args: unknown[]): Promise<T> {
       if (message.includes('APP_REQUEST_UNSUPPORTED:') || message.includes('Invalid IPC channel: app:request')) {
         // Fallback to legacy channel handlers.
       } else {
-        throw normalizeError(err);
+        throw normalizeError(err, { transport: 'ipc', channel, source: 'app:request' });
       }
     }
   }
@@ -349,7 +397,7 @@ async function invokeViaIpc<T>(channel: string, args: unknown[]): Promise<T> {
   try {
     return await window.electron.ipcRenderer.invoke(channel, ...args) as T;
   } catch (err) {
-    throw normalizeError(err);
+    throw normalizeError(err, { transport: 'ipc', channel, source: 'legacy-ipc' });
   }
 }
 
@@ -568,12 +616,13 @@ export function createGatewayHttpTransportInvoker(
         : 15000;
 
     const response = await invokeViaIpc<{
-      success: boolean;
-      status?: number;
       ok?: boolean;
+      data?: unknown;
+      error?: unknown;
+      success?: boolean;
+      status?: number;
       json?: unknown;
       text?: string;
-      error?: string;
     }>('gateway:httpProxy', [{
       path: '/rpc',
       method: 'POST',
@@ -585,8 +634,42 @@ export function createGatewayHttpTransportInvoker(
       },
     }]);
 
+    if (response && 'data' in response && typeof response.ok === 'boolean') {
+      if (!response.ok) {
+        const errObj = response.error as { message?: string } | string | undefined;
+        throw new Error(
+          typeof errObj === 'string'
+            ? errObj
+            : (errObj?.message || 'Gateway HTTP proxy failed'),
+        );
+      }
+      const proxyData = response.data as { status?: number; ok?: boolean; json?: unknown; text?: string } | undefined;
+      const payload = proxyData?.json as Record<string, unknown> | undefined;
+      if (!payload || typeof payload !== 'object') {
+        throw new Error(proxyData?.text || `Gateway HTTP returned non-JSON (status=${proxyData?.status ?? 'unknown'})`);
+      }
+      if (payload.type === 'res') {
+        if (payload.ok === false || payload.error) {
+          throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
+        }
+        return normalizeGatewayRpcEnvelope(payload.payload ?? payload) as T;
+      }
+      if ('ok' in payload) {
+        if (!payload.ok) {
+          throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
+        }
+        return normalizeGatewayRpcEnvelope(payload.data ?? payload) as T;
+      }
+      return normalizeGatewayRpcEnvelope(payload) as T;
+    }
+
     if (!response?.success) {
-      throw new Error(response?.error || 'Gateway HTTP proxy failed');
+      const errObj = response?.error as { message?: string } | string | undefined;
+      throw new Error(
+        typeof errObj === 'string'
+          ? errObj
+          : (errObj?.message || 'Gateway HTTP proxy failed'),
+      );
     }
 
     const payload = response?.json as Record<string, unknown> | undefined;
@@ -598,16 +681,16 @@ export function createGatewayHttpTransportInvoker(
       if (payload.ok === false || payload.error) {
         throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
       }
-      return (payload.payload ?? payload) as T;
+      return normalizeGatewayRpcEnvelope(payload.payload ?? payload) as T;
     }
     if ('ok' in payload) {
       if (!payload.ok) {
         throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
       }
-      return (payload.data ?? payload) as T;
+      return normalizeGatewayRpcEnvelope(payload.data ?? payload) as T;
     }
 
-    return payload as T;
+    return normalizeGatewayRpcEnvelope(payload) as T;
   };
 }
 
@@ -615,7 +698,13 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
   const timeoutMs = options.timeoutMs ?? 15000;
   const websocketFactory = options.websocketFactory ?? ((url: string) => new WebSocket(url));
   const resolveUrl = options.urlResolver ?? resolveDefaultGatewayWsUrl;
-  const resolveToken = options.tokenResolver ?? (() => invokeViaIpc<string | null>('settings:get', ['gatewayToken']));
+  const resolveToken = options.tokenResolver ?? (async () => {
+    const controlUi = await invokeViaIpc<GatewayControlUiResponse>('gateway:getControlUiUrl', []);
+    if (controlUi?.success && typeof controlUi.token === 'string' && controlUi.token.trim()) {
+      return controlUi.token;
+    }
+    return await invokeViaIpc<string | null>('settings:get', [{ key: 'gatewayToken' }]);
+  });
 
   let socket: WebSocket | null = null;
   let connectPromise: Promise<WebSocket> | null = null;
@@ -636,12 +725,36 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
     }
   };
 
+  const formatGatewayError = (errorValue: unknown): string => {
+    if (errorValue == null) return 'unknown';
+    if (typeof errorValue === 'string') return errorValue;
+    if (typeof errorValue === 'object') {
+      const asRecord = errorValue as Record<string, unknown>;
+      const message = typeof asRecord.message === 'string' ? asRecord.message : null;
+      const code = typeof asRecord.code === 'string' || typeof asRecord.code === 'number'
+        ? String(asRecord.code)
+        : null;
+      if (message && code) return `${code}: ${message}`;
+      if (message) return message;
+      try {
+        return JSON.stringify(errorValue);
+      } catch {
+        return String(errorValue);
+      }
+    }
+    return String(errorValue);
+  };
+
   const sendConnect = async (_challengeNonce: string) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error('Gateway WS not open during connect handshake');
     }
     const token = await Promise.resolve(resolveToken());
     connectRequestId = `connect-${Date.now()}`;
+    const auth =
+      typeof token === 'string' && token.trim().length > 0
+        ? { token }
+        : undefined;
     socket.send(JSON.stringify({
       type: 'req',
       id: connectRequestId,
@@ -650,18 +763,18 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
         minProtocol: 3,
         maxProtocol: 3,
         client: {
-          id: 'clawx-ui',
+          id: 'openclaw-control-ui',
           displayName: 'ClawX UI',
-          version: '0.1.0',
+          version: '1.0.0',
           platform: window.electron?.platform ?? 'unknown',
-          mode: 'ui',
+          mode: 'webchat',
         },
-        auth: {
-          token: token ?? null,
-        },
-        caps: [],
+        auth,
+        caps: ['tool-events'],
         role: 'operator',
         scopes: ['operator.admin'],
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+        locale: typeof navigator !== 'undefined' ? navigator.language : 'en',
       },
     }));
   };
@@ -738,7 +851,7 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
               const ok = msg.ok !== false && !msg.error;
               if (!ok) {
                 cleanup();
-                reject(new Error(`Gateway WS connect failed: ${String(msg.error ?? 'unknown')}`));
+                reject(new Error(`Gateway WS connect failed: ${formatGatewayError(msg.error)}`));
                 return;
               }
               handshakeDone = true;
@@ -765,10 +878,10 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
 
           const ok = msg.ok !== false && !msg.error;
           if (!ok) {
-            item.reject(new Error(String(msg.error ?? 'Gateway WS request failed')));
+            item.reject(new Error(formatGatewayError(msg.error ?? 'Gateway WS request failed')));
             return;
           }
-          item.resolve(msg.payload ?? msg);
+          item.resolve(normalizeGatewayRpcEnvelope(msg.payload ?? msg));
         } catch {
           // ignore malformed payload
         }
@@ -838,7 +951,7 @@ export function initializeDefaultTransports(): void {
   if (defaultTransportsInitialized) return;
   registerTransportInvoker('ws', createGatewayWsTransportInvoker());
   registerTransportInvoker('http', createGatewayHttpTransportInvoker());
-  applyGatewayTransportPreference('ws-first');
+  applyGatewayTransportPreference();
   defaultTransportsInitialized = true;
 }
 
@@ -864,15 +977,65 @@ export function toUserMessage(error: unknown): string {
 }
 
 export async function invokeApi<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const requestId = crypto.randomUUID();
   const order = resolveTransportOrder(channel);
   let lastError: unknown;
 
-  for (const kind of order) {
+  for (let i = 0; i < order.length; i += 1) {
+    const kind = order[i];
+    const attempt = i + 1;
+    const startedAt = Date.now();
     try {
-      return await invokeViaTransport<T>(kind, channel, args);
+      const value = await invokeViaTransport<T>(kind, channel, args);
+      const durationMs = Date.now() - startedAt;
+      logApiAttempt({
+        requestId,
+        channel,
+        transport: kind,
+        attempt,
+        durationMs,
+        ok: true,
+      });
+      if (durationMs >= SLOW_REQUEST_THRESHOLD_MS || attempt > 1) {
+        trackUiEvent('api.request', {
+          requestId,
+          channel,
+          transport: kind,
+          attempt,
+          durationMs,
+          fallbackUsed: attempt > 1,
+        });
+      }
+      return value;
     } catch (err) {
+      const durationMs = Date.now() - startedAt;
+      logApiAttempt({
+        requestId,
+        channel,
+        transport: kind,
+        attempt,
+        durationMs,
+        ok: false,
+        error: err,
+      });
+      trackUiEvent('api.request_error', {
+        requestId,
+        channel,
+        transport: kind,
+        attempt,
+        durationMs,
+        message: err instanceof Error ? err.message : String(err),
+      });
+
       if (err instanceof TransportUnsupportedError) {
         markTransportFailure(kind);
+        trackUiEvent('api.transport_fallback', {
+          requestId,
+          channel,
+          from: kind,
+          reason: 'unsupported',
+          nextAttempt: attempt + 1,
+        });
         lastError = err;
         continue;
       }
@@ -880,13 +1043,38 @@ export async function invokeApi<T>(channel: string, ...args: unknown[]): Promise
       // For non-IPC transports, fail open to the next transport.
       if (kind !== 'ipc') {
         markTransportFailure(kind);
+        trackUiEvent('api.transport_fallback', {
+          requestId,
+          channel,
+          from: kind,
+          reason: 'error',
+          nextAttempt: attempt + 1,
+        });
         continue;
       }
-      throw err;
+      throw normalizeError(err, {
+        requestId,
+        channel,
+        transport: kind,
+        attempt,
+        durationMs,
+      });
     }
   }
 
-  throw normalizeError(lastError);
+  trackUiEvent('api.request_failed', {
+    requestId,
+    channel,
+    attempts: order.length,
+    message: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+
+  throw normalizeError(lastError, {
+    requestId,
+    channel,
+    transport: 'ipc',
+    attempt: order.length,
+  });
 }
 
 export async function invokeIpc<T>(channel: string, ...args: unknown[]): Promise<T> {
