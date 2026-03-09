@@ -1,7 +1,7 @@
 {
     "steps": {
         "welcome": {
-            "title": "ClawXへようこそ",
+            "title": "MatchaClawへようこそ",
             "description": "AIアシスタントの設定準備が整いました"
         },
         "runtime": {
@@ -22,17 +22,39 @@
         },
         "complete": {
             "title": "完了！",
-            "description": "ClawXを使用する準備が整いました"
+            "description": "MatchaClawを使用する準備が整いました"
         }
     },
     "welcome": {
-        "title": "ClawXへようこそ",
-        "description": "ClawXはOpenClawのグラフィカルインターフェースで、お気に入りのメッセージングプラットフォームでAIアシスタントを簡単に使用できます。",
+        "title": "MatchaClawへようこそ",
+        "description": "MatchaClawはOpenClawのグラフィカルインターフェースで、お気に入りのメッセージングプラットフォームでAIアシスタントを簡単に使用できます。",
         "features": {
             "noCommand": "コマンドライン不要",
             "modernUI": "モダンで美しいインターフェース",
             "bundles": "プリインストールされたスキルバンドル",
             "crossPlatform": "クロスプラットフォーム対応"
+        }
+    },
+    "license": {
+        "label": "ライセンスキー",
+        "placeholder": "ライセンスキーを入力（例: MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+        "validate": "検証",
+        "hint": "次の手順に進むには、ライセンスキーの検証が必要です。",
+        "messages": {
+            "idle": "ライセンスキーの入力を待っています",
+            "valid": "ライセンス検証に成功しました",
+            "cache_grace_valid": "オフライン猶予期間のキャッシュで検証に成功しました",
+            "empty": "ライセンスキーを入力してください",
+            "format_invalid": "ライセンスキーの形式が正しくありません",
+            "service_unconfigured": "ライセンスサービスが未設定です",
+            "network_error": "ライセンスサービスに接続できません。ネットワークを確認してください",
+            "server_rejected": "ライセンスサービスに拒否されました",
+            "expired": "ライセンスの有効期限が切れています",
+            "device_mismatch": "このライセンスは現在のデバイスと一致しません",
+            "not_allowed": "このライセンスキーは許可されていません",
+            "checksum_invalid": "ライセンスキーが無効です",
+            "unknown": "ライセンス検証に失敗しました。再試行してください",
+            "requiredBeforeSkip": "スキップする前にライセンス検証を完了してください"
         }
     },
     "runtime": {
@@ -108,7 +130,7 @@
     },
     "complete": {
         "title": "セットアップ完了！",
-        "subtitle": "ClawXの構成が完了し、使用準備が整いました。AIアシスタントとのチャットを開始できます。",
+        "subtitle": "MatchaClawの構成が完了し、使用準備が整いました。AIアシスタントとのチャットを開始できます。",
         "provider": "AI プロバイダー",
         "components": "コンポーネント",
         "gateway": "ゲートウェイ",
