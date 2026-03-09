@@ -40,6 +40,7 @@ import {
   nextLifecycleEpoch,
   shouldDeferRestart,
 } from './process-policy';
+import { classifyGatewayStderrMessage } from './stderr-policy';
 
 /**
  * Gateway connection status
@@ -261,28 +262,8 @@ export class GatewayManager extends EventEmitter {
     return sanitized;
   }
 
-  private formatExit(code: number | null, signal: NodeJS.Signals | null): string {
-    if (code !== null) return `code=${code}`;
-    if (signal) return `signal=${signal}`;
-    return 'code=null signal=null';
-  }
-
   private classifyStderrMessage(message: string): { level: 'drop' | 'debug' | 'warn'; normalized: string } {
-    const msg = message.trim();
-    if (!msg) return { level: 'drop', normalized: msg };
-
-    // Known noisy lines that are not actionable for Gateway lifecycle debugging.
-    if (msg.includes('openclaw-control-ui') && msg.includes('token_mismatch')) return { level: 'drop', normalized: msg };
-    if (msg.includes('closed before connect') && msg.includes('token mismatch')) return { level: 'drop', normalized: msg };
-
-    // Downgrade frequent non-fatal noise.
-    if (msg.includes('ExperimentalWarning')) return { level: 'debug', normalized: msg };
-    if (msg.includes('DeprecationWarning')) return { level: 'debug', normalized: msg };
-    if (msg.includes('Debugger attached')) return { level: 'debug', normalized: msg };
-    // Electron restricts NODE_OPTIONS in packaged apps; this is expected and harmless.
-    if (msg.includes('NODE_OPTIONs are not supported in packaged apps')) return { level: 'debug', normalized: msg };
-
-    return { level: 'warn', normalized: msg };
+    return classifyGatewayStderrMessage(message);
   }
 
   private recordStartupStderrLine(line: string): void {
