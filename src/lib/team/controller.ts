@@ -3,7 +3,7 @@ import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 export const TEAM_CONTROLLER_ID = 'team-controller';
 export const TEAM_CONTROLLER_NAME = 'team-controller';
 export const TEAM_CONTROLLER_EMOJI = '\uD83E\uDDED';
-export const TEAM_CONTROLLER_PROMPT_STORAGE_KEY = 'clawx.teamControllerPromptTemplate';
+export const TEAM_CONTROLLER_PROMPT_STORAGE_KEY = 'matchaclaw.teamControllerPromptTemplate';
 
 export const DEFAULT_TEAM_CONTROLLER_PROMPT = [
   '# 角色',
@@ -74,7 +74,10 @@ export type TeamControllerReadiness = {
 };
 
 async function rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  const response = await window.electron.ipcRenderer.invoke('gateway:rpc', method, params, timeoutMs) as RpcResult<T>;
+  const response = await (timeoutMs == null
+    ? window.electron.ipcRenderer.invoke('gateway:rpc', method, params)
+    : window.electron.ipcRenderer.invoke('gateway:rpc', method, params, timeoutMs)
+  ) as RpcResult<T>;
   if (!response.success) {
     throw new Error(response.error || `RPC failed: ${method}`);
   }

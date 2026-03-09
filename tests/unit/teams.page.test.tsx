@@ -10,7 +10,7 @@ vi.mock('@/lib/team/controller', () => ({
   TEAM_CONTROLLER_ID: 'team-controller',
   TEAM_CONTROLLER_NAME: 'team-controller',
   TEAM_CONTROLLER_EMOJI: '🧭',
-  TEAM_CONTROLLER_PROMPT_STORAGE_KEY: 'clawx.teamControllerPromptTemplate',
+  TEAM_CONTROLLER_PROMPT_STORAGE_KEY: 'matchaclaw.teamControllerPromptTemplate',
   DEFAULT_TEAM_CONTROLLER_PROMPT: 'controller prompt',
   checkTeamControllerReadiness: vi.fn().mockResolvedValue({
     ready: true,
