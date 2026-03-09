@@ -1,147 +1,25 @@
 /**
- * Provider Registry — single source of truth for backend provider metadata.
- * Centralizes env var mappings, default models, and OpenClaw provider configs.
- *
- * NOTE: When adding a new provider type, also update src/lib/providers.ts
+ * Backend compatibility layer around the shared provider registry.
  */
 
-export const BUILTIN_PROVIDER_TYPES = [
-  'anthropic',
-  'openai',
-  'google',
-  'openrouter',
-  'ark',
-  'moonshot',
-  'siliconflow',
-  'minimax-portal',
-  'minimax-portal-cn',
-  'qwen-portal',
-  'ollama',
-] as const;
-export type BuiltinProviderType = (typeof BUILTIN_PROVIDER_TYPES)[number];
-export type ProviderType = BuiltinProviderType | 'custom';
+export {
+  BUILTIN_PROVIDER_TYPES,
+  type BuiltinProviderType,
+  type ProviderType,
+} from '../shared/providers/types';
+import {
+  type ProviderBackendConfig,
+  type ProviderModelEntry,
+} from '../shared/providers/types';
+import {
+  getKeyableProviderTypes as getSharedKeyableProviderTypes,
+  getProviderBackendConfig,
+  getProviderDefaultModel as getSharedProviderDefaultModel,
+  getProviderEnvVar as getSharedProviderEnvVar,
+} from '../shared/providers/registry';
 
-interface ProviderModelEntry extends Record<string, unknown> {
-  id: string;
-  name: string;
-}
-
-
-interface ProviderBackendMeta {
-  envVar?: string;
-  defaultModel?: string;
-  /** OpenClaw models.providers config (omit for built-in providers like anthropic) */
-  providerConfig?: {
-    baseUrl: string;
-    api: string;
-    apiKeyEnv: string;
-    models?: ProviderModelEntry[];
-    headers?: Record<string, string>;
-  };
-}
-
-const REGISTRY: Record<string, ProviderBackendMeta> = {
-  anthropic: {
-    envVar: 'ANTHROPIC_API_KEY',
-    defaultModel: 'anthropic/claude-opus-4-6',
-    // anthropic is built-in to OpenClaw's model registry, no provider config needed
-  },
-  openai: {
-    envVar: 'OPENAI_API_KEY',
-    defaultModel: 'openai/gpt-5.2',
-    providerConfig: {
-      baseUrl: 'https://api.openai.com/v1',
-      api: 'openai-responses',
-      apiKeyEnv: 'OPENAI_API_KEY',
-    },
-  },
-  google: {
-    envVar: 'GEMINI_API_KEY',
-    defaultModel: 'google/gemini-3.1-pro-preview',
-    // google is built-in to OpenClaw's pi-ai catalog, no providerConfig needed.
-    // Adding models.providers.google overrides the built-in and can break Gemini.
-  },
-  openrouter: {
-    envVar: 'OPENROUTER_API_KEY',
-    defaultModel: 'openrouter/anthropic/claude-opus-4.6',
-    providerConfig: {
-      baseUrl: 'https://openrouter.ai/api/v1',
-      api: 'openai-completions',
-      apiKeyEnv: 'OPENROUTER_API_KEY',
-      headers: {
-        'HTTP-Referer': 'https://claw-x.com',
-        'X-Title': 'ClawX',
-      },
-    },
-  },
-  ark: {
-    envVar: 'ARK_API_KEY',
-    providerConfig: {
-      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-      api: 'openai-completions',
-      apiKeyEnv: 'ARK_API_KEY',
-    },
-  },
-  moonshot: {
-    envVar: 'MOONSHOT_API_KEY',
-    defaultModel: 'moonshot/kimi-k2.5',
-    providerConfig: {
-      baseUrl: 'https://api.moonshot.cn/v1',
-      api: 'openai-completions',
-      apiKeyEnv: 'MOONSHOT_API_KEY',
-      models: [
-        {
-          id: 'kimi-k2.5',
-          name: 'Kimi K2.5',
-          reasoning: false,
-          input: ['text'],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 256000,
-          maxTokens: 8192,
-        },
-      ],
-    },
-  },
-  siliconflow: {
-    envVar: 'SILICONFLOW_API_KEY',
-    defaultModel: 'siliconflow/deepseek-ai/DeepSeek-V3',
-    providerConfig: {
-      baseUrl: 'https://api.siliconflow.cn/v1',
-      api: 'openai-completions',
-      apiKeyEnv: 'SILICONFLOW_API_KEY',
-    },
-  },
-  'minimax-portal': {
-    envVar: 'MINIMAX_API_KEY',
-    defaultModel: 'minimax-portal/MiniMax-M2.5',
-    providerConfig: {
-      baseUrl: 'https://api.minimax.io/anthropic',
-      api: 'anthropic-messages',
-      apiKeyEnv: 'MINIMAX_API_KEY',
-    },
-  },
-  'minimax-portal-cn': {
-    envVar: 'MINIMAX_CN_API_KEY',
-    defaultModel: 'minimax-portal/MiniMax-M2.5',
-    providerConfig: {
-      baseUrl: 'https://api.minimaxi.com/anthropic',
-      api: 'anthropic-messages',
-      apiKeyEnv: 'MINIMAX_CN_API_KEY',
-    },
-  },
-  'qwen-portal': {
-    envVar: 'QWEN_API_KEY',
-    defaultModel: 'qwen-portal/coder-model',
-    providerConfig: {
-      baseUrl: 'https://portal.qwen.ai/v1',
-      api: 'openai-completions',
-      apiKeyEnv: 'QWEN_API_KEY',
-    },
-  },
-  custom: {
-    envVar: 'CUSTOM_API_KEY',
-  },
-  // Additional providers with env var mappings but no default model
+// Additional env-backed providers that are not yet exposed in the UI.
+const EXTRA_ENV_ONLY_PROVIDERS: Record<string, { envVar: string }> = {
   groq: { envVar: 'GROQ_API_KEY' },
   deepgram: { envVar: 'DEEPGRAM_API_KEY' },
   cerebras: { envVar: 'CEREBRAS_API_KEY' },
@@ -151,26 +29,25 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
 
 /** Get the environment variable name for a provider type */
 export function getProviderEnvVar(type: string): string | undefined {
-  return REGISTRY[type]?.envVar;
+  return getSharedProviderEnvVar(type) ?? EXTRA_ENV_ONLY_PROVIDERS[type]?.envVar;
 }
 
 /** Get all environment variable names for a provider type (primary first). */
 export function getProviderEnvVars(type: string): string[] {
-  const meta = REGISTRY[type];
-  if (!meta?.envVar) return [];
-  return [meta.envVar];
+  const envVar = getProviderEnvVar(type);
+  return envVar ? [envVar] : [];
 }
 
 /** Get the default model string for a provider type */
 export function getProviderDefaultModel(type: string): string | undefined {
-  return REGISTRY[type]?.defaultModel;
+  return getSharedProviderDefaultModel(type);
 }
 
 /** Get the OpenClaw provider config (baseUrl, api, apiKeyEnv, models, headers) */
 export function getProviderConfig(
   type: string
 ): { baseUrl: string; api: string; apiKeyEnv: string; models?: ProviderModelEntry[]; headers?: Record<string, string> } | undefined {
-  return REGISTRY[type]?.providerConfig;
+  return getProviderBackendConfig(type) as ProviderBackendConfig | undefined;
 }
 
 /**
@@ -178,7 +55,5 @@ export function getProviderConfig(
  * Used by GatewayManager to inject API keys as env vars.
  */
 export function getKeyableProviderTypes(): string[] {
-  return Object.entries(REGISTRY)
-    .filter(([, meta]) => meta.envVar)
-    .map(([type]) => type);
+  return [...getSharedKeyableProviderTypes(), ...Object.keys(EXTRA_ENV_ONLY_PROVIDERS)];
 }

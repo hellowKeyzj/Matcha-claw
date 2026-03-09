@@ -3,8 +3,9 @@
  * Manages messaging channel state
  */
 import { create } from 'zustand';
+import { hostApiFetch } from '@/lib/host-api';
+import { useGatewayStore } from './gateway';
 import type { Channel, ChannelType } from '../types/channel';
-import { invokeIpc } from '@/lib/api-client';
 
 interface AddChannelParams {
   type: ChannelType;
@@ -18,7 +19,7 @@ interface ChannelsState {
   error: string | null;
 
   // Actions
-  fetchChannels: (options?: { probe?: boolean; silent?: boolean }) => Promise<void>;
+  fetchChannels: () => Promise<void>;
   addChannel: (params: AddChannelParams) => Promise<Channel>;
   deleteChannel: (channelId: string) => Promise<void>;
   connectChannel: (channelId: string) => Promise<void>;
@@ -34,20 +35,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   loading: false,
   error: null,
 
-  fetchChannels: async (options) => {
-    const probe = options?.probe ?? false;
-    const silent = options?.silent ?? false;
-    if (!silent) {
-      set({ loading: true, error: null });
-    }
+  fetchChannels: async () => {
+    set({ loading: true, error: null });
     try {
-      const result = await invokeIpc(
-        'gateway:rpc',
-        'channels.status',
-        { probe }
-      ) as {
-        success: boolean;
-        result?: {
+      const data = await useGatewayStore.getState().rpc<{
           channelOrder?: string[];
           channels?: Record<string, unknown>;
           channelAccounts?: Record<string, Array<{
@@ -63,12 +54,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
             lastOutboundAt?: number | null;
           }>>;
           channelDefaultAccountId?: Record<string, string>;
-        };
-        error?: string;
-      };
-
-      if (result.success && result.result) {
-        const data = result.result;
+      }>('channels.status', { probe: true });
+      if (data) {
         const channels: Channel[] = [];
 
         // Parse the complex channels.status response into simple Channel objects
@@ -131,30 +118,26 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           });
         }
 
-        set((state) => ({ channels, loading: silent ? state.loading : false }));
+        set({ channels, loading: false });
       } else {
         // Gateway not available - try to show channels from local config
-        set((state) => ({ channels: [], loading: silent ? state.loading : false }));
+        set({ channels: [], loading: false });
       }
     } catch {
       // Gateway not connected, show empty
-      set((state) => ({ channels: [], loading: silent ? state.loading : false }));
+      set({ channels: [], loading: false });
     }
   },
 
   addChannel: async (params) => {
     try {
-      const result = await invokeIpc(
-        'gateway:rpc',
-        'channels.add',
-        params
-      ) as { success: boolean; result?: Channel; error?: string };
+      const result = await useGatewayStore.getState().rpc<Channel>('channels.add', params);
 
-      if (result.success && result.result) {
+      if (result) {
         set((state) => ({
-          channels: [...state.channels, result.result!],
+          channels: [...state.channels, result],
         }));
-        return result.result;
+        return result;
       } else {
         // If gateway is not available, create a local channel for now
         const newChannel: Channel = {
@@ -189,17 +172,15 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
 
     try {
       // Delete the channel configuration from openclaw.json
-      await invokeIpc('channel:deleteConfig', channelType);
+      await hostApiFetch(`/api/channels/config/${encodeURIComponent(channelType)}`, {
+        method: 'DELETE',
+      });
     } catch (error) {
       console.error('Failed to delete channel config:', error);
     }
 
     try {
-      await invokeIpc(
-        'gateway:rpc',
-        'channels.delete',
-        { channelId: channelType }
-      );
+      await useGatewayStore.getState().rpc('channels.delete', { channelId: channelType });
     } catch (error) {
       // Continue with local deletion even if gateway fails
       console.error('Failed to delete channel from gateway:', error);
@@ -216,17 +197,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     updateChannel(channelId, { status: 'connecting', error: undefined });
 
     try {
-      const result = await invokeIpc(
-        'gateway:rpc',
-        'channels.connect',
-        { channelId }
-      ) as { success: boolean; error?: string };
-
-      if (result.success) {
-        updateChannel(channelId, { status: 'connected' });
-      } else {
-        updateChannel(channelId, { status: 'error', error: result.error });
-      }
+      await useGatewayStore.getState().rpc('channels.connect', { channelId });
+      updateChannel(channelId, { status: 'connected' });
     } catch (error) {
       updateChannel(channelId, { status: 'error', error: String(error) });
     }
@@ -236,11 +208,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     const { updateChannel } = get();
 
     try {
-      await invokeIpc(
-        'gateway:rpc',
-        'channels.disconnect',
-        { channelId }
-      );
+      await useGatewayStore.getState().rpc('channels.disconnect', { channelId });
     } catch (error) {
       console.error('Failed to disconnect channel:', error);
     }
@@ -249,17 +217,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   requestQrCode: async (channelType) => {
-    const result = await invokeIpc(
-      'gateway:rpc',
+    return await useGatewayStore.getState().rpc<{ qrCode: string; sessionId: string }>(
       'channels.requestQr',
-      { type: channelType }
-    ) as { success: boolean; result?: { qrCode: string; sessionId: string }; error?: string };
-
-    if (result.success && result.result) {
-      return result.result;
-    }
-
-    throw new Error(result.error || 'Failed to request QR code');
+      { type: channelType },
+    );
   },
 
   setChannels: (channels) => set({ channels }),

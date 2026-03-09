@@ -26,7 +26,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useSettingsStore } from '@/stores/settings';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { FeedbackState } from '@/components/common/FeedbackState';
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 
@@ -67,7 +67,7 @@ export function Dashboard() {
     if (isGatewayRunning) {
       fetchChannels();
       fetchSkills();
-      invokeIpc<UsageHistoryEntry[]>('usage:recentTokenHistory')
+      hostApiFetch<UsageHistoryEntry[]>('/api/usage/recent-token-history')
         .then((entries) => {
           setUsageHistory(Array.isArray(entries) ? entries : []);
           setUsagePage(1);
@@ -111,11 +111,11 @@ export function Dashboard() {
 
   const openDevConsole = async () => {
     try {
-      const result = await invokeIpc<{
+      const result = await hostApiFetch<{
         success: boolean;
         url?: string;
         error?: string;
-      }>('gateway:getControlUiUrl');
+      }>('/api/gateway/control-ui');
       if (result.success && result.url) {
         trackUiEvent('dashboard.quick_action', { action: 'dev_console' });
         window.electron.openExternal(result.url);

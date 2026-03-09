@@ -13,6 +13,19 @@
   "aiProviders": {
     "title": "AI プロバイダー",
     "description": "AI モデルプロバイダーと API キーを設定",
+    "overview": {
+      "title": "プロバイダーアカウント",
+      "description": "現在設定されているプロバイダーアカウントとモデルの概要です。",
+      "noModelSelected": "モデル未選択",
+      "multiAccountReady": "複数アカウント対応",
+      "singletonVendor": "単一アカウントのプロバイダー"
+    },
+    "authModes": {
+      "apiKey": "API キー",
+      "oauthDevice": "OAuth デバイス",
+      "oauthBrowser": "OAuth ブラウザ",
+      "local": "ローカル"
+    },
     "sections": {
       "model": "モデル設定",
       "fallback": "フォールバック設定"
@@ -84,6 +97,7 @@
       "cancel": "キャンセル",
       "codeCopied": "コードをクリップボードにコピーしました",
       "authFailed": "認証に失敗しました",
+      "browserFlowUnavailable": "このプロバイダーのブラウザ OAuth はまだ接続されていません。",
       "tryAgain": "再試行",
       "approveLogin": "ログインを承認",
       "step1": "以下の認証コードをコピーしてください。",

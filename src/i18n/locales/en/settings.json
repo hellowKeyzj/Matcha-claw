@@ -13,6 +13,19 @@
   "aiProviders": {
     "title": "AI Providers",
     "description": "Configure your AI model providers and API keys",
+    "overview": {
+      "title": "Provider Accounts",
+      "description": "A summary of the provider accounts and models currently configured.",
+      "noModelSelected": "No model selected",
+      "multiAccountReady": "Multi-account ready",
+      "singletonVendor": "Single-account vendor"
+    },
+    "authModes": {
+      "apiKey": "API Key",
+      "oauthDevice": "OAuth Device",
+      "oauthBrowser": "OAuth Browser",
+      "local": "Local"
+    },
     "sections": {
       "model": "Model Settings",
       "fallback": "Fallback Settings"
@@ -85,6 +98,7 @@
       "cancel": "Cancel",
       "codeCopied": "Code copied to clipboard",
       "authFailed": "Authentication Failed",
+      "browserFlowUnavailable": "Browser OAuth is not wired for this provider yet.",
       "tryAgain": "Try Again",
       "approveLogin": "Approve Login",
       "step1": "Copy the authorization code below.",

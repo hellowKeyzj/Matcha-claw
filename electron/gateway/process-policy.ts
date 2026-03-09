@@ -1,3 +1,15 @@
+export interface ReconnectConfig {
+  maxAttempts: number;
+  baseDelay: number;
+  maxDelay: number;
+}
+
+export const DEFAULT_RECONNECT_CONFIG: ReconnectConfig = {
+  maxAttempts: 10,
+  baseDelay: 1000,
+  maxDelay: 30000,
+};
+
 export function nextLifecycleEpoch(currentEpoch: number): number {
   return currentEpoch + 1;
 }
@@ -20,6 +32,53 @@ export function getReconnectSkipReason(context: ReconnectAttemptContext): string
     return `stale reconnect callback (scheduledEpoch=${context.scheduledEpoch}, currentEpoch=${context.currentEpoch})`;
   }
   return null;
+}
+
+export interface ReconnectScheduleContext {
+  shouldReconnect: boolean;
+  hasReconnectTimer: boolean;
+  reconnectAttempts: number;
+  maxAttempts: number;
+  baseDelay: number;
+  maxDelay: number;
+}
+
+export type ReconnectScheduleDecision =
+  | { action: 'skip'; reason: string }
+  | { action: 'already-scheduled' }
+  | { action: 'fail'; attempts: number; maxAttempts: number }
+  | { action: 'schedule'; nextAttempt: number; maxAttempts: number; delay: number };
+
+export function getReconnectScheduleDecision(
+  context: ReconnectScheduleContext,
+): ReconnectScheduleDecision {
+  if (!context.shouldReconnect) {
+    return { action: 'skip', reason: 'auto-reconnect disabled' };
+  }
+
+  if (context.hasReconnectTimer) {
+    return { action: 'already-scheduled' };
+  }
+
+  if (context.reconnectAttempts >= context.maxAttempts) {
+    return {
+      action: 'fail',
+      attempts: context.reconnectAttempts,
+      maxAttempts: context.maxAttempts,
+    };
+  }
+
+  const delay = Math.min(
+    context.baseDelay * Math.pow(2, context.reconnectAttempts),
+    context.maxDelay,
+  );
+
+  return {
+    action: 'schedule',
+    nextAttempt: context.reconnectAttempts + 1,
+    maxAttempts: context.maxAttempts,
+    delay,
+  };
 }
 
 export type GatewayLifecycleState = 'stopped' | 'starting' | 'running' | 'error' | 'reconnecting';

@@ -10,6 +10,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -126,17 +127,17 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
       // Stage all files via IPC
       console.log('[pickFiles] Staging files:', result.filePaths);
-      const staged = await invokeIpc(
-        'file:stage',
-        result.filePaths,
-      ) as Array<{
+      const staged = await hostApiFetch<Array<{
         id: string;
         fileName: string;
         mimeType: string;
         fileSize: number;
         stagedPath: string;
         preview: string | null;
-      }>;
+      }>>('/api/files/stage-paths', {
+        method: 'POST',
+        body: JSON.stringify({ filePaths: result.filePaths }),
+      });
       console.log('[pickFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
 
       // Update each placeholder with real data
@@ -193,18 +194,21 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         console.log(`[stageBuffer] Reading file: ${file.name} (${file.type}, ${file.size} bytes)`);
         const base64 = await readFileAsBase64(file);
         console.log(`[stageBuffer] Base64 length: ${base64?.length ?? 'null'}`);
-        const staged = await invokeIpc('file:stageBuffer', {
-          base64,
-          fileName: file.name,
-          mimeType: file.type || 'application/octet-stream',
-        }) as {
+        const staged = await hostApiFetch<{
           id: string;
           fileName: string;
           mimeType: string;
           fileSize: number;
           stagedPath: string;
           preview: string | null;
-        };
+        }>('/api/files/stage-buffer', {
+          method: 'POST',
+          body: JSON.stringify({
+            base64,
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+          }),
+        });
         console.log(`[stageBuffer] Staged: id=${staged?.id}, path=${staged?.stagedPath}, size=${staged?.fileSize}`);
         setAttachments(prev => prev.map(a =>
           a.id === tempId ? { ...staged, status: 'ready' as const } : a,

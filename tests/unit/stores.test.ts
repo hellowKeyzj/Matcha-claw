@@ -1,7 +1,7 @@
 /**
  * Zustand Stores Tests
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 
@@ -71,5 +71,15 @@ describe('Gateway Store', () => {
     const state = useGatewayStore.getState();
     expect(state.status.state).toBe('running');
     expect(state.status.pid).toBe(12345);
+  });
+
+  it('should proxy gateway rpc through ipc', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockResolvedValueOnce({ success: true, result: { ok: true } });
+
+    const result = await useGatewayStore.getState().rpc<{ ok: boolean }>('chat.history', { limit: 10 }, 5000);
+
+    expect(result.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('gateway:rpc', 'chat.history', { limit: 10 }, 5000);
   });
 });

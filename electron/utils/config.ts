@@ -12,6 +12,9 @@ export const PORTS = {
   
   /** ClawX GUI production port (for reference) */
   CLAWX_GUI: 23333,
+
+  /** Local host API server port */
+  CLAWX_HOST_API: 3210,
   
   /** OpenClaw Gateway port */
   OPENCLAW_GATEWAY: 18789,

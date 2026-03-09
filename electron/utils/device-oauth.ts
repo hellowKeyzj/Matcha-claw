@@ -42,6 +42,8 @@ export type { MiniMaxRegion };
 
 class DeviceOAuthManager extends EventEmitter {
     private activeProvider: OAuthProviderType | null = null;
+    private activeAccountId: string | null = null;
+    private activeLabel: string | null = null;
     private active: boolean = false;
     private mainWindow: BrowserWindow | null = null;
 
@@ -49,14 +51,20 @@ class DeviceOAuthManager extends EventEmitter {
         this.mainWindow = window;
     }
 
-    async startFlow(provider: OAuthProviderType, region: MiniMaxRegion = 'global'): Promise<boolean> {
+    async startFlow(
+        provider: OAuthProviderType,
+        region: MiniMaxRegion = 'global',
+        options?: { accountId?: string; label?: string },
+    ): Promise<boolean> {
         if (this.active) {
             await this.stopFlow();
         }
 
         this.active = true;
-        this.emit('oauth:start', { provider: provider });
+        this.emit('oauth:start', { provider, accountId: options?.accountId || provider });
         this.activeProvider = provider;
+        this.activeAccountId = options?.accountId || provider;
+        this.activeLabel = options?.label || null;
 
         try {
             if (provider === 'minimax-portal' || provider === 'minimax-portal-cn') {
@@ -77,6 +85,8 @@ class DeviceOAuthManager extends EventEmitter {
             this.emitError(error instanceof Error ? error.message : String(error));
             this.active = false;
             this.activeProvider = null;
+            this.activeAccountId = null;
+            this.activeLabel = null;
             return false;
         }
     }
@@ -84,6 +94,8 @@ class DeviceOAuthManager extends EventEmitter {
     async stopFlow(): Promise<void> {
         this.active = false;
         this.activeProvider = null;
+        this.activeAccountId = null;
+        this.activeLabel = null;
         logger.info('[DeviceOAuth] Flow explicitly stopped');
     }
 
@@ -194,8 +206,12 @@ class DeviceOAuthManager extends EventEmitter {
         api: 'anthropic-messages' | 'openai-completions';
         region?: MiniMaxRegion;
     }) {
+        const accountId = this.activeAccountId || providerType;
+        const accountLabel = this.activeLabel;
         this.active = false;
         this.activeProvider = null;
+        this.activeAccountId = null;
+        this.activeLabel = null;
         logger.info(`[DeviceOAuth] Successfully completed OAuth for ${providerType}`);
 
         // 1. Write OAuth token to OpenClaw's auth-profiles.json in native OAuth format.
@@ -254,15 +270,15 @@ class DeviceOAuthManager extends EventEmitter {
         }
 
         // 3. Save provider record in ClawX's own store so UI shows it as configured
-        const existing = await getProvider(providerType);
+        const existing = await getProvider(accountId);
         const nameMap: Record<OAuthProviderType, string> = {
             'minimax-portal': 'MiniMax (Global)',
             'minimax-portal-cn': 'MiniMax (CN)',
             'qwen-portal': 'Qwen',
         };
         const providerConfig: ProviderConfig = {
-            id: providerType,
-            name: nameMap[providerType as OAuthProviderType] || providerType,
+            id: accountId,
+            name: accountLabel || nameMap[providerType as OAuthProviderType] || providerType,
             type: providerType,
             enabled: existing?.enabled ?? true,
             baseUrl, // Save the dynamically resolved URL (Global vs CN)
@@ -274,11 +290,11 @@ class DeviceOAuthManager extends EventEmitter {
         await saveProvider(providerConfig);
 
         // 4. Emit success internally so the main process can restart the Gateway
-        this.emit('oauth:success', providerType);
+        this.emit('oauth:success', { provider: providerType, accountId });
 
         // 5. Emit success to frontend
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-            this.mainWindow.webContents.send('oauth:success', { provider: providerType, success: true });
+            this.mainWindow.webContents.send('oauth:success', { provider: providerType, accountId, success: true });
         }
     }
 
@@ -331,12 +347,14 @@ class DeviceOAuthManager extends EventEmitter {
         userCode: string;
         expiresIn: number;
     }) {
+        this.emit('oauth:code', data);
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
             this.mainWindow.webContents.send('oauth:code', data);
         }
     }
 
     private emitError(message: string) {
+        this.emit('oauth:error', { message });
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
             this.mainWindow.webContents.send('oauth:error', { message });
         }
