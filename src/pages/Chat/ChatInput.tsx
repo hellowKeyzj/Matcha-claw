@@ -6,10 +6,13 @@
  * Files are staged to disk via IPC — only lightweight path references
  * are sent with the message (no base64 over WebSocket).
  */
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2 } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { useSkillsStore } from '@/stores/skills';
+import { cn } from '@/lib/utils';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -101,6 +104,94 @@ function detectMentionRange(input: string, cursor: number): { start: number; end
   return { start: atIndex, end: safeCursor, query };
 }
 
+function detectSlashRange(input: string, cursor: number): { start: number; end: number; query: string } | null {
+  const safeCursor = Math.max(0, Math.min(cursor, input.length));
+  const beforeCursor = input.slice(0, safeCursor);
+  const slashIndex = beforeCursor.lastIndexOf('/');
+  if (slashIndex < 0) {
+    return null;
+  }
+  if (slashIndex > 0 && !/\s/.test(beforeCursor[slashIndex - 1])) {
+    return null;
+  }
+  const query = beforeCursor.slice(slashIndex + 1);
+  if (/[\s\r\n\t]/.test(query)) {
+    return null;
+  }
+  return { start: slashIndex, end: safeCursor, query };
+}
+
+interface SelectedSkill {
+  id: string;
+  name: string;
+  icon: string;
+}
+
+interface SlashDropdownLayout {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+  placement: 'above' | 'below';
+}
+
+function buildSkillPrefixedMessage(text: string, selectedSkills: SelectedSkill[]): string {
+  if (selectedSkills.length === 0) {
+    return text;
+  }
+  const skillNames = selectedSkills.map((skill) => skill.name).join('、');
+  const prefix = `[已选择技能: ${skillNames}]`;
+  if (!text) {
+    return prefix;
+  }
+  return `${prefix}\n${text}`;
+}
+
+function hasMissingSkillRequirements(missing?: {
+  bins?: string[];
+  anyBins?: string[];
+  env?: string[];
+  config?: string[];
+  os?: string[];
+}): boolean {
+  if (!missing) return false;
+  return Object.values(missing).some((items) => Array.isArray(items) && items.length > 0);
+}
+
+function isSkillRunnable(skill: {
+  enabled: boolean;
+  eligible?: boolean;
+  blockedByAllowlist?: boolean;
+  missing?: {
+    bins?: string[];
+    anyBins?: string[];
+    env?: string[];
+    config?: string[];
+    os?: string[];
+  };
+}): boolean {
+  if (!skill.enabled) return false;
+  if (skill.eligible === false) return false;
+  if (skill.blockedByAllowlist) return false;
+  if (hasMissingSkillRequirements(skill.missing)) return false;
+  return true;
+}
+
+function scrollOptionIntoView(container: HTMLDivElement, option: HTMLElement): void {
+  const optionTop = option.offsetTop;
+  const optionBottom = optionTop + option.offsetHeight;
+  const viewportTop = container.scrollTop;
+  const viewportBottom = viewportTop + container.clientHeight;
+
+  if (optionTop < viewportTop) {
+    container.scrollTop = optionTop;
+    return;
+  }
+  if (optionBottom > viewportBottom) {
+    container.scrollTop = optionBottom - container.clientHeight;
+  }
+}
+
 // ── Component ────────────────────────────────────────────────────
 
 export function ChatInput({
@@ -117,8 +208,20 @@ export function ChatInput({
   const [mentionEnd, setMentionEnd] = useState(-1);
   const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([]);
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashStart, setSlashStart] = useState(-1);
+  const [slashEnd, setSlashEnd] = useState(-1);
+  const [slashItems, setSlashItems] = useState<SelectedSkill[]>([]);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputContainerRef = useRef<HTMLDivElement>(null);
+  const slashListRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
+  const [slashDropdownLayout, setSlashDropdownLayout] = useState<SlashDropdownLayout | null>(null);
+  const skills = useSkillsStore((state) => state.skills);
+  const skillsLoading = useSkillsStore((state) => state.loading);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -134,12 +237,28 @@ export function ChatInput({
       textareaRef.current.focus();
     }
   }, [disabled]);
+
+  useEffect(() => {
+    if (skills.length > 0 || skillsLoading) {
+      return;
+    }
+    void fetchSkills();
+  }, [fetchSkills, skills.length, skillsLoading]);
+
   const closeMention = useCallback(() => {
     setMentionOpen(false);
     setMentionItems([]);
     setMentionActiveIndex(0);
     setMentionStart(-1);
     setMentionEnd(-1);
+  }, []);
+
+  const closeSlash = useCallback(() => {
+    setSlashOpen(false);
+    setSlashItems([]);
+    setSlashActiveIndex(0);
+    setSlashStart(-1);
+    setSlashEnd(-1);
   }, []);
 
   const refreshMentionCandidates = useCallback((nextInput: string, cursor: number) => {
@@ -167,7 +286,8 @@ export function ChatInput({
     setMentionEnd(range.end);
     setMentionItems(matched);
     setMentionActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
-  }, [closeMention, mentionCandidates]);
+    closeSlash();
+  }, [closeMention, closeSlash, mentionCandidates]);
 
   const applyMentionSelection = useCallback((candidate: MentionCandidate) => {
     if (!textareaRef.current || mentionStart < 0 || mentionEnd < mentionStart) {
@@ -183,6 +303,74 @@ export function ChatInput({
       textareaRef.current?.setSelectionRange(caret, caret);
     });
   }, [closeMention, input, mentionEnd, mentionStart]);
+
+  const refreshSlashCandidates = useCallback((nextInput: string, cursor: number) => {
+    const range = detectSlashRange(nextInput, cursor);
+    if (!range) {
+      closeSlash();
+      return;
+    }
+
+    const query = range.query.trim().toLowerCase();
+    const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
+    const availableSkills = skills.filter((skill) => isSkillRunnable(skill) && !selectedIds.has(skill.id));
+    const matched = availableSkills
+      .filter((skill) => {
+        if (!query) {
+          return true;
+        }
+        const candidates = [skill.id, skill.slug ?? '', skill.name, skill.description];
+        return candidates.some((value) => value.toLowerCase().includes(query));
+      })
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        icon: skill.icon || '🧩',
+      }));
+
+    if (matched.length === 0) {
+      setSlashOpen(true);
+      setSlashStart(range.start);
+      setSlashEnd(range.end);
+      setSlashItems([]);
+      setSlashActiveIndex(0);
+      closeMention();
+      return;
+    }
+
+    setSlashOpen(true);
+    setSlashStart(range.start);
+    setSlashEnd(range.end);
+    setSlashItems(matched);
+    setSlashActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
+    closeMention();
+  }, [closeMention, closeSlash, selectedSkills, skills]);
+
+  const applySlashSelection = useCallback((candidate: SelectedSkill) => {
+    if (!textareaRef.current || slashStart < 0 || slashEnd < slashStart) {
+      return;
+    }
+    const before = input.slice(0, slashStart);
+    const after = input.slice(slashEnd);
+    let nextValue = `${before}${after}`;
+    if (before.length > 0 && after.length > 0 && !/\s$/.test(before) && !/^\s/.test(after)) {
+      nextValue = `${before} ${after}`;
+    }
+    nextValue = nextValue.replace(/\s{2,}/g, ' ');
+    const caret = before.length;
+
+    setInput(nextValue);
+    setSelectedSkills((prev) => (prev.some((item) => item.id === candidate.id) ? prev : [...prev, candidate]));
+    closeSlash();
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(caret, caret);
+    });
+  }, [closeSlash, input, slashEnd, slashStart]);
+
+  const removeSelectedSkill = useCallback((skillId: string) => {
+    setSelectedSkills((prev) => prev.filter((skill) => skill.id !== skillId));
+  }, []);
 
   // ── File staging via native dialog ─────────────────────────────
 
@@ -314,7 +502,7 @@ export function ChatInput({
   }, []);
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
-  const canSend = (input.trim() || attachments.length > 0) && allReady && !disabled && !sending;
+  const canSend = (input.trim() || attachments.length > 0 || selectedSkills.length > 0) && allReady && !disabled && !sending;
   const canStop = sending && !disabled && !!onStop;
 
   const handleSend = useCallback(() => {
@@ -322,7 +510,8 @@ export function ChatInput({
     const readyAttachments = attachments.filter(a => a.status === 'ready');
     // Capture values before clearing — clear input immediately for snappy UX,
     // but keep attachments available for the async send
-    const textToSend = input.trim();
+    const rawText = input.trim();
+    const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
     const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
     console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
     if (attachmentsToSend) {
@@ -333,12 +522,14 @@ export function ChatInput({
     }
     setInput('');
     closeMention();
+    closeSlash();
+    setSelectedSkills([]);
     setAttachments([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     onSend(textToSend, attachmentsToSend);
-  }, [input, attachments, canSend, closeMention, onSend]);
+  }, [input, attachments, canSend, closeMention, closeSlash, onSend, selectedSkills]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -347,6 +538,33 @@ export function ChatInput({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (slashOpen) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (slashItems.length > 0) {
+            setSlashActiveIndex((prev) => Math.min(prev + 1, slashItems.length - 1));
+          }
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (slashItems.length > 0) {
+            setSlashActiveIndex((prev) => Math.max(prev - 1, 0));
+          }
+          return;
+        }
+        if ((e.key === 'Enter' || e.key === 'Tab') && slashItems.length > 0) {
+          e.preventDefault();
+          applySlashSelection(slashItems[slashActiveIndex] ?? slashItems[0]);
+          return;
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeSlash();
+          return;
+        }
+      }
+
       if (mentionOpen && mentionItems.length > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault();
@@ -379,7 +597,7 @@ export function ChatInput({
         handleSend();
       }
     },
-    [applyMentionSelection, closeMention, handleSend, mentionActiveIndex, mentionItems, mentionOpen],
+    [applyMentionSelection, applySlashSelection, closeMention, closeSlash, handleSend, mentionActiveIndex, mentionItems, mentionOpen, slashActiveIndex, slashItems, slashOpen],
   );
 
   // Handle paste (Ctrl/Cmd+V with files)
@@ -430,6 +648,120 @@ export function ChatInput({
     [stageBufferFiles],
   );
 
+  const updateSlashDropdownLayout = useCallback(() => {
+    const anchor = inputContainerRef.current;
+    if (!slashOpen || !anchor) {
+      setSlashDropdownLayout(null);
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    const viewportHeight = window.innerHeight;
+    const viewportWidth = window.innerWidth;
+    const margin = 8;
+    const desiredMaxHeight = 320;
+    const minHeight = 140;
+    const spaceAbove = Math.max(0, rect.top - margin);
+    const spaceBelow = Math.max(0, viewportHeight - rect.bottom - margin);
+    const placeAbove = spaceAbove > spaceBelow;
+    const availableHeight = placeAbove ? spaceAbove : spaceBelow;
+    const maxHeight = Math.max(minHeight, Math.min(desiredMaxHeight, availableHeight));
+    const clampedLeft = Math.max(8, Math.min(rect.left, viewportWidth - rect.width - 8));
+
+    setSlashDropdownLayout({
+      left: clampedLeft,
+      top: placeAbove ? rect.top - margin : rect.bottom + margin,
+      width: rect.width,
+      maxHeight,
+      placement: placeAbove ? 'above' : 'below',
+    });
+  }, [slashOpen]);
+
+  useLayoutEffect(() => {
+    updateSlashDropdownLayout();
+  }, [updateSlashDropdownLayout, selectedSkills.length, input.length, slashItems.length]);
+
+  useEffect(() => {
+    if (!slashOpen) {
+      return;
+    }
+    const handleViewportChange = () => {
+      updateSlashDropdownLayout();
+    };
+    handleViewportChange();
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+    return () => {
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [slashOpen, updateSlashDropdownLayout]);
+
+  useLayoutEffect(() => {
+    if (!slashOpen || slashItems.length === 0 || !slashListRef.current) {
+      return;
+    }
+    const activeOption = slashListRef.current.querySelector<HTMLElement>(
+      `[data-slash-index="${slashActiveIndex}"]`,
+    );
+    if (!activeOption) {
+      return;
+    }
+    scrollOptionIntoView(slashListRef.current, activeOption);
+    requestAnimationFrame(() => {
+      if (!slashListRef.current) {
+        return;
+      }
+      scrollOptionIntoView(slashListRef.current, activeOption);
+    });
+  }, [slashActiveIndex, slashItems.length, slashOpen]);
+
+  const slashDropdownPortal = slashOpen && slashDropdownLayout
+    ? createPortal(
+      <div
+        ref={slashListRef}
+        role="listbox"
+        className="z-[1000] overflow-y-auto overscroll-contain rounded-md border bg-background p-1 shadow-md"
+        style={{
+          position: 'fixed',
+          left: slashDropdownLayout.left,
+          top: slashDropdownLayout.top,
+          width: slashDropdownLayout.width,
+          maxHeight: slashDropdownLayout.maxHeight,
+          transform: slashDropdownLayout.placement === 'above' ? 'translateY(-100%)' : undefined,
+        }}
+      >
+        {slashItems.length === 0 && (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">没有匹配的 Skill</div>
+        )}
+        {slashItems.map((item, index) => {
+          const isActive = index === slashActiveIndex;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              data-slash-index={index}
+              role="option"
+              aria-selected={isActive}
+              className={cn(
+                'flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs',
+                isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted',
+              )}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                applySlashSelection(item);
+              }}
+            >
+              <span className="mr-2">{item.icon}</span>
+              <span className="flex-1 truncate font-medium">{item.name}</span>
+              <span className="ml-2 truncate text-muted-foreground">/{item.id}</span>
+            </button>
+          );
+        })}
+      </div>,
+      document.body,
+    )
+    : null;
+
   return (
     <div
       className="bg-background p-4"
@@ -467,32 +799,61 @@ export function ChatInput({
           </Button>
 
           {/* Textarea */}
-          <div className="flex-1 relative">
-            <Textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => {
-                const nextValue = e.target.value;
-                setInput(nextValue);
-                refreshMentionCandidates(nextValue, e.target.selectionStart ?? nextValue.length);
-              }}
-              onKeyDown={handleKeyDown}
-              onCompositionStart={() => {
-                isComposingRef.current = true;
-              }}
-              onCompositionEnd={() => {
-                isComposingRef.current = false;
-              }}
-              onPaste={handlePaste}
-              placeholder={disabled ? 'Gateway not connected...' : 'Message (Enter to send, Shift+Enter for new line)'}
-              disabled={disabled}
-              className="min-h-[44px] max-h-[200px] resize-none pr-4"
-              rows={1}
-            />
+          <div ref={inputContainerRef} className="flex-1 relative">
+            <div className="rounded-md border border-input bg-background px-3 py-2">
+              {selectedSkills.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {selectedSkills.map((skill) => (
+                    <span
+                      key={skill.id}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-primary/40 bg-primary/20 px-2.5 py-1 text-xs font-medium text-primary shadow-sm"
+                    >
+                      <span>{skill.icon}</span>
+                      <span className="truncate">{skill.name}</span>
+                      <button
+                        type="button"
+                        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-primary/80 hover:bg-primary/20 hover:text-primary"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          removeSelectedSkill(skill.id);
+                        }}
+                        aria-label={`移除技能 ${skill.name}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <Textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  const cursor = e.target.selectionStart ?? nextValue.length;
+                  setInput(nextValue);
+                  refreshMentionCandidates(nextValue, cursor);
+                  refreshSlashCandidates(nextValue, cursor);
+                }}
+                onKeyDown={handleKeyDown}
+                onCompositionStart={() => {
+                  isComposingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  isComposingRef.current = false;
+                }}
+                onPaste={handlePaste}
+                placeholder={disabled ? 'Gateway not connected...' : '输入 / 选择技能；Enter 发送，Shift+Enter 换行'}
+                disabled={disabled}
+                className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent p-0 pr-1 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                rows={1}
+              />
+            </div>
             {mentionOpen && mentionItems.length > 0 && (
               <div
                 role="listbox"
-                className="absolute bottom-full mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-background p-1 shadow-md"
+                className="absolute bottom-full z-50 mb-1 max-h-48 w-full overflow-y-auto overscroll-contain rounded-md border bg-background p-1 shadow-md"
               >
                 {mentionItems.map((item, index) => {
                   const isActive = index === mentionActiveIndex;
@@ -536,6 +897,7 @@ export function ChatInput({
           </Button>
         </div>
       </div>
+      {slashDropdownPortal}
     </div>
   );
 }
