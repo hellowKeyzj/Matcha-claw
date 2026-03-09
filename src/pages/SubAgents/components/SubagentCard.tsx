@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 interface SubagentCardProps {
   agent: SubagentSummary;
   locked?: boolean;
+  modelReady?: boolean;
   onEdit: () => void;
   onDelete: () => void;
   onManage: () => void;
@@ -14,13 +15,15 @@ interface SubagentCardProps {
 export function SubagentCard({
   agent,
   locked = false,
+  modelReady = true,
   onEdit,
   onDelete,
   onManage,
   onChat,
 }: SubagentCardProps) {
   const { t } = useTranslation('subagents');
-  const displayEmoji = agent.identityEmoji || (agent.id === 'main' ? '\u2699\uFE0F' : '\uD83E\uDD16');
+  const displayEmoji = agent.identityEmoji || (agent.isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16');
+  const runDisabled = !modelReady;
 
   return (
     <article className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm">
@@ -66,7 +69,8 @@ export function SubagentCard({
         <Button
           size="sm"
           aria-label={`Manage ${agent.id}`}
-          disabled={locked}
+          disabled={locked || runDisabled}
+          title={runDisabled ? t('card.modelMissingHint') : undefined}
           onClick={onManage}
         >
           {t('card.actions.manage')}
@@ -75,6 +79,8 @@ export function SubagentCard({
           variant="secondary"
           size="sm"
           aria-label={`Chat ${agent.id}`}
+          disabled={runDisabled}
+          title={runDisabled ? t('card.modelMissingHint') : undefined}
           onClick={onChat}
         >
           {t('card.actions.chat')}

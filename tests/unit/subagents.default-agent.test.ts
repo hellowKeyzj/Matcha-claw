@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { useSubagentsStore } from '@/stores/subagents';
 
 describe('subagents default agent', () => {
-  it('always keeps main as default in page state', async () => {
+  it('loadAgents 以 agents.list.defaultId 作为默认标记，不强制 main 为默认', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
       .mockResolvedValueOnce({
@@ -40,14 +40,14 @@ describe('subagents default agent', () => {
         name: 'Main',
         workspace: undefined,
         model: undefined,
-        isDefault: true,
+        isDefault: false,
       },
       {
         id: 'writer',
         name: 'Writer',
         workspace: undefined,
         model: undefined,
-        isDefault: false,
+        isDefault: true,
       },
     ]);
   });
