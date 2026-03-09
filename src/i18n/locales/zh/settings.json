@@ -1,6 +1,56 @@
 {
   "title": "设置",
-  "subtitle": "配置您的 ClawX 体验",
+  "subtitle": "配置您的 MatchaClaw 体验",
+  "license": {
+    "title": "License",
+    "description": "授权管理",
+    "gateStatus": "门禁状态",
+    "gateState": {
+      "checking": "校验中",
+      "granted": "已放行",
+      "blocked": "已拦截"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "请输入 License Key（示例：MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+    "showKey": "显示 License Key",
+    "hideKey": "隐藏 License Key",
+    "validate": "校验并保存",
+    "revalidate": "重新校验",
+    "clear": "清除本地 License",
+    "renewAlert": {
+      "near_expiry_renew_failed": "License 缓存剩余不足 1 天，自动续校失败，请尽快在此页重新校验。"
+    },
+    "messages": {
+      "valid": "License 校验通过",
+      "cache_grace_valid": "离线宽限中，使用本地授权缓存通过校验",
+      "empty": "请输入 License Key",
+      "format_invalid": "License Key 格式不正确",
+      "service_unconfigured": "授权服务未配置",
+      "network_error": "授权服务连接失败，请检查网络后重试",
+      "server_rejected": "License 被授权服务拒绝",
+      "expired": "License 已过期",
+      "device_mismatch": "License 与当前设备不匹配",
+      "not_allowed": "License Key 未授权",
+      "checksum_invalid": "License Key 无效",
+      "unknown": "License 校验失败，请稍后重试"
+    },
+    "confirmReplace": {
+      "title": "确认覆盖当前 License",
+      "message": "当前设备已存在 License 记录，继续会覆盖并重新绑定。是否继续？",
+      "confirm": "确认覆盖",
+      "cancel": "取消"
+    },
+    "confirmClear": {
+      "title": "确认清除本地 License",
+      "message": "清除后将删除本地密文与缓存，应用会重新进入授权拦截状态。",
+      "confirm": "确认清除",
+      "cancel": "取消"
+    },
+    "toast": {
+      "cleared": "本地 License 已清除",
+      "clearFailed": "清除本地 License 失败：{{error}}"
+    }
+  },
   "appearance": {
     "title": "外观",
     "description": "自定义外观和风格",
@@ -8,7 +58,18 @@
     "light": "浅色",
     "dark": "深色",
     "system": "跟随系统",
-    "language": "语言"
+    "language": "语言",
+    "userAvatar": "用户头像",
+    "userAvatarDesc": "上传你的照片作为聊天中的用户头像。",
+    "uploadAvatar": "上传头像",
+    "uploadAvatarInputLabel": "上传用户头像",
+    "clearAvatar": "清除头像",
+    "userAvatarPreviewAlt": "用户头像预览",
+    "userAvatarHint": "上传后会自动裁剪为 128x128 的方形头像并本地保存。",
+    "avatarInvalidType": "请选择图片文件",
+    "avatarUpdated": "用户头像已更新",
+    "avatarCleared": "用户头像已清除",
+    "avatarUpdateFailed": "更新用户头像失败：{{error}}"
   },
   "aiProviders": {
     "title": "AI 模型提供商",
@@ -22,7 +83,7 @@
     "notRequired": "非必填",
     "empty": {
       "title": "未配置提供商",
-      "desc": "添加 AI 提供商以开始使用 ClawX",
+      "desc": "添加 AI 提供商以开始使用 MatchaClaw",
       "cta": "添加您的第一个提供商"
     },
     "dialog": {
@@ -102,7 +163,7 @@
     "appLogs": "应用日志",
     "openFolder": "打开文件夹",
     "autoStart": "自动启动网关",
-    "autoStartDesc": "ClawX 启动时自动启动网关",
+    "autoStartDesc": "MatchaClaw 启动时自动启动网关",
     "proxyTitle": "代理",
     "proxyDesc": "让 Electron 和 Gateway 的网络请求都走本地代理客户端。",
     "proxyServer": "代理服务器",
@@ -137,7 +198,7 @@
   },
   "updates": {
     "title": "更新",
-    "description": "保持 ClawX 最新",
+    "description": "保持 MatchaClaw 最新",
     "autoCheck": "自动检查更新",
     "autoCheckDesc": "启动时检查更新",
     "autoDownload": "自动更新",
@@ -166,6 +227,33 @@
     "errorDetails": "错误详情：",
     "help": "开启自动更新后，更新将自动下载并安装。"
   },
+  "diagnostics": {
+    "title": "日志收集",
+    "description": "一键收集定位问题所需日志并打包压缩。",
+    "masking": "导出前会自动对 openclaw.json、settings.json、diagnostics.json 中的 token / API Key / 代理账号信息做掩码。",
+    "includesTitle": "日志包包含",
+    "collect": "收集并导出",
+    "collecting": "收集中...",
+    "openFolder": "打开压缩包位置",
+    "lastBundle": "最近一次导出",
+    "lastMeta": "导出时间：{{generatedAt}}，文件数：{{count}}",
+    "includes": {
+      "userDataLogs": "<userData>/logs/*（最近 3 天）",
+      "openclawLogs": "<openclawConfigDir>/logs/*（最近 3 天）",
+      "sessions": "<openclawConfigDir>/agents/*/sessions/*.jsonl（最近 3 天）及 sessions.json",
+      "workspace": "<openclawConfigDir>/workspace/**（白名单文件）",
+      "subagents": "<openclawConfigDir>/workspace-subagents/**（白名单文件）",
+      "pluginManifest": "<openclawConfigDir>/extensions/*/openclaw.plugin.json",
+      "settings": "<userData>/settings.json（脱敏）",
+      "openclawConfig": "<openclawConfigDir>/openclaw.json（脱敏）",
+      "generated": "diagnostics.json（自动生成，已脱敏）"
+    },
+    "toast": {
+      "success": "日志包已生成（{{count}} 个文件）",
+      "failed": "日志包生成失败：{{error}}",
+      "openFailed": "打开压缩包位置失败：{{error}}"
+    }
+  },
   "advanced": {
     "title": "高级",
     "description": "高级选项",
@@ -193,14 +281,5 @@
     "installTitle": "安装 OpenClaw 命令",
     "installMessage": "安装 \"openclaw\" 命令？",
     "installDetail": "这将创建 ~/.local/bin/openclaw。确保 ~/.local/bin 在您的 PATH 中。"
-  },
-  "about": {
-    "title": "关于",
-    "appName": "ClawX",
-    "tagline": "图形化 AI 助手",
-    "basedOn": "基于 OpenClaw",
-    "version": "版本 {{version}}",
-    "docs": "官网",
-    "github": "GitHub"
   }
 }
