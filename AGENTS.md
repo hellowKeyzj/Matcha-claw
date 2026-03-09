@@ -4,7 +4,7 @@
 
 ### Overview
 
-ClawX is a cross-platform **Electron desktop app** (React 19 + Vite + TypeScript) providing a GUI for the OpenClaw AI agent runtime. It uses pnpm as its package manager (pinned version in `package.json`'s `packageManager` field).
+MatchaClaw is a cross-platform **Electron desktop app** (React 19 + Vite + TypeScript) providing a GUI for the OpenClaw AI agent runtime. It uses pnpm as its package manager (pinned version in `package.json`'s `packageManager` field).
 
 ### Quick reference
 
@@ -34,13 +34,13 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ---
 
-# Matcha-claw 开发规范
+# Matcha-matchaclaw 开发规范
 
-本文件用于约束在 `Matcha-claw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
+本文件用于约束在 `Matcha-matchaclaw` 仓库内工作的编码代理行为。目标是：稳定、可维护、可升级。
 
 ## 0. 角色定义
 
-你是 Matcha-claw 项目的世界顶级架构编码助手。
+你是 Matcha-matchaclaw 项目的世界顶级架构编码助手。
 
 - 核心职责：
   - 守护架构边界与依赖方向，避免局部修补破坏整体结构。
@@ -97,8 +97,8 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ## 5. IPC 与协议规则
 
-- 继续开发时，先参考 `Matcha-claw/doc/gateway-rpc-api.md`（RPC）与 `Matcha-claw/doc/gateway-events-api.md`（事件），作为 OpenClaw 协议基准。
-- 涉及流式/订阅开发时，优先以 `Matcha-claw/doc/gateway-events-api.md` 的事件名、payload 与 `dropIfSlow` 语义为准。
+- 继续开发时，先参考 `Matcha-matchaclaw/doc/gateway-rpc-api.md`（RPC）与 `Matcha-matchaclaw/doc/gateway-events-api.md`（事件），作为 OpenClaw 协议基准。
+- 涉及流式/订阅开发时，优先以 `Matcha-matchaclaw/doc/gateway-events-api.md` 的事件名、payload 与 `dropIfSlow` 语义为准。
 - 所有 IPC 入参与返回值必须有明确 TypeScript 类型。
 - 错误语义统一：返回结构化错误（`code`/`message`），不要仅返回模糊字符串。
 - `gateway:rpc` 调用必须设置合理超时，超时后可见地反馈给 UI。
@@ -117,6 +117,15 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 - 函数保持单一职责；重复逻辑抽到 `electron/utils/*` 或 `src/lib/*`。
 - 注释只解释“为什么”，不解释显而易见的“做了什么”。
 - 优先小步重构，不做无边界大改。
+
+### 7.1 根因优先排障（强约束）
+
+- 处理故障时必须先定位根因，再提交修复；禁止只做表层“止痛”处理后结束任务。
+- `兜底`、`延长超时`、`重试`、`硬编码` 只能作为临时缓解，不能替代根因修复。
+- 若确需先上临时缓解，必须同时满足：
+  - 明确标注为临时方案与适用边界；
+  - 记录未解决的根因与风险；
+  - 同步给出后续根因修复计划（含触发条件与验证方式）。
 
 ## 8. 测试与验证（必做）
 
@@ -194,7 +203,7 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 ### 13.1 新增目录树
 
 ```text
-Matcha-claw/
+Matcha-matchaclaw/
 ├─ packages/
 │  └─ openclaw-task-manager-plugin/
 │     ├─ openclaw.plugin.json
@@ -237,7 +246,7 @@ Matcha-claw/
 
 ### 13.4 关键决策与原因
 
-- 采用“OpenClaw 插件 + Matcha-claw 适配层”而非改 OpenClaw 内核：降低升级耦合和回归风险。
+- 采用“OpenClaw 插件 + Matcha-matchaclaw 适配层”而非改 OpenClaw 内核：降低升级耦合和回归风险。
 - 任务状态机落盘 JSON 并加文件锁：确保崩溃恢复与多会话并发下的一致性。
 - webhook 使用一次性 token + TTL：控制审批回调暴露风险，避免重复消费。
 - 在设置页与任务页都提供安装入口：一方面满足首次接入路径，另一方面降低故障恢复门槛。
@@ -255,3 +264,362 @@ Matcha-claw/
 - `task-manager` Hook 改为“复杂度评估框架 + 动态切换建议”，移除执行期工具硬拦截策略。
 - Task 插件安装流程新增 `skills.entries.task-manager.enabled = true` 对齐，避免“插件启用但 Skill 未加载”。
 - 任务中心改为聚合“主 workspace + agents.list 配置的子 workspace”任务源，修复 `business-expert` 等子 Agent 创建任务在任务中心不可见的问题。
+
+## 14. Chat 任务收件箱架构变更（2026-03-06）
+
+### 14.1 新增目录树
+
+```text
+Matcha-matchaclaw/
+├─ src/
+│  ├─ lib/task-inbox.ts
+│  ├─ stores/task-inbox-store.ts
+│  └─ pages/Chat/
+│     ├─ components/TaskInboxPanel.tsx
+│     └─ index.tsx (双栏布局接入)
+├─ src/i18n/locales/{zh,en,ja}/chat.json
+├─ tests/unit/
+│  ├─ task-inbox-domain.test.ts
+│  ├─ task-inbox-store.test.ts
+│  ├─ chat-task-inbox-panel.test.tsx
+│  └─ chat-page-task-inbox.integration.test.tsx
+└─ doc/task-manager-plugin.md
+```
+
+### 14.2 文件职责（一句话）
+
+- `src/lib/task-inbox.ts`：封装未完成任务过滤、`assigned_session` 解析、`decision/free_text` 推断规则。
+- `src/stores/task-inbox-store.ts`：聚合跨 workspace 未完成任务，处理 `task_resume -> wakeTaskSession` 与会话跳转动作。
+- `src/pages/Chat/components/TaskInboxPanel.tsx`：右侧任务收件箱 UI，按输入模式渲染“按钮决策/文本提交”。
+- `src/pages/Chat/index.tsx`：将 Chat 页面改为左聊天右任务收件箱双栏结构。
+- `tests/unit/task-inbox-*.test.ts*`：覆盖领域规则、store 动作和 Chat 接入行为。
+
+### 14.3 模块依赖与边界
+
+- Chat 右栏不直接拼装 `gateway:rpc`，统一经 `src/lib/openclaw/task-manager-client.ts`。
+- `task-inbox-store` 可以调用 `useChatStore.getState().switchSession`，但不反向依赖页面组件。
+- UI 组件仅做交互分发与反馈（toast），任务事实源仍以 `task_list + task_*` 事件为准。
+
+### 14.4 关键决策与原因
+
+- 未完成任务状态统一为 `pending/running/waiting_for_input/waiting_approval`，与用户场景一致，避免“看不到运行中任务”。
+- 会话跳转采用“优先 `assigned_session`，缺失即提示”，避免隐式建会话导致错误路由。
+- `waiting_for_input` 强制按 `decision/free_text` 分流，降低并发任务恢复误判。
+- 恢复动作固定为 `task_resume` 成功后立即 `wakeTaskSession`，保证提交后自动继续执行。
+
+### 14.5 本次变更日志
+
+- 新增 Chat 右侧任务收件箱及跨 Agent 未完成任务聚合能力。
+- 新增任务卡片点击跳转子会话能力，并补齐“未绑定会话”显式提示。
+- 新增 `decision/free_text` 分流交互，提交后自动唤醒目标子会话。
+- 新增 4 组测试覆盖领域、状态层、组件与页面集成。
+- 同步 `chat` 三语文案与 task-manager 运维文档说明。
+
+### 14.6 布局补充变更（2026-03-07）
+
+#### 14.6.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+└─ src/
+   └─ components/layout/
+      ├─ AgentSessionsPane.tsx   # 新增：聊天页独立 Agent 会话栏（位于 Sidebar 右侧）
+      ├─ MainLayout.tsx          # 调整：聊天路由插入 AgentSessionsPane
+      └─ Sidebar.tsx             # 调整：只保留菜单导航，不再承载 Agent 会话树
+```
+
+#### 14.6.2 文件职责（增量）
+
+- `src/components/layout/AgentSessionsPane.tsx`：独立渲染“全部 Agent + 各自会话”，支持点击 Agent/会话切换到目标 chat session。
+- `src/components/layout/MainLayout.tsx`：在聊天路由 `/` 下，把 Agent 会话栏插入到左侧菜单与主内容之间。
+- `src/components/layout/Sidebar.tsx`：回归纯导航职责，避免菜单与会话树耦合。
+
+#### 14.6.3 模块依赖与边界（增量）
+
+- Agent 会话数据读取和会话切换统一在 `AgentSessionsPane` 内完成（`useSubagentsStore` + `useChatStore`）。
+- `Sidebar` 不再依赖 chat/subagents store，降低菜单层职责复杂度。
+- `MainLayout` 负责路由级布局编排，不承载会话业务逻辑。
+
+#### 14.6.4 关键决策与原因（增量）
+
+- 将会话树从菜单内嵌改为独立栏位，是为了匹配“红框区域”的信息密度和交互预期（导航与会话浏览分区）。
+- 主 Agent (`main`) 强制纳入会话栏，确保“显示全部 Agent”的一致性。
+
+## 15. Provider/Agent 一致性链路调整（2026-03-08）
+
+### 15.1 边界调整
+
+- `src/stores/providers.ts` 不再负责 provider 变更后的 before/after 配置快照与 `reconcileAgentModels` 编排。
+- provider 变更后 `agent.model` 一致性清理下沉到 `electron/main/ipc-handlers.ts`（主进程单点执行，避免前端 RPC 串联）。
+
+### 15.2 关键决策
+
+- Agent 列表渲染集合改为以 `agents.list` 运行时结果为真相源，配置快照只用于补充字段（不再反向驱动集合）。
+- `loadAgents` 增加请求版本戳，旧请求结果不得覆盖新请求，降低并发加载导致的 UI 回跳/残影。
+- provider 变更后仅刷新前端 provider 列表与模型目录，避免额外触发 `loadAgents` 风暴。
+
+### 15.3 本次变更日志
+
+- `src/stores/subagents.ts`：默认 Agent 语义改为 `defaultAgentId` 驱动，移除写死 `main` 的 defaults 补全逻辑。
+- `src/stores/providers.ts`：删除前端一致性同步链路，收敛为最小刷新动作。
+- `electron/main/ipc-handlers.ts`：新增 provider 变更后的 `agent.model` 统一清理与落盘逻辑。
+- `src/pages/SubAgents/components/SubagentFormDialog.tsx`：emoji 快选去重，修复重复 key 警告。
+
+### 14.7 配置快照链路调整（2026-03-07）
+
+#### 14.7.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+├─ electron/
+│  ├─ main/ipc-handlers.ts        # 新增 openclaw:getConfigJson IPC
+│  └─ preload/index.ts            # 暴露 openclaw:getConfigJson 白名单
+├─ src/stores/
+│  ├─ subagents.ts                # 优先走主进程配置快照读取，降低 gateway config.get 依赖
+│  └─ providers.ts                # provider 变更前后模型快照优先读取本地配置
+└─ electron/gateway/stderr-policy.ts # Gateway stderr 分类策略抽离
+```
+
+#### 14.7.2 文件职责（增量）
+
+- `electron/main/ipc-handlers.ts`：提供 `openclaw:getConfigJson`，返回本地 `~/.openclaw/openclaw.json` 快照。
+- `electron/preload/index.ts`：把 `openclaw:getConfigJson` 纳入 renderer 可调用白名单。
+- `src/stores/subagents.ts`：模型展示/清理逻辑优先使用本地配置快照，`gateway:rpc config.get` 仅保留兜底。
+- `src/stores/providers.ts`：provider 同步前后模型集合对比优先使用本地配置快照，`gateway:rpc config.get` 仅保留兜底。
+- `electron/gateway/stderr-policy.ts`：集中管理 gateway stderr 分类，避免分类规则散落在 manager 内。
+
+#### 14.7.3 模块依赖与边界（增量）
+
+- Renderer 不直接拼 `config.get` 作为主路径，改为通过 preload 白名单 IPC 向主进程读取配置快照。
+- Gateway RPC 仍作为兼容兜底，避免在 `openclaw:getConfigJson` 异常时功能不可用。
+
+#### 14.7.4 关键决策与原因（增量）
+
+- 近期模型清理改造后，`config.get` 调用频率上升会触发 OpenClaw `config/schema` 诊断日志放大。
+- 采用“主进程配置快照优先 + gateway RPC 兜底”可降低噪音触发源，同时保持兼容性和回退路径。
+
+#### 14.7.5 本次变更日志（增量）
+
+- 新增 `openclaw:getConfigJson` IPC 与 preload 暴露。
+- `subagents/providers` 模型同步流程切换为配置快照优先读取。
+- 保留 `gateway:rpc config.get` 兜底路径，避免硬切换导致回归。
+
+## 15. 模型同步与设置路由收敛（2026-03-07）
+
+### 15.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+└─ src/
+   └─ lib/
+      ├─ openclaw/
+      │  └─ model-catalog.ts   # 新增：统一解析配置中的模型集合（providers + defaults.models）
+      └─ settings/
+         └─ sections.ts         # 新增：设置分区 key、query 解析与路由构造
+```
+
+### 15.2 文件职责（增量）
+
+- `src/lib/openclaw/model-catalog.ts`：统一生成“配置中的模型 ID 集合”，供 providers/subagents 双侧复用。
+- `src/lib/settings/sections.ts`：提供设置分区常量、`section` 查询参数解析和分区跳转链接构造。
+
+### 15.3 模块依赖与边界（增量）
+
+- `src/stores/providers.ts` 与 `src/stores/subagents.ts` 不再各自维护模型集合解析逻辑，统一依赖 `model-catalog`。
+- 页面层（Chat/SubAgents）不再硬编码 `"/settings?section=aiProviders"`，统一依赖 `settings/sections` 构造链接。
+
+### 15.4 关键决策与原因（增量）
+
+- 模型集合来源合并 `config.models.providers` 与 `config.agents.defaults.models`，降低“配置有值但被误判不可用”的风险。
+- Agent 模型清理写回时保留对象形态（仅替换 `primary`），避免丢失 `fallbacks` 等结构化字段。
+
+### 15.5 本次变更日志
+
+- 新增统一模型集合解析器并接入 providers/subagents。
+- `reconcileAgentModels` 写回策略调整为“对象形态优先，仅替换 `primary`，无可用模型再清空”。
+- 新增设置分区路由工具，收敛 AI 提供商分区跳转路径构造。
+- 补充 `subagents` 空状态文案并替换页面硬编码文本。
+
+## 16. License 商用校验链路（2026-03-07）
+
+### 16.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+├─ electron/
+│  ├─ utils/license.ts
+│  ├─ utils/license-config.ts
+│  ├─ preload/index.ts
+│  └─ main/ipc-handlers.ts
+├─ src/
+│  ├─ pages/Setup/index.tsx
+│  ├─ i18n/locales/{zh,en,ja}/setup.json
+│  └─ types/electron.d.ts
+├─ scripts/
+│  └─ license_server.py
+├─ tests/unit/license-validation.test.ts
+└─ doc/license-release.md
+```
+
+### 16.2 文件职责（一句话）
+
+- `electron/utils/license-config.ts`：内置固定授权地址/模式/产品标识配置。
+- `electron/utils/license.ts`：统一 License 校验策略（在线优先、缓存宽限、离线本地兜底）与本地激活缓存管理。
+- `electron/main/ipc-handlers.ts`：注册 `license:validate` 主进程 IPC 入口。
+- `electron/preload/index.ts`：暴露 `license:validate` 白名单通道给 renderer。
+- `src/pages/Setup/index.tsx`：向导第 1 步强制 License 校验，未通过不可继续。
+- `src/i18n/locales/*/setup.json`：维护 License 校验状态与错误语义文案。
+- `scripts/license_server.py`：单文件 Python 版 License 工具（gen/add/import/export/serve）。
+- `tests/unit/license-validation.test.ts`：覆盖本地校验与策略分支行为。
+- `doc/license-release.md`：商用部署、环境变量与联调流程说明。
+
+### 16.3 模块依赖与边界
+
+- Renderer 层只通过 `window.electron.ipcRenderer.invoke('license:validate')` 校验授权，不直连 Node/网络。
+- 在线授权请求由主进程执行并复用 `proxyAwareFetch`，避免前端暴露授权细节。
+- 设备身份与授权缓存均在主进程维护，页面层只消费结构化结果码。
+
+### 16.4 关键决策与原因
+
+- 内置固定授权地址与 `online-required` 策略：避免每台机器手工配置环境变量，满足商用统一部署需求。
+- 允许短期离线缓存宽限：降低授权服务瞬时故障造成的不可用风险。
+- 保留 `online-optional/offline-local`：用于开发联调，不作为商用默认路径。
+
+### 16.5 本次变更日志
+
+- 新增 License 在线校验策略与缓存宽限机制，扩展错误语义（网络失败、服务未配置、设备不匹配、过期等）。
+- 向导第 1 步接入 License 输入与校验闸门；未通过不可进入后续步骤。
+- License 工具收敛为 `license_server.py` 单文件入口，移除冗余 `.mjs` 脚本。
+- 新增 `license_server.py` 单文件部署方案，支持批量生成与批量录入 key。
+- 修复 `AgentSessionsPane.tsx` 未使用参数导致的 typecheck 报错，恢复全量类型检查通过。
+
+## 17. Teams 调用分层收敛（2026-03-08）
+
+### 17.1 变更范围
+
+- `src/pages/Teams/index.tsx`
+- `src/pages/Teams/TeamChat.tsx`
+- `src/lib/team/role-resolver.ts`
+- `tests/unit/team-role-resolver.test.ts`
+
+### 17.2 关键决策与原因
+
+- Teams 页面首次展示改为优先走 `loadAgentsForDisplay`，不再直接触发 `loadAgents`，统一“展示读取”语义。
+- `createAgent` 完成后不再额外手动 `loadAgents`，改为消费 `createAgent` 返回的 `agentId`，避免重复刷新链路。
+- `resolvePlanAssignmentsForTeam` 去掉 `loadAgents` 依赖，角色补齐流程不再要求外部二次拉取 agent 列表。
+
+### 17.3 不变量
+
+- `loadAgents` 保留为运行时最小读取能力，不用于 Teams 页面默认首屏刷新。
+- Teams 侧 agent 创建后，后续流程必须以 `createAgent` 返回 `agentId` 作为主锚点，不依赖“先刷新再差集探测”的时序。
+
+## 18. License 门禁与换绑增强（2026-03-08）
+
+### 18.1 目录树增量
+
+```text
+Matcha-matchaclaw/
+├─ electron/
+│  ├─ utils/
+│  │  ├─ license.ts
+│  │  ├─ license-secret.ts        # 新增：本地 AES 密文读写
+│  │  └─ hardware-id.ts           # 新增：稳定硬件指纹采集与哈希
+│  ├─ main/ipc-handlers.ts        # 新增 license:getGateState/forceRevalidate/clearStoredKey
+│  ├─ main/index.ts               # 启动即 bootstrap 授权门禁
+│  └─ preload/index.ts            # 暴露新增 license IPC 白名单
+├─ src/
+│  ├─ App.tsx                     # 全局路由门禁：未授权仅允许 /settings
+│  ├─ pages/Settings/index.tsx    # 新增 License 区块（校验/重校/清除+二次确认）
+│  ├─ lib/settings/sections.ts    # 新增 settings section=license
+│  ├─ types/electron.d.ts         # 新增 license IPC 声明注释
+│  └─ i18n/locales/{zh,en,ja}/settings.json
+└─ scripts/
+   ├─ license_server.py           # 支持 hardwareId/installId 同硬件换绑 + unbind
+   ├─ license-server-README.md
+   └─ license-release.md
+```
+
+### 18.2 文件职责（一句话）
+
+- `electron/utils/license.ts`：统一门禁状态、自动续校调度、在线校验、缓存读写与本地密文联动。
+- `electron/utils/license-secret.ts`：实现 `license-secret.enc.json` 的 AES-256-GCM 加解密与落盘。
+- `electron/utils/hardware-id.ts`：提供跨平台硬件标识读取与哈希。
+- `src/App.tsx`：根据主进程门禁状态执行“仅设置页可访问”的路由收敛。
+- `src/pages/Settings/index.tsx`：提供 License 输入、覆盖确认、重校、清除确认入口。
+- `scripts/license_server.py`：兼容旧 `deviceId`，扩展 `hardwareId/installId` 与人工解绑命令。
+
+### 18.3 模块依赖与边界
+
+- Renderer 不直连授权服务，统一经 `window.electron.ipcRenderer` 调主进程 License IPC。
+- 门禁事实源在主进程（`electron/utils/license.ts`），前端仅消费快照并执行路由限制。
+- 服务端保持 `/v1/activate` 不变，新增字段走“可选兼容”，旧客户端无需改动。
+
+### 18.4 关键决策与原因
+
+- 门禁统一到主进程，避免前端页面各自判断导致绕过。
+- 本地密文采用自定义 AES 方案（不依赖系统钥匙串），满足部署一致性要求。
+- 同硬件换绑通过 `hardwareId` 命中替换 `installId`，降低重装/升级后占用新席位的用户摩擦。
+- 人工解绑最小化实现为 `unbind --key`，用于运维兜底。
+
+### 18.5 本次变更日志
+
+- 新增 License 门禁状态 IPC：`license:getGateState`、`license:forceRevalidate`、`license:clearStoredKey`。
+- 路由守卫调整为“未授权仅允许设置页”，支持升级后统一拦截。
+- 设置页新增 License 分区与二次确认交互（覆盖和清除）。
+- 新增本地密文文件 `license-secret.enc.json` 与自动续校调度。
+- `license_server.py` 新增 `hardwareId/installId` 兼容绑定策略与 `unbind` 命令。
+
+## 19. 配置一致性事件总线（2026-03-08）
+
+### 19.1 目录树增量
+
+```text
+Matcha-claw/
+├─ electron/
+│  ├─ main/
+│  │  ├─ config-domain-service.ts   # 新增：配置 revision/事件总线/外部写监听
+│  │  └─ ipc-handlers.ts            # 接入配置写入口打点与 config:changed 广播
+│  └─ preload/index.ts              # 新增 config:changed 事件白名单
+├─ src/
+│  ├─ stores/
+│  │  ├─ subagents.ts               # 新增 bindConfigChangedListener 去抖刷新
+│  │  └─ providers.ts               # 移除跨域强刷 subagents 模型目录
+│  ├─ App.tsx                        # 配置事件监听单点绑定
+│  ├─ pages/
+│  │  ├─ SubAgents/index.tsx        # 初始化改为“无数据才加载”
+│  │  └─ Teams/{index.tsx,TeamChat.tsx}
+│  ├─ components/layout/AgentSessionsPane.tsx
+│  └─ types/electron.d.ts           # 增加 ConfigChangedPayload 类型声明
+└─ tests/unit/providers.store.sync.test.ts    # 断言改为“依赖 config:changed 驱动刷新”
+```
+
+### 19.2 文件职责（一句话）
+
+- `electron/main/config-domain-service.ts`：维护配置 revision，监听 `openclaw.json` 外部变更并广播 `config:changed`。
+- `electron/main/ipc-handlers.ts`：对 `gateway:rpc` 写方法与本地配置写入口统一触发 `config:changed`。
+- `src/stores/subagents.ts`：提供幂等 `bindConfigChangedListener`，统一去抖执行 `loadAgentsForDisplay + loadAvailableModels`。
+- `src/App.tsx`：作为渲染层唯一配置监听绑定点，避免多页面重复订阅。
+- `src/stores/providers.ts`：provider 写成功后仅刷新 provider 列表，不再直接跨域强刷 subagents。
+
+### 19.3 模块依赖与边界
+
+- 配置变更事实源收敛到主进程：Renderer 不再自己猜测“何时该强刷”。
+- Subagents 展示刷新由事件驱动，不由 provider store 直接调用跨域 action。
+- 监听绑定收敛到 `App` 单点；页面层只做读取初始化，避免重复监听导致并发刷新抖动。
+- `loadAgents/loadAgentsForDisplay` 仍保持纯读取职责，不承担写修复语义。
+
+### 19.4 关键决策与原因
+
+- 用 `revision + hash` 去重，避免文件监听和写入口重复触发导致事件风暴。
+- 写入口成功即发事件，外部写入通过 watcher 补发，确保两类变更都能同步到 UI。
+- 页面初始化改为“无数据才拉取”，降低高频切页时不必要的全量请求。
+
+### 19.5 本次变更日志
+
+- 新增 `config:changed` 事件链路（主进程/预加载/渲染层订阅闭环）。
+- `gateway:rpc` 对 `config.set/patch/apply`、`agents.create/update/delete`、`skills.update` 等写方法自动打点。
+- provider/plugin/skill 本地写配置路径接入事件打点。
+- providers store 去除对 subagents 的直接模型刷新调用，改为事件驱动。
+- 清理 `subagents` 旧前端模型回填写链路（`reconcileAgentModels`），统一由主进程写入口处理一致性。
+- 移除 `config-repository` 前端写函数（`readConfigForCommit` / `patchConfigConsistently`），保留读取职责。
+- 移除 SubAgents/Teams/AgentSessionsPane 的重复 `config:changed` 订阅，改为 `App` 单点订阅。

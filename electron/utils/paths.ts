@@ -28,6 +28,15 @@ export function expandPath(path: string): string {
 
 let openClawConfigDirOverride: string | null = null;
 
+function pickExistingPath(candidates: string[]): string {
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[0];
+}
+
 /**
  * Get OpenClaw default config directory (without runtime override)
  */
@@ -59,21 +68,21 @@ export function getOpenClawSkillsDir(): string {
 }
 
 /**
- * Get ClawX config directory
+ * Get MatchaClaw config directory
  */
-export function getClawXConfigDir(): string {
-  return join(homedir(), '.clawx');
+export function getMatchaClawConfigDir(): string {
+  return join(homedir(), '.matchaclaw');
 }
 
 /**
- * Get ClawX logs directory
+ * Get MatchaClaw logs directory
  */
 export function getLogsDir(): string {
   return join(app.getPath('userData'), 'logs');
 }
 
 /**
- * Get ClawX data directory
+ * Get MatchaClaw data directory
  */
 export function getDataDir(): string {
   return app.getPath('userData');
@@ -114,7 +123,6 @@ export function getOpenClawDir(): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, 'openclaw');
   }
-  // Development: use node_modules/openclaw
   return join(__dirname, '../../node_modules/openclaw');
 }
 
@@ -142,18 +150,34 @@ export function getOpenClawEntryPath(): string {
 }
 
 /**
- * Get ClawHub CLI entry script path (clawdhub.js)
+ * Get MatchaClawHub CLI entry script path (matchaclawdhub.js)
  */
-export function getClawHubCliEntryPath(): string {
-  return join(app.getAppPath(), 'node_modules', 'clawhub', 'bin', 'clawdhub.js');
+export function getMatchaClawHubCliEntryPath(): string {
+  const appPath = app.getAppPath();
+  const packageCandidates = ['matchaclawhub', 'clawhub'];
+  const entryCandidates = ['bin/matchaclawdhub.js', 'bin/clawdhub.js'];
+
+  for (const pkg of packageCandidates) {
+    for (const entry of entryCandidates) {
+      const candidate = join(appPath, 'node_modules', pkg, entry);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return join(appPath, 'node_modules', 'matchaclawhub', 'bin', 'matchaclawdhub.js');
 }
 
 /**
- * Get ClawHub CLI binary path (node_modules/.bin)
+ * Get MatchaClawHub CLI binary path (node_modules/.bin)
  */
-export function getClawHubCliBinPath(): string {
-  const binName = process.platform === 'win32' ? 'clawhub.cmd' : 'clawhub';
-  return join(app.getAppPath(), 'node_modules', '.bin', binName);
+export function getMatchaClawHubCliBinPath(): string {
+  const binDir = join(app.getAppPath(), 'node_modules', '.bin');
+  const binNames = process.platform === 'win32'
+    ? ['matchaclawhub.cmd', 'clawhub.cmd']
+    : ['matchaclawhub', 'clawhub'];
+  return pickExistingPath(binNames.map((name) => join(binDir, name)));
 }
 
 /**

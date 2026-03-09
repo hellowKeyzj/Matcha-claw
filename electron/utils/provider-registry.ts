@@ -69,8 +69,8 @@ const REGISTRY: Record<string, ProviderBackendMeta> = {
       api: 'openai-completions',
       apiKeyEnv: 'OPENROUTER_API_KEY',
       headers: {
-        'HTTP-Referer': 'https://claw-x.com',
-        'X-Title': 'ClawX',
+        'HTTP-Referer': 'https://matchaclaw-x.com',
+        'X-Title': 'MatchaClaw',
       },
     },
   },

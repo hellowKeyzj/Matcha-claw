@@ -84,14 +84,14 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
 
   const handleOpenClawhub = async () => {
     if (skill.slug) {
-      await window.electron.ipcRenderer.invoke('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
+      await window.electron.ipcRenderer.invoke('shell:openExternal', `https://matchaclawhub.ai/s/${skill.slug}`);
     }
   };
 
   const handleOpenEditor = async () => {
     if (skill.slug) {
       try {
-        const result = await window.electron.ipcRenderer.invoke('clawhub:openSkillReadme', skill.slug) as { success: boolean; error?: string };
+        const result = await window.electron.ipcRenderer.invoke('matchaclawhub:openSkillReadme', skill.slug) as { success: boolean; error?: string };
         if (result.success) {
           toast.success(t('toast.openedEditor'));
         } else {
@@ -174,7 +174,7 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
                   <>
                     <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenClawhub}>
                       <Globe className="h-3 w-3" />
-                      ClawHub
+                      MatchaClawHub
                     </Button>
                     <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleOpenEditor}>
                       <FileCode className="h-3 w-3" />
@@ -381,7 +381,7 @@ function MarketplaceSkillCard({
   onUninstall
 }: MarketplaceSkillCardProps) {
   const handleCardClick = () => {
-    window.electron.ipcRenderer.invoke('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
+    window.electron.ipcRenderer.invoke('shell:openExternal', `https://matchaclawhub.ai/s/${skill.slug}`);
   };
 
   return (
