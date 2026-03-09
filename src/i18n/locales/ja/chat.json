@@ -1,8 +1,12 @@
 {
     "gatewayNotRunning": "ゲートウェイが停止中",
     "gatewayRequired": "チャットを使用するには OpenClaw ゲートウェイが実行されている必要があります。自動的に起動するか、設定から起動できます。",
+    "mainModelBlocked": {
+        "title": "デフォルトAgentのモデルが未設定です",
+        "description": "設定 > AI モデルプロバイダー でモデルを追加し、スマートエージェント管理台でモデル設定を完了してからチャットしてください。"
+    },
     "welcome": {
-        "title": "ClawX チャット",
+        "title": "MatchaClaw チャット",
         "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
         "askQuestions": "質問する",
         "askQuestionsDesc": "あらゆるトピックについて回答を得る",
@@ -14,5 +18,36 @@
         "refresh": "チャットを更新",
         "showThinking": "思考を表示",
         "hideThinking": "思考を非表示"
+    },
+    "taskInbox": {
+        "title": "タスク受信箱",
+        "unfinishedCount": "未完了タスク {{count}} 件",
+        "refresh": "タスクを更新",
+        "collapse": "タスク受信箱を折りたたむ",
+        "expand": "タスク受信箱を展開",
+        "workspaceScope": "対象: {{scope}}",
+        "gatewayStopped": "ゲートウェイが停止中のため、タスクリストと再開操作は無効です。",
+        "empty": "このワークスペースに未完了タスクはありません",
+        "openSession": "セッションへ移動",
+        "approve": "承認",
+        "reject": "却下",
+        "submitInput": "入力を送信",
+        "inputPlaceholder": "追加情報を入力してください",
+        "unboundSession": "セッション未紐付けです。先にタスクを再開してください。",
+        "taskNotFound": "タスクが見つからないか更新されました。更新して再試行してください。",
+        "assignedSessionReady": "セッション紐付け済み",
+        "assignedSessionMissing": "セッション未紐付け",
+        "untitledTask": "無題タスク",
+        "status": {
+            "pending": "待機中",
+            "running": "実行中",
+            "waiting_for_input": "入力待ち",
+            "waiting_approval": "承認待ち",
+            "completed": "完了",
+            "failed": "失敗"
+        },
+        "toast": {
+            "resumed": "タスクを再開しました"
+        }
     }
 }
