@@ -91,7 +91,6 @@ function App() {
   const initSettings = useSettingsStore((state) => state.init);
   const theme = useSettingsStore((state) => state.theme);
   const language = useSettingsStore((state) => state.language);
-  const gatewayTransportPreference = useSettingsStore((state) => state.gatewayTransportPreference);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const initGateway = useGatewayStore((state) => state.init);
 
@@ -152,8 +151,8 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    applyGatewayTransportPreference(gatewayTransportPreference);
-  }, [gatewayTransportPreference]);
+    applyGatewayTransportPreference();
+  }, []);
 
   return (
     <ErrorBoundary>

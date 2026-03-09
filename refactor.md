@@ -141,3 +141,38 @@ This branch captures local refactors focused on frontend UX polish, IPC call con
   - explicitly resolves via `chat:historyBuckets.*` to avoid raw key fallback.
 - Removed forced uppercase rendering for bucket headers to preserve localized casing.
 - Grouping now applies to all sessions (including `:main`) for consistent bucket visibility and behavior.
+
+### 19. `refactor_clawx_1` × `main` merge outcome (main-first baseline)
+- Performed a dedicated merge line with `origin/main` as the conflict-resolution baseline for high-risk files.
+- Resolved wide conflict surface in gateway/store/page layers by prioritizing compile-safe `main` implementations, then selectively re-applying compatible refactor behavior.
+- Merge result focus:
+  - keep app runnable and type-safe first
+  - avoid partial hybrid states that mix incompatible host-api/ipc patterns in a single module
+  - retain low-risk UX/flow improvements only when behavior parity is clear
+
+### 20. Post-merge compile recovery
+- Fixed merge-induced breakages causing `tsc`/build failures:
+  - malformed blocks in settings/channels/chat/store files
+  - duplicated variable declarations in `electron/gateway/manager.ts`
+  - mismatched transport helper usage introduced by partial conflict picks
+- Re-aligned broken modules to `origin/main` where necessary to restore a stable build baseline.
+- Current status after cleanup:
+  - `pnpm run typecheck` passes
+  - app-side Vite/Electron compile succeeds; packaging step may still fail under restricted proxy/network environments (non-code issue)
+
+### 21. IPC event compatibility fix after merge
+- Fixed runtime error `Invalid IPC channel: gateway:channel-status` by restoring preload allowlist compatibility with renderer subscriptions.
+- Reconciled `electron/preload/index.ts` event channel whitelist with active gateway event usage:
+  - `gateway:status-changed`
+  - `gateway:message`
+  - `gateway:notification`
+  - `gateway:channel-status`
+  - `gateway:chat-message`
+  - `gateway:exit`
+  - `gateway:error`
+
+### 22. Transport strategy consolidation (no user toggle)
+- Removed manual transport selection UI from Settings/Developer to reduce operator complexity and avoid invalid combinations.
+- Kept transport abstraction in code, but locked runtime policy to a single fixed chain:
+  - `WS first -> HTTP fallback -> IPC fallback`
+- Applied this as bootstrap default in app initialization rather than user preference switching.
