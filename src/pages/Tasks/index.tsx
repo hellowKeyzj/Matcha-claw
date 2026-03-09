@@ -336,11 +336,11 @@ export function TasksPage() {
 
       {!initialized ? null : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
-          <Card className="h-[70vh] overflow-hidden">
-            <CardHeader>
+          <Card className="flex h-[70vh] flex-col overflow-hidden">
+            <CardHeader className="shrink-0">
               <CardTitle>{t('listTitle')}</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3 overflow-y-auto pb-6">
+            <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto pb-6">
               {tasks.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t('empty')}</p>
               ) : (
@@ -374,12 +374,12 @@ export function TasksPage() {
             </CardContent>
           </Card>
 
-          <Card className="h-[70vh] overflow-hidden">
-            <CardHeader>
+          <Card className="flex h-[70vh] flex-col overflow-hidden">
+            <CardHeader className="shrink-0">
               <CardTitle>{selectedTask ? selectedTask.goal : t('detailTitle')}</CardTitle>
               <CardDescription>{selectedTask?.id || '-'}</CardDescription>
             </CardHeader>
-            <CardContent className="h-[calc(70vh-112px)] overflow-y-auto">
+            <CardContent className="min-h-0 flex-1 overflow-y-auto">
               {!selectedTask ? (
                 <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
               ) : (
