@@ -200,7 +200,6 @@ describe('subagents page', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Show emoji quick picks' }));
     fireEvent.click(screen.getByRole('button', { name: 'pick-emoji-🔥' }));
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
@@ -219,7 +218,7 @@ describe('subagents page', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
-    fireEvent.change(screen.getByLabelText('Initial Prompt'), {
+    fireEvent.change(screen.getByLabelText('System Prompt'), {
       target: { value: 'act as a finance analyst' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));

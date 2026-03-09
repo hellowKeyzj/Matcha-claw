@@ -34,6 +34,8 @@
   },
   "close": "关闭",
   "form": {
+    "basicInfo": "基本信息",
+    "aiConfig": "AI 配置",
     "name": "名称",
     "workspace": "工作区",
     "model": "模型",
@@ -43,14 +45,12 @@
     "modelsLoading": "模型加载中...",
     "selectModel": "请选择已配置模型",
     "modelUnavailable": "未找到可用的已配置模型。",
-    "initialPrompt": "初始提示词",
-    "initialPromptPlaceholder": "可选：先写一段给该子Agent的提示词",
+    "initialPrompt": "系统提示词",
+    "initialPromptPlaceholder": "可选：先写一段该 Agent 的系统提示词",
     "emoji": "表情",
-    "emojiNone": "不使用表情",
     "emojiPlaceholder": "可手动输入任意 emoji，或从下方选择",
     "emojiPanelShow": "显示快捷表情",
-    "emojiPanelHide": "隐藏快捷表情",
-    "emojiHelp": "下方是常用预设，也可以手动输入自定义 emoji。"
+    "emojiPanelHide": "隐藏快捷表情"
   },
   "card": {
     "default": "默认",

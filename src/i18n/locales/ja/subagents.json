@@ -31,6 +31,8 @@
   },
   "close": "閉じる",
   "form": {
+    "basicInfo": "基本情報",
+    "aiConfig": "AI 設定",
     "name": "名前",
     "workspace": "ワークスペース",
     "model": "モデル",
@@ -40,14 +42,12 @@
     "modelsLoading": "モデルを読み込み中...",
     "selectModel": "設定済みモデルを選択",
     "modelUnavailable": "利用可能な設定済みモデルがありません。",
-    "initialPrompt": "初期プロンプト",
-    "initialPromptPlaceholder": "任意: このサブAgentの初期プロンプトを入力",
+    "initialPrompt": "システムプロンプト",
+    "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力",
     "emoji": "絵文字",
-    "emojiNone": "絵文字なし",
     "emojiPlaceholder": "任意の絵文字を入力するか、下から選択",
     "emojiPanelShow": "絵文字候補を表示",
-    "emojiPanelHide": "絵文字候補を非表示",
-    "emojiHelp": "下はよく使う候補です。手入力でも設定できます。"
+    "emojiPanelHide": "絵文字候補を非表示"
   },
   "card": {
     "default": "デフォルト",

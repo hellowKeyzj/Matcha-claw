@@ -6,6 +6,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import {
   buildSubagentWorkspacePath,
+  buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
 } from '@/lib/subagent/workspace';
 import type { ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
@@ -27,7 +28,7 @@ interface SubagentFormDialogProps {
   open: boolean;
   title: string;
   mode: SubagentFormMode;
-  existingAgents: Pick<SubagentSummary, 'id' | 'workspace'>[];
+  existingAgents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[];
   modelOptions: ModelCatalogEntry[];
   modelsLoading: boolean;
   initialValues?: Partial<SubagentFormValues>;
@@ -65,7 +66,7 @@ export function SubagentFormDialog({
   const { t } = useTranslation('subagents');
   const [values, setValues] = useState<SubagentFormValues>(EMPTY_VALUES);
   const [submitting, setSubmitting] = useState(false);
-  const [emojiPanelOpen, setEmojiPanelOpen] = useState(false);
+  const [fallbackWorkspaceRoot, setFallbackWorkspaceRoot] = useState<string | undefined>(undefined);
   const resolvedModelOptions = useMemo(() => {
     const byId = new Map<string, ModelCatalogEntry>();
     for (const model of modelOptions) {
@@ -79,6 +80,11 @@ export function SubagentFormDialog({
     () => Array.from(new Set(EMOJI_OPTIONS)),
     []
   );
+  const buildWorkspaceValue = (name: string) => buildSubagentWorkspacePath({
+    name,
+    agents: existingAgents,
+    fallbackRoot: fallbackWorkspaceRoot,
+  });
 
   useEffect(() => {
     if (!open) {
@@ -86,7 +92,7 @@ export function SubagentFormDialog({
     }
     const initialName = initialValues?.name ?? '';
     const initialWorkspace = mode === 'create'
-      ? buildSubagentWorkspacePath({ name: initialName, agents: existingAgents })
+      ? buildWorkspaceValue(initialName)
       : (initialValues?.workspace ?? '');
     setValues({
       name: initialName,
@@ -96,8 +102,54 @@ export function SubagentFormDialog({
       prompt: initialValues?.prompt ?? '',
     });
     setSubmitting(false);
-    setEmojiPanelOpen(false);
   }, [existingAgents, initialValues, mode, modelOptions, open]);
+
+  useEffect(() => {
+    if (!open || mode !== 'create') {
+      return;
+    }
+    let cancelled = false;
+    const loadFallbackWorkspaceRoot = async () => {
+      try {
+        const rawConfigDir = await Promise.resolve(
+          window.electron?.ipcRenderer?.invoke?.('openclaw:getConfigDir')
+        );
+        const configDir = typeof rawConfigDir === 'string' ? rawConfigDir.trim() : '';
+        if (cancelled) {
+          return;
+        }
+        if (!configDir) {
+          setFallbackWorkspaceRoot(undefined);
+          return;
+        }
+        setFallbackWorkspaceRoot(buildWorkspaceSubagentsRootFromConfigDir(configDir));
+      } catch {
+        if (!cancelled) {
+          setFallbackWorkspaceRoot(undefined);
+        }
+      }
+    };
+    void loadFallbackWorkspaceRoot();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, open]);
+
+  useEffect(() => {
+    if (!open || mode !== 'create') {
+      return;
+    }
+    setValues((prev) => {
+      const nextWorkspace = buildWorkspaceValue(prev.name);
+      if (nextWorkspace === prev.workspace) {
+        return prev;
+      }
+      return {
+        ...prev,
+        workspace: nextWorkspace,
+      };
+    });
+  }, [existingAgents, fallbackWorkspaceRoot, mode, open]);
 
   useEffect(() => {
     if (!open || values.model || modelOptions.length !== 1) {
@@ -143,7 +195,7 @@ export function SubagentFormDialog({
       <section
         role="dialog"
         aria-label={title}
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg border bg-background p-4 shadow-lg"
+        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border bg-background p-6 shadow-xl"
       >
         <header className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
@@ -152,7 +204,7 @@ export function SubagentFormDialog({
           </Button>
         </header>
         <form
-          className="mt-4 space-y-3"
+          className="mt-5 space-y-6"
           onSubmit={async (event) => {
             event.preventDefault();
             if (!canSubmit) {
@@ -172,132 +224,126 @@ export function SubagentFormDialog({
             }
           }}
         >
-          <div className="space-y-1">
-            <Label htmlFor="subagent-name">{t('form.name')}</Label>
-            <Input
-              id="subagent-name"
-              value={values.name}
-              onChange={(event) => {
-                const nextName = event.target.value;
-                setValues((prev) => ({
-                  ...prev,
-                  name: nextName,
-                  ...(mode === 'create'
-                    ? {
-                      workspace: buildSubagentWorkspacePath({
-                        name: nextName,
-                        agents: existingAgents,
-                      }),
-                    }
-                    : {}),
-                }));
-              }}
-            />
-            {duplicateName && (
-              <p className="text-xs text-destructive">{t('form.nameDuplicate')}</p>
-            )}
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="subagent-workspace">{t('form.workspace')}</Label>
-            <Input
-              id="subagent-workspace"
-              value={values.workspace}
-              readOnly
-              className="text-muted-foreground"
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="subagent-model">{t('form.model')}</Label>
-            <Select
-              id="subagent-model"
-              value={values.model}
-              disabled={modelsLoading || !hasModelOptions}
-              onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))}
-            >
-              <option value="">
-                {modelsLoading
-                  ? t('form.modelsLoading')
-                  : t('form.selectModel')}
-              </option>
-              {resolvedModelOptions.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.provider ? `${model.id} (${model.provider})` : model.id}
-                </option>
-              ))}
-            </Select>
-            {!modelsLoading && !hasModelOptions && (
-              <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
-            )}
-          </div>
-          {mode === 'create' && (
-            <div className="space-y-2">
-              <Label htmlFor="subagent-emoji">{t('form.emoji')}</Label>
-              <Input
-                id="subagent-emoji"
-                value={values.emoji}
-                maxLength={16}
-                placeholder={t('form.emojiPlaceholder')}
-                onChange={(event) => setValues((prev) => ({ ...prev, emoji: event.target.value }))}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setEmojiPanelOpen((prev) => !prev)}
-              >
-                {emojiPanelOpen ? t('form.emojiPanelHide') : t('form.emojiPanelShow')}
-              </Button>
-              {emojiPanelOpen && (
-                <div className="rounded-md border p-2">
-                  <div className="grid max-h-40 grid-cols-10 gap-1 overflow-y-auto pr-1">
-                    {resolvedEmojiOptions.map((emoji) => {
-                      const selected = values.emoji === emoji;
-                      return (
-                        <button
-                          key={emoji}
-                          type="button"
-                          aria-label={`pick-emoji-${emoji}`}
-                          onClick={() => setValues((prev) => ({ ...prev, emoji }))}
-                          className={cn(
-                            'h-8 w-8 rounded border text-lg leading-none transition-colors',
-                            selected
-                              ? 'border-primary bg-primary/10'
-                              : 'border-transparent hover:bg-accent'
-                          )}
-                        >
-                          {emoji}
-                        </button>
-                      );
-                    })}
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">{t('form.basicInfo')}</h3>
+            <div className={cn('grid gap-4', mode === 'create' ? 'md:grid-cols-[250px,1fr]' : 'md:grid-cols-1')}>
+              {mode === 'create' && (
+                <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+                  <div className="flex items-center">
+                    <Label htmlFor="subagent-emoji">{t('form.emoji')}</Label>
+                  </div>
+                  <Input
+                    id="subagent-emoji"
+                    value={values.emoji}
+                    maxLength={16}
+                    placeholder={t('form.emojiPlaceholder')}
+                    onChange={(event) => setValues((prev) => ({ ...prev, emoji: event.target.value }))}
+                  />
+                  <div className="rounded-md border bg-background p-2">
+                    <div className="grid max-h-48 grid-cols-8 gap-1 overflow-y-auto pr-1">
+                      {resolvedEmojiOptions.map((emoji) => {
+                        const selected = values.emoji === emoji;
+                        return (
+                          <button
+                            key={emoji}
+                            type="button"
+                            aria-label={`pick-emoji-${emoji}`}
+                            onClick={() => setValues((prev) => ({ ...prev, emoji }))}
+                            className={cn(
+                              'h-8 w-8 rounded border text-lg leading-none transition-colors',
+                              selected
+                                ? 'border-primary bg-primary/10'
+                                : 'border-transparent hover:bg-accent'
+                            )}
+                          >
+                            {emoji}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}
-              <p className="text-xs text-muted-foreground">{t('form.emojiHelp')}</p>
-              {values.emoji && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setValues((prev) => ({ ...prev, emoji: '' }))}
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <Label htmlFor="subagent-name">{t('form.name')}</Label>
+                  <Input
+                    id="subagent-name"
+                    value={values.name}
+                    onChange={(event) => {
+                      const nextName = event.target.value;
+                      setValues((prev) => ({
+                        ...prev,
+                        name: nextName,
+                        ...(mode === 'create'
+                          ? {
+                            workspace: buildWorkspaceValue(nextName),
+                          }
+                          : {}),
+                      }));
+                    }}
+                  />
+                  {duplicateName && (
+                    <p className="text-xs text-destructive">{t('form.nameDuplicate')}</p>
+                  )}
+                </div>
+                {mode === 'create' && (
+                  <div className="space-y-1">
+                    <Label htmlFor="subagent-initial-prompt">{t('form.initialPrompt')}</Label>
+                    <Textarea
+                      id="subagent-initial-prompt"
+                      rows={9}
+                      className="min-h-[220px]"
+                      value={values.prompt}
+                      placeholder={t('form.initialPromptPlaceholder')}
+                      onChange={(event) => setValues((prev) => ({ ...prev, prompt: event.target.value }))}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">{t('form.aiConfig')}</h3>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-1">
+                <Label htmlFor="subagent-workspace">{t('form.workspace')}</Label>
+                <Input
+                  id="subagent-workspace"
+                  value={values.workspace}
+                  readOnly
+                  className="text-muted-foreground"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="subagent-model">{t('form.model')}</Label>
+                <Select
+                  id="subagent-model"
+                  value={values.model}
+                  disabled={modelsLoading || !hasModelOptions}
+                  onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))}
                 >
-                  {t('form.emojiNone')}
-                </Button>
-              )}
+                  <option value="">
+                    {modelsLoading
+                      ? t('form.modelsLoading')
+                      : t('form.selectModel')}
+                  </option>
+                  {resolvedModelOptions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.provider ? `${model.id} (${model.provider})` : model.id}
+                    </option>
+                  ))}
+                </Select>
+                {!modelsLoading && !hasModelOptions && (
+                  <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
+                )}
+              </div>
             </div>
-          )}
-          {mode === 'create' && (
-            <div className="space-y-1">
-              <Label htmlFor="subagent-initial-prompt">{t('form.initialPrompt')}</Label>
-              <Textarea
-                id="subagent-initial-prompt"
-                rows={3}
-                value={values.prompt}
-                placeholder={t('form.initialPromptPlaceholder')}
-                onChange={(event) => setValues((prev) => ({ ...prev, prompt: event.target.value }))}
-              />
-            </div>
-          )}
-          <div className="mt-4 flex justify-end gap-2">
+          </section>
+
+          <div className="flex justify-end gap-2 border-t pt-3">
             <Button type="submit" disabled={!canSubmit}>
               {submitLabel}
             </Button>

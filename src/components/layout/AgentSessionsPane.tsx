@@ -149,6 +149,11 @@ function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): s
   return canonical;
 }
 
+function hasCanonicalMainSession(agentId: string, sessions: ChatSession[]): boolean {
+  const canonical = buildDefaultAgentSessionKey(agentId);
+  return sessions.some((session) => session.key === canonical);
+}
+
 function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
   if (explicitEmoji && explicitEmoji.trim()) {
     return explicitEmoji;
@@ -369,7 +374,9 @@ export function AgentSessionsPane({
             ) : (
               agentSessionNodes.map((node) => {
                 const preferredSessionKey = resolvePreferredSessionKey(node.agentId, node.sessions);
-                const childSessions = node.sessions.filter((session) => session.key !== preferredSessionKey);
+                const childSessions = hasCanonicalMainSession(node.agentId, node.sessions)
+                  ? node.sessions.filter((session) => session.key !== preferredSessionKey)
+                  : node.sessions;
                 const isMainSessionActive = currentSessionKey === preferredSessionKey;
                 const groupCollapsed = Boolean(collapsedAgentGroupsInView[node.agentId]);
                 return (

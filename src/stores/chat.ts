@@ -1361,8 +1361,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
-    const { currentSessionKey, messages } = get();
-    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const { currentSessionKey, messages, loading } = get();
+    // Guard against false "empty session" during async history loading.
+    const leavingEmpty = !loading && !currentSessionKey.endsWith(':main') && messages.length === 0;
     set((s) => ({
       currentSessionKey: key,
       messages: [],
@@ -1452,8 +1453,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // NOTE: We intentionally do NOT call sessions.reset on the old session.
     // sessions.reset archives (renames) the session JSONL file, making old
     // conversation history inaccessible when the user switches back to it.
-    const { currentSessionKey, messages } = get();
-    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const { currentSessionKey, messages, loading } = get();
+    // Guard against false "empty session" during async history loading.
+    const leavingEmpty = !loading && !currentSessionKey.endsWith(':main') && messages.length === 0;
     const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
       ?? getCanonicalPrefixFromSessions(get().sessions)
       ?? DEFAULT_CANONICAL_PREFIX;
@@ -1486,12 +1488,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Cleanup empty session on navigate away ──
 
   cleanupEmptySession: () => {
-    const { currentSessionKey, messages } = get();
+    const { currentSessionKey, messages, loading } = get();
     // Only remove non-main sessions that were never used (no messages sent).
     // This mirrors the "leavingEmpty" logic in switchSession so that creating
     // a new session and immediately navigating away doesn't leave a ghost entry
     // in the sidebar.
-    const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const isEmptyNonMain = !loading && !currentSessionKey.endsWith(':main') && messages.length === 0;
     if (!isEmptyNonMain) return;
     set((s) => ({
       sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),

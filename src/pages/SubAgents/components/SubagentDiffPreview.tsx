@@ -89,7 +89,7 @@ export function SubagentDiffPreview({ previewDiffByFile, persistedContentByFile 
         <article className="rounded-lg border bg-card p-3">
           <h4 className="mb-2 text-sm font-medium">{activeName}</h4>
           {hasDiffPreview ? (
-            <pre className="max-h-[460px] overflow-auto text-xs">
+            <pre className="h-[460px] overflow-auto text-xs">
               {activeLines.map((line, index) => (
                 <div key={`${activeName}-${index}`} className={LINE_STYLE[line.type]}>
                   {PREFIX[line.type]}
@@ -98,7 +98,7 @@ export function SubagentDiffPreview({ previewDiffByFile, persistedContentByFile 
               ))}
             </pre>
           ) : (
-            <pre className="max-h-[460px] overflow-auto whitespace-pre-wrap text-xs text-foreground">
+            <pre className="h-[460px] overflow-auto whitespace-pre-wrap text-xs text-foreground">
               {activeContent || t('manage.emptyFileContent')}
             </pre>
           )}
