@@ -1,5 +1,6 @@
 import { invokeIpc } from '@/lib/api-client';
 import { trackUiEvent } from './telemetry';
+import { normalizeAppError } from './error-model';
 
 const HOST_API_PORT = 3210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
@@ -45,7 +46,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
     } catch {
       // ignore body parse failure
     }
-    throw new Error(message);
+    throw normalizeAppError(new Error(message), {
+      source: 'browser-fallback',
+      status: response.status,
+    });
   }
 
   if (response.status === 204) {
@@ -117,8 +121,12 @@ function parseLegacyProxyResponse<T>(
 }
 
 function shouldFallbackToBrowser(message: string): boolean {
-  return message.includes('Invalid IPC channel: hostapi:fetch')
-    || message.includes('window is not defined');
+  const normalized = message.toLowerCase();
+  return normalized.includes('invalid ipc channel: hostapi:fetch')
+    || normalized.includes("no handler registered for 'hostapi:fetch'")
+    || normalized.includes('no handler registered for "hostapi:fetch"')
+    || normalized.includes('no handler registered for hostapi:fetch')
+    || normalized.includes('window is not defined');
 }
 
 export async function hostApiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -139,16 +147,18 @@ export async function hostApiFetch<T>(path: string, init?: RequestInit): Promise
 
     return parseLegacyProxyResponse<T>(response, path, method, startedAt);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const normalized = normalizeAppError(error, { source: 'ipc-proxy', path, method });
+    const message = normalized.message;
     trackUiEvent('hostapi.fetch_error', {
       path,
       method,
       source: 'ipc-proxy',
       durationMs: Date.now() - startedAt,
       message,
+      code: normalized.code,
     });
     if (!shouldFallbackToBrowser(message)) {
-      throw error;
+      throw normalized;
     }
   }
 
@@ -167,7 +177,11 @@ export async function hostApiFetch<T>(path: string, init?: RequestInit): Promise
     durationMs: Date.now() - startedAt,
     status: response.status,
   });
-  return parseResponse<T>(response);
+  try {
+    return await parseResponse<T>(response);
+  } catch (error) {
+    throw normalizeAppError(error, { source: 'browser-fallback', path, method });
+  }
 }
 
 export function createHostEventSource(path = '/api/events'): EventSource {

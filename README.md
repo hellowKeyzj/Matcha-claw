@@ -144,7 +144,6 @@ pnpm run init
 # Start in development mode
 pnpm dev
 ```
-
 ### First Launch
 
 When you launch ClawX for the first time, the **Setup Wizard** will guide you through:
@@ -175,7 +174,6 @@ Recommended local examples:
 ```text
 Proxy Server: http://127.0.0.1:7890
 ```
-
 Notes:
 
 - A bare `host:port` value is treated as HTTP.
@@ -189,8 +187,7 @@ Notes:
 
 ClawX employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
+```┌─────────────────────────────────────────────────────────────────┐
 │                        ClawX Desktop App                         │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -234,7 +231,6 @@ ClawX employs a **dual-process architecture** with a unified host API layer. The
 │  • Provider abstraction layer                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
 ### Design Principles
 
 - **Process Isolation**: The AI runtime operates in a separate process, ensuring UI responsiveness even during heavy computation
@@ -271,34 +267,31 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 
 ### Project Structure
 
+```ClawX/
+├── electron/                 # Electron Main Process
+│   ├── api/                 # Main-side API router and handlers
+│   │   └── routes/          # RPC/HTTP proxy route modules
+│   ├── services/            # Provider, secrets and runtime services
+│   │   ├── providers/       # Provider/account model sync logic
+│   │   └── secrets/         # OS keychain and secret storage
+│   ├── shared/              # Shared provider schemas/constants
+│   │   └── providers/
+│   ├── main/                # App entry, windows, IPC registration
+│   ├── gateway/             # OpenClaw Gateway process manager
+│   ├── preload/             # Secure IPC bridge
+│   └── utils/               # Utilities (storage, auth, paths)
+├── src/                      # React Renderer Process
+│   ├── lib/                 # Unified frontend API + error model
+│   ├── stores/              # Zustand stores (settings/chat/gateway)
+│   ├── components/          # Reusable UI components
+│   ├── pages/               # Setup/Dashboard/Chat/Channels/Skills/Cron/Settings
+│   ├── i18n/                # Localization resources
+│   └── types/               # TypeScript type definitions
+├── tests/
+│   └── unit/                # Vitest unit/integration-like tests
+├── resources/                # Static assets (icons/images)
+└── scripts/                  # Build and utility scripts
 ```
-ClawX/
-├── electron/              # Electron Main Process
-│   ├── main/             # Application entry, window management
-│   ├── gateway/          # OpenClaw Gateway process manager
-│   ├── preload/          # Secure IPC bridge scripts
-│   └── utils/            # Utilities (storage, auth, paths)
-├── src/                   # React Renderer Process
-│   ├── components/       # Reusable UI components
-│   │   ├── ui/          # Base components (shadcn/ui)
-│   │   ├── layout/      # Layout components (sidebar, header)
-│   │   └── common/      # Shared components
-│   ├── pages/           # Application pages
-│   │   ├── Setup/       # Initial setup wizard
-│   │   ├── Dashboard/   # Home dashboard
-│   │   ├── Chat/        # AI chat interface
-│   │   ├── Channels/    # Channel management
-│   │   ├── Skills/      # Skill browser & manager
-│   │   ├── Cron/        # Scheduled tasks
-│   │   └── Settings/    # Configuration panels
-│   ├── stores/          # Zustand state stores
-│   ├── lib/             # Frontend utilities
-│   └── types/           # TypeScript type definitions
-├── resources/            # Static assets (icons, images)
-├── scripts/              # Build & utility scripts
-└── tests/               # Test suites
-```
-
 ### Available Commands
 
 ```bash
@@ -321,7 +314,6 @@ pnpm package:mac          # Package for macOS
 pnpm package:win          # Package for Windows
 pnpm package:linux        # Package for Linux
 ```
-
 ### Tech Stack
 
 | Layer | Technology |

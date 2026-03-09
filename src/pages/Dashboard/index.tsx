@@ -61,9 +61,13 @@ export function Dashboard() {
   const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
   const [usagePage, setUsagePage] = useState(1);
 
-  // Fetch data only when gateway is running
+  // Track page view on mount only.
   useEffect(() => {
     trackUiEvent('dashboard.page_viewed');
+  }, []);
+
+  // Fetch data only when gateway is running.
+  useEffect(() => {
     if (isGatewayRunning) {
       fetchChannels();
       fetchSkills();
