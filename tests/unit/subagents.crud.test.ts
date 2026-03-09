@@ -19,33 +19,62 @@ describe('subagents crud', () => {
 
   it('calls agents.create and agents.update with model', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke
-      .mockResolvedValueOnce({ success: true, result: {} })
-      .mockResolvedValueOnce({ success: true, result: {} });
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.create') {
+        return { success: true, result: { agentId: 'writer-v2' } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer-v2' }],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.update') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
 
-    await useSubagentsStore.getState().createAgent({
+    const createdAgentId = await useSubagentsStore.getState().createAgent({
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
     });
+    expect(createdAgentId).toBe('writer-v2');
 
     expect(invoke).toHaveBeenCalledWith(
       'gateway:rpc',
       'agents.create',
-      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' }
+      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
     );
     expect(invoke).toHaveBeenCalledWith(
       'gateway:rpc',
       'agents.update',
-      { agentId: 'writer', model: 'gpt-4.1-mini' }
+      { agentId: 'writer-v2', model: 'gpt-4.1-mini' },
     );
   });
 
   it('passes emoji to agents.create when provided', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke
-      .mockResolvedValueOnce({ success: true, result: {} })
-      .mockResolvedValueOnce({ success: true, result: {} });
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.create') {
+        return { success: true, result: { agentId: 'writer' } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer' }],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.update') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
 
     await useSubagentsStore.getState().createAgent({
       name: 'writer',
@@ -57,8 +86,72 @@ describe('subagents crud', () => {
     expect(invoke).toHaveBeenCalledWith(
       'gateway:rpc',
       'agents.create',
-      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer', emoji: '🤖' }
+      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer', emoji: '🤖' },
     );
+  });
+
+  it('create 成功后若首次 agents.update 返回 not found，会自动重试并成功', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({ loadAgents });
+    let updateCallCount = 0;
+    let listCallCount = 0;
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.create') {
+        return { success: true, result: { agentId: 'test4' } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        listCallCount += 1;
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'test4' }],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.update') {
+        updateCallCount += 1;
+        if (updateCallCount === 1) {
+          return { success: false, error: 'Error: agent "test4" not found' };
+        }
+        return { success: true, result: { ok: true } };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await expect(useSubagentsStore.getState().createAgent({
+      name: 'test4',
+      workspace: '/tmp/test4',
+      model: 'gpt-4.1-mini',
+    })).resolves.toBe('test4');
+
+    expect(updateCallCount).toBe(2);
+    expect(listCallCount).toBeGreaterThanOrEqual(2);
+    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'secrets.reload', {});
+    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.patch', expect.anything());
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(useSubagentsStore.getState().error).toBeNull();
+  });
+
+  it('create 在 agents.create 未返回 agentId 时抛协议错误且不调用 agents.update', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.create') {
+        return { success: true, result: { ok: true } };
+      }
+      if (channel === 'gateway:rpc' && method === 'agents.update') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await expect(useSubagentsStore.getState().createAgent({
+      name: 'test-missing-id',
+      workspace: '/tmp/test-missing-id',
+      model: 'gpt-4.1-mini',
+    })).rejects.toThrow('agents.create returned missing agentId');
+
+    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'agents.update', expect.anything());
   });
 
   it('calls agents.update with model payload', async () => {

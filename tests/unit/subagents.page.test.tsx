@@ -20,9 +20,11 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
 }
 
 describe('subagents page', () => {
-  const createAgent = vi.fn().mockResolvedValue(undefined);
+  const createAgent = vi.fn().mockResolvedValue('writer');
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
+  const loadAgents = vi.fn().mockResolvedValue(undefined);
+  const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
   const generateDraftFromPrompt = vi.fn().mockResolvedValue(undefined);
   const cancelDraft = vi.fn().mockResolvedValue(undefined);
   const loadPersistedFilesForAgent = vi.fn().mockResolvedValue({});
@@ -31,6 +33,8 @@ describe('subagents page', () => {
     createAgent.mockClear();
     updateAgent.mockClear();
     deleteAgent.mockClear();
+    loadAgents.mockClear();
+    loadAvailableModels.mockClear();
     generateDraftFromPrompt.mockClear();
     cancelDraft.mockClear();
     loadPersistedFilesForAgent.mockClear();
@@ -80,8 +84,8 @@ describe('subagents page', () => {
       draftError: null,
       previewDiffByFile: {},
       selectedAgentId: null,
-      loadAgents: vi.fn().mockResolvedValue(undefined),
-      loadAvailableModels: vi.fn().mockResolvedValue(undefined),
+      loadAgents,
+      loadAvailableModels,
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
       createAgent,
@@ -100,6 +104,29 @@ describe('subagents page', () => {
     expect(screen.getByText('agent-alpha')).toBeInTheDocument();
     expect(screen.getByTestId('agent-emoji-main')).toHaveTextContent('⚙️');
     expect(screen.getByTestId('agent-emoji-agent-alpha')).toHaveTextContent('📊');
+  });
+
+  it('挂载时触发初始化加载', () => {
+    useSubagentsStore.setState({
+      agents: [],
+      availableModels: [],
+    });
+    renderSubagentsPage();
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows top guide when there is no available model', () => {
+    useSubagentsStore.setState({
+      availableModels: [],
+      modelsLoading: false,
+    });
+
+    renderSubagentsPage(['/subagents']);
+
+    expect(screen.getByText('Please go to Settings > AI Providers to add a model first.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Settings' }));
+    expect(screen.getByTestId('router-location')).toHaveTextContent('/settings?section=aiProviders');
   });
 
   it('opens create dialog when clicking add button', () => {
@@ -128,6 +155,26 @@ describe('subagents page', () => {
         model: 'gpt-4.1-mini',
       });
     });
+  });
+
+  it('createAgent 失败时保持弹窗打开，不进入管理态', async () => {
+    createAgent.mockRejectedValueOnce(new Error('RPC timeout: agents.create'));
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledWith({
+        name: 'writer',
+        workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+        model: 'gpt-4.1-mini',
+      });
+    });
+
+    expect(screen.getByRole('dialog', { name: 'Create Subagent' })).toBeInTheDocument();
+    expect(screen.queryByText('Managing: writer')).toBeNull();
   });
 
   it('passes selected emoji when creating subagent', async () => {
@@ -258,6 +305,41 @@ describe('subagents page', () => {
     expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
   });
 
+  it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/home/dev/.openclaw/workspace',
+          model: 'gpt-main',
+          identityEmoji: '⚙️',
+          isDefault: true,
+        },
+        {
+          id: 'agent-alpha',
+          name: 'Alpha',
+          workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
+          model: 'legacy/removed-model',
+          identityEmoji: '📊',
+          isDefault: false,
+        },
+      ],
+      availableModels: [
+        { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+      ],
+      modelsLoading: false,
+    });
+
+    renderSubagentsPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+
+    const modelSelect = screen.getByLabelText('Model');
+    expect(screen.queryByRole('option', { name: 'legacy/removed-model' })).toBeNull();
+    expect(modelSelect).toHaveValue('openai/gpt-4.1-mini');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('does not render set-default action buttons', () => {
     renderSubagentsPage();
 
@@ -282,6 +364,34 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Manage main' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
+  });
+
+  it('disables manage/chat actions when model is missing', () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/home/dev/.openclaw/workspace',
+          model: 'gpt-main',
+          identityEmoji: '⚙️',
+          isDefault: true,
+        },
+        {
+          id: 'agent-no-model',
+          name: 'NoModel',
+          workspace: '/home/dev/.openclaw/workspace-subagents/no-model',
+          model: undefined,
+          identityEmoji: '📉',
+          isDefault: false,
+        },
+      ],
+    });
+
+    renderSubagentsPage();
+
+    expect(screen.getByRole('button', { name: 'Manage agent-no-model' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Chat agent-no-model' })).toBeDisabled();
   });
 
   it('keeps managed panel visible after page remount', () => {

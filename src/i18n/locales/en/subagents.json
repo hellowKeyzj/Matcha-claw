@@ -2,6 +2,11 @@
   "title": "Subagent Workspace",
   "subtitle": "Manage subagents and model settings.",
   "newSubagent": "New Subagent",
+  "empty": "No subagents found.",
+  "modelGuide": {
+    "description": "Please go to Settings > AI Providers to add a model first.",
+    "action": "Open Settings"
+  },
   "createDialogTitle": "Create Subagent",
   "editDialogTitle": "Edit Subagent",
   "manageTitle": "Managing: {{agentId}}",
@@ -49,7 +54,8 @@
   },
   "card": {
     "default": "Default",
-    "modelFallback": "-",
+    "modelFallback": "Model not configured",
+    "modelMissingHint": "Model is not configured. Chat and run are disabled.",
     "lockedHint": "Main agent is read-only.",
     "actions": {
       "edit": "Edit",

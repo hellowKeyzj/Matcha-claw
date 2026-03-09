@@ -2,6 +2,11 @@
   "title": "サブAgentワークスペース",
   "subtitle": "サブAgentとモデル設定を管理します。",
   "newSubagent": "新規サブAgent",
+  "empty": "サブAgentが見つかりません。",
+  "modelGuide": {
+    "description": "先に 設定 > AI モデルプロバイダー でモデルを追加してください。",
+    "action": "設定を開く"
+  },
   "createDialogTitle": "サブAgentを作成",
   "editDialogTitle": "サブAgentを編集",
   "manageTitle": "管理中: {{agentId}}",
@@ -46,7 +51,8 @@
   },
   "card": {
     "default": "デフォルト",
-    "modelFallback": "-",
+    "modelFallback": "モデル未設定",
+    "modelMissingHint": "モデルが未設定のため、会話/実行はできません。",
     "lockedHint": "main agent はシステム予約のため操作できません。",
     "actions": {
       "edit": "編集",
