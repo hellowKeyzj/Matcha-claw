@@ -28,6 +28,98 @@ describe('subagents store', () => {
     );
   });
 
+  it('loadAgents 与 loadAvailableModels 并发时，config.get 只请求一次', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    let resolveConfigGet: ((value: unknown) => void) | null = null;
+    const configGetTask = new Promise((resolve) => {
+      resolveConfigGet = resolve;
+    });
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            defaultId: 'main',
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'models.list') {
+        return {
+          success: true,
+          result: {
+            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        return configGetTask as Promise<unknown>;
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    const loadAgentsTask = useSubagentsStore.getState().loadAgents();
+    const loadModelsTask = useSubagentsStore.getState().loadAvailableModels();
+    resolveConfigGet?.({
+      success: true,
+      result: {
+        config: {
+          agents: {
+            list: [{ id: 'main', model: 'openai/gpt-4.1-mini' }],
+          },
+          models: {
+            providers: {
+              openai: { models: ['gpt-4.1-mini'] },
+            },
+          },
+        },
+      },
+    });
+
+    await Promise.all([loadAgentsTask, loadModelsTask]);
+
+    const configGetCalls = invoke.mock.calls.filter(
+      ([channel, method]) => channel === 'gateway:rpc' && method === 'config.get'
+    );
+    expect(configGetCalls).toHaveLength(1);
+  });
+
+  it('短 TTL 内重复 loadAgents 复用 config.get 结果', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, method) => {
+      if (channel === 'gateway:rpc' && method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            defaultId: 'main',
+          },
+        };
+      }
+      if (channel === 'gateway:rpc' && method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {
+              agents: {
+                list: [{ id: 'main', workspace: '/workspace/main' }],
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().loadAgents();
+    await useSubagentsStore.getState().loadAgents();
+
+    const configGetCalls = invoke.mock.calls.filter(
+      ([channel, method]) => channel === 'gateway:rpc' && method === 'config.get'
+    );
+    expect(configGetCalls).toHaveLength(1);
+  });
+
   it('loadAgents 使用 config.get 补齐 workspace/model，且不使用旧 store 回填', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     useSubagentsStore.setState({

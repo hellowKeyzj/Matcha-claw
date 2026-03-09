@@ -58,8 +58,15 @@ const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
 const IDENTITY_EMOJI_CACHE_TTL_MS = 5 * 60 * 1000;
 const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
+const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 let workspaceFallbackRootCache: string | undefined;
 let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
+let configDisplayCache:
+  | { snapshot: ConfigDisplaySnapshot; cachedAt: number; requestSeq: number }
+  | null = null;
+let configDisplayReadTask: Promise<ConfigDisplaySnapshot> | null = null;
+let configDisplayReadTaskSeq = 0;
+let configDisplayReadSeq = 0;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -104,6 +111,10 @@ interface ConfigDisplaySnapshot {
   defaultWorkspace?: string;
   defaultModel?: string;
   configuredModelIds: string[];
+}
+
+interface ReadConfigForDisplayOptions {
+  forceRefresh?: boolean;
 }
 
 interface SubagentsState {
@@ -351,16 +362,63 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
   };
 }
 
-async function readConfigForDisplay(): Promise<ConfigDisplaySnapshot> {
-  try {
-    const configGetResult = await rpc<ConfigGetResult>('config.get', {});
-    return buildConfigDisplaySnapshot(configGetResult);
-  } catch {
-    return {
-      byAgentId: new Map(),
-      configuredModelIds: [],
-    };
+function createEmptyConfigDisplaySnapshot(): ConfigDisplaySnapshot {
+  return {
+    byAgentId: new Map(),
+    configuredModelIds: [],
+  };
+}
+
+function isConfigDisplayCacheFresh(nowMs: number): boolean {
+  if (!configDisplayCache) {
+    return false;
   }
+  return (nowMs - configDisplayCache.cachedAt) <= CONFIG_DISPLAY_CACHE_TTL_MS;
+}
+
+function invalidateConfigDisplayCache(): void {
+  configDisplayCache = null;
+}
+
+async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Promise<ConfigDisplaySnapshot> {
+  const forceRefresh = options?.forceRefresh === true;
+  const nowMs = Date.now();
+
+  if (!forceRefresh && isConfigDisplayCacheFresh(nowMs) && configDisplayCache) {
+    return configDisplayCache.snapshot;
+  }
+  if (!forceRefresh && configDisplayReadTask) {
+    return configDisplayReadTask;
+  }
+
+  const requestSeq = ++configDisplayReadSeq;
+  const task = (async () => {
+    try {
+      const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+      const snapshot = buildConfigDisplaySnapshot(configGetResult);
+      if (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq) {
+        configDisplayCache = {
+          snapshot,
+          cachedAt: Date.now(),
+          requestSeq,
+        };
+      }
+      return snapshot;
+    } catch {
+      if (configDisplayCache) {
+        return configDisplayCache.snapshot;
+      }
+      return createEmptyConfigDisplaySnapshot();
+    } finally {
+      if (configDisplayReadTaskSeq === requestSeq) {
+        configDisplayReadTask = null;
+      }
+    }
+  })();
+
+  configDisplayReadTask = task;
+  configDisplayReadTaskSeq = requestSeq;
+  return task;
 }
 
 async function resolveWorkspaceFallbackRoot(): Promise<string | undefined> {
@@ -862,6 +920,22 @@ let agentsStateMutationVersion = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
 const pendingDeletedAgentIds = new Set<string>();
 
+export function __resetSubagentsStoreInternalCachesForTest(): void {
+  workspaceFallbackRootCache = undefined;
+  workspaceFallbackRootTask = null;
+  configDisplayCache = null;
+  configDisplayReadTask = null;
+  configDisplayReadTaskSeq = 0;
+  configDisplayReadSeq = 0;
+  identityEmojiCache.clear();
+  identityEmojiLoadTasks.clear();
+  persistedFilesLoadTasks.clear();
+  pendingDeletedAgentIds.clear();
+  latestLoadAgentsRequestId = 0;
+  agentsStateMutationVersion = 0;
+  agentMutationChain = Promise.resolve();
+}
+
 function bumpAgentsStateMutationVersion(): number {
   agentsStateMutationVersion += 1;
   return agentsStateMutationVersion;
@@ -1166,6 +1240,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       } catch {
         partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
       }
+      invalidateConfigDisplayCache();
       await get().loadAgents();
       await syncRoleMetadataFromAgents(get().agents);
       if (partialFailureMessage) {
@@ -1209,6 +1284,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         workspace: nextWorkspace,
         model: nextModel,
       });
+      invalidateConfigDisplayCache();
       await get().loadAgents();
       await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
