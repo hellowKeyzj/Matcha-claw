@@ -53,6 +53,13 @@ const electronAPI = {
         'settings:setMany',
         'settings:getAll',
         'settings:reset',
+        // License
+        'license:validate',
+        'license:getGateState',
+        'license:getStoredKey',
+        'license:forceRevalidate',
+        'license:clearStoredKey',
+        'diagnostics:collectBundle',
         'usage:recentTokenHistory',
         // Update
         'update:status',
@@ -102,12 +109,12 @@ const electronAPI = {
         // WhatsApp
         'channel:requestWhatsAppQr',
         'channel:cancelWhatsAppQr',
-        // ClawHub
-        'clawhub:search',
-        'clawhub:install',
-        'clawhub:uninstall',
-        'clawhub:list',
-        'clawhub:openSkillReadme',
+        // MatchaClawHub
+        'matchaclawhub:search',
+        'matchaclawhub:install',
+        'matchaclawhub:uninstall',
+        'matchaclawhub:list',
+        'matchaclawhub:openSkillReadme',
         // UV
         'uv:check',
         'uv:install-all',
@@ -144,6 +151,7 @@ const electronAPI = {
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',
+        'openclaw:getConfigJson',
         'openclaw:getSkillsDir',
         'openclaw:getWorkspaceDir',
         'openclaw:getTaskWorkspaceDirs',
@@ -190,6 +198,7 @@ const electronAPI = {
         'oauth:success',
         'oauth:error',
         'openclaw:cli-installed',
+        'config:changed',
       ];
 
       if (validChannels.includes(channel)) {
@@ -232,6 +241,7 @@ const electronAPI = {
         'oauth:code',
         'oauth:success',
         'oauth:error',
+        'config:changed',
       ];
 
       if (validChannels.includes(channel)) {
