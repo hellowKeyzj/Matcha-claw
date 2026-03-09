@@ -3,7 +3,7 @@ import { resolveProxySettings, type ProxySettings } from './proxy';
 import { logger } from './logger';
 
 /**
- * Sync ClawX global proxy settings into OpenClaw channel config where the
+ * Sync MatchaClaw global proxy settings into OpenClaw channel config where the
  * upstream runtime expects an explicit per-channel proxy knob.
  */
 export async function syncProxyConfigToOpenClaw(settings: ProxySettings): Promise<void> {

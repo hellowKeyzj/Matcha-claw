@@ -1,29 +1,29 @@
 /**
- * ClawHub Service
- * Manages interactions with the ClawHub CLI for skills management
+ * MatchaClawHub Service
+ * Manages interactions with the MatchaClawHub CLI for skills management
  */
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { app, shell } from 'electron';
-import { getOpenClawConfigDir, ensureDir, getClawHubCliBinPath, getClawHubCliEntryPath, quoteForCmd } from '../utils/paths';
+import { getOpenClawConfigDir, ensureDir, getMatchaClawHubCliBinPath, getMatchaClawHubCliEntryPath, quoteForCmd } from '../utils/paths';
 
-export interface ClawHubSearchParams {
+export interface MatchaClawHubSearchParams {
     query: string;
     limit?: number;
 }
 
-export interface ClawHubInstallParams {
+export interface MatchaClawHubInstallParams {
     slug: string;
     version?: string;
     force?: boolean;
 }
 
-export interface ClawHubUninstallParams {
+export interface MatchaClawHubUninstallParams {
     slug: string;
 }
 
-export interface ClawHubSkillResult {
+export interface MatchaClawHubSkillResult {
     slug: string;
     name: string;
     description: string;
@@ -33,7 +33,7 @@ export interface ClawHubSkillResult {
     stars?: number;
 }
 
-export class ClawHubService {
+export class MatchaClawHubService {
     private workDir: string;
     private cliPath: string;
     private cliEntryPath: string;
@@ -46,8 +46,8 @@ export class ClawHubService {
         this.workDir = getOpenClawConfigDir();
         ensureDir(this.workDir);
 
-        const binPath = getClawHubCliBinPath();
-        const entryPath = getClawHubCliEntryPath();
+        const binPath = getMatchaClawHubCliBinPath();
+        const entryPath = getMatchaClawHubCliEntryPath();
 
         this.cliEntryPath = entryPath;
         if (!app.isPackaged && fs.existsSync(binPath)) {
@@ -68,28 +68,28 @@ export class ClawHubService {
     }
 
     /**
-     * Run a ClawHub CLI command
+     * Run a MatchaClawHub CLI command
      */
     private async runCommand(args: string[]): Promise<string> {
         return new Promise((resolve, reject) => {
             if (this.useNodeRunner && !fs.existsSync(this.cliEntryPath)) {
-                reject(new Error(`ClawHub CLI entry not found at: ${this.cliEntryPath}`));
+                reject(new Error(`MatchaClawHub CLI entry not found at: ${this.cliEntryPath}`));
                 return;
             }
 
             if (!this.useNodeRunner && !fs.existsSync(this.cliPath)) {
-                reject(new Error(`ClawHub CLI not found at: ${this.cliPath}`));
+                reject(new Error(`MatchaClawHub CLI not found at: ${this.cliPath}`));
                 return;
             }
 
             const commandArgs = this.useNodeRunner ? [this.cliEntryPath, ...args] : args;
             const displayCommand = [this.cliPath, ...commandArgs].join(' ');
-            console.log(`Running ClawHub command: ${displayCommand}`);
+            console.log(`Running MatchaClawHub command: ${displayCommand}`);
 
             const isWin = process.platform === 'win32';
             const useShell = isWin && !this.useNodeRunner;
             const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
-            const env = {
+            const env: NodeJS.ProcessEnv = {
                 ...baseEnv,
                 CI: 'true',
                 FORCE_COLOR: '0',
@@ -104,7 +104,7 @@ export class ClawHubService {
                 shell: useShell,
                 env: {
                     ...env,
-                    CLAWHUB_WORKDIR: this.workDir,
+                    MATCHACLAWHUB_WORKDIR: this.workDir,
                 },
                 windowsHide: true,
             });
@@ -121,13 +121,13 @@ export class ClawHubService {
             });
 
             child.on('error', (error) => {
-                console.error('ClawHub process error:', error);
+                console.error('MatchaClawHub process error:', error);
                 reject(error);
             });
 
             child.on('close', (code) => {
                 if (code !== 0 && code !== null) {
-                    console.error(`ClawHub command failed with code ${code}`);
+                    console.error(`MatchaClawHub command failed with code ${code}`);
                     console.error('Stderr:', stderr);
                     reject(new Error(`Command failed: ${stderr || stdout}`));
                 } else {
@@ -140,7 +140,7 @@ export class ClawHubService {
     /**
      * Search for skills
      */
-    async search(params: ClawHubSearchParams): Promise<ClawHubSkillResult[]> {
+    async search(params: MatchaClawHubSearchParams): Promise<MatchaClawHubSkillResult[]> {
         try {
             // If query is empty, use 'explore' to show trending skills
             if (!params.query || params.query.trim() === '') {
@@ -180,7 +180,7 @@ export class ClawHubService {
                     };
                 }
 
-                // Fallback for new clawhub search format without version:
+                // Fallback for new matchaclawhub search format without version:
                 // slug  name/description  (score)
                 match = cleanLine.match(/^(\S+)\s+(.+)$/);
                 if (match) {
@@ -198,9 +198,9 @@ export class ClawHubService {
                     };
                 }
                 return null;
-            }).filter((s): s is ClawHubSkillResult => s !== null);
+            }).filter((s): s is MatchaClawHubSkillResult => s !== null);
         } catch (error) {
-            console.error('ClawHub search error:', error);
+            console.error('MatchaClawHub search error:', error);
             throw error;
         }
     }
@@ -208,7 +208,7 @@ export class ClawHubService {
     /**
      * Explore trending skills
      */
-    async explore(params: { limit?: number } = {}): Promise<ClawHubSkillResult[]> {
+    async explore(params: { limit?: number } = {}): Promise<MatchaClawHubSkillResult[]> {
         try {
             const args = ['explore'];
             if (params.limit) {
@@ -234,9 +234,9 @@ export class ClawHubService {
                     };
                 }
                 return null;
-            }).filter((s): s is ClawHubSkillResult => s !== null);
+            }).filter((s): s is MatchaClawHubSkillResult => s !== null);
         } catch (error) {
-            console.error('ClawHub explore error:', error);
+            console.error('MatchaClawHub explore error:', error);
             throw error;
         }
     }
@@ -244,7 +244,7 @@ export class ClawHubService {
     /**
      * Install a skill
      */
-    async install(params: ClawHubInstallParams): Promise<void> {
+    async install(params: MatchaClawHubInstallParams): Promise<void> {
         const args = ['install', params.slug];
 
         if (params.version) {
@@ -261,7 +261,7 @@ export class ClawHubService {
     /**
      * Uninstall a skill
      */
-    async uninstall(params: ClawHubUninstallParams): Promise<void> {
+    async uninstall(params: MatchaClawHubUninstallParams): Promise<void> {
         const fsPromises = fs.promises;
 
         // 1. Delete the skill directory
@@ -272,7 +272,7 @@ export class ClawHubService {
         }
 
         // 2. Remove from lock.json
-        const lockFile = path.join(this.workDir, '.clawhub', 'lock.json');
+        const lockFile = path.join(this.workDir, '.matchaclawhub', 'lock.json');
         if (fs.existsSync(lockFile)) {
             try {
                 const lockData = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
@@ -282,7 +282,7 @@ export class ClawHubService {
                     await fsPromises.writeFile(lockFile, JSON.stringify(lockData, null, 2));
                 }
             } catch (err) {
-                console.error('Failed to update ClawHub lock file:', err);
+                console.error('Failed to update MatchaClawHub lock file:', err);
             }
         }
     }
@@ -310,7 +310,7 @@ export class ClawHubService {
                 return null;
             }).filter((s): s is { slug: string; version: string } => s !== null);
         } catch (error) {
-            console.error('ClawHub list error:', error);
+            console.error('MatchaClawHub list error:', error);
             return [];
         }
     }
