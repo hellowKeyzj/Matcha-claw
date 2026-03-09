@@ -1,7 +1,7 @@
 {
     "steps": {
         "welcome": {
-            "title": "Welcome to ClawX",
+            "title": "Welcome to MatchaClaw",
             "description": "Your AI assistant is ready to be configured"
         },
         "runtime": {
@@ -22,17 +22,39 @@
         },
         "complete": {
             "title": "All Set!",
-            "description": "ClawX is ready to use"
+            "description": "MatchaClaw is ready to use"
         }
     },
     "welcome": {
-        "title": "Welcome to ClawX",
-        "description": "ClawX is a graphical interface for OpenClaw, making it easy to use AI assistants across your favorite messaging platforms.",
+        "title": "Welcome to MatchaClaw",
+        "description": "MatchaClaw is a graphical interface for OpenClaw, making it easy to use AI assistants across your favorite messaging platforms.",
         "features": {
             "noCommand": "Zero command-line required",
             "modernUI": "Modern, beautiful interface",
             "bundles": "Pre-installed skill bundles",
             "crossPlatform": "Cross-platform support"
+        }
+    },
+    "license": {
+        "label": "License Key",
+        "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+        "validate": "Validate",
+        "hint": "You must validate a license key before moving to the next step.",
+        "messages": {
+            "idle": "Waiting for license key input",
+            "valid": "License validation passed",
+            "cache_grace_valid": "Validation passed from cached offline grace period",
+            "empty": "Please enter a license key",
+            "format_invalid": "License key format is invalid",
+            "service_unconfigured": "License service is not configured",
+            "network_error": "Cannot reach license service, please check network and retry",
+            "server_rejected": "License was rejected by license service",
+            "expired": "License has expired",
+            "device_mismatch": "License does not match this device",
+            "not_allowed": "License key is not authorized",
+            "checksum_invalid": "License key is invalid",
+            "unknown": "License validation failed, please try again",
+            "requiredBeforeSkip": "Complete license validation before skipping setup"
         }
     },
     "runtime": {
@@ -108,7 +130,7 @@
     },
     "complete": {
         "title": "Setup Complete!",
-        "subtitle": "ClawX is configured and ready to use. You can now start chatting with your AI assistant.",
+        "subtitle": "MatchaClaw is configured and ready to use. You can now start chatting with your AI assistant.",
         "provider": "AI Provider",
         "components": "Components",
         "gateway": "Gateway",
