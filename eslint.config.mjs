@@ -49,6 +49,10 @@ export default [
           selector: "CallExpression[callee.type='MemberExpression'][callee.property.name='invoke'][callee.object.type='MemberExpression'][callee.object.property.name='ipcRenderer'][callee.object.object.type='MemberExpression'][callee.object.object.property.name='electron'][callee.object.object.object.name='window']",
           message: 'Use invokeIpc from @/lib/api-client instead of window.electron.ipcRenderer.invoke.',
         },
+        {
+          selector: "CallExpression[callee.name='fetch'] Literal[value=/^https?:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?\\//]",
+          message: 'Do not call local endpoints directly from renderer. Route through host-api/api-client proxies.',
+        },
       ],
     },
   },
