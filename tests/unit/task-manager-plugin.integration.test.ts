@@ -291,4 +291,40 @@ describe('task-manager plugin integration', () => {
       await rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it('scopes dynamic switch guard by session only', async () => {
+    const workspace = await createWorkspace('task-plugin-session-guard-');
+    try {
+      const app = bootstrapPlugin(workspace);
+      const suffix = Date.now().toString(36);
+      const sessionA = `agent:business-expert:session-a-${suffix}`;
+      const sessionB = `agent:business-expert:session-b-${suffix}`;
+
+      await app.callHook(
+        'llm_output',
+        {
+          assistantTexts: ['步骤 1：提交申请\n步骤 2：风险评估\n步骤 3：审批决策'],
+        },
+        { sessionKey: sessionA, agentId: 'business-expert' },
+      );
+
+      const hitCurrentSession = await app.callHook(
+        'before_agent_start',
+        { prompt: '继续' },
+        { sessionKey: sessionA, workspaceDir: workspace, agentId: 'business-expert' },
+      );
+      const hitCurrentText = (hitCurrentSession as { prependContext?: string } | undefined)?.prependContext ?? '';
+      expect(hitCurrentText).toContain('Task Manager 动态切换建议');
+
+      const otherSession = await app.callHook(
+        'before_agent_start',
+        { prompt: '继续' },
+        { sessionKey: sessionB, workspaceDir: workspace, agentId: 'business-expert' },
+      );
+      const otherText = (otherSession as { prependContext?: string } | undefined)?.prependContext ?? '';
+      expect(otherText).not.toContain('Task Manager 动态切换建议');
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 });
