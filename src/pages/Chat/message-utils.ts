@@ -5,12 +5,20 @@
  */
 import type { RawMessage, ContentBlock } from '@/stores/chat';
 
-/**
- * Clean Gateway metadata from user message text for display.
- * Strips: [media attached: ... | ...], [message_id: ...],
- * and the timestamp prefix [Day Date Time Timezone].
- */
-function cleanUserText(text: string): string {
+function extractRawText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return (content as ContentBlock[])
+      .filter((block) => block.type === 'text' && block.text)
+      .map((block) => block.text!)
+      .join('\n\n');
+  }
+  return '';
+}
+
+function stripGatewayPrelude(text: string): string {
   return text
     // Remove [media attached: path (mime) | path] references
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
@@ -19,9 +27,18 @@ function cleanUserText(text: string): string {
     // Remove Gateway-injected "Conversation info (untrusted metadata): ```json...```" block
     .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
     // Fallback: remove "Conversation info (...): {...}" without code block wrapper
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
+    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '');
+}
+
+/**
+ * Clean Gateway metadata from user message text for display.
+ * Strips: [media attached: ... | ...], [message_id: ...],
+ * and the timestamp prefix [Day Date Time Timezone].
+ */
+function cleanUserText(text: string): string {
+  return stripGatewayPrelude(text)
     // Remove Gateway timestamp prefix like [Fri 2026-02-13 22:39 GMT+8]
-    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
+    .replace(/^\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
     .trim();
 }
 
@@ -38,19 +55,9 @@ export function extractText(message: RawMessage | unknown): string {
 
   let result = '';
 
-  if (typeof content === 'string') {
-    result = content.trim().length > 0 ? content : '';
-  } else if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const block of content as ContentBlock[]) {
-      if (block.type === 'text' && block.text) {
-        if (block.text.trim().length > 0) {
-          parts.push(block.text);
-        }
-      }
-    }
-    const combined = parts.join('\n\n');
-    result = combined.trim().length > 0 ? combined : '';
+  const raw = extractRawText(content);
+  if (raw.trim().length > 0) {
+    result = raw;
   } else if (typeof msg.text === 'string') {
     // Fallback: try .text field
     result = msg.text.trim().length > 0 ? msg.text : '';
@@ -97,17 +104,7 @@ export function extractMediaRefs(message: RawMessage | unknown): Array<{ filePat
   if (!message || typeof message !== 'object') return [];
   const msg = message as Record<string, unknown>;
   if (msg.role !== 'user') return [];
-  const content = msg.content;
-
-  let text = '';
-  if (typeof content === 'string') {
-    text = content;
-  } else if (Array.isArray(content)) {
-    text = (content as ContentBlock[])
-      .filter(b => b.type === 'text' && b.text)
-      .map(b => b.text!)
-      .join('\n');
-  }
+  const text = extractRawText(msg.content);
 
   const refs: Array<{ filePath: string; mimeType: string }> = [];
   const regex = /\[media attached:\s*([^\s(]+)\s*\(([^)]+)\)\s*\|[^\]]*\]/g;

@@ -1396,6 +1396,83 @@ function registerOpenClawHandlers(
     return true;
   }
 
+  type PluginInstallValidation = {
+    ok: boolean;
+    entryPaths: string[];
+    reason?: string;
+  };
+
+  function normalizeExtensionEntryPath(entry: unknown): string | null {
+    if (typeof entry !== 'string') return null;
+    const trimmed = entry.trim();
+    if (!trimmed) return null;
+    // 插件入口必须是相对路径，避免越界。
+    if (isAbsolute(trimmed)) return null;
+    if (trimmed.startsWith('~')) return null;
+    const normalized = trimmed.replaceAll('\\', '/');
+    if (normalized.includes(':')) return null;
+    const cleaned = normalized.replace(/^\.\/+/, '');
+    if (!cleaned) return null;
+    if (cleaned.split('/').some((part) => part === '..' || !part)) return null;
+    return cleaned;
+  }
+
+  function readDeclaredExtensionEntries(pluginDir: string): string[] {
+    const packageJsonPath = join(pluginDir, 'package.json');
+    if (!existsSync(packageJsonPath)) return [];
+    try {
+      const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as Record<string, unknown>;
+      if (!isRecord(parsed.openclaw)) return [];
+      const extensions = (parsed.openclaw as Record<string, unknown>).extensions;
+      if (!Array.isArray(extensions)) return [];
+      const entries: string[] = [];
+      for (const entry of extensions) {
+        const normalized = normalizeExtensionEntryPath(entry);
+        if (normalized) {
+          entries.push(normalized);
+        }
+      }
+      return entries;
+    } catch {
+      return [];
+    }
+  }
+
+  function validatePluginInstallLayout(pluginDir: string): PluginInstallValidation {
+    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+    if (!existsSync(manifestPath)) {
+      return { ok: false, entryPaths: [], reason: 'missing openclaw.plugin.json' };
+    }
+
+    const entryPaths = readDeclaredExtensionEntries(pluginDir);
+    if (entryPaths.length === 0) {
+      return { ok: true, entryPaths: [] };
+    }
+
+    const missing: string[] = [];
+    for (const entryPath of entryPaths) {
+      const abs = resolve(pluginDir, entryPath);
+      const rel = relative(pluginDir, abs);
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+        missing.push(`${entryPath} (escapes package dir)`);
+        continue;
+      }
+      if (!existsSync(abs)) {
+        missing.push(entryPath);
+      }
+    }
+
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        entryPaths,
+        reason: `missing extension entries: ${missing.join(', ')}`,
+      };
+    }
+
+    return { ok: true, entryPaths };
+  }
+
   interface EnsureBundledPluginOptions {
     extraDevSources?: string[];
     forceReinstall?: boolean;
@@ -1443,17 +1520,42 @@ function registerOpenClawHandlers(
         ...devCandidates,
       ];
 
-    const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+    const sourceValidationErrors: string[] = [];
+    let sourceDir: string | undefined;
+    for (const candidate of candidateSources) {
+      if (!existsSync(join(candidate, 'openclaw.plugin.json'))) {
+        continue;
+      }
+      const validation = validatePluginInstallLayout(candidate);
+      if (validation.ok) {
+        sourceDir = candidate;
+        break;
+      }
+      const reason = validation.reason || 'invalid plugin layout';
+      sourceValidationErrors.push(`${candidate}: ${reason}`);
+      logger.warn(`Skipping invalid ${pluginId} plugin source candidate: ${candidate} (${reason})`);
+    }
     if (!sourceDir) {
       logger.warn(`Bundled ${pluginId} plugin mirror not found in candidate paths`, { candidateSources });
       return {
         installed: false,
-        warning: `Bundled ${pluginId} plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
+        warning: sourceValidationErrors.length > 0
+          ? `Bundled ${pluginId} plugin mirror invalid. Checked: ${sourceValidationErrors.join(' | ')}`
+          : `Bundled ${pluginId} plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
       };
     }
 
     try {
+      const sourceValidation = validatePluginInstallLayout(sourceDir);
+      if (!sourceValidation.ok) {
+        return {
+          installed: false,
+          warning: `Bundled ${pluginId} plugin source invalid: ${sourceValidation.reason || 'unknown reason'}`,
+        };
+      }
+
       mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
+      let removedOldDir = false;
       try {
         rmSync(targetDir, {
           recursive: true,
@@ -1461,14 +1563,30 @@ function registerOpenClawHandlers(
           maxRetries: 8,
           retryDelay: 120,
         });
+        removedOldDir = true;
       } catch (removeError) {
         // Windows 上扩展目录偶发被占用，删除失败时降级为原地覆盖复制。
         logger.warn(`Failed to remove existing ${pluginId} plugin directory, fallback to in-place overwrite:`, removeError);
       }
-      cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
 
-      if (!existsSync(targetManifest)) {
-        return { installed: false, warning: `Failed to install ${pluginId} plugin mirror (manifest missing).` };
+      if (!removedOldDir) {
+        mkdirSync(targetDir, { recursive: true });
+      }
+
+      cpSync(sourceDir, targetDir, {
+        recursive: true,
+        dereference: true,
+        force: true,
+        errorOnExist: false,
+      });
+
+      const targetValidation = validatePluginInstallLayout(targetDir);
+
+      if (!existsSync(targetManifest) || !targetValidation.ok) {
+        return {
+          installed: false,
+          warning: `Failed to install ${pluginId} plugin mirror (${targetValidation.reason || 'manifest missing'}).`,
+        };
       }
 
       logger.info(`Installed ${pluginId} plugin from bundled mirror: ${sourceDir}`);

@@ -327,4 +327,57 @@ describe('task-manager plugin integration', () => {
       await rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it('cleans task-manager injected prepend context in before_message_write hook', async () => {
+    const workspace = await createWorkspace('task-plugin-message-clean-');
+    try {
+      const app = bootstrapPlugin(workspace);
+      const injectedByMarker = [
+        '<!-- task-manager:context:start -->',
+        '## Task Manager 恢复提示',
+        '- task-123: 示例任务',
+        '<!-- task-manager:context:end -->',
+        '',
+        '[Mon 2026-03-09 23:21 GMT+8] 请恢复执行任务 task-123。附加信息：yes',
+      ].join('\n');
+      const markerOutput = await app.callHook(
+        'before_message_write',
+        {
+          message: { role: 'user', content: injectedByMarker },
+        },
+        { sessionKey: 'agent:main:main', agentId: 'main' },
+      );
+      expect((markerOutput as { message?: { content?: string } }).message?.content).toBe(
+        '[Mon 2026-03-09 23:21 GMT+8] 请恢复执行任务 task-123。附加信息：yes',
+      );
+
+      const injectedLegacy = [
+        '## Task Manager 触发建议',
+        '- 建议进入任务模式',
+        '',
+        '[Mon 2026-03-09 23:21 GMT+8] 继续。',
+      ].join('\n');
+      const legacyOutput = await app.callHook(
+        'before_message_write',
+        {
+          message: { role: 'user', content: injectedLegacy },
+        },
+        { sessionKey: 'agent:main:main', agentId: 'main' },
+      );
+      expect((legacyOutput as { message?: { content?: string } }).message?.content).toBe(
+        '[Mon 2026-03-09 23:21 GMT+8] 继续。',
+      );
+
+      const assistantOutput = await app.callHook(
+        'before_message_write',
+        {
+          message: { role: 'assistant', content: injectedByMarker },
+        },
+        { sessionKey: 'agent:main:main', agentId: 'main' },
+      );
+      expect(assistantOutput).toBeUndefined();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 });
