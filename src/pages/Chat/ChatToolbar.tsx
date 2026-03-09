@@ -1,6 +1,6 @@
 /**
  * Chat Toolbar
- * Session selector, new session, refresh, and thinking toggle.
+ * Refresh and thinking toggle.
  * Rendered in the Header when on the Chat page.
  */
 import { RefreshCw, Brain } from 'lucide-react';
