@@ -99,7 +99,7 @@ export function Channels() {
   // Connected/disconnected channel counts
   const connectedCount = channels.filter((c) => c.status === 'connected').length;
 
-  if (loading) {
+  if (loading && channels.length === 0) {
     return (
       <div className="flex h-96 items-center justify-center">
         <LoadingSpinner size="lg" />
