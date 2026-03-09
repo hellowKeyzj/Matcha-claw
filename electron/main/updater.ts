@@ -2,18 +2,15 @@
  * Auto-Updater Module
  * Handles automatic application updates using electron-updater
  *
- * Update providers are configured in electron-builder.yml (OSS primary, GitHub fallback).
- * For prerelease channels (alpha, beta), the feed URL is overridden at runtime
- * to point at the channel-specific OSS directory (e.g. /alpha/, /beta/).
+ * Update providers are configured in electron-builder.yml.
+ * For prerelease channels (alpha, beta), autoUpdater.channel controls which
+ * channel metadata file is requested.
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
-
-/** Base CDN URL (without trailing channel path) */
-const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -63,23 +60,14 @@ export class AppUpdater extends EventEmitter {
       debug: (msg: string) => logger.debug('[Updater]', msg),
     };
 
-    // Override feed URL for prerelease channels so that
-    // alpha -> /alpha/alpha-mac.yml, beta -> /beta/beta-mac.yml, etc.
+    // Use the publish provider packaged in app-update.yml.
     const version = app.getVersion();
     const channel = detectChannel(version);
-    const feedUrl = `${OSS_BASE_URL}/${channel}`;
-
-    logger.info(`[Updater] Version: ${version}, channel: ${channel}, feedUrl: ${feedUrl}`);
+    logger.info(`[Updater] Version: ${version}, channel: ${channel}, provider: app-update.yml`);
 
     // Set channel so electron-updater requests the correct yml filename.
     // e.g. channel "alpha" → requests alpha-mac.yml, channel "latest" → requests latest-mac.yml
     autoUpdater.channel = channel;
-
-    autoUpdater.setFeedURL({
-      provider: 'generic',
-      url: feedUrl,
-      useMultipleRangeRequest: false,
-    });
 
     this.setupListeners();
   }
