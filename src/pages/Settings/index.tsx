@@ -2,12 +2,16 @@
  * Settings Page
  * Application configuration
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
   Moon,
   Monitor,
   RefreshCw,
+  Loader2,
+  Eye,
+  EyeOff,
   ChevronDown,
   ChevronRight,
   Terminal,
@@ -16,6 +20,10 @@ import {
   Download,
   Copy,
   FileText,
+  Wrench,
+  Upload,
+  Trash2,
+  User,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -46,19 +54,146 @@ import {
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApiFetch } from '@/lib/host-api';
+import { getTaskPluginStatus, installTaskPlugin } from '@/lib/openclaw/task-manager-client';
+import {
+  DEFAULT_SETTINGS_SECTION,
+  parseSettingsSectionFromSearch,
+  type SettingsSectionKey,
+} from '@/lib/settings/sections';
 type ControlUiInfo = {
   url: string;
   token: string;
   port: number;
 };
 
+type TaskPluginInfo = {
+  installed: boolean;
+  enabled: boolean;
+  skillEnabled: boolean;
+  version?: string;
+  pluginDir: string;
+};
+
+type LicenseValidationCode =
+  | 'valid'
+  | 'empty'
+  | 'format_invalid'
+  | 'service_unconfigured'
+  | 'network_error'
+  | 'server_rejected'
+  | 'cache_grace_valid'
+  | 'expired'
+  | 'device_mismatch'
+  | 'not_allowed'
+  | 'checksum_invalid';
+
+type LicenseValidationCodeWithUnknown = LicenseValidationCode | 'unknown';
+
+interface LicenseValidationResponse {
+  valid: boolean;
+  code: LicenseValidationCode;
+  normalizedKey?: string;
+  message?: string;
+}
+
+interface LicenseGateSnapshot {
+  state: 'checking' | 'granted' | 'blocked';
+  reason: string;
+  checkedAtMs: number;
+  hasStoredKey: boolean;
+  hasUsableCache: boolean;
+  nextRevalidateAtMs: number | null;
+  lastValidation?: LicenseValidationResponse | null;
+  renewalAlert?: 'near_expiry_renew_failed' | null;
+}
+
+interface DiagnosticsBundleResponse {
+  zipPath: string;
+  generatedAt: string;
+  fileCount: number;
+}
+
+function maskLicenseKeyForDisplay(raw: string): string {
+  const text = raw.trim();
+  if (!text) {
+    return '';
+  }
+  const visiblePrefix = 4;
+  const visibleSuffix = 4;
+  const plainChars = text.replace(/-/g, '').length;
+  let shownPlainChars = 0;
+  return text.split('').map((char) => {
+    if (char === '-') {
+      return '-';
+    }
+    shownPlainChars += 1;
+    if (plainChars <= visiblePrefix + visibleSuffix) {
+      return '*';
+    }
+    if (shownPlainChars <= visiblePrefix || shownPlainChars > plainChars - visibleSuffix) {
+      return char;
+    }
+    return '*';
+  }).join('');
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string' || !reader.result) {
+        reject(new Error('avatar_invalid_data_url'));
+        return;
+      }
+      resolve(reader.result);
+    };
+    reader.onerror = () => reject(new Error('avatar_file_read_failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('avatar_image_decode_failed'));
+    image.src = src;
+  });
+}
+
+async function cropImageToSquareDataUrl(src: string, size = 128): Promise<string> {
+  const image = await loadImageElement(src);
+  const cropSize = Math.min(image.width, image.height);
+  const sx = (image.width - cropSize) / 2;
+  const sy = (image.height - cropSize) / 2;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('avatar_canvas_unavailable');
+  }
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.clearRect(0, 0, size, size);
+  context.drawImage(image, sx, sy, cropSize, cropSize, 0, 0, size, size);
+  return canvas.toDataURL('image/png');
+}
+
 export function Settings() {
   const { t } = useTranslation('settings');
+  const location = useLocation();
+  const navigate = useNavigate();
   const {
     theme,
     setTheme,
     language,
     setLanguage,
+    userAvatarDataUrl,
+    setUserAvatarDataUrl,
+    clearUserAvatar,
     gatewayAutoStart,
     setGatewayAutoStart,
     proxyEnabled,
@@ -103,6 +238,31 @@ export function Settings() {
   const showCliTools = true;
   const [showLogs, setShowLogs] = useState(false);
   const [logContent, setLogContent] = useState('');
+  const [collectingDiagnostics, setCollectingDiagnostics] = useState(false);
+  const [lastDiagnosticsZipPath, setLastDiagnosticsZipPath] = useState('');
+  const [lastDiagnosticsGeneratedAt, setLastDiagnosticsGeneratedAt] = useState('');
+  const [lastDiagnosticsFileCount, setLastDiagnosticsFileCount] = useState(0);
+  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(
+    () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
+  );
+  const userAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const [taskPluginInfo, setTaskPluginInfo] = useState<TaskPluginInfo | null>(null);
+  const [taskPluginBusy, setTaskPluginBusy] = useState(false);
+  const [licenseKeyInput, setLicenseKeyInput] = useState('');
+  const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCodeWithUnknown | null>(null);
+  const [licenseValidationMessage, setLicenseValidationMessage] = useState('');
+  const [licenseBusy, setLicenseBusy] = useState(false);
+  const [showLicenseKeyPlain, setShowLicenseKeyPlain] = useState(false);
+  const [licenseGateSnapshot, setLicenseGateSnapshot] = useState<LicenseGateSnapshot>({
+    state: 'checking',
+    reason: 'init',
+    checkedAtMs: 0,
+    hasStoredKey: false,
+    hasUsableCache: false,
+    nextRevalidateAtMs: null,
+    lastValidation: null,
+    renewalAlert: null,
+  });
 
   const handleShowLogs = async () => {
     try {
@@ -124,6 +284,218 @@ export function Settings() {
     } catch {
       // ignore
     }
+  };
+
+  const refreshLicenseGateSnapshot = useCallback(async () => {
+    try {
+      const snapshot = await hostApiFetch<LicenseGateSnapshot>('/api/license/gate');
+      if (snapshot && typeof snapshot === 'object' && typeof snapshot.state === 'string') {
+        setLicenseGateSnapshot(snapshot);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const loadStoredLicenseKey = useCallback(async () => {
+    try {
+      const payload = await hostApiFetch<{ key: string | null }>('/api/license/stored-key');
+      const storedKey = typeof payload.key === 'string' ? payload.key.trim() : '';
+      if (storedKey) {
+        setLicenseKeyInput(storedKey);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const resolveLicenseMessage = useCallback((code: LicenseValidationCodeWithUnknown | null, fallbackMessage?: string) => {
+    if (!code) {
+      return '';
+    }
+    const localized = t(`license.messages.${code}`, { defaultValue: '' });
+    if (localized) {
+      return fallbackMessage ? `${localized}: ${fallbackMessage}` : localized;
+    }
+    if (fallbackMessage) {
+      return fallbackMessage;
+    }
+    return t('license.messages.unknown');
+  }, [t]);
+
+  const applyLicenseResult = useCallback((result: LicenseValidationResponse | null) => {
+    if (!result) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(t('license.messages.unknown'));
+      return;
+    }
+
+    const nextCode: LicenseValidationCodeWithUnknown = result.code ?? 'unknown';
+    setLicenseValidationCode(nextCode);
+    const message = resolveLicenseMessage(nextCode, result.message);
+    setLicenseValidationMessage(message);
+    if (result.normalizedKey) {
+      setLicenseKeyInput(result.normalizedKey);
+    }
+    if (result.valid) {
+      if (result.code === 'cache_grace_valid') {
+        toast.success(t('license.messages.cache_grace_valid'));
+      } else {
+        toast.success(t('license.messages.valid'));
+      }
+    } else {
+      toast.error(message || t('license.messages.unknown'));
+    }
+  }, [resolveLicenseMessage, t]);
+
+  const runValidateLicense = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      const result = await hostApiFetch<LicenseValidationResponse>('/api/license/validate', {
+        method: 'POST',
+        body: JSON.stringify({ key: licenseKeyInput }),
+      });
+      applyLicenseResult(result);
+      await refreshLicenseGateSnapshot();
+    } catch (error) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(resolveLicenseMessage('unknown', String(error)));
+      toast.error(resolveLicenseMessage('unknown', String(error)));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [applyLicenseResult, licenseKeyInput, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+
+  const handleValidateLicense = useCallback(() => {
+    if (!licenseKeyInput.trim()) {
+      setLicenseValidationCode('empty');
+      setLicenseValidationMessage(resolveLicenseMessage('empty'));
+      toast.error(resolveLicenseMessage('empty'));
+      return;
+    }
+    void runValidateLicense();
+  }, [licenseKeyInput, resolveLicenseMessage, runValidateLicense]);
+
+  const handleForceRevalidate = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      const result = await hostApiFetch<LicenseValidationResponse>('/api/license/revalidate', {
+        method: 'POST',
+      });
+      applyLicenseResult(result);
+      await refreshLicenseGateSnapshot();
+    } catch (error) {
+      setLicenseValidationCode('unknown');
+      setLicenseValidationMessage(resolveLicenseMessage('unknown', String(error)));
+      toast.error(resolveLicenseMessage('unknown', String(error)));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [applyLicenseResult, refreshLicenseGateSnapshot, resolveLicenseMessage]);
+
+  const handleClearStoredLicense = useCallback(async () => {
+    setLicenseBusy(true);
+    try {
+      await hostApiFetch('/api/license/clear', { method: 'POST' });
+      setLicenseKeyInput('');
+      setLicenseValidationCode(null);
+      setLicenseValidationMessage('');
+      setShowLicenseKeyPlain(false);
+      await refreshLicenseGateSnapshot();
+      toast.success(t('license.toast.cleared'));
+    } catch (error) {
+      toast.error(t('license.toast.clearFailed', { error: String(error) }));
+    } finally {
+      setLicenseBusy(false);
+    }
+  }, [refreshLicenseGateSnapshot, t]);
+
+  const handleCollectDiagnosticsBundle = useCallback(async () => {
+    setCollectingDiagnostics(true);
+    try {
+      const result = await hostApiFetch<DiagnosticsBundleResponse>('/api/diagnostics/collect', {
+        method: 'POST',
+      });
+      if (!result || typeof result.zipPath !== 'string' || !result.zipPath.trim()) {
+        throw new Error('invalid diagnostics bundle result');
+      }
+      setLastDiagnosticsZipPath(result.zipPath);
+      setLastDiagnosticsGeneratedAt(result.generatedAt);
+      setLastDiagnosticsFileCount(result.fileCount);
+      toast.success(t('diagnostics.toast.success', { count: result.fileCount }));
+    } catch (error) {
+      toast.error(t('diagnostics.toast.failed', { error: String(error) }));
+    } finally {
+      setCollectingDiagnostics(false);
+    }
+  }, [t]);
+
+  const handleOpenDiagnosticsBundleFolder = useCallback(async () => {
+    if (!lastDiagnosticsZipPath) {
+      return;
+    }
+    try {
+      await invokeIpc('shell:showItemInFolder', lastDiagnosticsZipPath);
+    } catch (error) {
+      toast.error(t('diagnostics.toast.openFailed', { error: String(error) }));
+    }
+  }, [lastDiagnosticsZipPath, t]);
+
+  const loadTaskPluginStatus = useCallback(async (silent = true) => {
+    try {
+      const status = await getTaskPluginStatus();
+      setTaskPluginInfo(status);
+    } catch (error) {
+      if (!silent) {
+        toast.error(t('taskPlugin.toastStatusFailed', { error: String(error) }));
+      }
+    }
+  }, [t]);
+
+  const handleInstallTaskPlugin = useCallback(async () => {
+    setTaskPluginBusy(true);
+    try {
+      const result = await installTaskPlugin();
+      if (!result.success) {
+        toast.error(t('taskPlugin.toastInstallFailed', { error: result.error || 'unknown error' }));
+        return;
+      }
+      toast.success(t('taskPlugin.toastInstallSuccess'));
+      await loadTaskPluginStatus(true);
+    } catch (error) {
+      toast.error(t('taskPlugin.toastInstallFailed', { error: String(error) }));
+    } finally {
+      setTaskPluginBusy(false);
+    }
+  }, [loadTaskPluginStatus, t]);
+
+  const handleAvatarFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
+    event.target.value = '';
+    if (!selectedFile) {
+      return;
+    }
+    if (!selectedFile.type.startsWith('image/')) {
+      toast.error(t('appearance.avatarInvalidType'));
+      return;
+    }
+
+    try {
+      const sourceDataUrl = await readFileAsDataUrl(selectedFile);
+      const squareAvatarDataUrl = await cropImageToSquareDataUrl(sourceDataUrl, 128);
+      setUserAvatarDataUrl(squareAvatarDataUrl);
+      toast.success(t('appearance.avatarUpdated'));
+    } catch (error) {
+      toast.error(t('appearance.avatarUpdateFailed', { error: String(error) }));
+    }
+  };
+
+  const handleClearAvatar = () => {
+    clearUserAvatar();
+    if (userAvatarInputRef.current) {
+      userAvatarInputRef.current.value = '';
+    }
+    toast.success(t('appearance.avatarCleared'));
   };
 
   // Open developer console
@@ -267,6 +639,33 @@ export function Settings() {
     setProxyBypassRulesDraft(proxyBypassRules);
   }, [proxyBypassRules]);
 
+  useEffect(() => {
+    void loadTaskPluginStatus(true);
+  }, [loadTaskPluginStatus]);
+
+  useEffect(() => {
+    void refreshLicenseGateSnapshot();
+    void loadStoredLicenseKey();
+  }, [refreshLicenseGateSnapshot, loadStoredLicenseKey]);
+
+  useEffect(() => {
+    if (activeSection !== 'license') {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshLicenseGateSnapshot();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [activeSection, refreshLicenseGateSnapshot]);
+
+  useEffect(() => {
+    const sectionFromQuery = parseSettingsSectionFromSearch(location.search);
+    if (!sectionFromQuery) {
+      return;
+    }
+    setActiveSection((prev) => (prev === sectionFromQuery ? prev : sectionFromQuery));
+  }, [location.search]);
+
   const handleSaveProxySettings = async () => {
     setSavingProxy(true);
     try {
@@ -391,6 +790,31 @@ export function Settings() {
     );
   };
 
+  const taskPluginReady = Boolean(taskPluginInfo?.installed && taskPluginInfo?.enabled && taskPluginInfo?.skillEnabled);
+
+  const taskPluginBadgeVariant = !taskPluginInfo?.installed
+    ? 'secondary'
+    : taskPluginReady
+      ? 'success'
+      : 'destructive';
+
+  const taskPluginStatusLabel = !taskPluginInfo?.installed
+    ? t('taskPlugin.notInstalled')
+    : taskPluginReady
+      ? t('taskPlugin.installedEnabled')
+      : t('taskPlugin.installedDisabled');
+
+  const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
+    { key: 'gateway', label: t('gateway.title') },
+    { key: 'appearance', label: t('appearance.title') },
+    { key: 'aiProviders', label: t('aiProviders.title') },
+    { key: 'taskPlugin', label: t('taskPlugin.title') },
+    { key: 'updates', label: t('updates.title') },
+    { key: 'advanced', label: t('advanced.title') },
+    { key: 'license', label: t('license.title') },
+    { key: 'diagnostics', label: t('diagnostics.title') },
+  ];
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <div>
@@ -400,7 +824,158 @@ export function Settings() {
         </p>
       </div>
 
-      {/* Appearance */}
+      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <Card className="h-fit border-border/60 bg-card/80">
+          <CardContent className="p-2.5">
+            <nav className="space-y-1" aria-label={t('title')}>
+              {sectionItems.map((section) => (
+                <Button
+                  key={section.key}
+                  type="button"
+                  variant="ghost"
+                  className={`w-full h-10 justify-start rounded-lg px-2.5 text-sm font-medium transition-colors border border-transparent ${
+                    activeSection === section.key
+                      ? 'bg-primary/12 text-primary hover:bg-primary/18'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/70'
+                  }`}
+                  onClick={() => {
+                    setActiveSection(section.key);
+                    const params = new URLSearchParams(location.search);
+                    params.set('section', section.key);
+                    const nextSearch = params.toString();
+                    navigate(
+                      {
+                        pathname: location.pathname,
+                        search: nextSearch ? `?${nextSearch}` : '',
+                      },
+                      { replace: true },
+                    );
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    className={`mr-2 h-1.5 w-1.5 rounded-full transition-colors ${
+                      activeSection === section.key ? 'bg-primary' : 'bg-transparent'
+                    }`}
+                  />
+                  <span className="truncate">{section.label}</span>
+                </Button>
+              ))}
+            </nav>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          {activeSection === 'license' && (
+            <Card className="order-2">
+              <CardHeader>
+                <CardTitle>{t('license.title')}</CardTitle>
+                <CardDescription>{t('license.description')}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 p-3">
+                  <div>
+                    <Label>{t('license.gateStatus')}</Label>
+                    {licenseGateSnapshot.renewalAlert ? (
+                      <p className="mt-1 text-xs text-amber-600">
+                        {t(`license.renewAlert.${licenseGateSnapshot.renewalAlert}`)}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Badge
+                    variant={
+                      licenseGateSnapshot.state === 'granted'
+                        ? 'success'
+                        : licenseGateSnapshot.state === 'blocked'
+                          ? 'destructive'
+                          : 'secondary'
+                    }
+                  >
+                    {t(`license.gateState.${licenseGateSnapshot.state}`)}
+                  </Badge>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="settings-license-key">{t('license.inputLabel')}</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="settings-license-key"
+                      value={showLicenseKeyPlain ? licenseKeyInput : maskLicenseKeyForDisplay(licenseKeyInput)}
+                      placeholder={t('license.placeholder')}
+                      readOnly={!showLicenseKeyPlain && licenseGateSnapshot.hasStoredKey && Boolean(licenseKeyInput)}
+                      onChange={(event) => {
+                        setLicenseKeyInput(event.target.value);
+                        setLicenseValidationCode(null);
+                        setLicenseValidationMessage('');
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          handleValidateLicense();
+                        }
+                      }}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setShowLicenseKeyPlain((prev) => !prev)}
+                      title={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
+                      aria-label={showLicenseKeyPlain ? t('license.hideKey') : t('license.showKey')}
+                    >
+                      {showLicenseKeyPlain ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  {(licenseValidationMessage || licenseValidationCode) ? (
+                    <p
+                      className={
+                        licenseValidationCode === 'valid' || licenseValidationCode === 'cache_grace_valid'
+                          ? 'text-xs text-green-500'
+                          : licenseValidationCode
+                            ? 'text-xs text-destructive'
+                            : 'text-xs text-muted-foreground'
+                      }
+                    >
+                      {licenseValidationMessage || resolveLicenseMessage(licenseValidationCode)}
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" onClick={handleValidateLicense} disabled={licenseBusy}>
+                    {licenseBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    {t('license.validate')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      void handleForceRevalidate();
+                    }}
+                    disabled={licenseBusy || !licenseGateSnapshot.hasStoredKey}
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    {t('license.revalidate')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={() => {
+                      void handleClearStoredLicense();
+                    }}
+                    disabled={licenseBusy || (!licenseGateSnapshot.hasStoredKey && !licenseGateSnapshot.hasUsableCache)}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    {t('license.clear')}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Appearance */}
+          {activeSection === 'appearance' && (
       <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('appearance.title')}</CardTitle>
@@ -451,10 +1026,68 @@ export function Settings() {
               ))}
             </div>
           </div>
+          <Separator />
+          <div className="space-y-3">
+            <div>
+              <Label>{t('appearance.userAvatar')}</Label>
+              <p className="text-sm text-muted-foreground">
+                {t('appearance.userAvatarDesc')}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-muted">
+                {userAvatarDataUrl ? (
+                  <img
+                    src={userAvatarDataUrl}
+                    alt={t('appearance.userAvatarPreviewAlt')}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <User className="h-6 w-6 text-muted-foreground" />
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={userAvatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  aria-label={t('appearance.uploadAvatarInputLabel')}
+                  onChange={(event) => {
+                    void handleAvatarFileSelect(event);
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => userAvatarInputRef.current?.click()}
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  {t('appearance.uploadAvatar')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={!userAvatarDataUrl}
+                  onClick={handleClearAvatar}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {t('appearance.clearAvatar')}
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t('appearance.userAvatarHint')}
+            </p>
+          </div>
         </CardContent>
       </Card>
+          )}
 
       {/* AI Providers */}
+      {activeSection === 'aiProviders' && (
       <Card className="order-2">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -467,8 +1100,10 @@ export function Settings() {
           <ProvidersSettings />
         </CardContent>
       </Card>
+      )}
 
       {/* Gateway */}
+      {activeSection === 'gateway' && (
       <Card className="order-1">
         <CardHeader>
           <CardTitle>{t('gateway.title')}</CardTitle>
@@ -662,8 +1297,64 @@ export function Settings() {
           )}
         </CardContent>
       </Card>
+      )}
+
+      {/* Task Plugin */}
+      {activeSection === 'taskPlugin' && (
+      <Card className="order-2">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wrench className="h-5 w-5" />
+            {t('taskPlugin.title')}
+          </CardTitle>
+          <CardDescription>{t('taskPlugin.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <Label>{t('taskPlugin.status')}</Label>
+              <div className="flex items-center gap-2">
+                <Badge variant={taskPluginBadgeVariant}>{taskPluginStatusLabel}</Badge>
+                {taskPluginInfo?.version ? (
+                  <span className="text-xs text-muted-foreground">
+                    {t('taskPlugin.version')}: {taskPluginInfo.version}
+                  </span>
+                ) : null}
+              </div>
+              {taskPluginInfo?.installed ? (
+                <p className="text-xs text-muted-foreground">
+                  Skill `task-manager`: {taskPluginInfo.skillEnabled ? 'enabled' : 'disabled'}
+                </p>
+              ) : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => void loadTaskPluginStatus(false)}
+                disabled={taskPluginBusy}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                {t('taskPlugin.refresh')}
+              </Button>
+              <Button onClick={() => void handleInstallTaskPlugin()} disabled={taskPluginBusy}>
+                <Wrench className="mr-2 h-4 w-4" />
+                {taskPluginInfo?.installed ? t('taskPlugin.reinstall') : t('taskPlugin.install')}
+              </Button>
+            </div>
+          </div>
+
+          {taskPluginInfo?.pluginDir ? (
+            <div className="space-y-1">
+              <Label>{t('taskPlugin.path')}</Label>
+              <Input readOnly value={taskPluginInfo.pluginDir} className="font-mono" />
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+      )}
 
       {/* Updates */}
+      {activeSection === 'updates' && (
       <Card className="order-2">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -707,8 +1398,63 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
+
+      {/* Diagnostics */}
+      {activeSection === 'diagnostics' && (
+      <Card className="order-2">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            {t('diagnostics.title')}
+          </CardTitle>
+          <CardDescription>{t('diagnostics.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              onClick={() => {
+                void handleCollectDiagnosticsBundle();
+              }}
+              disabled={collectingDiagnostics}
+            >
+              {collectingDiagnostics ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-2 h-4 w-4" />
+              )}
+              {collectingDiagnostics ? t('diagnostics.collecting') : t('diagnostics.collect')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                void handleOpenDiagnosticsBundleFolder();
+              }}
+              disabled={!lastDiagnosticsZipPath}
+            >
+              <ExternalLink className="mr-2 h-4 w-4" />
+              {t('diagnostics.openFolder')}
+            </Button>
+          </div>
+
+          {lastDiagnosticsZipPath ? (
+            <div className="space-y-2 rounded-lg border border-border/60 bg-background/40 p-3">
+              <Label>{t('diagnostics.lastBundle')}</Label>
+              <Input readOnly value={lastDiagnosticsZipPath} className="font-mono" />
+              <p className="text-xs text-muted-foreground">
+                {t('diagnostics.lastMeta', {
+                  generatedAt: lastDiagnosticsGeneratedAt || '-',
+                  count: lastDiagnosticsFileCount,
+                })}
+              </p>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+      )}
 
       {/* Advanced */}
+      {activeSection === 'advanced' && (
       <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('advanced.title')}</CardTitle>
@@ -729,9 +1475,10 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
 
       {/* Developer */}
-      {devModeUnlocked && (
+      {activeSection === 'advanced' && devModeUnlocked && (
         <Card className="order-2">
           <CardHeader>
             <CardTitle>{t('developer.title')}</CardTitle>
@@ -926,6 +1673,7 @@ export function Settings() {
       )}
 
       {/* About */}
+      {activeSection === 'advanced' && (
       <Card className="order-2">
         <CardHeader>
           <CardTitle>{t('about.title')}</CardTitle>
@@ -954,6 +1702,9 @@ export function Settings() {
           </div>
         </CardContent>
       </Card>
+      )}
+        </div>
+      </div>
     </div>
   );
 }

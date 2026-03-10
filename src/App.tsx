@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
-import { Component, useEffect } from 'react';
+import { Component, useCallback, useEffect } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -23,6 +23,7 @@ import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { applyGatewayTransportPreference } from './lib/api-client';
+import { hostApiFetch } from './lib/host-api';
 
 
 /**
@@ -89,6 +90,15 @@ class ErrorBoundary extends Component<
   }
 }
 
+interface LicenseGateSnapshot {
+  state: 'checking' | 'granted' | 'blocked';
+  reason: string;
+  checkedAtMs: number;
+  hasStoredKey: boolean;
+  hasUsableCache: boolean;
+  nextRevalidateAtMs: number | null;
+}
+
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -96,7 +106,20 @@ function App() {
   const theme = useSettingsStore((state) => state.theme);
   const language = useSettingsStore((state) => state.language);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
+  const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
+
+  const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
+    try {
+      const result = await hostApiFetch<LicenseGateSnapshot>('/api/license/gate');
+      if (!result || typeof result !== 'object' || typeof result.state !== 'string') {
+        return null;
+      }
+      return result;
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     initSettings();
@@ -114,12 +137,41 @@ function App() {
     initGateway();
   }, [initGateway]);
 
-  // Redirect to setup wizard if not complete
   useEffect(() => {
-    if (!setupComplete && !location.pathname.startsWith('/setup')) {
-      navigate('/setup');
+    if (!settingsInitialized) {
+      return;
     }
-  }, [setupComplete, location.pathname, navigate]);
+
+    let cancelled = false;
+
+    const enforceRouteGuard = async () => {
+      if (!setupComplete) {
+        if (!location.pathname.startsWith('/setup')) {
+          navigate('/setup', { replace: true });
+        }
+        return;
+      }
+
+      const gateSnapshot = await fetchLicenseGateSnapshot();
+      if (cancelled || !gateSnapshot) {
+        return;
+      }
+
+      if (gateSnapshot.state !== 'granted' && !location.pathname.startsWith('/settings')) {
+        navigate('/settings?section=license', { replace: true });
+        return;
+      }
+
+      if (gateSnapshot.state === 'granted' && location.pathname.startsWith('/setup')) {
+        navigate('/', { replace: true });
+      }
+    };
+
+    void enforceRouteGuard();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchLicenseGateSnapshot, location.pathname, navigate, settingsInitialized, setupComplete]);
 
   // Listen for navigation events from main process
   useEffect(() => {

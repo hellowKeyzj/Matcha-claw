@@ -239,3 +239,83 @@ tests/unit/
   - ChatMessage 增加用户头像/assistant emoji 与文件路径 hint 可点击打开目录
   - Chat 页接入任务收件箱右侧分栏宽度持久化、`?session/?agent` 跳转
   - 补齐 0004 相关单测并通过 lint/typecheck/全量测试
+
+---
+
+## 目录树（本次 0005 迁移相关）
+
+```text
+electron/
+├── api/
+│   ├── server.ts (接入 license / diagnostics 路由)
+│   └── routes/
+│       ├── license.ts
+│       └── diagnostics.ts
+├── main/
+│   └── index.ts (启动阶段引导 license gate bootstrap)
+└── utils/
+    ├── store.ts (新增 setupComplete 与 userAvatarDataUrl)
+    ├── hardware-id.ts
+    ├── license-config.ts
+    ├── license-secret.ts
+    └── license.ts
+
+src/
+├── App.tsx (setup/license 路由门禁)
+├── stores/
+│   └── settings.ts (初始化标记、setupComplete 同步、头像持久化)
+├── pages/
+│   ├── Setup/index.tsx (welcome 前置 license 校验)
+│   ├── Settings/index.tsx (分栏结构 + license/taskPlugin/diagnostics/avatar)
+│   └── Chat/index.tsx (接入用户头像)
+└── i18n/locales/*/
+    ├── settings.json
+    └── setup.json
+
+scripts/
+├── license_server.py
+├── license_audit_summary.py
+├── license-server-README.md
+└── license-release.md
+
+tests/unit/
+├── license-validation.test.ts
+├── settings.section-switch.test.tsx
+└── settings.user-avatar.test.tsx
+```
+
+## 文件职责（关键模块）
+
+- `electron/utils/license.ts`：授权门禁核心逻辑（本地校验、在线校验、缓存宽限、重验调度、gate 快照）
+- `electron/api/routes/license.ts`：License Host API 路由（gate/stored-key/validate/revalidate/clear）
+- `electron/api/routes/diagnostics.ts`：本地诊断包采集与路径返回
+- `src/stores/settings.ts`：统一设置状态，新增 setupComplete 与用户头像数据同步
+- `src/pages/Setup/index.tsx`：向导 welcome 步骤执行 License 校验前置
+- `src/pages/Settings/index.tsx`：设置页分栏入口与授权/诊断/插件/头像管理 UI
+- `scripts/license_server.py`：授权码生成、导入导出、解绑、激活服务一体化运维脚本
+
+## 模块依赖与边界
+
+- Renderer 侧新增能力统一走 `hostApiFetch` / `invokeIpc`，未新增页面直连 `window.electron.ipcRenderer.invoke`
+- 授权门禁状态只由 Main 侧 `license gate` 维护，前端仅读取快照并触发校验动作
+- 设置页分栏复用现有路由 query 与 store 模式，不引入独立状态管理框架
+- 诊断采集在 Main 侧聚合日志与设置，Renderer 仅触发并展示结果
+
+## 关键决策与原因
+
+1. 保留完整授权链路（校验、缓存、重验、清除、门禁），但按现有 host-api/api-client 边界落地
+2. setup 与 runtime 统一走授权门禁，避免“向导通过但运行时未鉴权”的状态分裂
+3. 设置页采用 query 驱动分栏，兼容现有路由与历史导航行为
+4. 头像能力直接复用现有 settings store 持久化，不新增独立 profile 子系统
+5. 诊断能力先提供本地可收集与可定位路径的最小闭环，再由后续补丁扩展上传/脱敏策略
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`feat(settings): migrate patch-0005 license gate with framework adaptation`
+- 主要结果：
+  - Setup 增加 License 前置校验，App 增加 setup/license 双重门禁
+  - Settings 重构为分栏结构，新增 License、Task Plugin、Diagnostics、用户头像管理
+  - Main 新增授权能力（hardware id、密文存储、gate bootstrap、重验调度）并提供 Host API 路由
+  - 新增授权服务脚本与运维文档，补齐授权链路发布资料
+  - 补齐 license/settings 相关测试并通过全量校验

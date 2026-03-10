@@ -23,6 +23,7 @@ export interface AppSettings {
   // General
   theme: 'light' | 'dark' | 'system';
   language: string;
+  userAvatarDataUrl: string | null;
   startMinimized: boolean;
   launchAtStartup: boolean;
   
@@ -46,6 +47,7 @@ export interface AppSettings {
   // UI State
   sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
+  setupComplete: boolean;
   
   // Presets
   selectedBundles: string[];
@@ -60,6 +62,7 @@ const defaults: AppSettings = {
   // General
   theme: 'system',
   language: 'en',
+  userAvatarDataUrl: null,
   startMinimized: false,
   launchAtStartup: false,
   
@@ -83,6 +86,7 @@ const defaults: AppSettings = {
   // UI State
   sidebarCollapsed: false,
   devModeUnlocked: false,
+  setupComplete: false,
   
   // Presets
   selectedBundles: ['productivity', 'developer'],

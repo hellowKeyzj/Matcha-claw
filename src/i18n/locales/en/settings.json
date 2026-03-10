@@ -8,7 +8,18 @@
     "light": "Light",
     "dark": "Dark",
     "system": "System",
-    "language": "Language"
+    "language": "Language",
+    "userAvatar": "User Avatar",
+    "userAvatarDesc": "Upload your photo to use as the chat user avatar",
+    "userAvatarPreviewAlt": "User avatar preview",
+    "uploadAvatarInputLabel": "Upload User Avatar",
+    "uploadAvatar": "Upload Avatar",
+    "clearAvatar": "Clear Avatar",
+    "userAvatarHint": "Uploaded images are cropped to a 128x128 square avatar and stored locally",
+    "avatarInvalidType": "Please choose an image file",
+    "avatarUpdated": "User avatar updated",
+    "avatarCleared": "User avatar cleared",
+    "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
   "aiProviders": {
     "title": "AI Providers",
@@ -105,6 +116,74 @@
       "step2": "Open the login page in your browser.",
       "step3": "Paste the code to approve access.",
       "requestingCode": "Requesting secure login code..."
+    }
+  },
+  "taskPlugin": {
+    "title": "Task Plugin",
+    "description": "Manage the built-in task-manager plugin runtime status",
+    "status": "Status",
+    "version": "Version",
+    "path": "Plugin Path",
+    "install": "Install",
+    "reinstall": "Reinstall",
+    "refresh": "Refresh",
+    "notInstalled": "Not Installed",
+    "installedEnabled": "Installed & Enabled",
+    "installedDisabled": "Installed but Disabled",
+    "toastInstallSuccess": "Task plugin installed",
+    "toastInstallFailed": "Failed to install task plugin: {{error}}",
+    "toastStatusFailed": "Failed to load task plugin status: {{error}}"
+  },
+  "license": {
+    "title": "License",
+    "description": "Activate and manage your local license authorization",
+    "gateStatus": "Gate Status",
+    "gateState": {
+      "checking": "Checking",
+      "granted": "Granted",
+      "blocked": "Blocked"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "Renewal failed near expiry. Please revalidate as soon as possible"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+    "showKey": "Show license key",
+    "hideKey": "Hide license key",
+    "validate": "Validate License",
+    "revalidate": "Revalidate",
+    "clear": "Clear",
+    "messages": {
+      "valid": "License validated",
+      "cache_grace_valid": "License validated by cached grace period",
+      "empty": "Please enter a license key",
+      "format_invalid": "Invalid license key format",
+      "service_unconfigured": "License service is not configured",
+      "network_error": "Cannot reach license service, please check network and retry",
+      "server_rejected": "License was rejected by license service",
+      "expired": "License has expired",
+      "device_mismatch": "License device does not match this machine",
+      "not_allowed": "License is not allowed",
+      "checksum_invalid": "License checksum is invalid",
+      "unknown": "License validation failed"
+    },
+    "toast": {
+      "cleared": "Local license cleared",
+      "clearFailed": "Failed to clear local license: {{error}}"
+    }
+  },
+  "diagnostics": {
+    "title": "Diagnostics",
+    "description": "Collect a local diagnostics bundle for troubleshooting",
+    "collect": "Collect Bundle",
+    "collecting": "Collecting",
+    "openFolder": "Open Folder",
+    "lastBundle": "Last Bundle",
+    "lastMeta": "Generated at {{generatedAt}}, files: {{count}}",
+    "toast": {
+      "success": "Diagnostics bundle generated, files: {{count}}",
+      "failed": "Failed to generate diagnostics bundle: {{error}}",
+      "openFailed": "Failed to open diagnostics folder: {{error}}"
     }
   },
   "gateway": {

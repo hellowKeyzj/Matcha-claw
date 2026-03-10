@@ -11,6 +11,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useSettingsStore } from '@/stores/settings';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
@@ -95,6 +96,7 @@ export function Chat() {
   const clearError = useChatStore((s) => s.clearError);
   const agents = useSubagentsStore((s) => s.agents);
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
+  const userAvatarDataUrl = useSettingsStore((s) => s.userAvatarDataUrl);
 
   const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
 
@@ -288,6 +290,7 @@ export function Chat() {
                     message={msg}
                     showThinking={showThinking}
                     assistantAvatarEmoji={assistantAvatarEmoji}
+                    userAvatarImageUrl={userAvatarDataUrl}
                   />
                 ))}
 
@@ -309,6 +312,7 @@ export function Chat() {
                     isStreaming
                     streamingTools={streamingTools}
                     assistantAvatarEmoji={assistantAvatarEmoji}
+                    userAvatarImageUrl={userAvatarDataUrl}
                   />
                 )}
 

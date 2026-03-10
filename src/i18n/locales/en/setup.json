@@ -35,6 +35,28 @@
             "crossPlatform": "Cross-platform support"
         }
     },
+    "license": {
+        "label": "License Key",
+        "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+        "hint": "You must validate a license key before moving to the next step",
+        "validate": "Validate",
+        "messages": {
+            "idle": "Waiting for license key input",
+            "valid": "License validated",
+            "cache_grace_valid": "License validated by cached grace period",
+            "empty": "Please enter a license key",
+            "format_invalid": "Invalid license key format",
+            "service_unconfigured": "License service is not configured",
+            "network_error": "Cannot reach license service, please check network and retry",
+            "server_rejected": "License was rejected by license service",
+            "expired": "License has expired",
+            "device_mismatch": "License device does not match this machine",
+            "not_allowed": "License is not allowed",
+            "checksum_invalid": "License checksum is invalid",
+            "requiredBeforeSkip": "Complete license validation before skipping setup",
+            "unknown": "License validation failed"
+        }
+    },
     "runtime": {
         "title": "Checking Environment",
         "viewLogs": "View Logs",
