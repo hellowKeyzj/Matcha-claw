@@ -1,0 +1,38 @@
+{
+    "title": "任务中心",
+    "subtitle": "任务看板与团队讨论中心",
+    "workspace": "工作区",
+    "installPlugin": "安装任务插件",
+    "refresh": "刷新",
+    "gatewayNotRunning": "网关未运行",
+    "plugin": {
+        "title": "需要安装 Task Manager 插件",
+        "description": "使用任务中心前请先安装并启用 task-manager 插件"
+    },
+    "stats": {
+        "running": "执行中",
+        "waiting": "等待中",
+        "completed": "已完成"
+    },
+    "listTitle": "任务列表",
+    "empty": "暂无任务",
+    "detailTitle": "任务详情",
+    "selectTask": "请选择一个任务查看详情",
+    "noMarkdown": "暂无计划 Markdown",
+    "stepsOverview": "步骤清单",
+    "completedTag": "已完成",
+    "pendingTag": "待办",
+    "blocked": {
+        "title": "待确认任务",
+        "pendingCount": "{{count}} 个任务待确认",
+        "inputPlaceholder": "请输入该任务需要的补充信息",
+        "close": "关闭",
+        "submitInput": "提交输入",
+        "reject": "拒绝",
+        "confirm": "确认"
+    },
+    "toast": {
+        "pluginInstalled": "任务插件安装成功",
+        "resumed": "任务已恢复执行"
+    }
+}

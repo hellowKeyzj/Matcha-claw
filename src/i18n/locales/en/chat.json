@@ -22,5 +22,36 @@
         "withinTwoWeeks": "Within 2 Weeks",
         "withinMonth": "Within 1 Month",
         "older": "Older than 1 Month"
+    },
+    "taskInbox": {
+        "title": "Task Inbox",
+        "unfinishedCount": "{{count}} unfinished tasks",
+        "refresh": "Refresh tasks",
+        "workspaceScope": "Scope: {{scope}}",
+        "gatewayStopped": "Gateway is stopped; task list and resume actions are unavailable",
+        "empty": "No unfinished tasks in current workspace",
+        "unboundSession": "No bound session yet, resume task first",
+        "taskNotFound": "Task not found or updated, please refresh",
+        "untitledTask": "Untitled task",
+        "assignedSessionReady": "Session is bound",
+        "assignedSessionMissing": "Session is not bound",
+        "openSession": "Open session",
+        "inputPlaceholder": "Please provide additional information",
+        "submitInput": "Submit input",
+        "reject": "Reject",
+        "approve": "Approve",
+        "collapse": "Collapse task inbox",
+        "expand": "Expand task inbox",
+        "status": {
+            "pending": "Pending",
+            "running": "Running",
+            "waiting_for_input": "Waiting Input",
+            "waiting_approval": "Waiting Approval",
+            "completed": "Completed",
+            "failed": "Failed"
+        },
+        "toast": {
+            "resumed": "Task resumed"
+        }
     }
 }

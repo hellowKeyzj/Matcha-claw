@@ -104,6 +104,9 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 ### 🧠 子代理工作区
 通过可视化工作区创建和管理专用子代理。内置草稿生成、逐行 Diff 预览与受控应用流程，可安全演进 `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md`。
 
+### ✅ 任务看板与团队讨论中心
+在 `/tasks` 统一规划和跟踪任务执行，查看结构化 checklist 进度，并通过聊天侧任务收件箱协同讨论。
+
 ### 📡 多频道管理
 同时配置和监控多个 AI 频道。每个频道独立运行，允许你为不同任务运行专门的智能体。
 
@@ -286,9 +289,9 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 │   └── utils/               # 工具模块（存储、认证、路径）
 ├── src/                      # React 渲染进程
 │   ├── lib/                 # 前端统一 API 与错误模型
-│   ├── stores/              # Zustand 状态仓库（settings/chat/gateway）
+│   ├── stores/              # Zustand 状态仓库（settings/chat/gateway/tasks）
 │   ├── components/          # 可复用 UI 组件
-│   ├── pages/               # Setup/Dashboard/Chat/SubAgents/Channels/Skills/Cron/Settings
+│   ├── pages/               # Setup/Dashboard/Chat/Tasks/Teams/SubAgents/Channels/Skills/Cron/Settings
 │   ├── i18n/                # 国际化资源
 │   └── types/               # TypeScript 类型定义
 ├── tests/

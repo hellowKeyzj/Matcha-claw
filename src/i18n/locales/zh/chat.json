@@ -22,5 +22,36 @@
         "withinTwoWeeks": "两周内",
         "withinMonth": "一个月内",
         "older": "一个月之前"
+    },
+    "taskInbox": {
+        "title": "任务收件箱",
+        "unfinishedCount": "{{count}} 个未完成任务",
+        "refresh": "刷新任务",
+        "workspaceScope": "范围：{{scope}}",
+        "gatewayStopped": "网关未运行，任务列表与恢复操作已禁用",
+        "empty": "当前工作区无未完成任务",
+        "unboundSession": "未绑定会话，先恢复任务",
+        "taskNotFound": "任务不存在或已更新，请刷新后重试",
+        "untitledTask": "未命名任务",
+        "assignedSessionReady": "已绑定会话",
+        "assignedSessionMissing": "未绑定会话",
+        "openSession": "进入会话",
+        "inputPlaceholder": "请输入补充信息",
+        "submitInput": "提交输入",
+        "reject": "拒绝",
+        "approve": "批准",
+        "collapse": "收起任务收件箱",
+        "expand": "展开任务收件箱",
+        "status": {
+            "pending": "待处理",
+            "running": "执行中",
+            "waiting_for_input": "等待输入",
+            "waiting_approval": "等待审批",
+            "completed": "已完成",
+            "failed": "已失败"
+        },
+        "toast": {
+            "resumed": "任务已恢复执行"
+        }
     }
 }
