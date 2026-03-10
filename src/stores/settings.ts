@@ -14,6 +14,7 @@ interface SettingsState {
   // General
   theme: Theme;
   language: string;
+  userAvatarDataUrl: string | null;
   startMinimized: boolean;
   launchAtStartup: boolean;
 
@@ -38,11 +39,14 @@ interface SettingsState {
 
   // Setup
   setupComplete: boolean;
+  initialized: boolean;
 
   // Actions
   init: () => Promise<void>;
   setTheme: (theme: Theme) => void;
   setLanguage: (language: string) => void;
+  setUserAvatarDataUrl: (dataUrl: string | null) => void;
+  clearUserAvatar: () => void;
   setStartMinimized: (value: boolean) => void;
   setLaunchAtStartup: (value: boolean) => void;
   setGatewayAutoStart: (value: boolean) => void;
@@ -70,6 +74,7 @@ const defaultSettings = {
     if (lang.startsWith('ja')) return 'ja';
     return 'en';
   })(),
+  userAvatarDataUrl: null,
   startMinimized: false,
   launchAtStartup: false,
   gatewayAutoStart: true,
@@ -86,6 +91,7 @@ const defaultSettings = {
   sidebarCollapsed: false,
   devModeUnlocked: false,
   setupComplete: false,
+  initialized: false,
 };
 
 export const useSettingsStore = create<SettingsState>()(
@@ -96,13 +102,30 @@ export const useSettingsStore = create<SettingsState>()(
       init: async () => {
         try {
           const settings = await hostApiFetch<Partial<typeof defaultSettings>>('/api/settings');
-          set((state) => ({ ...state, ...settings }));
+          let shouldSyncSetupComplete = false;
+          set((state) => {
+            const mergedSetupComplete = Boolean(state.setupComplete || settings.setupComplete);
+            shouldSyncSetupComplete = mergedSetupComplete && !settings.setupComplete;
+            return {
+              ...state,
+              ...settings,
+              setupComplete: mergedSetupComplete,
+              initialized: true,
+            };
+          });
+          if (shouldSyncSetupComplete) {
+            void hostApiFetch('/api/settings/setupComplete', {
+              method: 'PUT',
+              body: JSON.stringify({ value: true }),
+            }).catch(() => {});
+          }
           if (settings.language) {
             i18n.changeLanguage(settings.language);
           }
         } catch {
           // Keep renderer-persisted settings as a fallback when the main
           // process store is not reachable.
+          set({ initialized: true });
         }
       },
 
@@ -113,6 +136,20 @@ export const useSettingsStore = create<SettingsState>()(
         void hostApiFetch('/api/settings/language', {
           method: 'PUT',
           body: JSON.stringify({ value: language }),
+        }).catch(() => {});
+      },
+      setUserAvatarDataUrl: (userAvatarDataUrl) => {
+        set({ userAvatarDataUrl });
+        void hostApiFetch('/api/settings/userAvatarDataUrl', {
+          method: 'PUT',
+          body: JSON.stringify({ value: userAvatarDataUrl }),
+        }).catch(() => {});
+      },
+      clearUserAvatar: () => {
+        set({ userAvatarDataUrl: null });
+        void hostApiFetch('/api/settings/userAvatarDataUrl', {
+          method: 'PUT',
+          body: JSON.stringify({ value: null }),
         }).catch(() => {});
       },
       setStartMinimized: (startMinimized) => set({ startMinimized }),
@@ -142,11 +179,22 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoDownloadUpdate: (autoDownloadUpdate) => set({ autoDownloadUpdate }),
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
       setDevModeUnlocked: (devModeUnlocked) => set({ devModeUnlocked }),
-      markSetupComplete: () => set({ setupComplete: true }),
-      resetSettings: () => set(defaultSettings),
+      markSetupComplete: () => {
+        set({ setupComplete: true });
+        void hostApiFetch('/api/settings/setupComplete', {
+          method: 'PUT',
+          body: JSON.stringify({ value: true }),
+        }).catch(() => {});
+      },
+      resetSettings: () => set({ ...defaultSettings, initialized: true }),
     }),
     {
       name: 'clawx-settings',
+      merge: (persistedState, currentState) => ({
+        ...currentState,
+        ...(persistedState as Partial<SettingsState>),
+        initialized: false,
+      }),
     }
   )
 );

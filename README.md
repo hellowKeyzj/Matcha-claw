@@ -118,6 +118,9 @@ Extend your AI agents with pre-built skills. Browse, install, and manage skills 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain.
 
+### 🔑 License Gate & Diagnostics
+The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.
+
 ### 🌙 Adaptive Theming
 Light mode, dark mode, or system-synchronized themes. ClawX adapts to your preferences automatically.
 
@@ -154,10 +157,11 @@ pnpm dev
 
 When you launch ClawX for the first time, the **Setup Wizard** will guide you through:
 
-1. **Language & Region** – Configure your preferred locale
-2. **AI Provider** – Enter your API keys for supported providers
-3. **Skill Bundles** – Select pre-configured skills for common use cases
-4. **Verification** – Test your configuration before entering the main interface
+1. **License & Language** – Validate your license key and configure your preferred locale
+2. **Environment Check** – Verify local runtime requirements
+3. **AI Provider** – Enter your API keys for supported providers
+4. **Skill Bundles** – Select pre-configured skills for common use cases
+5. **Verification** – Test your configuration before entering the main interface
 
 > Note for Moonshot (Kimi): ClawX keeps Kimi web search enabled by default.  
 > When Moonshot is configured, ClawX also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
