@@ -317,3 +317,53 @@ tests/unit/
   - Main 新增授权能力（hardware id、密文存储、gate bootstrap、重验调度）并提供 Host API 路由
   - 新增授权服务脚本与运维文档，补齐授权链路发布资料
   - 补齐 license/settings 相关测试并通过全量校验
+
+---
+
+## 目录树（本次 0007 迁移相关）
+
+```text
+.github/workflows/
+├── check.yml
+├── release.yml
+└── debug-installer.yml
+
+scripts/
+└── update-release-README.md
+
+repo root/
+├── .gitattributes
+└── .gitignore
+```
+
+## 文件职责（关键模块）
+
+- `.github/workflows/release.yml`：统一 Release 构建矩阵、发布文案、OSS `release-info.json` 下载命名。
+- `.github/workflows/check.yml`：PR 校验入口（路径忽略 + 并发互斥），降低无效 CI 占用。
+- `.github/workflows/debug-installer.yml`：Windows 安装包调试专用工作流，快速定位构建/签名产物问题。
+- `scripts/update-release-README.md`：发布链路实操说明（触发方式、通道规则、命名规范、验收清单）。
+- `.gitattributes`：统一文本文件换行策略（LF），避免跨平台行尾漂移。
+- `.gitignore`：补充本地工具目录忽略，防止无关文件进入版本库。
+
+## 模块依赖与边界
+
+- 仅调整构建与发布基础设施，不改动运行时业务链路（Renderer/Main/Gateway 协议保持不变）。
+- 保留现有 `upload-oss` + channel 目录方案，继续兼容 `latest/alpha/beta` 的 updater 读取模式。
+- 品牌迁移只做“安全替换层”（Release 文案与产物前缀），兼容层（如 OSS bucket 名）暂保留不动。
+
+## 关键决策与原因
+
+1. 0007 采用“发布链路增量重构”而非替换式重构，避免对现有 updater 通道策略引入回归。
+2. `release-info.json` 下载前缀统一为 `MatchaClaw-*`，与当前打包产物命名一致，避免官网链接失配。
+3. 新增 `debug-installer` 独立 workflow，缩短安装包问题定位回路，不污染主发布流水线。
+4. 未迁移补丁中会改变现网通道语义或引入环境耦合的部分（例如通道改名、强行切换更新地址策略）。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`chore(release): migrate patch-0007 build/release pipeline with framework adaptation`
+- 主要结果：
+  - CI/Release workflow 按现有架构完成适配：增加并发控制、手动平台矩阵、Windows 调试打包链路。
+  - 发布文案、产物命名、`release-info.json` 链接统一为 MatchaClaw 品牌。
+  - 新增发布说明文档 `scripts/update-release-README.md`，沉淀发布与验收标准操作。
+  - 顺带修复 `electron/utils/diagnostics-bundle.ts` 两处 lint 阻塞（无行为变更）以通过全量校验。
