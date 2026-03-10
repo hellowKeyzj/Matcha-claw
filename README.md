@@ -1,9 +1,9 @@
 
 <p align="center">
-  <img src="src/assets/logo.svg" width="128" height="128" alt="ClawX Logo" />
+  <img src="src/assets/logo.svg" width="128" height="128" alt="MatchaClaw Logo" />
 </p>
 
-<h1 align="center">ClawX</h1>
+<h1 align="center">MatchaClaw</h1>
 
 <p align="center">
   <strong>The Desktop Interface for OpenClaw AI Agents</strong>
@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="#features">Features</a> •
-  <a href="#why-clawx">Why ClawX</a> •
+  <a href="#why-MatchaClaw">Why MatchaClaw</a> •
   <a href="#getting-started">Getting Started</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#development">Development</a> •
@@ -25,7 +25,7 @@
   <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
   <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
   </a>
-  <img src="https://img.shields.io/github/downloads/ValueCell-ai/ClawX/total?color=%23027DEB" alt="Downloads" />
+  <img src="https://img.shields.io/github/downloads/ValueCell-ai/MatchaClaw/total?color=%23027DEB" alt="Downloads" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
 
@@ -37,11 +37,11 @@
 
 ## Overview
 
-**ClawX** bridges the gap between powerful AI agents and everyday users. Built on top of [OpenClaw](https://github.com/OpenClaw), it transforms command-line AI orchestration into an accessible, beautiful desktop experience—no terminal required.
+**MatchaClaw** bridges the gap between powerful AI agents and everyday users. Built on top of [OpenClaw](https://github.com/OpenClaw), it transforms command-line AI orchestration into an accessible, beautiful desktop experience—no terminal required.
 
-Whether you're automating workflows, managing AI-powered channels, or scheduling intelligent tasks, ClawX provides the interface you need to harness AI agents effectively.
+Whether you're automating workflows, managing AI-powered channels, or scheduling intelligent tasks, MatchaClaw provides the interface you need to harness AI agents effectively.
 
-ClawX comes pre-configured with best-practice model providers and natively supports Windows as well as multi-language settings. Of course, you can also fine-tune advanced configurations via **Settings → Advanced → Developer Mode**.
+MatchaClaw comes pre-configured with best-practice model providers and natively supports Windows as well as multi-language settings. Of course, you can also fine-tune advanced configurations via **Settings → Advanced → Developer Mode**.
 
 ---
 ## Screenshot
@@ -72,11 +72,11 @@ ClawX comes pre-configured with best-practice model providers and natively suppo
 
 ---
 
-## Why ClawX
+## Why MatchaClaw
 
-Building AI agents shouldn't require mastering the command line. ClawX was designed with a simple philosophy: **powerful technology deserves an interface that respects your time.**
+Building AI agents shouldn't require mastering the command line. MatchaClaw was designed with a simple philosophy: **powerful technology deserves an interface that respects your time.**
 
-| Challenge | ClawX Solution |
+| Challenge | MatchaClaw Solution |
 |-----------|----------------|
 | Complex CLI setup | One-click installation with guided setup wizard |
 | Configuration files | Visual settings with real-time validation |
@@ -86,7 +86,7 @@ Building AI agents shouldn't require mastering the command line. ClawX was desig
 
 ### OpenClaw Inside
 
-ClawX is built directly upon the official **OpenClaw** core. Instead of requiring a separate installation, we embed the runtime within the application to provide a seamless "battery-included" experience.
+MatchaClaw is built directly upon the official **OpenClaw** core. Instead of requiring a separate installation, we embed the runtime within the application to provide a seamless "battery-included" experience.
 
 We are committed to maintaining strict alignment with the upstream OpenClaw project, ensuring that you always have access to the latest capabilities, stability improvements, and ecosystem compatibility provided by the official releases.
 
@@ -122,7 +122,7 @@ Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials 
 The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.
 
 ### 🌙 Adaptive Theming
-Light mode, dark mode, or system-synchronized themes. ClawX adapts to your preferences automatically.
+Light mode, dark mode, or system-synchronized themes. MatchaClaw adapts to your preferences automatically.
 
 ---
 
@@ -138,14 +138,14 @@ Light mode, dark mode, or system-synchronized themes. ClawX adapts to your prefe
 
 #### Pre-built Releases (Recommended)
 
-Download the latest release for your platform from the [Releases](https://github.com/ValueCell-ai/ClawX/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/ValueCell-ai/MatchaClaw/releases) page.
 
 #### Build from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/ValueCell-ai/ClawX.git
-cd ClawX
+git clone https://github.com/ValueCell-ai/MatchaClaw.git
+cd MatchaClaw
 
 # Initialize the project
 pnpm run init
@@ -155,7 +155,7 @@ pnpm dev
 ```
 ### First Launch
 
-When you launch ClawX for the first time, the **Setup Wizard** will guide you through:
+When you launch MatchaClaw for the first time, the **Setup Wizard** will guide you through:
 
 1. **License & Language** – Validate your license key and configure your preferred locale
 2. **Environment Check** – Verify local runtime requirements
@@ -163,12 +163,12 @@ When you launch ClawX for the first time, the **Setup Wizard** will guide you th
 4. **Skill Bundles** – Select pre-configured skills for common use cases
 5. **Verification** – Test your configuration before entering the main interface
 
-> Note for Moonshot (Kimi): ClawX keeps Kimi web search enabled by default.  
-> When Moonshot is configured, ClawX also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
+> Note for Moonshot (Kimi): MatchaClaw keeps Kimi web search enabled by default.  
+> When Moonshot is configured, MatchaClaw also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
 
 ### Proxy Settings
 
-ClawX includes built-in proxy settings for environments where Electron, the OpenClaw Gateway, or channels such as Telegram need to reach the internet through a local proxy client.
+MatchaClaw includes built-in proxy settings for environments where Electron, the OpenClaw Gateway, or channels such as Telegram need to reach the internet through a local proxy client.
 
 Open **Settings → Gateway → Proxy** and configure:
 
@@ -187,18 +187,18 @@ Proxy Server: http://127.0.0.1:7890
 Notes:
 
 - A bare `host:port` value is treated as HTTP.
-- If advanced proxy fields are left empty, ClawX falls back to `Proxy Server`.
+- If advanced proxy fields are left empty, MatchaClaw falls back to `Proxy Server`.
 - Saving proxy settings reapplies Electron networking immediately and restarts the Gateway automatically.
-- ClawX also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
+- MatchaClaw also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
 
 ---
 
 ## Architecture
 
-ClawX employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
+MatchaClaw employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
 
 ```┌─────────────────────────────────────────────────────────────────┐
-│                        ClawX Desktop App                         │
+│                        MatchaClaw Desktop App                         │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │              Electron Main Process                          │  │
@@ -277,7 +277,7 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 
 ### Project Structure
 
-```ClawX/
+```MatchaClaw/
 ├── electron/                 # Electron Main Process
 │   ├── api/                 # Main-side API router and handlers
 │   │   └── routes/          # RPC/HTTP proxy route modules
@@ -341,7 +341,7 @@ pnpm package:linux        # Package for Linux
 
 ## Contributing
 
-We welcome contributions from the community! Whether it's bug fixes, new features, documentation improvements, or translations—every contribution helps make ClawX better.
+We welcome contributions from the community! Whether it's bug fixes, new features, documentation improvements, or translations—every contribution helps make MatchaClaw better.
 
 ### How to Contribute
 
@@ -362,7 +362,7 @@ We welcome contributions from the community! Whether it's bug fixes, new feature
 
 ## Acknowledgments
 
-ClawX is built on the shoulders of excellent open-source projects:
+MatchaClaw is built on the shoulders of excellent open-source projects:
 
 - [OpenClaw](https://github.com/OpenClaw) – The AI agent runtime
 - [Electron](https://www.electronjs.org/) – Cross-platform desktop framework
@@ -380,11 +380,11 @@ Join our community to connect with other users, get support, and share your expe
 | :---: | :---: | :---: |
 | <img src="src/assets/community/wecom-qr.png" width="150" alt="WeChat QR Code" /> | <img src="src/assets/community/feishu-qr.png" width="150" alt="Feishu QR Code" /> | <img src="src/assets/community/20260212-185822.png" width="150" alt="Discord QR Code" /> |
 
-### ClawX Partner Program 🚀
+### MatchaClaw Partner Program 🚀
 
-We're launching the ClawX Partner Program and looking for partners who can help introduce ClawX to more clients, especially those with custom AI agent or automation needs.
+We're launching the MatchaClaw Partner Program and looking for partners who can help introduce MatchaClaw to more clients, especially those with custom AI agent or automation needs.
 
-Partners help connect us with potential users and projects, while the ClawX team provides full technical support, customization, and integration.
+Partners help connect us with potential users and projects, while the MatchaClaw team provides full technical support, customization, and integration.
 
 If you work with clients interested in AI tools or automation, we'd love to collaborate.
 
@@ -395,17 +395,19 @@ DM us or email [public@valuecell.ai](mailto:public@valuecell.ai) to learn more.
 ## Star History
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=ValueCell-ai/ClawX&type=Date" alt="Star History Chart" />
+  <img src="https://api.star-history.com/svg?repos=ValueCell-ai/MatchaClaw&type=Date" alt="Star History Chart" />
 </p>
 
 ---
 
 ## License
 
-ClawX is released under the [MIT License](LICENSE). You're free to use, modify, and distribute this software.
+MatchaClaw is released under the [MIT License](LICENSE). You're free to use, modify, and distribute this software.
 
 ---
 
 <p align="center">
   <sub>Built with ❤️ by the ValueCell Team</sub>
 </p>
+
+

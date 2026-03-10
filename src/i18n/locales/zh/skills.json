@@ -10,6 +10,7 @@
     },
     "filter": {
         "all": "全部 ({{count}})",
+        "eligible": "可用 ({{count}})",
         "builtIn": "内置 ({{count}})",
         "marketplace": "市场 ({{count}})"
     },
@@ -30,6 +31,7 @@
         "version": "版本",
         "author": "作者",
         "source": "来源",
+        "availability": "可用性",
         "coreSystem": "核心系统",
         "bundled": "内置",
         "userInstalled": "用户安装",
@@ -49,6 +51,14 @@
         "configSaved": "配置已保存",
         "openManual": "打开手册",
         "configurable": "可配置"
+    },
+    "availability": {
+        "eligible": "可用",
+        "blocked": "阻止",
+        "missing": "缺少依赖",
+        "unknown": "状态未知",
+        "blockedByAllowlist": "被 allowlist 阻止",
+        "missingPrefix": "缺失: {{items}}"
     },
     "toast": {
         "enabled": "技能已启用",

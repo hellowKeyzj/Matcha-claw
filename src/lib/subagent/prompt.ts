@@ -2,7 +2,6 @@
 import type {
   DraftByFile,
   SubagentDraftFile,
-  SubagentDraftRoleMetadata,
   SubagentTargetFile,
 } from '@/types/subagent';
 
@@ -28,17 +27,10 @@ interface RawDraftItem {
 
 interface RawDraftOutput {
   files?: unknown;
-  roleMetadata?: unknown;
-}
-
-interface RawRoleMetadata {
-  summary?: unknown;
-  tags?: unknown;
 }
 
 export interface ParsedSubagentDraft {
   draftByFile: DraftByFile;
-  roleMetadata: SubagentDraftRoleMetadata;
 }
 
 const MANDATORY_ITERATION_INSTRUCTIONS = [
@@ -50,10 +42,8 @@ const MANDATORY_ITERATION_INSTRUCTIONS = [
   '每轮都检查 AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md 的一致性。',
   '优先使用具体、可执行的表述，避免空泛语句。',
   '输出前自检：完整性、一致性、清晰度、可执行性。',
-  '输出格式必须始终为 JSON：{"files":[{"name","content","reason","confidence"}],"roleMetadata":{"summary","tags"}}。',
+  '输出格式必须始终为 JSON：{"files":[{"name","content","reason","confidence"}]}。',
   '每个文件项必须包含：name、content、reason、confidence。',
-  'roleMetadata.summary 必填，用 120-300 字概括该 agent 的职责边界与擅长任务。',
-  'roleMetadata.tags 必填，提供 3-8 个短标签数组。',
   'confidence 必须是 [0,1] 区间内的数字。',
   'content 字段内禁止出现未转义的双引号；如必须使用双引号，写成 \\\\"。',
   'content 字段禁止使用三反引号代码块（```）；如需示例，请改为普通文本或缩进文本。',
@@ -199,7 +189,7 @@ export function buildSubagentPromptPayload(
     systemPrompt: [
       '你是配置拆分助手。',
       '仅可输出 5 个目标文件：AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md。',
-      '严格返回 JSON：{"files":[{"name","content","reason","confidence"}],"roleMetadata":{"summary","tags"}}，不允许额外文本。',
+      '严格返回 JSON：{"files":[{"name","content","reason","confidence"}]}，不允许额外文本。',
       'confidence 必须在 0 到 1 之间。',
     ].join('\n'),
     userPrompt: [
@@ -282,36 +272,8 @@ export function parseDraftPayload(output: string): ParsedSubagentDraft {
     draftByFile[normalized.name] = normalized;
   }
 
-  const rawRoleMetadata = parsed.roleMetadata;
-  if (!rawRoleMetadata || typeof rawRoleMetadata !== 'object') {
-    throw new Error('Invalid output schema: roleMetadata is required');
-  }
-  const roleMetadata = rawRoleMetadata as RawRoleMetadata;
-  const summary = typeof roleMetadata.summary === 'string'
-    ? roleMetadata.summary.trim()
-    : '';
-  if (!summary) {
-    throw new Error('Invalid output schema: roleMetadata.summary is required');
-  }
-  if (summary.includes('```')) {
-    throw new Error('Invalid output schema: roleMetadata.summary cannot contain code fences');
-  }
-  const tags = Array.isArray(roleMetadata.tags)
-    ? roleMetadata.tags
-      .filter((item): item is string => typeof item === 'string')
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0)
-    : [];
-  if (tags.length === 0) {
-    throw new Error('Invalid output schema: roleMetadata.tags is required');
-  }
-
   return {
     draftByFile,
-    roleMetadata: {
-      summary,
-      tags: Array.from(new Set(tags)).slice(0, 8),
-    },
   };
 }
 

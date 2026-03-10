@@ -17,8 +17,7 @@ src/
 │   ├── subagent/
 │   │   ├── prompt.ts
 │   │   └── workspace.ts
-│   └── team/
-│       └── roles-metadata.ts
+│   └── team/ (已移除 0001 临时依赖文件 `roles-metadata.ts`)
 ├── pages/
 │   └── SubAgents/
 │       ├── index.tsx
@@ -57,7 +56,6 @@ tests/
 - `src/stores/subagents.ts`：子代理领域状态、CRUD、草稿生成、Diff 预览与应用主流程。
 - `src/lib/subagent/prompt.ts`：提示词拼装、模型输出解析与草稿结构校验。
 - `src/lib/subagent/workspace.ts`：子代理目录与命名规范、冲突检测。
-- `src/lib/team/roles-metadata.ts`：角色元数据读写、合并与选择逻辑。
 - `src/lib/openclaw/*`：草稿生成依赖的会话/运行时 RPC 抽象。
 - `src/pages/SubAgents/*`：子代理页面与对话框组件。
 - `src/constants/subagent-files.ts`：可管理目标文件白名单常量。
@@ -68,7 +66,7 @@ tests/
 
 - 渲染层统一通过 `src/lib/api-client.ts` 的 `invokeIpc` 调后端，不新增直连 `window.electron.ipcRenderer.invoke(...)`。
 - `pages/SubAgents` 只依赖 `stores/subagents`，UI 不直接编排 RPC。
-- `stores/subagents` 负责组合 `lib/subagent/*`、`lib/openclaw/*`、`lib/team/roles-metadata.ts` 完成业务流程。
+- `stores/subagents` 负责组合 `lib/subagent/*`、`lib/openclaw/*` 完成业务流程。
 - `App/Sidebar/i18n` 只负责路由、导航与文案注册，不承载业务逻辑。
 
 ## 关键决策与原因
@@ -76,7 +74,7 @@ tests/
 1. 完整迁移 0001 功能，但按“最小依赖原则”仅抽取直接依赖模块。
 2. 复用现有框架边界（`invokeIpc` + store 驱动 UI），移除补丁中冗余或越层调用模式。
 3. 保持默认 `main` agent 只读策略，避免误删/误改核心代理。
-4. 草稿输出强约束为结构化 JSON，并要求 `roleMetadata`，保证后续角色元数据同步可用。
+4. 草稿输出强约束为结构化 JSON，仅保留 `files` 草稿载荷，移除辅助元数据链路避免与现架构冲突。
 5. 0001 范围测试与后续补丁能力解耦（导航测试移除 `AgentSessionsPane` 依赖）。
 
 ## 本次变更日志

@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Post-removal script for ClawX on Linux
+# Post-removal script for MatchaClaw on Linux
 
 set -e
 
 # Remove symbolic links
-rm -f /usr/local/bin/clawx 2>/dev/null || true
+rm -f /usr/local/bin/MatchaClaw 2>/dev/null || true
 rm -f /usr/local/bin/openclaw 2>/dev/null || true
 
 # Update desktop database
@@ -19,9 +19,10 @@ if command -v gtk-update-icon-cache &> /dev/null; then
 fi
 
 # Remove AppArmor profile
-APPARMOR_PROFILE_TARGET='/etc/apparmor.d/clawx'
+APPARMOR_PROFILE_TARGET='/etc/apparmor.d/MatchaClaw'
 if [ -f "$APPARMOR_PROFILE_TARGET" ]; then
     rm -f "$APPARMOR_PROFILE_TARGET"
 fi
 
-echo "ClawX has been removed."
+echo "MatchaClaw has been removed."
+

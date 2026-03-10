@@ -6,10 +6,6 @@ function buildDraftOutput(
 ): string {
   return JSON.stringify({
     files,
-    roleMetadata: {
-      summary: '负责子 agent 行为规范设计与执行流程约束。',
-      tags: ['subagent', 'prompt', 'workflow'],
-    },
   });
 }
 
@@ -72,7 +68,7 @@ describe('subagents prompt pipeline', () => {
     expect(invoke.mock.calls[0]?.[2]).not.toHaveProperty('system');
     const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
-    expect(sentMessage).toContain('"roleMetadata":{"summary","tags"}');
+    expect(sentMessage).toContain('"files":[{"name","content","reason","confidence"}]');
     expect(sentMessage).toContain('JSON');
 
     const draft = useSubagentsStore.getState().draftByFile;
@@ -118,10 +114,6 @@ describe('subagents prompt pipeline', () => {
               reason: 'wrapped output',
               confidence: 0.8,
             }],
-            roleMetadata: {
-              summary: '负责子 agent 行为规范设计与执行流程约束。',
-              tags: ['subagent', 'prompt', 'workflow'],
-            },
           }),
           '```',
         ].join('\n'),

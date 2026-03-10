@@ -1,17 +1,20 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { app } from 'electron';
-import { existsSync, cpSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   deleteChannelConfig,
   getChannelFormValues,
   listConfiguredChannels,
+  readOpenClawConfig,
   saveChannelConfig,
   setChannelEnabled,
   validateChannelConfig,
   validateChannelCredentials,
+  writeOpenClawConfig,
 } from '../../utils/channel-config';
+import { upsertPluginInstallRecord } from '../../utils/plugin-install-record';
 import { whatsAppLoginManager } from '../../utils/whatsapp-login';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -24,12 +27,54 @@ function scheduleGatewayChannelRestart(ctx: HostApiContext, reason: string): voi
   void reason;
 }
 
-async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+type ManagedPluginInstallResult = {
+  installed: boolean;
+  warning?: string;
+  installedPath?: string;
+  sourcePath?: string;
+  version?: string;
+};
+
+function getInstalledPluginVersion(pluginId: string): string | undefined {
+  const pkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
+  if (!existsSync(pkgPath)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function recordChannelPluginInstall(pluginId: string, installResult: ManagedPluginInstallResult): Promise<void> {
+  if (!installResult.installed) {
+    return;
+  }
+  const config = await readOpenClawConfig();
+  const { nextConfig, changed } = upsertPluginInstallRecord(config as Record<string, unknown>, {
+    pluginId,
+    source: 'path',
+    installPath: installResult.installedPath ?? join(homedir(), '.openclaw', 'extensions', pluginId),
+    sourcePath: installResult.sourcePath,
+    version: installResult.version,
+  });
+  if (changed) {
+    await writeOpenClawConfig(nextConfig);
+  }
+}
+
+async function ensureDingTalkPluginInstalled(): Promise<ManagedPluginInstallResult> {
   const targetDir = join(homedir(), '.openclaw', 'extensions', 'dingtalk');
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
   if (existsSync(targetManifest)) {
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      version: getInstalledPluginVersion('dingtalk'),
+    };
   }
 
   const candidateSources = app.isPackaged
@@ -59,18 +104,27 @@ async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; wa
     if (!existsSync(targetManifest)) {
       return { installed: false, warning: 'Failed to install DingTalk plugin mirror (manifest missing).' };
     }
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      sourcePath: sourceDir,
+      version: getInstalledPluginVersion('dingtalk'),
+    };
   } catch {
     return { installed: false, warning: 'Failed to install bundled DingTalk plugin mirror' };
   }
 }
 
-async function ensureWeComPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+async function ensureWeComPluginInstalled(): Promise<ManagedPluginInstallResult> {
   const targetDir = join(homedir(), '.openclaw', 'extensions', 'wecom');
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
   if (existsSync(targetManifest)) {
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      version: getInstalledPluginVersion('wecom'),
+    };
   }
 
   const candidateSources = app.isPackaged
@@ -100,18 +154,27 @@ async function ensureWeComPluginInstalled(): Promise<{ installed: boolean; warni
     if (!existsSync(targetManifest)) {
       return { installed: false, warning: 'Failed to install WeCom plugin mirror (manifest missing).' };
     }
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      sourcePath: sourceDir,
+      version: getInstalledPluginVersion('wecom'),
+    };
   } catch {
     return { installed: false, warning: 'Failed to install bundled WeCom plugin mirror' };
   }
 }
 
-async function ensureQQBotPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+async function ensureQQBotPluginInstalled(): Promise<ManagedPluginInstallResult> {
   const targetDir = join(homedir(), '.openclaw', 'extensions', 'qqbot');
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
   if (existsSync(targetManifest)) {
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      version: getInstalledPluginVersion('qqbot'),
+    };
   }
 
   const candidateSources = app.isPackaged
@@ -141,7 +204,12 @@ async function ensureQQBotPluginInstalled(): Promise<{ installed: boolean; warni
     if (!existsSync(targetManifest)) {
       return { installed: false, warning: 'Failed to install QQ Bot plugin mirror (manifest missing).' };
     }
-    return { installed: true };
+    return {
+      installed: true,
+      installedPath: targetDir,
+      sourcePath: sourceDir,
+      version: getInstalledPluginVersion('qqbot'),
+    };
   } catch {
     return { installed: false, warning: 'Failed to install bundled QQ Bot plugin mirror' };
   }
@@ -208,6 +276,7 @@ export async function handleChannelRoutes(
           sendJson(res, 500, { success: false, error: installResult.warning || 'DingTalk plugin install failed' });
           return true;
         }
+        await recordChannelPluginInstall('dingtalk', installResult);
       }
       if (body.channelType === 'wecom') {
         const installResult = await ensureWeComPluginInstalled();
@@ -215,6 +284,7 @@ export async function handleChannelRoutes(
           sendJson(res, 500, { success: false, error: installResult.warning || 'WeCom plugin install failed' });
           return true;
         }
+        await recordChannelPluginInstall('wecom', installResult);
       }
       if (body.channelType === 'qqbot') {
         const installResult = await ensureQQBotPluginInstalled();
@@ -222,6 +292,7 @@ export async function handleChannelRoutes(
           sendJson(res, 500, { success: false, error: installResult.warning || 'QQ Bot plugin install failed' });
           return true;
         }
+        await recordChannelPluginInstall('qqbot', installResult);
       }
       await saveChannelConfig(body.channelType, body.config);
       scheduleGatewayChannelRestart(ctx, `channel:saveConfig:${body.channelType}`);

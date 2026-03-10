@@ -6,6 +6,14 @@
 /**
  * Skill data structure
  */
+export interface SkillMissingRequirements {
+  bins?: string[];
+  anyBins?: string[];
+  env?: string[];
+  config?: string[];
+  os?: string[];
+}
+
 export interface Skill {
   id: string;
   slug?: string;
@@ -20,6 +28,9 @@ export interface Skill {
   isCore?: boolean;
   isBundled?: boolean;
   dependencies?: string[];
+  eligible?: boolean;
+  blockedByAllowlist?: boolean;
+  missing?: SkillMissingRequirements;
 }
 
 /**

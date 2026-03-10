@@ -8,7 +8,7 @@ type ValidationProfile =
   | 'none';
 
 function logValidationStatus(provider: string, status: number): void {
-  console.log(`[clawx-validate] ${provider} HTTP ${status}`);
+  console.log(`[matchaclaw-validate] ${provider} HTTP ${status}`);
 }
 
 function maskSecret(secret: string): string {
@@ -55,7 +55,7 @@ function logValidationRequest(
   headers: Record<string, string>,
 ): void {
   console.log(
-    `[clawx-validate] ${provider} request ${method} ${sanitizeValidationUrl(url)} headers=${JSON.stringify(sanitizeHeaders(headers))}`,
+    `[matchaclaw-validate] ${provider} request ${method} ${sanitizeValidationUrl(url)} headers=${JSON.stringify(sanitizeHeaders(headers))}`,
   );
 }
 
@@ -122,7 +122,7 @@ async function validateOpenAiCompatibleKey(
 
   if (modelsResult.error?.includes('API error: 404')) {
     console.log(
-      `[clawx-validate] ${providerType} /models returned 404, falling back to /chat/completions probe`,
+      `[matchaclaw-validate] ${providerType} /models returned 404, falling back to /chat/completions probe`,
     );
     const base = normalizeBaseUrl(trimmedBaseUrl);
     const chatUrl = `${base}/chat/completions`;

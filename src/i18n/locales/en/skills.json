@@ -10,6 +10,7 @@
     },
     "filter": {
         "all": "All ({{count}})",
+        "eligible": "Eligible ({{count}})",
         "builtIn": "Built-in ({{count}})",
         "marketplace": "Marketplace ({{count}})"
     },
@@ -30,6 +31,7 @@
         "version": "Version",
         "author": "Author",
         "source": "Source",
+        "availability": "Availability",
         "coreSystem": "Core System",
         "bundled": "Bundled",
         "userInstalled": "User Installed",
@@ -49,6 +51,14 @@
         "configSaved": "Configuration saved",
         "openManual": "Open Manual",
         "configurable": "Configurable"
+    },
+    "availability": {
+        "eligible": "Eligible",
+        "blocked": "Blocked",
+        "missing": "Missing requirements",
+        "unknown": "Unknown",
+        "blockedByAllowlist": "Blocked by allowlist",
+        "missingPrefix": "Missing: {{items}}"
     },
     "toast": {
         "enabled": "Skill enabled",
