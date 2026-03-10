@@ -1,11 +1,19 @@
-# ClawX CI Workflow
-# Runs on pull requests (main/develop) 
+# MatchaClaw CI Workflow
+# Runs on pull requests
 name: Check and Build
 
 on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:

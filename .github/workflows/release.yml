@@ -1,7 +1,8 @@
-# ClawX Release Workflow
+# MatchaClaw Release Workflow
 # Builds and publishes releases for macOS, Windows, and Linux
 
 name: Release
+run-name: Release (${{ github.event_name }})
 
 on:
   push:
@@ -12,53 +13,77 @@ on:
       version:
         description: 'Version to release (e.g., 1.0.0)'
         required: true
+      platform:
+        description: 'Build target platform'
+        required: false
+        default: 'win'
+        type: choice
+        options:
+          - win
+          - mac
+          - linux
+          - all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set-matrix.outputs.include }}
+    steps:
+      - id: set-matrix
+        shell: bash
+        run: |
+          event="${{ github.event_name }}"
+          platform="${{ github.event.inputs.platform }}"
+
+          if [ "$event" = "push" ] || [ -z "$platform" ] || [ "$platform" = "all" ]; then
+            include='[{"os":"macos-latest","platform":"mac"},{"os":"windows-latest","platform":"win"},{"os":"ubuntu-latest","platform":"linux"}]'
+          elif [ "$platform" = "win" ]; then
+            include='[{"os":"windows-latest","platform":"win"}]'
+          elif [ "$platform" = "mac" ]; then
+            include='[{"os":"macos-latest","platform":"mac"}]'
+          elif [ "$platform" = "linux" ]; then
+            include='[{"os":"ubuntu-latest","platform":"linux"}]'
+          else
+            echo "Unsupported platform input: $platform"
+            exit 1
+          fi
+
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+          echo "Resolved matrix: $include"
+
   release:
+    needs: resolve-matrix
     strategy:
       matrix:
-        include:
-          - os: macos-latest
-            platform: mac
-          - os: windows-latest
-            platform: win
-          - os: ubuntu-latest
-            platform: linux
+        include: ${{ fromJSON(needs.resolve-matrix.outputs.include) }}
 
     runs-on: ${{ matrix.os }}
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
+          cache: 'pnpm'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Setup pnpm cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
@@ -87,6 +112,23 @@ jobs:
         run: |
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
+
+          # Guardrail: if CSC_LINK is misconfigured (e.g. points to a directory),
+          # fall back to unsigned build instead of failing hard.
+          if [ -n "${CSC_LINK:-}" ]; then
+            echo "Detected CSC_LINK in environment"
+            if [ -d "${CSC_LINK}" ]; then
+              echo "Invalid CSC_LINK: points to a directory (${CSC_LINK})"
+              echo "Falling back to unsigned build"
+              unset CSC_LINK
+              unset CSC_KEY_PASSWORD
+              export CSC_IDENTITY_AUTO_DISCOVERY=false
+            fi
+          else
+            echo "No CSC_LINK provided; building unsigned macOS artifacts"
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+
           pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec electron-builder --mac --publish never
 
       # Windows specific steps
@@ -128,7 +170,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -148,7 +190,7 @@ jobs:
           echo "Removing builder-debug.yml files to avoid duplicate asset upload conflicts..."
           find release-artifacts/ -name "builder-debug.yml" -delete -print || true
 
-      - name: Create GitHub Release (as pre-release)
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
@@ -161,32 +203,32 @@ jobs:
             release-artifacts/**/*.rpm
             release-artifacts/**/*.yml
           draft: false
-          prerelease: true
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
           make_latest: false
           generate_release_notes: true
           body: |
-            ## 🚀 ClawX ${{ github.ref_name }}
-            
-            ClawX - Graphical AI Assistant based on OpenClaw
+            ## 🚀 MatchaClaw ${{ github.ref_name }}
+             
+            MatchaClaw - Graphical AI Assistant based on OpenClaw
             
             ### 📦 Downloads
             
             Please select the appropriate installer for your operating system and architecture:
             
             #### macOS
-            - **Apple Silicon (M1/M2/M3/M4)**: `ClawX-*-mac-arm64.dmg`
-            - **Intel (x64)**: `ClawX-*-mac-x64.dmg`
+            - **Apple Silicon (M1/M2/M3/M4)**: `MatchaClaw-*-mac-arm64.dmg`
+            - **Intel (x64)**: `MatchaClaw-*-mac-x64.dmg`
             
             #### Windows
-            - **Installer (x64)**: `ClawX-*-win-x64.exe`
-            - **Installer (ARM64)**: `ClawX-*-win-arm64.exe`
+            - **Installer (x64)**: `MatchaClaw-*-win-x64.exe`
+            - **Installer (ARM64)**: `MatchaClaw-*-win-arm64.exe`
             
             #### Linux
-            - **AppImage (x64)**: `ClawX-*-linux-x86_64.AppImage` (Universal format, recommended)
-            - **AppImage (ARM64)**: `ClawX-*-linux-arm64.AppImage`
-            - **Debian/Ubuntu (x64)**: `ClawX-*-linux-amd64.deb`
-            - **Debian/Ubuntu (ARM64)**: `ClawX-*-linux-arm64.deb`
-            - **RPM (x64)**: `ClawX-*-linux-x86_64.rpm`
+            - **AppImage (x64)**: `MatchaClaw-*-linux-x86_64.AppImage` (Universal format, recommended)
+            - **AppImage (ARM64)**: `MatchaClaw-*-linux-arm64.AppImage`
+            - **Debian/Ubuntu (x64)**: `MatchaClaw-*-linux-amd64.deb`
+            - **Debian/Ubuntu (ARM64)**: `MatchaClaw-*-linux-arm64.deb`
+            - **RPM (x64)**: `MatchaClaw-*-linux-x86_64.rpm`
             
             ### 📝 Release Notes
             
@@ -196,7 +238,7 @@ jobs:
             
             - **macOS**: On first launch, you may see "cannot verify developer". Go to System Preferences → Security & Privacy to allow the app to run
             - **Windows**: SmartScreen may block the app. Click "More info" → "Run anyway" to proceed
-            - **Linux AppImage**: First run `chmod +x ClawX-*.AppImage` to add execute permission. On Ubuntu 22.04 you may also need `sudo apt install libfuse2`; on Ubuntu 24.04 use `sudo apt install libfuse2t64`
+            - **Linux AppImage**: First run `chmod +x MatchaClaw-*.AppImage` to add execute permission. On Ubuntu 22.04 you may also need `sudo apt install libfuse2`; on Ubuntu 24.04 use `sudo apt install libfuse2t64`
             - **Linux .deb (Ubuntu 24.04)**: If installation fails due to missing dependencies, use `sudo apt install libgtk-3-0t64 libnotify4t64 libxss1t64` before installing
             
             ---
@@ -223,7 +265,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -301,19 +343,19 @@ jobs:
               releaseDate: $date,
               downloads: {
                 mac: {
-                  x64: ($base + "/ClawX-" + $version + "-mac-x64.dmg"),
-                  arm64: ($base + "/ClawX-" + $version + "-mac-arm64.dmg")
+                  x64: ($base + "/MatchaClaw-" + $version + "-mac-x64.dmg"),
+                  arm64: ($base + "/MatchaClaw-" + $version + "-mac-arm64.dmg")
                 },
                 win: {
-                  x64: ($base + "/ClawX-" + $version + "-win-x64.exe"),
-                  arm64: ($base + "/ClawX-" + $version + "-win-arm64.exe")
+                  x64: ($base + "/MatchaClaw-" + $version + "-win-x64.exe"),
+                  arm64: ($base + "/MatchaClaw-" + $version + "-win-arm64.exe")
                 },
                 linux: {
-                  deb_amd64: ($base + "/ClawX-" + $version + "-linux-amd64.deb"),
-                  deb_arm64: ($base + "/ClawX-" + $version + "-linux-arm64.deb"),
-                  appimage_x64: ($base + "/ClawX-" + $version + "-linux-x86_64.AppImage"),
-                  appimage_arm64: ($base + "/ClawX-" + $version + "-linux-arm64.AppImage"),
-                  rpm_x64: ($base + "/ClawX-" + $version + "-linux-x86_64.rpm")
+                  deb_amd64: ($base + "/MatchaClaw-" + $version + "-linux-amd64.deb"),
+                  deb_arm64: ($base + "/MatchaClaw-" + $version + "-linux-arm64.deb"),
+                  appimage_x64: ($base + "/MatchaClaw-" + $version + "-linux-x86_64.AppImage"),
+                  appimage_arm64: ($base + "/MatchaClaw-" + $version + "-linux-arm64.AppImage"),
+                  rpm_x64: ($base + "/MatchaClaw-" + $version + "-linux-x86_64.rpm")
                 }
               },
               changelog: $changelog
