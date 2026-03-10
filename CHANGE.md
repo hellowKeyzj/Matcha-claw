@@ -178,3 +178,64 @@ tests/unit/
   - 新增 main/preload task 插件安装与状态 IPC，补齐 workspace 查询能力
   - 新增本地 task-manager 插件包并接入打包脚本
   - 新增任务领域与导航相关单测并通过全量测试
+
+---
+
+## 目录树（本次 0004 迁移相关）
+
+```text
+src/
+├── components/layout/
+│   ├── AgentSessionsPane.tsx
+│   ├── PaneEdgeToggle.tsx
+│   ├── VerticalPaneResizer.tsx
+│   ├── MainLayout.tsx (改造：双侧分栏 + 拖拽宽度)
+│   └── Sidebar.tsx (改造：导航职责收敛 + Chat 入口行为修正)
+├── pages/Chat/
+│   ├── ChatInput.tsx (新增 @mention、/skill、技能标签)
+│   ├── ChatMessage.tsx (新增头像能力、文件路径 hint 链接化)
+│   └── index.tsx (改造：任务收件箱分栏宽度持久化、会话 query 跳转)
+├── stores/
+│   └── chat.ts (统一会话标题提取与 loadHistory 竞态保护)
+└── i18n/locales/*/common.json
+
+tests/unit/
+├── chat-input-mention.test.tsx
+├── chat-message-avatar.test.tsx
+├── chat-session-labeling.test.ts
+└── sidebar.chat-nav.test.tsx
+```
+
+## 文件职责（关键模块）
+
+- `src/components/layout/AgentSessionsPane.tsx`：按 agent 分组展示会话，负责组折叠、会话切换、新会话入口
+- `src/components/layout/VerticalPaneResizer.tsx`：统一竖向分栏拖拽条组件
+- `src/components/layout/PaneEdgeToggle.tsx`：统一边缘折叠/展开触发器
+- `src/pages/Chat/ChatInput.tsx`：聊天输入增强（mention、技能快捷选择、发送前技能前缀拼装）
+- `src/pages/Chat/ChatMessage.tsx`：消息展示增强（assistant emoji、user avatar、文件路径提示可点开目录）
+- `src/stores/chat.ts`：会话标题提取策略与历史加载竞态保护
+
+## 模块依赖与边界
+
+- Renderer 侧继续统一通过 `host-api/api-client`，未新增页面内直连 `window.electron.ipcRenderer.invoke`
+- 会话/消息业务状态统一由 `chat store` 持有，UI 仅消费状态并派发动作
+- 文案通过 i18n common 侧边栏 key 扩展，不在组件内硬编码导航文案
+- 主布局分栏能力在 `layout` 组件层闭环，不向业务 store 泄漏拖拽细节
+
+## 关键决策与原因
+
+1. 0004 的“会话导航 + 聊天输入增强 + 分栏交互”按现框架落地，避免直接搬补丁私有实现
+2. 会话标题统一为“用户有效内容优先，assistant 有效内容兜底（过滤模板句）”，解决纯 assistant 会话标题缺失
+3. `loadHistory` 增加会话切换竞态丢弃，避免异步回包覆盖当前会话 UI
+4. 侧边栏收敛为导航入口，Agent 会话列表下沉到独立 pane，降低单组件复杂度
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`feat(chat): migrate patch-0004 with framework adaptation`
+- 主要结果：
+  - 新增 AgentSessionsPane 与统一分栏组件，主布局支持双侧拖拽与折叠持久化
+  - ChatInput 增加 `@mention`、`/skill` 与技能标签发送能力
+  - ChatMessage 增加用户头像/assistant emoji 与文件路径 hint 可点击打开目录
+  - Chat 页接入任务收件箱右侧分栏宽度持久化、`?session/?agent` 跳转
+  - 补齐 0004 相关单测并通过 lint/typecheck/全量测试

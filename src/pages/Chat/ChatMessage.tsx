@@ -17,6 +17,8 @@ import { extractText, extractThinking, extractImages, extractToolUse, formatTime
 interface ChatMessageProps {
   message: RawMessage;
   showThinking: boolean;
+  assistantAvatarEmoji?: string;
+  userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
   streamingTools?: Array<{
     id?: string;
@@ -37,9 +39,34 @@ function imageSrc(img: ExtractedImage): string | null {
   return null;
 }
 
+const FILE_LINK_EXTENSIONS = 'md|txt|json|ya?ml|csv|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif|webp|svg|mp4|mov|avi|mkv|webm|mp3|wav|ogg|aac|zip|tar|gz|rar|7z';
+const FILE_HINT_RE = new RegExp(
+  String.raw`(^|[^\p{L}\p{N}_./\\-])((?:\.{1,2}[\\/])?[\p{L}\p{N}_./\\-]+?\.(?:${FILE_LINK_EXTENSIONS}))(?=$|[^\p{L}\p{N}_./\\-])`,
+  'giu',
+);
+
+function linkifyFileHintsInMarkdown(text: string): string {
+  if (!text) return text;
+  const chunks = text.split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+  return chunks.map((chunk) => {
+    if (chunk.startsWith('```') || (chunk.startsWith('`') && chunk.endsWith('`'))) {
+      return chunk;
+    }
+    return chunk.replace(FILE_HINT_RE, (full, prefix: string, path: string) => {
+      if (!path || path.includes('://')) {
+        return full;
+      }
+      const normalized = path.trim();
+      return `${prefix}[${normalized}](filehint:${encodeURIComponent(normalized)})`;
+    });
+  }).join('');
+}
+
 export const ChatMessage = memo(function ChatMessage({
   message,
   showThinking,
+  assistantAvatarEmoji,
+  userAvatarImageUrl,
   isStreaming = false,
   streamingTools = [],
 }: ChatMessageProps) {
@@ -79,7 +106,19 @@ export const ChatMessage = memo(function ChatMessage({
             : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
         )}
       >
-        {isUser ? <User className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+        {isUser ? (
+          userAvatarImageUrl ? (
+            <img
+              src={userAvatarImageUrl}
+              alt="user-avatar"
+              className="h-full w-full rounded-full object-cover"
+            />
+          ) : (
+            <User className="h-4 w-4" />
+          )
+        ) : (
+          assistantAvatarEmoji ? <span className="text-base leading-none">{assistantAvatarEmoji}</span> : <Sparkles className="h-4 w-4" />
+        )}
       </div>
 
       {/* Content */}
@@ -336,6 +375,17 @@ function MessageBubble({
   isUser: boolean;
   isStreaming: boolean;
 }) {
+  const handleOpenFileHint = useCallback(async (hintPath: string) => {
+    if (!hintPath) {
+      return;
+    }
+    try {
+      await invokeIpc('shell:showItemInFolder', hintPath);
+    } catch {
+      // ignore open errors
+    }
+  }, []);
+
   return (
     <div
       className={cn(
@@ -372,15 +422,34 @@ function MessageBubble({
                 );
               },
               a({ href, children }) {
+                const rawHref = typeof href === 'string' ? href : '';
+                if (rawHref.startsWith('filehint:')) {
+                  const encodedHint = rawHref.slice('filehint:'.length);
+                  let decodedHint = encodedHint;
+                  try {
+                    decodedHint = decodeURIComponent(encodedHint);
+                  } catch {
+                    decodedHint = encodedHint;
+                  }
+                  return (
+                    <button
+                      type="button"
+                      className="inline cursor-pointer rounded-sm text-primary underline underline-offset-2 hover:text-primary/80"
+                      onClick={() => void handleOpenFileHint(decodedHint)}
+                    >
+                      {children}
+                    </button>
+                  );
+                }
                 return (
-                  <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
+                  <a href={rawHref} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
                     {children}
                   </a>
                 );
               },
             }}
           >
-            {text}
+            {linkifyFileHintsInMarkdown(text)}
           </ReactMarkdown>
           {isStreaming && (
             <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />

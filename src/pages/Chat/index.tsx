@@ -4,22 +4,77 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSubagentsStore } from '@/stores/subagents';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { TaskInboxPanel } from './components/TaskInboxPanel';
+import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 
+const TASK_INBOX_MIN_WIDTH = 260;
+const TASK_INBOX_MAX_WIDTH = 560;
+const TASK_INBOX_DEFAULT_WIDTH = 360;
+const TASK_INBOX_RESIZER_WIDTH = 6;
+const CHAT_MAIN_MIN_WIDTH = 520;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function loadTaskInboxWidth(): number {
+  try {
+    const raw = Number(window.localStorage.getItem('chat:task-inbox-width') || TASK_INBOX_DEFAULT_WIDTH);
+    if (!Number.isFinite(raw)) {
+      return TASK_INBOX_DEFAULT_WIDTH;
+    }
+    return clamp(raw, TASK_INBOX_MIN_WIDTH, TASK_INBOX_MAX_WIDTH);
+  } catch {
+    return TASK_INBOX_DEFAULT_WIDTH;
+  }
+}
+
+function clampTaskInboxWidth(width: number, containerWidth: number): number {
+  const maxWidth = Math.max(
+    TASK_INBOX_MIN_WIDTH,
+    containerWidth - CHAT_MAIN_MIN_WIDTH - TASK_INBOX_RESIZER_WIDTH,
+  );
+  return clamp(width, TASK_INBOX_MIN_WIDTH, Math.min(TASK_INBOX_MAX_WIDTH, maxWidth));
+}
+
+function buildAgentChatSessionKey(agentId: string): string {
+  const normalized = agentId.trim();
+  if (!normalized) {
+    return '';
+  }
+  return `agent:${normalized}:main`;
+}
+
+function parseAgentIdFromSessionKey(sessionKey: string): string {
+  const matched = sessionKey.match(/^agent:([^:]+):/i);
+  return matched?.[1] ?? 'main';
+}
+
+function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
+  if (explicitEmoji && explicitEmoji.trim()) {
+    return explicitEmoji;
+  }
+  return isDefault ? '⚙️' : '🤖';
+}
+
 export function Chat() {
   const { t } = useTranslation('chat');
+  const location = useLocation();
+  const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
@@ -33,15 +88,91 @@ export function Chat() {
   const pendingFinal = useChatStore((s) => s.pendingFinal);
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);
+  const switchSession = useChatStore((s) => s.switchSession);
+  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abortRun = useChatStore((s) => s.abortRun);
   const clearError = useChatStore((s) => s.clearError);
+  const agents = useSubagentsStore((s) => s.agents);
+  const loadAgents = useSubagentsStore((s) => s.loadAgents);
 
   const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatLayoutRef = useRef<HTMLDivElement>(null);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
-  const [taskInboxCollapsed, setTaskInboxCollapsed] = useState(false);
+  const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('chat:task-inbox-collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [taskInboxWidth, setTaskInboxWidth] = useState<number>(() => loadTaskInboxWidth());
+
+  const mentionCandidates = useMemo(
+    () => agents.map((agent) => ({
+      id: agent.id,
+      label: agent.name || agent.id,
+      insertText: `@${agent.id} `,
+    })),
+    [agents],
+  );
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('chat:task-inbox-collapsed', taskInboxCollapsed ? '1' : '0');
+    } catch {
+      // ignore localStorage errors
+    }
+  }, [taskInboxCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('chat:task-inbox-width', String(taskInboxWidth));
+    } catch {
+      // ignore localStorage errors
+    }
+  }, [taskInboxWidth]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const containerWidth = chatLayoutRef.current?.clientWidth ?? window.innerWidth;
+      setTaskInboxWidth((prev) => clampTaskInboxWidth(prev, containerWidth));
+    };
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const startTaskInboxResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (taskInboxCollapsed) {
+      return;
+    }
+    event.preventDefault();
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const rect = chatLayoutRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      const rawWidth = rect.right - moveEvent.clientX - TASK_INBOX_RESIZER_WIDTH;
+      const next = clampTaskInboxWidth(rawWidth, rect.width);
+      setTaskInboxWidth(next);
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
 
   // Load data when gateway is running.
   // When the store already holds messages for this session (i.e. the user
@@ -52,9 +183,19 @@ export function Chat() {
     if (!isGatewayRunning) return;
     let cancelled = false;
     const hasExistingMessages = useChatStore.getState().messages.length > 0;
+    const params = new URLSearchParams(location.search);
+    const sessionParam = params.get('session')?.trim() ?? '';
+    const agentParam = params.get('agent')?.trim() ?? '';
+    const targetSessionKey = sessionParam || buildAgentChatSessionKey(agentParam);
     (async () => {
+      await loadAgents();
       await loadSessions();
       if (cancelled) return;
+      if (targetSessionKey) {
+        switchSession(targetSessionKey);
+        navigate('/', { replace: true });
+        return;
+      }
       await loadHistory(hasExistingMessages);
     })();
     return () => {
@@ -63,7 +204,7 @@ export function Chat() {
       // empty session so it doesn't linger as a ghost entry in the sidebar.
       cleanupEmptySession();
     };
-  }, [isGatewayRunning, loadHistory, loadSessions, cleanupEmptySession]);
+  }, [cleanupEmptySession, isGatewayRunning, loadAgents, loadHistory, loadSessions, location.search, navigate, switchSession]);
 
   // Auto-scroll on new messages, streaming, or activity changes
   useEffect(() => {
@@ -107,17 +248,31 @@ export function Chat() {
   const hasStreamToolStatus = streamingTools.length > 0;
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
+  const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
+  const currentAgent = agents.find((item) => item.id === currentAgentId);
+  const assistantAvatarEmoji = resolveAgentEmoji(
+    currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
+    Boolean(currentAgent?.isDefault),
+  );
 
   return (
-    <div className="flex -m-6 flex-col xl:flex-row" style={{ height: 'calc(100vh - 2.5rem)' }}>
-      <div className="flex min-h-0 flex-1 flex-col">
-        {/* Toolbar */}
+    <div
+      ref={chatLayoutRef}
+      className={cn(
+        'grid h-full min-h-0 grid-cols-1 overflow-hidden xl:[grid-template-columns:minmax(0,1fr)_var(--task-inbox-resizer-width)_var(--task-inbox-width)]',
+        taskInboxCollapsed ? 'xl:[grid-template-columns:minmax(0,1fr)_52px]' : '',
+      )}
+      style={{
+        ['--task-inbox-width' as string]: `${taskInboxWidth}px`,
+        ['--task-inbox-resizer-width' as string]: `${TASK_INBOX_RESIZER_WIDTH}px`,
+      }}
+    >
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         <div className="flex shrink-0 items-center justify-end px-4 py-2">
           <ChatToolbar />
         </div>
 
-        {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           <div className="mx-auto max-w-4xl space-y-4">
             {loading && !sending ? (
               <div className="flex h-full items-center justify-center py-20">
@@ -132,10 +287,10 @@ export function Chat() {
                     key={msg.id || `msg-${idx}`}
                     message={msg}
                     showThinking={showThinking}
+                    assistantAvatarEmoji={assistantAvatarEmoji}
                   />
                 ))}
 
-                {/* Streaming message */}
                 {shouldRenderStreaming && (
                   <ChatMessage
                     message={(streamMsg
@@ -153,27 +308,24 @@ export function Chat() {
                     showThinking={showThinking}
                     isStreaming
                     streamingTools={streamingTools}
+                    assistantAvatarEmoji={assistantAvatarEmoji}
                   />
                 )}
 
-                {/* Activity indicator: waiting for next AI turn after tool execution */}
                 {sending && pendingFinal && !shouldRenderStreaming && (
                   <ActivityIndicator phase="tool_processing" />
                 )}
 
-                {/* Typing indicator when sending but no stream content yet */}
                 {sending && !pendingFinal && !hasAnyStreamContent && (
                   <TypingIndicator />
                 )}
               </>
             )}
 
-            {/* Scroll anchor */}
             <div ref={messagesEndRef} />
           </div>
         </div>
 
-        {/* Error bar */}
         {error && (
           <div className="border-t border-destructive/20 bg-destructive/10 px-4 py-2">
             <div className="mx-auto flex max-w-4xl items-center justify-between">
@@ -191,26 +343,29 @@ export function Chat() {
           </div>
         )}
 
-        {/* Input Area */}
         <ChatInput
           onSend={sendMessage}
           onStop={abortRun}
           disabled={!isGatewayRunning}
           sending={sending}
+          mentionCandidates={mentionCandidates}
         />
       </div>
 
-      <div
-        className={cn(
-          'shrink-0 transition-all duration-200',
-          taskInboxCollapsed ? 'h-16 xl:h-auto xl:w-8' : 'h-[40vh] xl:h-auto xl:w-[320px]',
-        )}
-      >
-        <TaskInboxPanel
-          collapsed={taskInboxCollapsed}
-          onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
+      {!taskInboxCollapsed && (
+        <VerticalPaneResizer
+          testId="chat-right-resizer"
+          className="hidden xl:block"
+          onMouseDown={startTaskInboxResize}
+          ariaLabel="Resize task inbox"
+          variant="subtle-border"
         />
-      </div>
+      )}
+
+      <TaskInboxPanel
+        collapsed={taskInboxCollapsed}
+        onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
+      />
     </div>
   );
 }
