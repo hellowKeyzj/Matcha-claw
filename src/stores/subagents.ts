@@ -21,17 +21,10 @@ import {
   extractChatSendOutput,
   parseDraftPayload,
 } from '@/lib/subagent/prompt';
-import {
-  mergeRolesFromAgents,
-  readRolesMetadata,
-  resolveRolesMetadataRoot,
-  writeRolesMetadata,
-} from '@/lib/team/roles-metadata';
 import type {
   AgentsListResult,
   ConfigGetResult,
   DraftByFile,
-  SubagentDraftRoleMetadata,
   ModelCatalogEntry,
   PreviewDiffByFile,
   SubagentSummary,
@@ -131,7 +124,6 @@ interface SubagentsState {
   draftApplySuccessByAgent: Record<string, boolean>;
   draftSessionKeyByAgent: Record<string, string>;
   draftRawOutputByAgent: Record<string, string>;
-  draftRoleMetadataByAgent: Record<string, SubagentDraftRoleMetadata | undefined>;
   persistedFilesByAgent: Record<string, Partial<Record<SubagentTargetFile, string>>>;
   draftByFile: DraftByFile;
   draftError: string | null;
@@ -777,67 +769,6 @@ async function hydrateAgentIdentityEmoji(agents: SubagentSummary[]): Promise<Sub
   return hydrated;
 }
 
-async function removeRoleMetadataForAgent(agentId: string, agents: SubagentSummary[]): Promise<void> {
-  if (agents.length === 0) {
-    return;
-  }
-  try {
-    const root = resolveRolesMetadataRoot(agents);
-    const current = await readRolesMetadata(root).catch(() => []);
-    if (!current.some((entry) => entry.agentId === agentId)) {
-      return;
-    }
-    const next = current.filter((entry) => entry.agentId !== agentId);
-    await writeRolesMetadata(root, next);
-  } catch {
-    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
-  }
-}
-
-async function syncRoleMetadataFromAgents(agents: SubagentSummary[]): Promise<void> {
-  if (agents.length === 0) {
-    return;
-  }
-  try {
-    const root = resolveRolesMetadataRoot(agents);
-    const current = await readRolesMetadata(root).catch(() => []);
-    const next = mergeRolesFromAgents(current, agents);
-    await writeRolesMetadata(root, next);
-  } catch {
-    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
-  }
-}
-
-async function upsertRoleMetadataFromDraft(
-  agentId: string,
-  roleMetadata: SubagentDraftRoleMetadata,
-  agents: SubagentSummary[],
-): Promise<void> {
-  if (agents.length === 0) {
-    return;
-  }
-  try {
-    const root = resolveRolesMetadataRoot(agents);
-    const current = await readRolesMetadata(root).catch(() => []);
-    const merged = mergeRolesFromAgents(current, agents);
-    const nowIso = new Date().toISOString();
-    const next = merged.map((entry) => {
-      if (entry.agentId !== agentId) {
-        return entry;
-      }
-      return {
-        ...entry,
-        summary: roleMetadata.summary,
-        tags: roleMetadata.tags,
-        updatedAt: nowIso,
-      };
-    });
-    await writeRolesMetadata(root, next);
-  } catch {
-    // ROLES_METADATA is auxiliary; avoid blocking core agent flows.
-  }
-}
-
 async function waitForDraftOutputFromHistory(sessionKey: string): Promise<string> {
   return waitForDraftOutputFromHistoryWithTimeout(sessionKey, DRAFT_HISTORY_READ_TIMEOUT_MS);
 }
@@ -999,7 +930,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   draftApplySuccessByAgent: {},
   draftSessionKeyByAgent: {},
   draftRawOutputByAgent: {},
-  draftRoleMetadataByAgent: {},
   persistedFilesByAgent: {},
   draftByFile: {},
   draftError: null,
@@ -1162,15 +1092,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         delete nextPromptByAgent[agentId];
         const nextRawOutputByAgent = { ...state.draftRawOutputByAgent };
         delete nextRawOutputByAgent[agentId];
-        const nextRoleMetadataByAgent = { ...state.draftRoleMetadataByAgent };
-        delete nextRoleMetadataByAgent[agentId];
         return {
           draftByFile: {},
           previewDiffByFile: {},
           draftError: null,
           draftPromptByAgent: nextPromptByAgent,
           draftRawOutputByAgent: nextRawOutputByAgent,
-          draftRoleMetadataByAgent: nextRoleMetadataByAgent,
           draftApplyingByAgent: nextApplyingByAgent,
           draftApplySuccessByAgent: {
             ...state.draftApplySuccessByAgent,
@@ -1232,7 +1159,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       invalidateConfigDisplayCache();
       await get().loadAgents();
-      await syncRoleMetadataFromAgents(get().agents);
       if (partialFailureMessage) {
         set({ error: partialFailureMessage });
       }
@@ -1276,7 +1202,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       });
       invalidateConfigDisplayCache();
       await get().loadAgents();
-      await syncRoleMetadataFromAgents(get().agents);
     } catch (error) {
       set({
         loading: false,
@@ -1320,7 +1245,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         };
       });
       await rpc('agents.delete', { agentId, deleteFiles: true });
-      await removeRoleMetadataForAgent(agentId, agentsSnapshot);
       set({ loading: false, error: null });
     } catch (error) {
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
@@ -1408,11 +1332,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       lastModelOutput = outputText;
 
       let draftByFile: DraftByFile;
-      let roleMetadata: SubagentDraftRoleMetadata;
       try {
         const parsedDraft = parseDraftPayload(outputText);
         draftByFile = parsedDraft.draftByFile;
-        roleMetadata = parsedDraft.roleMetadata;
       } catch (firstParseError) {
         const parseMessage = firstParseError instanceof Error ? firstParseError.message : '';
         const shouldRetry = parseMessage.includes('Invalid JSON output from model')
@@ -1424,9 +1346,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const retryMessage = [
           '上一条输出无法解析为有效 JSON。',
           '请只返回一个 JSON 对象，不要 Markdown 代码块，不要任何额外解释。',
-          '严格使用结构：{"files":[{"name","content","reason","confidence"}],"roleMetadata":{"summary","tags"}}。',
-          'roleMetadata.summary 必填。',
-          'roleMetadata.tags 必填，至少 3 个短标签。',
+          '严格使用结构：{"files":[{"name","content","reason","confidence"}]}。',
           'content 内不要使用 ``` 代码块；若有双引号必须转义为 \\\\"。',
           '请精简内容，确保 5 个文件都完整闭合后再输出。',
         ].join('\n');
@@ -1434,7 +1354,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         lastModelOutput = outputText;
         const parsedDraft = parseDraftPayload(outputText);
         draftByFile = parsedDraft.draftByFile;
-        roleMetadata = parsedDraft.roleMetadata;
       }
 
       set((state) => ({
@@ -1447,10 +1366,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         draftPromptByAgent: {
           ...state.draftPromptByAgent,
           [agentId]: trimmedPrompt,
-        },
-        draftRoleMetadataByAgent: {
-          ...state.draftRoleMetadataByAgent,
-          [agentId]: roleMetadata,
         },
       }));
     } catch (error) {
@@ -1503,11 +1418,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       throw new Error('No approved draft content to apply');
     }
 
-    const roleMetadata = get().draftRoleMetadataByAgent[agentId];
-    if (!roleMetadata) {
-      throw new Error('Missing role metadata in draft; please regenerate draft');
-    }
-
     set((state) => ({
       loading: true,
       error: null,
@@ -1526,7 +1436,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       await rpc('agents.files.list', { agentId });
       await get().loadAgents();
-      await upsertRoleMetadataFromDraft(agentId, roleMetadata, get().agents);
       set((state) => ({
         loading: false,
         draftByFile: {},
@@ -1535,10 +1444,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         draftApplyingByAgent: {
           ...state.draftApplyingByAgent,
           [agentId]: false,
-        },
-        draftRoleMetadataByAgent: {
-          ...state.draftRoleMetadataByAgent,
-          [agentId]: undefined,
         },
         persistedFilesByAgent: {
           ...state.persistedFilesByAgent,

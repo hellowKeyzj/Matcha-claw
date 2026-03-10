@@ -10,6 +10,7 @@
     },
     "filter": {
         "all": "すべて ({{count}})",
+        "eligible": "利用可能 ({{count}})",
         "builtIn": "内蔵 ({{count}})",
         "marketplace": "マーケットプレイス ({{count}})"
     },
@@ -30,6 +31,7 @@
         "version": "バージョン",
         "author": "作者",
         "source": "ソース",
+        "availability": "可用性",
         "coreSystem": "コアシステム",
         "bundled": "内蔵",
         "userInstalled": "ユーザーインストール",
@@ -49,6 +51,14 @@
         "configSaved": "設定を保存しました",
         "openManual": "マニュアルを開く",
         "configurable": "設定可能"
+    },
+    "availability": {
+        "eligible": "利用可能",
+        "blocked": "ブロック",
+        "missing": "依存不足",
+        "unknown": "不明",
+        "blockedByAllowlist": "allowlist によってブロック",
+        "missingPrefix": "Missing: {{items}}"
     },
     "toast": {
         "enabled": "スキルを有効にしました",
