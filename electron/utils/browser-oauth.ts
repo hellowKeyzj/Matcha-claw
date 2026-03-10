@@ -51,7 +51,7 @@ class BrowserOAuthManager extends EventEmitter {
           logger.info(`[BrowserOAuth] ${title || 'OAuth note'}: ${message}`);
         },
         prompt: async () => {
-          throw new Error('Manual browser OAuth fallback is not implemented in ClawX yet.');
+          throw new Error('Manual browser OAuth fallback is not implemented in MatchaClaw yet.');
         },
         progress: {
           update: (message) => logger.info(`[BrowserOAuth] ${message}`),
@@ -159,3 +159,4 @@ class BrowserOAuthManager extends EventEmitter {
 }
 
 export const browserOAuthManager = new BrowserOAuthManager();
+

@@ -1,25 +1,10 @@
 import { app } from 'electron';
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'http';
-import { getAllSettings } from '../../utils/store';
-import { logger } from '../../utils/logger';
+import { collectDiagnosticsBundle } from '../../utils/diagnostics-bundle';
+import { getLicenseGateSnapshot } from '../../utils/license';
+import { getOpenClawConfigDir } from '../../utils/paths';
 import type { HostApiContext } from '../context';
 import { sendJson } from '../route-utils';
-
-interface DiagnosticsBundlePayload {
-  generatedAt: string;
-  appVersion: string;
-  platform: NodeJS.Platform;
-  gatewayStatus: ReturnType<HostApiContext['gatewayManager']['getStatus']>;
-  settings: Awaited<ReturnType<typeof getAllSettings>>;
-  logFiles: Awaited<ReturnType<typeof logger.listLogFiles>>;
-  recentLogs: string;
-}
-
-function safeFileStamp(date: Date): string {
-  return date.toISOString().replace(/[:.]/g, '-');
-}
 
 export async function handleDiagnosticsRoutes(
   req: IncomingMessage,
@@ -29,34 +14,26 @@ export async function handleDiagnosticsRoutes(
 ): Promise<boolean> {
   if (url.pathname === '/api/diagnostics/collect' && req.method === 'POST') {
     try {
-      const generatedAt = new Date();
-      const diagnosticsDir = path.join(app.getPath('userData'), 'diagnostics');
-      await mkdir(diagnosticsDir, { recursive: true });
-      const filePath = path.join(diagnosticsDir, `diagnostics-${safeFileStamp(generatedAt)}.json`);
-
-      const [settings, logFiles, recentLogs] = await Promise.all([
-        getAllSettings(),
-        logger.listLogFiles(),
-        logger.readLogFile(500),
-      ]);
-
-      const payload: DiagnosticsBundlePayload = {
-        generatedAt: generatedAt.toISOString(),
-        appVersion: app.getVersion(),
-        platform: process.platform,
-        gatewayStatus: ctx.gatewayManager.getStatus(),
-        settings,
-        logFiles,
-        recentLogs,
-      };
-
-      await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-
-      sendJson(res, 200, {
-        zipPath: filePath,
-        generatedAt: payload.generatedAt,
-        fileCount: (logFiles?.length ?? 0) + 1,
+      const result = await collectDiagnosticsBundle({
+        userDataDir: app.getPath('userData'),
+        openclawConfigDir: getOpenClawConfigDir(),
+        appInfo: {
+          name: app.getName(),
+          version: app.getVersion(),
+          isPackaged: app.isPackaged,
+          platform: process.platform,
+          arch: process.arch,
+          electron: process.versions.electron,
+          node: process.versions.node,
+        },
+        gateway: {
+          status: ctx.gatewayManager.getStatus(),
+        },
+        license: {
+          gateSnapshot: getLicenseGateSnapshot(),
+        },
       });
+      sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

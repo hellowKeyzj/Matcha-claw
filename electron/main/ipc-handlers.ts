@@ -52,6 +52,7 @@ import {
 import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
 import { registerTeamIpcHandlers } from './team-ipc-handlers';
+import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 
 type AppRequest = {
   id?: string;
@@ -843,7 +844,7 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
   });
 
   // Create a new cron job
-  // UI-created tasks have no delivery target — results go to the ClawX chat page.
+  // UI-created tasks have no delivery target — results go to the MatchaClaw chat page.
   // Tasks created via external channels (Feishu, Discord, etc.) are handled
   // directly by the OpenClaw Gateway and do not pass through this IPC handler.
   ipcMain.handle('cron:create', async (_, input: {
@@ -860,7 +861,7 @@ function registerCronHandlers(gatewayManager: GatewayManager): void {
         enabled: input.enabled ?? true,
         wakeMode: 'next-heartbeat',
         sessionTarget: 'isolated',
-        // UI-created jobs deliver results via ClawX WebSocket chat events,
+        // UI-created jobs deliver results via MatchaClaw WebSocket chat events,
         // not external messaging channels.  Setting mode='none' prevents
         // the Gateway from attempting channel delivery (which would fail
         // with "Channel is required" when no channels are configured).
@@ -1279,6 +1280,22 @@ function registerGatewayHandlers(
  * For checking package status and channel configuration
  */
 function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
+  type PluginInstallAudit = {
+    source: InstallSource;
+    installPath?: string;
+    sourcePath?: string;
+    spec?: string;
+    version?: string;
+  };
+
+  type ManagedPluginInstallResult = {
+    installed: boolean;
+    warning?: string;
+    installedPath?: string;
+    sourcePath?: string;
+    version?: string;
+  };
+
   const scheduleGatewayChannelRestart = (reason: string): void => {
     if (gatewayManager.getStatus().state !== 'stopped') {
       logger.info(`Scheduling Gateway restart after ${reason}`);
@@ -1352,7 +1369,7 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     return false;
   }
 
-  function ensureTaskPluginEnabledInConfig(pluginId: string): void {
+  function ensureTaskPluginEnabledInConfig(pluginId: string, audit?: PluginInstallAudit): void {
     const config = readOpenClawConfigJson();
     const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
     const allow = Array.isArray(plugins.allow)
@@ -1378,16 +1395,44 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     skills.entries = skillEntries;
     config.skills = skills;
 
-    writeOpenClawConfigJson(config);
+    const { nextConfig } = upsertPluginInstallRecord(config, {
+      pluginId,
+      source: audit?.source ?? 'path',
+      installPath: audit?.installPath ?? join(homedir(), '.openclaw', 'extensions', pluginId),
+      sourcePath: audit?.sourcePath,
+      spec: audit?.spec,
+      version: audit?.version ?? getInstalledPluginVersion(pluginId),
+    });
+
+    writeOpenClawConfigJson(nextConfig);
   }
 
-  async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+  function ensurePluginInstallRecordInConfig(pluginId: string, audit: PluginInstallAudit): void {
+    const config = readOpenClawConfigJson();
+    const { nextConfig, changed } = upsertPluginInstallRecord(config, {
+      pluginId,
+      source: audit.source,
+      installPath: audit.installPath,
+      sourcePath: audit.sourcePath,
+      spec: audit.spec,
+      version: audit.version,
+    });
+    if (changed) {
+      writeOpenClawConfigJson(nextConfig);
+    }
+  }
+
+  async function ensureDingTalkPluginInstalled(): Promise<ManagedPluginInstallResult> {
     const targetDir = join(homedir(), '.openclaw', 'extensions', 'dingtalk');
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
     if (existsSync(targetManifest)) {
       logger.info('DingTalk plugin already installed from local mirror');
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion('dingtalk'),
+      };
     }
 
     const candidateSources = app.isPackaged
@@ -1421,7 +1466,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       }
 
       logger.info(`Installed DingTalk plugin from bundled mirror: ${sourceDir}`);
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion('dingtalk'),
+      };
     } catch (error) {
       logger.warn('Failed to install DingTalk plugin from bundled mirror:', error);
       return {
@@ -1431,13 +1481,17 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
   }
 
-  async function ensureWeComPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+  async function ensureWeComPluginInstalled(): Promise<ManagedPluginInstallResult> {
     const targetDir = join(homedir(), '.openclaw', 'extensions', 'wecom');
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
     if (existsSync(targetManifest)) {
       logger.info('WeCom plugin already installed from local mirror');
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion('wecom'),
+      };
     }
 
     const candidateSources = app.isPackaged
@@ -1471,7 +1525,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       }
 
       logger.info(`Installed WeCom plugin from bundled mirror: ${sourceDir}`);
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion('wecom'),
+      };
     } catch (error) {
       logger.warn('Failed to install WeCom plugin from bundled mirror:', error);
       return {
@@ -1481,13 +1540,17 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
   }
 
-  async function ensureQQBotPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
+  async function ensureQQBotPluginInstalled(): Promise<ManagedPluginInstallResult> {
     const targetDir = join(homedir(), '.openclaw', 'extensions', 'qqbot');
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
     if (existsSync(targetManifest)) {
       logger.info('QQ Bot plugin already installed from local mirror');
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion('qqbot'),
+      };
     }
 
     const candidateSources = app.isPackaged
@@ -1521,7 +1584,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       }
 
       logger.info(`Installed QQ Bot plugin from bundled mirror: ${sourceDir}`);
-      return { installed: true };
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion('qqbot'),
+      };
     } catch (error) {
       logger.warn('Failed to install QQ Bot plugin from bundled mirror:', error);
       return {
@@ -1714,7 +1782,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
         };
       }
 
-      ensureTaskPluginEnabledInConfig('task-manager');
+      ensureTaskPluginEnabledInConfig('task-manager', {
+        source: 'path',
+        installPath: installResult.installedPath,
+        sourcePath: installResult.sourcePath,
+        version: installResult.version,
+      });
       scheduleGatewayChannelRestart('task:pluginInstall');
 
       return {
@@ -1750,6 +1823,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           };
         }
         await saveChannelConfig(channelType, config);
+        ensurePluginInstallRecordInConfig('dingtalk', {
+          source: 'path',
+          installPath: installResult.installedPath,
+          sourcePath: installResult.sourcePath,
+          version: installResult.version,
+        });
         scheduleGatewayChannelRestart(`channel:saveConfig (${channelType})`);
         return {
           success: true,
@@ -1766,6 +1845,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           };
         }
         await saveChannelConfig(channelType, config);
+        ensurePluginInstallRecordInConfig('wecom', {
+          source: 'path',
+          installPath: installResult.installedPath,
+          sourcePath: installResult.sourcePath,
+          version: installResult.version,
+        });
         scheduleGatewayChannelRestart(`channel:saveConfig (${channelType})`);
         return {
           success: true,
@@ -1782,6 +1867,12 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           };
         }
         await saveChannelConfig(channelType, config);
+        ensurePluginInstallRecordInConfig('qqbot', {
+          source: 'path',
+          installPath: installResult.installedPath,
+          sourcePath: installResult.sourcePath,
+          version: installResult.version,
+        });
         if (gatewayManager.getStatus().state !== 'stopped') {
           logger.info(`Scheduling Gateway reload after channel:saveConfig (${channelType})`);
           gatewayManager.debouncedReload();
@@ -2260,7 +2351,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
         // This ensures Setup/Settings validation reflects unsaved edits immediately.
         const resolvedBaseUrl = options?.baseUrl || provider?.baseUrl || registryBaseUrl;
 
-        console.log(`[clawx-validate] validating provider type: ${providerType}`);
+        console.log(`[MatchaClaw-validate] validating provider type: ${providerType}`);
         return await validateApiKeyWithProvider(providerType, apiKey, { baseUrl: resolvedBaseUrl });
       } catch (error) {
         console.error('Validation error:', error);
@@ -2840,3 +2931,4 @@ function registerSessionHandlers(): void {
     }
   });
 }
+

@@ -1,4 +1,4 @@
-; ClawX Custom NSIS Installer/Uninstaller Script
+; MatchaClaw Custom NSIS Installer/Uninstaller Script
 ;
 ; Install: enables long paths, adds resources\cli to user PATH for openclaw CLI.
 ; Uninstall: removes the PATH entry and optionally deletes user data.
@@ -9,7 +9,7 @@
 
 !macro customCheckAppRunning
   ; Pre-emptively remove old shortcuts to prevent the Windows "Missing Shortcut"
-  ; dialog during upgrades.  The built-in NSIS uninstaller deletes ClawX.exe
+  ; dialog during upgrades.  The built-in NSIS uninstaller deletes MatchaClaw.exe
   ; *before* removing shortcuts; Windows Shell link tracking can detect the
   ; broken target in that brief window and pop a resolver dialog.
   ; Delete is a silent no-op when the file doesn't exist (safe for fresh installs).
@@ -118,14 +118,14 @@
 
   ; Ask user if they want to completely remove all user data
   MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Do you want to completely remove all ClawX user data?$\r$\n$\r$\nThis will delete:$\r$\n  • .openclaw folder (configuration & skills)$\r$\n  • AppData\Local\clawx (local app data)$\r$\n  • AppData\Roaming\clawx (roaming app data)$\r$\n$\r$\nSelect 'No' to keep your data for future reinstallation." \
+    "Do you want to completely remove all MatchaClaw user data?$\r$\n$\r$\nThis will delete:$\r$\n  • .openclaw folder (configuration & skills)$\r$\n  • AppData\Local\MatchaClaw (local app data)$\r$\n  • AppData\Roaming\MatchaClaw (roaming app data)$\r$\n$\r$\nSelect 'No' to keep your data for future reinstallation." \
     /SD IDNO IDYES _cu_removeData IDNO _cu_skipRemove
 
   _cu_removeData:
     ; --- Always remove current user's data first ---
     RMDir /r "$PROFILE\.openclaw"
-    RMDir /r "$LOCALAPPDATA\clawx"
-    RMDir /r "$APPDATA\clawx"
+    RMDir /r "$LOCALAPPDATA\MatchaClaw"
+    RMDir /r "$APPDATA\MatchaClaw"
 
     ; --- For per-machine (all users) installs, enumerate all user profiles ---
     StrCpy $R0 0
@@ -141,8 +141,8 @@
     StrCmp $R2 $PROFILE _cu_enumNext
 
     RMDir /r "$R2\.openclaw"
-    RMDir /r "$R2\AppData\Local\clawx"
-    RMDir /r "$R2\AppData\Roaming\clawx"
+    RMDir /r "$R2\AppData\Local\MatchaClaw"
+    RMDir /r "$R2\AppData\Roaming\MatchaClaw"
 
   _cu_enumNext:
     IntOp $R0 $R0 + 1
@@ -151,4 +151,5 @@
   _cu_enumDone:
   _cu_skipRemove:
 !macroend
+
 

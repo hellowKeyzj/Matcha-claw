@@ -6,7 +6,15 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import { useGatewayStore } from './gateway';
-import type { Skill, MarketplaceSkill } from '../types/skill';
+import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '../types/skill';
+
+type GatewaySkillMissing = {
+  bins?: string[];
+  anyBins?: string[];
+  env?: string[];
+  config?: string[];
+  os?: string[];
+};
 
 type GatewaySkillStatus = {
   skillKey: string;
@@ -20,6 +28,9 @@ type GatewaySkillStatus = {
   config?: Record<string, unknown>;
   bundled?: boolean;
   always?: boolean;
+  eligible?: boolean;
+  blockedByAllowlist?: boolean;
+  missing?: GatewaySkillMissing;
 };
 
 type GatewaySkillsStatusResult = {
@@ -30,6 +41,36 @@ type ClawHubListResult = {
   slug: string;
   version?: string;
 };
+
+type MarketplaceSearchResult = {
+  success: boolean;
+  results?: MarketplaceSkill[];
+  error?: string;
+};
+
+const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
+const marketplaceSearchCache = new Map<string, {
+  timestamp: number;
+  results: MarketplaceSkill[];
+}>();
+const inflightMarketplaceSearch = new Map<string, Promise<MarketplaceSearchResult>>();
+
+function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissingRequirements | undefined {
+  if (!missing) {
+    return undefined;
+  }
+
+  const normalized: SkillMissingRequirements = {
+    bins: Array.isArray(missing.bins) ? missing.bins : [],
+    anyBins: Array.isArray(missing.anyBins) ? missing.anyBins : [],
+    env: Array.isArray(missing.env) ? missing.env : [],
+    config: Array.isArray(missing.config) ? missing.config : [],
+    os: Array.isArray(missing.os) ? missing.os : [],
+  };
+
+  const hasMissing = Object.values(normalized).some((items) => Array.isArray(items) && items.length > 0);
+  return hasMissing ? normalized : undefined;
+}
 
 function mapErrorCodeToSkillErrorKey(
   code: AppError['code'],
@@ -114,6 +155,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             icon: s.emoji || '📦',
             version: s.version || '1.0.0',
             author: s.author,
+            eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
+            blockedByAllowlist: s.blockedByAllowlist === true,
+            missing: normalizeMissingRequirements(s.missing),
             config: {
               ...(s.config || {}),
               ...directConfig,
@@ -159,14 +203,31 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
 
   searchSkills: async (query: string) => {
+    const normalizedQuery = query.trim();
+    const cacheKey = normalizedQuery.toLowerCase();
+    const now = Date.now();
+    const cached = marketplaceSearchCache.get(cacheKey);
+    if (cached && now - cached.timestamp < MARKETPLACE_SEARCH_CACHE_TTL_MS) {
+      set({ searchResults: cached.results, searching: false, searchError: null });
+      return;
+    }
+
     set({ searching: true, searchError: null });
-    try {
-      const result = await hostApiFetch<{ success: boolean; results?: MarketplaceSkill[]; error?: string }>('/api/clawhub/search', {
+    let pending = inflightMarketplaceSearch.get(cacheKey);
+    if (!pending) {
+      pending = hostApiFetch<MarketplaceSearchResult>('/api/clawhub/search', {
         method: 'POST',
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query: normalizedQuery }),
       });
+      inflightMarketplaceSearch.set(cacheKey, pending);
+    }
+
+    try {
+      const result = await pending;
       if (result.success) {
-        set({ searchResults: result.results || [] });
+        const results = result.results || [];
+        marketplaceSearchCache.set(cacheKey, { timestamp: Date.now(), results });
+        set({ searchResults: results });
       } else {
         throw normalizeAppError(new Error(result.error || 'Search failed'), {
           module: 'skills',
@@ -177,11 +238,17 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       const appError = normalizeAppError(error, { module: 'skills', operation: 'search' });
       set({ searchError: mapErrorCodeToSkillErrorKey(appError.code, 'search') });
     } finally {
+      if (inflightMarketplaceSearch.get(cacheKey) === pending) {
+        inflightMarketplaceSearch.delete(cacheKey);
+      }
       set({ searching: false });
     }
   },
 
   installSkill: async (slug: string, version?: string) => {
+    if (get().installing[slug]) {
+      return;
+    }
     set((state) => ({ installing: { ...state.installing, [slug]: true } }));
     try {
       const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/install', {
