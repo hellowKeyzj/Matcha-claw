@@ -8,7 +8,18 @@
     "light": "浅色",
     "dark": "深色",
     "system": "跟随系统",
-    "language": "语言"
+    "language": "语言",
+    "userAvatar": "用户头像",
+    "userAvatarDesc": "上传你的头像，聊天中将作为用户头像显示",
+    "userAvatarPreviewAlt": "用户头像预览",
+    "uploadAvatarInputLabel": "上传用户头像",
+    "uploadAvatar": "上传头像",
+    "clearAvatar": "清除头像",
+    "userAvatarHint": "上传后会自动裁剪为 128x128 方形头像，并仅本地保存",
+    "avatarInvalidType": "请选择图片文件",
+    "avatarUpdated": "用户头像已更新",
+    "avatarCleared": "用户头像已清除",
+    "avatarUpdateFailed": "更新用户头像失败: {{error}}"
   },
   "aiProviders": {
     "title": "AI 模型提供商",
@@ -105,6 +116,74 @@
       "step2": "在浏览器中打开登录页面。",
       "step3": "粘贴授权码以批准访问。",
       "requestingCode": "正在获取安全登录码..."
+    }
+  },
+  "taskPlugin": {
+    "title": "任务插件",
+    "description": "管理内置 task-manager 插件运行状态",
+    "status": "状态",
+    "version": "版本",
+    "path": "插件路径",
+    "install": "安装",
+    "reinstall": "重装",
+    "refresh": "刷新",
+    "notInstalled": "未安装",
+    "installedEnabled": "已安装并启用",
+    "installedDisabled": "已安装但未启用",
+    "toastInstallSuccess": "任务插件安装成功",
+    "toastInstallFailed": "安装任务插件失败: {{error}}",
+    "toastStatusFailed": "读取任务插件状态失败: {{error}}"
+  },
+  "license": {
+    "title": "授权",
+    "description": "激活并管理本机授权",
+    "gateStatus": "门禁状态",
+    "gateState": {
+      "checking": "检查中",
+      "granted": "已授权",
+      "blocked": "未授权"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "临近过期续期失败，请尽快重新校验"
+    },
+    "inputLabel": "授权码",
+    "placeholder": "输入授权码（例如 MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+    "showKey": "显示授权码",
+    "hideKey": "隐藏授权码",
+    "validate": "校验授权",
+    "revalidate": "重新校验",
+    "clear": "清除",
+    "messages": {
+      "valid": "授权校验成功",
+      "cache_grace_valid": "使用离线缓存宽限校验成功",
+      "empty": "请输入授权码",
+      "format_invalid": "授权码格式不正确",
+      "service_unconfigured": "授权服务未配置",
+      "network_error": "无法连接授权服务，请检查网络后重试",
+      "server_rejected": "授权服务拒绝了该授权码",
+      "expired": "授权已过期",
+      "device_mismatch": "授权设备与当前机器不匹配",
+      "not_allowed": "授权码不在允许名单中",
+      "checksum_invalid": "授权码校验位无效",
+      "unknown": "授权校验失败"
+    },
+    "toast": {
+      "cleared": "本地授权已清除",
+      "clearFailed": "清除本地授权失败: {{error}}"
+    }
+  },
+  "diagnostics": {
+    "title": "诊断导出",
+    "description": "收集本地诊断包用于问题排查",
+    "collect": "导出诊断包",
+    "collecting": "导出中",
+    "openFolder": "打开目录",
+    "lastBundle": "最近一次导出",
+    "lastMeta": "生成时间 {{generatedAt}}，文件数 {{count}}",
+    "toast": {
+      "success": "诊断包已生成，文件数: {{count}}",
+      "failed": "生成诊断包失败: {{error}}",
+      "openFailed": "打开诊断目录失败: {{error}}"
     }
   },
   "gateway": {

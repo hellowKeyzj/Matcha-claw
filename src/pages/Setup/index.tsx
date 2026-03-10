@@ -40,6 +40,31 @@ interface SetupStep {
   description: string;
 }
 
+type LicenseValidationCode =
+  | 'valid'
+  | 'empty'
+  | 'format_invalid'
+  | 'service_unconfigured'
+  | 'network_error'
+  | 'server_rejected'
+  | 'cache_grace_valid'
+  | 'expired'
+  | 'device_mismatch'
+  | 'not_allowed'
+  | 'checksum_invalid';
+
+interface LicenseValidationResponse {
+  valid: boolean;
+  code: LicenseValidationCode;
+  normalizedKey?: string;
+  message?: string;
+}
+
+interface LicenseGateSnapshot {
+  state: 'checking' | 'granted' | 'blocked';
+  lastValidation?: LicenseValidationResponse | null;
+}
+
 const STEP = {
   WELCOME: 0,
   RUNTIME: 1,
@@ -129,6 +154,11 @@ export function Setup() {
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
+  const [licenseKey, setLicenseKey] = useState('');
+  const [licenseValidation, setLicenseValidation] = useState<LicenseValidationResponse | null>(null);
+  const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCode | 'unknown' | null>(null);
+  const [licenseValidating, setLicenseValidating] = useState(false);
+  const bootstrappedLicenseRef = useRef(false);
 
   const safeStepIndex = Number.isInteger(currentStep)
     ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
@@ -136,6 +166,7 @@ export function Setup() {
   const step = steps[safeStepIndex] ?? steps[STEP.WELCOME];
   const isFirstStep = safeStepIndex === STEP.WELCOME;
   const isLastStep = safeStepIndex === steps.length - 1;
+  const licenseValidated = licenseValidation?.valid === true;
 
   const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
 
@@ -143,7 +174,7 @@ export function Setup() {
   const canProceed = useMemo(() => {
     switch (safeStepIndex) {
       case STEP.WELCOME:
-        return true;
+        return licenseValidated;
       case STEP.RUNTIME:
         return runtimeChecksPassed;
       case STEP.PROVIDER:
@@ -155,7 +186,7 @@ export function Setup() {
       default:
         return true;
     }
-  }, [safeStepIndex, providerConfigured, runtimeChecksPassed]);
+  }, [licenseValidated, providerConfigured, runtimeChecksPassed, safeStepIndex]);
 
   const handleNext = async () => {
     if (isLastStep) {
@@ -173,9 +204,105 @@ export function Setup() {
   };
 
   const handleSkip = () => {
+    if (safeStepIndex === STEP.WELCOME && !licenseValidated) {
+      toast.error(t('license.messages.requiredBeforeSkip'));
+      return;
+    }
     markSetupComplete();
     navigate('/');
   };
+
+  const handleLicenseKeyChange = useCallback((value: string) => {
+    setLicenseKey(value);
+    setLicenseValidation(null);
+    setLicenseValidationCode(null);
+  }, []);
+
+  const handleValidateLicense = useCallback(async () => {
+    setLicenseValidating(true);
+    try {
+      const result = await hostApiFetch<LicenseValidationResponse>('/api/license/validate', {
+        method: 'POST',
+        body: JSON.stringify({ key: licenseKey }),
+      });
+
+      setLicenseValidation(result);
+      setLicenseValidationCode(result.code);
+      if (result.normalizedKey) {
+        setLicenseKey(result.normalizedKey);
+      }
+
+      if (result.valid) {
+        if (result.code === 'cache_grace_valid') {
+          toast.success(t('license.messages.cache_grace_valid'));
+        } else {
+          toast.success(t('license.messages.valid'));
+        }
+      } else {
+        const localized = t(`license.messages.${result.code}`, { defaultValue: '' });
+        const fallback = t('license.messages.unknown');
+        toast.error(result.message ? `${localized || fallback}: ${result.message}` : (localized || fallback));
+      }
+    } catch (error) {
+      setLicenseValidation(null);
+      setLicenseValidationCode('unknown');
+      toast.error(t('license.messages.unknown', { defaultValue: String(error) }));
+    } finally {
+      setLicenseValidating(false);
+    }
+  }, [licenseKey, t]);
+
+  useEffect(() => {
+    if (bootstrappedLicenseRef.current) {
+      return;
+    }
+    bootstrappedLicenseRef.current = true;
+
+    const bootstrapFromGate = async () => {
+      try {
+        const [storedKeyPayload, gate] = await Promise.all([
+          hostApiFetch<{ key: string | null }>('/api/license/stored-key'),
+          hostApiFetch<LicenseGateSnapshot>('/api/license/gate'),
+        ]);
+
+        const normalizedStoredKey = typeof storedKeyPayload?.key === 'string'
+          ? storedKeyPayload.key.trim()
+          : '';
+        if (normalizedStoredKey) {
+          setLicenseKey(normalizedStoredKey);
+        }
+
+        if (gate?.state !== 'granted') {
+          return;
+        }
+
+        const lastValidation = gate.lastValidation;
+        const resolvedValidation: LicenseValidationResponse =
+          lastValidation && lastValidation.valid
+            ? {
+              ...lastValidation,
+              normalizedKey: lastValidation.normalizedKey || normalizedStoredKey || undefined,
+            }
+            : {
+              valid: true,
+              code: 'valid',
+              normalizedKey: normalizedStoredKey || undefined,
+            };
+
+        setLicenseValidation(resolvedValidation);
+        setLicenseValidationCode(resolvedValidation.code);
+        if (resolvedValidation.normalizedKey) {
+          setLicenseKey(resolvedValidation.normalizedKey);
+        }
+
+        setCurrentStep((prev) => (prev === STEP.WELCOME ? STEP.RUNTIME : prev));
+      } catch {
+        // ignore bootstrap errors
+      }
+    };
+
+    void bootstrapFromGate();
+  }, []);
 
   // Auto-proceed when installation is complete
   const handleInstallationComplete = useCallback((skills: string[]) => {
@@ -241,7 +368,15 @@ export function Setup() {
 
             {/* Step-specific content */}
             <div className="rounded-xl bg-card text-card-foreground border shadow-sm p-8 mb-8">
-              {safeStepIndex === STEP.WELCOME && <WelcomeContent />}
+              {safeStepIndex === STEP.WELCOME && (
+                <WelcomeContent
+                  licenseKey={licenseKey}
+                  onLicenseKeyChange={handleLicenseKeyChange}
+                  onValidateLicense={handleValidateLicense}
+                  licenseValidating={licenseValidating}
+                  licenseValidationCode={licenseValidationCode}
+                />
+              )}
               {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
               {safeStepIndex === STEP.PROVIDER && (
                 <ProviderContent
@@ -280,7 +415,7 @@ export function Setup() {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {!isLastStep && safeStepIndex !== STEP.RUNTIME && (
+                  {!isLastStep && safeStepIndex !== STEP.RUNTIME && safeStepIndex !== STEP.WELCOME && (
                     <Button variant="ghost" onClick={handleSkip}>
                       {t('nav.skipSetup')}
                     </Button>
@@ -307,8 +442,22 @@ export function Setup() {
 
 // ==================== Step Content Components ====================
 
-function WelcomeContent() {
-  const { t } = useTranslation(['setup', 'settings']);
+interface WelcomeContentProps {
+  licenseKey: string;
+  onLicenseKeyChange: (value: string) => void;
+  onValidateLicense: () => Promise<void>;
+  licenseValidating: boolean;
+  licenseValidationCode: LicenseValidationCode | 'unknown' | null;
+}
+
+function WelcomeContent({
+  licenseKey,
+  onLicenseKeyChange,
+  onValidateLicense,
+  licenseValidating,
+  licenseValidationCode,
+}: WelcomeContentProps) {
+  const { t } = useTranslation('setup');
   const { language, setLanguage } = useSettingsStore();
 
   return (
@@ -320,6 +469,44 @@ function WelcomeContent() {
       <p className="text-muted-foreground">
         {t('welcome.description')}
       </p>
+
+      <div className="mx-auto max-w-md rounded-lg border p-4 text-left space-y-3">
+        <div className="space-y-1">
+          <Label htmlFor="setup-license-key">{t('license.label')}</Label>
+          <p className="text-xs text-muted-foreground">{t('license.hint')}</p>
+        </div>
+        <div className="flex gap-2">
+          <Input
+            id="setup-license-key"
+            value={licenseKey}
+            placeholder={t('license.placeholder')}
+            onChange={(event) => onLicenseKeyChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                void onValidateLicense();
+              }
+            }}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button type="button" onClick={() => void onValidateLicense()} disabled={licenseValidating}>
+            {licenseValidating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('license.validate')}
+          </Button>
+        </div>
+        <p
+          className={cn(
+            'text-xs',
+            licenseValidationCode === 'valid' || licenseValidationCode === 'cache_grace_valid'
+              ? 'text-green-500'
+              : licenseValidationCode
+                ? 'text-destructive'
+                : 'text-muted-foreground'
+          )}
+        >
+          {licenseValidationCode ? t(`license.messages.${licenseValidationCode}`) : t('license.messages.idle')}
+        </p>
+      </div>
 
       {/* Language Selector */}
       <div className="flex justify-center gap-2 py-2">

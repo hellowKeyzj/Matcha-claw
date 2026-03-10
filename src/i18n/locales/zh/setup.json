@@ -35,6 +35,28 @@
             "crossPlatform": "跨平台支持"
         }
     },
+    "license": {
+        "label": "授权码",
+        "placeholder": "输入授权码（例如 MATCHACLAW-ABCD-EFGH-IJKL-MNPQ）",
+        "hint": "进入下一步前必须先完成授权校验",
+        "validate": "校验",
+        "messages": {
+            "idle": "等待输入授权码",
+            "valid": "授权校验成功",
+            "cache_grace_valid": "离线缓存宽限校验成功",
+            "empty": "请输入授权码",
+            "format_invalid": "授权码格式不正确",
+            "service_unconfigured": "授权服务未配置",
+            "network_error": "无法连接授权服务，请检查网络后重试",
+            "server_rejected": "授权服务拒绝了该授权码",
+            "expired": "授权已过期",
+            "device_mismatch": "授权设备与当前机器不匹配",
+            "not_allowed": "授权码不在允许名单中",
+            "checksum_invalid": "授权码校验位无效",
+            "requiredBeforeSkip": "完成授权校验后才能跳过设置",
+            "unknown": "授权校验失败"
+        }
+    },
     "runtime": {
         "title": "检查环境",
         "viewLogs": "查看日志",
