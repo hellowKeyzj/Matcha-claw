@@ -132,6 +132,18 @@ const electronAPI = {
         'chat:sendWithMedia',
         // Session management
         'session:delete',
+        // Team runtime
+        'team:init',
+        'team:snapshot',
+        'team:planUpsert',
+        'team:claimNext',
+        'team:heartbeat',
+        'team:taskUpdate',
+        'team:mailboxPost',
+        'team:mailboxPull',
+        'team:releaseClaim',
+        'team:reset',
+        'team:listTasks',
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',

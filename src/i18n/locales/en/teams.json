@@ -1,0 +1,77 @@
+{
+  "title": "Agents Workspace",
+  "subtitle": "",
+  "defaultValues": {
+    "teamName": "New Team"
+  },
+  "create": {
+    "title": "Create Team",
+    "teamName": "Team Name",
+    "teamNamePlaceholder": "Enter team name",
+    "leadAgent": "Lead Agent",
+    "selectLead": "Select lead agent",
+    "members": "Members",
+    "createButton": "Create Team"
+  },
+  "list": {
+    "title": "Teams",
+    "empty": "No teams yet",
+    "lead": "Lead",
+    "members": "Members",
+    "open": "Open",
+    "delete": "Delete"
+  },
+  "chat": {
+    "teamNotFound": "Team not found",
+    "backToList": "Back to Teams",
+    "runStatus": "Run status",
+    "refresh": "Refresh Snapshot"
+  },
+  "board": {
+    "title": "Task Board",
+    "newTaskTitle": "Task Title",
+    "newTaskTitlePlaceholder": "Optional title",
+    "newTaskInstruction": "Instruction",
+    "newTaskInstructionPlaceholder": "Describe the task",
+    "newTaskDeps": "Depends On",
+    "newTaskDepsPlaceholder": "task-a, task-b",
+    "addTask": "Add Task",
+    "emptyColumn": "No tasks",
+    "owner": "Owner",
+    "unclaimed": "Unclaimed",
+    "claimNext": "Claim Next",
+    "markRunning": "Mark Running",
+    "markDone": "Mark Done",
+    "markBlocked": "Mark Blocked",
+    "markFailed": "Mark Failed",
+    "heartbeat": "Heartbeat",
+    "release": "Release",
+    "columns": {
+      "todo": "TODO",
+      "claimed": "CLAIMED",
+      "running": "RUNNING",
+      "blocked": "BLOCKED",
+      "done": "DONE",
+      "failed": "FAILED"
+    }
+  },
+  "mailbox": {
+    "title": "Mailbox",
+    "target": "Target",
+    "broadcast": "Broadcast",
+    "message": "Message",
+    "messagePlaceholder": "Type your message",
+    "send": "Post Message",
+    "pull": "Pull Messages",
+    "empty": "No messages yet"
+  },
+  "agents": {
+    "title": "Agents",
+    "active": "Active Agent",
+    "select": "Select agent",
+    "sessionKey": "Session key",
+    "ownedTasks": "Owned tasks",
+    "runningTasks": "Running",
+    "claimForAgent": "Claim For Agent"
+  }
+}
