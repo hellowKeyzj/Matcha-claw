@@ -329,8 +329,8 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   let agentEntries: Array<import('node:fs').Dirent> = [];
   try {
     agentEntries = await readdir(agentsDir, { withFileTypes: true });
-  } catch {
-    agentEntries = [];
+  } catch (error) {
+    void error;
   }
   for (const agentEntry of agentEntries) {
     if (!agentEntry.isDirectory()) {
@@ -393,8 +393,8 @@ export async function collectDiagnosticsBundle(input: CollectDiagnosticsBundleIn
   let extensionEntries: Array<import('node:fs').Dirent> = [];
   try {
     extensionEntries = await readdir(extensionsDir, { withFileTypes: true });
-  } catch {
-    extensionEntries = [];
+  } catch (error) {
+    void error;
   }
   for (const extensionEntry of extensionEntries) {
     if (!extensionEntry.isDirectory()) {

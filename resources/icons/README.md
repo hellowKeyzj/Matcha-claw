@@ -59,7 +59,7 @@ If you prefer to generate icons manually:
 
 ### Application Icon
 - **Corner Radius**: ~20% of width (200px on 1024px canvas)
-- **Foreground**: White claw symbol with "X" accent
+- **Foreground**: White matchaclaw symbol with "X" accent
 - **Safe Area**: Keep 10% margin from edges
 
 ### macOS Tray Icon
@@ -77,4 +77,3 @@ If you prefer to generate icons manually:
 3. Run `node scripts/generate-icons.mjs`
 4. Verify generated icons look correct
 5. Commit all generated files
-
