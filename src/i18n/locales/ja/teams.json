@@ -1,0 +1,77 @@
+{
+  "title": "Agents ワークスペース",
+  "subtitle": "",
+  "defaultValues": {
+    "teamName": "新しいチーム"
+  },
+  "create": {
+    "title": "チーム作成",
+    "teamName": "チーム名",
+    "teamNamePlaceholder": "チーム名を入力",
+    "leadAgent": "リード Agent",
+    "selectLead": "リード Agent を選択",
+    "members": "メンバー",
+    "createButton": "チームを作成"
+  },
+  "list": {
+    "title": "チーム一覧",
+    "empty": "チームがありません",
+    "lead": "リード",
+    "members": "メンバー",
+    "open": "開く",
+    "delete": "削除"
+  },
+  "chat": {
+    "teamNotFound": "チームが見つかりません",
+    "backToList": "チーム一覧へ戻る",
+    "runStatus": "実行状態",
+    "refresh": "スナップショット更新"
+  },
+  "board": {
+    "title": "タスクボード",
+    "newTaskTitle": "タスクタイトル",
+    "newTaskTitlePlaceholder": "任意タイトル",
+    "newTaskInstruction": "指示",
+    "newTaskInstructionPlaceholder": "タスク内容を入力",
+    "newTaskDeps": "依存タスク",
+    "newTaskDepsPlaceholder": "task-a, task-b",
+    "addTask": "タスク追加",
+    "emptyColumn": "タスクなし",
+    "owner": "担当",
+    "unclaimed": "未クレーム",
+    "claimNext": "次をクレーム",
+    "markRunning": "実行中へ",
+    "markDone": "完了へ",
+    "markBlocked": "ブロックへ",
+    "markFailed": "失敗へ",
+    "heartbeat": "ハートビート",
+    "release": "クレーム解除",
+    "columns": {
+      "todo": "TODO",
+      "claimed": "CLAIMED",
+      "running": "RUNNING",
+      "blocked": "BLOCKED",
+      "done": "DONE",
+      "failed": "FAILED"
+    }
+  },
+  "mailbox": {
+    "title": "Mailbox",
+    "target": "送信先",
+    "broadcast": "ブロードキャスト",
+    "message": "メッセージ",
+    "messagePlaceholder": "メッセージを入力",
+    "send": "投稿",
+    "pull": "取得",
+    "empty": "メッセージはまだありません"
+  },
+  "agents": {
+    "title": "Agent 状態",
+    "active": "操作中 Agent",
+    "select": "Agent を選択",
+    "sessionKey": "セッションキー",
+    "ownedTasks": "担当タスク",
+    "runningTasks": "実行中",
+    "claimForAgent": "この Agent でクレーム"
+  }
+}

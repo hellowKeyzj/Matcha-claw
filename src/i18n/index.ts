@@ -11,6 +11,7 @@ import enSkills from './locales/en/skills.json';
 import enCron from './locales/en/cron.json';
 import enSetup from './locales/en/setup.json';
 import enSubagents from './locales/en/subagents.json';
+import enTeams from './locales/en/teams.json';
 
 // ZH
 import zhCommon from './locales/zh/common.json';
@@ -22,6 +23,7 @@ import zhSkills from './locales/zh/skills.json';
 import zhCron from './locales/zh/cron.json';
 import zhSetup from './locales/zh/setup.json';
 import zhSubagents from './locales/zh/subagents.json';
+import zhTeams from './locales/zh/teams.json';
 
 // JA
 import jaCommon from './locales/ja/common.json';
@@ -33,6 +35,7 @@ import jaSkills from './locales/ja/skills.json';
 import jaCron from './locales/ja/cron.json';
 import jaSetup from './locales/ja/setup.json';
 import jaSubagents from './locales/ja/subagents.json';
+import jaTeams from './locales/ja/teams.json';
 
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
@@ -53,6 +56,7 @@ const resources = {
         cron: enCron,
         setup: enSetup,
         subagents: enSubagents,
+        teams: enTeams,
     },
     zh: {
         common: zhCommon,
@@ -64,6 +68,7 @@ const resources = {
         cron: zhCron,
         setup: zhSetup,
         subagents: zhSubagents,
+        teams: zhTeams,
     },
     ja: {
         common: jaCommon,
@@ -75,6 +80,7 @@ const resources = {
         cron: jaCron,
         setup: jaSetup,
         subagents: jaSubagents,
+        teams: jaTeams,
     },
 };
 
@@ -85,7 +91,7 @@ i18n
         lng: 'en', // will be overridden by settings store
         fallbackLng: 'en',
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'teams'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

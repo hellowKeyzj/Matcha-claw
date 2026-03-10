@@ -15,6 +15,8 @@ import { Channels } from './pages/Channels';
 import { Skills } from './pages/Skills';
 import { Cron } from './pages/Cron';
 import { SubAgents } from './pages/SubAgents';
+import { TeamsPage } from './pages/Teams';
+import { TeamChatPage } from './pages/Teams/TeamChat';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
@@ -168,6 +170,8 @@ function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/channels" element={<Channels />} />
             <Route path="/subagents" element={<SubAgents />} />
+            <Route path="/teams" element={<TeamsPage />} />
+            <Route path="/teams/:teamId" element={<TeamChatPage />} />
             <Route path="/skills" element={<Skills />} />
             <Route path="/cron" element={<Cron />} />
             <Route path="/settings/*" element={<Settings />} />

@@ -1,0 +1,77 @@
+{
+  "title": "团队协作中心",
+  "subtitle": "任务看板与团队讨论中心",
+  "defaultValues": {
+    "teamName": "新团队"
+  },
+  "create": {
+    "title": "创建团队",
+    "teamName": "团队名称",
+    "teamNamePlaceholder": "输入团队名称",
+    "leadAgent": "主控 Agent",
+    "selectLead": "选择主控 Agent",
+    "members": "成员",
+    "createButton": "创建团队"
+  },
+  "list": {
+    "title": "团队列表",
+    "empty": "暂无团队",
+    "lead": "主控",
+    "members": "成员",
+    "open": "打开",
+    "delete": "删除"
+  },
+  "chat": {
+    "teamNotFound": "团队不存在",
+    "backToList": "返回团队列表",
+    "runStatus": "运行状态",
+    "refresh": "刷新快照"
+  },
+  "board": {
+    "title": "任务看板",
+    "newTaskTitle": "任务标题",
+    "newTaskTitlePlaceholder": "可选标题",
+    "newTaskInstruction": "任务指令",
+    "newTaskInstructionPlaceholder": "描述要执行的任务",
+    "newTaskDeps": "依赖任务",
+    "newTaskDepsPlaceholder": "task-a, task-b",
+    "addTask": "新增任务",
+    "emptyColumn": "暂无任务",
+    "owner": "负责人",
+    "unclaimed": "未认领",
+    "claimNext": "认领下一个",
+    "markRunning": "标记执行中",
+    "markDone": "标记完成",
+    "markBlocked": "标记阻塞",
+    "markFailed": "标记失败",
+    "heartbeat": "续租心跳",
+    "release": "释放认领",
+    "columns": {
+      "todo": "待办",
+      "claimed": "已认领",
+      "running": "执行中",
+      "blocked": "已阻塞",
+      "done": "已完成",
+      "failed": "失败"
+    }
+  },
+  "mailbox": {
+    "title": "讨论邮箱",
+    "target": "目标",
+    "broadcast": "广播",
+    "message": "消息",
+    "messagePlaceholder": "输入消息内容",
+    "send": "投递消息",
+    "pull": "拉取消息",
+    "empty": "暂无消息"
+  },
+  "agents": {
+    "title": "成员状态",
+    "active": "当前操作成员",
+    "select": "选择成员",
+    "sessionKey": "会话键",
+    "ownedTasks": "负责任务",
+    "runningTasks": "执行中",
+    "claimForAgent": "为该成员认领任务"
+  }
+}

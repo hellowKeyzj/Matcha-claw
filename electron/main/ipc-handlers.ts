@@ -51,6 +51,7 @@ import {
 } from '../services/providers/provider-runtime-sync';
 import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
+import { registerTeamIpcHandlers } from './team-ipc-handlers';
 
 type AppRequest = {
   id?: string;
@@ -139,6 +140,9 @@ export function registerIpcHandlers(
 
   // File staging handlers (upload/send separation)
   registerFileHandlers();
+
+  // Team runtime handlers (pull-claim + mailbox)
+  registerTeamIpcHandlers();
 }
 
 function registerHostApiProxyHandlers(): void {
