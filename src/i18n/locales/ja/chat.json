@@ -22,5 +22,36 @@
         "withinTwoWeeks": "2週間以内",
         "withinMonth": "1か月以内",
         "older": "1か月より前"
+    },
+    "taskInbox": {
+        "title": "タスク受信箱",
+        "unfinishedCount": "未完了タスク {{count}} 件",
+        "refresh": "タスクを更新",
+        "workspaceScope": "対象: {{scope}}",
+        "gatewayStopped": "ゲートウェイ停止中のため、タスク一覧と再開操作は利用できません",
+        "empty": "現在のワークスペースに未完了タスクはありません",
+        "unboundSession": "セッション未紐付けです。先にタスクを再開してください",
+        "taskNotFound": "タスクが見つからないか更新されています。再読み込みしてください",
+        "untitledTask": "無題タスク",
+        "assignedSessionReady": "セッション紐付け済み",
+        "assignedSessionMissing": "セッション未紐付け",
+        "openSession": "セッションを開く",
+        "inputPlaceholder": "補足情報を入力してください",
+        "submitInput": "入力を送信",
+        "reject": "却下",
+        "approve": "承認",
+        "collapse": "タスク受信箱を折りたたむ",
+        "expand": "タスク受信箱を展開",
+        "status": {
+            "pending": "保留",
+            "running": "実行中",
+            "waiting_for_input": "入力待ち",
+            "waiting_approval": "承認待ち",
+            "completed": "完了",
+            "failed": "失敗"
+        },
+        "toast": {
+            "resumed": "タスクを再開しました"
+        }
     }
 }

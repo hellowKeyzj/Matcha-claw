@@ -1,0 +1,38 @@
+{
+    "title": "Task Center",
+    "subtitle": "Task board and team discussion center",
+    "workspace": "Workspace",
+    "installPlugin": "Install Task Plugin",
+    "refresh": "Refresh",
+    "gatewayNotRunning": "Gateway is not running",
+    "plugin": {
+        "title": "Task Manager Plugin Required",
+        "description": "Install and enable task-manager plugin before using task center"
+    },
+    "stats": {
+        "running": "Running",
+        "waiting": "Waiting",
+        "completed": "Completed"
+    },
+    "listTitle": "Tasks",
+    "empty": "No tasks available",
+    "detailTitle": "Task Detail",
+    "selectTask": "Select a task to view detail",
+    "noMarkdown": "No plan markdown available",
+    "stepsOverview": "Checklist",
+    "completedTag": "Completed",
+    "pendingTag": "Pending",
+    "blocked": {
+        "title": "Pending Confirmations",
+        "pendingCount": "{{count}} tasks waiting",
+        "inputPlaceholder": "Please provide additional information",
+        "close": "Close",
+        "submitInput": "Submit",
+        "reject": "Reject",
+        "confirm": "Confirm"
+    },
+    "toast": {
+        "pluginInstalled": "Task plugin installed",
+        "resumed": "Task resumed"
+    }
+}

@@ -13,8 +13,10 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
+import { TaskInboxPanel } from './components/TaskInboxPanel';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
+import { cn } from '@/lib/utils';
 
 export function Chat() {
   const { t } = useTranslation('chat');
@@ -39,6 +41,7 @@ export function Chat() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
+  const [taskInboxCollapsed, setTaskInboxCollapsed] = useState(false);
 
   // Load data when gateway is running.
   // When the store already holds messages for this session (i.e. the user
@@ -106,94 +109,108 @@ export function Chat() {
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
 
   return (
-    <div className="flex flex-col -m-6" style={{ height: 'calc(100vh - 2.5rem)' }}>
-      {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-end px-4 py-2">
-        <ChatToolbar />
-      </div>
-
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
-        <div className="max-w-4xl mx-auto space-y-4">
-          {loading && !sending ? (
-            <div className="flex h-full items-center justify-center py-20">
-              <LoadingSpinner size="lg" />
-            </div>
-          ) : messages.length === 0 && !sending ? (
-            <WelcomeScreen />
-          ) : (
-            <>
-              {messages.map((msg, idx) => (
-                <ChatMessage
-                  key={msg.id || `msg-${idx}`}
-                  message={msg}
-                  showThinking={showThinking}
-                />
-              ))}
-
-              {/* Streaming message */}
-              {shouldRenderStreaming && (
-                <ChatMessage
-                  message={(streamMsg
-                    ? {
-                        ...(streamMsg as Record<string, unknown>),
-                        role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-                        content: streamMsg.content ?? streamText,
-                        timestamp: streamMsg.timestamp ?? streamingTimestamp,
-                      }
-                    : {
-                        role: 'assistant',
-                        content: streamText,
-                        timestamp: streamingTimestamp,
-                      }) as RawMessage}
-                  showThinking={showThinking}
-                  isStreaming
-                  streamingTools={streamingTools}
-                />
-              )}
-
-              {/* Activity indicator: waiting for next AI turn after tool execution */}
-              {sending && pendingFinal && !shouldRenderStreaming && (
-                <ActivityIndicator phase="tool_processing" />
-              )}
-
-              {/* Typing indicator when sending but no stream content yet */}
-              {sending && !pendingFinal && !hasAnyStreamContent && (
-                <TypingIndicator />
-              )}
-            </>
-          )}
-
-          {/* Scroll anchor */}
-          <div ref={messagesEndRef} />
+    <div className="flex -m-6 flex-col xl:flex-row" style={{ height: 'calc(100vh - 2.5rem)' }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Toolbar */}
+        <div className="flex shrink-0 items-center justify-end px-4 py-2">
+          <ChatToolbar />
         </div>
-      </div>
 
-      {/* Error bar */}
-      {error && (
-        <div className="px-4 py-2 bg-destructive/10 border-t border-destructive/20">
-          <div className="max-w-4xl mx-auto flex items-center justify-between">
-            <p className="text-sm text-destructive flex items-center gap-2">
-              <AlertCircle className="h-4 w-4" />
-              {error}
-            </p>
-            <button
-              onClick={clearError}
-              className="text-xs text-destructive/60 hover:text-destructive underline"
-            >
-              {t('common:actions.dismiss')}
-            </button>
+        {/* Messages Area */}
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          <div className="mx-auto max-w-4xl space-y-4">
+            {loading && !sending ? (
+              <div className="flex h-full items-center justify-center py-20">
+                <LoadingSpinner size="lg" />
+              </div>
+            ) : messages.length === 0 && !sending ? (
+              <WelcomeScreen />
+            ) : (
+              <>
+                {messages.map((msg, idx) => (
+                  <ChatMessage
+                    key={msg.id || `msg-${idx}`}
+                    message={msg}
+                    showThinking={showThinking}
+                  />
+                ))}
+
+                {/* Streaming message */}
+                {shouldRenderStreaming && (
+                  <ChatMessage
+                    message={(streamMsg
+                      ? {
+                          ...(streamMsg as Record<string, unknown>),
+                          role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
+                          content: streamMsg.content ?? streamText,
+                          timestamp: streamMsg.timestamp ?? streamingTimestamp,
+                        }
+                      : {
+                          role: 'assistant',
+                          content: streamText,
+                          timestamp: streamingTimestamp,
+                        }) as RawMessage}
+                    showThinking={showThinking}
+                    isStreaming
+                    streamingTools={streamingTools}
+                  />
+                )}
+
+                {/* Activity indicator: waiting for next AI turn after tool execution */}
+                {sending && pendingFinal && !shouldRenderStreaming && (
+                  <ActivityIndicator phase="tool_processing" />
+                )}
+
+                {/* Typing indicator when sending but no stream content yet */}
+                {sending && !pendingFinal && !hasAnyStreamContent && (
+                  <TypingIndicator />
+                )}
+              </>
+            )}
+
+            {/* Scroll anchor */}
+            <div ref={messagesEndRef} />
           </div>
         </div>
-      )}
 
-      {/* Input Area */}
-      <ChatInput
-        onSend={sendMessage}
-        onStop={abortRun}
-        disabled={!isGatewayRunning}
-        sending={sending}
-      />
+        {/* Error bar */}
+        {error && (
+          <div className="border-t border-destructive/20 bg-destructive/10 px-4 py-2">
+            <div className="mx-auto flex max-w-4xl items-center justify-between">
+              <p className="flex items-center gap-2 text-sm text-destructive">
+                <AlertCircle className="h-4 w-4" />
+                {error}
+              </p>
+              <button
+                onClick={clearError}
+                className="text-xs text-destructive/60 underline hover:text-destructive"
+              >
+                {t('common:actions.dismiss')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Input Area */}
+        <ChatInput
+          onSend={sendMessage}
+          onStop={abortRun}
+          disabled={!isGatewayRunning}
+          sending={sending}
+        />
+      </div>
+
+      <div
+        className={cn(
+          'shrink-0 transition-all duration-200',
+          taskInboxCollapsed ? 'h-16 xl:h-auto xl:w-8' : 'h-[40vh] xl:h-auto xl:w-[320px]',
+        )}
+      >
+        <TaskInboxPanel
+          collapsed={taskInboxCollapsed}
+          onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
+        />
+      </div>
     </div>
   );
 }

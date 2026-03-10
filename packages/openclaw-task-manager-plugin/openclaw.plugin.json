@@ -1,0 +1,13 @@
+{
+  "id": "task-manager",
+  "name": "Task Manager",
+  "description": "Production-grade markdown task planning with resume and blocking support.",
+  "skills": [
+    "./skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

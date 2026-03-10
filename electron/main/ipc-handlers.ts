@@ -3,16 +3,16 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
-import { existsSync, cpSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, cpSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, extname, basename } from 'node:path';
+import { join, extname, basename, resolve as resolvePath } from 'node:path';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
   type ProviderConfig,
 } from '../utils/secure-storage';
-import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir } from '../utils/paths';
+import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir, expandPath } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
 import {
@@ -1288,6 +1288,99 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
   };
 
+  const OPENCLAW_CONFIG_PATH = join(getOpenClawConfigDir(), 'openclaw.json');
+
+  type OpenClawConfigObject = Record<string, unknown>;
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function readOpenClawConfigJson(): OpenClawConfigObject {
+    if (!existsSync(OPENCLAW_CONFIG_PATH)) {
+      return {};
+    }
+    try {
+      const raw = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      return isRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writeOpenClawConfigJson(config: OpenClawConfigObject): void {
+    mkdirSync(getOpenClawConfigDir(), { recursive: true });
+    writeFileSync(OPENCLAW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  }
+
+  function getInstalledPluginVersion(pluginId: string): string | undefined {
+    const pkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
+    if (!existsSync(pkgPath)) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+      return typeof parsed.version === 'string' ? parsed.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function readPluginEnabledFromConfig(config: OpenClawConfigObject, pluginId: string): boolean {
+    const plugins = isRecord(config.plugins) ? config.plugins : {};
+    const allow = Array.isArray(plugins.allow)
+      ? plugins.allow.filter((item): item is string => typeof item === 'string')
+      : [];
+    const entries = isRecord(plugins.entries) ? plugins.entries : {};
+    const pluginEntry = isRecord(entries[pluginId]) ? entries[pluginId] : {};
+    const enabled = pluginEntry.enabled;
+    if (typeof enabled === 'boolean') {
+      return allow.includes(pluginId) && enabled;
+    }
+    return allow.includes(pluginId);
+  }
+
+  function readSkillEnabledFromConfig(config: OpenClawConfigObject, skillId: string): boolean {
+    const skills = isRecord(config.skills) ? config.skills : {};
+    const entries = isRecord(skills.entries) ? skills.entries : {};
+    const skillEntry = isRecord(entries[skillId]) ? entries[skillId] : {};
+    const enabled = skillEntry.enabled;
+    if (typeof enabled === 'boolean') {
+      return enabled;
+    }
+    return false;
+  }
+
+  function ensureTaskPluginEnabledInConfig(pluginId: string): void {
+    const config = readOpenClawConfigJson();
+    const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
+    const allow = Array.isArray(plugins.allow)
+      ? plugins.allow.filter((item): item is string => typeof item === 'string')
+      : [];
+    if (!allow.includes(pluginId)) {
+      allow.push(pluginId);
+    }
+    plugins.allow = allow;
+
+    const pluginEntries = isRecord(plugins.entries) ? { ...plugins.entries } : {};
+    const pluginEntry = isRecord(pluginEntries[pluginId]) ? { ...pluginEntries[pluginId] } : {};
+    pluginEntry.enabled = true;
+    pluginEntries[pluginId] = pluginEntry;
+    plugins.entries = pluginEntries;
+    config.plugins = plugins;
+
+    const skills = isRecord(config.skills) ? { ...config.skills } : {};
+    const skillEntries = isRecord(skills.entries) ? { ...skills.entries } : {};
+    const taskSkill = isRecord(skillEntries[pluginId]) ? { ...skillEntries[pluginId] } : {};
+    taskSkill.enabled = true;
+    skillEntries[pluginId] = taskSkill;
+    skills.entries = skillEntries;
+    config.skills = skills;
+
+    writeOpenClawConfigJson(config);
+  }
+
   async function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
     const targetDir = join(homedir(), '.openclaw', 'extensions', 'dingtalk');
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
@@ -1438,6 +1531,72 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
   }
 
+  async function ensureTaskManagerPluginInstalled(): Promise<{
+    installed: boolean;
+    warning?: string;
+    installedPath?: string;
+    sourcePath?: string;
+    version?: string;
+  }> {
+    const pluginId = 'task-manager';
+    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const targetManifest = join(targetDir, 'openclaw.plugin.json');
+
+    if (existsSync(targetManifest)) {
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
+    }
+
+    const candidateSources = app.isPackaged
+      ? [
+          join(process.resourcesPath, 'openclaw-plugins', pluginId),
+          join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginId),
+          join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId),
+        ]
+      : [
+          join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
+          join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
+          join(__dirname, '../../build/openclaw-plugins/task-manager'),
+          join(process.cwd(), 'packages', 'openclaw-task-manager-plugin'),
+          join(app.getAppPath(), 'packages', 'openclaw-task-manager-plugin'),
+          join(__dirname, '../../packages/openclaw-task-manager-plugin'),
+        ];
+
+    const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+    if (!sourceDir) {
+      logger.warn('Task manager plugin source not found in candidate paths', { candidateSources });
+      return {
+        installed: false,
+        warning: `Task manager plugin source not found. Checked: ${candidateSources.join(' | ')}`,
+      };
+    }
+
+    try {
+      mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
+      rmSync(targetDir, { recursive: true, force: true });
+      cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+
+      if (!existsSync(targetManifest)) {
+        return { installed: false, warning: 'Failed to install task-manager plugin (manifest missing)' };
+      }
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
+    } catch (error) {
+      logger.warn('Failed to install task-manager plugin:', error);
+      return {
+        installed: false,
+        warning: 'Failed to install task-manager plugin',
+      };
+    }
+  }
+
   // Get OpenClaw package status
   ipcMain.handle('openclaw:status', () => {
     const status = getOpenClawStatus();
@@ -1461,6 +1620,51 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     return getOpenClawConfigDir();
   });
 
+  // Get OpenClaw default workspace directory from openclaw.json
+  ipcMain.handle('openclaw:getWorkspaceDir', () => {
+    const config = readOpenClawConfigJson();
+    const agents = isRecord(config.agents) ? config.agents : {};
+    const defaults = isRecord(agents.defaults) ? agents.defaults : {};
+    const workspace = typeof defaults.workspace === 'string' ? defaults.workspace.trim() : '';
+    if (!workspace) {
+      return null;
+    }
+    return resolvePath(expandPath(workspace));
+  });
+
+  // Get all workspace directories related to task manager scope.
+  ipcMain.handle('openclaw:getTaskWorkspaceDirs', () => {
+    const config = readOpenClawConfigJson();
+    const dirs = new Set<string>();
+    const pushWorkspace = (value: unknown) => {
+      if (typeof value !== 'string') {
+        return;
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return;
+      }
+      const resolved = resolvePath(expandPath(trimmed));
+      if (existsSync(resolved)) {
+        dirs.add(resolved);
+      }
+    };
+
+    const agents = isRecord(config.agents) ? config.agents : {};
+    const defaults = isRecord(agents.defaults) ? agents.defaults : {};
+    pushWorkspace(defaults.workspace);
+
+    const list = Array.isArray(agents.list) ? agents.list : [];
+    for (const entry of list) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      pushWorkspace(entry.workspace);
+    }
+
+    return Array.from(dirs);
+  });
+
   // Get the OpenClaw skills directory (~/.openclaw/skills)
   ipcMain.handle('openclaw:getSkillsDir', () => {
     const dir = getOpenClawSkillsDir();
@@ -1481,6 +1685,52 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       return { success: true, command: getOpenClawCliCommand() };
     } catch (error) {
       return { success: false, error: String(error) };
+    }
+  });
+
+  // Task manager plugin status
+  ipcMain.handle('task:pluginStatus', async () => {
+    const pluginId = 'task-manager';
+    const pluginDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+    const config = readOpenClawConfigJson();
+    return {
+      installed: existsSync(manifestPath),
+      enabled: readPluginEnabledFromConfig(config, pluginId),
+      skillEnabled: readSkillEnabledFromConfig(config, pluginId),
+      version: getInstalledPluginVersion(pluginId),
+      pluginDir,
+    };
+  });
+
+  // Install and enable task-manager plugin
+  ipcMain.handle('task:pluginInstall', async () => {
+    try {
+      const installResult = await ensureTaskManagerPluginInstalled();
+      if (!installResult.installed) {
+        return {
+          success: false,
+          error: installResult.warning || 'Task manager plugin install failed',
+        };
+      }
+
+      ensureTaskPluginEnabledInConfig('task-manager');
+      scheduleGatewayChannelRestart('task:pluginInstall');
+
+      return {
+        success: true,
+        installed: true,
+        enabled: true,
+        skillEnabled: true,
+        installedPath: installResult.installedPath,
+        version: installResult.version,
+      };
+    } catch (error) {
+      logger.error('Failed to install task manager plugin:', error);
+      return {
+        success: false,
+        error: String(error),
+      };
     }
   });
 
