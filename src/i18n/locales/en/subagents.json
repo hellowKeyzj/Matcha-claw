@@ -1,0 +1,67 @@
+{
+  "title": "Subagent Workspace",
+  "subtitle": "Manage subagents and model settings.",
+  "newSubagent": "New Subagent",
+  "empty": "No subagents found.",
+  "modelGuide": {
+    "description": "Please go to Settings > AI Providers to add a model first.",
+    "action": "Open Settings"
+  },
+  "createDialogTitle": "Create Subagent",
+  "editDialogTitle": "Edit Subagent",
+  "manageTitle": "Managing: {{agentId}}",
+  "manage": {
+    "promptLabel": "Prompt",
+    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "generateDraft": "Generate Draft",
+    "generatingDraft": "Generating...",
+    "applyingDraft": "Applying...",
+    "generateDiffPreview": "Generate Diff Preview",
+    "diffPreviewTitle": "Diff Preview",
+    "currentFilesTitle": "Current Files",
+    "emptyFileContent": "(empty)",
+    "confirmApplyDraft": "Confirm Apply Draft",
+    "cancelDraft": "Cancel Draft",
+    "applyDraftSuccess": "Draft applied successfully.",
+    "rawOutputTitle": "Raw model output"
+  },
+  "deleteDialog": {
+    "title": "Delete {{agentId}}",
+    "description": "Deleting this subagent will remove workspace/agentDir/sessions. Continue?",
+    "cancel": "Cancel",
+    "confirm": "Delete",
+    "deleting": "Deleting..."
+  },
+  "close": "Close",
+  "form": {
+    "basicInfo": "Basic Information",
+    "aiConfig": "AI Configuration",
+    "name": "Name",
+    "workspace": "Workspace",
+    "model": "Model",
+    "emoji": "Emoji",
+    "emojiPlaceholder": "Type any emoji, or pick one below",
+    "emojiPanelShow": "Show emoji quick picks",
+    "emojiPanelHide": "Hide emoji quick picks",
+    "initialPrompt": "System Prompt",
+    "initialPromptPlaceholder": "Optional: set a system prompt for this subagent",
+    "create": "Create",
+    "save": "Save",
+    "nameDuplicate": "Agent name is duplicated.",
+    "modelsLoading": "Loading models...",
+    "selectModel": "Select a configured model",
+    "modelUnavailable": "No configured models found."
+  },
+  "card": {
+    "default": "Default",
+    "modelFallback": "Model not configured",
+    "modelMissingHint": "Model is not configured. Chat and run are disabled.",
+    "lockedHint": "Main agent is read-only.",
+    "actions": {
+      "edit": "Edit",
+      "delete": "Delete",
+      "manage": "Manage",
+      "chat": "Chat"
+    }
+  }
+}
