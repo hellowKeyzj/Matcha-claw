@@ -101,6 +101,9 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 ### 💬 智能聊天界面
 通过现代化的聊天体验与 AI 智能体交互。支持多会话上下文、消息历史记录以及 Markdown 富文本渲染。
 
+### 🧠 子代理工作区
+通过可视化工作区创建和管理专用子代理。内置草稿生成、逐行 Diff 预览与受控应用流程，可安全演进 `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md`。
+
 ### 📡 多频道管理
 同时配置和监控多个 AI 频道。每个频道独立运行，允许你为不同任务运行专门的智能体。
 
@@ -285,7 +288,7 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 │   ├── lib/                 # 前端统一 API 与错误模型
 │   ├── stores/              # Zustand 状态仓库（settings/chat/gateway）
 │   ├── components/          # 可复用 UI 组件
-│   ├── pages/               # Setup/Dashboard/Chat/Channels/Skills/Cron/Settings
+│   ├── pages/               # Setup/Dashboard/Chat/SubAgents/Channels/Skills/Cron/Settings
 │   ├── i18n/                # 国际化资源
 │   └── types/               # TypeScript 类型定义
 ├── tests/

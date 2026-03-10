@@ -4,6 +4,7 @@
  */
 import { vi } from 'vitest';
 import '@testing-library/jest-dom';
+import { __resetSubagentsStoreInternalCachesForTest } from '@/stores/subagents';
 
 // Mock window.electron API
 const mockElectron = {
@@ -40,5 +41,6 @@ Object.defineProperty(window, 'matchMedia', {
 
 // Reset mocks after each test
 afterEach(() => {
+  __resetSubagentsStoreInternalCachesForTest();
   vi.clearAllMocks();
 });
