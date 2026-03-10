@@ -1,0 +1,38 @@
+{
+    "title": "タスクセンター",
+    "subtitle": "タスクボードとチームディスカッションセンター",
+    "workspace": "ワークスペース",
+    "installPlugin": "タスクプラグインをインストール",
+    "refresh": "更新",
+    "gatewayNotRunning": "ゲートウェイが停止中です",
+    "plugin": {
+        "title": "Task Manager プラグインが必要です",
+        "description": "タスクセンターを使う前に task-manager プラグインをインストールして有効化してください"
+    },
+    "stats": {
+        "running": "実行中",
+        "waiting": "待機中",
+        "completed": "完了"
+    },
+    "listTitle": "タスク一覧",
+    "empty": "タスクはありません",
+    "detailTitle": "タスク詳細",
+    "selectTask": "タスクを選択して詳細を表示",
+    "noMarkdown": "計画 Markdown がありません",
+    "stepsOverview": "チェックリスト",
+    "completedTag": "完了",
+    "pendingTag": "保留",
+    "blocked": {
+        "title": "確認待ちタスク",
+        "pendingCount": "{{count}} 件のタスクが確認待ちです",
+        "inputPlaceholder": "このタスクに必要な補足情報を入力してください",
+        "close": "閉じる",
+        "submitInput": "入力を送信",
+        "reject": "却下",
+        "confirm": "承認"
+    },
+    "toast": {
+        "pluginInstalled": "タスクプラグインをインストールしました",
+        "resumed": "タスクを再開しました"
+    }
+}

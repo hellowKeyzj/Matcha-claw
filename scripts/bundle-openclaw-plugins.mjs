@@ -34,10 +34,23 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
+function realpathSafe(p) {
+  const normalized = normWin(p);
+  try {
+    return fs.realpathSync(normalized);
+  } catch (error) {
+    if (process.platform === 'win32' && normalized !== p) {
+      return fs.realpathSync(p);
+    }
+    throw error;
+  }
+}
+
 const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@sliverp/qqbot', pluginId: 'qqbot' },
+  { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {
@@ -86,7 +99,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
   }
 
-  const realPluginPath = fs.realpathSync(normWin(pkgPath));
+  const realPluginPath = realpathSafe(pkgPath);
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
 
   echo`📦 Bundling plugin ${npmName} -> ${outputDir}`;
@@ -126,7 +139,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
 
       let realPath;
       try {
-        realPath = fs.realpathSync(normWin(fullPath));
+        realPath = realpathSafe(fullPath);
       } catch {
         continue;
       }
@@ -173,11 +186,39 @@ function bundleOnePlugin({ npmName, pluginId }) {
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
+function bundleLocalPlugin({ localPath, pluginId }) {
+  const sourceDir = normWin(localPath);
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Missing local plugin source "${localPath}".`);
+  }
+
+  const outputDir = path.join(OUTPUT_ROOT, pluginId);
+  echo`📦 Bundling local plugin ${localPath} -> ${outputDir}`;
+
+  if (fs.existsSync(outputDir)) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.cpSync(sourceDir, outputDir, { recursive: true, dereference: true });
+
+  const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
+  }
+  echo`   ✅ ${pluginId}: copied local source`;
+}
+
 echo`📦 Bundling OpenClaw plugin mirrors...`;
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {
-  bundleOnePlugin(plugin);
+  if (plugin.npmName) {
+    bundleOnePlugin(plugin);
+    continue;
+  }
+  if (plugin.localPath) {
+    bundleLocalPlugin(plugin);
+  }
 }
 
 echo`✅ Plugin mirrors ready: ${OUTPUT_ROOT}`;

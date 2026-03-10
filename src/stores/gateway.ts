@@ -34,7 +34,25 @@ interface GatewayState {
 
 function handleGatewayNotification(notification: { method?: string; params?: Record<string, unknown> } | undefined): void {
   const payload = notification;
-  if (!payload || payload.method !== 'agent' || !payload.params || typeof payload.params !== 'object') {
+  if (!payload || !payload.params || typeof payload.params !== 'object') {
+    return;
+  }
+
+  if (typeof payload.method === 'string' && payload.method.startsWith('task_')) {
+    import('./task-inbox-store')
+      .then(({ useTaskInboxStore }) => {
+        useTaskInboxStore.getState().handleGatewayNotification(payload);
+      })
+      .catch(() => {});
+    import('./task-center-store')
+      .then(({ useTaskCenterStore }) => {
+        useTaskCenterStore.getState().handleGatewayNotification(payload);
+      })
+      .catch(() => {});
+    return;
+  }
+
+  if (payload.method !== 'agent') {
     return;
   }
 
