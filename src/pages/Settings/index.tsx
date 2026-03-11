@@ -194,6 +194,8 @@ export function Settings() {
     userAvatarDataUrl,
     setUserAvatarDataUrl,
     clearUserAvatar,
+    launchAtStartup,
+    setLaunchAtStartup,
     gatewayAutoStart,
     setGatewayAutoStart,
     proxyEnabled,
@@ -1075,6 +1077,18 @@ export function Settings() {
                   <Trash2 className="mr-2 h-4 w-4" />
                   {t('appearance.clearAvatar')}
                 </Button>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-[15px] font-medium text-foreground/80">{t('appearance.launchAtStartup')}</Label>
+                  <p className="text-[13px] text-muted-foreground mt-1">
+                    {t('appearance.launchAtStartupDesc')}
+                  </p>
+                </div>
+                <Switch
+                  checked={launchAtStartup}
+                  onCheckedChange={setLaunchAtStartup}
+                />
               </div>
             </div>
             <p className="text-xs text-muted-foreground">

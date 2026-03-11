@@ -131,6 +131,9 @@ The setup wizard requires license validation before continuing. Runtime access i
 ### 🌙 Adaptive Theming
 Light mode, dark mode, or system-synchronized themes. MatchaClaw adapts to your preferences automatically.
 
+### 🚀 Startup Launch Control
+In **Settings → General**, you can enable **Launch at system startup** so ClawX starts automatically after login.
+
 ---
 
 ## Getting Started
