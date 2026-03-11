@@ -98,9 +98,19 @@ export function Channels() {
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
+  const safeChannels = Array.isArray(channels) ? channels : [];
+  const configuredPlaceholderChannels: Channel[] = displayedChannelTypes
+    .filter((type) => configuredTypes.includes(type) && !safeChannels.some((channel) => channel.type === type))
+    .map((type) => ({
+      id: `${type}-default`,
+      type,
+      name: CHANNEL_NAMES[type] || CHANNEL_META[type].name,
+      status: 'disconnected',
+    }));
+  const configuredChannels = [...safeChannels, ...configuredPlaceholderChannels];
 
   // Connected/disconnected channel counts
-  const connectedCount = channels.filter((c) => c.status === 'connected').length;
+  const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
 
   if (loading) {
     return (
@@ -141,7 +151,7 @@ export function Channels() {
                 <Radio className="h-6 w-6 text-primary" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{channels.length}</p>
+                <p className="text-2xl font-bold">{configuredChannels.length}</p>
                 <p className="text-sm text-muted-foreground">{t('stats.total')}</p>
               </div>
             </div>
@@ -167,7 +177,7 @@ export function Channels() {
                 <PowerOff className="h-6 w-6 text-slate-600" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{channels.length - connectedCount}</p>
+                <p className="text-2xl font-bold">{configuredChannels.length - connectedCount}</p>
                 <p className="text-sm text-muted-foreground">{t('stats.disconnected')}</p>
               </div>
             </div>
@@ -197,7 +207,7 @@ export function Channels() {
       )}
 
       {/* Configured Channels */}
-      {channels.length > 0 && (
+      {configuredChannels.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>{t('configured')}</CardTitle>
@@ -205,7 +215,7 @@ export function Channels() {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {channels.map((channel) => (
+              {configuredChannels.map((channel) => (
                 <ChannelCard
                   key={channel.id}
                   channel={channel}
@@ -233,7 +243,7 @@ export function Channels() {
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             {displayedChannelTypes.map((type) => {
               const meta = CHANNEL_META[type];
-              const isConfigured = configuredTypes.includes(type);
+              const isConfigured = configuredChannels.some((channel) => channel.type === type);
               return (
                 <button
                   key={type}
