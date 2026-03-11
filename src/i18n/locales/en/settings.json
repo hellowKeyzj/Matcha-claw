@@ -71,6 +71,7 @@
       "change": "Change provider",
       "add": "Add Provider",
       "save": "Save",
+      "customDoc": "Documentation",
       "validate": "Validate"
     },
     "card": {
