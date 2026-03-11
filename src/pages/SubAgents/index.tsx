@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { normalizeSubagentNameToSlug } from '@/lib/subagent/workspace';
 import { buildSettingsSectionLink } from '@/lib/settings/sections';
+import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
@@ -48,6 +49,8 @@ export function SubAgents() {
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const gatewayState = useGatewayStore((state) => state.status.state);
+  const wasGatewayRunningRef = useRef(gatewayState === 'running');
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
   const persistedContentByFile = managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
@@ -63,6 +66,15 @@ export function SubAgents() {
     void loadAgents();
     void loadAvailableModels();
   }, [loadAgents, loadAvailableModels]);
+
+  useEffect(() => {
+    const isGatewayRunning = gatewayState === 'running';
+    if (isGatewayRunning && !wasGatewayRunningRef.current) {
+      void loadAgents();
+      void loadAvailableModels();
+    }
+    wasGatewayRunningRef.current = isGatewayRunning;
+  }, [gatewayState, loadAgents, loadAvailableModels]);
 
   useEffect(() => {
     if (!managedAgentId) {
