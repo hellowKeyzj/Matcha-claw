@@ -133,20 +133,19 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
   };
 
   const handleOpenEditor = async () => {
-    if (skill.slug) {
-      try {
-        const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/open-readme', {
-          method: 'POST',
-          body: JSON.stringify({ slug: skill.slug }),
-        });
-        if (result.success) {
-          toast.success(t('toast.openedEditor'));
-        } else {
-          toast.error(result.error || t('toast.failedEditor'));
-        }
-      } catch (err) {
-        toast.error(t('toast.failedEditor') + ': ' + String(err));
+    if (!skill?.id) return;
+    try {
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/open-readme', {
+        method: 'POST',
+        body: JSON.stringify({ skillKey: skill.id, slug: skill.slug }),
+      });
+      if (result.success) {
+        toast.success(t('toast.openedEditor'));
+      } else {
+        toast.error(result.error || t('toast.failedEditor'));
       }
+    } catch (err) {
+      toast.error(t('toast.failedEditor') + ': ' + String(err));
     }
   };
 
@@ -636,9 +635,16 @@ export function Skills() {
   }, [fetchSkills, isGatewayRunning]);
 
   // Filter skills
-  const filteredSkills = skills.filter((skill) => {
-    const matchesSearch = skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      skill.description.toLowerCase().includes(searchQuery.toLowerCase());
+  const safeSkills = Array.isArray(skills) ? skills : [];
+  const filteredSkills = safeSkills.filter((skill) => {
+    const q = searchQuery.toLowerCase().trim();
+    const matchesSearch =
+      q.length === 0
+      || skill.name.toLowerCase().includes(q)
+      || skill.description.toLowerCase().includes(q)
+      || skill.id.toLowerCase().includes(q)
+      || (skill.slug || '').toLowerCase().includes(q)
+      || (skill.author || '').toLowerCase().includes(q);
 
     let matchesSource = true;
     if (selectedSource === 'eligible') {
@@ -662,10 +668,10 @@ export function Skills() {
   });
 
   const sourceStats = {
-    all: skills.length,
-    eligible: skills.filter((s) => s.eligible === true).length,
-    builtIn: skills.filter(s => s.isBundled).length,
-    marketplace: skills.filter(s => !s.isBundled).length,
+    all: safeSkills.length,
+    eligible: safeSkills.filter((s) => s.eligible === true).length,
+    builtIn: safeSkills.filter(s => s.isBundled).length,
+    marketplace: safeSkills.filter(s => !s.isBundled).length,
   };
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
@@ -1001,6 +1007,11 @@ export function Skills() {
                               ) : (
                                 <Globe className="h-3 w-3 text-purple-500/70" />
                               )}
+                              {skill.slug && skill.slug !== skill.name ? (
+                                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-black/10 dark:border-white/10 text-muted-foreground">
+                                  {skill.slug}
+                                </span>
+                              ) : null}
                             </CardTitle>
                           </div>
                         </div>
@@ -1165,7 +1176,7 @@ export function Skills() {
             {searchResults.length > 0 ? (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {searchResults.map((skill) => {
-                  const isInstalled = skills.some(s => s.id === skill.slug || s.name === skill.name); // Simple check, ideally check by ID/slug
+                  const isInstalled = safeSkills.some((s) => s.id === skill.slug || s.name === skill.name);
                   return (
                     <MarketplaceSkillCard
                       key={skill.slug}
