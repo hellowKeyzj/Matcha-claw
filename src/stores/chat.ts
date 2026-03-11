@@ -699,10 +699,15 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   }
 }
 
-function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null {
-  const canonical = sessions.find((s) => s.key.startsWith('agent:'))?.key;
-  if (!canonical) return null;
-  const parts = canonical.split(':');
+function getCanonicalPrefixFromSessions(
+  sessions: ChatSession[],
+  preferredSessionKey?: string,
+): string | null {
+  const candidate = preferredSessionKey && preferredSessionKey.startsWith('agent:')
+    ? preferredSessionKey
+    : sessions.find((s) => s.key.startsWith('agent:'))?.key;
+  if (!candidate) return null;
+  const parts = candidate.split(':');
   if (parts.length < 2) return null;
   return `${parts[0]}:${parts[1]}`;
 }
@@ -1175,7 +1180,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // conversation history inaccessible when the user switches back to it.
     const { currentSessionKey, messages } = get();
     const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
-    const prefix = getCanonicalPrefixFromSessions(get().sessions) ?? DEFAULT_CANONICAL_PREFIX;
+    const prefix = getCanonicalPrefixFromSessions(get().sessions, currentSessionKey) ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
     set((s) => ({
