@@ -5,7 +5,7 @@
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
 import { existsSync, cpSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, extname, basename, resolve as resolvePath } from 'node:path';
+import { join, extname, basename, isAbsolute, resolve as resolvePath } from 'node:path';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
@@ -2412,7 +2412,30 @@ function registerShellHandlers(): void {
 
   // Open path in file explorer
   ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {
-    shell.showItemInFolder(path);
+    const rawPath = typeof path === 'string' ? path.trim() : '';
+    if (!rawPath) {
+      return { success: false, error: 'empty_path' };
+    }
+
+    const decodedPath = (() => {
+      try {
+        return decodeURIComponent(rawPath);
+      } catch {
+        return rawPath;
+      }
+    })();
+    const expandedPath = expandPath(decodedPath);
+    if (!isAbsolute(expandedPath)) {
+      logger.warn(`[shell:showItemInFolder] relative path rejected: "${rawPath}"`);
+      return { success: false, error: 'relative_path_not_supported', rawPath };
+    }
+    const resolvedPath = resolvePath(expandedPath);
+    if (!existsSync(resolvedPath)) {
+      logger.warn(`[shell:showItemInFolder] target not found: raw="${rawPath}" resolved="${resolvedPath}"`);
+      return { success: false, error: 'not_found', rawPath, resolvedPath };
+    }
+    shell.showItemInFolder(resolvedPath);
+    return { success: true, resolvedPath, source: 'absolute' };
   });
 
   // Open path

@@ -3,9 +3,9 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import { User, Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
@@ -44,12 +44,160 @@ const FILE_HINT_RE = new RegExp(
   String.raw`(^|[^\p{L}\p{N}_./\\-])((?:\.{1,2}[\\/])?[\p{L}\p{N}_./\\-]+?\.(?:${FILE_LINK_EXTENSIONS}))(?=$|[^\p{L}\p{N}_./\\-])`,
   'giu',
 );
+const MARKDOWN_LINK_SEGMENT_RE = /^!?\[[^\]\n]+\]\([^)]+\)$/u;
+const FILE_PATH_WITH_EXT_RE = new RegExp(String.raw`\.(?:${FILE_LINK_EXTENSIONS})(?:$|[?#])`, 'iu');
+const URI_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+const WINDOWS_ABSOLUTE_PATH_RE = /^[a-z]:[\\/]/i;
+const LOCAL_RELATIVE_PATH_RE = /^\.{1,2}[\\/]/;
+type FileHintPathResolver = (displayPath: string) => string | undefined;
 
-function linkifyFileHintsInMarkdown(text: string): string {
+function decodeMaybeEncodedPath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+function getFileNameFromPath(path: string): string {
+  const withoutQuery = path.split(/[?#]/, 1)[0];
+  const parts = withoutQuery.split(/[\\/]/);
+  return parts[parts.length - 1] || withoutQuery;
+}
+
+function isAbsoluteLikePath(path: string): boolean {
+  const normalized = path.trim();
+  return (
+    normalized.startsWith('/')
+    || normalized.startsWith('~/')
+    || normalized.startsWith('\\\\')
+    || WINDOWS_ABSOLUTE_PATH_RE.test(normalized)
+  );
+}
+
+function looksLikeAbsoluteFilePath(path: string): boolean {
+  const normalized = decodeMaybeEncodedPath(path.trim());
+  if (!isAbsoluteLikePath(normalized)) {
+    return false;
+  }
+  return FILE_PATH_WITH_EXT_RE.test(normalized);
+}
+
+function createFileHintPathResolver(
+  attachedFiles: AttachedFileMeta[],
+): FileHintPathResolver | undefined {
+  const nameToAbsolutePaths = new Map<string, string[]>();
+  const attachedAbsolutePaths = new Set<string>();
+
+  const addAbsolutePath = (candidate?: string): void => {
+    if (!candidate) {
+      return;
+    }
+    const normalized = decodeMaybeEncodedPath(candidate.trim());
+    if (!looksLikeAbsoluteFilePath(normalized)) {
+      return;
+    }
+    attachedAbsolutePaths.add(normalized);
+    const fileName = getFileNameFromPath(normalized).toLowerCase();
+    if (!fileName) {
+      return;
+    }
+    const existingPaths = nameToAbsolutePaths.get(fileName);
+    if (!existingPaths) {
+      nameToAbsolutePaths.set(fileName, [normalized]);
+      return;
+    }
+    if (!existingPaths.includes(normalized)) {
+      existingPaths.push(normalized);
+    }
+  };
+
+  for (const file of attachedFiles) {
+    addAbsolutePath(file.filePath);
+  }
+
+  if (nameToAbsolutePaths.size === 0) {
+    return undefined;
+  }
+
+  return (displayPath: string): string | undefined => {
+    const normalized = decodeMaybeEncodedPath(displayPath.trim());
+    if (!normalized) {
+      return undefined;
+    }
+    if (isAbsoluteLikePath(normalized)) {
+      return attachedAbsolutePaths.has(normalized) ? normalized : undefined;
+    }
+    const fileName = getFileNameFromPath(normalized).toLowerCase();
+    const candidates = nameToAbsolutePaths.get(fileName);
+    if (!candidates || candidates.length === 0) {
+      return undefined;
+    }
+    // Keep stable behavior: when multiple absolute paths share same file name,
+    // use the first collected path from this message's attachments.
+    return candidates[0];
+  };
+}
+
+function shouldMigrateLegacyLocalMarkdownHref(rawHref: string): boolean {
+  const href = rawHref.trim();
+  if (!href || href.startsWith('#') || href.startsWith('filehint:')) {
+    return false;
+  }
+
+  const decoded = decodeMaybeEncodedPath(href);
+  if (/^(https?:\/\/|mailto:|tel:|data:|javascript:)/i.test(decoded)) {
+    return false;
+  }
+
+  const isWindowsAbsolutePath = WINDOWS_ABSOLUTE_PATH_RE.test(decoded);
+  if (URI_SCHEME_RE.test(decoded) && !isWindowsAbsolutePath) {
+    return false;
+  }
+
+  if (
+    isWindowsAbsolutePath
+    || decoded.startsWith('\\\\')
+    || decoded.startsWith('/')
+    || decoded.startsWith('~/')
+    || LOCAL_RELATIVE_PATH_RE.test(decoded)
+  ) {
+    return true;
+  }
+
+  return FILE_PATH_WITH_EXT_RE.test(decoded);
+}
+
+function migrateLegacyMarkdownFileLinks(text: string, resolveFileHintPath?: FileHintPathResolver): string {
   if (!text) return text;
   const chunks = text.split(/(```[\s\S]*?```|`[^`\n]*`)/g);
   return chunks.map((chunk) => {
     if (chunk.startsWith('```') || (chunk.startsWith('`') && chunk.endsWith('`'))) {
+      return chunk;
+    }
+    return chunk.replace(/(!?\[[^\]\n]+\])\(([^)\n]+)\)/g, (full, label: string, href: string) => {
+      if (!shouldMigrateLegacyLocalMarkdownHref(href)) {
+        return full;
+      }
+      const normalized = decodeMaybeEncodedPath(href.trim());
+      const resolvedPath = resolveFileHintPath?.(normalized);
+      if (!resolvedPath || !looksLikeAbsoluteFilePath(resolvedPath)) {
+        return normalized;
+      }
+      return `${label}(filehint:${encodeURIComponent(resolvedPath)})`;
+    });
+  }).join('');
+}
+
+function linkifyFileHintsInMarkdown(text: string, resolveFileHintPath?: FileHintPathResolver): string {
+  if (!text) return text;
+  const chunks = text.split(/(```[\s\S]*?```|`[^`\n]*`|!?\[[^\]\n]+\]\([^)]+\))/g);
+  return chunks.map((chunk) => {
+    if (
+      chunk.startsWith('```')
+      || (chunk.startsWith('`') && chunk.endsWith('`'))
+      || MARKDOWN_LINK_SEGMENT_RE.test(chunk)
+    ) {
       return chunk;
     }
     return chunk.replace(FILE_HINT_RE, (full, prefix: string, path: string) => {
@@ -57,7 +205,11 @@ function linkifyFileHintsInMarkdown(text: string): string {
         return full;
       }
       const normalized = path.trim();
-      return `${prefix}[${normalized}](filehint:${encodeURIComponent(normalized)})`;
+      const resolvedPath = resolveFileHintPath?.(normalized);
+      if (!resolvedPath || !looksLikeAbsoluteFilePath(resolvedPath)) {
+        return full;
+      }
+      return `${prefix}[${normalized}](filehint:${encodeURIComponent(resolvedPath)})`;
     });
   }).join('');
 }
@@ -82,6 +234,10 @@ export const ChatMessage = memo(function ChatMessage({
   const visibleTools = tools;
 
   const attachedFiles = message._attachedFiles || [];
+  const resolveFileHintPath = useMemo(
+    () => createFileHintPathResolver(attachedFiles),
+    [attachedFiles],
+  );
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
 
   // Never render tool result messages in chat UI
@@ -205,6 +361,7 @@ export const ChatMessage = memo(function ChatMessage({
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
+            resolveFileHintPath={resolveFileHintPath}
           />
         )}
 
@@ -370,10 +527,12 @@ function MessageBubble({
   text,
   isUser,
   isStreaming,
+  resolveFileHintPath,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
+  resolveFileHintPath?: FileHintPathResolver;
 }) {
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
@@ -402,6 +561,12 @@ function MessageBubble({
         <div className="prose prose-sm dark:prose-invert max-w-none break-words break-all">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
+            urlTransform={(url) => {
+              if (url.startsWith('filehint:')) {
+                return url;
+              }
+              return defaultUrlTransform(url);
+            }}
             components={{
               code({ className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className || '');
@@ -425,12 +590,7 @@ function MessageBubble({
                 const rawHref = typeof href === 'string' ? href : '';
                 if (rawHref.startsWith('filehint:')) {
                   const encodedHint = rawHref.slice('filehint:'.length);
-                  let decodedHint = encodedHint;
-                  try {
-                    decodedHint = decodeURIComponent(encodedHint);
-                  } catch {
-                    decodedHint = encodedHint;
-                  }
+                  const decodedHint = decodeMaybeEncodedPath(encodedHint);
                   return (
                     <button
                       type="button"
@@ -449,7 +609,10 @@ function MessageBubble({
               },
             }}
           >
-            {linkifyFileHintsInMarkdown(text)}
+            {linkifyFileHintsInMarkdown(
+              migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
+              resolveFileHintPath,
+            )}
           </ReactMarkdown>
           {isStreaming && (
             <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />
@@ -505,6 +668,32 @@ function FileIcon({ mimeType, className }: { mimeType: string; className?: strin
 }
 
 function FileCard({ file }: { file: AttachedFileMeta }) {
+  const canOpen = typeof file.filePath === 'string' && file.filePath.trim().length > 0;
+  const handleOpen = useCallback(() => {
+    if (!canOpen) {
+      return;
+    }
+    void invokeIpc('shell:showItemInFolder', file.filePath!);
+  }, [canOpen, file.filePath]);
+
+  if (canOpen) {
+    return (
+      <button
+        type="button"
+        onClick={handleOpen}
+        className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 bg-muted/30 max-w-[220px] text-left cursor-pointer hover:bg-muted/50 transition-colors"
+      >
+        <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 overflow-hidden">
+          <p className="text-xs font-medium truncate">{file.fileName}</p>
+          <p className="text-[10px] text-muted-foreground">
+            {file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
+          </p>
+        </div>
+      </button>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 bg-muted/30 max-w-[220px]">
       <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
