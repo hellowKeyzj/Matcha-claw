@@ -15,7 +15,6 @@ import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 
 import { ClawHubService } from '../gateway/clawhub';
-import { ensureClawXContext, repairClawXOnlyBootstrapFiles } from '../utils/openclaw-workspace';
 import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToProfile } from '../utils/openclaw-cli';
 import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
@@ -221,13 +220,6 @@ async function initialize(): Promise<void> {
     mainWindow = null;
   });
 
-  // Repair any bootstrap files that only contain MatchaClaw markers (no OpenClaw
-  // template content). This fixes a race condition where ensureClawXContext()
-  // previously created the file before the gateway could seed the full template.
-  void repairClawXOnlyBootstrapFiles().catch((error) => {
-    logger.warn('Failed to repair bootstrap files:', error);
-  });
-
   // Pre-deploy built-in skills (feishu-doc, feishu-drive, feishu-perm, feishu-wiki)
   // to ~/.openclaw/skills/ so they are immediately available without manual install.
   void ensureBuiltinSkillsInstalled().catch((error) => {
@@ -238,11 +230,6 @@ async function initialize(): Promise<void> {
   // renderer subscribers observe the full startup lifecycle.
   gatewayManager.on('status', (status: { state: string }) => {
     hostEventBus.emit('gateway:status', status);
-    if (status.state === 'running') {
-      void ensureClawXContext().catch((error) => {
-        logger.warn('Failed to re-merge MatchaClaw context after gateway reconnect:', error);
-      });
-    }
   });
 
   gatewayManager.on('error', (error) => {
@@ -320,13 +307,6 @@ async function initialize(): Promise<void> {
   } else {
     logger.info('Gateway auto-start disabled in settings');
   }
-
-  // Merge MatchaClaw context snippets into the workspace bootstrap files.
-  // The gateway seeds workspace files asynchronously after its HTTP server
-  // is ready, so ensureClawXContext will retry until the target files appear.
-  void ensureClawXContext().catch((error) => {
-    logger.warn('Failed to merge MatchaClaw context into workspace:', error);
-  });
 
   // Auto-install openclaw CLI and shell completions (non-blocking).
   void autoInstallCliIfNeeded((installedPath) => {
