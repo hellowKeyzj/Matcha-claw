@@ -11,6 +11,7 @@ import { syncGatewayTokenToConfig, syncBrowserConfigToOpenClaw, sanitizeOpenClaw
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
+import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 
 export interface GatewayLaunchContext {
   appSettings: Awaited<ReturnType<typeof getAllSettings>>;
@@ -23,6 +24,7 @@ export interface GatewayLaunchContext {
   loadedProviderKeyCount: number;
   proxySummary: string;
   channelStartupSummary: string;
+  bundledPluginsDir?: string;
 }
 
 export async function syncGatewayConfigBeforeLaunch(
@@ -127,6 +129,13 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   const appSettings = await getAllSettings();
   await syncGatewayConfigBeforeLaunch(appSettings);
 
+  const bundledPluginsDir = await ensureBundledPluginsMirrorDir({
+    openclawDir,
+    mirrorRootDir: path.join(app.getPath('userData'), 'openclaw-bundled-plugins'),
+    packaged: app.isPackaged,
+    logger,
+  });
+
   if (!existsSync(entryScript)) {
     throw new Error(`OpenClaw entry script not found at: ${entryScript}`);
   }
@@ -166,6 +175,9 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',
   };
+  if (bundledPluginsDir) {
+    forkEnv.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledPluginsDir;
+  }
 
   return {
     appSettings,
@@ -178,5 +190,6 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     loadedProviderKeyCount,
     proxySummary,
     channelStartupSummary,
+    bundledPluginsDir,
   };
 }
