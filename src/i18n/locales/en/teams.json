@@ -25,7 +25,13 @@
     "teamNotFound": "Team not found",
     "backToList": "Back to Teams",
     "runStatus": "Run status",
-    "refresh": "Refresh Snapshot"
+    "refresh": "Refresh Snapshot",
+    "autoRunnerStart": "Start Auto Runner",
+    "autoRunnerStop": "Pause Auto Runner",
+    "autoRunnerOn": "Running",
+    "autoRunnerOff": "Paused",
+    "autoRunnerStatus": "Auto runner: {{state}} (active agents: {{count}})",
+    "autoRunnerError": "Auto runner error: {{error}}"
   },
   "board": {
     "title": "Task Board",

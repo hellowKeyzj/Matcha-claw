@@ -25,7 +25,13 @@
     "teamNotFound": "团队不存在",
     "backToList": "返回团队列表",
     "runStatus": "运行状态",
-    "refresh": "刷新快照"
+    "refresh": "刷新快照",
+    "autoRunnerStart": "开启自动执行",
+    "autoRunnerStop": "暂停自动执行",
+    "autoRunnerOn": "运行中",
+    "autoRunnerOff": "已暂停",
+    "autoRunnerStatus": "自动执行：{{state}}（活跃成员 {{count}}）",
+    "autoRunnerError": "自动执行错误：{{error}}"
   },
   "board": {
     "title": "任务看板",

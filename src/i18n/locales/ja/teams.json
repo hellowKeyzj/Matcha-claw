@@ -25,7 +25,13 @@
     "teamNotFound": "チームが見つかりません",
     "backToList": "チーム一覧へ戻る",
     "runStatus": "実行状態",
-    "refresh": "スナップショット更新"
+    "refresh": "スナップショット更新",
+    "autoRunnerStart": "自動実行を開始",
+    "autoRunnerStop": "自動実行を停止",
+    "autoRunnerOn": "実行中",
+    "autoRunnerOff": "停止中",
+    "autoRunnerStatus": "自動実行: {{state}}（稼働中メンバー: {{count}}）",
+    "autoRunnerError": "自動実行エラー: {{error}}"
   },
   "board": {
     "title": "タスクボード",
