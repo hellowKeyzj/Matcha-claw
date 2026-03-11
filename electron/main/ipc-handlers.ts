@@ -54,6 +54,7 @@ import { appUpdater } from './updater';
 import { registerTeamIpcHandlers } from './team-ipc-handlers';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 import { getPort } from '../utils/config';
+import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs } from '../utils/task-workspace-scope';
 
 type AppRequest = {
   id?: string;
@@ -1763,46 +1764,13 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
   // Get OpenClaw default workspace directory from openclaw.json
   ipcMain.handle('openclaw:getWorkspaceDir', () => {
     const config = readOpenClawConfigJson();
-    const agents = isRecord(config.agents) ? config.agents : {};
-    const defaults = isRecord(agents.defaults) ? agents.defaults : {};
-    const workspace = typeof defaults.workspace === 'string' ? defaults.workspace.trim() : '';
-    if (!workspace) {
-      return null;
-    }
-    return resolvePath(expandPath(workspace));
+    return resolveMainWorkspaceDir(config, getOpenClawConfigDir());
   });
 
   // Get all workspace directories related to task manager scope.
   ipcMain.handle('openclaw:getTaskWorkspaceDirs', () => {
     const config = readOpenClawConfigJson();
-    const dirs = new Set<string>();
-    const pushWorkspace = (value: unknown) => {
-      if (typeof value !== 'string') {
-        return;
-      }
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return;
-      }
-      const resolved = resolvePath(expandPath(trimmed));
-      if (existsSync(resolved)) {
-        dirs.add(resolved);
-      }
-    };
-
-    const agents = isRecord(config.agents) ? config.agents : {};
-    const defaults = isRecord(agents.defaults) ? agents.defaults : {};
-    pushWorkspace(defaults.workspace);
-
-    const list = Array.isArray(agents.list) ? agents.list : [];
-    for (const entry of list) {
-      if (!isRecord(entry)) {
-        continue;
-      }
-      pushWorkspace(entry.workspace);
-    }
-
-    return Array.from(dirs);
+    return resolveTaskWorkspaceDirs(config, getOpenClawConfigDir());
   });
 
   // Get the OpenClaw skills directory (~/.openclaw/skills)
