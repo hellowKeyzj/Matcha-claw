@@ -116,7 +116,7 @@ Schedule AI tasks to run automatically. Define triggers, set intervals, and let 
 Extend your AI agents with pre-built skills. Browse, install, and manage skills through the integrated skill panel—no package managers required.
 
 ### 🔐 Secure Provider Integration
-Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain.
+Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
 
 ### 🔑 License Gate & Diagnostics
 The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.
@@ -159,7 +159,7 @@ When you launch MatchaClaw for the first time, the **Setup Wizard** will guide y
 
 1. **License & Language** – Validate your license key and configure your preferred locale
 2. **Environment Check** – Verify local runtime requirements
-3. **AI Provider** – Enter your API keys for supported providers
+3. **AI Provider** – Add providers with API keys or OAuth (for providers that support browser/device login)
 4. **Skill Bundles** – Select pre-configured skills for common use cases
 5. **Verification** – Test your configuration before entering the main interface
 
@@ -409,5 +409,4 @@ MatchaClaw is released under the [MIT License](LICENSE). You're free to use, mod
 <p align="center">
   <sub>Built with ❤️ by the ValueCell Team</sub>
 </p>
-
 
