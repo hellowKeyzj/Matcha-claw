@@ -497,3 +497,49 @@ tests/unit/
   - 修复 Host API 端口解析兜底，消除 `http://127.0.0.1:undefined`。
   - Host API 端口键统一为 `MATCHACLAW_HOST_API`，并移除 `CLAWX_HOST_API` 兼容读取。
   - 插件镜像日志改为 ASCII 文案并补齐端口配置单测。
+
+---
+
+## 目录树（本次发布链路切换到 supercnm 更新目录）
+
+```text
+.github/workflows/
+└── release.yml (移除 upload-oss/finalize，改为 publish 内服务器推送)
+
+electron/
+├── main/
+│   └── updater.ts (移除运行时强制 OSS feed 覆盖)
+└── ../electron-builder.yml (publish.generic 改为 supercnm 更新地址)
+
+scripts/
+└── update-release-README.md (发布文档改为服务器目录发布模型)
+```
+
+## 文件职责（关键模块）
+
+- `.github/workflows/release.yml`：在 `publish` 作业中聚合产物、推送更新文件到远端目录、创建 GitHub Release。
+- `electron-builder.yml`：定义更新主源为 `https://www.supercnm.top/claw-update`，并保留 GitHub fallback。
+- `electron/main/updater.ts`：按版本设置 `autoUpdater.channel`，不再在代码里硬编码 OSS feed URL。
+- `scripts/update-release-README.md`：同步更新发布参数、通道规则与排障预期。
+
+## 模块依赖与边界
+
+- 更新源选择交由 `electron-builder` 的 publish 配置主导，主进程不再重写 feed URL。
+- 发布链路不再依赖阿里云 OSS 专用流程（`upload-oss`、`finalize` 已废弃）。
+- 仍保留 GitHub Release 作为分发与回退通道。
+
+## 关键决策与原因
+
+1. 与 `patch/0007` 意图对齐，统一更新入口到 `https://www.supercnm.top/claw-update`。
+2. 消除“workflow 指向新域名但客户端仍指向旧 OSS 域名”的双源漂移风险。
+3. 将发布步骤收敛到单一 `publish` 作业，减少跨作业时序与通道状态复杂度。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`chore(release): switch updater source to supercnm claw-update and retire oss pipeline`
+- 主要结果：
+  - `release.yml` 删除 `upload-oss/finalize`，新增服务器目录推送步骤与缺参跳过策略
+  - `electron-builder.yml` 更新主更新源到 `https://www.supercnm.top/claw-update`
+  - `updater.ts` 移除硬编码 OSS feed 覆盖，改为仅设置 `autoUpdater.channel`
+  - 发布说明文档同步为新发布模型
