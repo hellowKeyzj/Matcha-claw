@@ -408,3 +408,42 @@ tests/unit/
   - 开发模式下自动镜像 OpenClaw bundled plugins 到用户目录并注入 `OPENCLAW_BUNDLED_PLUGINS_DIR`。
   - 修复因 pnpm 硬链接导致的 `unsafe plugin manifest path` 与 `plugins.slots.memory: plugin not found` 连锁启动失败。
   - 补齐单测并通过全量 lint/typecheck/test。
+
+---
+
+## 目录树（本次废弃 workspace context merge 流程）
+
+```text
+electron/
+├── main/
+│   └── index.ts (移除 workspace context merge 调用链)
+└── utils/
+    └── openclaw-workspace.ts (已删除)
+
+resources/
+└── context/ (已删除)
+```
+
+## 文件职责（关键模块）
+
+- `electron/main/index.ts`：移除启动阶段与 Gateway running 回调中的 workspace `AGENTS/TOOLS` 合并流程，仅保留网关事件桥接。
+
+## 模块依赖与边界
+
+- 移除 Main 进程对 `resources/context` 的隐式文件注入流程，避免运行时对 `~/.openclaw/workspace*` 目录做反复轮询与写入。
+- 不影响既有 `host-api/api-client`、Gateway 启动、subagents 主流程与 diagnostics 目录采集能力。
+
+## 关键决策与原因
+
+1. 启动日志中的 `Skipping AGENTS.md/TOOLS.md ... retry x/15` 来自 context merge 轮询，不属于核心运行能力，且会制造噪音。
+2. 当前需求明确废弃该流程，因此应删除调用链与资源目录，而非仅降级日志级别。
+3. 删除 `electron/utils/openclaw-workspace.ts` 与 `resources/context`，防止后续被误引用导致“逻辑已废弃但代码残留”。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`refactor(main): remove workspace context merge bootstrap flow`
+- 主要结果：
+  - 删除 `openclaw-workspace` 全模块与 `resources/context` 目录
+  - 移除 `main/index.ts` 中全部 context merge/repair 触发点
+  - 启动阶段不再打印 `MatchaClaw context merge` 与 `Skipping AGENTS/TOOLS` 轮询日志
