@@ -303,14 +303,5 @@
     "installTitle": "OpenClaw コマンドをインストール",
     "installMessage": "\"openclaw\" コマンドをインストールしますか？",
     "installDetail": "~/.local/bin/openclaw が作成されます。グローバルに実行するには ~/.local/bin が PATH に含まれていることを確認してください。"
-  },
-  "about": {
-    "title": "バージョン情報",
-    "appName": "MatchaClaw",
-    "tagline": "グラフィカル AI アシスタント",
-    "basedOn": "OpenClaw ベース",
-    "version": "バージョン {{version}}",
-    "docs": "公式サイト",
-    "github": "GitHub"
   }
 }
