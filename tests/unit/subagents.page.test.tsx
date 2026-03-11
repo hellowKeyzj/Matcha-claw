@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { SubAgents } from '@/pages/SubAgents';
+import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 
@@ -40,6 +41,15 @@ describe('subagents page', () => {
     loadPersistedFilesForAgent.mockClear();
 
     i18n.changeLanguage('en');
+    useGatewayStore.setState({
+      status: {
+        state: 'stopped',
+        port: 18789,
+      },
+      health: null,
+      isInitialized: true,
+      lastError: null,
+    });
     useSubagentsStore.setState({
       agents: [
         {
@@ -114,6 +124,26 @@ describe('subagents page', () => {
     renderSubagentsPage();
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+  });
+
+  it('网关恢复到 running 后会自动重载数据', async () => {
+    renderSubagentsPage();
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      useGatewayStore.setState({
+        status: {
+          state: 'running',
+          port: 18789,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(loadAgents).toHaveBeenCalledTimes(2);
+    });
+    expect(loadAvailableModels).toHaveBeenCalledTimes(2);
   });
 
   it('shows top guide when there is no available model', () => {

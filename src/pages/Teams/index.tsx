@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
@@ -15,6 +16,8 @@ export function TeamsPage() {
   const navigate = useNavigate();
   const agents = useSubagentsStore((state) => state.agents);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const gatewayState = useGatewayStore((state) => state.status.state);
+  const wasGatewayRunningRef = useRef(gatewayState === 'running');
 
   const teams = useTeamsStore((state) => state.teams);
   const createTeam = useTeamsStore((state) => state.createTeam);
@@ -30,6 +33,14 @@ export function TeamsPage() {
   useEffect(() => {
     void loadAgents();
   }, [loadAgents]);
+
+  useEffect(() => {
+    const isGatewayRunning = gatewayState === 'running';
+    if (isGatewayRunning && !wasGatewayRunningRef.current) {
+      void loadAgents();
+    }
+    wasGatewayRunningRef.current = isGatewayRunning;
+  }, [gatewayState, loadAgents]);
 
   const effectiveLeadAgentId = useMemo(() => {
     if (!leadAgentId) {

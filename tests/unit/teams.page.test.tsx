@@ -1,15 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { TeamsPage } from '@/pages/Teams';
+import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 
 describe('teams page', () => {
+  const loadAgentsMock = vi.fn().mockResolvedValue(undefined);
+
   beforeEach(() => {
     i18n.changeLanguage('en');
     localStorage.removeItem('teams-runtime-store');
+    loadAgentsMock.mockClear();
+
+    useGatewayStore.setState({
+      status: {
+        state: 'stopped',
+        port: 18789,
+      },
+      health: null,
+      isInitialized: true,
+      lastError: null,
+    });
 
     useSubagentsStore.setState({
       agents: [
@@ -30,7 +44,7 @@ describe('teams page', () => {
           isDefault: false,
         },
       ],
-      loadAgents: vi.fn().mockResolvedValue(undefined),
+      loadAgents: loadAgentsMock,
       managedAgentId: null,
     } as never);
 
@@ -46,6 +60,29 @@ describe('teams page', () => {
       errorByTeamId: {},
       initRuntime: vi.fn().mockResolvedValue(undefined),
     } as never);
+  });
+
+  it('gateway 恢复到 running 后会自动刷新智能体列表', async () => {
+    render(
+      <MemoryRouter>
+        <TeamsPage />
+      </MemoryRouter>,
+    );
+
+    expect(loadAgentsMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      useGatewayStore.setState({
+        status: {
+          state: 'running',
+          port: 18789,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(loadAgentsMock).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('renders create form and team list', async () => {

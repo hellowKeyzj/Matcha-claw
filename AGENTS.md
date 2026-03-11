@@ -38,3 +38,20 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - Transport policy is Main-owned and fixed as `WS -> HTTP -> IPC fallback`; renderer should not implement protocol switching UI/business logic.
 - **Doc sync rule**: After any functional or architecture change, review `README.md`, `README.zh-CN.md`, and `README.ja-JP.md` for required updates; if behavior/flows/interfaces changed, update docs in the same PR/commit.
 
+## 原子提交规范（全局）
+
+以下规则用于**所有“要求我提交代码”**的场景，默认执行：
+
+- **提交粒度**：一次仅提交一个完整能力或一个完整修复，保持原子性，不混入无关改动。
+- **实现流程**：先明确边界与改动清单，再落地实现，再验证通过后再提交。
+- **架构约束**：必须遵循现有框架边界（如 `host-api/api-client`、既有 `store/i18n/路由` 模式），禁止引入平行实现或重复轮子。
+- **冗余治理**：与本次能力无关的代码不带入；旧残留、冲突逻辑和临时兜底应在同次提交内清理干净。
+- **测试要求（TDD）**：
+  - 先补失败用例，再实现修复，再跑通过
+  - 提交前至少覆盖本次改动的关键行为回归
+  - 用户要求“都测吧”时，执行相关测试集而非仅 smoke
+- **提交信息要求**：
+  - 提交标题和摘要使用中文
+  - 必须明确写出“新增了什么功能、修改了什么行为、删了什么冗余”
+  - 禁止信息不足的标题（例如仅写“迁移/调整/优化”而无具体内容）
+  - 允许使用规范前缀（如 `feat/fix/refactor(scope): ...`）
