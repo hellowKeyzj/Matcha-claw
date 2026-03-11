@@ -5,8 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
+import { useTeamAutoRunner } from './useTeamAutoRunner';
 
 const DEFAULT_LEASE_MS = 60_000;
 
@@ -21,6 +23,7 @@ function buildTaskId(): string {
 export function TeamChat({ teamId }: { teamId?: string }) {
   const { t } = useTranslation('teams');
   const navigate = useNavigate();
+  const gatewayState = useGatewayStore((state) => state.status.state);
 
   const teams = useTeamsStore((state) => state.teams);
   const activeTeamId = useTeamsStore((state) => state.activeTeamId);
@@ -49,6 +52,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [messageText, setMessageText] = useState('');
   const [messageTo, setMessageTo] = useState<'broadcast' | string>('broadcast');
+  const [autoRunnerEnabled, setAutoRunnerEnabled] = useState(true);
 
   const effectiveSelectedAgentId = useMemo(() => {
     if (!team) {
@@ -88,6 +92,18 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     return groups;
   }, [tasks]);
 
+  const autoRunner = useTeamAutoRunner({
+    enabled: Boolean(team && autoRunnerEnabled && gatewayState === 'running'),
+    teamId: team?.id,
+    memberIds: team?.memberIds ?? [],
+    getSessionKey: (agentId: string) => sessionKey(agentId, team?.id ?? ''),
+    claimNext,
+    heartbeat,
+    updateTaskStatus,
+    releaseClaim,
+    postMailbox,
+  });
+
   if (!team || !resolvedTeamId) {
     return (
       <Card>
@@ -102,6 +118,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   }
 
   const leadSession = effectiveSelectedAgentId ? sessionKey(effectiveSelectedAgentId, team.id) : '';
+  const autoRunnerState = autoRunnerEnabled && gatewayState === 'running'
+    ? t('chat.autoRunnerOn')
+    : t('chat.autoRunnerOff');
 
   const handleAddTask = async () => {
     const instruction = newTaskInstruction.trim();
@@ -141,6 +160,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant={autoRunnerEnabled ? 'default' : 'outline'}
+            onClick={() => setAutoRunnerEnabled((prev) => !prev)}
+          >
+            {autoRunnerEnabled ? t('chat.autoRunnerStop') : t('chat.autoRunnerStart')}
+          </Button>
           <Button variant="outline" onClick={() => void refreshSnapshot(team.id)}>
             {t('chat.refresh')}
           </Button>
@@ -153,6 +178,16 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
+        </div>
+      )}
+
+      <div className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
+        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: autoRunner.activeAgentIds.length })}
+      </div>
+
+      {autoRunner.lastError && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          {t('chat.autoRunnerError', { error: autoRunner.lastError })}
         </div>
       )}
 

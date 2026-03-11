@@ -1,5 +1,12 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-11 团队自动执行首版）
+
+- 新增 `src/pages/Teams/useTeamAutoRunner.ts`：团队成员自动执行循环（claim -> running -> chat.send -> done/failed -> release）。
+- `src/pages/Teams/TeamChat.tsx` 接入自动执行开关与运行状态展示，支持一键暂停/恢复。
+- 新增团队自动执行错误提示与活跃成员计数，便于观察任务分配与执行进度。
+- 更新 `src/i18n/locales/{zh,en,ja}/teams.json`，补齐自动执行相关文案。
+
 ## 目录树（本次 0001 迁移相关）
 
 ```text
