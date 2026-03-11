@@ -6,7 +6,6 @@ import {
   listTasks,
   resumeTask,
   type Task,
-  type TaskNotification,
   wakeTaskSession,
 } from '@/lib/openclaw/task-manager-client';
 import { filterUnfinishedTasks } from '@/lib/task-inbox';
@@ -291,7 +290,7 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
       return;
     }
 
-    const payload = notification as TaskNotification;
+    const payload = notification as { method?: unknown; params?: unknown };
     if (typeof payload.method !== 'string' || !payload.method.startsWith('task_')) {
       return;
     }
@@ -333,6 +332,13 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
           tasks: upsertTask(state.tasks, task),
         }));
       }
+      return;
+    }
+
+    if (task) {
+      set((state) => ({
+        tasks: upsertTask(state.tasks, task),
+      }));
     }
   },
 
