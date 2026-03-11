@@ -543,3 +543,53 @@ scripts/
   - `electron-builder.yml` 更新主更新源到 `https://www.supercnm.top/claw-update`
   - `updater.ts` 移除硬编码 OSS feed 覆盖，改为仅设置 `autoUpdater.channel`
   - 发布说明文档同步为新发布模型
+
+---
+
+## 目录树（本次任务可见性修复）
+
+```text
+electron/
+├── main/
+│   └── ipc-handlers.ts (任务 workspace scope 解析改造)
+└── utils/
+    └── task-workspace-scope.ts (新增：主工作区/任务 scope 统一解析)
+
+src/stores/
+├── task-inbox-store.ts (兼容 task_created/task_create 等 task_* 事件兜底入列)
+└── task-center-store.ts (兼容 task_created/task_create 等 task_* 事件兜底入列)
+
+tests/unit/
+├── task-workspace-scope.test.ts (新增：scope 回退与合并规则)
+├── task-inbox-store.test.ts (新增 task_created 入列用例)
+└── task-center-store.test.ts (新增 task_created 入列用例)
+```
+
+## 文件职责（关键模块）
+
+- `electron/utils/task-workspace-scope.ts`：统一解析主工作区与任务读取 scope；配置缺失时回退到 `<openclawConfigDir>/workspace`。
+- `electron/main/ipc-handlers.ts`：`openclaw:getWorkspaceDir` 与 `openclaw:getTaskWorkspaceDirs` 改为复用统一解析器，避免主工作区漏读。
+- `src/stores/task-inbox-store.ts`：在保留既有事件分支的同时，对携带 `params.task` 的 `task_*` 通知做兜底 upsert。
+- `src/stores/task-center-store.ts`：同上，补齐任务页对新增任务事件的实时入列能力。
+
+## 模块依赖与边界
+
+- 仅调整 Main 的任务 scope 计算与 Renderer 任务 store 事件消费，不改变 `host-api/api-client` 通信边界。
+- 不改 Task Manager 插件协议与任务持久化格式；仍沿用 `task_list/task_get/task_resume`。
+- UI 侧继续通过 store 拉取与订阅，不引入页面级临时协议分支。
+
+## 关键决策与原因
+
+1. 任务创建成功但 UI 不显示的主因是 scope 漏读主工作区：当 `agents.defaults.workspace`/`main.workspace` 缺失时，原实现无法覆盖 `~/.openclaw/workspace`。
+2. 任务实时事件存在名称漂移风险（如 `task_created`），仅匹配少数固定方法会导致“创建后不立即出现”。
+3. 采用“主因修复 + 事件兜底”组合方案，既保证读取范围正确，也保证新任务实时可见。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`fix(tasks): 修复任务创建后在收件箱与任务页不可见`
+- 主要结果：
+  - 任务 workspace scope 统一解析：主工作区缺失配置时回退到 `<openclawConfigDir>/workspace`
+  - `openclaw:getTaskWorkspaceDirs` 始终包含主工作区，并合并子代理 workspace
+  - 任务收件箱与任务页 store 兼容 `task_created/task_create` 等 `task_*` 新增事件入列
+  - 补齐 scope 解析与事件入列单测，防止回归

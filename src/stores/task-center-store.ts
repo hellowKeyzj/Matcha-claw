@@ -371,6 +371,18 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           });
         });
       }
+      return;
+    }
+
+    const task = params.task as Task | undefined;
+    if (task) {
+      const blocked = extractBlockedTaskFromTask(task);
+      set((state) => ({
+        tasks: patchTask(state.tasks, task),
+        blockedQueue: blocked
+          ? upsertBlockedTask(state.blockedQueue, blocked)
+          : removeBlockedTask(state.blockedQueue, task.id),
+      }));
     }
   },
 }));

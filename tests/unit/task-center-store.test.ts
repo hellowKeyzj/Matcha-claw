@@ -98,4 +98,18 @@ describe('task center store', () => {
     expect(state.blockedQueue).toHaveLength(0);
     expect(state.tasks[0]?.status).toBe('running');
   });
+
+  it('handleGatewayNotification 兼容 task_created 并写入任务列表', async () => {
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+
+    useTaskCenterStore.getState().handleGatewayNotification({
+      method: 'task_created',
+      params: {
+        task: task({ id: 'task-created-2', status: 'pending' }),
+      },
+    });
+
+    const state = useTaskCenterStore.getState();
+    expect(state.tasks.some((item) => item.id === 'task-created-2')).toBe(true);
+  });
 });

@@ -92,4 +92,18 @@ describe('task inbox store', () => {
     expect(result).toEqual({ switched: true });
     expect(useChatStore.getState().currentSessionKey).toBe('agent:beta:main');
   });
+
+  it('handleGatewayNotification 兼容 task_created 并写入未完成任务', async () => {
+    const { useTaskInboxStore } = await import('@/stores/task-inbox-store');
+
+    useTaskInboxStore.getState().handleGatewayNotification({
+      method: 'task_created',
+      params: {
+        task: task({ id: 'task-created-1', status: 'pending' }),
+      },
+    });
+
+    const state = useTaskInboxStore.getState();
+    expect(state.tasks.some((item) => item.id === 'task-created-1')).toBe(true);
+  });
 });
