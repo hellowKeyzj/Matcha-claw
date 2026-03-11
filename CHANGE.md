@@ -367,3 +367,44 @@ repo root/
   - 发布文案、产物命名、`release-info.json` 链接统一为 MatchaClaw 品牌。
   - 新增发布说明文档 `scripts/update-release-README.md`，沉淀发布与验收标准操作。
   - 顺带修复 `electron/utils/diagnostics-bundle.ts` 两处 lint 阻塞（无行为变更）以通过全量校验。
+
+---
+
+## 目录树（本次 Gateway 插件镜像修复）
+
+```text
+electron/gateway/
+├── bundled-plugins-mirror.ts (新增)
+├── config-sync.ts (接入镜像目录与环境变量注入)
+└── process-launcher.ts (启动日志补充镜像目录信息)
+
+tests/unit/
+└── bundled-plugins-mirror.test.ts (新增)
+```
+
+## 文件职责（关键模块）
+
+- `electron/gateway/bundled-plugins-mirror.ts`：在 Gateway 启动前将 `openclaw/extensions` 镜像到本地目录，避免 pnpm 硬链接触发 OpenClaw 插件安全校验。
+- `electron/gateway/config-sync.ts`：把镜像目录注入 `OPENCLAW_BUNDLED_PLUGINS_DIR`，强制 Gateway 从安全目录加载 bundled plugins。
+- `tests/unit/bundled-plugins-mirror.test.ts`：验证“硬链接打断、镜像复用、打包模式直连”三类行为。
+
+## 模块依赖与边界
+
+- 仅改 Main/Gateway 启动层，不改 Renderer 业务逻辑与 host-api/api-client 边界。
+- 不修改用户 `plugins.entries` 配置结构，仍沿用现有配置模型；只变更 bundled 插件发现目录来源。
+- 打包模式保持原行为（直接使用 OpenClaw 自带 extensions 目录）。
+
+## 关键决策与原因
+
+1. 问题根因是 OpenClaw 在读取插件清单时默认 `rejectHardlinks=true`，pnpm `.pnpm` 目录中的文件常为硬链接，导致 `unsafe plugin manifest path`。
+2. 采用“复制成普通文件镜像”而不是复用 pnpm 路径，才能从根上规避硬链接校验失败。
+3. 增加镜像元信息缓存，源版本未变化时复用目录，避免每次启动全量复制。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`fix(gateway): mirror bundled plugins to bypass pnpm hardlink validation`
+- 主要结果：
+  - 开发模式下自动镜像 OpenClaw bundled plugins 到用户目录并注入 `OPENCLAW_BUNDLED_PLUGINS_DIR`。
+  - 修复因 pnpm 硬链接导致的 `unsafe plugin manifest path` 与 `plugins.slots.memory: plugin not found` 连锁启动失败。
+  - 补齐单测并通过全量 lint/typecheck/test。
