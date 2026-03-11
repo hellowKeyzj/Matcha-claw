@@ -163,6 +163,7 @@ export function ChatInput({
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
   const skills = useSkillsStore((state) => state.skills);
   const skillsLoading = useSkillsStore((state) => state.loading);
@@ -189,6 +190,15 @@ export function ChatInput({
     }
     void fetchSkills();
   }, [fetchSkills, skills.length, skillsLoading, slashOpen]);
+
+  useEffect(() => {
+    if (!slashOpen || slashItems.length === 0) {
+      slashItemRefs.current = [];
+      return;
+    }
+    const activeNode = slashItemRefs.current[slashActiveIndex];
+    activeNode?.scrollIntoView?.({ block: 'center' });
+  }, [slashActiveIndex, slashItems.length, slashOpen]);
 
   const closeMention = useCallback(() => {
     setMentionOpen(false);
@@ -258,7 +268,7 @@ export function ChatInput({
     const query = normalizeSearchText(range.query);
     const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
     const matched = skills
-      .filter((skill) => skill.enabled && !selectedIds.has(skill.id))
+      .filter((skill) => skill.enabled && skill.eligible === true && !selectedIds.has(skill.id))
       .filter((skill) => {
         if (!query) {
           return true;
@@ -721,6 +731,9 @@ export function ChatInput({
                     return (
                       <button
                         key={item.id}
+                        ref={(node) => {
+                          slashItemRefs.current[index] = node;
+                        }}
                         type="button"
                         role="option"
                         aria-selected={isActive}
