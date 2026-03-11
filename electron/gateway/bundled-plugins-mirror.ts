@@ -122,11 +122,11 @@ export async function ensureBundledPluginsMirrorDir(
 
     await rm(mirrorDir, { recursive: true, force: true });
     await rename(tmpDir, mirrorDir);
-    options.logger?.info?.(`已刷新 OpenClaw 插件镜像目录: ${mirrorDir}`);
+    options.logger?.info?.(`Refreshed OpenClaw bundled plugins mirror: ${mirrorDir}`);
     return mirrorDir;
   } catch (error) {
     await rm(tmpDir, { recursive: true, force: true });
-    options.logger?.warn?.(`刷新 OpenClaw 插件镜像目录失败: ${String(error)}`);
+    options.logger?.warn?.(`Failed to refresh OpenClaw bundled plugins mirror: ${String(error)}`);
     return sourceMeta.sourceRealDir;
   }
 }

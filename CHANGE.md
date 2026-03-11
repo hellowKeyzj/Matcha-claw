@@ -447,3 +447,53 @@ resources/
   - 删除 `openclaw-workspace` 全模块与 `resources/context` 目录
   - 移除 `main/index.ts` 中全部 context merge/repair 触发点
   - 启动阶段不再打印 `MatchaClaw context merge` 与 `Skipping AGENTS/TOOLS` 轮询日志
+
+---
+
+## 目录树（本次 Host API 代理与端口修复）
+
+```text
+electron/
+├── main/
+│   └── ipc-handlers.ts (新增 hostapi:fetch 主进程代理实现)
+├── api/
+│   └── server.ts (Host API 端口解析兜底)
+├── utils/
+│   └── config.ts (Host API 端口键切换为 MATCHACLAW_HOST_API)
+└── gateway/
+    └── bundled-plugins-mirror.ts (镜像日志改为 ASCII)
+
+tests/unit/
+└── config.ports.test.ts (端口键/环境变量规则测试更新)
+```
+
+## 文件职责（关键模块）
+
+- `electron/main/ipc-handlers.ts`：注册 `hostapi:fetch`，统一把 renderer 请求代理到本地 Host API。
+- `electron/api/server.ts`：以 `resolvedPort` 启动 Host API，避免非法端口导致 `undefined` 日志与监听异常。
+- `electron/utils/config.ts`：Host API 端口主键统一为 `MATCHACLAW_HOST_API`，并约束 Host API 仅读取 `MATCHACLAW_PORT_MATCHACLAW_HOST_API`。
+- `electron/gateway/bundled-plugins-mirror.ts`：镜像目录日志统一 ASCII 文案，避免控制台乱码。
+- `tests/unit/config.ports.test.ts`：验证 Host API 端口新键读取与旧兼容变量失效行为。
+
+## 模块依赖与边界
+
+- Renderer 仍经 `host-api/api-client` 调用，不新增页面直连 IPC 。
+- 主进程通过 `hostapi:fetch` 代理访问 Host API；Host API 与 Gateway 通信边界不变。
+- 端口配置权责集中到 `electron/utils/config.ts`，避免多处硬编码。
+
+## 关键决策与原因
+
+1. `hostapi:fetch` 需要主进程实际 handler，避免 `No handler registered for 'hostapi:fetch'`。
+2. Host API 启动使用 `resolvedPort`，避免端口空值污染监听与日志。
+3. 按要求去除 `CLAWX_HOST_API` 兼容，防止配置源混杂。
+4. 日志改 ASCII，规避 Windows 控制台编码导致的中文乱码。
+
+## 本次变更日志
+
+- 日期：2026-03-11
+- 变更主题：`fix(host-api): wire hostapi proxy and normalize MATCHACLAW host api port`
+- 主要结果：
+  - 新增主进程 `hostapi:fetch` 代理实现，前端 Host API 调用链恢复可用。
+  - 修复 Host API 端口解析兜底，消除 `http://127.0.0.1:undefined`。
+  - Host API 端口键统一为 `MATCHACLAW_HOST_API`，并移除 `CLAWX_HOST_API` 兼容读取。
+  - 插件镜像日志改为 ASCII 文案并补齐端口配置单测。
