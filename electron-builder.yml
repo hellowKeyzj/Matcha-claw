@@ -44,15 +44,15 @@ asarUnpack:
 npmRebuild: false
 
 # Auto-update configuration
-# Primary: Alibaba Cloud OSS (fast for Chinese users, used for auto-update)
-# Fallback: GitHub Releases (backup, used when OSS is unavailable)
+# Primary: update server static path
+# Fallback: GitHub Releases (backup, used when update server is unavailable)
 publish:
   - provider: generic
-    url: https://oss.intelli-spectrum.com/latest
-    useMultipleRangeRequest: false
+    url: https://www.supercnm.top/claw-update
+    useMultipleRangeRequest: true
   - provider: github
-    owner: ValueCell-ai
-    repo: MatchaClaw
+    owner: hellowKeyzj
+    repo: Matcha-claw
 
 # macOS Configuration
 mac:
@@ -181,4 +181,3 @@ deb:
     - libuuid1
   afterInstall: scripts/linux/after-install.sh
   afterRemove: scripts/linux/after-remove.sh
-
