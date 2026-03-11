@@ -304,14 +304,5 @@
     "installTitle": "Install OpenClaw Command",
     "installMessage": "Install the \"openclaw\" command?",
     "installDetail": "This will create ~/.local/bin/openclaw. Ensure ~/.local/bin is on your PATH if you want to run it globally."
-  },
-  "about": {
-    "title": "About",
-    "appName": "MatchaClaw",
-    "tagline": "Graphical AI Assistant",
-    "basedOn": "Based on OpenClaw",
-    "version": "Version {{version}}",
-    "docs": "Website",
-    "github": "GitHub"
   }
 }
