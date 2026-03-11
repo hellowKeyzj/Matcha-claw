@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
+import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { cn } from '@/lib/utils';
 import { getBlockedPrompt, resolveTaskInputMode } from '@/lib/task-inbox';
 import { useGatewayStore } from '@/stores/gateway';
@@ -160,15 +161,13 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
             {unfinishedCount}
           </span>
         </div>
-        <button
-          type="button"
+        <PaneEdgeToggle
+          side="left"
           onClick={onToggleCollapse}
-          className="mx-auto mb-2 flex h-5 w-5 items-center justify-center rounded-full border bg-background text-muted-foreground hover:text-foreground"
-          aria-label={t('taskInbox.expand')}
+          ariaLabel={t('taskInbox.expand')}
           title={t('taskInbox.expand')}
-        >
-          <ChevronLeft className="h-3 w-3" />
-        </button>
+          icon={<ChevronLeft className="h-2.5 w-2.5" />}
+        />
       </aside>
     );
   }
@@ -329,15 +328,13 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
         })}
       </div>
 
-      <button
-        type="button"
+      <PaneEdgeToggle
+        side="left"
         onClick={onToggleCollapse}
-        className="absolute bottom-3 -left-2 flex h-5 w-5 items-center justify-center rounded-full border bg-background text-muted-foreground hover:text-foreground"
-        aria-label={t('taskInbox.collapse')}
+        ariaLabel={t('taskInbox.collapse')}
         title={t('taskInbox.collapse')}
-      >
-        <ChevronRight className="h-3 w-3" />
-      </button>
+        icon={<ChevronRight className="h-2.5 w-2.5" />}
+      />
     </aside>
   );
 }
