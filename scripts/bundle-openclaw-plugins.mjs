@@ -51,6 +51,7 @@ const PLUGINS = [
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@sliverp/qqbot', pluginId: 'qqbot' },
   { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
+  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {
