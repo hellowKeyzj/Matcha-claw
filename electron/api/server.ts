@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { PORTS } from '../utils/config';
+import { PORTS, getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { HostApiContext } from './context';
 import { handleAppRoutes } from './routes/app';
@@ -40,10 +40,14 @@ const routeHandlers: RouteHandler[] = [
   handleUsageRoutes,
 ];
 
-export function startHostApiServer(ctx: HostApiContext, port = PORTS.CLAWX_HOST_API): Server {
+export function startHostApiServer(ctx: HostApiContext, port = PORTS.MATCHACLAW_HOST_API): Server {
+  const resolvedPort = Number.isFinite(port) && port > 0
+    ? port
+    : getPort('MATCHACLAW_HOST_API');
+
   const server = createServer(async (req, res) => {
     try {
-      const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
+      const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
       for (const handler of routeHandlers) {
         if (await handler(req, res, requestUrl, ctx)) {
           return;
@@ -56,8 +60,8 @@ export function startHostApiServer(ctx: HostApiContext, port = PORTS.CLAWX_HOST_
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    logger.info(`Host API server listening on http://127.0.0.1:${port}`);
+  server.listen(resolvedPort, '127.0.0.1', () => {
+    logger.info(`Host API server listening on http://127.0.0.1:${resolvedPort}`);
   });
 
   return server;
