@@ -2,7 +2,7 @@
  * Dashboard Page
  * Main overview page showing system status and quick actions
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   MessageSquare,
@@ -46,6 +46,8 @@ type UsageHistoryEntry = {
 
 type UsageWindow = '7d' | '30d' | 'all';
 type UsageGroupBy = 'model' | 'day';
+const USAGE_FETCH_MAX_ATTEMPTS = 6;
+const USAGE_FETCH_RETRY_DELAY_MS = 1500;
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
@@ -60,27 +62,124 @@ export function Dashboard() {
   const [usageGroupBy, setUsageGroupBy] = useState<UsageGroupBy>('model');
   const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
   const [usagePage, setUsagePage] = useState(1);
+  const usageFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usageFetchGenerationRef = useRef(0);
 
   // Track page view on mount only.
   useEffect(() => {
     trackUiEvent('dashboard.page_viewed');
   }, []);
 
-  // Fetch data only when gateway is running.
+  // Fetch channels/skills only when gateway is running.
   useEffect(() => {
     if (isGatewayRunning) {
       fetchChannels();
       fetchSkills();
-      hostApiFetch<UsageHistoryEntry[]>('/api/usage/recent-token-history')
-        .then((entries) => {
-          setUsageHistory(Array.isArray(entries) ? entries : []);
-          setUsagePage(1);
-        })
-        .catch(() => {
-          setUsageHistory([]);
-        });
     }
   }, [fetchChannels, fetchSkills, isGatewayRunning]);
+
+  // Fetch token usage history with retry when Gateway just restarted and
+  // history data may not be ready yet.
+  useEffect(() => {
+    if (usageFetchTimerRef.current) {
+      clearTimeout(usageFetchTimerRef.current);
+      usageFetchTimerRef.current = null;
+    }
+
+    if (!isGatewayRunning) {
+      return;
+    }
+
+    const generation = usageFetchGenerationRef.current + 1;
+    usageFetchGenerationRef.current = generation;
+    const restartMarker = `${gatewayStatus.pid ?? 'na'}:${gatewayStatus.connectedAt ?? 'na'}`;
+    trackUiEvent('dashboard.token_usage_fetch_started', {
+      generation,
+      restartMarker,
+    });
+
+    const fetchUsageHistoryWithRetry = async (attempt: number) => {
+      trackUiEvent('dashboard.token_usage_fetch_attempt', {
+        generation,
+        attempt,
+        restartMarker,
+      });
+
+      try {
+        const entries = await hostApiFetch<UsageHistoryEntry[]>('/api/usage/recent-token-history');
+        if (usageFetchGenerationRef.current !== generation) {
+          return;
+        }
+
+        const normalized = Array.isArray(entries) ? entries : [];
+        setUsageHistory(normalized);
+        setUsagePage(1);
+        trackUiEvent('dashboard.token_usage_fetch_succeeded', {
+          generation,
+          attempt,
+          records: normalized.length,
+          restartMarker,
+        });
+
+        if (normalized.length === 0 && attempt < USAGE_FETCH_MAX_ATTEMPTS) {
+          trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
+            generation,
+            attempt,
+            reason: 'empty',
+            restartMarker,
+          });
+          usageFetchTimerRef.current = setTimeout(() => {
+            void fetchUsageHistoryWithRetry(attempt + 1);
+          }, USAGE_FETCH_RETRY_DELAY_MS);
+        } else if (normalized.length === 0) {
+          trackUiEvent('dashboard.token_usage_fetch_exhausted', {
+            generation,
+            attempt,
+            reason: 'empty',
+            restartMarker,
+          });
+        }
+      } catch (error) {
+        if (usageFetchGenerationRef.current !== generation) {
+          return;
+        }
+        trackUiEvent('dashboard.token_usage_fetch_failed_attempt', {
+          generation,
+          attempt,
+          restartMarker,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        if (attempt < USAGE_FETCH_MAX_ATTEMPTS) {
+          trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
+            generation,
+            attempt,
+            reason: 'error',
+            restartMarker,
+          });
+          usageFetchTimerRef.current = setTimeout(() => {
+            void fetchUsageHistoryWithRetry(attempt + 1);
+          }, USAGE_FETCH_RETRY_DELAY_MS);
+          return;
+        }
+        setUsageHistory([]);
+        trackUiEvent('dashboard.token_usage_fetch_exhausted', {
+          generation,
+          attempt,
+          reason: 'error',
+          restartMarker,
+        });
+      }
+    };
+
+    void fetchUsageHistoryWithRetry(1);
+
+    return () => {
+      if (usageFetchTimerRef.current) {
+        clearTimeout(usageFetchTimerRef.current);
+        usageFetchTimerRef.current = null;
+      }
+    };
+  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning]);
 
   // Calculate statistics safely
   const connectedChannels = Array.isArray(channels) ? channels.filter((c) => c.status === 'connected').length : 0;
