@@ -19,7 +19,7 @@ import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToPro
 import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { getSetting } from '../utils/store';
-import { ensureBuiltinSkillsInstalled } from '../utils/skill-config';
+import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../utils/skill-config';
 import { startHostApiServer } from '../api/server';
 import { HostEventBus } from '../api/event-bus';
 import { deviceOAuthManager } from '../utils/device-oauth';
@@ -224,6 +224,13 @@ async function initialize(): Promise<void> {
   // to ~/.openclaw/skills/ so they are immediately available without manual install.
   void ensureBuiltinSkillsInstalled().catch((error) => {
     logger.warn('Failed to install built-in skills:', error);
+  });
+
+  // Pre-deploy bundled third-party skills from resources/preinstalled-skills.
+  // This installs full skill directories (not only SKILL.md) in an idempotent,
+  // non-destructive way and never blocks startup.
+  void ensurePreinstalledSkillsInstalled().catch((error) => {
+    logger.warn('Failed to install preinstalled skills:', error);
   });
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
