@@ -119,5 +119,20 @@ describe('chat session actions', () => {
     expect(next.pendingFinal).toBe(false);
     nowSpy.mockRestore();
   });
-});
 
+  it('newSession should prefer currentSessionKey agent prefix over sessions first item', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1712222222222);
+    const { createSessionActions } = await import('@/stores/chat/session-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:main:main' }, { key: 'agent:test:main' }],
+      messages: [],
+    });
+    const actions = createSessionActions(h.set as never, h.get as never);
+
+    actions.newSession();
+    const next = h.read();
+    expect(next.currentSessionKey).toBe('agent:test:session-1712222222222');
+    nowSpy.mockRestore();
+  });
+});
