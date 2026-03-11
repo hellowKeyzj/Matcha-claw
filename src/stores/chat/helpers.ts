@@ -538,10 +538,15 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   }
 }
 
-function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null {
-  const canonical = sessions.find((s) => s.key.startsWith('agent:'))?.key;
-  if (!canonical) return null;
-  const parts = canonical.split(':');
+function getCanonicalPrefixFromSessions(
+  sessions: ChatSession[],
+  preferredSessionKey?: string,
+): string | null {
+  const candidate = preferredSessionKey && preferredSessionKey.startsWith('agent:')
+    ? preferredSessionKey
+    : sessions.find((s) => s.key.startsWith('agent:'))?.key;
+  if (!candidate) return null;
+  const parts = candidate.split(':');
   if (parts.length < 2) return null;
   return `${parts[0]}:${parts[1]}`;
 }
