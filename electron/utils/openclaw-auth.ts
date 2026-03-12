@@ -957,24 +957,31 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     }
   }
 
-  // ── channels.feishu migration ──────────────────────────────────
-  // The official feishu plugin reads the default account's credentials from
-  // the top level of `channels.feishu` (appId, appSecret), but ClawX
-  // historically stored them only under `channels.feishu.accounts.default`.
-  // Mirror the default account credentials at the top level so the plugin
-  // can discover them.
-  const feishuSection = (config.channels as Record<string, Record<string, unknown>> | undefined)?.feishu;
-  if (feishuSection) {
-    const feishuAccounts = feishuSection.accounts as Record<string, Record<string, unknown>> | undefined;
-    const defaultAccount = feishuAccounts?.default;
-    if (defaultAccount?.appId && defaultAccount?.appSecret && !feishuSection.appId) {
+  // ── channels default-account migration ─────────────────────────
+  // Most OpenClaw channel plugins read the default account's credentials
+  // from the top level of `channels.<type>` (e.g. channels.feishu.appId),
+  // but ClawX historically stored them only under `channels.<type>.accounts.default`.
+  // Mirror the default account credentials at the top level so plugins can
+  // discover them.
+  const channelsObj = config.channels as Record<string, Record<string, unknown>> | undefined;
+  if (channelsObj && typeof channelsObj === 'object') {
+    for (const [channelType, section] of Object.entries(channelsObj)) {
+      if (!section || typeof section !== 'object') continue;
+      const accounts = section.accounts as Record<string, Record<string, unknown>> | undefined;
+      const defaultAccount = accounts?.default;
+      if (!defaultAccount || typeof defaultAccount !== 'object') continue;
+      // Mirror each missing key from accounts.default to the top level
+      let mirrored = false;
       for (const [key, value] of Object.entries(defaultAccount)) {
-        if (key !== 'enabled' && !(key in feishuSection)) {
-          feishuSection[key] = value;
+        if (!(key in section)) {
+          section[key] = value;
+          mirrored = true;
         }
       }
-      modified = true;
-      console.log('[sanitize] Mirrored feishu default account credentials to top-level channels.feishu');
+      if (mirrored) {
+        modified = true;
+        console.log(`[sanitize] Mirrored ${channelType} default account credentials to top-level channels.${channelType}`);
+      }
     }
   }
 

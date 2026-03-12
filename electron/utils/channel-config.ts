@@ -371,6 +371,17 @@ export async function saveChannelConfig(
         enabled: transformedConfig.enabled ?? true,
     };
 
+    // Most OpenClaw channel plugins read the default account's credentials
+    // from the top level of `channels.<type>` (e.g. channels.feishu.appId),
+    // not from `accounts.default`.  Mirror them there so plugins can discover
+    // the credentials correctly.  We use the final account entry (not
+    // transformedConfig) because `enabled` is only added at the account level.
+    if (resolvedAccountId === DEFAULT_ACCOUNT_ID) {
+        for (const [key, value] of Object.entries(accounts[resolvedAccountId])) {
+            channelSection[key] = value;
+        }
+    }
+
     await writeOpenClawConfig(currentConfig);
     logger.info('Channel config saved', {
         channelType,
