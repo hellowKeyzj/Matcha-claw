@@ -6,6 +6,8 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
+import { useTeamsStore } from '@/stores/teams';
+import { useTaskCenterStore } from '@/stores/task-center-store';
 import i18n from '@/i18n';
 
 function LocationEcho() {
@@ -54,6 +56,47 @@ function setupSidebarState() {
     status: { state: 'running', port: 18789 },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
+  useTeamsStore.setState({
+    teams: [],
+    activeTeamId: null,
+    runMetaByTeamId: {},
+    tasksByTeamId: {},
+    mailboxByTeamId: {},
+    mailboxCursorByTeamId: {},
+    eventsByTeamId: {},
+    loadingByTeamId: {},
+    errorByTeamId: {},
+    createTeam: vi.fn(),
+    setActiveTeam: vi.fn(),
+    deleteTeam: vi.fn(),
+    initRuntime: vi.fn().mockResolvedValue(undefined),
+    refreshSnapshot: vi.fn().mockResolvedValue(undefined),
+    planUpsert: vi.fn().mockResolvedValue(undefined),
+    claimNext: vi.fn().mockResolvedValue(null),
+    heartbeat: vi.fn().mockResolvedValue(true),
+    updateTaskStatus: vi.fn().mockResolvedValue(undefined),
+    postMailbox: vi.fn().mockResolvedValue(undefined),
+    pullMailbox: vi.fn().mockResolvedValue(undefined),
+    releaseClaim: vi.fn().mockResolvedValue(undefined),
+  } as never);
+  useTaskCenterStore.setState({
+    tasks: [],
+    loading: false,
+    initialized: true,
+    error: null,
+    workspaceDir: null,
+    workspaceDirs: [],
+    pluginInstalled: true,
+    pluginEnabled: true,
+    pluginVersion: undefined,
+    blockedQueue: [],
+    init: vi.fn().mockResolvedValue(undefined),
+    refreshTasks: vi.fn().mockResolvedValue(undefined),
+    installPlugin: vi.fn().mockResolvedValue(undefined),
+    resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
+    closeBlockedDialog: vi.fn(),
+    handleGatewayNotification: vi.fn(),
+  } as never);
   i18n.changeLanguage('en');
 }
 
@@ -99,5 +142,73 @@ describe('sidebar chat nav', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New Chat' }));
 
     expect(newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders pending question cards and navigates to team detail', () => {
+    setupSidebarState();
+    useTeamsStore.setState({
+      teams: [
+        {
+          id: 'team-1',
+          name: 'Team One',
+          leadAgentId: 'main',
+          memberIds: ['main'],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      mailboxByTeamId: {
+        'team-1': [
+          {
+            msgId: 'q1',
+            fromAgentId: 'main',
+            to: 'main',
+            kind: 'question',
+            relatedTaskId: 'task-123',
+            content: '[AUTO-BLOCKED] need decision',
+            createdAt: Date.now(),
+          },
+        ],
+      },
+    } as never);
+
+    mountSidebar('/dashboard');
+
+    expect(screen.getByText('Session Blockers')).toBeInTheDocument();
+    expect(screen.getByText('Task task-123')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Task task-123/i }));
+    expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+  });
+
+  it('renders task-manager blockers and navigates to tasks page', () => {
+    setupSidebarState();
+    useTaskCenterStore.setState({
+      blockedQueue: [
+        {
+          taskId: 'task-456',
+          confirmId: 'confirm-1',
+          prompt: 'Need manual approval',
+          type: 'waiting_approval',
+          inputMode: 'decision',
+        },
+      ],
+      tasks: [
+        {
+          id: 'task-456',
+          goal: 'Deploy release pipeline',
+          status: 'waiting_approval',
+          progress: 0.5,
+          created_at: 100,
+          updated_at: 200,
+        },
+      ],
+    } as never);
+
+    mountSidebar('/dashboard');
+
+    expect(screen.getByText('Task Center')).toBeInTheDocument();
+    expect(screen.getByText(/Approval Blocker/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Deploy release pipeline/i }));
+    expect(screen.getByTestId('location-echo')).toHaveTextContent('/tasks');
   });
 });
