@@ -21,7 +21,16 @@
         "expandMenu": "Expand sidebar",
         "dashboard": "Dashboard",
         "settings": "Settings",
-        "devConsole": "Developer Console"
+        "devConsole": "Developer Console",
+        "pendingBlockers": "Session Blockers",
+        "pendingBlockersEmpty": "No pending blockers",
+        "pendingBlockerTask": "Task {{taskId}}",
+        "pendingBlockerGeneral": "General Blocker",
+        "pendingBlockerFrom": "From {{from}}",
+        "pendingBlockerTypeApproval": "Approval Blocker",
+        "pendingBlockerTypeInput": "Input Blocker",
+        "pendingBlockerSourceTask": "Task Center",
+        "pendingBlockerTaskId": "Task ID {{taskId}}"
     },
     "actions": {
         "save": "Save",
