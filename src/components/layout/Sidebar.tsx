@@ -167,6 +167,9 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
         if (message.kind !== 'question') {
           continue;
         }
+        if (!message.relatedTaskId) {
+          continue;
+        }
         if (message.relatedTaskId) {
           const decidedAt = latestDecisionAtByTask.get(message.relatedTaskId) ?? 0;
           if (decidedAt >= message.createdAt) {

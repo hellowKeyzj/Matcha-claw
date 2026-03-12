@@ -44,6 +44,7 @@ import { launchGatewayProcess } from './process-launcher';
 import { GatewayRestartController } from './restart-controller';
 import { classifyGatewayStderrMessage, recordGatewayStartupStderrLine } from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
+import { getSetting } from '../utils/store';
 
 export interface GatewayStatus {
   state: GatewayLifecycleState;
@@ -614,7 +615,7 @@ export class GatewayManager extends EventEmitter {
       deviceIdentity: this.deviceIdentity,
       platform: process.platform,
       pendingRequests: this.pendingRequests,
-      getToken: async () => await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken')),
+      getToken: async () => getSetting('gatewayToken'),
       onHandshakeComplete: (ws) => {
         this.ws = ws;
         this.setStatus({
