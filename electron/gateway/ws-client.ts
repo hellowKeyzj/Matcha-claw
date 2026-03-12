@@ -67,6 +67,7 @@ export async function waitForGatewayReady(options: {
 }): Promise<void> {
   const retries = options.retries ?? 2400;
   const intervalMs = options.intervalMs ?? 200;
+  const waitStartedAt = Date.now();
 
   for (let i = 0; i < retries; i++) {
     const exitCode = options.getProcessExitCode();
@@ -78,7 +79,9 @@ export async function waitForGatewayReady(options: {
     try {
       const ready = await probeGatewayReady(options.port, 1500);
       if (ready) {
-        logger.debug(`Gateway ready after ${i + 1} attempt(s)`);
+        logger.debug(
+          `Gateway ready after ${i + 1} attempt(s), elapsedMs=${Date.now() - waitStartedAt}`,
+        );
         return;
       }
     } catch {
@@ -86,7 +89,9 @@ export async function waitForGatewayReady(options: {
     }
 
     if (i > 0 && i % 10 === 0) {
-      logger.debug(`Still waiting for Gateway... (attempt ${i + 1}/${retries})`);
+      logger.debug(
+        `Still waiting for Gateway... (attempt ${i + 1}/${retries}, elapsedMs=${Date.now() - waitStartedAt})`,
+      );
     }
 
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -171,6 +176,7 @@ export async function connectGatewaySocket(options: {
   onCloseAfterHandshake: () => void;
 }): Promise<WebSocket> {
   logger.debug(`Connecting Gateway WebSocket (ws://localhost:${options.port}/ws)`);
+  const socketConnectStartedAt = Date.now();
 
   return await new Promise<WebSocket>((resolve, reject) => {
     const wsUrl = `ws://localhost:${options.port}/ws`;
@@ -181,6 +187,9 @@ export async function connectGatewaySocket(options: {
     let challengeTimer: NodeJS.Timeout | null = null;
     let challengeReceived = false;
     let settled = false;
+    let socketOpenedAt = 0;
+    let challengeReceivedAt = 0;
+    let handshakeSentAt = 0;
 
     const cleanupHandshakeRequest = () => {
       if (challengeTimer) {
@@ -215,7 +224,10 @@ export async function connectGatewaySocket(options: {
     };
 
     const sendConnectHandshake = async (challengeNonce: string) => {
-      logger.debug('Sending connect handshake with challenge nonce');
+      handshakeSentAt = Date.now();
+      logger.debug(
+        `Sending connect handshake with challenge nonce (elapsedSinceOpenMs=${socketOpenedAt ? handshakeSentAt - socketOpenedAt : -1})`,
+      );
 
       const currentToken = await options.getToken();
       const connectPayload = buildGatewayConnectFrame({
@@ -240,7 +252,10 @@ export async function connectGatewaySocket(options: {
       options.pendingRequests.set(connectId, {
         resolve: () => {
           handshakeComplete = true;
-          logger.debug('Gateway connect handshake completed');
+          const now = Date.now();
+          logger.debug(
+            `Gateway connect handshake completed (handshakeMs=${handshakeSentAt ? now - handshakeSentAt : -1}, totalSinceWsConnectMs=${now - socketConnectStartedAt}, challengeWaitMs=${challengeReceivedAt ? challengeReceivedAt - socketConnectStartedAt : -1})`,
+          );
           options.onHandshakeComplete(ws);
           resolveOnce();
         },
@@ -261,7 +276,10 @@ export async function connectGatewaySocket(options: {
     }, 10000);
 
     ws.on('open', () => {
-      logger.debug('Gateway WebSocket opened, waiting for connect.challenge...');
+      socketOpenedAt = Date.now();
+      logger.debug(
+        `Gateway WebSocket opened, waiting for connect.challenge... (elapsedSinceConnectMs=${socketOpenedAt - socketConnectStartedAt})`,
+      );
     });
 
     ws.on('message', (data) => {
@@ -272,6 +290,7 @@ export async function connectGatewaySocket(options: {
           typeof message === 'object' && message !== null &&
           message.type === 'event' && message.event === 'connect.challenge'
         ) {
+          challengeReceivedAt = Date.now();
           challengeReceived = true;
           if (challengeTimer) {
             clearTimeout(challengeTimer);
@@ -282,7 +301,9 @@ export async function connectGatewaySocket(options: {
             rejectOnce(new Error('Gateway connect.challenge missing nonce'));
             return;
           }
-          logger.debug('Received connect.challenge, sending handshake');
+          logger.debug(
+            `Received connect.challenge, sending handshake (challengeWaitMs=${challengeReceivedAt - socketConnectStartedAt})`,
+          );
           void sendConnectHandshake(nonce);
           return;
         }
