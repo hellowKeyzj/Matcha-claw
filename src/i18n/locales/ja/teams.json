@@ -78,6 +78,7 @@
     "sessionKey": "セッションキー",
     "ownedTasks": "担当タスク",
     "runningTasks": "実行中",
+    "autoRunningTask": "自動実行タスク",
     "claimForAgent": "この Agent でクレーム"
   }
 }

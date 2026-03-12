@@ -78,6 +78,7 @@
     "sessionKey": "Session key",
     "ownedTasks": "Owned tasks",
     "runningTasks": "Running",
+    "autoRunningTask": "Auto task",
     "claimForAgent": "Claim For Agent"
   }
 }

@@ -254,12 +254,25 @@ export const useTeamsStore = create<TeamsState>()(
         return result.ok;
       },
       updateTaskStatus: async (teamId, taskId, status, options) => {
-        const result = await teamTaskUpdate({
+        const payload: {
+          teamId: string;
+          taskId: string;
+          status: TeamTaskStatus;
+          resultSummary?: string;
+          error?: string;
+        } = {
           teamId,
           taskId,
           status,
-          ...(options?.resultSummary ? { resultSummary: options.resultSummary } : {}),
-          ...(options?.error ? { error: options.error } : {}),
+        };
+        if (options && Object.prototype.hasOwnProperty.call(options, 'resultSummary')) {
+          payload.resultSummary = options.resultSummary;
+        }
+        if (options && Object.prototype.hasOwnProperty.call(options, 'error')) {
+          payload.error = options.error;
+        }
+        const result = await teamTaskUpdate({
+          ...payload,
         });
         set((state) => ({
           tasksByTeamId: {

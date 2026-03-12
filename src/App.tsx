@@ -24,6 +24,7 @@ import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
+import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
 
 
 /**
@@ -213,6 +214,7 @@ function App() {
   return (
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
+        <TeamsRuntimeDaemon />
         <Routes>
           {/* Setup wizard (shown on first launch) */}
           <Route path="/setup/*" element={<Setup />} />

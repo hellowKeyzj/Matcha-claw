@@ -78,6 +78,7 @@
     "sessionKey": "会话键",
     "ownedTasks": "负责任务",
     "runningTasks": "执行中",
+    "autoRunningTask": "自动执行任务",
     "claimForAgent": "为该成员认领任务"
   }
 }
