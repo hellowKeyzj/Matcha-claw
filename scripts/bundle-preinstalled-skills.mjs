@@ -2,7 +2,7 @@
 
 import 'zx/globals';
 import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -10,6 +10,40 @@ const ROOT = join(__dirname, '..');
 const MANIFEST_PATH = join(ROOT, 'resources', 'skills', 'preinstalled-manifest.json');
 const OUTPUT_ROOT = join(ROOT, 'build', 'preinstalled-skills');
 const TMP_ROOT = join(ROOT, 'build', '.tmp-preinstalled-skills');
+$.cwd = ROOT;
+$.env.GIT_TERMINAL_PROMPT = '0';
+
+const GIT_RETRY_MAX = Number.parseInt(process.env.PREINSTALL_GIT_RETRY ?? '3', 10);
+const GIT_RETRY_DELAY_MS = Number.parseInt(process.env.PREINSTALL_GIT_RETRY_DELAY_MS ?? '2000', 10);
+
+function parsePositiveInt(value, fallback) {
+  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  return fallback;
+}
+
+const RETRY_MAX = parsePositiveInt(GIT_RETRY_MAX, 3);
+const RETRY_DELAY_MS = parsePositiveInt(GIT_RETRY_DELAY_MS, 2000);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithRetry(label, action) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= RETRY_MAX; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= RETRY_MAX) break;
+      const backoffMs = RETRY_DELAY_MS * (2 ** (attempt - 1));
+      echo`⚠️ ${label} failed (attempt ${attempt}/${RETRY_MAX}): ${error.message || String(error)}`;
+      echo`   retrying in ${backoffMs}ms...`;
+      await sleep(backoffMs);
+    }
+  }
+  throw new Error(`${label} failed after ${RETRY_MAX} attempts: ${lastError?.message || String(lastError)}`);
+}
 
 function loadManifest() {
   if (!existsSync(MANIFEST_PATH)) {
@@ -43,18 +77,35 @@ function createRepoDirName(repo, ref) {
   return `${repo.replace(/[\\/]/g, '__')}__${ref.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 }
 
-async function fetchSparseRepo(repo, ref, paths, checkoutDir) {
+function toShellPath(path) {
+  return path.replaceAll('\\', '/');
+}
+
+async function fetchRepoSnapshot(repo, ref, paths, checkoutDir) {
   const remote = `https://github.com/${repo}.git`;
-  mkdirSync(checkoutDir, { recursive: true });
+  const relativeCheckoutDir = relative(ROOT, checkoutDir);
+  const checkoutShellPath = toShellPath(relativeCheckoutDir || '.');
 
-  await $`git init ${checkoutDir}`;
-  await $`git -C ${checkoutDir} remote add origin ${remote}`;
-  await $`git -C ${checkoutDir} sparse-checkout init --cone`;
-  await $`git -C ${checkoutDir} sparse-checkout set ${paths}`;
-  await $`git -C ${checkoutDir} fetch --depth 1 origin ${ref}`;
-  await $`git -C ${checkoutDir} checkout FETCH_HEAD`;
+  await runWithRetry(`git clone ${repo}@${ref}`, async () => {
+    rmSync(checkoutDir, { recursive: true, force: true });
+    await $`git clone --depth 1 --filter=blob:none --no-checkout --branch ${ref} ${remote} ${checkoutShellPath}`;
+  });
 
-  const commit = (await $`git -C ${checkoutDir} rev-parse HEAD`).stdout.trim();
+  await runWithRetry(`git sparse-checkout init ${repo}@${ref}`, async () => {
+    await $`git -C ${checkoutShellPath} sparse-checkout init --no-cone`;
+  });
+
+  for (const repoPath of paths) {
+    await runWithRetry(`git sparse-checkout add ${repoPath} (${repo}@${ref})`, async () => {
+      await $`git -C ${checkoutShellPath} sparse-checkout add ${repoPath}`;
+    });
+  }
+
+  await runWithRetry(`git checkout ${repo}@${ref}`, async () => {
+    await $`git -C ${checkoutShellPath} checkout ${ref}`;
+  });
+
+  const commit = (await $`git -C ${checkoutShellPath} rev-parse HEAD`).stdout.trim();
   return commit;
 }
 
@@ -77,7 +128,7 @@ for (const group of groups) {
   const sparsePaths = [...new Set(group.entries.map((entry) => entry.repoPath))];
 
   echo`Fetching ${group.repo} @ ${group.ref}`;
-  const commit = await fetchSparseRepo(group.repo, group.ref, sparsePaths, repoDir);
+  const commit = await fetchRepoSnapshot(group.repo, group.ref, sparsePaths, repoDir);
   echo`   commit ${commit}`;
 
   for (const entry of group.entries) {
@@ -85,7 +136,7 @@ for (const group of groups) {
     const targetDir = join(OUTPUT_ROOT, entry.slug);
 
     if (!existsSync(sourceDir)) {
-      throw new Error(`Missing source path in repo checkout: ${entry.repoPath}`);
+      throw new Error(`Missing source path in repo checkout: ${entry.repoPath} (repo=${entry.repo}, ref=${entry.ref || 'main'})`);
     }
 
     rmSync(targetDir, { recursive: true, force: true });
