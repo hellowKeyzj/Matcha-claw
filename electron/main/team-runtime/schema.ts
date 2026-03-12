@@ -4,7 +4,7 @@ const TASK_TRANSITIONS: Record<TeamTaskStatus, TeamTaskStatus[]> = {
   todo: ['claimed'],
   claimed: ['running', 'todo'],
   running: ['done', 'blocked', 'failed'],
-  blocked: ['running', 'failed'],
+  blocked: ['running', 'failed', 'todo'],
   done: [],
   failed: ['todo', 'claimed'],
 };

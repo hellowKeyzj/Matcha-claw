@@ -7,6 +7,10 @@ describe('team runtime schema', () => {
     expect(isTaskStatusTransitionAllowed('blocked', 'running')).toBe(true);
   });
 
+  it('allows blocked -> todo for retry requeue', () => {
+    expect(isTaskStatusTransitionAllowed('blocked', 'todo')).toBe(true);
+  });
+
   it('rejects done -> running', () => {
     expect(isTaskStatusTransitionAllowed('done', 'running')).toBe(false);
   });
