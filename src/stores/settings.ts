@@ -17,6 +17,7 @@ interface SettingsState {
   userAvatarDataUrl: string | null;
   startMinimized: boolean;
   launchAtStartup: boolean;
+  telemetryEnabled: boolean;
 
   // Gateway
   gatewayAutoStart: boolean;
@@ -49,6 +50,7 @@ interface SettingsState {
   clearUserAvatar: () => void;
   setStartMinimized: (value: boolean) => void;
   setLaunchAtStartup: (value: boolean) => void;
+  setTelemetryEnabled: (value: boolean) => void;
   setGatewayAutoStart: (value: boolean) => void;
   setGatewayPort: (port: number) => void;
   setProxyEnabled: (value: boolean) => void;
@@ -77,6 +79,7 @@ const defaultSettings = {
   userAvatarDataUrl: null,
   startMinimized: false,
   launchAtStartup: false,
+  telemetryEnabled: true,
   gatewayAutoStart: true,
   gatewayPort: 18789,
   proxyEnabled: false,
