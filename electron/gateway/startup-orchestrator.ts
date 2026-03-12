@@ -34,43 +34,76 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
 
   while (true) {
     startAttempts++;
+    const attemptStartedAt = Date.now();
+    const stageDurations: Record<string, number> = {};
+    const measureStage = async <T>(stageName: string, runner: () => Promise<T>): Promise<T> => {
+      const stageStartedAt = Date.now();
+      try {
+        return await runner();
+      } finally {
+        stageDurations[stageName] = Date.now() - stageStartedAt;
+      }
+    };
     hooks.assertLifecycle('start');
     hooks.resetStartupStderrLines();
 
     try {
+      logger.debug(`Gateway startup attempt ${startAttempts}/${maxStartAttempts} begin`);
       logger.debug('Checking for existing Gateway...');
-      const existing = await hooks.findExistingGateway(hooks.port, hooks.ownedPid);
+      const existing = await measureStage('find-existing', async () => {
+        return await hooks.findExistingGateway(hooks.port, hooks.ownedPid);
+      });
       hooks.assertLifecycle('start/find-existing');
       if (existing) {
         logger.debug(`Found existing Gateway on port ${existing.port}`);
-        await hooks.connect(existing.port, existing.externalToken);
+        await measureStage('connect-existing', async () => {
+          await hooks.connect(existing.port, existing.externalToken);
+        });
         hooks.assertLifecycle('start/connect-existing');
         hooks.onConnectedToExistingGateway();
+        logger.info(
+          `Gateway startup attempt ${startAttempts} completed via existing gateway (totalMs=${Date.now() - attemptStartedAt}, stages=${JSON.stringify(stageDurations)})`,
+        );
         return;
       }
 
       logger.debug('No existing Gateway found, starting new process...');
 
       if (hooks.shouldWaitForPortFree) {
-        await hooks.waitForPortFree(hooks.port);
+        await measureStage('wait-port-free', async () => {
+          await hooks.waitForPortFree(hooks.port);
+        });
         hooks.assertLifecycle('start/wait-port');
       }
 
-      await hooks.startProcess();
+      await measureStage('start-process', async () => {
+        await hooks.startProcess();
+      });
       hooks.assertLifecycle('start/start-process');
 
-      await hooks.waitForReady(hooks.port);
+      await measureStage('wait-ready', async () => {
+        await hooks.waitForReady(hooks.port);
+      });
       hooks.assertLifecycle('start/wait-ready');
 
-      await hooks.connect(hooks.port);
+      await measureStage('connect-managed', async () => {
+        await hooks.connect(hooks.port);
+      });
       hooks.assertLifecycle('start/connect');
 
       hooks.onConnectedToManagedGateway();
+      logger.info(
+        `Gateway startup attempt ${startAttempts} completed via managed gateway (totalMs=${Date.now() - attemptStartedAt}, stages=${JSON.stringify(stageDurations)})`,
+      );
       return;
     } catch (error) {
       if (error instanceof LifecycleSupersededError) {
         throw error;
       }
+
+      logger.warn(
+        `Gateway startup attempt ${startAttempts} failed (totalMs=${Date.now() - attemptStartedAt}, stages=${JSON.stringify(stageDurations)})`,
+      );
 
       const recoveryAction = getGatewayStartupRecoveryAction({
         startupError: error,
