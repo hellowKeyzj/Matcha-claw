@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
-import { Component, useCallback, useEffect } from 'react';
+import { Component, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -22,6 +22,7 @@ import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
+import { useSkillsStore } from './stores/skills';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
@@ -109,6 +110,9 @@ function App() {
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
+  const gatewayState = useGatewayStore((state) => state.status.state);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const skillsPrefetchedRef = useRef(false);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -210,6 +214,43 @@ function App() {
   useEffect(() => {
     applyGatewayTransportPreference();
   }, []);
+
+  useEffect(() => {
+    if (!settingsInitialized || !setupComplete || gatewayState !== 'running') {
+      return;
+    }
+    if (skillsPrefetchedRef.current) {
+      return;
+    }
+    skillsPrefetchedRef.current = true;
+
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const prewarm = () => {
+      if (cancelled) {
+        return;
+      }
+      void fetchSkills();
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(() => prewarm(), { timeout: 1500 });
+    } else {
+      timeoutId = window.setTimeout(prewarm, 600);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [fetchSkills, gatewayState, settingsInitialized, setupComplete]);
 
   return (
     <ErrorBoundary>

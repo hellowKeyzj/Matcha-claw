@@ -24,17 +24,19 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useSkillsStore } from '@/stores/skills';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 
 interface NavItemProps {
   to: string;
   icon: React.ReactNode;
   label: string;
   collapsed?: boolean;
+  onMouseEnter?: () => void;
 }
 
 interface SidebarProps {
@@ -71,10 +73,11 @@ function formatMessageTime(createdAt: number): string {
   });
 }
 
-function NavItem({ to, icon, label, collapsed }: NavItemProps) {
+function NavItem({ to, icon, label, collapsed, onMouseEnter }: NavItemProps) {
   return (
     <NavLink
       to={to}
+      onMouseEnter={onMouseEnter}
       className={({ isActive }) =>
         cn(
           'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
@@ -103,6 +106,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   const taskCenterTasks = useTaskCenterStore((state) => state.tasks);
   const blockedQueue = useTaskCenterStore((state) => state.blockedQueue);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -136,6 +140,13 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
     { to: '/settings', icon: <Settings className="h-5 w-5" />, label: t('sidebar.settings') },
   ];
+
+  const prefetchSkillsOnHover = useCallback(() => {
+    if (gatewayState !== 'running') {
+      return;
+    }
+    void fetchSkills();
+  }, [fetchSkills, gatewayState]);
 
   useEffect(() => {
     if (gatewayState !== 'running' || taskCenterInitialized) {
@@ -248,7 +259,12 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
         </button>
 
         {navItems.map((item) => (
-          <NavItem key={item.to} {...item} collapsed={sidebarCollapsed} />
+          <NavItem
+            key={item.to}
+            {...item}
+            collapsed={sidebarCollapsed}
+            onMouseEnter={item.to === '/skills' ? prefetchSkillsOnHover : undefined}
+          />
         ))}
 
         {!sidebarCollapsed && (
