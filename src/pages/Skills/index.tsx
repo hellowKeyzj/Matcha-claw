@@ -2,7 +2,7 @@
  * Skills Page
  * Browse and manage AI skills
  */
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search,
@@ -46,6 +46,8 @@ import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
+const INITIAL_SKILLS_BATCH = 24;
+const SKILLS_BATCH_SIZE = 24;
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   if (!skill.enabled) return 'disabled';
@@ -194,7 +196,7 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
       }
 
       // Refresh skills from gateway to get updated config
-      await fetchSkills();
+      await fetchSkills({ force: true });
 
       toast.success(t('detail.configSaved'));
     } catch (err) {
@@ -605,6 +607,7 @@ export function Skills() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
   const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('all');
+  const [visibleSkillCount, setVisibleSkillCount] = useState(INITIAL_SKILLS_BATCH);
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -635,44 +638,92 @@ export function Skills() {
   }, [fetchSkills, isGatewayRunning]);
 
   // Filter skills
-  const safeSkills = Array.isArray(skills) ? skills : [];
-  const filteredSkills = safeSkills.filter((skill) => {
+  const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
+
+  const filteredSkills = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    const matchesSearch =
-      q.length === 0
-      || skill.name.toLowerCase().includes(q)
-      || skill.description.toLowerCase().includes(q)
-      || skill.id.toLowerCase().includes(q)
-      || (skill.slug || '').toLowerCase().includes(q)
-      || (skill.author || '').toLowerCase().includes(q);
+    return safeSkills.filter((skill) => {
+      const matchesSearch =
+        q.length === 0
+        || skill.name.toLowerCase().includes(q)
+        || skill.description.toLowerCase().includes(q)
+        || skill.id.toLowerCase().includes(q)
+        || (skill.slug || '').toLowerCase().includes(q)
+        || (skill.author || '').toLowerCase().includes(q);
 
-    let matchesSource = true;
-    if (selectedSource === 'eligible') {
-      matchesSource = skill.eligible === true;
-    } else if (selectedSource === 'built-in') {
-      matchesSource = !!skill.isBundled;
-    } else if (selectedSource === 'marketplace') {
-      matchesSource = !skill.isBundled;
-    }
+      let matchesSource = true;
+      if (selectedSource === 'eligible') {
+        matchesSource = skill.eligible === true;
+      } else if (selectedSource === 'built-in') {
+        matchesSource = !!skill.isBundled;
+      } else if (selectedSource === 'marketplace') {
+        matchesSource = !skill.isBundled;
+      }
 
-    return matchesSearch && matchesSource;
-  }).sort((a, b) => {
-    // Enabled skills first
-    if (a.enabled && !b.enabled) return -1;
-    if (!a.enabled && b.enabled) return 1;
-    // Then core/bundled
-    if (a.isCore && !b.isCore) return -1;
-    if (!a.isCore && b.isCore) return 1;
-    // Finally alphabetical
-    return a.name.localeCompare(b.name);
-  });
+      return matchesSearch && matchesSource;
+    }).sort((a, b) => {
+      // Enabled skills first
+      if (a.enabled && !b.enabled) return -1;
+      if (!a.enabled && b.enabled) return 1;
+      // Then core/bundled
+      if (a.isCore && !b.isCore) return -1;
+      if (!a.isCore && b.isCore) return 1;
+      // Finally alphabetical
+      return a.name.localeCompare(b.name);
+    });
+  }, [safeSkills, searchQuery, selectedSource]);
 
-  const sourceStats = {
+  const sourceStats = useMemo(() => ({
     all: safeSkills.length,
     eligible: safeSkills.filter((s) => s.eligible === true).length,
-    builtIn: safeSkills.filter(s => s.isBundled).length,
-    marketplace: safeSkills.filter(s => !s.isBundled).length,
-  };
+    builtIn: safeSkills.filter((s) => s.isBundled).length,
+    marketplace: safeSkills.filter((s) => !s.isBundled).length,
+  }), [safeSkills]);
+
+  const visibleSkills = useMemo(
+    () => filteredSkills.slice(0, visibleSkillCount),
+    [filteredSkills, visibleSkillCount],
+  );
+
+  useEffect(() => {
+    setVisibleSkillCount(INITIAL_SKILLS_BATCH);
+  }, [filteredSkills]);
+
+  useEffect(() => {
+    if (activeTab !== 'all') {
+      return;
+    }
+    if (visibleSkillCount >= filteredSkills.length) {
+      return;
+    }
+
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+    let cancelled = false;
+
+    const appendBatch = () => {
+      if (cancelled) {
+        return;
+      }
+      setVisibleSkillCount((prev) => Math.min(prev + SKILLS_BATCH_SIZE, filteredSkills.length));
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(() => appendBatch(), { timeout: 120 });
+    } else {
+      timeoutId = window.setTimeout(appendBatch, 16);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [activeTab, filteredSkills.length, visibleSkillCount]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -718,7 +769,7 @@ export function Skills() {
     }
   }, [enableSkill, disableSkill, t]);
 
-  const hasInstalledSkills = skills.some(s => !s.isBundled);
+  const hasInstalledSkills = useMemo(() => skills.some((s) => !s.isBundled), [skills]);
 
   const handleOpenSkillsFolder = useCallback(async () => {
     try {
@@ -843,7 +894,7 @@ export function Skills() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={fetchSkills} disabled={!isGatewayRunning}>
+          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!isGatewayRunning}>
             <RefreshCw className="h-4 w-4 mr-2" />
             {t('refresh')}
           </Button>
@@ -977,7 +1028,7 @@ export function Skills() {
             </Card>
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {filteredSkills.map((skill) => {
+              {visibleSkills.map((skill) => {
                 const availabilityKind = getSkillAvailabilityKind(skill);
                 const missingSummary = formatMissingSummary(skill.missing);
                 const availabilityLabel = availabilityKind === 'disabled'
