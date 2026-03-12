@@ -5,9 +5,6 @@
 export interface ProxySettings {
   proxyEnabled: boolean;
   proxyServer: string;
-  proxyHttpServer: string;
-  proxyHttpsServer: string;
-  proxyAllServer: string;
   proxyBypassRules: string;
 }
 
@@ -41,15 +38,12 @@ export function normalizeProxyServer(proxyServer: string): string {
 }
 
 export function resolveProxySettings(settings: ProxySettings): ResolvedProxySettings {
-  const legacyProxy = normalizeProxyServer(settings.proxyServer);
-  const allProxy = normalizeProxyServer(settings.proxyAllServer);
-  const httpProxy = normalizeProxyServer(settings.proxyHttpServer) || legacyProxy || allProxy;
-  const httpsProxy = normalizeProxyServer(settings.proxyHttpsServer) || legacyProxy || allProxy;
+  const proxy = normalizeProxyServer(settings.proxyServer);
 
   return {
-    httpProxy,
-    httpsProxy,
-    allProxy: allProxy || legacyProxy,
+    httpProxy: proxy,
+    httpsProxy: proxy,
+    allProxy: proxy,
     bypassRules: trimValue(settings.proxyBypassRules),
   };
 }
@@ -69,8 +63,8 @@ export function buildElectronProxyConfig(settings: ProxySettings): ElectronProxy
     rules.push(`https=${resolved.httpsProxy}`);
   }
 
-  // Fallback rule for protocols like ws/wss or when users only configured ALL_PROXY.
-  const fallbackProxy = resolved.allProxy || resolved.httpsProxy || resolved.httpProxy;
+  // Fallback rule for protocols like ws/wss.
+  const fallbackProxy = resolved.allProxy;
   if (fallbackProxy) {
     rules.push(fallbackProxy);
   }

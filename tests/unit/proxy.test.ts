@@ -15,13 +15,10 @@ describe('proxy helpers', () => {
     expect(normalizeProxyServer('socks5://127.0.0.1:7891')).toBe('socks5://127.0.0.1:7891');
   });
 
-  it('falls back to the base proxy server when advanced fields are empty', () => {
+  it('resolves a single proxy server to all protocols', () => {
     expect(resolveProxySettings({
       proxyEnabled: true,
       proxyServer: '127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: '',
-      proxyAllServer: '',
       proxyBypassRules: '<local>',
     })).toEqual({
       httpProxy: 'http://127.0.0.1:7890',
@@ -31,34 +28,15 @@ describe('proxy helpers', () => {
     });
   });
 
-  it('uses advanced overrides when provided', () => {
+  it('keeps a SOCKS proxy scheme as-is', () => {
     expect(resolveProxySettings({
       proxyEnabled: true,
-      proxyServer: 'http://127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: 'http://127.0.0.1:7892',
-      proxyAllServer: 'socks5://127.0.0.1:7891',
+      proxyServer: 'socks5://127.0.0.1:7891',
       proxyBypassRules: '',
     })).toEqual({
-      httpProxy: 'http://127.0.0.1:7890',
-      httpsProxy: 'http://127.0.0.1:7892',
+      httpProxy: 'socks5://127.0.0.1:7891',
+      httpsProxy: 'socks5://127.0.0.1:7891',
       allProxy: 'socks5://127.0.0.1:7891',
-      bypassRules: '',
-    });
-  });
-
-  it('keeps blank advanced fields aligned with the base proxy server', () => {
-    expect(resolveProxySettings({
-      proxyEnabled: true,
-      proxyServer: 'http://127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: 'http://127.0.0.1:7892',
-      proxyAllServer: '',
-      proxyBypassRules: '',
-    })).toEqual({
-      httpProxy: 'http://127.0.0.1:7890',
-      httpsProxy: 'http://127.0.0.1:7892',
-      allProxy: 'http://127.0.0.1:7890',
       bypassRules: '',
     });
   });
@@ -67,24 +45,18 @@ describe('proxy helpers', () => {
     expect(buildElectronProxyConfig({
       proxyEnabled: false,
       proxyServer: '127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: '',
-      proxyAllServer: '',
       proxyBypassRules: '<local>',
     })).toEqual({ mode: 'direct' });
   });
 
-  it('builds protocol-specific Electron rules when proxy is enabled', () => {
+  it('builds Electron proxy rules when proxy is enabled', () => {
     expect(buildElectronProxyConfig({
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: 'http://127.0.0.1:7892',
-      proxyAllServer: 'socks5://127.0.0.1:7891',
       proxyBypassRules: '<local>;localhost',
     })).toEqual({
       mode: 'fixed_servers',
-      proxyRules: 'http=http://127.0.0.1:7890;https=http://127.0.0.1:7892;socks5://127.0.0.1:7891',
+      proxyRules: 'http=http://127.0.0.1:7890;https=http://127.0.0.1:7890;http://127.0.0.1:7890',
       proxyBypassRules: '<local>;localhost',
     });
   });
@@ -93,17 +65,14 @@ describe('proxy helpers', () => {
     expect(buildProxyEnv({
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
-      proxyHttpServer: '',
-      proxyHttpsServer: '',
-      proxyAllServer: 'socks5://127.0.0.1:7891',
       proxyBypassRules: '<local>;localhost\n127.0.0.1',
     })).toEqual({
       HTTP_PROXY: 'http://127.0.0.1:7890',
       HTTPS_PROXY: 'http://127.0.0.1:7890',
-      ALL_PROXY: 'socks5://127.0.0.1:7891',
+      ALL_PROXY: 'http://127.0.0.1:7890',
       http_proxy: 'http://127.0.0.1:7890',
       https_proxy: 'http://127.0.0.1:7890',
-      all_proxy: 'socks5://127.0.0.1:7891',
+      all_proxy: 'http://127.0.0.1:7890',
       NO_PROXY: '<local>,localhost,127.0.0.1',
       no_proxy: '<local>,localhost,127.0.0.1',
     });
