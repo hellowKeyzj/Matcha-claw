@@ -49,11 +49,17 @@ type MarketplaceSearchResult = {
 };
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
+const SKILLS_FETCH_MIN_INTERVAL_MS = 1500;
+const CLAWHUB_LIST_CACHE_TTL_MS = 30000;
 const marketplaceSearchCache = new Map<string, {
   timestamp: number;
   results: MarketplaceSkill[];
 }>();
 const inflightMarketplaceSearch = new Map<string, Promise<MarketplaceSearchResult>>();
+let inflightSkillsFetch: Promise<void> | null = null;
+let lastSkillsFetchAt = 0;
+let cachedClawhubList: { timestamp: number; results: ClawHubListResult[] } | null = null;
+let inflightClawhubList: Promise<{ success: boolean; results?: ClawHubListResult[]; error?: string }> | null = null;
 
 function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissingRequirements | undefined {
   if (!missing) {
@@ -103,7 +109,7 @@ interface SkillsState {
   error: string | null;
 
   // Actions
-  fetchSkills: () => Promise<void>;
+  fetchSkills: (options?: { force?: boolean }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
   uninstallSkill: (slug: string) => Promise<void>;
@@ -122,84 +128,162 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installing: {},
   error: null,
 
-  fetchSkills: async () => {
+  fetchSkills: async (options) => {
+    const force = options?.force === true;
+    const now = Date.now();
+
+    if (inflightSkillsFetch) {
+      await inflightSkillsFetch;
+      return;
+    }
+    if (!force && get().skills.length > 0 && now - lastSkillsFetchAt < SKILLS_FETCH_MIN_INTERVAL_MS) {
+      return;
+    }
+
     // Only show loading state if we have no skills yet (initial load)
     if (get().skills.length === 0) {
       set({ loading: true, error: null });
     }
-    try {
-      // 1. Fetch from Gateway (running skills)
-      const gatewayData = await useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
-
-      // 2. Fetch from ClawHub (installed on disk)
-      const clawhubResult = await hostApiFetch<{ success: boolean; results?: ClawHubListResult[]; error?: string }>('/api/clawhub/list');
-
-      // 3. Fetch configurations directly from Electron (since Gateway doesn't return them)
-      const configResult = await hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
-
-      let combinedSkills: Skill[] = [];
-      const currentSkills = get().skills;
-
-      // Map gateway skills info
-      if (gatewayData.skills) {
-        combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
-          // Merge with direct config if available
-          const directConfig = configResult[s.skillKey] || {};
-
-          return {
-            id: s.skillKey,
-            slug: s.slug || s.skillKey,
-            name: s.name || s.skillKey,
-            description: s.description || '',
-            enabled: !s.disabled,
-            icon: s.emoji || '📦',
-            version: s.version || '1.0.0',
-            author: s.author,
-            eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
-            blockedByAllowlist: s.blockedByAllowlist === true,
-            missing: normalizeMissingRequirements(s.missing),
-            config: {
-              ...(s.config || {}),
-              ...directConfig,
-            },
-            isCore: s.bundled && s.always,
-            isBundled: s.bundled,
-          };
-        });
-      } else if (currentSkills.length > 0) {
-        // ... if gateway down ...
-        combinedSkills = [...currentSkills];
-      }
-
-      // Merge with ClawHub results
-      if (clawhubResult.success && clawhubResult.results) {
-        clawhubResult.results.forEach((cs: ClawHubListResult) => {
-          const existing = combinedSkills.find(s => s.id === cs.slug);
-          if (!existing) {
-            const directConfig = configResult[cs.slug] || {};
-            combinedSkills.push({
-              id: cs.slug,
-              slug: cs.slug,
-              name: cs.slug,
-              description: 'Recently installed, initializing...',
-              enabled: false,
-              icon: '⌛',
-              version: cs.version || 'unknown',
-              author: undefined,
-              config: directConfig,
-              isCore: false,
-              isBundled: false,
+    inflightSkillsFetch = (async () => {
+      try {
+        const gatewayPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
+        const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
+        const clawhubPromise = (() => {
+          const cacheFresh =
+            !force &&
+            cachedClawhubList &&
+            now - cachedClawhubList.timestamp < CLAWHUB_LIST_CACHE_TTL_MS;
+          if (cacheFresh) {
+            return Promise.resolve<{ success: boolean; results?: ClawHubListResult[]; error?: string }>({
+              success: true,
+              results: cachedClawhubList!.results,
             });
           }
-        });
-      }
 
-      set({ skills: combinedSkills, loading: false });
-    } catch (error) {
-      console.error('Failed to fetch skills:', error);
-      const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
-      set({ loading: false, error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch') });
-    }
+          if (!inflightClawhubList) {
+            inflightClawhubList = Promise.resolve(
+              hostApiFetch<{ success: boolean; results?: ClawHubListResult[]; error?: string }>('/api/clawhub/list'),
+            )
+              .then((result) => {
+                const normalized =
+                  result && typeof result === 'object'
+                    ? result
+                    : ({ success: false, error: 'Invalid ClawHub list response' } as {
+                      success: boolean;
+                      results?: ClawHubListResult[];
+                      error?: string;
+                    });
+                if (normalized.success && normalized.results) {
+                  cachedClawhubList = {
+                    timestamp: Date.now(),
+                    results: normalized.results,
+                  };
+                }
+                return normalized;
+              })
+              .finally(() => {
+                inflightClawhubList = null;
+              });
+          }
+          return inflightClawhubList;
+        })();
+
+        const [gatewayData, configResult] = await Promise.all([
+          gatewayPromise,
+          configPromise,
+        ]);
+
+        const mergeWithClawhub = (
+          baseSkills: Skill[],
+          clawhubResults?: ClawHubListResult[],
+        ): Skill[] => {
+          if (!Array.isArray(clawhubResults) || clawhubResults.length === 0) {
+            return baseSkills;
+          }
+          const merged = [...baseSkills];
+          clawhubResults.forEach((cs: ClawHubListResult) => {
+            const existing = merged.find((s) => s.id === cs.slug);
+            if (!existing) {
+              const directConfig = configResult[cs.slug] || {};
+              merged.push({
+                id: cs.slug,
+                slug: cs.slug,
+                name: cs.slug,
+                description: 'Recently installed, initializing...',
+                enabled: false,
+                icon: '⌛',
+                version: cs.version || 'unknown',
+                author: undefined,
+                config: directConfig,
+                isCore: false,
+                isBundled: false,
+              });
+            }
+          });
+          return merged;
+        };
+
+        let combinedSkills: Skill[] = [];
+        const currentSkills = get().skills;
+
+        // Map gateway skills info
+        if (gatewayData.skills) {
+          combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
+            // Merge with direct config if available
+            const directConfig = configResult[s.skillKey] || {};
+
+            return {
+              id: s.skillKey,
+              slug: s.slug || s.skillKey,
+              name: s.name || s.skillKey,
+              description: s.description || '',
+              enabled: !s.disabled,
+              icon: s.emoji || '📦',
+              version: s.version || '1.0.0',
+              author: s.author,
+              eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
+              blockedByAllowlist: s.blockedByAllowlist === true,
+              missing: normalizeMissingRequirements(s.missing),
+              config: {
+                ...(s.config || {}),
+                ...directConfig,
+              },
+              isCore: s.bundled && s.always,
+              isBundled: s.bundled,
+            };
+          });
+        } else if (currentSkills.length > 0) {
+          // ... if gateway down ...
+          combinedSkills = [...currentSkills];
+        }
+
+        lastSkillsFetchAt = Date.now();
+        set({ skills: combinedSkills, loading: false, error: null });
+
+        // Merge ClawHub list in the background to avoid blocking page entry.
+        void clawhubPromise
+          .then((clawhubResult) => {
+            if (!clawhubResult.success || !clawhubResult.results) {
+              return;
+            }
+            const mergedSkills = mergeWithClawhub(combinedSkills, clawhubResult.results);
+            if (mergedSkills.length !== combinedSkills.length) {
+              set({ skills: mergedSkills, loading: false, error: null });
+            }
+          })
+          .catch((error) => {
+            console.warn('ClawHub list merge skipped:', error);
+          });
+      } catch (error) {
+        console.error('Failed to fetch skills:', error);
+        const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+        set({ loading: false, error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch') });
+      } finally {
+        inflightSkillsFetch = null;
+      }
+    })();
+
+    await inflightSkillsFetch;
   },
 
   searchSkills: async (query: string) => {
@@ -263,7 +347,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(mapErrorCodeToSkillErrorKey(appError.code, 'install'));
       }
       // Refresh skills after install
-      await get().fetchSkills();
+      await get().fetchSkills({ force: true });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -287,7 +371,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(result.error || 'Uninstall failed');
       }
       // Refresh skills after uninstall
-      await get().fetchSkills();
+      await get().fetchSkills({ force: true });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;
