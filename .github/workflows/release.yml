@@ -73,14 +73,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: 'pnpm'
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -113,23 +115,28 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
-          # Guardrail: if CSC_LINK is misconfigured (e.g. points to a directory),
-          # fall back to unsigned build instead of failing hard.
-          if [ -n "${CSC_LINK:-}" ]; then
-            echo "Detected CSC_LINK in environment"
-            if [ -d "${CSC_LINK}" ]; then
-              echo "Invalid CSC_LINK: points to a directory (${CSC_LINK})"
-              echo "Falling back to unsigned build"
-              unset CSC_LINK
-              unset CSC_KEY_PASSWORD
-              export CSC_IDENTITY_AUTO_DISCOVERY=false
+          pnpm run build:vite
+          pnpm exec zx scripts/bundle-openclaw.mjs
+          pnpm exec zx scripts/bundle-openclaw-plugins.mjs
+          pnpm exec zx scripts/bundle-preinstalled-skills.mjs
+
+          BUILDER_ARGS=(--mac --publish never)
+          if [ -n "${CSC_LINK:-}" ] && [ -n "${CSC_KEY_PASSWORD:-}" ]; then
+            echo "Detected macOS certificate; building signed artifacts"
+            if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+              echo "Detected notarization credentials; keep notarize=true from electron-builder.yml"
+            else
+              echo "Apple notarization credentials not complete; disable notarization for this run"
+              BUILDER_ARGS+=("-c.mac.notarize=false")
             fi
           else
-            echo "No CSC_LINK provided; building unsigned macOS artifacts"
+            echo "No CSC cert credentials; building unsigned macOS artifacts"
+            unset CSC_LINK CSC_KEY_PASSWORD CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD
             export CSC_IDENTITY_AUTO_DISCOVERY=false
+            BUILDER_ARGS+=("-c.mac.identity=null" "-c.mac.notarize=false")
           fi
 
-          pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --mac --publish never
+          pnpm exec electron-builder "${BUILDER_ARGS[@]}"
 
       # Windows specific steps
       - name: Build Windows
