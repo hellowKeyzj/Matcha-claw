@@ -235,7 +235,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r bg-background transition-all duration-300"
+      className="relative flex shrink-0 flex-col border-r border-border/80 bg-card transition-all duration-300"
       style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
     >
       <nav className="flex flex-1 flex-col gap-1 overflow-hidden p-2">

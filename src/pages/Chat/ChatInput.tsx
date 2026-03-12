@@ -604,7 +604,7 @@ export function ChatInput({
 
   return (
     <div
-      className="bg-background p-4"
+      className="p-4"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -640,7 +640,7 @@ export function ChatInput({
 
           {/* Textarea */}
           <div className="flex-1 relative">
-            <div className="rounded-md border border-input bg-background px-3 py-2">
+            <div className="rounded-md border border-input/90 bg-card/70 px-3 py-2 backdrop-blur-[2px]">
               {selectedSkills.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {selectedSkills.map((skill) => (
@@ -773,9 +773,8 @@ export function ChatInput({
             )}
           </Button>
         </div>
-        <div className="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>Tip: switch sessions from the sidebar to keep context clean.</span>
-          {hasFailedAttachments && (
+        {hasFailedAttachments && (
+          <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
             <Button
               variant="link"
               size="sm"
@@ -787,8 +786,8 @@ export function ChatInput({
             >
               Retry failed attachments
             </Button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

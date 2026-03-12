@@ -1050,8 +1050,8 @@ export function Settings() {
                   {t('appearance.clearAvatar')}
                 </Button>
               </div>
-              <div className="flex items-center justify-between">
-                <div>
+              <div className="ml-auto flex w-auto max-w-full items-center gap-3">
+                <div className="max-w-[240px]">
                   <Label className="text-[15px] font-medium text-foreground/80">{t('appearance.launchAtStartup')}</Label>
                   <p className="text-[13px] text-muted-foreground mt-1">
                     {t('appearance.launchAtStartupDesc')}
