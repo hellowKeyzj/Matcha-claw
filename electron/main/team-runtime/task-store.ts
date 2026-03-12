@@ -202,7 +202,14 @@ export async function updateTaskStatus(input: {
       ? task.attempt + 1
       : task.attempt,
     resultSummary: input.resultSummary ?? task.resultSummary,
-    error: input.error ?? (input.nextStatus === 'done' ? undefined : task.error),
+    error: input.error ?? (
+      input.nextStatus === 'done'
+      || input.nextStatus === 'todo'
+      || input.nextStatus === 'running'
+      || input.nextStatus === 'claimed'
+        ? undefined
+        : task.error
+    ),
     updatedAt: now,
   };
   if (input.nextStatus === 'todo' || input.nextStatus === 'done' || input.nextStatus === 'failed') {

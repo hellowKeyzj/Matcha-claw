@@ -7,10 +7,13 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
+import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
-import { useTeamAutoRunner } from './useTeamAutoRunner';
+import type { TeamMailboxMessage, TeamTask } from '@/lib/team/runtime-client';
 
 const DEFAULT_LEASE_MS = 60_000;
+const EMPTY_TASKS: TeamTask[] = [];
+const EMPTY_MESSAGES: TeamMailboxMessage[] = [];
 
 function sessionKey(agentId: string, teamId: string): string {
   return `agent:${agentId}:team:${teamId}:exec`;
@@ -40,8 +43,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
 
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
   const team = teams.find((row) => row.id === resolvedTeamId);
-  const tasks = useTeamsStore((state) => (resolvedTeamId ? (state.tasksByTeamId[resolvedTeamId] ?? []) : []));
-  const messages = useTeamsStore((state) => (resolvedTeamId ? (state.mailboxByTeamId[resolvedTeamId] ?? []) : []));
+  const tasks = useTeamsStore((state) => (
+    resolvedTeamId ? (state.tasksByTeamId[resolvedTeamId] ?? EMPTY_TASKS) : EMPTY_TASKS
+  ));
+  const messages = useTeamsStore((state) => (
+    resolvedTeamId ? (state.mailboxByTeamId[resolvedTeamId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES
+  ));
   const runMeta = useTeamsStore((state) => (resolvedTeamId ? state.runMetaByTeamId[resolvedTeamId] : undefined));
   const loading = useTeamsStore((state) => (resolvedTeamId ? Boolean(state.loadingByTeamId[resolvedTeamId]) : false));
   const error = useTeamsStore((state) => (resolvedTeamId ? state.errorByTeamId[resolvedTeamId] : undefined));
@@ -52,7 +59,11 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [messageText, setMessageText] = useState('');
   const [messageTo, setMessageTo] = useState<'broadcast' | string>('broadcast');
-  const [autoRunnerEnabled, setAutoRunnerEnabled] = useState(true);
+  const enabledByTeamId = useTeamsRunnerStore((state) => state.enabledByTeamId);
+  const activeAgentIdsByTeamId = useTeamsRunnerStore((state) => state.activeAgentIdsByTeamId);
+  const activeTaskByAgentByTeamId = useTeamsRunnerStore((state) => state.activeTaskByAgentByTeamId);
+  const lastErrorByTeamId = useTeamsRunnerStore((state) => state.lastErrorByTeamId);
+  const setTeamEnabled = useTeamsRunnerStore((state) => state.setTeamEnabled);
 
   const effectiveSelectedAgentId = useMemo(() => {
     if (!team) {
@@ -92,17 +103,24 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     return groups;
   }, [tasks]);
 
-  const autoRunner = useTeamAutoRunner({
-    enabled: Boolean(team && autoRunnerEnabled && gatewayState === 'running'),
-    teamId: team?.id,
-    memberIds: team?.memberIds ?? [],
-    getSessionKey: (agentId: string) => sessionKey(agentId, team?.id ?? ''),
-    claimNext,
-    heartbeat,
-    updateTaskStatus,
-    releaseClaim,
-    postMailbox,
-  });
+  const teamAutoRunnerEnabled = resolvedTeamId ? (enabledByTeamId[resolvedTeamId] ?? true) : true;
+  const teamActiveAgentIds = useMemo(
+    () => (resolvedTeamId ? (activeAgentIdsByTeamId[resolvedTeamId] ?? []) : []),
+    [activeAgentIdsByTeamId, resolvedTeamId],
+  );
+  const teamActiveTaskByAgent = useMemo(
+    () => (resolvedTeamId ? (activeTaskByAgentByTeamId[resolvedTeamId] ?? {}) : {}),
+    [activeTaskByAgentByTeamId, resolvedTeamId],
+  );
+  const autoRunnerVisibleActiveCount = useMemo(() => {
+    const ids = new Set(teamActiveAgentIds);
+    for (const task of tasks) {
+      if ((task.status === 'claimed' || task.status === 'running') && task.ownerAgentId) {
+        ids.add(task.ownerAgentId);
+      }
+    }
+    return ids.size;
+  }, [teamActiveAgentIds, tasks]);
 
   if (!team || !resolvedTeamId) {
     return (
@@ -118,9 +136,10 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   }
 
   const leadSession = effectiveSelectedAgentId ? sessionKey(effectiveSelectedAgentId, team.id) : '';
-  const autoRunnerState = autoRunnerEnabled && gatewayState === 'running'
+  const autoRunnerState = teamAutoRunnerEnabled && gatewayState === 'running'
     ? t('chat.autoRunnerOn')
     : t('chat.autoRunnerOff');
+  const autoRunnerError = resolvedTeamId ? lastErrorByTeamId[resolvedTeamId] : undefined;
 
   const handleAddTask = async () => {
     const instruction = newTaskInstruction.trim();
@@ -161,10 +180,15 @@ export function TeamChat({ teamId }: { teamId?: string }) {
         </div>
         <div className="flex items-center gap-2">
           <Button
-            variant={autoRunnerEnabled ? 'default' : 'outline'}
-            onClick={() => setAutoRunnerEnabled((prev) => !prev)}
+            variant={teamAutoRunnerEnabled ? 'default' : 'outline'}
+            onClick={() => {
+              if (!team) {
+                return;
+              }
+              setTeamEnabled(team.id, !teamAutoRunnerEnabled);
+            }}
           >
-            {autoRunnerEnabled ? t('chat.autoRunnerStop') : t('chat.autoRunnerStart')}
+            {teamAutoRunnerEnabled ? t('chat.autoRunnerStop') : t('chat.autoRunnerStart')}
           </Button>
           <Button variant="outline" onClick={() => void refreshSnapshot(team.id)}>
             {t('chat.refresh')}
@@ -182,12 +206,12 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       )}
 
       <div className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
-        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: autoRunner.activeAgentIds.length })}
+        {t('chat.autoRunnerStatus', { state: autoRunnerState, count: autoRunnerVisibleActiveCount })}
       </div>
 
-      {autoRunner.lastError && (
+      {autoRunnerError && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-          {t('chat.autoRunnerError', { error: autoRunner.lastError })}
+          {t('chat.autoRunnerError', { error: autoRunnerError })}
         </div>
       )}
 
@@ -435,12 +459,18 @@ export function TeamChat({ teamId }: { teamId?: string }) {
               {team.memberIds.map((agentId) => {
                 const ownedTasks = tasks.filter((task) => task.ownerAgentId === agentId);
                 const runningCount = ownedTasks.filter((task) => task.status === 'running').length;
+                const activeTaskId = teamActiveTaskByAgent[agentId];
                 return (
                   <div key={agentId} className="rounded border p-2">
                     <div className="text-sm font-medium">{agentId}</div>
                     <div className="text-xs text-muted-foreground">
                       {t('agents.ownedTasks')}: {ownedTasks.length} · {t('agents.runningTasks')}: {runningCount}
                     </div>
+                    {activeTaskId && (
+                      <div className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
+                        {t('agents.autoRunningTask')}: {activeTaskId}
+                      </div>
+                    )}
                     <div className="mt-2">
                       <Button
                         size="sm"

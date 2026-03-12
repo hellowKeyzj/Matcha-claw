@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { useTeamsStore } from '@/stores/teams';
+import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { TeamChat } from '@/pages/Teams/TeamChat';
 import i18n from '@/i18n';
 
@@ -9,6 +10,15 @@ describe('team chat', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
     localStorage.removeItem('teams-runtime-store');
+    localStorage.removeItem('teams-runner-store');
+
+    useTeamsRunnerStore.setState({
+      daemonRunning: true,
+      enabledByTeamId: { 'team-1': true },
+      activeAgentIdsByTeamId: { 'team-1': [] },
+      activeTaskByAgentByTeamId: { 'team-1': {} },
+      lastErrorByTeamId: {},
+    });
 
     useTeamsStore.setState({
       teams: [

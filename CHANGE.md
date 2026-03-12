@@ -1,5 +1,63 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-11 团队执行器闭环补齐）
+
+### 目录树
+
+```text
+src/
+├── components/runtime/
+│   └── TeamsRuntimeDaemon.tsx
+├── lib/team/
+│   ├── background-orchestrator.ts
+│   └── runner-automation.ts
+├── stores/
+│   └── teams-runner.ts
+└── pages/Teams/
+    ├── TeamChat.tsx
+    └── useTeamAutoRunner.ts (已删除)
+
+electron/main/team-runtime/
+└── schema.ts
+
+tests/unit/
+├── team-runner-automation.test.ts
+├── team-runtime-schema.test.ts
+└── team-runtime-task-store.test.ts
+
+docs/plans/
+└── 2026-03-09-teams-minimal-pull-mailbox-design.md
+```
+
+### 文件职责
+
+- `TeamsRuntimeDaemon.tsx`：应用级后台守护组件，负责启动/停止团队执行编排器。
+- `background-orchestrator.ts`：后台常驻调度（自动认领、执行、阻塞决策、自动规划）。
+- `runner-automation.ts`：阻塞决策解析、自动仲裁、proposal 标题提取等纯逻辑。
+- `teams-runner.ts`：后台执行状态存储（开关、活跃成员、活跃任务、错误）。
+- `TeamChat.tsx`：团队页展示与手动操作入口，消费全局 runner 状态，不再承载执行循环。
+- `schema.ts`：任务状态机约束，新增 `blocked -> todo` 以支持重试回队列。
+
+### 模块依赖与边界
+
+- 执行循环从页面侧迁移到全局后台 daemon，UI 与执行编排解耦。
+- 渲染层继续通过 `teams store -> runtime-client -> IPC(team:*)` 访问运行时。
+- 阻塞决策/自动规划仅操作 `team:*` 契约，不新增旁路状态源。
+
+### 关键决策与原因
+
+1. 用全局 daemon 替代页面挂载执行，解决“切页即停工”的架构问题。
+2. 阻塞流程改为 mailbox 决策闭环，避免失败后任务无人处理。
+3. lead 自动处理 proposal 与超时仲裁，补齐最小自治协作能力。
+4. 将“完成判定”收紧为“run 完成且产生新的 assistant 回复”，避免旧消息误判完成。
+
+### 本次变更
+
+- 新增后台常驻执行器、全局 runner store、自动决策工具模块。
+- 删除旧 `useTeamAutoRunner.ts` 页面内执行器。
+- 补齐 `blocked -> todo` 状态迁移与对应单测。
+- 更新团队方案文档，补齐并发/接管/回归测试矩阵与验证命令。
+
 ## 本次变更日志（2026-03-11 团队自动执行首版）
 
 - 新增 `src/pages/Teams/useTeamAutoRunner.ts`：团队成员自动执行循环（claim -> running -> chat.send -> done/failed -> release）。

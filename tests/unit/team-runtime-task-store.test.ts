@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { claimNextTask, listTasks, upsertPlanTasks } from '@electron/main/team-runtime/task-store';
+import { claimNextTask, listTasks, updateTaskStatus, upsertPlanTasks } from '@electron/main/team-runtime/task-store';
 
 describe('team runtime task store', () => {
   it('does not claim task with unresolved dependsOn', async () => {
@@ -50,6 +50,48 @@ describe('team runtime task store', () => {
       const tasks = await listTasks(root);
       expect(tasks[0]?.status).toBe('claimed');
       expect(tasks[0]?.ownerAgentId).toBe('owner-a');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('supports blocked -> todo retry requeue flow', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'team-task-retry-'));
+    try {
+      await upsertPlanTasks({
+        runtimeRoot: root,
+        tasks: [{ taskId: 'task-1', instruction: 'first task' }],
+      });
+
+      const claimed = await claimNextTask({
+        runtimeRoot: root,
+        agentId: 'owner-a',
+        sessionKey: 'owner-session',
+        leaseMs: 30000,
+      });
+      expect(claimed?.status).toBe('claimed');
+
+      await updateTaskStatus({
+        runtimeRoot: root,
+        taskId: 'task-1',
+        nextStatus: 'running',
+      });
+      await updateTaskStatus({
+        runtimeRoot: root,
+        taskId: 'task-1',
+        nextStatus: 'blocked',
+        error: 'tool timeout',
+      });
+      await updateTaskStatus({
+        runtimeRoot: root,
+        taskId: 'task-1',
+        nextStatus: 'todo',
+      });
+
+      const tasks = await listTasks(root);
+      expect(tasks[0]?.status).toBe('todo');
+      expect(tasks[0]?.ownerAgentId).toBeUndefined();
+      expect(tasks[0]?.claimSessionKey).toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
