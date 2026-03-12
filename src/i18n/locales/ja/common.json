@@ -21,7 +21,16 @@
         "expandMenu": "サイドバーを展開",
         "dashboard": "ダッシュボード",
         "settings": "設定",
-        "devConsole": "開発者コンソール"
+        "devConsole": "開発者コンソール",
+        "pendingBlockers": "セッション阻害",
+        "pendingBlockersEmpty": "未処理の阻害はありません",
+        "pendingBlockerTask": "タスク {{taskId}}",
+        "pendingBlockerGeneral": "一般阻害",
+        "pendingBlockerFrom": "{{from}} から",
+        "pendingBlockerTypeApproval": "承認待ち阻害",
+        "pendingBlockerTypeInput": "入力待ち阻害",
+        "pendingBlockerSourceTask": "タスクセンター",
+        "pendingBlockerTaskId": "タスクID {{taskId}}"
     },
     "actions": {
         "save": "保存",
