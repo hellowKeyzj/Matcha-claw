@@ -396,10 +396,11 @@ export function TeamChat({ teamId }: { teamId?: string }) {
               <Button
                 onClick={async () => {
                   if (!effectiveSelectedAgentId || !messageText.trim()) return;
+                  const normalizedTo = messageTo || 'broadcast';
                   await postMailbox(team.id, {
                     msgId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                     fromAgentId: effectiveSelectedAgentId,
-                    to: messageTo,
+                    to: normalizedTo,
                     kind: 'question',
                     content: messageText.trim(),
                     createdAt: Date.now(),
