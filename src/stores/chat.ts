@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import intermediateToolFillerBlacklistConfig from '@/constants/intermediate-tool-filler-blacklist.json';
 import { useGatewayStore } from './gateway';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -189,6 +190,57 @@ const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
   /^task manager.*(恢复提示|动态切换建议)/i,
   /^检测到多个待确认任务/i,
 ];
+const INTERMEDIATE_TOOL_FILLER_BLACKLIST = buildIntermediateToolFillerBlacklist(
+  intermediateToolFillerBlacklistConfig,
+);
+const INTERMEDIATE_TOOL_PHRASE_STATS_KEY = 'clawx:intermediate-tool-phrase-stats:v1';
+const INTERMEDIATE_TOOL_PHRASE_STATS_MAX_ITEMS = 200;
+const INTERMEDIATE_TOOL_PHRASE_TRACK_MAX_LENGTH = 120;
+const INTERMEDIATE_TOOL_PHRASE_REPORT_COUNTS = new Set([3, 5, 10, 20, 50]);
+
+interface IntermediateToolPhraseStat {
+  sample: string;
+  count: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+type IntermediateToolPhraseStats = Record<string, IntermediateToolPhraseStat>;
+
+function buildIntermediateToolFillerBlacklist(source: unknown): Set<string> {
+  if (!Array.isArray(source)) return new Set<string>();
+  const normalized = source
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => normalizeIntermediateToolPhrase(item))
+    .filter((item) => item.length > 0);
+  return new Set<string>(normalized);
+}
+
+function loadIntermediateToolPhraseStats(): IntermediateToolPhraseStats {
+  try {
+    const raw = localStorage.getItem(INTERMEDIATE_TOOL_PHRASE_STATS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as IntermediateToolPhraseStats;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveIntermediateToolPhraseStats(stats: IntermediateToolPhraseStats): void {
+  try {
+    const entries = Object.entries(stats);
+    entries.sort((a, b) => {
+      const countDiff = (b[1]?.count ?? 0) - (a[1]?.count ?? 0);
+      if (countDiff !== 0) return countDiff;
+      return (b[1]?.lastSeenAt ?? 0) - (a[1]?.lastSeenAt ?? 0);
+    });
+    const trimmed = entries.slice(0, INTERMEDIATE_TOOL_PHRASE_STATS_MAX_ITEMS);
+    localStorage.setItem(INTERMEDIATE_TOOL_PHRASE_STATS_KEY, JSON.stringify(Object.fromEntries(trimmed)));
+  } catch {
+    // 忽略 localStorage 配额或序列化错误
+  }
+}
 
 /** Extract plain text from message content (string or content blocks) */
 function getMessageText(content: unknown): string {
@@ -200,6 +252,134 @@ function getMessageText(content: unknown): string {
       .join('\n');
   }
   return '';
+}
+
+function getAssistantText(message: RawMessage | undefined): string {
+  if (!message || typeof message !== 'object') return '';
+  const fromContent = getMessageText(message.content).trim();
+  if (fromContent) return fromContent;
+  const row = message as unknown as Record<string, unknown>;
+  return typeof row.text === 'string' ? row.text.trim() : '';
+}
+
+function hasAssistantToolCall(message: RawMessage | undefined): boolean {
+  if (!message || typeof message !== 'object') return false;
+  const content = message.content;
+  if (Array.isArray(content)) {
+    for (const block of content as ContentBlock[]) {
+      if (block.type === 'tool_use' || block.type === 'toolCall') return true;
+    }
+  }
+  const row = message as unknown as Record<string, unknown>;
+  const toolCalls = row.tool_calls ?? row.toolCalls;
+  return Array.isArray(toolCalls) && toolCalls.length > 0;
+}
+
+function normalizeIntermediateToolPhrase(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[`"'“”]/g, '')
+    .replace(/[，。！!？?、,.]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldTrackIntermediateToolPhrase(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.length > INTERMEDIATE_TOOL_PHRASE_TRACK_MAX_LENGTH) return false;
+  return !trimmed.includes('\n');
+}
+
+function recordIntermediateToolPhrase(text: string): void {
+  if (!shouldTrackIntermediateToolPhrase(text)) return;
+  const normalized = normalizeIntermediateToolPhrase(text);
+  if (!normalized) return;
+
+  const now = Date.now();
+  const stats = loadIntermediateToolPhraseStats();
+  const current = stats[normalized];
+  const nextCount = (current?.count ?? 0) + 1;
+  stats[normalized] = {
+    sample: text.trim().slice(0, INTERMEDIATE_TOOL_PHRASE_TRACK_MAX_LENGTH),
+    count: nextCount,
+    firstSeenAt: current?.firstSeenAt ?? now,
+    lastSeenAt: now,
+  };
+  saveIntermediateToolPhraseStats(stats);
+
+  if (INTERMEDIATE_TOOL_PHRASE_REPORT_COUNTS.has(nextCount)) {
+    console.info(`[chat] 中间工具套话高频出现 (${nextCount}): ${stats[normalized].sample}`);
+  }
+}
+
+function isBlacklistedIntermediateToolPhrase(text: string): boolean {
+  const normalized = normalizeIntermediateToolPhrase(text);
+  return normalized.length > 0 && INTERMEDIATE_TOOL_FILLER_BLACKLIST.has(normalized);
+}
+
+function stripAssistantTextForToolFiller(message: RawMessage): RawMessage {
+  const row = message as unknown as Record<string, unknown>;
+  const nextRow: Record<string, unknown> = { ...row };
+  let changed = false;
+
+  if (typeof nextRow.content === 'string') {
+    if (nextRow.content.trim().length > 0) {
+      nextRow.content = '';
+      changed = true;
+    }
+  } else if (Array.isArray(nextRow.content)) {
+    const nextContent = (nextRow.content as ContentBlock[]).filter((block) => block.type !== 'text');
+    if (nextContent.length !== nextRow.content.length) {
+      nextRow.content = nextContent;
+      changed = true;
+    }
+  }
+
+  if (typeof nextRow.text === 'string' && nextRow.text.trim().length > 0) {
+    nextRow.text = '';
+    changed = true;
+  }
+
+  return changed ? nextRow as unknown as RawMessage : message;
+}
+
+function shouldTreatAsIntermediateToolTurn(
+  message: RawMessage | undefined,
+  nextMessage?: RawMessage,
+  requireFollower = false,
+): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  if (!hasAssistantToolCall(message)) return false;
+  if (!getAssistantText(message)) return false;
+  if (!requireFollower) return true;
+  if (!nextMessage) return false;
+  if (isToolResultRole(nextMessage.role)) return true;
+  return nextMessage.role === 'assistant';
+}
+
+function sanitizeIntermediateToolFillerMessage(
+  message: RawMessage,
+  options?: {
+    nextMessage?: RawMessage;
+    requireFollower?: boolean;
+    trackPhrase?: boolean;
+  },
+): RawMessage {
+  const requireFollower = options?.requireFollower ?? false;
+  if (!shouldTreatAsIntermediateToolTurn(message, options?.nextMessage, requireFollower)) {
+    return message;
+  }
+
+  const text = getAssistantText(message);
+  if (!text) return message;
+  if (options?.trackPhrase) {
+    recordIntermediateToolPhrase(text);
+  }
+  if (!isBlacklistedIntermediateToolPhrase(text)) {
+    return message;
+  }
+  return stripAssistantTextForToolFiller(message);
 }
 
 function normalizeSessionLabelText(text: string): string {
@@ -1251,7 +1431,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         // Before filtering: attach images/files from tool_result messages to the next assistant message
         const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
-        const filteredMessages = messagesWithToolImages.filter((msg) => !isToolResultRole(msg.role));
+        const filteredMessages: RawMessage[] = [];
+        for (let i = 0; i < messagesWithToolImages.length; i += 1) {
+          const current = messagesWithToolImages[i];
+          if (isToolResultRole(current.role)) continue;
+          const next = i + 1 < messagesWithToolImages.length ? messagesWithToolImages[i + 1] : undefined;
+          filteredMessages.push(
+            sanitizeIntermediateToolFillerMessage(current, {
+              nextMessage: next,
+              requireFollower: true,
+              trackPhrase: false,
+            }),
+          );
+        }
         // Restore file attachments for user/assistant messages (from cache + text patterns)
         const enrichedMessages = enrichWithCachedImages(filteredMessages);
         const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
@@ -1659,21 +1851,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
               // would be overwritten by the next turn's deltas and never appear in the UI.
               const currentStream = s.streamingMessage as RawMessage | null;
               const snapshotMsgs: RawMessage[] = [];
-              if (currentStream) {
-                const streamRole = currentStream.role;
-                if (streamRole === 'assistant' || streamRole === undefined) {
-                  // Use message's own id if available, otherwise derive a stable one from runId
-                  const snapId = currentStream.id
-                    || `${runId || 'run'}-turn-${s.messages.length}`;
-                  if (!s.messages.some(m => m.id === snapId)) {
-                    snapshotMsgs.push({
-                      ...(currentStream as RawMessage),
-                      role: 'assistant',
-                      id: snapId,
-                    });
+                if (currentStream) {
+                  const streamRole = currentStream.role;
+                  if (streamRole === 'assistant' || streamRole === undefined) {
+                    // Use message's own id if available, otherwise derive a stable one from runId
+                    const snapId = currentStream.id
+                      || `${runId || 'run'}-turn-${s.messages.length}`;
+                    if (!s.messages.some(m => m.id === snapId)) {
+                      const snapshot = sanitizeIntermediateToolFillerMessage({
+                        ...(currentStream as RawMessage),
+                        role: 'assistant',
+                        id: snapId,
+                      }, { trackPhrase: true });
+                      snapshotMsgs.push(snapshot);
+                    }
                   }
                 }
-              }
               return {
                 messages: snapshotMsgs.length > 0 ? [...s.messages, ...snapshotMsgs] : s.messages,
                 streamingText: '',
@@ -1769,8 +1962,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             || `error-snap-${Date.now()}`;
           const alreadyExists = get().messages.some(m => m.id === snapId);
           if (!alreadyExists) {
+            const snapshot = sanitizeIntermediateToolFillerMessage({
+              ...currentStream,
+              role: 'assistant' as const,
+              id: snapId,
+            }, { trackPhrase: true });
             set((s) => ({
-              messages: [...s.messages, { ...currentStream, role: 'assistant' as const, id: snapId }],
+              messages: [...s.messages, snapshot],
             }));
           }
         }
