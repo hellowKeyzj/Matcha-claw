@@ -200,15 +200,9 @@ export function Settings() {
     setGatewayAutoStart,
     proxyEnabled,
     proxyServer,
-    proxyHttpServer,
-    proxyHttpsServer,
-    proxyAllServer,
     proxyBypassRules,
     setProxyEnabled,
     setProxyServer,
-    setProxyHttpServer,
-    setProxyHttpsServer,
-    setProxyAllServer,
     setProxyBypassRules,
     autoCheckUpdate,
     setAutoCheckUpdate,
@@ -224,12 +218,9 @@ export function Settings() {
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
   const [proxyServerDraft, setProxyServerDraft] = useState('');
-  const [proxyHttpServerDraft, setProxyHttpServerDraft] = useState('');
-  const [proxyHttpsServerDraft, setProxyHttpsServerDraft] = useState('');
-  const [proxyAllServerDraft, setProxyAllServerDraft] = useState('');
   const [proxyBypassRulesDraft, setProxyBypassRulesDraft] = useState('');
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState(false);
-  const [showAdvancedProxy, setShowAdvancedProxy] = useState(false);
+  const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
@@ -625,18 +616,6 @@ export function Settings() {
   }, [proxyServer]);
 
   useEffect(() => {
-    setProxyHttpServerDraft(proxyHttpServer);
-  }, [proxyHttpServer]);
-
-  useEffect(() => {
-    setProxyHttpsServerDraft(proxyHttpsServer);
-  }, [proxyHttpsServer]);
-
-  useEffect(() => {
-    setProxyAllServerDraft(proxyAllServer);
-  }, [proxyAllServer]);
-
-  useEffect(() => {
     setProxyBypassRulesDraft(proxyBypassRules);
   }, [proxyBypassRules]);
 
@@ -671,23 +650,14 @@ export function Settings() {
     setSavingProxy(true);
     try {
       const normalizedProxyServer = proxyServerDraft.trim();
-      const normalizedHttpServer = proxyHttpServerDraft.trim();
-      const normalizedHttpsServer = proxyHttpsServerDraft.trim();
-      const normalizedAllServer = proxyAllServerDraft.trim();
       const normalizedBypassRules = proxyBypassRulesDraft.trim();
       await invokeIpc('settings:setMany', {
         proxyEnabled: proxyEnabledDraft,
         proxyServer: normalizedProxyServer,
-        proxyHttpServer: normalizedHttpServer,
-        proxyHttpsServer: normalizedHttpsServer,
-        proxyAllServer: normalizedAllServer,
         proxyBypassRules: normalizedBypassRules,
       });
 
       setProxyServer(normalizedProxyServer);
-      setProxyHttpServer(normalizedHttpServer);
-      setProxyHttpsServer(normalizedHttpsServer);
-      setProxyAllServer(normalizedAllServer);
       setProxyBypassRules(normalizedBypassRules);
       setProxyEnabled(proxyEnabledDraft);
 
@@ -816,6 +786,20 @@ export function Settings() {
     { key: 'diagnostics', label: t('diagnostics.title') },
   ];
 
+  const switchSection = useCallback((section: SettingsSectionKey) => {
+    setActiveSection(section);
+    const params = new URLSearchParams(location.search);
+    params.set('section', section);
+    const nextSearch = params.toString();
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextSearch ? `?${nextSearch}` : '',
+      },
+      { replace: true },
+    );
+  }, [location.pathname, location.search, navigate]);
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <div>
@@ -839,19 +823,7 @@ export function Settings() {
                       ? 'bg-primary/12 text-primary hover:bg-primary/18'
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted/70'
                   }`}
-                  onClick={() => {
-                    setActiveSection(section.key);
-                    const params = new URLSearchParams(location.search);
-                    params.set('section', section.key);
-                    const nextSearch = params.toString();
-                    navigate(
-                      {
-                        pathname: location.pathname,
-                        search: nextSearch ? `?${nextSearch}` : '',
-                      },
-                      { replace: true },
-                    );
-                  }}
+                  onClick={() => switchSection(section.key)}
                 >
                   <span
                     aria-hidden
@@ -1190,124 +1162,80 @@ export function Settings() {
 
           <Separator />
 
-          {devModeUnlocked ? (
-            <div className="space-y-4">
-              <div className="rounded-md border border-border/60 p-3">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start"
-                  onClick={() => setShowAdvancedProxy((prev) => !prev)}
-                >
-                  {showAdvancedProxy ? (
-                    <ChevronDown className="h-4 w-4 mr-2" />
-                  ) : (
-                    <ChevronRight className="h-4 w-4 mr-2" />
-                  )}
-                  {showAdvancedProxy ? t('gateway.hideAdvancedProxy') : t('gateway.showAdvancedProxy')}
-                </Button>
-                {showAdvancedProxy && (
-                  <div className="mt-3 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label>{t('gateway.proxyTitle')}</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {t('gateway.proxyDesc')}
-                        </p>
-                      </div>
-                      <Switch
-                        checked={proxyEnabledDraft}
-                        onCheckedChange={setProxyEnabledDraft}
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="proxy-server">{t('gateway.proxyServer')}</Label>
-                      <Input
-                        id="proxy-server"
-                        value={proxyServerDraft}
-                        onChange={(event) => setProxyServerDraft(event.target.value)}
-                        placeholder="http://127.0.0.1:7890"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('gateway.proxyServerHelp')}
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="proxy-http-server">{t('gateway.proxyHttpServer')}</Label>
-                      <Input
-                        id="proxy-http-server"
-                        value={proxyHttpServerDraft}
-                        onChange={(event) => setProxyHttpServerDraft(event.target.value)}
-                        placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('gateway.proxyHttpServerHelp')}
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="proxy-https-server">{t('gateway.proxyHttpsServer')}</Label>
-                      <Input
-                        id="proxy-https-server"
-                        value={proxyHttpsServerDraft}
-                        onChange={(event) => setProxyHttpsServerDraft(event.target.value)}
-                        placeholder={proxyServerDraft || 'http://127.0.0.1:7890'}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('gateway.proxyHttpsServerHelp')}
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="proxy-all-server">{t('gateway.proxyAllServer')}</Label>
-                      <Input
-                        id="proxy-all-server"
-                        value={proxyAllServerDraft}
-                        onChange={(event) => setProxyAllServerDraft(event.target.value)}
-                        placeholder={proxyServerDraft || 'socks5://127.0.0.1:7891'}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('gateway.proxyAllServerHelp')}
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="proxy-bypass">{t('gateway.proxyBypass')}</Label>
-                      <Input
-                        id="proxy-bypass"
-                        value={proxyBypassRulesDraft}
-                        onChange={(event) => setProxyBypassRulesDraft(event.target.value)}
-                        placeholder="<local>;localhost;127.0.0.1;::1"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        {t('gateway.proxyBypassHelp')}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
-                      <p className="text-sm text-muted-foreground">
-                        {t('gateway.proxyRestartNote')}
-                      </p>
-                      <Button
-                        variant="outline"
-                        onClick={handleSaveProxySettings}
-                        disabled={savingProxy}
-                      >
-                        <RefreshCw className={`h-4 w-4 mr-2${savingProxy ? ' animate-spin' : ''}`} />
-                        {savingProxy ? t('common:status.saving') : t('common:actions.save')}
-                      </Button>
-                    </div>
-                  </div>
+          <div className="rounded-md border border-border/60 p-3">
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-auto w-full justify-start p-0 hover:bg-transparent"
+              onClick={() => setProxySettingsExpanded((prev) => !prev)}
+            >
+              <div className="flex items-center gap-2">
+                {proxySettingsExpanded ? (
+                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                ) : (
+                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
                 )}
+                <div className="text-left">
+                  <Label>{t('gateway.proxyTitle')}</Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('gateway.proxyDesc')}
+                  </p>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="rounded-md border border-border/60 bg-muted/30 p-4 text-sm text-muted-foreground">
-              {t('advanced.devModeDesc')}
-            </div>
-          )}
+            </Button>
+
+            {proxySettingsExpanded && (
+              <div className="mt-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <Label>{t('gateway.proxyTitle')}</Label>
+                  <Switch
+                    checked={proxyEnabledDraft}
+                    onCheckedChange={setProxyEnabledDraft}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="proxy-server">{t('gateway.proxyServer')}</Label>
+                  <Input
+                    id="proxy-server"
+                    value={proxyServerDraft}
+                    onChange={(event) => setProxyServerDraft(event.target.value)}
+                    placeholder="http://127.0.0.1:7890"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('gateway.proxyServerHelp')}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="proxy-bypass">{t('gateway.proxyBypass')}</Label>
+                  <Input
+                    id="proxy-bypass"
+                    value={proxyBypassRulesDraft}
+                    onChange={(event) => setProxyBypassRulesDraft(event.target.value)}
+                    placeholder="<local>;localhost;127.0.0.1;::1"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('gateway.proxyBypassHelp')}
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
+                  <p className="text-sm text-muted-foreground">
+                    {t('gateway.proxyRestartNote')}
+                  </p>
+                  <Button
+                    variant="outline"
+                    onClick={handleSaveProxySettings}
+                    disabled={savingProxy}
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2${savingProxy ? ' animate-spin' : ''}`} />
+                    {savingProxy ? t('common:status.saving') : t('common:actions.save')}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
       )}

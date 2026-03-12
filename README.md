@@ -184,10 +184,6 @@ Open **Settings → Gateway → Proxy** and configure:
 
 - **Proxy Server**: the default proxy for all requests
 - **Bypass Rules**: hosts that should connect directly, separated by semicolons, commas, or new lines
-- In **Developer Mode**, you can optionally override:
-  - **HTTP Proxy**
-  - **HTTPS Proxy**
-  - **ALL_PROXY / SOCKS**
 
 Recommended local examples:
 
@@ -197,7 +193,6 @@ Proxy Server: http://127.0.0.1:7890
 Notes:
 
 - A bare `host:port` value is treated as HTTP.
-- If advanced proxy fields are left empty, MatchaClaw falls back to `Proxy Server`.
 - Saving proxy settings reapplies Electron networking immediately and restarts the Gateway automatically.
 - MatchaClaw also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
 
@@ -419,4 +414,3 @@ MatchaClaw is released under the [MIT License](LICENSE). You're free to use, mod
 <p align="center">
   <sub>Built with ❤️ by the ValueCell Team</sub>
 </p>
-

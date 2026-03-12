@@ -237,9 +237,6 @@ function isProxyKey(key: keyof AppSettings): boolean {
   return (
     key === 'proxyEnabled' ||
     key === 'proxyServer' ||
-    key === 'proxyHttpServer' ||
-    key === 'proxyHttpsServer' ||
-    key === 'proxyAllServer' ||
     key === 'proxyBypassRules'
   );
 }
@@ -2593,9 +2590,6 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
     if (
       key === 'proxyEnabled' ||
       key === 'proxyServer' ||
-      key === 'proxyHttpServer' ||
-      key === 'proxyHttpsServer' ||
-      key === 'proxyAllServer' ||
       key === 'proxyBypassRules'
     ) {
       await handleProxySettingsChange();
@@ -2616,9 +2610,6 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
     if (entries.some(([key]) =>
       key === 'proxyEnabled' ||
       key === 'proxyServer' ||
-      key === 'proxyHttpServer' ||
-      key === 'proxyHttpsServer' ||
-      key === 'proxyAllServer' ||
       key === 'proxyBypassRules'
     )) {
       await handleProxySettingsChange();

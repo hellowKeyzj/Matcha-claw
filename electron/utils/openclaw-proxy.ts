@@ -16,7 +16,7 @@ export async function syncProxyConfigToOpenClaw(settings: ProxySettings): Promis
 
   const resolved = resolveProxySettings(settings);
   const nextProxy = settings.proxyEnabled
-    ? (resolved.allProxy || resolved.httpsProxy || resolved.httpProxy)
+    ? resolved.allProxy
     : '';
   const currentProxy = typeof telegramConfig.proxy === 'string' ? telegramConfig.proxy : '';
 
@@ -41,4 +41,3 @@ export async function syncProxyConfigToOpenClaw(settings: ProxySettings): Promis
   await writeOpenClawConfig(config);
   logger.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
 }
-

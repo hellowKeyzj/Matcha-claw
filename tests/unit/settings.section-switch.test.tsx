@@ -63,9 +63,6 @@ describe('settings page section switch', () => {
       gatewayAutoStart: true,
       proxyEnabled: false,
       proxyServer: '',
-      proxyHttpServer: '',
-      proxyHttpsServer: '',
-      proxyAllServer: '',
       proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
       autoCheckUpdate: true,
       autoDownloadUpdate: false,
@@ -92,7 +89,7 @@ describe('settings page section switch', () => {
     });
 
     expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Appearance' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'General' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'AI Providers' })).toBeInTheDocument();
 
     expect(screen.getByText('Status')).toBeInTheDocument();

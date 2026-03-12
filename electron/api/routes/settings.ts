@@ -17,9 +17,6 @@ function patchTouchesProxy(patch: Partial<AppSettings>): boolean {
   return Object.keys(patch).some((key) => (
     key === 'proxyEnabled' ||
     key === 'proxyServer' ||
-    key === 'proxyHttpServer' ||
-    key === 'proxyHttpsServer' ||
-    key === 'proxyAllServer' ||
     key === 'proxyBypassRules'
   ));
 }
@@ -77,9 +74,6 @@ export async function handleSettingsRoutes(
       if (
         key === 'proxyEnabled' ||
         key === 'proxyServer' ||
-        key === 'proxyHttpServer' ||
-        key === 'proxyHttpsServer' ||
-        key === 'proxyAllServer' ||
         key === 'proxyBypassRules'
       ) {
         await handleProxySettingsChange(ctx);
