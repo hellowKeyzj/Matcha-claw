@@ -151,7 +151,7 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
     return (
       <aside
         data-testid="chat-task-inbox-panel"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-t border-border/80 bg-card xl:border-l xl:border-t-0"
       >
         <div className="flex flex-1 flex-col items-center gap-2 px-1 py-3">
           <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
@@ -173,7 +173,7 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
   }
 
   return (
-    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-t bg-muted/10 xl:border-l xl:border-t-0">
+    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-t border-border/80 bg-card xl:border-l xl:border-t-0">
       <div className="px-4 py-3">
         <div className="flex items-center justify-between">
           <div>

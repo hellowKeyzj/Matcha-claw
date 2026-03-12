@@ -212,10 +212,13 @@ export function MainLayout() {
   };
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
+    <div className="app-shell-bg flex h-screen flex-col overflow-hidden bg-background">
       <TitleBar />
 
-      <div ref={layoutRef} className="flex flex-1 overflow-hidden">
+      <div
+        ref={layoutRef}
+        className="flex flex-1 overflow-hidden"
+      >
         <Sidebar expandedWidth={sidebarWidth} collapsedWidth={SIDEBAR_COLLAPSED_WIDTH} />
         {!sidebarCollapsed && (
           <VerticalPaneResizer
@@ -240,7 +243,7 @@ export function MainLayout() {
             variant="subtle-border"
           />
         )}
-        <main className="min-w-0 flex-1 overflow-auto p-6">
+        <main className="min-w-0 flex-1 overflow-auto bg-card p-6">
           <Outlet />
         </main>
       </div>

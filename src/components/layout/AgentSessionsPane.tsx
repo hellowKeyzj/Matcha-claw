@@ -260,7 +260,7 @@ export function AgentSessionsPane({
   return (
     <aside
       data-testid="agent-sessions-pane"
-      className="relative flex shrink-0 flex-col border-r bg-background"
+      className="relative flex shrink-0 flex-col border-r border-border/80 bg-card"
       style={{ width: collapsed ? collapsedWidth : expandedWidth }}
     >
       {collapsed ? (

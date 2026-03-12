@@ -147,7 +147,6 @@ export function TasksPage() {
     loading,
     initialized,
     error,
-    workspaceDir,
     pluginInstalled,
     pluginEnabled,
     blockedQueue,
@@ -245,11 +244,6 @@ export function TasksPage() {
         <div>
           <h1 className="text-2xl font-bold">{t('title')}</h1>
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
-          {workspaceDir && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {t('workspace')}: {workspaceDir}
-            </p>
-          )}
         </div>
         <div className="flex items-center gap-2">
           {!pluginInstalled || !pluginEnabled ? (
