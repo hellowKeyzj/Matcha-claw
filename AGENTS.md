@@ -6,6 +6,14 @@
 
 MatchaClaw is a cross-platform **Electron desktop app** (React 19 + Vite + TypeScript) providing a GUI for the OpenClaw AI agent runtime. It uses pnpm as its package manager (pinned version in `package.json`'s `packageManager` field).
 
+### Linked References
+
+- `@docs/gateway-rpc-api.md` — OpenClaw Gateway RPC 开发基线（握手、帧结构、方法清单、实现层差异与调用边界）。
+- `@docs/gateway-events-api.md` — OpenClaw Gateway 事件开发基线（事件总表、`agent/chat` 语义、慢连接策略、`node.event` 上报事件）。
+- `@docs/hook-extension-points.md` — OpenClaw 插件 Hook 完整插入点（触发位置、优先级/执行顺序、返回值与异常语义）。
+
+> 约束：凡涉及 OpenClaw 接口、事件流或插件扩展的开发，必须先对齐上述文档，再进入实现。
+
 ### Quick reference
 
 Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
