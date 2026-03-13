@@ -57,7 +57,7 @@ describe('api-client', () => {
       .mockResolvedValueOnce({ ok: false, error: { code: 'TIMEOUT', message: 'network timeout' } })
       .mockResolvedValueOnce({ ok: true, data: { success: true } });
 
-    const result = await invokeIpcWithRetry<{ success: boolean }>('provider:list', [], 1);
+    const result = await invokeIpcWithRetry<{ success: boolean }>('provider:listAccounts', [], 1);
 
     expect(result.success).toBe(true);
     expect(invoke).toHaveBeenCalledTimes(2);

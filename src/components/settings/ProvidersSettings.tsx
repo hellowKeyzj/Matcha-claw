@@ -27,11 +27,11 @@ import { Separator } from '@/components/ui/separator';
 import {
   useProviderStore,
   type ProviderAccount,
-  type ProviderConfig,
   type ProviderVendorInfo,
 } from '@/stores/providers';
 import {
   PROVIDER_TYPE_INFO,
+  type ProviderConfig,
   type ProviderType,
   getProviderIconUrl,
   resolveProviderApiKeyForSave,
@@ -826,7 +826,7 @@ function AddProviderDialog({
       const accountId = supportsMultipleAccounts ? `${selectedType}-${crypto.randomUUID()}` : selectedType;
       const label = name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType;
       pendingOAuthRef.current = { accountId, label };
-      await hostApiFetch('/api/providers/oauth/start', {
+      await hostApiFetch('/api/provider-accounts/oauth/start', {
         method: 'POST',
         body: JSON.stringify({ provider: selectedType, accountId, label }),
       });
@@ -843,7 +843,7 @@ function AddProviderDialog({
     setManualCodeInput('');
     setOauthError(null);
     pendingOAuthRef.current = null;
-    await hostApiFetch('/api/providers/oauth/cancel', {
+    await hostApiFetch('/api/provider-accounts/oauth/cancel', {
       method: 'POST',
     });
   };
@@ -852,7 +852,7 @@ function AddProviderDialog({
     const value = manualCodeInput.trim();
     if (!value) return;
     try {
-      await hostApiFetch('/api/providers/oauth/submit', {
+      await hostApiFetch('/api/provider-accounts/oauth/submit', {
         method: 'POST',
         body: JSON.stringify({ code: value }),
       });

@@ -1014,7 +1014,7 @@ function ProviderContent({
       );
       const label = selectedProviderData?.name || selectedProvider;
       pendingOAuthRef.current = { accountId, label };
-      await hostApiFetch('/api/providers/oauth/start', {
+      await hostApiFetch('/api/provider-accounts/oauth/start', {
         method: 'POST',
         body: JSON.stringify({ provider: selectedProvider, accountId, label }),
       });
@@ -1031,14 +1031,14 @@ function ProviderContent({
     setManualCodeInput('');
     setOauthError(null);
     pendingOAuthRef.current = null;
-    await hostApiFetch('/api/providers/oauth/cancel', { method: 'POST' });
+    await hostApiFetch('/api/provider-accounts/oauth/cancel', { method: 'POST' });
   };
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
     if (!value) return;
     try {
-      await hostApiFetch('/api/providers/oauth/submit', {
+      await hostApiFetch('/api/provider-accounts/oauth/submit', {
         method: 'POST',
         body: JSON.stringify({ code: value }),
       });
@@ -1069,7 +1069,7 @@ function ProviderContent({
           const requiresKey = typeInfo?.requiresApiKey ?? false;
           onConfiguredChange(!requiresKey || hasConfiguredCredentials(preferred, statusMap.get(preferred.id)));
           const storedKey = (await hostApiFetch<{ apiKey: string | null }>(
-            `/api/providers/${encodeURIComponent(preferred.id)}/api-key`,
+            `/api/provider-accounts/${encodeURIComponent(preferred.id)}/api-key`,
           )).apiKey;
           onApiKeyChange(storedKey || '');
         } else if (!cancelled) {
@@ -1103,10 +1103,10 @@ function ProviderContent({
         setSelectedAccountId(preferredAccount?.id || null);
 
         const savedProvider = await hostApiFetch<{ baseUrl?: string; model?: string } | null>(
-          `/api/providers/${encodeURIComponent(accountIdForLoad)}`,
+          `/api/provider-accounts/${encodeURIComponent(accountIdForLoad)}`,
         );
         const storedKey = (await hostApiFetch<{ apiKey: string | null }>(
-          `/api/providers/${encodeURIComponent(accountIdForLoad)}/api-key`,
+          `/api/provider-accounts/${encodeURIComponent(accountIdForLoad)}/api-key`,
         )).apiKey;
         if (!cancelled) {
           onApiKeyChange(storedKey || '');
@@ -1183,12 +1183,15 @@ function ProviderContent({
       // Validate key if the provider requires one and a key was entered
       const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
       if (isApiKeyRequired && apiKey) {
-        const result = await invokeIpc(
-          'provider:validateKey',
-          selectedAccountId || selectedProvider,
-          apiKey,
-          { baseUrl: baseUrl.trim() || undefined }
-        ) as { valid: boolean; error?: string };
+        const result = await hostApiFetch<{ valid: boolean; error?: string }>('/api/provider-accounts/validate', {
+          method: 'POST',
+          body: JSON.stringify({
+            accountId: selectedAccountId || undefined,
+            vendorId: selectedProvider,
+            apiKey,
+            options: { baseUrl: baseUrl.trim() || undefined },
+          }),
+        });
 
         setKeyValid(result.valid);
 

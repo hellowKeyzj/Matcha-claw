@@ -378,8 +378,8 @@ export class GatewayManager extends EventEmitter {
   /**
    * Debounced restart — coalesces multiple rapid restart requests into a
    * single restart after `delayMs` of inactivity.  This prevents the
-   * cascading stop/start cycles that occur when provider:save,
-   * provider:setDefault and channel:saveConfig all fire within seconds
+   * cascading stop/start cycles that occur when provider-account create/update/default
+   * and channel:saveConfig all fire within seconds
    * of each other during setup.
    */
   debouncedRestart(delayMs = 2000): void {
