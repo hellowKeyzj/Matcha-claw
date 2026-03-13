@@ -9,16 +9,9 @@ import { join, extname, basename, isAbsolute, resolve as resolvePath } from 'nod
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
-import {
-  type ProviderConfig,
-} from '../utils/secure-storage';
 import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir, expandPath } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
-import {
-  saveProviderKeyToOpenClaw,
-  removeProviderFromOpenClaw,
-} from '../utils/openclaw-auth';
 import { logger } from '../utils/logger';
 import {
   saveChannelConfig,
@@ -33,24 +26,13 @@ import {
 import { checkUvInstalled, installUv, setupManagedPython } from '../utils/uv-setup';
 import { updateSkillConfig, getSkillConfig, getAllSkillConfigs } from '../utils/skill-config';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
-import { getProviderConfig } from '../utils/provider-registry';
-import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
-import { browserOAuthManager, type BrowserOAuthProviderType } from '../utils/browser-oauth';
+import { deviceOAuthManager } from '../utils/device-oauth';
+import { browserOAuthManager } from '../utils/browser-oauth';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
 import { getProviderService } from '../services/providers/provider-service';
-import {
-  getOpenClawProviderKey,
-  syncDefaultProviderToRuntime,
-  syncDeletedProviderApiKeyToRuntime,
-  syncDeletedProviderToRuntime,
-  syncProviderApiKeyToRuntime,
-  syncSavedProviderToRuntime,
-  syncUpdatedProviderToRuntime,
-} from '../services/providers/provider-runtime-sync';
-import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
 import { registerTeamIpcHandlers } from './team-ipc-handlers';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
@@ -85,7 +67,7 @@ export function registerIpcHandlers(
   clawHubService: ClawHubService,
   mainWindow: BrowserWindow
 ): void {
-  // Unified request protocol (non-breaking: legacy channels remain available)
+  // Unified request protocol
   registerUnifiedRequestHandlers(gatewayManager);
 
   // Host API proxy handlers
@@ -284,237 +266,49 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
           break;
         }
         case 'provider': {
-          if (request.action === 'list') {
-            data = await providerService.listLegacyProvidersWithKeyInfo();
+          if (request.action === 'listAccounts') {
+            data = await providerService.listAccounts();
             break;
           }
-          if (request.action === 'get') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.get payload');
-            data = await providerService.getLegacyProvider(providerId);
+          if (request.action === 'listVendors') {
+            data = await providerService.listVendors();
             break;
           }
-          if (request.action === 'getDefault') {
-            data = await providerService.getDefaultLegacyProvider();
+          if (request.action === 'listAccountStatuses') {
+            data = await providerService.listAccountStatuses();
             break;
           }
-          if (request.action === 'hasApiKey') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.hasApiKey payload');
-            data = await providerService.hasLegacyProviderApiKey(providerId);
+          if (request.action === 'getAccount') {
+            const payload = request.payload as { accountId?: string } | string | undefined;
+            const accountId = typeof payload === 'string' ? payload : payload?.accountId;
+            if (!accountId) throw new Error('Invalid provider.getAccount payload');
+            data = await providerService.getAccount(accountId);
             break;
           }
-          if (request.action === 'getApiKey') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.getApiKey payload');
-            data = await providerService.getLegacyProviderApiKey(providerId);
+          if (request.action === 'getDefaultAccountId') {
+            data = await providerService.getDefaultAccountId();
             break;
           }
-          if (request.action === 'validateKey') {
-            const payload = request.payload as
-              | { providerId?: string; apiKey?: string; options?: { baseUrl?: string } }
-              | [string, string, { baseUrl?: string }?]
-              | undefined;
-            const providerId = Array.isArray(payload) ? payload[0] : payload?.providerId;
-            const apiKey = Array.isArray(payload) ? payload[1] : payload?.apiKey;
-            const options = Array.isArray(payload) ? payload[2] : payload?.options;
-            if (!providerId || typeof apiKey !== 'string') {
-              throw new Error('Invalid provider.validateKey payload');
-            }
-
-            const provider = await providerService.getLegacyProvider(providerId);
-            const providerType = provider?.type || providerId;
-            const registryBaseUrl = getProviderConfig(providerType)?.baseUrl;
-            const resolvedBaseUrl = options?.baseUrl || provider?.baseUrl || registryBaseUrl;
-            data = await validateApiKeyWithProvider(providerType, apiKey, { baseUrl: resolvedBaseUrl });
+          if (request.action === 'hasAccountApiKey') {
+            const payload = request.payload as { accountId?: string } | string | undefined;
+            const accountId = typeof payload === 'string' ? payload : payload?.accountId;
+            if (!accountId) throw new Error('Invalid provider.hasAccountApiKey payload');
+            data = await providerService.hasAccountApiKey(accountId);
             break;
           }
-          if (request.action === 'save') {
-            const payload = request.payload as
-              | { config?: ProviderConfig; apiKey?: string }
-              | [ProviderConfig, string?]
-              | undefined;
-            const config = Array.isArray(payload) ? payload[0] : payload?.config;
-            const apiKey = Array.isArray(payload) ? payload[1] : payload?.apiKey;
-            if (!config) throw new Error('Invalid provider.save payload');
-
-            try {
-              await providerService.saveLegacyProvider(config);
-
-              if (apiKey !== undefined) {
-                const trimmedKey = apiKey.trim();
-                if (trimmedKey) {
-                  await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
-                }
-              }
-
-              try {
-                await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-              } catch (err) {
-                console.warn('Failed to sync openclaw provider config:', err);
-              }
-
-              data = { success: true };
-            } catch (error) {
-              data = { success: false, error: String(error) };
-            }
+          if (request.action === 'getAccountApiKey') {
+            const payload = request.payload as { accountId?: string } | string | undefined;
+            const accountId = typeof payload === 'string' ? payload : payload?.accountId;
+            if (!accountId) throw new Error('Invalid provider.getAccountApiKey payload');
+            data = await providerService.getAccountApiKey(accountId);
             break;
           }
-          if (request.action === 'delete') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.delete payload');
-
-            try {
-              const existing = await providerService.getLegacyProvider(providerId);
-              await providerService.deleteLegacyProvider(providerId);
-              if (existing?.type) {
-                try {
-                  await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-                } catch (err) {
-                  console.warn('Failed to completely remove provider from OpenClaw:', err);
-                }
-              }
-              data = { success: true };
-            } catch (error) {
-              data = { success: false, error: String(error) };
-            }
-            break;
-          }
-          if (request.action === 'setApiKey') {
-            const payload = request.payload as
-              | { providerId?: string; apiKey?: string }
-              | [string, string]
-              | undefined;
-            const providerId = Array.isArray(payload) ? payload[0] : payload?.providerId;
-            const apiKey = Array.isArray(payload) ? payload[1] : payload?.apiKey;
-            if (!providerId || typeof apiKey !== 'string') throw new Error('Invalid provider.setApiKey payload');
-
-            try {
-              await providerService.setLegacyProviderApiKey(providerId, apiKey);
-              const provider = await providerService.getLegacyProvider(providerId);
-              const providerType = provider?.type || providerId;
-              const ock = getOpenClawProviderKey(providerType, providerId);
-              try {
-                await saveProviderKeyToOpenClaw(ock, apiKey);
-              } catch (err) {
-                console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-              }
-              data = { success: true };
-            } catch (error) {
-              data = { success: false, error: String(error) };
-            }
-            break;
-          }
-          if (request.action === 'updateWithKey') {
-            const payload = request.payload as
-              | { providerId?: string; updates?: Partial<ProviderConfig>; apiKey?: string }
-              | [string, Partial<ProviderConfig>, string?]
-              | undefined;
-            const providerId = Array.isArray(payload) ? payload[0] : payload?.providerId;
-            const updates = Array.isArray(payload) ? payload[1] : payload?.updates;
-            const apiKey = Array.isArray(payload) ? payload[2] : payload?.apiKey;
-            if (!providerId || !updates) throw new Error('Invalid provider.updateWithKey payload');
-
-            const existing = await providerService.getLegacyProvider(providerId);
-            if (!existing) {
-              data = { success: false, error: 'Provider not found' };
-              break;
-            }
-
-            const previousKey = await providerService.getLegacyProviderApiKey(providerId);
-            const previousOck = getOpenClawProviderKey(existing.type, providerId);
-
-            try {
-              const nextConfig: ProviderConfig = {
-                ...existing,
-                ...updates,
-                updatedAt: new Date().toISOString(),
-              };
-              const ock = getOpenClawProviderKey(nextConfig.type, providerId);
-              await providerService.saveLegacyProvider(nextConfig);
-
-              if (apiKey !== undefined) {
-                const trimmedKey = apiKey.trim();
-                if (trimmedKey) {
-                  await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
-                  await saveProviderKeyToOpenClaw(ock, trimmedKey);
-                } else {
-                  await providerService.deleteLegacyProviderApiKey(providerId);
-                  await removeProviderFromOpenClaw(ock);
-                }
-              }
-
-              try {
-                await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-              } catch (err) {
-                console.warn('Failed to sync openclaw config after provider update:', err);
-              }
-
-              data = { success: true };
-            } catch (error) {
-              try {
-                await providerService.saveLegacyProvider(existing);
-                if (previousKey) {
-                  await providerService.setLegacyProviderApiKey(providerId, previousKey);
-                  await saveProviderKeyToOpenClaw(previousOck, previousKey);
-                } else {
-                  await providerService.deleteLegacyProviderApiKey(providerId);
-                  await removeProviderFromOpenClaw(previousOck);
-                }
-              } catch (rollbackError) {
-                console.warn('Failed to rollback provider updateWithKey:', rollbackError);
-              }
-
-              data = { success: false, error: String(error) };
-            }
-            break;
-          }
-          if (request.action === 'deleteApiKey') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.deleteApiKey payload');
-            try {
-              await providerService.deleteLegacyProviderApiKey(providerId);
-              const provider = await providerService.getLegacyProvider(providerId);
-              const providerType = provider?.type || providerId;
-              const ock = getOpenClawProviderKey(providerType, providerId);
-              try {
-                if (ock) {
-                  await removeProviderFromOpenClaw(ock);
-                }
-              } catch (err) {
-                console.warn('Failed to completely remove provider from OpenClaw:', err);
-              }
-              data = { success: true };
-            } catch (error) {
-              data = { success: false, error: String(error) };
-            }
-            break;
-          }
-          if (request.action === 'setDefault') {
-            const payload = request.payload as { providerId?: string } | string | undefined;
-            const providerId = typeof payload === 'string' ? payload : payload?.providerId;
-            if (!providerId) throw new Error('Invalid provider.setDefault payload');
-
-            try {
-              await providerService.setDefaultLegacyProvider(providerId);
-              const provider = await providerService.getLegacyProvider(providerId);
-              if (provider) {
-                try {
-                  await syncDefaultProviderToRuntime(providerId, gatewayManager);
-                } catch (err) {
-                  console.warn('Failed to set OpenClaw default model:', err);
-                }
-              }
-
-              data = { success: true };
-            } catch (error) {
-              data = { success: false, error: String(error) };
-            }
+          if (request.action === 'setDefaultAccount') {
+            const payload = request.payload as { accountId?: string } | string | undefined;
+            const accountId = typeof payload === 'string' ? payload : payload?.accountId;
+            if (!accountId) throw new Error('Invalid provider.setDefaultAccount payload');
+            await providerService.setDefaultAccount(accountId);
+            data = { success: true };
             break;
           }
           return {
@@ -2081,63 +1875,14 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
 function registerDeviceOAuthHandlers(mainWindow: BrowserWindow): void {
   deviceOAuthManager.setWindow(mainWindow);
   browserOAuthManager.setWindow(mainWindow);
-
-  // Request Provider OAuth initialization
-  ipcMain.handle(
-    'provider:requestOAuth',
-    async (
-      _,
-      provider: OAuthProviderType | BrowserOAuthProviderType,
-      region?: 'global' | 'cn',
-      options?: { accountId?: string; label?: string },
-    ) => {
-      try {
-        logger.info(`provider:requestOAuth for ${provider}`);
-        if (provider === 'google' || provider === 'openai') {
-          await browserOAuthManager.startFlow(provider, options);
-        } else {
-          await deviceOAuthManager.startFlow(provider, region, options);
-        }
-        return { success: true };
-      } catch (error) {
-        logger.error('provider:requestOAuth failed', error);
-        return { success: false, error: String(error) };
-      }
-    },
-  );
-
-  // Cancel Provider OAuth
-  ipcMain.handle('provider:cancelOAuth', async () => {
-    try {
-      await deviceOAuthManager.stopFlow();
-      await browserOAuthManager.stopFlow();
-      return { success: true };
-    } catch (error) {
-      logger.error('provider:cancelOAuth failed', error);
-      return { success: false, error: String(error) };
-    }
-  });
 }
 
 /**
  * Provider-related IPC handlers
  */
 function registerProviderHandlers(gatewayManager: GatewayManager): void {
-  const providerService = getProviderService();
-  const legacyProviderChannelsWarned = new Set<string>();
-  const logLegacyProviderChannel = (channel: string): void => {
-    if (legacyProviderChannelsWarned.has(channel)) return;
-    legacyProviderChannelsWarned.add(channel);
-    logger.warn(
-      `[provider-migration] Legacy IPC channel "${channel}" is deprecated. Prefer app:request provider actions and account APIs.`,
-    );
-  };
-
   // Listen for OAuth success to automatically restart the Gateway with new tokens/configs.
-  // Use a longer debounce (8s) so that provider:setDefault — which writes the full config
-  // and then calls debouncedRestart(2s) — has time to fire and coalesce into a single
-  // restart.  Without this, the OAuth restart fires first with stale config, and the
-  // subsequent provider:setDefault restart is deferred and dropped.
+  // 使用较长 debounce，避免 OAuth 与提供商配置更新触发重复重启。
   deviceOAuthManager.on('oauth:success', ({ provider, accountId }) => {
     logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
     gatewayManager.debouncedRestart(8000);
@@ -2146,268 +1891,6 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
     logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
     gatewayManager.debouncedRestart(8000);
   });
-
-  // Get all providers with key info
-  ipcMain.handle('provider:list', async () => {
-    logLegacyProviderChannel('provider:list');
-    return await providerService.listLegacyProvidersWithKeyInfo();
-  });
-
-  // New provider-service endpoints used by the account-based refactor.
-  ipcMain.handle('provider:listVendors', async () => {
-    return await providerService.listVendors();
-  });
-
-  ipcMain.handle('provider:listAccounts', async () => {
-    return await providerService.listAccounts();
-  });
-
-  ipcMain.handle('provider:getAccount', async (_, accountId: string) => {
-    return await providerService.getAccount(accountId);
-  });
-
-  // Get a specific provider
-  ipcMain.handle('provider:get', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:get');
-    return await providerService.getLegacyProvider(providerId);
-  });
-
-  // Save a provider configuration
-  ipcMain.handle('provider:save', async (_, config: ProviderConfig, apiKey?: string) => {
-    logLegacyProviderChannel('provider:save');
-    try {
-      // Save the provider config
-      await providerService.saveLegacyProvider(config);
-
-      // Store the API key if provided
-      if (apiKey !== undefined) {
-        const trimmedKey = apiKey.trim();
-        if (trimmedKey) {
-          await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
-
-          // Also write to OpenClaw auth-profiles.json so the gateway can use it
-          try {
-            await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
-          } catch (err) {
-            console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-          }
-        }
-      }
-
-      // Sync the provider configuration to openclaw.json so Gateway knows about it
-      try {
-        await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to sync openclaw provider config:', err);
-      }
-
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // Delete a provider
-  ipcMain.handle('provider:delete', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:delete');
-    try {
-      const existing = await providerService.getLegacyProvider(providerId);
-      await providerService.deleteLegacyProvider(providerId);
-
-      // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
-      if (existing?.type) {
-        try {
-          await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to completely remove provider from OpenClaw:', err);
-        }
-      }
-
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // Update API key for a provider
-  ipcMain.handle('provider:setApiKey', async (_, providerId: string, apiKey: string) => {
-    logLegacyProviderChannel('provider:setApiKey');
-    try {
-      await providerService.setLegacyProviderApiKey(providerId, apiKey);
-
-      // Also write to OpenClaw auth-profiles.json
-      const provider = await providerService.getLegacyProvider(providerId);
-      const providerType = provider?.type || providerId;
-      try {
-        await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
-      } catch (err) {
-        console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-      }
-
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // Atomically update provider config and API key
-  ipcMain.handle(
-    'provider:updateWithKey',
-    async (
-      _,
-      providerId: string,
-      updates: Partial<ProviderConfig>,
-      apiKey?: string
-    ) => {
-      logLegacyProviderChannel('provider:updateWithKey');
-      const existing = await providerService.getLegacyProvider(providerId);
-      if (!existing) {
-        return { success: false, error: 'Provider not found' };
-      }
-
-      const previousKey = await providerService.getLegacyProviderApiKey(providerId);
-      const previousOck = getOpenClawProviderKey(existing.type, providerId);
-
-      try {
-        const nextConfig: ProviderConfig = {
-          ...existing,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-
-        const ock = getOpenClawProviderKey(nextConfig.type, providerId);
-
-        await providerService.saveLegacyProvider(nextConfig);
-
-        if (apiKey !== undefined) {
-          const trimmedKey = apiKey.trim();
-          if (trimmedKey) {
-            await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
-            await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
-          } else {
-            await providerService.deleteLegacyProviderApiKey(providerId);
-            await removeProviderFromOpenClaw(ock);
-          }
-        }
-
-        // Sync the provider configuration to openclaw.json so Gateway knows about it
-        try {
-          await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to sync openclaw config after provider update:', err);
-        }
-
-        return { success: true };
-      } catch (error) {
-        // Best-effort rollback to keep config/key consistent.
-        try {
-          await providerService.saveLegacyProvider(existing);
-          if (previousKey) {
-            await providerService.setLegacyProviderApiKey(providerId, previousKey);
-            await saveProviderKeyToOpenClaw(previousOck, previousKey);
-          } else {
-            await providerService.deleteLegacyProviderApiKey(providerId);
-            await removeProviderFromOpenClaw(previousOck);
-          }
-        } catch (rollbackError) {
-          console.warn('Failed to rollback provider updateWithKey:', rollbackError);
-        }
-
-        return { success: false, error: String(error) };
-      }
-    }
-  );
-
-  // Delete API key for a provider
-  ipcMain.handle('provider:deleteApiKey', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:deleteApiKey');
-    try {
-      await providerService.deleteLegacyProviderApiKey(providerId);
-
-      // Keep OpenClaw auth-profiles.json in sync with local key storage
-      const provider = await providerService.getLegacyProvider(providerId);
-      try {
-        await syncDeletedProviderApiKeyToRuntime(provider, providerId);
-      } catch (err) {
-        console.warn('Failed to completely remove provider from OpenClaw:', err);
-      }
-
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
-
-  // Check if a provider has an API key
-  ipcMain.handle('provider:hasApiKey', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:hasApiKey');
-    return await providerService.hasLegacyProviderApiKey(providerId);
-  });
-
-  // Get the actual API key (for internal use only - be careful!)
-  ipcMain.handle('provider:getApiKey', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:getApiKey');
-    return await providerService.getLegacyProviderApiKey(providerId);
-  });
-
-  // Set default provider and update OpenClaw default model
-  ipcMain.handle('provider:setDefault', async (_, providerId: string) => {
-    logLegacyProviderChannel('provider:setDefault');
-    try {
-      await providerService.setDefaultLegacyProvider(providerId);
-
-      // Update OpenClaw config to use this provider's default model
-      try {
-        await syncDefaultProviderToRuntime(providerId, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to set OpenClaw default model:', err);
-      }
-
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
-  });
-
-
-
-  // Get default provider
-  ipcMain.handle('provider:getDefault', async () => {
-    logLegacyProviderChannel('provider:getDefault');
-    return await providerService.getDefaultLegacyProvider();
-  });
-
-  // Validate API key by making a real test request to the provider.
-  // providerId can be either a stored provider ID or a provider type.
-  ipcMain.handle(
-    'provider:validateKey',
-    async (
-      _,
-      providerId: string,
-      apiKey: string,
-      options?: { baseUrl?: string }
-    ) => {
-      logLegacyProviderChannel('provider:validateKey');
-      try {
-        // First try to get existing provider
-        const provider = await providerService.getLegacyProvider(providerId);
-
-        // Use provider.type if provider exists, otherwise use providerId as the type
-        // This allows validation during setup when provider hasn't been saved yet
-        const providerType = provider?.type || providerId;
-        const registryBaseUrl = getProviderConfig(providerType)?.baseUrl;
-        // Prefer caller-supplied baseUrl (live form value) over persisted config.
-        // This ensures Setup/Settings validation reflects unsaved edits immediately.
-        const resolvedBaseUrl = options?.baseUrl || provider?.baseUrl || registryBaseUrl;
-
-        console.log(`[MatchaClaw-validate] validating provider type: ${providerType}`);
-        return await validateApiKeyWithProvider(providerType, apiKey, { baseUrl: resolvedBaseUrl });
-      } catch (error) {
-        console.error('Validation error:', error);
-        return { valid: false, error: String(error) };
-      }
-    }
-  );
 }
 
 /**

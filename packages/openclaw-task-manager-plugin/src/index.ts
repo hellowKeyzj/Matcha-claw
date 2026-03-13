@@ -843,6 +843,7 @@ const plugin = {
 
     api.registerHttpRoute({
       path: "/task-manager/webhook",
+      auth: "plugin",
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const url = resolveQuery(req.url);

@@ -22,7 +22,7 @@ export interface ProviderListItem {
 export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
   const [accounts, statuses, vendors, defaultInfo] = await Promise.all([
     hostApiFetch<ProviderAccount[]>('/api/provider-accounts'),
-    hostApiFetch<ProviderWithKeyInfo[]>('/api/providers'),
+    hostApiFetch<ProviderWithKeyInfo[]>('/api/provider-accounts/status'),
     hostApiFetch<ProviderVendorInfo[]>('/api/provider-vendors'),
     hostApiFetch<{ accountId: string | null }>('/api/provider-accounts/default'),
   ]);
@@ -74,23 +74,6 @@ export function buildProviderAccountId(
   return vendor?.supportsMultipleAccounts ? `${vendorId}-${crypto.randomUUID()}` : vendorId;
 }
 
-export function legacyProviderToAccount(provider: ProviderWithKeyInfo): ProviderAccount {
-  return {
-    id: provider.id,
-    vendorId: provider.type,
-    label: provider.name,
-    authMode: provider.type === 'ollama' ? 'local' : 'api_key',
-    baseUrl: provider.baseUrl,
-    model: provider.model,
-    fallbackModels: provider.fallbackModels,
-    fallbackAccountIds: provider.fallbackProviderIds,
-    enabled: provider.enabled,
-    isDefault: false,
-    createdAt: provider.createdAt,
-    updatedAt: provider.updatedAt,
-  };
-}
-
 export function buildProviderListItems(
   accounts: ProviderAccount[],
   statuses: ProviderWithKeyInfo[],
@@ -100,23 +83,15 @@ export function buildProviderListItems(
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const statusMap = new Map(statuses.map((status) => [status.id, status]));
 
-  if (accounts.length > 0) {
-    return accounts
-      .map((account) => ({
-        account,
-        vendor: vendorMap.get(account.vendorId),
-        status: statusMap.get(account.id),
-      }))
-      .sort((left, right) => {
-        if (left.account.id === defaultAccountId) return -1;
-        if (right.account.id === defaultAccountId) return 1;
-        return right.account.updatedAt.localeCompare(left.account.updatedAt);
-      });
-  }
-
-  return statuses.map((status) => ({
-    account: legacyProviderToAccount(status),
-    vendor: vendorMap.get(status.type),
-    status,
-  }));
+  return accounts
+    .map((account) => ({
+      account,
+      vendor: vendorMap.get(account.vendorId),
+      status: statusMap.get(account.id),
+    }))
+    .sort((left, right) => {
+      if (left.account.id === defaultAccountId) return -1;
+      if (right.account.id === defaultAccountId) return 1;
+      return right.account.updatedAt.localeCompare(left.account.updatedAt);
+    });
 }
