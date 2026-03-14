@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { claimTaskLock, isLeaseExpired, releaseTaskLock } from '@electron/main/team-runtime/claim-lock';
+import { claimTaskLock, isLeaseExpired, releaseTaskLock } from '@electron/adapters/platform/team-runtime/claim-lock';
 
 describe('team runtime claim lock', () => {
   it('allows only one claimer for same task', async () => {

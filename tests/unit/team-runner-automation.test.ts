@@ -3,7 +3,7 @@ import {
   deriveAutoBlockedDecision,
   deriveTaskTitleFromProposal,
   parseBlockedDecision,
-} from '@/lib/team/runner-automation';
+} from '@/features/teams/domain/runner-automation';
 
 describe('team runner automation helpers', () => {
   it('parses retry/fail decisions from plain text and json', () => {

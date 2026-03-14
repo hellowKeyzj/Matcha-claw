@@ -1,5 +1,84 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-15 目录分层重构：services/features + team-runtime 迁移）
+
+### 目录树
+
+```text
+electron/
+├── adapters/
+│   └── platform/
+│       └── team-runtime/
+│           ├── claim-lock.ts
+│           ├── mailbox-store.ts
+│           ├── runtime-store.ts
+│           ├── schema.ts
+│           ├── task-store.ts
+│           └── types.ts
+├── core/
+│   └── application/
+│       └── team-runtime-service.ts
+└── main/
+    └── team-ipc-handlers.ts
+
+src/
+├── features/
+│   ├── subagents/
+│   │   └── domain/
+│   │       ├── prompt.ts
+│   │       └── workspace.ts
+│   └── teams/
+│       ├── api/
+│       │   └── runtime-client.ts
+│       ├── domain/
+│       │   └── runner-automation.ts
+│       └── runtime/
+│           └── orchestrator.ts
+├── lib/
+│   └── sections.ts
+└── services/
+    └── openclaw/
+        ├── agent-runtime.ts
+        ├── session-runtime.ts
+        ├── task-manager-client.ts
+        └── types.ts
+```
+
+### 文件职责
+
+- `electron/adapters/platform/team-runtime/*`：团队运行时的文件存储、任务状态机、claim lock、邮箱与事件落盘实现（adapter 侧）。
+- `electron/core/application/team-runtime-service.ts`：团队运行时 application service，统一编排 team IPC 的业务流程。
+- `electron/main/team-ipc-handlers.ts`：仅做参数校验与 application service 调用，不再直接拼业务流程。
+- `src/services/openclaw/*`：OpenClaw/Gateway 客户端能力，归并为基础设施服务层。
+- `src/features/subagents/domain/*`：Subagent 领域规则（workspace/prompt）。
+- `src/features/teams/api/runtime-client.ts`：Teams 运行时 IPC 客户端访问层。
+- `src/features/teams/domain/runner-automation.ts`：Teams 自动仲裁与指令解析领域规则。
+- `src/features/teams/runtime/orchestrator.ts`：Teams 运行时编排器，归并到 teams feature 域。
+- `src/lib/sections.ts`：通用设置分区链接与解析函数（移除 `src/lib/settings` 目录层）。
+
+### 模块依赖与边界
+
+- `main -> core/application -> adapters` 方向收敛，主进程 team IPC 去业务化。
+- `services/openclaw` 独立承载外部运行时访问能力，避免与 feature/domain 混杂。
+- `features/subagents/domain` 与 `features/teams/runtime` 承载业务域规则与编排。
+
+### 关键决策与原因
+
+1. 将 `team-runtime` 从 `electron/main` 迁出，消除 host-shell 层业务实现堆积。
+2. 用 `TeamRuntimeApplicationService` 承接 team 业务流程，确保 IPC handler 只承担输入边界职责。
+3. 将 `src/lib/openclaw` 与 `src/lib/subagent` 拆分到 `services` 与 `features/*/domain`，按变化源分层。
+
+### 本次变更
+
+- 完成 `electron/main/team-runtime/* -> electron/adapters/platform/team-runtime/*` 迁移。
+- 新增 `electron/core/application/team-runtime-service.ts` 并导出到 application 入口。
+- 重构 `electron/main/team-ipc-handlers.ts` 为“参数校验 + 调用 application service”模式。
+- 完成 `src/lib/openclaw/* -> src/services/openclaw/*` 迁移并全量改引用。
+- 完成 `src/lib/subagent/* -> src/features/subagents/domain/*` 迁移并全量改引用。
+- 完成 `src/lib/team/* -> src/features/teams/*` 全量迁移（`runtime-client`、`runner-automation`、`background-orchestrator`）并清理 `src/lib/team`。
+- 完成 `src/lib/settings/sections.ts -> src/lib/sections.ts` 迁移并清理 `src/lib/settings`。
+- 验证通过：`pnpm run typecheck`、`pnpm run check:trait-boundary`、相关 unit tests（24 tests）。
+
 ## 本次变更日志（2026-03-14 Agent 平台化收口：C 阶段主进程瘦身）
 
 ### 目录树

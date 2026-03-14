@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { teamsBackgroundOrchestrator } from '@/lib/team/background-orchestrator';
+import { teamsBackgroundOrchestrator } from '@/features/teams/runtime/orchestrator';
 
 export function TeamsRuntimeDaemon() {
   useEffect(() => {

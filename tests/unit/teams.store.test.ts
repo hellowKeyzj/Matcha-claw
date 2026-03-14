@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/team/runtime-client', () => ({
+vi.mock('@/features/teams/api/runtime-client', () => ({
   teamInit: vi.fn(),
   teamSnapshot: vi.fn(),
   teamPlanUpsert: vi.fn(),
@@ -23,7 +23,7 @@ import {
   teamReleaseClaim,
   teamSnapshot,
   teamTaskUpdate,
-} from '@/lib/team/runtime-client';
+} from '@/features/teams/api/runtime-client';
 
 describe('teams store', () => {
   beforeEach(() => {

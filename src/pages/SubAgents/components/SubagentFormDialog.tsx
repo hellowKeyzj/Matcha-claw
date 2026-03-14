@@ -1,4 +1,4 @@
-﻿import { Button } from '@/components/ui/button';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -9,7 +9,7 @@ import {
   buildSubagentWorkspacePath,
   buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
-} from '@/lib/subagent/workspace';
+} from '@/features/subagents/domain/workspace';
 import type { ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
 import { X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';

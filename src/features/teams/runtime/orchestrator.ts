@@ -1,8 +1,8 @@
 import { invokeIpc } from '@/lib/api-client';
-import { waitAgentRunWithProgress } from '@/lib/openclaw/agent-runtime';
-import { findLatestAssistantText, type ChatMessage } from '@/lib/openclaw/session-runtime';
-import type { TeamMailboxMessage, TeamTask } from '@/lib/team/runtime-client';
-import { deriveAutoBlockedDecision, deriveTaskTitleFromProposal, parseBlockedDecision } from '@/lib/team/runner-automation';
+import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
+import { findLatestAssistantText, type ChatMessage } from '@/services/openclaw/session-runtime';
+import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
+import { deriveAutoBlockedDecision, deriveTaskTitleFromProposal, parseBlockedDecision } from '@/features/teams/domain/runner-automation';
 import { useGatewayStore } from '@/stores/gateway';
 import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';

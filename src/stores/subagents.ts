@@ -4,23 +4,23 @@ import { buildLineDiff } from '@/lib/line-diff';
 import { invokeIpc } from '@/lib/api-client';
 import {
   waitAgentRunWithProgress,
-} from '@/lib/openclaw/agent-runtime';
+} from '@/services/openclaw/agent-runtime';
 import {
   deleteSession,
   fetchLatestAssistantText,
   sendChatMessage,
-} from '@/lib/openclaw/session-runtime';
+} from '@/services/openclaw/session-runtime';
 import {
   buildSubagentWorkspacePath,
   buildWorkspaceSubagentsRootFromConfigDir,
   hasSubagentNameConflict,
   normalizeSubagentNameToSlug,
-} from '@/lib/subagent/workspace';
+} from '@/features/subagents/domain/workspace';
 import {
   buildSubagentPromptPayload,
   extractChatSendOutput,
   parseDraftPayload,
-} from '@/lib/subagent/prompt';
+} from '@/features/subagents/domain/prompt';
 import type {
   AgentsListResult,
   ConfigGetResult,

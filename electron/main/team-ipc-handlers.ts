@@ -2,14 +2,19 @@ import { ipcMain } from 'electron';
 import { join } from 'node:path';
 import { getOpenClawConfigDir } from '../utils/paths';
 import { logger } from '../utils/logger';
-import { mailboxPost, mailboxPull } from './team-runtime/mailbox-store';
+import {
+  TeamRuntimeApplicationService,
+  type TeamRuntimeStoragePort,
+  type TeamTaskStatus,
+} from '../core/application';
+import { mailboxPost, mailboxPull } from '../adapters/platform/team-runtime/mailbox-store';
 import {
   appendTeamEvent,
   buildTeamSnapshot,
   clearTeamRuntime,
   initTeamRun,
   readTeamRun,
-} from './team-runtime/runtime-store';
+} from '../adapters/platform/team-runtime/runtime-store';
 import {
   claimNextTask,
   heartbeatTaskClaim,
@@ -17,34 +22,70 @@ import {
   releaseTaskClaim,
   upsertPlanTasks,
   updateTaskStatus,
-} from './team-runtime/task-store';
+} from '../adapters/platform/team-runtime/task-store';
+
+function normalizeRequired(value: unknown, field: string): string {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    throw new Error(`${field} is required`);
+  }
+  return normalized;
+}
+
+function normalizeLeaseMs(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  const lease = Number(value);
+  if (!Number.isFinite(lease) || lease <= 0) {
+    throw new Error('leaseMs must be a positive number');
+  }
+  return lease;
+}
+
+function normalizeMailboxLimit(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  const limit = Number(value);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error('mailboxLimit must be a positive number');
+  }
+  return Math.floor(limit);
+}
+
+function normalizeTaskStatus(value: unknown): TeamTaskStatus {
+  const status = String(value ?? '').trim() as TeamTaskStatus;
+  const allowed: TeamTaskStatus[] = ['todo', 'claimed', 'running', 'blocked', 'done', 'failed'];
+  if (!allowed.includes(status)) {
+    throw new Error('status is invalid');
+  }
+  return status;
+}
 
 function resolveRuntimeRoot(teamId: string): string {
-  const normalized = String(teamId ?? '').trim();
-  if (!normalized) {
-    throw new Error('teamId is required');
-  }
-  return join(getOpenClawConfigDir(), 'team-runtime', normalized);
+  return join(getOpenClawConfigDir(), 'team-runtime', teamId);
 }
+
+const teamRuntimeStorage: TeamRuntimeStoragePort = {
+  initRun: initTeamRun,
+  readRun: readTeamRun,
+  appendEvent: appendTeamEvent,
+  buildSnapshot: buildTeamSnapshot,
+  upsertPlanTasks,
+  claimNextTask,
+  heartbeatTaskClaim,
+  updateTaskStatus,
+  mailboxPost,
+  mailboxPull,
+  releaseTaskClaim,
+  clearRuntime: clearTeamRuntime,
+  listTasks,
+};
+
+const teamRuntimeService = new TeamRuntimeApplicationService(teamRuntimeStorage, resolveRuntimeRoot);
 
 export function registerTeamIpcHandlers(): void {
   ipcMain.handle('team:init', async (_, input: { teamId: string; leadAgentId: string }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const run = await initTeamRun({
-      runtimeRoot,
-      teamId: input.teamId,
-      leadAgentId: input.leadAgentId,
-    });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: run.teamId,
-      type: 'team:init',
-      payload: { leadAgentId: run.leadAgentId },
-    });
-    return {
-      runtimeRoot,
-      run,
-    };
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const leadAgentId = normalizeRequired(input?.leadAgentId, 'leadAgentId');
+    return teamRuntimeService.init({ teamId, leadAgentId });
   });
 
   ipcMain.handle('team:snapshot', async (_, input: {
@@ -52,11 +93,11 @@ export function registerTeamIpcHandlers(): void {
     mailboxCursor?: string;
     mailboxLimit?: number;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    return buildTeamSnapshot({
-      runtimeRoot,
-      mailboxCursor: input.mailboxCursor,
-      mailboxLimit: input.mailboxLimit,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    return teamRuntimeService.snapshot({
+      teamId,
+      mailboxCursor: input?.mailboxCursor,
+      mailboxLimit: normalizeMailboxLimit(input?.mailboxLimit),
     });
   });
 
@@ -64,22 +105,14 @@ export function registerTeamIpcHandlers(): void {
     teamId: string;
     tasks: Array<{ taskId: string; title?: string; instruction: string; dependsOn?: string[] }>;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const run = await readTeamRun(runtimeRoot);
-    if (!run) {
-      throw new Error(`Team run not initialized: ${input.teamId}`);
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    if (!Array.isArray(input?.tasks)) {
+      throw new Error('tasks must be an array');
     }
-    const tasks = await upsertPlanTasks({
-      runtimeRoot,
+    return teamRuntimeService.planUpsert({
+      teamId,
       tasks: input.tasks,
     });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: input.teamId,
-      type: 'team:planUpsert',
-      payload: { taskCount: tasks.length },
-    });
-    return { tasks };
   });
 
   ipcMain.handle('team:claimNext', async (_, input: {
@@ -88,23 +121,15 @@ export function registerTeamIpcHandlers(): void {
     sessionKey: string;
     leaseMs?: number;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const task = await claimNextTask({
-      runtimeRoot,
-      agentId: input.agentId,
-      sessionKey: input.sessionKey,
-      leaseMs: input.leaseMs ?? 60_000,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const agentId = normalizeRequired(input?.agentId, 'agentId');
+    const sessionKey = normalizeRequired(input?.sessionKey, 'sessionKey');
+    return teamRuntimeService.claimNext({
+      teamId,
+      agentId,
+      sessionKey,
+      leaseMs: normalizeLeaseMs(input?.leaseMs),
     });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: input.teamId,
-      type: 'team:claimNext',
-      payload: {
-        agentId: input.agentId,
-        taskId: task?.taskId ?? null,
-      },
-    });
-    return { task };
   });
 
   ipcMain.handle('team:heartbeat', async (_, input: {
@@ -114,54 +139,35 @@ export function registerTeamIpcHandlers(): void {
     sessionKey: string;
     leaseMs?: number;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const result = await heartbeatTaskClaim({
-      runtimeRoot,
-      taskId: input.taskId,
-      agentId: input.agentId,
-      sessionKey: input.sessionKey,
-      leaseMs: input.leaseMs ?? 60_000,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const taskId = normalizeRequired(input?.taskId, 'taskId');
+    const agentId = normalizeRequired(input?.agentId, 'agentId');
+    const sessionKey = normalizeRequired(input?.sessionKey, 'sessionKey');
+    return teamRuntimeService.heartbeat({
+      teamId,
+      taskId,
+      agentId,
+      sessionKey,
+      leaseMs: normalizeLeaseMs(input?.leaseMs),
     });
-    if (result.ok) {
-      await appendTeamEvent({
-        runtimeRoot,
-        teamId: input.teamId,
-        type: 'team:heartbeat',
-        payload: {
-          taskId: input.taskId,
-          agentId: input.agentId,
-          leaseUntil: result.task?.leaseUntil ?? null,
-        },
-      });
-    }
-    return result;
   });
 
   ipcMain.handle('team:taskUpdate', async (_, input: {
     teamId: string;
     taskId: string;
-    status: 'todo' | 'claimed' | 'running' | 'blocked' | 'done' | 'failed';
+    status: TeamTaskStatus;
     resultSummary?: string;
     error?: string;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const task = await updateTaskStatus({
-      runtimeRoot,
-      taskId: input.taskId,
-      nextStatus: input.status,
-      resultSummary: input.resultSummary,
-      error: input.error,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const taskId = normalizeRequired(input?.taskId, 'taskId');
+    return teamRuntimeService.taskUpdate({
+      teamId,
+      taskId,
+      status: normalizeTaskStatus(input?.status),
+      resultSummary: input?.resultSummary,
+      error: input?.error,
     });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: input.teamId,
-      type: 'team:taskUpdate',
-      payload: {
-        taskId: input.taskId,
-        status: input.status,
-      },
-    });
-    return { task };
   });
 
   ipcMain.handle('team:mailboxPost', async (_, input: {
@@ -177,22 +183,18 @@ export function registerTeamIpcHandlers(): void {
       createdAt?: number;
     };
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const result = await mailboxPost({
-      runtimeRoot,
-      message: input.message,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const message = input?.message;
+    if (!message || typeof message !== 'object') {
+      throw new Error('message is required');
+    }
+    normalizeRequired(message.msgId, 'message.msgId');
+    normalizeRequired(message.fromAgentId, 'message.fromAgentId');
+    normalizeRequired(message.content, 'message.content');
+    return teamRuntimeService.mailboxPost({
+      teamId,
+      message,
     });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: input.teamId,
-      type: 'team:mailboxPost',
-      payload: {
-        msgId: result.message.msgId,
-        fromAgentId: result.message.fromAgentId,
-        kind: result.message.kind,
-      },
-    });
-    return result;
   });
 
   ipcMain.handle('team:mailboxPull', async (_, input: {
@@ -200,11 +202,11 @@ export function registerTeamIpcHandlers(): void {
     cursor?: string;
     limit?: number;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    return mailboxPull({
-      runtimeRoot,
-      cursor: input.cursor,
-      limit: input.limit,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    return teamRuntimeService.mailboxPull({
+      teamId,
+      cursor: input?.cursor,
+      limit: normalizeMailboxLimit(input?.limit),
     });
   });
 
@@ -214,37 +216,28 @@ export function registerTeamIpcHandlers(): void {
     agentId: string;
     sessionKey: string;
   }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const result = await releaseTaskClaim({
-      runtimeRoot,
-      taskId: input.taskId,
-      agentId: input.agentId,
-      sessionKey: input.sessionKey,
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const taskId = normalizeRequired(input?.taskId, 'taskId');
+    const agentId = normalizeRequired(input?.agentId, 'agentId');
+    const sessionKey = normalizeRequired(input?.sessionKey, 'sessionKey');
+    return teamRuntimeService.releaseClaim({
+      teamId,
+      taskId,
+      agentId,
+      sessionKey,
     });
-    await appendTeamEvent({
-      runtimeRoot,
-      teamId: input.teamId,
-      type: 'team:releaseClaim',
-      payload: {
-        taskId: input.taskId,
-        agentId: input.agentId,
-        ok: result.ok,
-      },
-    });
-    return result;
   });
 
   ipcMain.handle('team:reset', async (_, input: { teamId: string }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    await clearTeamRuntime(runtimeRoot);
-    logger.info(`Team runtime reset: ${input.teamId}`);
-    return { ok: true };
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    const result = await teamRuntimeService.reset({ teamId });
+    logger.info(`Team runtime reset: ${teamId}`);
+    return result;
   });
 
   ipcMain.handle('team:listTasks', async (_, input: { teamId: string }) => {
-    const runtimeRoot = resolveRuntimeRoot(input.teamId);
-    const tasks = await listTasks(runtimeRoot);
-    return { tasks };
+    const teamId = normalizeRequired(input?.teamId, 'teamId');
+    return teamRuntimeService.listTasks({ teamId });
   });
 
   logger.info('Team runtime IPC handlers registered');

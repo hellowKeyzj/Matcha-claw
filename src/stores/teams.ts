@@ -14,7 +14,7 @@ import {
   type TeamRunMeta,
   type TeamTask,
   type TeamTaskStatus,
-} from '@/lib/team/runtime-client';
+} from '@/features/teams/api/runtime-client';
 
 export interface TeamMeta {
   id: string;

@@ -9,7 +9,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
-import type { TeamMailboxMessage, TeamTask } from '@/lib/team/runtime-client';
+import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
 
 const DEFAULT_LEASE_MS = 60_000;
 const EMPTY_TASKS: TeamTask[] = [];

@@ -1,4 +1,4 @@
-import type { TeamTask } from '@/lib/team/runtime-client';
+import type { TeamTask } from '@/features/teams/api/runtime-client';
 
 export type BlockedDecisionAction = 'retry' | 'fail' | null;
 

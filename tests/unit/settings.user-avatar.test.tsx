@@ -15,7 +15,7 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
-vi.mock('@/lib/openclaw/task-manager-client', () => ({
+vi.mock('@/services/openclaw/task-manager-client', () => ({
   getTaskPluginStatus: vi.fn().mockResolvedValue({
     installed: false,
     enabled: false,

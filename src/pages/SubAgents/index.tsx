@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { normalizeSubagentNameToSlug } from '@/lib/subagent/workspace';
-import { buildSettingsSectionLink } from '@/lib/settings/sections';
+import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
+import { buildSettingsSectionLink } from '@/lib/sections';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary } from '@/types/subagent';

@@ -8,7 +8,7 @@ import {
   resumeTask,
   type Task,
   wakeTaskSession,
-} from '@/lib/openclaw/task-manager-client';
+} from '@/services/openclaw/task-manager-client';
 import { inferInputModeFromPrompt } from '@/lib/task-inbox';
 
 interface BlockedTaskItem {

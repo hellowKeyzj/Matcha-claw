@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTaskStatusTransitionAllowed, sanitizeTaskRecord } from '@electron/main/team-runtime/schema';
+import { isTaskStatusTransitionAllowed, sanitizeTaskRecord } from '@electron/adapters/platform/team-runtime/schema';
 
 describe('team runtime schema', () => {
   it('allows running -> blocked -> running', () => {
