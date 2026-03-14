@@ -1,5 +1,210 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-14 Agent 平台化实施计划逐文件映射）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-implementation.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-implementation.md`：平台化改造实施主计划，包含现有代码目录逐文件迁移映射、分阶段任务、验收标准与回滚策略。
+
+### 模块依赖与边界
+
+- 明确目标分层：`contracts -> application -> adapters/*`，`host-shell` 仅保留宿主能力。
+- 明确 Electron 主进程迁移边界：迁移平台业务逻辑，保留窗口/托盘/系统集成逻辑。
+- 明确三账本模型（`GatewayPluginState`/`LocalPluginState`/`ToolRegistry`）与调和路径。
+
+### 关键决策与原因
+
+1. 需求明确要求“按现有代码目录逐文件映射”，因此实施文档采用文件级矩阵而非抽象任务描述。
+2. 现有仓库仍是 Electron 生产架构，先做分层收敛和职责拆分，再进行后续运行时演进，降低一次性重构风险。
+3. 保留 `gateway-client` 并行客户端为可选路径，不作为主链路，避免与主进程治理路径混淆。
+
+### 本次变更
+
+- 新增 `2026-03-14-agent-platform-implementation.md`。
+- 固化 6 组目录（`electron/main`、`electron/main/team-runtime`、`electron/gateway`、`electron/api`、`electron/services/*`、`src/lib/*`）逐文件映射。
+- 提供 7 个可执行任务（含测试与提交粒度）和统一 DoD/回滚策略。
+
+## 本次变更日志（2026-03-14 Cron 手动/定时双配置执行）
+
+### 目录树
+
+```text
+electron/
+├── utils/
+│   └── cron-manual-trigger.ts
+├── main/
+│   └── ipc-handlers.ts
+└── api/
+    └── routes/
+        └── cron.ts
+
+tests/
+└── unit/
+    └── cron-manual-trigger.test.ts
+```
+
+### 文件职责
+
+- `electron/utils/cron-manual-trigger.ts`：封装“手动执行临时切换配置 -> 触发 -> 后台恢复原配置”的统一流程。
+- `electron/api/routes/cron.ts`：将 `/api/cron/trigger` 改为使用统一手动触发流程。
+- `tests/unit/cron-manual-trigger.test.ts`：覆盖手动切换条件与 patch 生成逻辑。
+
+### 模块依赖与边界
+
+- 渲染层不直接改动，仍通过 `IPC/Host API -> Gateway RPC`。
+- Cron 触发行为统一收口到 `electron/utils/cron-manual-trigger.ts`，避免路由与 IPC 双实现漂移。
+- 仅改“手动触发路径”，定时调度创建/执行路径保持不变。
+
+### 关键决策与原因
+
+1. 当前 OpenClaw 手动 `cron.run` 对 `isolated + agentTurn` 存在执行路径问题，导致手动触发不稳定。
+2. 采用“双配置策略”：定时保留 `isolated + agentTurn`，手动临时切 `main + systemEvent` 后执行。
+3. 为避免污染定时配置，手动执行完成后后台自动恢复原始字段。
+
+### 本次变更
+
+- 新增 Cron 手动触发统一工具，提供切换与恢复机制。
+- `/api/cron/trigger` 改为复用该工具。
+- 补充单测并通过（含既有 cron 会话回填用例回归）。
+
+## 本次变更日志（2026-03-14 Trait 驱动架构强化 v2）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-full-architecture-design.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-full-architecture-design.md`：严格 Trait 驱动版架构文档，新增契约层、依赖方向、合规门禁与测试基线。
+
+### 模块依赖与边界
+
+- 架构分层明确为 `core/contracts -> core/application -> adapters/*`，并隔离 `host-shell`。
+- 核心边界由组件描述升级为 Trait 契约清单（不再只保留 RuntimeDriver 单点抽象）。
+- 统一三账本模型与 `ReconcilerPort` 调和机制。
+
+### 关键决策与原因
+
+1. 修复“半 Trait 化”问题，避免应用层感知具体运行时实现。
+2. 通过依赖方向禁令与 PR 合规门禁，避免后续架构回退。
+3. 将主进程迁移策略与契约测试策略固化为可执行工程规则。
+
+### 本次变更
+
+- 全量重写架构文档为 Trait 驱动 v2。
+- 新增核心 Trait：`ToolRegistryPort`、`ContextAssemblerPort`、`ToolExecutorPort`、`RuntimeManagerPort`、`PolicyEnginePort`、`AuditSinkPort`、`EventBusPort`、`ReconcilerPort`。
+- 新增“Trait 驱动合规门禁”和“测试策略（Contract/Adapter/Migration）”章节。
+
+## 本次变更日志（2026-03-14 架构最终定稿 + 主进程迁移矩阵）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-full-architecture-design.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-full-architecture-design.md`：平台架构最终定稿，明确“统一控制面 + 被纳管运行时”模型，并加入 Electron 主进程逻辑迁移策略。
+
+### 模块依赖与边界
+
+- 新增 `AgentRuntimeDriver` 契约中心化表达，统一 Runtime 接入与工具纳管。
+- 以三账本（`GatewayPluginState` / `LocalPluginState` / `ToolRegistry`）定义状态一致性边界。
+- 明确主进程分层：平台业务逻辑迁入 Core，OS 集成能力保留在 Host Shell。
+
+### 关键决策与原因
+
+1. 采用“控制面/资源门户”定位，避免平台与 OpenClaw 职责重叠。
+2. 将“Electron 主进程是否迁移”从口头结论固化为迁移矩阵与阶段顺序。
+3. 用 Driver + Reconciler 约束上游变动风险和状态漂移风险。
+
+### 本次变更
+
+- 按最终定稿结构重写架构文档（原则、概念、分层、流程、状态同步、迁移、风险、冻结）。
+- 新增第 6 章《Electron 主进程逻辑迁移策略（必答）》。
+- 收敛并统一 OpenClaw 接入边界与工具治理口径。
+
+## 本次变更日志（2026-03-14 架构文档重整）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-full-architecture-design.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-full-architecture-design.md`：平台架构主文档（重整版），统一为“最小内核 + 平台能力插件域 + OpenClaw 接入契约”结构。
+
+### 模块依赖与边界
+
+- 内核边界与插件域边界分离，避免把具体业务语义放入内核。
+- 明确 OpenClaw 原生插件/skill（上游）能力归属，平台只做接入、映射、治理。
+- 将状态权威源、热插拔分级、迁移路线、冻结清单统一到同一结构中。
+
+### 关键决策与原因
+
+1. 原文档章节层次过深、重复描述较多，阅读路径不直观。
+2. 通过“先总纲、再边界、再接入、再治理、再迁移”重排，降低认知跳转成本。
+3. 统一术语后，避免将 `OpenClawPluginBridge` 误解为“实现 skill 能力”的组件。
+
+### 本次变更
+
+- 全量重写 `2026-03-14-agent-platform-full-architecture-design.md` 为简洁结构版。
+- 统一 `OpenClaw 原生插件/skill（上游）` 口径。
+- 收敛章节为：定位、架构、边界、接入、状态、治理、安全、版本、迁移、风险、冻结、准入。
+- 补回 `AgentRuntimeProvider` 契约定义，并明确 `OpenClawCapabilityAdapter` 是当前默认 provider 实现。
+- 将状态模型改为分账：`GatewayPluginState` / `LocalPluginState` / `ToolRegistry`（派生视图）。
+
+## 本次变更日志（2026-03-14 OpenClaw 接口语义澄清）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-full-architecture-design.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-full-architecture-design.md`：平台化架构设计主文档，明确“最小内核 + 能力插件域”边界与 OpenClaw 接入语义。
+
+### 模块依赖与边界
+
+- OpenClaw 能力来源明确为：Gateway RPC、Gateway 事件流、OpenClaw 插件 Hook 运行时。
+- `OpenClawPluginBridge` 边界明确为：接口调用、状态同步、语义映射、审计纳管；不实现 skill 本体逻辑、不承载 Hook 执行器。
+- 平台内核仅负责治理与基础设施，不在内核中二次实现 OpenClaw 原生机制。
+
+### 关键决策与原因
+
+1. 消除“Bridge 赋能 skill”语义歧义，避免错误实现方向（误把平台写成 OpenClaw 替代层）。
+2. 把 OpenClaw 对外能力事实锚定到三份基线文档，确保后续开发有可核对依据。
+3. 在插件纳管规则中显式写入 Hook 归属，防止团队重复造 Hook 执行框架。
+
+### 本次变更
+
+- 在架构文档新增“OpenClaw 对外接口事实”章节，引用 RPC/Event/Hook 基线。
+- 将 `OpenClawPluginBridge` 相关描述统一为“接入/映射/治理”语义。
+- 在 OpenClaw 插件纳管规则补充“Hook 归属”约束。
+
 ## 本次变更日志（2026-03-11 团队执行器闭环补齐）
 
 ### 目录树

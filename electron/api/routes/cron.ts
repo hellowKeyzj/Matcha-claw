@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import { getOpenClawConfigDir } from '../../utils/paths';
+import { triggerCronJobWithSplitProfiles } from '../../utils/cron-manual-trigger';
 
 interface GatewayCronJob {
   id: string;
@@ -32,6 +33,7 @@ interface CronRunLogEntry {
   status?: string;
   error?: string;
   summary?: string;
+  recoveredSummary?: string;
   sessionId?: string;
   sessionKey?: string;
   ts?: number;
@@ -100,7 +102,8 @@ function buildCronRunMessage(entry: CronRunLogEntry, index: number): CronSession
   if (!timestamp) return null;
 
   const status = typeof entry.status === 'string' ? entry.status.toLowerCase() : '';
-  const summary = typeof entry.summary === 'string' ? entry.summary.trim() : '';
+  const recoveredSummary = typeof entry.recoveredSummary === 'string' ? entry.recoveredSummary.trim() : '';
+  const summary = recoveredSummary || (typeof entry.summary === 'string' ? entry.summary.trim() : '');
   const error = typeof entry.error === 'string' ? entry.error.trim() : '';
   let content = summary || error;
 
@@ -133,6 +136,150 @@ function buildCronRunMessage(entry: CronRunLogEntry, index: number): CronSession
     timestamp,
     ...(status === 'error' ? { isError: true } : {}),
   };
+}
+
+function normalizeTextForComparison(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[。！!？?，,、；;：:]/g, '');
+}
+
+function looksLikePromptEcho(summary: string, prompt: string): boolean {
+  const normalizedSummary = normalizeTextForComparison(summary);
+  const normalizedPrompt = normalizeTextForComparison(prompt);
+  if (!normalizedSummary || !normalizedPrompt) return false;
+  if (normalizedSummary === normalizedPrompt) return true;
+
+  // Handle common "prompt echo with wrappers", such as:
+  // "Scheduled task: ... Prompt: <prompt>" or "Prompt: <prompt>".
+  if (normalizedSummary.includes(normalizedPrompt)) {
+    const extraLength = normalizedSummary.length - normalizedPrompt.length;
+    if (extraLength <= 0) return true;
+
+    const extraRatio = extraLength / Math.max(1, normalizedPrompt.length);
+    const hasPromptAsEdge = normalizedSummary.startsWith(normalizedPrompt)
+      || normalizedSummary.endsWith(normalizedPrompt);
+
+    // Small wrapper text around the same prompt should still be treated as echo.
+    if (extraLength <= 28 || extraRatio <= 0.35 || hasPromptAsEdge) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function shouldRecoverRunSummary(entry: CronRunLogEntry, prompt: string): boolean {
+  const status = typeof entry.status === 'string' ? entry.status.toLowerCase() : '';
+  if (status === 'error') return false;
+  const summary = typeof entry.summary === 'string' ? entry.summary.trim() : '';
+  if (!summary) return true;
+  if (!prompt) return false;
+  return looksLikePromptEcho(summary, prompt);
+}
+
+function extractTextFromMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+
+  const lines: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const record = block as { type?: unknown; text?: unknown };
+    if (record.type === 'text' && typeof record.text === 'string') {
+      const text = record.text.trim();
+      if (text) lines.push(text);
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+function isSubstantiveAssistantText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === 'ok' || normalized === 'ok.' || normalized === 'i understand.' || normalized === 'i understand') {
+    return false;
+  }
+  return true;
+}
+
+function toRunIdentity(entry: CronRunLogEntry, index: number): string {
+  return `${entry.runAtMs ?? ''}|${entry.ts ?? ''}|${index}`;
+}
+
+async function recoverRunSummariesFromMainSession(params: {
+  ctx: HostApiContext;
+  agentId: string;
+  runs: CronRunLogEntry[];
+}): Promise<Map<string, string>> {
+  const recovered = new Map<string, string>();
+  let historyResult: unknown;
+
+  try {
+    historyResult = await params.ctx.gatewayManager.rpc('chat.history', {
+      sessionKey: `agent:${params.agentId}:main`,
+      limit: 1200,
+    });
+  } catch {
+    return recovered;
+  }
+
+  const rawMessages = (historyResult as { messages?: unknown })?.messages;
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+    return recovered;
+  }
+
+  const assistantMessages = rawMessages
+    .map((raw) => {
+      if (!raw || typeof raw !== 'object') return null;
+      const record = raw as { role?: unknown; content?: unknown; timestamp?: unknown };
+      const role = typeof record.role === 'string' ? record.role.toLowerCase() : '';
+      if (role !== 'assistant') return null;
+      const text = extractTextFromMessageContent(record.content);
+      if (!isSubstantiveAssistantText(text)) return null;
+      const timestamp = normalizeTimestampMs(record.timestamp);
+      if (!timestamp) return null;
+      return { timestamp, text };
+    })
+    .filter((entry): entry is { timestamp: number; text: string } => Boolean(entry))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (assistantMessages.length === 0) return recovered;
+
+  const usedAssistantIndexes = new Set<number>();
+  const sortedRuns = params.runs
+    .map((entry, index) => ({
+      entry,
+      index,
+      runAt: normalizeTimestampMs(entry.runAtMs) ?? normalizeTimestampMs(entry.ts),
+      durationMs: typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) ? Math.max(0, entry.durationMs) : 0,
+    }))
+    .filter((item) => Number.isFinite(item.runAt))
+    .sort((a, b) => (a.runAt ?? 0) - (b.runAt ?? 0));
+
+  for (const run of sortedRuns) {
+    if (!run.runAt) continue;
+    const windowStart = run.runAt - 30_000;
+    const windowEnd = run.runAt + Math.max(run.durationMs, 120_000) + 5 * 60_000;
+
+    let chosenIndex = -1;
+    for (let idx = 0; idx < assistantMessages.length; idx += 1) {
+      if (usedAssistantIndexes.has(idx)) continue;
+      const candidate = assistantMessages[idx];
+      if (candidate.timestamp < windowStart) continue;
+      if (candidate.timestamp > windowEnd) break;
+      chosenIndex = idx;
+    }
+
+    if (chosenIndex < 0) continue;
+    usedAssistantIndexes.add(chosenIndex);
+    const identity = toRunIdentity(run.entry, run.index);
+    recovered.set(identity, assistantMessages[chosenIndex].text);
+  }
+
+  return recovered;
 }
 
 async function readCronRunLog(jobId: string): Promise<CronRunLogEntry[]> {
@@ -278,6 +425,9 @@ function transformCronJob(job: GatewayCronJob) {
   const nextRun = job.state?.nextRunAtMs
     ? new Date(job.state.nextRunAtMs).toISOString()
     : undefined;
+  const runningAt = job.state?.runningAtMs
+    ? new Date(job.state.runningAtMs).toISOString()
+    : undefined;
 
   return {
     id: job.id,
@@ -290,6 +440,7 @@ function transformCronJob(job: GatewayCronJob) {
     updatedAt: new Date(job.updatedAtMs).toISOString(),
     lastRun,
     nextRun,
+    runningAt,
   };
 }
 
@@ -322,10 +473,27 @@ export async function handleCronRoutes(
 
       const jobs = (jobsResult as { jobs?: GatewayCronJob[] }).jobs ?? [];
       const job = jobs.find((item) => item.id === parsedSession.jobId);
+      const prompt = job?.payload?.message || job?.payload?.text || '';
+      let effectiveRuns = runs;
+      if (runs.some((entry) => shouldRecoverRunSummary(entry, prompt))) {
+        const recovered = await recoverRunSummariesFromMainSession({
+          ctx,
+          agentId: parsedSession.agentId,
+          runs,
+        });
+        if (recovered.size > 0) {
+          effectiveRuns = runs.map((entry, index) => {
+            const recoveredSummary = recovered.get(toRunIdentity(entry, index));
+            return recoveredSummary
+              ? { ...entry, recoveredSummary }
+              : entry;
+          });
+        }
+      }
       const messages = buildCronSessionFallbackMessages({
         sessionKey,
         job,
-        runs,
+        runs: effectiveRuns,
         sessionEntry: sessionEntry ? {
           label: typeof sessionEntry.label === 'string' ? sessionEntry.label : undefined,
           updatedAt: normalizeTimestampMs(sessionEntry.updatedAt),
@@ -437,7 +605,11 @@ export async function handleCronRoutes(
   if (url.pathname === '/api/cron/trigger' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ id: string }>(req);
-      sendJson(res, 200, await ctx.gatewayManager.rpc('cron.run', { id: body.id, mode: 'force' }));
+      sendJson(res, 200, await triggerCronJobWithSplitProfiles({
+        id: body.id,
+        rpc: ctx.gatewayManager.rpc.bind(ctx.gatewayManager),
+        logger: console,
+      }));
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
