@@ -6,7 +6,7 @@ import {
   parseAgentIdFromAssignedSession,
   resolveTaskInputMode,
 } from '@/lib/task-inbox';
-import type { Task } from '@/lib/openclaw/task-manager-client';
+import type { Task } from '@/services/openclaw/task-manager-client';
 
 function buildTask(overrides: Partial<Task>): Task {
   return {

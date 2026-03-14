@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TeamsBackgroundOrchestrator } from '@/lib/team/background-orchestrator';
+import { TeamsBackgroundOrchestrator } from '@/features/teams/runtime/orchestrator';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTeamsStore } from '@/stores/teams';

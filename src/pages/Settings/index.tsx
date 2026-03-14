@@ -54,12 +54,12 @@ import {
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApiFetch } from '@/lib/host-api';
-import { getTaskPluginStatus, installTaskPlugin } from '@/lib/openclaw/task-manager-client';
+import { getTaskPluginStatus, installTaskPlugin } from '@/services/openclaw/task-manager-client';
 import {
   DEFAULT_SETTINGS_SECTION,
   parseSettingsSectionFromSearch,
   type SettingsSectionKey,
-} from '@/lib/settings/sections';
+} from '@/lib/sections';
 type ControlUiInfo = {
   url: string;
   token: string;

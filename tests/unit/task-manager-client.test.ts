@@ -16,7 +16,7 @@ describe('task manager client', () => {
       success: true,
       result: { tasks: [{ id: 'task-1' }] },
     });
-    const { listTasks } = await import('@/lib/openclaw/task-manager-client');
+    const { listTasks } = await import('@/services/openclaw/task-manager-client');
     const tasks = await listTasks('E:/workspace/main');
 
     expect(tasks).toHaveLength(1);
@@ -30,7 +30,7 @@ describe('task manager client', () => {
         task: { id: 'task-2', goal: 'goal', status: 'running', progress: 0.6, plan_markdown: '', created_at: 1, updated_at: 2 },
       },
     });
-    const { resumeTask } = await import('@/lib/openclaw/task-manager-client');
+    const { resumeTask } = await import('@/services/openclaw/task-manager-client');
     const task = await resumeTask('task-2', {
       confirmId: 'confirm-1',
       decision: 'approve',
@@ -51,7 +51,7 @@ describe('task manager client', () => {
   it('getTaskPluginStatus/installTaskPlugin 走 task:* IPC', async () => {
     invokeIpcMock.mockResolvedValueOnce({ installed: true, enabled: true, skillEnabled: true, pluginDir: 'x' });
     invokeIpcMock.mockResolvedValueOnce({ success: true, installed: true });
-    const { getTaskPluginStatus, installTaskPlugin } = await import('@/lib/openclaw/task-manager-client');
+    const { getTaskPluginStatus, installTaskPlugin } = await import('@/services/openclaw/task-manager-client');
 
     const status = await getTaskPluginStatus();
     const install = await installTaskPlugin();

@@ -1,4 +1,4 @@
-import type { GatewayRpcInvoker } from '@/lib/openclaw/types';
+import type { GatewayRpcInvoker } from '@/services/openclaw/types';
 
 export interface ChatMessage {
   role?: unknown;

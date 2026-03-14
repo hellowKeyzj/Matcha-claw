@@ -1,4 +1,4 @@
-import type { Task, TaskStatus } from '@/lib/openclaw/task-manager-client';
+import type { Task, TaskStatus } from '@/services/openclaw/task-manager-client';
 
 const UNFINISHED_TASK_STATUSES = new Set<TaskStatus>([
   'pending',

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
-import type { Task } from '@/lib/openclaw/task-manager-client';
+import type { Task } from '@/services/openclaw/task-manager-client';
 
 const getWorkspaceDirMock = vi.fn<() => Promise<string | null>>();
 const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
@@ -8,7 +8,7 @@ const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
 const resumeTaskMock = vi.fn();
 const wakeTaskSessionMock = vi.fn();
 
-vi.mock('@/lib/openclaw/task-manager-client', () => ({
+vi.mock('@/services/openclaw/task-manager-client', () => ({
   getWorkspaceDir: (...args: unknown[]) => getWorkspaceDirMock(...args),
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
   listTasks: (...args: unknown[]) => listTasksMock(...args),
