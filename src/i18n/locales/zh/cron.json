@@ -6,7 +6,8 @@
     "gatewayWarning": "网关未运行。没有活跃的网关，无法管理定时任务。",
     "stats": {
         "total": "任务总数",
-        "active": "运行中",
+        "active": "已启用",
+        "running": "执行中",
         "paused": "已暂停",
         "failed": "失败"
     },
