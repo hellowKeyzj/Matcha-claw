@@ -352,18 +352,25 @@ interface CronJobCardProps {
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
-  onTrigger: () => Promise<void>;
+  onTrigger: () => Promise<{ ran: boolean; reason?: string }>;
 }
 
 function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
   const { t } = useTranslation('cron');
   const [triggering, setTriggering] = useState(false);
+  const isRunning = Boolean(job.runningAt);
 
   const handleTrigger = async () => {
     setTriggering(true);
     try {
-      await onTrigger();
-      toast.success(t('toast.triggered'));
+      const result = await onTrigger();
+      if (result.ran) {
+        toast.success(t('toast.triggered'));
+      } else if (result.reason === 'already-running') {
+        toast.warning(t('toast.alreadyRunning', '任务已在执行中，请稍后重试'));
+      } else {
+        toast.warning(t('toast.notTriggered', '任务未触发'));
+      }
     } catch (error) {
       console.error('Failed to trigger cron job:', error);
       toast.error(t('toast.failedTrigger', { error: error instanceof Error ? error.message : String(error) }));
@@ -407,6 +414,9 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
             <Badge variant={job.enabled ? 'success' : 'secondary'}>
               {job.enabled ? t('stats.active') : t('stats.paused')}
             </Badge>
+            {isRunning && (
+              <Badge variant="default">{t('stats.running')}</Badge>
+            )}
             <Switch
               checked={job.enabled}
               onCheckedChange={onToggle}
@@ -466,7 +476,7 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
             variant="ghost"
             size="sm"
             onClick={handleTrigger}
-            disabled={triggering}
+            disabled={triggering || isRunning}
           >
             {triggering ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -507,7 +517,7 @@ export function Cron() {
   }, [fetchJobs, isGatewayRunning]);
 
   // Statistics
-  const activeJobs = jobs.filter((j) => j.enabled);
+  const runningJobs = jobs.filter((j) => Boolean(j.runningAt));
   const pausedJobs = jobs.filter((j) => !j.enabled);
   const failedJobs = jobs.filter((j) => j.lastRun && !j.lastRun.success);
 
@@ -600,8 +610,8 @@ export function Cron() {
                 <Play className="h-6 w-6 text-green-600" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{activeJobs.length}</p>
-                <p className="text-sm text-muted-foreground">{t('stats.active')}</p>
+                <p className="text-2xl font-bold">{runningJobs.length}</p>
+                <p className="text-sm text-muted-foreground">{t('stats.running')}</p>
               </div>
             </div>
           </CardContent>

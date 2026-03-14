@@ -6,7 +6,8 @@
     "gatewayWarning": "Gateway is not running. Scheduled tasks cannot be managed without an active Gateway.",
     "stats": {
         "total": "Total Tasks",
-        "active": "Active",
+        "active": "Enabled",
+        "running": "Running",
         "paused": "Paused",
         "failed": "Failed"
     },

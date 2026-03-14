@@ -47,6 +47,7 @@ export interface CronJob {
   updatedAt: string;
   lastRun?: CronJobLastRun;
   nextRun?: string;
+  runningAt?: string;
 }
 
 /**
@@ -75,4 +76,3 @@ export interface CronJobUpdateInput {
  * Schedule type for UI picker
  */
 export type ScheduleType = 'daily' | 'weekly' | 'monthly' | 'interval' | 'custom';
-
