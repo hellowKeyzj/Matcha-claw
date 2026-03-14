@@ -615,6 +615,7 @@ interface GatewayCronJob {
   delivery?: { mode: string; channel?: string; to?: string };
   sessionTarget?: string;
   state: {
+    runningAtMs?: number;
     nextRunAtMs?: number;
     lastRunAtMs?: number;
     lastStatus?: string;
@@ -650,6 +651,9 @@ function transformCronJob(job: GatewayCronJob) {
   const nextRun = job.state?.nextRunAtMs
     ? new Date(job.state.nextRunAtMs).toISOString()
     : undefined;
+  const runningAt = job.state?.runningAtMs
+    ? new Date(job.state.runningAtMs).toISOString()
+    : undefined;
 
   return {
     id: job.id,
@@ -662,6 +666,7 @@ function transformCronJob(job: GatewayCronJob) {
     updatedAt: new Date(job.updatedAtMs).toISOString(),
     lastRun,
     nextRun,
+    runningAt,
   };
 }
 
