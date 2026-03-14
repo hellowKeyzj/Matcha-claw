@@ -1,5 +1,53 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-14 Agent 平台化收口：C 阶段主进程瘦身）
+
+### 目录树
+
+```text
+electron/
+├── adapters/
+│   └── platform/
+│       └── ipc/
+│           ├── cron-ipc.ts
+│           ├── gateway-ipc.ts
+│           ├── openclaw-ipc.ts
+│           ├── provider-ipc.ts
+│           └── skill-config-ipc.ts
+└── main/
+    └── ipc-handlers.ts
+
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-cutover-checklist.md
+```
+
+### 文件职责
+
+- `electron/adapters/platform/ipc/*.ts`：承接原主进程中的平台业务 IPC 处理逻辑，按能力域拆分（gateway/openclaw/cron/provider/skill-config）。
+- `electron/main/ipc-handlers.ts`：收敛为注册与宿主壳层编排入口，减少平台业务细节内嵌。
+- `docs/plans/2026-03-14-agent-platform-cutover-checklist.md`：同步 A/B/C 切流完成态与回滚策略。
+
+### 模块依赖与边界
+
+- 维持单向依赖：`core/contracts -> core/application -> adapters -> host-shell`。
+- `main/ipc-handlers.ts` 仅依赖 adapter 注册函数，不再维护大段平台业务实现。
+- 平台业务入口统一经 `platform-composition-root` / `platform-ipc-facade` 连接 application 层。
+
+### 关键决策与原因
+
+1. C 阶段优先做“主进程去业务化”，避免继续在宿主层堆叠平台语义。
+2. 保留兼容链路（如 unified request）以降低切流回归风险。
+3. 将 cutover checklist 与代码同步，避免迁移状态口径漂移。
+
+### 本次变更
+
+- 新增 `electron/adapters/platform/ipc/*` 五个模块并接入 `registerIpcHandlers`。
+- 清理 `gateway-ipc.ts` 抽取残留与 `cron-ipc.ts` 导出边界问题。
+- `ipc-handlers.ts` 迁出 gateway/openclaw/cron/provider/skill-config 业务大段逻辑。
+- 同步更新 `2026-03-14-agent-platform-cutover-checklist.md`。
+- 验证通过：`check:trait-boundary`、平台相关 unit/integration/contract、`pnpm test`、`pnpm run lint`。
+
 ## 本次变更日志（2026-03-14 Agent 平台 Trait 驱动 implementation plan）
 
 ### 目录树
