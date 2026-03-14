@@ -23,11 +23,26 @@ export async function handleGatewayRoutes(
   }
 
   if (url.pathname === '/api/gateway/status' && req.method === 'GET') {
-    sendJson(res, 200, ctx.gatewayManager.getStatus());
+    const status = ctx.gatewayManager.getStatus();
+    if (ctx.platformFacade) {
+      const platformHealth = await ctx.platformFacade.runtimeHealth();
+      sendJson(res, 200, { ...status, platformHealth });
+      return true;
+    }
+    sendJson(res, 200, status);
     return true;
   }
 
   if (url.pathname === '/api/gateway/health' && req.method === 'GET') {
+    if (ctx.platformFacade) {
+      const health = await ctx.platformFacade.runtimeHealth();
+      sendJson(res, 200, {
+        ok: health.status === 'running',
+        status: health.status,
+        detail: health.detail,
+      });
+      return true;
+    }
     const health = await ctx.gatewayManager.checkHealth();
     sendJson(res, 200, health);
     return true;
@@ -119,6 +134,69 @@ export async function handleGatewayRoutes(
       }
       const result = await ctx.gatewayManager.rpc('chat.send', rpcParams, 120000);
       sendJson(res, 200, { success: true, result });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/platform/runtime/health' && req.method === 'GET') {
+    if (!ctx.platformFacade) {
+      sendJson(res, 501, { success: false, error: 'platform facade unavailable' });
+      return true;
+    }
+    const health = await ctx.platformFacade.runtimeHealth();
+    sendJson(res, 200, {
+      success: true,
+      status: health.status,
+      detail: health.detail,
+      ok: health.status === 'running',
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/platform/tools/install-native' && req.method === 'POST') {
+    if (!ctx.platformFacade) {
+      sendJson(res, 501, { success: false, error: 'platform facade unavailable' });
+      return true;
+    }
+    try {
+      const body = await parseJsonBody<{ source?: { kind: string; spec: string; version?: string } }>(req);
+      if (!body.source) {
+        sendJson(res, 400, { success: false, error: 'source is required' });
+        return true;
+      }
+      const toolId = await ctx.platformFacade.installNativeTool(body.source);
+      sendJson(res, 200, { success: true, toolId });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/platform/tools/reconcile' && req.method === 'POST') {
+    if (!ctx.platformFacade) {
+      sendJson(res, 501, { success: false, error: 'platform facade unavailable' });
+      return true;
+    }
+    try {
+      const report = await ctx.platformFacade.reconcileNativeTools();
+      sendJson(res, 200, { success: true, report });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/platform/tools' && req.method === 'GET') {
+    if (!ctx.platformFacade) {
+      sendJson(res, 501, { success: false, error: 'platform facade unavailable' });
+      return true;
+    }
+    try {
+      const includeDisabled = url.searchParams.get('includeDisabled') === 'true';
+      const tools = await ctx.platformFacade.listEffectiveTools({ includeDisabled });
+      sendJson(res, 200, { success: true, tools });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

@@ -31,6 +31,8 @@
     "lint": "eslint . --fix",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:contract": "vitest run tests/contract",
+    "check:trait-boundary": "node scripts/check-trait-boundary.mjs",
     "uv:download": "zx scripts/download-bundled-uv.mjs",
     "uv:download:mac": "zx scripts/download-bundled-uv.mjs --platform=mac",
     "uv:download:win": "zx scripts/download-bundled-uv.mjs --platform=win",

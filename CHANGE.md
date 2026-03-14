@@ -1,5 +1,37 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-14 Agent 平台 Trait 驱动 implementation plan）
+
+### 目录树
+
+```text
+docs/
+└── plans/
+    └── 2026-03-14-agent-platform-implementation-plan.md
+```
+
+### 文件职责
+
+- `docs/plans/2026-03-14-agent-platform-implementation-plan.md`：基于 Trait 驱动架构设计的实施主计划，按任务给出分层落地路径、测试策略、迁移阶段与提交粒度。
+
+### 模块依赖与边界
+
+- 实施目标边界固定为：`core/contracts -> core/application -> adapters/*`，`host-shell` 只保留宿主职责。
+- 计划要求 `application` 仅依赖契约，不得引用具体 OpenClaw/Platform 适配实现。
+- 迁移按 A/B/C 分阶段推进（双写验证 -> 主链路切换 -> 冗余剥离），并要求三账本一致性验证。
+
+### 关键决策与原因
+
+1. 采用与现有 `implementation-plan` 一致的 TDD 任务模板，保障计划可执行、可审计。
+2. 将 Trait 合规门禁与 contract tests 直接纳入实施计划，避免“先改造后补治理”的回归风险。
+3. 将主进程迁移与回滚路径写入同一计划，确保架构迁移具备可控切换窗口。
+
+### 本次变更
+
+- 新增 `2026-03-14-agent-platform-implementation-plan.md`。
+- 固化 9 个实施任务（contracts/application/adapters/host-shell/门禁/文档收口）。
+- 明确最终 DoD：分层依赖、三账本调和、合规门禁、跨层测试与文档同步。
+
 ## 本次变更日志（2026-03-14 Agent 平台化实施计划逐文件映射）
 
 ### 目录树

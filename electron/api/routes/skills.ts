@@ -14,6 +14,22 @@ export async function handleSkillRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/skills/effective' && req.method === 'GET') {
+    if (!ctx.platformFacade) {
+      sendJson(res, 501, { success: false, error: 'platform facade unavailable' });
+      return true;
+    }
+    try {
+      const tools = await ctx.platformFacade.listEffectiveTools({
+        includeDisabled: false,
+      });
+      sendJson(res, 200, { success: true, tools });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/skills/config' && req.method === 'PUT') {
     try {
       const body = await parseJsonBody<{

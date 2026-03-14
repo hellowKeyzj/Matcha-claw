@@ -28,6 +28,7 @@ import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureLicenseGateBootstrapped } from '../utils/license';
+import { buildPlatformCompositionRoot } from './platform-composition-root';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -67,6 +68,7 @@ let mainWindow: BrowserWindow | null = null;
 const gatewayManager = new GatewayManager();
 const clawHubService = new ClawHubService();
 const hostEventBus = new HostEventBus();
+const platformRoot = buildPlatformCompositionRoot({ gatewayManager, hostEventBus });
 let hostApiServer: Server | null = null;
 
 /**
@@ -194,7 +196,7 @@ async function initialize(): Promise<void> {
   );
 
   // Register IPC handlers
-  registerIpcHandlers(gatewayManager, clawHubService, mainWindow);
+  registerIpcHandlers(gatewayManager, clawHubService, mainWindow, platformRoot.facade);
   ensureLicenseGateBootstrapped();
 
   hostApiServer = startHostApiServer({
@@ -202,6 +204,7 @@ async function initialize(): Promise<void> {
     clawHubService,
     eventBus: hostEventBus,
     mainWindow,
+    platformFacade: platformRoot.facade,
   });
 
   // Register update handlers

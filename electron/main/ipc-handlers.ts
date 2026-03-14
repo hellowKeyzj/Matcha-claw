@@ -38,6 +38,8 @@ import { registerTeamIpcHandlers } from './team-ipc-handlers';
 import { upsertPluginInstallRecord, type InstallSource } from '../utils/plugin-install-record';
 import { getPort } from '../utils/config';
 import { resolveMainWorkspaceDir, resolveTaskWorkspaceDirs } from '../utils/task-workspace-scope';
+import type { PlatformRuntimeFacade } from './platform-ipc-facade';
+import type { AssembleRequest, RegistryQuery, ToolSource } from '../core/contracts';
 
 type AppRequest = {
   id?: string;
@@ -65,16 +67,17 @@ type AppResponse = {
 export function registerIpcHandlers(
   gatewayManager: GatewayManager,
   clawHubService: ClawHubService,
-  mainWindow: BrowserWindow
+  mainWindow: BrowserWindow,
+  platformFacade?: PlatformRuntimeFacade,
 ): void {
   // Unified request protocol
-  registerUnifiedRequestHandlers(gatewayManager);
+  registerUnifiedRequestHandlers(gatewayManager, platformFacade);
 
   // Host API proxy handlers
   registerHostApiProxyHandlers();
 
   // Gateway handlers
-  registerGatewayHandlers(gatewayManager, mainWindow);
+  registerGatewayHandlers(gatewayManager, mainWindow, platformFacade);
 
   // ClawHub handlers
   registerClawHubHandlers(clawHubService);
@@ -227,7 +230,10 @@ function isLaunchAtStartupKey(key: keyof AppSettings): boolean {
   return key === 'launchAtStartup';
 }
 
-function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
+function registerUnifiedRequestHandlers(
+  gatewayManager: GatewayManager,
+  platformFacade?: PlatformRuntimeFacade,
+): void {
   const providerService = getProviderService();
   const handleProxySettingsChange = async () => {
     const settings = await getAllSettings();
@@ -371,6 +377,46 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
           if (request.action === 'cancelAutoInstall') {
             appUpdater.cancelAutoInstall();
             data = { success: true };
+            break;
+          }
+          return {
+            id: request.id,
+            ok: false,
+            error: {
+              code: 'UNSUPPORTED',
+              message: `APP_REQUEST_UNSUPPORTED:${request.module}.${request.action}`,
+            },
+          };
+        }
+        case 'platform': {
+          if (!platformFacade) {
+            return {
+              id: request.id,
+              ok: false,
+              error: {
+                code: 'UNSUPPORTED',
+                message: 'APP_REQUEST_UNSUPPORTED:platform.facade_missing',
+              },
+            };
+          }
+
+          if (request.action === 'runtimeHealth') {
+            data = await platformFacade.runtimeHealth();
+            break;
+          }
+          if (request.action === 'installNativeTool') {
+            const payload = request.payload as { source?: ToolSource } | undefined;
+            if (!payload?.source) throw new Error('Invalid platform.installNativeTool payload');
+            data = await platformFacade.installNativeTool(payload.source);
+            break;
+          }
+          if (request.action === 'reconcileNativeTools') {
+            data = await platformFacade.reconcileNativeTools();
+            break;
+          }
+          if (request.action === 'listEffectiveTools') {
+            const payload = request.payload as RegistryQuery | undefined;
+            data = await platformFacade.listEffectiveTools(payload);
             break;
           }
           return {
@@ -877,7 +923,8 @@ function registerLogHandlers(): void {
  */
 function registerGatewayHandlers(
   gatewayManager: GatewayManager,
-  mainWindow: BrowserWindow
+  mainWindow: BrowserWindow,
+  platformFacade?: PlatformRuntimeFacade,
 ): void {
   type GatewayHttpProxyRequest = {
     path?: string;
@@ -888,8 +935,16 @@ function registerGatewayHandlers(
   };
 
   // Get Gateway status
-  ipcMain.handle('gateway:status', () => {
-    return gatewayManager.getStatus();
+  ipcMain.handle('gateway:status', async () => {
+    const gatewayStatus = gatewayManager.getStatus();
+    if (!platformFacade) {
+      return gatewayStatus;
+    }
+    const runtimeHealth = await platformFacade.runtimeHealth();
+    return {
+      ...gatewayStatus,
+      platformHealth: runtimeHealth,
+    };
   });
 
   // Check if Gateway is connected
@@ -932,6 +987,78 @@ function registerGatewayHandlers(
     try {
       const result = await gatewayManager.rpc(method, params, timeoutMs);
       return { success: true, result };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:runtimeHealth', async () => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      const status = await platformFacade.runtimeHealth();
+      return { success: true, status };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:installNativeTool', async (_, source: ToolSource) => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      const toolId = await platformFacade.installNativeTool(source);
+      return { success: true, toolId };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:reconcileTools', async () => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      const report = await platformFacade.reconcileNativeTools();
+      return { success: true, report };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:startRun', async (_, req: AssembleRequest) => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      const runId = await platformFacade.startRun(req);
+      return { success: true, runId };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:abortRun', async (_, runId: string) => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      await platformFacade.abortRun(runId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('platform:listTools', async (_, query?: RegistryQuery) => {
+    if (!platformFacade) {
+      return { success: false, error: 'platform facade unavailable' };
+    }
+    try {
+      const tools = await platformFacade.listEffectiveTools(query);
+      return { success: true, tools };
     } catch (error) {
       return { success: false, error: String(error) };
     }
@@ -1105,6 +1232,15 @@ function registerGatewayHandlers(
   // Health check
   ipcMain.handle('gateway:health', async () => {
     try {
+      if (platformFacade) {
+        const health = await platformFacade.runtimeHealth();
+        return {
+          success: true,
+          ok: health.status === 'running',
+          status: health.status,
+          detail: health.detail,
+        };
+      }
       const health = await gatewayManager.checkHealth();
       return { success: true, ...health };
     } catch (error) {
