@@ -499,7 +499,11 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
   );
 }
 
-export function Cron() {
+interface CronProps {
+  embedded?: boolean;
+}
+
+export function Cron({ embedded = false }: CronProps) {
   const { t } = useTranslation('cron');
   const { jobs, loading, error, fetchJobs, createJob, updateJob, toggleJob, deleteJob, triggerJob } = useCronStore();
   const gatewayStatus = useGatewayStore((state) => state.status);
@@ -551,13 +555,15 @@ export function Cron() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-muted-foreground">
-            {t('subtitle')}
-          </p>
-        </div>
+      <div className={cn('flex items-center', embedded ? 'justify-end' : 'justify-between')}>
+        {!embedded && (
+          <div>
+            <h1 className="text-2xl font-bold">{t('title')}</h1>
+            <p className="text-muted-foreground">
+              {t('subtitle')}
+            </p>
+          </div>
+        )}
         <div className="flex gap-2">
           <Button variant="outline" onClick={fetchJobs} disabled={!isGatewayRunning}>
             <RefreshCw className="h-4 w-4 mr-2" />

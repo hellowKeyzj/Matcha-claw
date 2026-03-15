@@ -2,7 +2,7 @@
  * Root Application Component
  * Handles routing and global providers
  */
-import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Component, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
@@ -13,7 +13,6 @@ import { Dashboard } from './pages/Dashboard';
 import { Chat } from './pages/Chat';
 import { Channels } from './pages/Channels';
 import { Skills } from './pages/Skills';
-import { Cron } from './pages/Cron';
 import { SubAgents } from './pages/SubAgents';
 import { TeamsPage } from './pages/Teams';
 import { TeamChatPage } from './pages/Teams/TeamChat';
@@ -270,7 +269,7 @@ function App() {
             <Route path="/teams/:teamId" element={<TeamChatPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/skills" element={<Skills />} />
-            <Route path="/cron" element={<Cron />} />
+            <Route path="/cron" element={<Navigate to="/tasks?tab=scheduled" replace />} />
             <Route path="/settings/*" element={<Settings />} />
           </Route>
         </Routes>

@@ -206,7 +206,7 @@ describe('sidebar chat nav', () => {
 
     mountSidebar('/dashboard');
 
-    expect(screen.getByText('Task Center')).toBeInTheDocument();
+    expect(screen.getAllByText('Task Center').length).toBeGreaterThan(0);
     expect(screen.getByText(/Approval Blocker/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Deploy release pipeline/i }));
     expect(screen.getByTestId('location-echo')).toHaveTextContent('/tasks');
