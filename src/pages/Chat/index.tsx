@@ -4,7 +4,7 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
@@ -88,7 +88,7 @@ export function Chat() {
   const streamingTools = useChatStore((s) => s.streamingTools);
   const pendingFinal = useChatStore((s) => s.pendingFinal);
   const approvalStatus = useChatStore((s) => s.approvalStatus);
-  const pendingApprovalsBySession = useChatStore((s) => s.pendingApprovalsBySession);
+  const currentPendingApprovals = useChatStore((s) => s.pendingApprovalsBySession[s.currentSessionKey] ?? []);
   const resolveApproval = useChatStore((s) => s.resolveApproval);
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -104,7 +104,10 @@ export function Chat() {
   const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesViewportRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const autoScrollRafRef = useRef<number | null>(null);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
   const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
     try {
@@ -202,9 +205,43 @@ export function Chat() {
     };
   }, [cleanupEmptySession, isGatewayRunning, loadAgents, loadHistory, loadSessions, location.search, navigate, switchSession]);
 
-  // Auto-scroll on new messages, streaming, or activity changes
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const evaluateStickiness = () => {
+      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      shouldStickToBottomRef.current = distanceToBottom <= 120;
+    };
+
+    evaluateStickiness();
+    viewport.addEventListener('scroll', evaluateStickiness, { passive: true });
+    return () => {
+      viewport.removeEventListener('scroll', evaluateStickiness);
+    };
+  }, []);
+
+  // Auto-scroll on new messages, streaming, or activity changes.
+  // Keep smooth behavior for non-stream updates; use auto during streaming to avoid animation thrash.
+  useEffect(() => {
+    if (!shouldStickToBottomRef.current) {
+      return;
+    }
+    if (autoScrollRafRef.current != null) {
+      window.cancelAnimationFrame(autoScrollRafRef.current);
+    }
+    autoScrollRafRef.current = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: sending ? 'auto' : 'smooth' });
+      autoScrollRafRef.current = null;
+    });
+    return () => {
+      if (autoScrollRafRef.current != null) {
+        window.cancelAnimationFrame(autoScrollRafRef.current);
+        autoScrollRafRef.current = null;
+      }
+    };
   }, [messages, streamingMessage, sending, pendingFinal]);
 
   // Update timestamp when sending starts
@@ -245,7 +282,6 @@ export function Chat() {
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
   const waitingApproval = approvalStatus === 'awaiting_approval';
-  const currentPendingApprovals = pendingApprovalsBySession[currentSessionKey] ?? [];
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
   const assistantAvatarEmoji = resolveAgentEmoji(
@@ -270,7 +306,7 @@ export function Chat() {
           <ChatToolbar />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div ref={messagesViewportRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           <div className="mx-auto max-w-4xl space-y-4">
             {loading && !sending ? (
               <div className="flex h-full items-center justify-center py-20">
@@ -280,15 +316,12 @@ export function Chat() {
               <WelcomeScreen />
             ) : (
               <>
-                {messages.map((msg, idx) => (
-                  <ChatMessage
-                    key={msg.id || `msg-${idx}`}
-                    message={msg}
-                    showThinking={showThinking}
-                    assistantAvatarEmoji={assistantAvatarEmoji}
-                    userAvatarImageUrl={userAvatarDataUrl}
-                  />
-                ))}
+                <ChatMessageHistoryList
+                  messages={messages}
+                  showThinking={showThinking}
+                  assistantAvatarEmoji={assistantAvatarEmoji}
+                  userAvatarImageUrl={userAvatarDataUrl}
+                />
 
                 {shouldRenderStreaming && (
                   <ChatMessage
@@ -312,20 +345,8 @@ export function Chat() {
                   />
                 )}
 
-                {sending && waitingApproval && !shouldRenderStreaming && (
-                  <>
-                    <ActivityIndicator phase="approval_waiting" />
-                    {currentPendingApprovals.length > 0 && (
-                      <ApprovalActionsPanel
-                        approvals={currentPendingApprovals}
-                        onResolve={(id, decision) => void resolveApproval(id, decision)}
-                      />
-                    )}
-                  </>
-                )}
-
                 {sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && (
-                  <ActivityIndicator phase="tool_processing" />
+                  <ActivityIndicator />
                 )}
 
                 {sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && (
@@ -351,6 +372,23 @@ export function Chat() {
               >
                 {t('common:actions.dismiss')}
               </button>
+            </div>
+          </div>
+        )}
+
+        {waitingApproval && (
+          <div className="border-t border-primary/20 bg-card/70 px-4 py-3" data-testid="chat-approval-dock">
+            <div className="mx-auto max-w-4xl">
+              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                <span>{t('approval.waitingLabel')}</span>
+              </div>
+              {currentPendingApprovals.length > 0 && (
+                <ApprovalActionsPanel
+                  approvals={currentPendingApprovals}
+                  onResolve={(id, decision) => void resolveApproval(id, decision)}
+                />
+              )}
             </div>
           </div>
         )}
@@ -435,10 +473,8 @@ function TypingIndicator() {
 
 // ── Activity Indicator (shown between tool cycles) ─────────────
 
-function ActivityIndicator({ phase }: { phase: 'tool_processing' | 'approval_waiting' }) {
-  const label = phase === 'approval_waiting'
-    ? 'Waiting for approval...'
-    : 'Processing tool results...';
+function ActivityIndicator() {
+  const label = 'Processing tool results...';
   return (
     <div className="flex gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-blue-600 text-white">
@@ -463,7 +499,7 @@ function ApprovalActionsPanel({
 }) {
   const { t } = useTranslation('chat');
   return (
-    <div className="ml-11 rounded-xl border border-primary/20 bg-card p-3">
+    <div className="w-full rounded-xl border border-primary/20 bg-background/80 p-3">
       <div className="mb-2 text-sm font-medium text-foreground">{t('approval.panelTitle')}</div>
       <div className="space-y-2">
         {approvals.map((approval) => (
@@ -502,3 +538,29 @@ function ApprovalActionsPanel({
 }
 
 export default Chat;
+
+const ChatMessageHistoryList = memo(function ChatMessageHistoryList({
+  messages,
+  showThinking,
+  assistantAvatarEmoji,
+  userAvatarImageUrl,
+}: {
+  messages: RawMessage[];
+  showThinking: boolean;
+  assistantAvatarEmoji: string;
+  userAvatarImageUrl: string | null;
+}) {
+  return (
+    <>
+      {messages.map((msg, idx) => (
+        <ChatMessage
+          key={msg.id || `msg-${idx}`}
+          message={msg}
+          showThinking={showThinking}
+          assistantAvatarEmoji={assistantAvatarEmoji}
+          userAvatarImageUrl={userAvatarImageUrl}
+        />
+      ))}
+    </>
+  );
+});

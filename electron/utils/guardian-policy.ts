@@ -197,25 +197,32 @@ export function syncGuardianPolicyToOpenClawConfig(
 ): { changed: boolean; payload: GuardianPolicyPayload; configPath: string; userPolicyPath: string } {
   const payload = buildGuardianPolicyPayloadFromSettings(settings);
   const config = readOpenClawConfig();
-
-  const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
-  const entries = isRecord(plugins.entries) ? { ...plugins.entries } : {};
-  const taskManagerEntry = isRecord(entries['task-manager']) ? { ...entries['task-manager'] } : {};
-  const guardian = isRecord(taskManagerEntry.guardian) ? { ...taskManagerEntry.guardian } : {};
-
-  const nextGuardian = {
-    ...guardian,
-    preset: payload.preset,
-    securityPolicyVersion: payload.securityPolicyVersion,
-    securityPolicyByAgent: payload.securityPolicyByAgent,
-  };
-
-  const changed = JSON.stringify(guardian) !== JSON.stringify(nextGuardian);
+  // NOTE:
+  // OpenClaw 当前配置 schema 不允许 plugins.entries.task-manager.guardian，
+  // 若写入会导致 Gateway 启动失败并触发 doctor 修复循环。
+  // 因此仅把策略落到 guardian.policy.json，运行时通过 guardian.policy.sync 注入。
+  let changed = false;
+  if (isRecord(config.plugins)) {
+    const plugins = { ...config.plugins };
+    if (isRecord(plugins.entries)) {
+      const entries = { ...plugins.entries } as Record<string, unknown>;
+      if (isRecord(entries['task-manager'])) {
+        const taskManagerEntry = { ...entries['task-manager'] } as Record<string, unknown>;
+        if (Object.prototype.hasOwnProperty.call(taskManagerEntry, 'guardian')) {
+          delete taskManagerEntry.guardian;
+          changed = true;
+          if (Object.keys(taskManagerEntry).length > 0) {
+            entries['task-manager'] = taskManagerEntry;
+          } else {
+            delete entries['task-manager'];
+          }
+          plugins.entries = entries;
+          config.plugins = plugins;
+        }
+      }
+    }
+  }
   if (changed) {
-    taskManagerEntry.guardian = nextGuardian;
-    entries['task-manager'] = taskManagerEntry;
-    plugins.entries = entries;
-    config.plugins = plugins;
     writeOpenClawConfig(config);
   }
   writeGuardianUserPolicy(payload);

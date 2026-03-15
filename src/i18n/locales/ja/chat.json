@@ -22,6 +22,7 @@
     },
     "approval": {
         "panelTitle": "承認待ち",
+        "waitingLabel": "承認待ちです...",
         "pendingTool": "ツール: {{tool}}",
         "unknownTool": "不明なツール",
         "allowOnce": "今回のみ許可",

@@ -104,7 +104,7 @@ describe('guardian plugin hooks', () => {
     const approvalManager = createApprovalManager('allow-once');
     const context = {
       execApprovalManager: approvalManager,
-      nodeSendToAllSubscribed: (event: string, payload: Record<string, unknown>) => {
+      broadcast: (event: string, payload: Record<string, unknown>) => {
         events.push({ event, payload });
       },
     };
@@ -135,6 +135,83 @@ describe('guardian plugin hooks', () => {
     const resolved = events.find((item) => item.event === 'exec.approval.resolved');
     expect(requested?.payload.runId).toBe('run-1');
     expect(resolved?.payload.runId).toBe('run-1');
+  });
+
+  it('before_tool_call 可直接使用 hook ctx 的审批上下文（无需 task_list 预热）', async () => {
+    const { hooks } = createFakeApi(tempDir, {
+      guardian: { defaultAction: 'confirm' },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const events: RecordedEvent[] = [];
+    const approvalManager = createApprovalManager('allow-once');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo direct' }, runId: 'run-direct', toolCallId: 'tc-direct' },
+      {
+        toolName: 'system.run',
+        runId: 'run-direct',
+        toolCallId: 'tc-direct',
+        sessionKey: 'agent:main:main',
+        agentId: 'main',
+        execApprovalManager: approvalManager,
+        broadcast: (event: string, payload: Record<string, unknown>) => {
+          events.push({ event, payload });
+        },
+      },
+    );
+
+    expect(result).toBeUndefined();
+    expect(approvalManager.create).toHaveBeenCalledTimes(1);
+    expect(approvalManager.register).toHaveBeenCalledTimes(1);
+    expect(events.some((item) => item.event === 'exec.approval.requested')).toBe(true);
+    expect(events.some((item) => item.event === 'exec.approval.resolved')).toBe(true);
+  });
+
+  it('before_tool_call 在仅有 broadcast 通道时也会发布审批事件', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: { defaultAction: 'confirm' },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const events: RecordedEvent[] = [];
+    const approvalManager = createApprovalManager('allow-once');
+    const context = {
+      broadcast: (event: string, payload: Record<string, unknown>) => {
+        events.push({ event, payload });
+      },
+    };
+
+    const taskList = gatewayMethods.get('task_list');
+    expect(taskList).toBeTypeOf('function');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo broadcast-only' }, runId: 'run-broadcast', toolCallId: 'tc-broadcast' },
+      {
+        toolName: 'system.run',
+        runId: 'run-broadcast',
+        toolCallId: 'tc-broadcast',
+        sessionKey: 'agent:main:main',
+        agentId: 'main',
+        execApprovalManager: approvalManager,
+      },
+    );
+
+    expect(result).toBeUndefined();
+    expect(approvalManager.create).toHaveBeenCalledTimes(1);
+    expect(approvalManager.register).toHaveBeenCalledTimes(1);
+    expect(events.some((item) => item.event === 'exec.approval.requested')).toBe(true);
+    expect(events.some((item) => item.event === 'exec.approval.resolved')).toBe(true);
   });
 
   it('before_tool_call 在审批拒绝时阻断并写入审计', async () => {
@@ -470,5 +547,151 @@ describe('guardian plugin hooks', () => {
 
     expect(result).toBeUndefined();
     expect(context.execApprovalManager.register).not.toHaveBeenCalled();
+  });
+
+  it('guardian.policy.sync 切换到 relaxed 时会重置预设衍生动作', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: {
+        preset: 'balanced',
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const syncPolicy = gatewayMethods.get('guardian.policy.sync');
+    expect(syncPolicy).toBeTypeOf('function');
+    let syncPayload: Record<string, unknown> | null = null;
+    await syncPolicy?.({
+      params: {
+        preset: 'relaxed',
+        securityPolicyVersion: 5,
+        securityPolicyByAgent: {},
+      },
+      context,
+      respond: (ok: boolean, body?: Record<string, unknown>) => {
+        expect(ok).toBe(true);
+        syncPayload = body ?? null;
+      },
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+    expect(syncPayload?.preset).toBe('relaxed');
+
+    const defaultActionResult = await beforeToolCall?.(
+      { toolName: 'custom.echo', params: { text: 'hello' }, runId: 'run-14', toolCallId: 'tc-14' },
+      { toolName: 'custom.echo', runId: 'run-14', toolCallId: 'tc-14', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    const highRiskResult = await beforeToolCall?.(
+      { toolName: 'write', params: { path: 'C:\\temp\\demo.txt', content: 'hello' }, runId: 'run-15', toolCallId: 'tc-15' },
+      { toolName: 'write', runId: 'run-15', toolCallId: 'tc-15', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+
+    expect(defaultActionResult).toBeUndefined();
+    expect(highRiskResult).toBeUndefined();
+    expect(context.execApprovalManager.register).not.toHaveBeenCalled();
+  });
+
+  it('诊断日志：before_tool_call 审批等待与总耗时超阈值时会告警', async () => {
+    const { hooks, gatewayMethods, logger } = createFakeApi(tempDir, {
+      guardian: {
+        defaultAction: 'confirm',
+        diagnostics: {
+          slowBeforeToolCallMs: 0,
+          slowApprovalWaitMs: 0,
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo diagnostics' }, runId: 'run-12', toolCallId: 'tc-12' },
+      { toolName: 'system.run', runId: 'run-12', toolCallId: 'tc-12', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+
+    expect(result).toBeUndefined();
+    const warnMessages = logger.warn.mock.calls.map((args) => String(args[0] ?? ''));
+    expect(warnMessages.some((line) => line.includes('[guardian] 审批等待 耗时'))).toBe(true);
+    expect(warnMessages.some((line) => line.includes('[guardian] before_tool_call 耗时'))).toBe(true);
+  });
+
+  it('诊断日志：after_tool_call 审计写入与总耗时超阈值时会告警', async () => {
+    const { hooks, gatewayMethods, logger } = createFakeApi(tempDir, {
+      guardian: {
+        defaultAction: 'allow',
+        diagnostics: {
+          slowAfterToolCallMs: 0,
+          slowAuditWriteMs: 0,
+        },
+      },
+    });
+    const afterToolCall = hooks.get('after_tool_call');
+    expect(afterToolCall).toBeTypeOf('function');
+
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await afterToolCall?.(
+      {
+        toolName: 'http.request',
+        params: {
+          url: 'https://example.com/api',
+          authorization: 'Bearer sk-secret-value',
+        },
+        runId: 'run-13',
+        toolCallId: 'tc-13',
+        durationMs: 12,
+      },
+      {
+        toolName: 'http.request',
+        runId: 'run-13',
+        toolCallId: 'tc-13',
+        sessionKey: 'agent:main:main',
+        agentId: 'main',
+      },
+    );
+
+    const warnMessages = logger.warn.mock.calls.map((args) => String(args[0] ?? ''));
+    expect(warnMessages.some((line) => line.includes('[guardian] audit 写入 耗时'))).toBe(true);
+    expect(warnMessages.some((line) => line.includes('[guardian] after_tool_call 耗时'))).toBe(true);
   });
 });

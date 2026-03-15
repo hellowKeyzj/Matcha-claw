@@ -10,6 +10,14 @@ import type { GatewayStatus } from '../types/gateway';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
+let chatStoreModulePromise: Promise<typeof import('./chat')> | null = null;
+let taskInboxStoreModulePromise: Promise<typeof import('./task-inbox-store')> | null = null;
+let taskCenterStoreModulePromise: Promise<typeof import('./task-center-store')> | null = null;
+let channelsStoreModulePromise: Promise<typeof import('./channels')> | null = null;
+const TASK_NOTIFICATION_FLUSH_MS = 48;
+const TASK_NOTIFICATION_COALESCE_LIMIT = 200;
+let queuedTaskNotifications: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+let taskNotificationFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface GatewayHealth {
   ok: boolean;
@@ -30,6 +38,115 @@ interface GatewayState {
   rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   setStatus: (status: GatewayStatus) => void;
   clearError: () => void;
+}
+
+function getChatStoreModule() {
+  if (!chatStoreModulePromise) {
+    chatStoreModulePromise = import('./chat');
+  }
+  return chatStoreModulePromise;
+}
+
+function syncPendingApprovalsFromChatStore(): void {
+  getChatStoreModule()
+    .then(({ useChatStore }) => {
+      const state = useChatStore.getState() as { syncPendingApprovals?: () => Promise<void> };
+      if (typeof state.syncPendingApprovals !== 'function') return;
+      void state.syncPendingApprovals();
+    })
+    .catch(() => {});
+}
+
+function getTaskInboxStoreModule() {
+  if (!taskInboxStoreModulePromise) {
+    taskInboxStoreModulePromise = import('./task-inbox-store');
+  }
+  return taskInboxStoreModulePromise;
+}
+
+function getTaskCenterStoreModule() {
+  if (!taskCenterStoreModulePromise) {
+    taskCenterStoreModulePromise = import('./task-center-store');
+  }
+  return taskCenterStoreModulePromise;
+}
+
+function getChannelsStoreModule() {
+  if (!channelsStoreModulePromise) {
+    channelsStoreModulePromise = import('./channels');
+  }
+  return channelsStoreModulePromise;
+}
+
+function coalesceTaskNotifications(
+  notifications: Array<{ method?: string; params?: Record<string, unknown> }>,
+): Array<{ method?: string; params?: Record<string, unknown> }> {
+  const passthrough: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+  const byTaskId = new Map<string, { method?: string; params?: Record<string, unknown> }>();
+
+  for (const payload of notifications) {
+    const method = payload.method;
+    if (method !== 'task_progress_update' && method !== 'task_status_changed') {
+      passthrough.push(payload);
+      continue;
+    }
+    const params = payload.params;
+    const task = (params?.task && typeof params.task === 'object')
+      ? params.task as { id?: unknown }
+      : undefined;
+    const taskId = typeof task?.id === 'string'
+      ? task.id
+      : (typeof params?.taskId === 'string' ? params.taskId : '');
+    if (!taskId) {
+      passthrough.push(payload);
+      continue;
+    }
+    byTaskId.set(taskId, payload);
+  }
+
+  return [...passthrough, ...byTaskId.values()];
+}
+
+async function flushTaskNotifications(): Promise<void> {
+  if (taskNotificationFlushTimer) {
+    clearTimeout(taskNotificationFlushTimer);
+    taskNotificationFlushTimer = null;
+  }
+  if (queuedTaskNotifications.length === 0) {
+    return;
+  }
+  const pending = queuedTaskNotifications;
+  queuedTaskNotifications = [];
+  const compacted = coalesceTaskNotifications(pending);
+
+  try {
+    const [{ useTaskInboxStore }, { useTaskCenterStore }] = await Promise.all([
+      getTaskInboxStoreModule(),
+      getTaskCenterStoreModule(),
+    ]);
+    for (const payload of compacted) {
+      useTaskInboxStore.getState().handleGatewayNotification(payload);
+      useTaskCenterStore.getState().handleGatewayNotification(payload);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function enqueueTaskNotification(payload: { method?: string; params?: Record<string, unknown> }): void {
+  queuedTaskNotifications.push(payload);
+  if (queuedTaskNotifications.length > TASK_NOTIFICATION_COALESCE_LIMIT) {
+    queuedTaskNotifications.splice(
+      0,
+      queuedTaskNotifications.length - TASK_NOTIFICATION_COALESCE_LIMIT,
+    );
+  }
+  if (taskNotificationFlushTimer) {
+    return;
+  }
+  taskNotificationFlushTimer = setTimeout(() => {
+    void flushTaskNotifications();
+  }, TASK_NOTIFICATION_FLUSH_MS);
 }
 
 function handleGatewayNotification(notification: { method?: string; params?: Record<string, unknown> } | undefined): void {
@@ -62,7 +179,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   };
 
   if (payload.method === 'exec.approval.requested') {
-    import('./chat')
+    getChatStoreModule()
       .then(({ useChatStore }) => {
         useChatStore.getState().handleApprovalRequested(extractApprovalPayload(payload.params!));
       })
@@ -71,7 +188,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 
   if (payload.method === 'exec.approval.resolved') {
-    import('./chat')
+    getChatStoreModule()
       .then(({ useChatStore }) => {
         useChatStore.getState().handleApprovalResolved(extractApprovalPayload(payload.params!));
       })
@@ -80,16 +197,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 
   if (typeof payload.method === 'string' && payload.method.startsWith('task_')) {
-    import('./task-inbox-store')
-      .then(({ useTaskInboxStore }) => {
-        useTaskInboxStore.getState().handleGatewayNotification(payload);
-      })
-      .catch(() => {});
-    import('./task-center-store')
-      .then(({ useTaskCenterStore }) => {
-        useTaskCenterStore.getState().handleGatewayNotification(payload);
-      })
-      .catch(() => {});
+    enqueueTaskNotification(payload);
     return;
   }
 
@@ -112,7 +220,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
       state: p.state ?? data.state,
       message: p.message ?? data.message,
     };
-    import('./chat')
+    getChatStoreModule()
       .then(({ useChatStore }) => {
         useChatStore.getState().handleChatEvent(normalizedEvent);
       })
@@ -122,7 +230,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   const runId = p.runId ?? data.runId;
   const sessionKey = p.sessionKey ?? data.sessionKey;
   if (phase === 'started' && runId != null && sessionKey != null) {
-    import('./chat')
+    getChatStoreModule()
       .then(({ useChatStore }) => {
         const state = useChatStore.getState();
         const resolvedSessionKey = String(sessionKey);
@@ -143,7 +251,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 
   if (phase === 'completed' || phase === 'done' || phase === 'finished' || phase === 'end') {
-    import('./chat')
+    getChatStoreModule()
       .then(({ useChatStore }) => {
         const state = useChatStore.getState();
         const resolvedSessionKey = sessionKey != null ? String(sessionKey) : null;
@@ -175,7 +283,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
 }
 
 function handleGatewayChatMessage(data: unknown): void {
-  import('./chat').then(({ useChatStore }) => {
+  getChatStoreModule().then(({ useChatStore }) => {
     const chatData = data as Record<string, unknown>;
     const payload = ('message' in chatData && typeof chatData.message === 'object')
       ? chatData.message as Record<string, unknown>
@@ -234,7 +342,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
+            const prevState = get().status.state;
             set({ status: payload });
+            if (payload.state === 'running' && prevState !== 'running') {
+              syncPendingApprovalsFromChatStore();
+            }
           }));
           unsubscribers.push(subscribeHostEvent<{ message?: string }>('gateway:error', (payload) => {
             set({ lastError: payload.message || 'Gateway error' });
@@ -251,7 +363,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
             'gateway:channel-status',
             (update) => {
-              import('./channels')
+              getChannelsStoreModule()
                 .then(({ useChannelsStore }) => {
                   if (!update.channelId || !update.status) return;
                   const state = useChannelsStore.getState();
@@ -264,6 +376,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             },
           ));
           gatewayEventUnsubscribers = unsubscribers;
+        }
+        if (status.state === 'running') {
+          syncPendingApprovalsFromChatStore();
         }
       } catch (error) {
         console.error('Failed to initialize Gateway:', error);

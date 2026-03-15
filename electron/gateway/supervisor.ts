@@ -7,6 +7,36 @@ import { getUvMirrorEnv } from '../utils/uv-env';
 import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
 import { logger } from '../utils/logger';
 
+const ANSI_ESCAPE_RE = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+function normalizeDoctorOutputLine(line: string): string {
+  const withoutAnsi = line.replace(ANSI_ESCAPE_RE, '');
+  const withoutControls = withoutAnsi.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+  return withoutControls.trim();
+}
+
+function isLikelyDoctorDecorationNoise(line: string): boolean {
+  if (!line) return true;
+
+  const compact = line.replace(/\s+/g, '');
+  if (!compact) return true;
+
+  // Decorative box lines usually contain no semantic alphanumeric content.
+  const hasAsciiWord = /[A-Za-z0-9]/.test(compact);
+  const asciiCount = (compact.match(/[\x20-\x7E]/g) ?? []).length;
+  const nonAsciiCount = compact.length - asciiCount;
+  if (!hasAsciiWord && nonAsciiCount >= 8) {
+    return true;
+  }
+
+  // Separators like "──────" / "======" / repeated symbols should be dropped.
+  if (/^[\p{S}\p{P}\p{Zs}]+$/u.test(line)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function warmupManagedPythonReadiness(): void {
   void isPythonReady().then((pythonReady) => {
     if (!pythonReady) {
@@ -274,7 +304,7 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
     : process.env.PATH || '';
 
   const uvEnv = await getUvMirrorEnv();
-  const doctorArgs = ['doctor', '--fix', '--yes', '--non-interactive'];
+  const doctorArgs = ['--no-color', 'doctor', '--fix', '--yes', '--non-interactive'];
   logger.info(
     `Running OpenClaw doctor repair (entry="${entryScript}", args="${doctorArgs.join(' ')}", cwd="${openclawDir}", bundledBin=${binPathExists ? 'yes' : 'no'})`,
   );
@@ -285,6 +315,10 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
       PATH: finalPath,
       ...uvEnv,
       OPENCLAW_NO_RESPAWN: '1',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      TERM: 'dumb',
+      CI: '1',
     };
 
     const child = utilityProcess.fork(entryScript, doctorArgs, {
@@ -319,8 +353,8 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
     child.stdout?.on('data', (data) => {
       const raw = data.toString();
       for (const line of raw.split(/\r?\n/)) {
-        const normalized = line.trim();
-        if (!normalized) continue;
+        const normalized = normalizeDoctorOutputLine(line);
+        if (!normalized || isLikelyDoctorDecorationNoise(normalized)) continue;
         logger.debug(`[Gateway doctor stdout] ${normalized}`);
       }
     });
@@ -328,8 +362,8 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
     child.stderr?.on('data', (data) => {
       const raw = data.toString();
       for (const line of raw.split(/\r?\n/)) {
-        const normalized = line.trim();
-        if (!normalized) continue;
+        const normalized = normalizeDoctorOutputLine(line);
+        if (!normalized || isLikelyDoctorDecorationNoise(normalized)) continue;
         logger.warn(`[Gateway doctor stderr] ${normalized}`);
       }
     });

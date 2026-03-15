@@ -74,6 +74,51 @@ describe('chat 审批等待态流程', () => {
     expect(state.pendingFinal).toBe(true);
   });
 
+  it('chat.send 超时且事件丢失时，应通过 exec.approvals.get 补拉进入 awaiting_approval', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'chat.send') {
+        throw new Error('TIMEOUT: gateway rpc timeout');
+      }
+      if (method === 'exec.approvals.get') {
+        return {
+          approvals: [
+            {
+              id: 'approval-from-pull',
+              runId: 'run-pull-1',
+              toolName: 'web_search',
+              request: {
+                sessionKey: 'agent:main:main',
+              },
+              createdAt: Date.now(),
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().sendMessage('hello');
+
+    const state = useChatStore.getState() as unknown as {
+      approvalStatus?: string;
+      error: string | null;
+      sending: boolean;
+      pendingFinal: boolean;
+      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
+    };
+    expect(state.approvalStatus).toBe('awaiting_approval');
+    expect(state.error).toBeNull();
+    expect(state.sending).toBe(true);
+    expect(state.pendingFinal).toBe(true);
+    expect((state.pendingApprovalsBySession['agent:main:main'] ?? []).some((item) => item.id === 'approval-from-pull')).toBe(true);
+    expect(rpcMock).toHaveBeenCalledWith('exec.approvals.get', {});
+  });
+
   it('停止时应先 deny 当前会话 pending 审批，再 chat.abort', async () => {
     const rpcMock = vi.fn(async () => ({}));
     useGatewayStore.setState({
@@ -119,5 +164,80 @@ describe('chat 审批等待态流程', () => {
       method: 'chat.abort',
       params: { sessionKey: 'agent:main:main' },
     });
+  });
+
+  it('收到当前会话审批请求时应清理流式占位，确保审批按钮可见', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sending: true,
+      pendingFinal: true,
+      approvalStatus: 'idle',
+      streamingMessage: {
+        role: 'assistant',
+        content: '正在调用工具...',
+      },
+      streamingTools: [
+        {
+          id: 'tool-1',
+          name: 'web_search',
+          status: 'running',
+        },
+      ],
+    } as never);
+
+    useChatStore.getState().handleApprovalRequested({
+      id: 'approval-visible',
+      sessionKey: 'agent:main:main',
+      runId: 'run-visible',
+      toolName: 'web_search',
+      createdAt: Date.now(),
+    });
+
+    const state = useChatStore.getState() as unknown as {
+      approvalStatus: string;
+      streamingMessage: unknown;
+      streamingTools: Array<unknown>;
+      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
+    };
+    expect(state.approvalStatus).toBe('awaiting_approval');
+    expect(state.streamingMessage).toBeNull();
+    expect(state.streamingTools).toEqual([]);
+    expect((state.pendingApprovalsBySession['agent:main:main'] ?? []).some((item) => item.id === 'approval-visible')).toBe(true);
+  });
+
+  it('syncPendingApprovals 在补拉为空时应清理当前会话过期审批', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'exec.approvals.get') {
+        return { approvals: [] };
+      }
+      return {};
+    });
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      approvalStatus: 'awaiting_approval',
+      pendingApprovalsBySession: {
+        'agent:main:main': [
+          {
+            id: 'stale-approval',
+            sessionKey: 'agent:main:main',
+            createdAtMs: Date.now() - 1000,
+          },
+        ],
+      },
+    } as never);
+
+    await useChatStore.getState().syncPendingApprovals('agent:main:main');
+
+    const state = useChatStore.getState() as unknown as {
+      approvalStatus: string;
+      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
+    };
+    expect(state.approvalStatus).toBe('idle');
+    expect(state.pendingApprovalsBySession['agent:main:main']).toEqual([]);
   });
 });

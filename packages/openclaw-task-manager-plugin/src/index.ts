@@ -324,7 +324,9 @@ function publishTaskEvent(event: string, payload: Record<string, unknown>): void
 
 function updateEventPublisher(options: GatewayRequestHandlerOptions, guardian?: GuardianController): void {
   eventPublisher = (event, payload) => {
-    options.context.nodeSendToAllSubscribed(event, payload);
+    try {
+      options.context.broadcast(event, payload, { dropIfSlow: true });
+    } catch {}
   };
   guardian?.bindGatewayContext(options.context);
 }
