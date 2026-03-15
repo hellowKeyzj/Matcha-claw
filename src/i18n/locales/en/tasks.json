@@ -39,6 +39,10 @@
     "stepsOverview": "Checklist",
     "completedTag": "Completed",
     "pendingTag": "Pending",
+    "pagination": {
+        "showing": "Showing {{shown}} / {{total}}",
+        "loadMore": "Load more"
+    },
     "blocked": {
         "title": "Pending Confirmations",
         "pendingCount": "{{count}} tasks waiting",

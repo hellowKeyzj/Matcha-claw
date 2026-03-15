@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -45,7 +45,7 @@ function progressToPercent(progress: number): number {
   return Math.max(0, Math.min(100, Math.round(progress)));
 }
 
-export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInboxPanelProps) {
+export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInboxPanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -396,4 +396,4 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
       />
     </aside>
   );
-}
+});

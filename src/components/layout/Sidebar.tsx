@@ -25,11 +25,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useSkillsStore } from '@/stores/skills';
+import { useChannelsStore } from '@/stores/channels';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
+import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useTransition } from 'react';
 
 interface NavItemProps {
   to: string;
@@ -37,6 +39,9 @@ interface NavItemProps {
   label: string;
   collapsed?: boolean;
   onMouseEnter?: () => void;
+  onFocus?: () => void;
+  onMouseDown?: () => void;
+  onNavigate?: (to: string) => void;
 }
 
 interface SidebarProps {
@@ -74,11 +79,36 @@ function formatMessageTime(createdAt: number): string {
   });
 }
 
-function NavItem({ to, icon, label, collapsed, onMouseEnter }: NavItemProps) {
+const SIDEBAR_BLOCKER_RENDER_LIMIT = 8;
+const TEAM_MAILBOX_SCAN_LIMIT = 80;
+const TEAM_MAILBOX_CARD_LIMIT = 3;
+const TASK_BLOCKER_SCAN_LIMIT = 24;
+const CHAT_APPROVAL_SCAN_LIMIT = 24;
+
+function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onMouseDown, onNavigate }: NavItemProps) {
   return (
     <NavLink
       to={to}
       onMouseEnter={onMouseEnter}
+      onFocus={onFocus}
+      onMouseDown={onMouseDown}
+      onClick={(event) => {
+        if (!onNavigate) {
+          return;
+        }
+        if (
+          event.defaultPrevented
+          || event.button !== 0
+          || event.metaKey
+          || event.ctrlKey
+          || event.shiftKey
+          || event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        onNavigate(to);
+      }}
       className={({ isActive }) =>
         cn(
           'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
@@ -105,17 +135,26 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
   const sessionLabels = useChatStore((state) => state.sessionLabels);
   const chatSessions = useChatStore((state) => state.sessions);
+  const deferredTeams = useDeferredValue(teams);
+  const deferredMailboxByTeamId = useDeferredValue(mailboxByTeamId);
+  const deferredTaskCenterTasks = useDeferredValue(taskCenterTasks);
+  const deferredBlockedQueue = useDeferredValue(blockedQueue);
+  const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
+  const deferredSessionLabels = useDeferredValue(sessionLabels);
+  const deferredChatSessions = useDeferredValue(chatSessions);
 
   const pendingBlockers = useMemo<PendingBlockerCard[]>(() => {
     const cards: PendingBlockerCard[] = [];
-    for (const team of teams) {
-      const mailbox = mailboxByTeamId[team.id] ?? [];
+    for (const team of deferredTeams) {
+      const mailbox = deferredMailboxByTeamId[team.id] ?? [];
       if (mailbox.length === 0) {
         continue;
       }
+      const startIndex = Math.max(0, mailbox.length - TEAM_MAILBOX_SCAN_LIMIT);
 
       const latestDecisionAtByTask = new Map<string, number>();
-      for (const message of mailbox) {
+      for (let index = mailbox.length - 1; index >= startIndex; index -= 1) {
+        const message = mailbox[index];
         if (message.kind !== 'decision' || !message.relatedTaskId) {
           continue;
         }
@@ -125,7 +164,12 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
         }
       }
 
-      for (const message of mailbox) {
+      let perTeamCards = 0;
+      for (let index = mailbox.length - 1; index >= startIndex; index -= 1) {
+        if (perTeamCards >= TEAM_MAILBOX_CARD_LIMIT) {
+          break;
+        }
+        const message = mailbox[index];
         if (message.kind !== 'question') {
           continue;
         }
@@ -151,11 +195,14 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
           from: message.fromAgentId,
           createdAt: message.createdAt,
         });
+        perTeamCards += 1;
       }
     }
 
-    const taskById = new Map(taskCenterTasks.map((task) => [task.id, task]));
-    for (const blocked of blockedQueue) {
+    const taskById = new Map(deferredTaskCenterTasks.map((task) => [task.id, task]));
+    const blockedSlice = deferredBlockedQueue.slice(-TASK_BLOCKER_SCAN_LIMIT);
+    for (let index = blockedSlice.length - 1; index >= 0; index -= 1) {
+      const blocked = blockedSlice[index];
       const task = taskById.get(blocked.taskId);
       const statusLabel = blocked.type === 'waiting_approval'
         ? t('sidebar.pendingBlockerTypeApproval')
@@ -180,14 +227,20 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     }
 
     const sessionDisplayNameByKey = new Map(
-      chatSessions.map((session) => [session.key, session.displayName || session.key]),
+      deferredChatSessions.map((session) => [session.key, session.displayName || session.key]),
     );
-    for (const [sessionKey, approvals] of Object.entries(pendingApprovalsBySession)) {
-      for (const approval of approvals) {
+    let approvalCards = 0;
+    for (const [sessionKey, approvals] of Object.entries(deferredPendingApprovalsBySession)) {
+      const startIndex = Math.max(0, approvals.length - CHAT_APPROVAL_SCAN_LIMIT);
+      for (let index = approvals.length - 1; index >= startIndex; index -= 1) {
+        if (approvalCards >= CHAT_APPROVAL_SCAN_LIMIT) {
+          break;
+        }
+        const approval = approvals[index];
         const toolName = typeof approval.toolName === 'string' && approval.toolName.trim().length > 0
           ? approval.toolName.trim()
           : 'tool-call';
-        const sessionLabel = sessionLabels[sessionKey]
+        const sessionLabel = deferredSessionLabels[sessionKey]
           || sessionDisplayNameByKey.get(sessionKey)
           || sessionKey;
         cards.push({
@@ -201,13 +254,23 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
           createdAt: approval.createdAtMs,
           sessionKey,
         });
+        approvalCards += 1;
       }
     }
 
     return cards
       .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, 8);
-  }, [blockedQueue, chatSessions, mailboxByTeamId, pendingApprovalsBySession, sessionLabels, t, taskCenterTasks, teams]);
+      .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
+  }, [
+    deferredBlockedQueue,
+    deferredChatSessions,
+    deferredMailboxByTeamId,
+    deferredPendingApprovalsBySession,
+    deferredSessionLabels,
+    deferredTaskCenterTasks,
+    deferredTeams,
+    t,
+  ]);
 
   return (
     <section className="mt-3 rounded-lg border border-border/70 bg-muted/30 p-2">
@@ -278,7 +341,10 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   const gatewayState = useGatewayStore((state) => state.status.state);
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
+  const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const fetchChannels = useChannelsStore((state) => state.fetchChannels);
+  const [, startTransition] = useTransition();
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -313,12 +379,40 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     { to: '/security', icon: <ShieldCheck className="h-5 w-5" />, label: t('sidebar.security') },
   ];
 
-  const prefetchSkillsOnHover = useCallback(() => {
+  const prefetchNavPath = useCallback((path: string) => {
+    if (path === '/subagents') {
+      void prefetchSubagentTemplateCatalog();
+      return;
+    }
+
     if (gatewayState !== 'running') {
       return;
     }
-    void fetchSkills();
-  }, [fetchSkills, gatewayState]);
+
+    if (path === '/skills') {
+      void fetchSkills();
+      return;
+    }
+
+    if (path === '/dashboard') {
+      void fetchChannels({ silent: true });
+      return;
+    }
+
+    if (path === '/tasks') {
+      if (!taskCenterInitialized) {
+        void initTaskCenter();
+      }
+      void refreshTaskCenter();
+    }
+  }, [
+    fetchChannels,
+    fetchSkills,
+    gatewayState,
+    initTaskCenter,
+    refreshTaskCenter,
+    taskCenterInitialized,
+  ]);
 
   useEffect(() => {
     if (gatewayState !== 'running' || taskCenterInitialized) {
@@ -326,6 +420,15 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     }
     void initTaskCenter();
   }, [gatewayState, initTaskCenter, taskCenterInitialized]);
+
+  const navigateWithTransition = useCallback((to: string) => {
+    if (location.pathname === to) {
+      return;
+    }
+    startTransition(() => {
+      navigate(to);
+    });
+  }, [location.pathname, navigate, startTransition]);
 
   return (
     <aside
@@ -357,7 +460,10 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
             key={item.to}
             {...item}
             collapsed={sidebarCollapsed}
-            onMouseEnter={item.to === '/skills' ? prefetchSkillsOnHover : undefined}
+            onMouseEnter={() => prefetchNavPath(item.to)}
+            onFocus={() => prefetchNavPath(item.to)}
+            onMouseDown={() => prefetchNavPath(item.to)}
+            onNavigate={navigateWithTransition}
           />
         ))}
 

@@ -12,7 +12,7 @@ interface CronState {
   error: string | null;
   
   // Actions
-  fetchJobs: () => Promise<void>;
+  fetchJobs: (options?: { silent?: boolean }) => Promise<void>;
   createJob: (input: CronJobCreateInput) => Promise<CronJob>;
   updateJob: (id: string, input: CronJobUpdateInput) => Promise<void>;
   deleteJob: (id: string) => Promise<void>;
@@ -26,14 +26,23 @@ export const useCronStore = create<CronState>((set) => ({
   loading: false,
   error: null,
   
-  fetchJobs: async () => {
-    set({ loading: true, error: null });
+  fetchJobs: async (options) => {
+    const silent = options?.silent === true;
+    if (!silent) {
+      set({ loading: true, error: null });
+    }
     
     try {
       const result = await hostApiFetch<CronJob[]>('/api/cron/jobs');
-      set({ jobs: result, loading: false });
+      if (silent) {
+        set({ jobs: result });
+      } else {
+        set({ jobs: result, loading: false });
+      }
     } catch (error) {
-      set({ error: String(error), loading: false });
+      if (!silent) {
+        set({ error: String(error), loading: false });
+      }
     }
   },
   

@@ -31,7 +31,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
-import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
@@ -516,7 +515,7 @@ export function Cron({ embedded = false }: CronProps) {
   // Fetch jobs on mount
   useEffect(() => {
     if (isGatewayRunning) {
-      fetchJobs();
+      void fetchJobs({ silent: true });
     }
   }, [fetchJobs, isGatewayRunning]);
 
@@ -542,16 +541,6 @@ export function Cron({ embedded = false }: CronProps) {
     }
   }, [toggleJob, t]);
 
-
-
-  if (loading) {
-    return (
-      <div className="flex h-96 items-center justify-center">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -565,8 +554,12 @@ export function Cron({ embedded = false }: CronProps) {
           </div>
         )}
         <div className="flex gap-2">
-          <Button variant="outline" onClick={fetchJobs} disabled={!isGatewayRunning}>
-            <RefreshCw className="h-4 w-4 mr-2" />
+          <Button
+            variant="outline"
+            onClick={() => { void fetchJobs(); }}
+            disabled={!isGatewayRunning || loading}
+          >
+            <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
             {t('refresh')}
           </Button>
           <Button

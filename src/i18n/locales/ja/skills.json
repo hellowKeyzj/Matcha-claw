@@ -22,6 +22,10 @@
         "disableVisible": "表示中を一括無効化",
         "installSkill": "スキルをインストール"
     },
+    "pagination": {
+        "showing": "{{shown}} / {{total}} 件を表示中",
+        "loadMore": "さらに読み込む"
+    },
     "noSkills": "スキルが見つかりません",
     "noSkillsSearch": "別の検索語をお試しください",
     "noSkillsAvailable": "利用可能なスキルがありません",

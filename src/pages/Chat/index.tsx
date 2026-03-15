@@ -27,6 +27,7 @@ const TASK_INBOX_MAX_WIDTH = 560;
 const TASK_INBOX_DEFAULT_WIDTH = 360;
 const TASK_INBOX_RESIZER_WIDTH = 6;
 const CHAT_MAIN_MIN_WIDTH = 520;
+const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -88,7 +89,7 @@ export function Chat() {
   const streamingTools = useChatStore((s) => s.streamingTools);
   const pendingFinal = useChatStore((s) => s.pendingFinal);
   const approvalStatus = useChatStore((s) => s.approvalStatus);
-  const currentPendingApprovals = useChatStore((s) => s.pendingApprovalsBySession[s.currentSessionKey] ?? []);
+  const currentPendingApprovals = useChatStore((s) => s.pendingApprovalsBySession[s.currentSessionKey] ?? EMPTY_APPROVAL_ITEMS);
   const resolveApproval = useChatStore((s) => s.resolveApproval);
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);

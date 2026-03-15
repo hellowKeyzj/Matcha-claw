@@ -39,6 +39,10 @@
     "stepsOverview": "步骤清单",
     "completedTag": "已完成",
     "pendingTag": "待办",
+    "pagination": {
+        "showing": "已显示 {{shown}} / {{total}}",
+        "loadMore": "加载更多"
+    },
     "blocked": {
         "title": "待确认任务",
         "pendingCount": "{{count}} 个任务待确认",

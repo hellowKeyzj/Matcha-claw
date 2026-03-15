@@ -22,6 +22,10 @@
         "disableVisible": "Disable Visible",
         "installSkill": "Install Skills"
     },
+    "pagination": {
+        "showing": "Showing {{shown}} / {{total}}",
+        "loadMore": "Load more"
+    },
     "noSkills": "No skills found",
     "noSkillsSearch": "Try a different search term",
     "noSkillsAvailable": "No skills available",

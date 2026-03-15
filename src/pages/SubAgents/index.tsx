@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
-import { getSubagentTemplateById, getSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
+import {
+  getSubagentTemplateById,
+  getSubagentTemplateCatalog,
+  prefetchSubagentTemplateById,
+} from '@/services/openclaw/subagent-template-catalog';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
@@ -15,6 +19,10 @@ import { SubagentManageDialog } from './components/SubagentManageDialog';
 import { SubagentTemplateLoadDialog } from './components/SubagentTemplateLoadDialog';
 
 type DialogMode = 'create' | 'edit';
+const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
+const INITIAL_TEMPLATE_CARD_BATCH = 9;
+const TEMPLATE_CARD_BATCH_SIZE = 18;
+const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
 
 export function SubAgents() {
   const { t } = useTranslation('subagents');
@@ -60,10 +68,16 @@ export function SubAgents() {
   const [selectedTemplateCategory, setSelectedTemplateCategory] = useState<string>('all');
   const [templateLoadingId, setTemplateLoadingId] = useState<string | null>(null);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  const [templateDialogLoading, setTemplateDialogLoading] = useState(false);
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
+  const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(false);
+  const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const wasGatewayRunningRef = useRef(gatewayState === 'running');
+  const templateLoadRequestIdRef = useRef(0);
+  const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
+  const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
   const persistedContentByFile = managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
@@ -123,7 +137,48 @@ export function SubAgents() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    let rafId: number | undefined;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setSubagentsHeavyContentReady(true);
+      }
+    };
+
+    const scheduleIdle = () => {
+      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(markReady, { timeout: SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
+      } else {
+        timeoutId = window.setTimeout(markReady, 120);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      scheduleIdle();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof rafId === 'number') {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, []);
+
   const templateCategoryCountById = useMemo(() => {
+    if (!subagentsHeavyContentReady) {
+      return new Map<string, number>();
+    }
     const counts = new Map<string, number>();
     for (const template of templateCatalog.templates) {
       const categoryId = template.categoryId?.trim();
@@ -133,9 +188,12 @@ export function SubAgents() {
       counts.set(categoryId, (counts.get(categoryId) ?? 0) + 1);
     }
     return counts;
-  }, [templateCatalog.templates]);
+  }, [subagentsHeavyContentReady, templateCatalog.templates]);
 
   const templateCategories = useMemo(() => {
+    if (!subagentsHeavyContentReady) {
+      return [];
+    }
     const usedCategoryIds = new Set(templateCategoryCountById.keys());
     const categoriesFromCatalog = templateCatalog.categories
       .filter((category) => usedCategoryIds.has(category.id))
@@ -154,24 +212,141 @@ export function SubAgents() {
       .sort((a, b) => a.localeCompare(b))
       .map((id) => ({ id }));
     return [...categoriesFromCatalog, ...fallbackCategories];
-  }, [templateCatalog.categories, templateCategoryCountById]);
+  }, [subagentsHeavyContentReady, templateCatalog.categories, templateCategoryCountById]);
 
   const filteredTemplates = useMemo(() => {
+    if (!subagentsHeavyContentReady) {
+      return [];
+    }
     if (selectedTemplateCategory === 'all') {
       return templateCatalog.templates;
     }
     return templateCatalog.templates.filter((template) => template.categoryId === selectedTemplateCategory);
-  }, [selectedTemplateCategory, templateCatalog.templates]);
+  }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCatalog.templates]);
+  const deferredFilteredTemplates = useDeferredValue(filteredTemplates);
+  const visibleTemplates = useMemo(
+    () => deferredFilteredTemplates.slice(0, visibleTemplateCount),
+    [deferredFilteredTemplates, visibleTemplateCount],
+  );
+  const displayedTemplateCount = Math.min(visibleTemplateCount, deferredFilteredTemplates.length);
 
   useEffect(() => {
-    if (selectedTemplateCategory === 'all') {
+    if (!templatesExpanded) {
+      return;
+    }
+    setVisibleTemplateCount(INITIAL_TEMPLATE_CARD_BATCH);
+  }, [selectedTemplateCategory, templatesExpanded]);
+
+  const appendVisibleTemplates = useCallback(() => {
+    setVisibleTemplateCount((prev) => {
+      if (prev >= deferredFilteredTemplates.length) {
+        return prev;
+      }
+      return Math.min(prev + TEMPLATE_CARD_BATCH_SIZE, deferredFilteredTemplates.length);
+    });
+  }, [deferredFilteredTemplates.length]);
+
+  const handleTemplateCardScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
+      return;
+    }
+    const target = event.currentTarget;
+    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (remain <= TEMPLATE_CARD_SCROLL_THRESHOLD_PX) {
+      appendVisibleTemplates();
+    }
+  }, [appendVisibleTemplates, deferredFilteredTemplates.length, displayedTemplateCount]);
+
+  useEffect(() => {
+    if (!templatesExpanded || !subagentsHeavyContentReady) {
+      return;
+    }
+    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
+      return;
+    }
+    const container = templateCardScrollRef.current;
+    if (!container) {
+      return;
+    }
+    if (container.scrollHeight <= container.clientHeight + 8) {
+      appendVisibleTemplates();
+    }
+  }, [
+    appendVisibleTemplates,
+    deferredFilteredTemplates.length,
+    displayedTemplateCount,
+    subagentsHeavyContentReady,
+    templatesExpanded,
+    visibleTemplates.length,
+  ]);
+
+  useEffect(() => {
+    if (!subagentsHeavyContentReady || selectedTemplateCategory === 'all') {
       return;
     }
     const exists = templateCategories.some((category) => category.id === selectedTemplateCategory);
     if (!exists) {
       setSelectedTemplateCategory('all');
     }
-  }, [selectedTemplateCategory, templateCategories]);
+  }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCategories]);
+
+  const prefetchTemplateDetail = useCallback((templateId: string) => {
+    const normalizedId = templateId.trim();
+    if (!normalizedId) {
+      return;
+    }
+    if (prefetchedTemplateIdsRef.current.has(normalizedId)) {
+      return;
+    }
+    prefetchedTemplateIdsRef.current.add(normalizedId);
+    void prefetchSubagentTemplateById(normalizedId).catch(() => {
+      prefetchedTemplateIdsRef.current.delete(normalizedId);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!subagentsHeavyContentReady || !templatesExpanded || templatesLoading || deferredFilteredTemplates.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+
+    const runPrefetch = async () => {
+      for (const template of deferredFilteredTemplates.slice(0, 4)) {
+        if (cancelled) {
+          return;
+        }
+        prefetchTemplateDetail(template.id);
+        await sleep(80);
+      }
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(() => {
+        void runPrefetch();
+      }, { timeout: 500 });
+    } else {
+      timeoutId = window.setTimeout(() => {
+        void runPrefetch();
+      }, 120);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [deferredFilteredTemplates, prefetchTemplateDetail, subagentsHeavyContentReady, templatesExpanded, templatesLoading]);
 
   const editingAgent: SubagentSummary | undefined = editingAgentId
     ? agents.find((agent) => agent.id === editingAgentId)
@@ -190,16 +365,30 @@ export function SubAgents() {
   };
 
   const handleLoadTemplate = async (templateId: string) => {
+    const requestId = templateLoadRequestIdRef.current + 1;
+    templateLoadRequestIdRef.current = requestId;
     setTemplateLoadingId(templateId);
     setTemplateError(null);
+    setTemplateDialogOpen(true);
+    setTemplateDialogLoading(true);
+    setActiveTemplate(null);
     try {
       const detail = await getSubagentTemplateById(templateId);
+      if (templateLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       setActiveTemplate(detail);
-      setTemplateDialogOpen(true);
     } catch (error) {
+      if (templateLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+      setTemplateDialogOpen(false);
       setTemplateError(error instanceof Error ? error.message : 'Failed to load template');
     } finally {
-      setTemplateLoadingId(null);
+      if (templateLoadRequestIdRef.current === requestId) {
+        setTemplateDialogLoading(false);
+        setTemplateLoadingId(null);
+      }
     }
   };
 
@@ -271,18 +460,36 @@ export function SubAgents() {
           </div>
         </div>
 
-        {templatesExpanded && templatesLoading && (
+        {templatesExpanded && !subagentsHeavyContentReady && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={`subagents-template-filter-placeholder-${index}`} className="h-8 w-20 animate-pulse rounded-md bg-muted" />
+              ))}
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {Array.from({ length: 3 }).map((_, index) => (
+                <div key={`subagents-template-card-placeholder-${index}`} className="rounded-md border bg-background p-3">
+                  <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-4/5 animate-pulse rounded bg-muted" />
+                  <div className="mt-4 h-8 w-full animate-pulse rounded bg-muted" />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {templatesExpanded && subagentsHeavyContentReady && templatesLoading && (
           <p className="text-sm text-muted-foreground">{t('templates.loading')}</p>
         )}
-        {templatesExpanded && !templatesLoading && templateError && (
+        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && templateError && (
           <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-sm text-destructive">
             {t('templates.error', { message: templateError })}
           </p>
         )}
-        {templatesExpanded && !templatesLoading && !templateError && templateCatalog.templates.length === 0 && (
+        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && !templateError && templateCatalog.templates.length === 0 && (
           <p className="text-sm text-muted-foreground">{t('templates.empty')}</p>
         )}
-        {templatesExpanded && !templatesLoading && !templateError && templateCatalog.templates.length > 0 && (
+        {templatesExpanded && subagentsHeavyContentReady && !templatesLoading && !templateError && templateCatalog.templates.length > 0 && (
           <>
             <div className="flex flex-wrap items-center gap-2">
               <Button
@@ -306,77 +513,119 @@ export function SubAgents() {
                 </Button>
               ))}
             </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {filteredTemplates.map((template) => (
-              <article key={template.id} className="rounded-md border bg-background p-3">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base">
-                    {template.emoji || '\uD83E\uDD16'}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
-                        {tTemplate(`templates.${template.id}.name`, { defaultValue: template.name })}
-                      </h3>
-                      <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium leading-none text-primary">
-                        {t('templates.badge')}
-                      </span>
-                    </div>
-                    <p className="truncate text-xs text-muted-foreground">{template.id}</p>
-                    {(
-                      tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' }) || ''
-                    ) && (
-                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                        {tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' })}
-                      </p>
-                    )}
+            {deferredFilteredTemplates.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t('templates.empty')}</p>
+            ) : (
+              <>
+                <div
+                  ref={templateCardScrollRef}
+                  className="max-h-[56vh] overflow-y-auto pr-1"
+                  onScroll={handleTemplateCardScroll}
+                >
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {visibleTemplates.map((template) => {
+                      const localizedTemplateName = tTemplate(`templates.${template.id}.name`, { defaultValue: template.name });
+                      const localizedSummary = tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' }) || '';
+                      return (
+                        <article
+                          key={template.id}
+                          className="rounded-md border bg-background p-3"
+                          onMouseEnter={() => prefetchTemplateDetail(template.id)}
+                          onFocus={() => prefetchTemplateDetail(template.id)}
+                          onMouseDown={() => prefetchTemplateDetail(template.id)}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base">
+                              {template.emoji || '\uD83E\uDD16'}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
+                                  {localizedTemplateName}
+                                </h3>
+                                <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium leading-none text-primary">
+                                  {t('templates.badge')}
+                                </span>
+                              </div>
+                              <p className="truncate text-xs text-muted-foreground">{template.id}</p>
+                              {localizedSummary && (
+                                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                                  {localizedSummary}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="mt-3">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="w-full"
+                              disabled={templateLoadingId === template.id || modelsLoading || availableModels.length === 0}
+                              onClick={() => {
+                                void handleLoadTemplate(template.id);
+                              }}
+                              onMouseEnter={() => prefetchTemplateDetail(template.id)}
+                              onFocus={() => prefetchTemplateDetail(template.id)}
+                            >
+                              {templateLoadingId === template.id ? t('templates.loadingButton') : t('templates.load')}
+                            </Button>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
                 </div>
-                <div className="mt-3">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="w-full"
-                    disabled={templateLoadingId === template.id || modelsLoading || availableModels.length === 0}
-                    onClick={() => {
-                      void handleLoadTemplate(template.id);
-                    }}
-                  >
-                    {templateLoadingId === template.id ? t('templates.loadingButton') : t('templates.load')}
-                  </Button>
-                </div>
-              </article>
-              ))}
-            </div>
+                {displayedTemplateCount < deferredFilteredTemplates.length && (
+                  <div className="rounded-md border border-dashed px-3 py-2 text-center">
+                    <p className="text-xs text-muted-foreground">
+                      {t('templates.pagination.showing', { shown: displayedTemplateCount, total: deferredFilteredTemplates.length })}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
           </>
         )}
       </section>
 
-      <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {agents.map((agent) => (
-          <SubagentCard
-            key={agent.id}
-            agent={agent}
-            editLocked={false}
-            deleteLocked={Boolean(agent.isDefault)}
-            manageLocked={false}
-            modelReady={Boolean(agent.model?.trim())}
-            onEdit={() => openEditDialog(agent.id)}
-            onDelete={() => {
-              setDeletingAgentId(agent.id);
-            }}
-            onManage={() => {
-              setManagedAgentId(agent.id);
-            }}
-            onChat={() => {
-              const query = new URLSearchParams({ agent: agent.id }).toString();
-              navigate(`/?${query}`);
-            }}
-          />
-        ))}
-      </div>
+      {!subagentsHeavyContentReady ? (
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={`subagents-card-placeholder-${index}`} className="rounded-lg border bg-card p-4">
+              <div className="h-5 w-2/5 animate-pulse rounded bg-muted" />
+              <div className="mt-3 h-3 w-4/5 animate-pulse rounded bg-muted" />
+              <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
+              <div className="mt-4 h-8 w-full animate-pulse rounded bg-muted" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {agents.map((agent) => (
+            <SubagentCard
+              key={agent.id}
+              agent={agent}
+              editLocked={false}
+              deleteLocked={Boolean(agent.isDefault)}
+              manageLocked={false}
+              modelReady={Boolean(agent.model?.trim())}
+              onEdit={() => openEditDialog(agent.id)}
+              onDelete={() => {
+                setDeletingAgentId(agent.id);
+              }}
+              onManage={() => {
+                setManagedAgentId(agent.id);
+              }}
+              onChat={() => {
+                const query = new URLSearchParams({ agent: agent.id }).toString();
+                navigate(`/?${query}`);
+              }}
+            />
+          ))}
+        </div>
+      )}
 
-      {!loading && agents.length === 0 && (
+      {subagentsHeavyContentReady && !loading && agents.length === 0 && (
         <p className="text-sm text-muted-foreground">{t('empty')}</p>
       )}
       <SubagentDeleteDialog
@@ -486,6 +735,7 @@ export function SubAgents() {
 
       <SubagentTemplateLoadDialog
         open={templateDialogOpen}
+        loading={templateDialogLoading}
         template={activeTemplate}
         modelOptions={availableModels}
         modelsLoading={modelsLoading}
@@ -512,7 +762,9 @@ export function SubAgents() {
           }
         }}
         onClose={() => {
+          templateLoadRequestIdRef.current += 1;
           setTemplateDialogOpen(false);
+          setTemplateDialogLoading(false);
           setActiveTemplate(null);
         }}
       />

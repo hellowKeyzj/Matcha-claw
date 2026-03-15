@@ -18,6 +18,10 @@
     "empty": "未发现可用模板。",
     "error": "模板加载失败：{{message}}",
     "badge": "模板",
+    "pagination": {
+      "showing": "已显示 {{shown}} / {{total}}",
+      "loadMore": "加载更多模板"
+    },
     "categories": {
       "all": "全部",
       "design": "设计",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -38,6 +38,10 @@ type TaskStatusFilter = 'all' | 'running' | 'waiting' | 'completed' | 'incomplet
 const TASK_POLLING_FAST_MS = 5_000;
 const TASK_POLLING_NORMAL_MS = 20_000;
 const TASK_POLLING_BACKGROUND_MS = 60_000;
+const INITIAL_TASK_LIST_BATCH = 40;
+const TASK_LIST_BATCH_SIZE = 40;
+const TASK_LIST_SCROLL_THRESHOLD_PX = 160;
+const TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 function resolveTaskCenterTab(value: string | null): TaskCenterTab {
   if (value === 'scheduled') {
@@ -225,11 +229,19 @@ export function TasksPage() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
+  const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
+  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0);
+  const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
+  const tasksForView = taskHeavyContentReady ? tasks : [];
 
   useEffect(() => {
-    void init();
-  }, [init]);
+    if (!initialized) {
+      void init();
+      return;
+    }
+    void refreshTasks();
+  }, [init, initialized, refreshTasks]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -237,6 +249,53 @@ export function TasksPage() {
     }, 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (taskHeavyContentReady) {
+      return;
+    }
+    let cancelled = false;
+    let rafId: number | undefined;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setTaskHeavyContentReady(true);
+      }
+    };
+
+    const scheduleIdle = () => {
+      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(markReady, { timeout: TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
+      } else {
+        timeoutId = window.setTimeout(markReady, 120);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      scheduleIdle();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof rafId === 'number') {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [taskHeavyContentReady]);
+
+  useEffect(() => {
+    if (!taskHeavyContentReady && initialized && tasks.length > 0) {
+      setTaskHeavyContentReady(true);
+    }
+  }, [initialized, taskHeavyContentReady, tasks.length]);
 
   const hasActiveTasks = useMemo(
     () =>
@@ -304,7 +363,7 @@ export function TasksPage() {
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
-    return tasks.filter((task) => {
+    return tasksForView.filter((task) => {
       if (dateRange.startMs == null && dateRange.endMs == null) {
         return true;
       }
@@ -320,7 +379,7 @@ export function TasksPage() {
       }
       return true;
     });
-  }, [dateRange.endMs, dateRange.startMs, tasks]);
+  }, [dateRange.endMs, dateRange.startMs, tasksForView]);
   const statsTasks = useMemo(() => {
     if (statsWindow === 'all') {
       return longTasks;
@@ -336,6 +395,50 @@ export function TasksPage() {
     () => statsTasks.filter((task) => matchesStatusFilter(task, statusFilter)),
     [statsTasks, statusFilter],
   );
+  const visibleTasks = useMemo(
+    () => filteredTasks.slice(0, visibleTaskCount),
+    [filteredTasks, visibleTaskCount],
+  );
+
+  useEffect(() => {
+    setVisibleTaskCount(INITIAL_TASK_LIST_BATCH);
+  }, [filteredTasks]);
+
+  const appendVisibleTasks = useCallback(() => {
+    setVisibleTaskCount((prev) => {
+      if (prev >= filteredTasks.length) {
+        return prev;
+      }
+      return Math.min(prev + TASK_LIST_BATCH_SIZE, filteredTasks.length);
+    });
+  }, [filteredTasks.length]);
+
+  const handleTaskListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    if (visibleTaskCount >= filteredTasks.length) {
+      return;
+    }
+    const target = event.currentTarget;
+    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (remain <= TASK_LIST_SCROLL_THRESHOLD_PX) {
+      appendVisibleTasks();
+    }
+  }, [appendVisibleTasks, filteredTasks.length, visibleTaskCount]);
+
+  useEffect(() => {
+    if (activeTab !== 'long' || !taskHeavyContentReady) {
+      return;
+    }
+    if (visibleTaskCount >= filteredTasks.length) {
+      return;
+    }
+    const container = taskListScrollRef.current;
+    if (!container) {
+      return;
+    }
+    if (container.scrollHeight <= container.clientHeight + 8) {
+      appendVisibleTasks();
+    }
+  }, [activeTab, appendVisibleTasks, filteredTasks.length, taskHeavyContentReady, visibleTaskCount, visibleTasks.length]);
 
   const effectiveSelectedTaskId = useMemo(() => {
     if (filteredTasks.length === 0) {
@@ -351,12 +454,43 @@ export function TasksPage() {
     () => filteredTasks.find((task) => task.id === effectiveSelectedTaskId) ?? null,
     [effectiveSelectedTaskId, filteredTasks],
   );
-  const selectedTaskChecklist = useMemo(() => {
-    if (!selectedTask?.plan_markdown) {
-      return [];
+  const [selectedTaskChecklist, setSelectedTaskChecklist] = useState<ChecklistItem[]>([]);
+
+  useEffect(() => {
+    const markdown = selectedTask?.plan_markdown ?? '';
+    if (!markdown) {
+      setSelectedTaskChecklist([]);
+      return;
     }
-    return parseChecklist(selectedTask.plan_markdown);
-  }, [selectedTask]);
+
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const parse = () => {
+      if (cancelled) {
+        return;
+      }
+      setSelectedTaskChecklist(parseChecklist(markdown));
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(parse, { timeout: 280 });
+    } else {
+      timeoutId = window.setTimeout(parse, 16);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [selectedTask?.plan_markdown]);
+
   const checklistSummary = useMemo(
     () =>
       selectedTaskChecklist.reduce<ProgressCounter>(
@@ -372,10 +506,30 @@ export function TasksPage() {
     [selectedTaskChecklist],
   );
 
-  const runningCount = statsTasks.filter((task) => task.status === 'running').length;
-  const waitingCount = statsTasks.filter((task) => task.status === 'waiting_for_input' || task.status === 'waiting_approval').length;
-  const completedCount = statsTasks.filter((task) => task.status === 'completed').length;
-  const incompleteCount = statsTasks.filter((task) => isIncompleteTask(task)).length;
+  const taskStatusSummary = useMemo(() => {
+    return statsTasks.reduce(
+      (acc, task) => {
+        if (task.status === 'running') {
+          acc.running += 1;
+        }
+        if (task.status === 'waiting_for_input' || task.status === 'waiting_approval') {
+          acc.waiting += 1;
+        }
+        if (task.status === 'completed') {
+          acc.completed += 1;
+        }
+        if (isIncompleteTask(task)) {
+          acc.incomplete += 1;
+        }
+        return acc;
+      },
+      { running: 0, waiting: 0, completed: 0, incomplete: 0 },
+    );
+  }, [statsTasks]);
+  const runningCount = taskStatusSummary.running;
+  const waitingCount = taskStatusSummary.waiting;
+  const completedCount = taskStatusSummary.completed;
+  const incompleteCount = taskStatusSummary.incomplete;
 
   const handleInstall = async () => {
     await installPlugin();
@@ -633,36 +787,58 @@ export function TasksPage() {
                 <CardHeader className="shrink-0">
                   <CardTitle>{t('listTitle')}</CardTitle>
                 </CardHeader>
-                <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto pb-6">
-                  {filteredTasks.length === 0 ? (
+                <CardContent ref={taskListScrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto pb-6" onScroll={handleTaskListScroll}>
+                  {!taskHeavyContentReady ? (
+                    <div className="space-y-3">
+                      {Array.from({ length: 6 }).map((_, index) => (
+                        <div key={`task-placeholder-${index}`} className="rounded-lg border p-3">
+                          <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
+                          <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" />
+                          <div className="mt-2 h-2 w-16 animate-pulse rounded bg-muted" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : filteredTasks.length === 0 ? (
                     <p className="text-sm text-muted-foreground">{t('empty')}</p>
                   ) : (
-                    filteredTasks.map((task) => (
-                      <button
-                        key={task.id}
-                        type="button"
-                        className={cn(
-                          'w-full rounded-lg border p-3 text-left transition-colors',
-                          effectiveSelectedTaskId === task.id ? 'border-primary bg-primary/5' : 'hover:bg-accent/40',
-                        )}
-                        onClick={() => setSelectedTaskId(task.id)}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="line-clamp-2 text-sm font-medium">{task.goal}</p>
-                          <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+                    <>
+                      {visibleTasks.map((task) => (
+                        <button
+                          key={task.id}
+                          type="button"
+                          className={cn(
+                            'w-full rounded-lg border p-3 text-left transition-colors',
+                            effectiveSelectedTaskId === task.id ? 'border-primary bg-primary/5' : 'hover:bg-accent/40',
+                          )}
+                          onClick={() => setSelectedTaskId(task.id)}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="line-clamp-2 text-sm font-medium">{task.goal}</p>
+                            <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+                          </div>
+                          <div className="mt-3 space-y-1">
+                            <Progress
+                              value={Math.round(task.progress * 100)}
+                              className={cn(
+                                'h-1.5 bg-muted/70',
+                                task.status === 'completed' ? '[&>div]:bg-emerald-500' : '[&>div]:bg-slate-500/80',
+                              )}
+                            />
+                            <p className="text-xs text-muted-foreground">{Math.round(task.progress * 100)}%</p>
+                          </div>
+                        </button>
+                      ))}
+                      {visibleTaskCount < filteredTasks.length && (
+                        <div className="space-y-2 rounded-md border border-dashed px-3 py-3 text-center">
+                          <p className="text-xs text-muted-foreground">
+                            {t('pagination.showing', { shown: visibleTaskCount, total: filteredTasks.length })}
+                          </p>
+                          <Button variant="outline" size="sm" onClick={appendVisibleTasks}>
+                            {t('pagination.loadMore')}
+                          </Button>
                         </div>
-                        <div className="mt-3 space-y-1">
-                          <Progress
-                            value={Math.round(task.progress * 100)}
-                            className={cn(
-                              'h-1.5 bg-muted/70',
-                              task.status === 'completed' ? '[&>div]:bg-emerald-500' : '[&>div]:bg-slate-500/80',
-                            )}
-                          />
-                          <p className="text-xs text-muted-foreground">{Math.round(task.progress * 100)}%</p>
-                        </div>
-                      </button>
-                    ))
+                      )}
+                    </>
                   )}
                 </CardContent>
               </Card>
@@ -673,7 +849,13 @@ export function TasksPage() {
                   <CardDescription>{selectedTask?.id || '-'}</CardDescription>
                 </CardHeader>
                 <CardContent className="min-h-0 flex-1 overflow-y-auto">
-                  {!selectedTask ? (
+                  {!taskHeavyContentReady ? (
+                    <div className="space-y-3">
+                      <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+                      <div className="h-16 w-full animate-pulse rounded bg-muted" />
+                      <div className="h-20 w-full animate-pulse rounded bg-muted" />
+                    </div>
+                  ) : !selectedTask ? (
                     <p className="text-sm text-muted-foreground">{t('selectTask')}</p>
                   ) : (
                     <div className="space-y-4">
