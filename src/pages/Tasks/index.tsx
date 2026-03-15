@@ -35,6 +35,10 @@ type TaskCenterTab = 'long' | 'scheduled';
 type TaskStatsWindow = 'all' | '7d' | '30d';
 type TaskStatusFilter = 'all' | 'running' | 'waiting' | 'completed' | 'incomplete';
 
+const TASK_POLLING_FAST_MS = 5_000;
+const TASK_POLLING_NORMAL_MS = 20_000;
+const TASK_POLLING_BACKGROUND_MS = 60_000;
+
 function resolveTaskCenterTab(value: string | null): TaskCenterTab {
   if (value === 'scheduled') {
     return 'scheduled';
@@ -220,6 +224,7 @@ export function TasksPage() {
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
 
   useEffect(() => {
@@ -227,14 +232,75 @@ export function TasksPage() {
   }, [init]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      setStatsNowMs(Date.now());
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const hasActiveTasks = useMemo(
+    () =>
+      tasks.some((task) =>
+        task.status === 'pending' || task.status === 'running' || task.status === 'waiting_for_input' || task.status === 'waiting_approval'),
+    [tasks],
+  );
+
+  useEffect(() => {
     if (!pluginInstalled || !pluginEnabled || gatewayStatus.state !== 'running') {
       return;
     }
-    const timer = window.setInterval(() => {
-      void refreshTasks();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [pluginEnabled, pluginInstalled, gatewayStatus.state, refreshTasks]);
+
+    let timer: number | null = null;
+    let disposed = false;
+
+    const clearTimer = () => {
+      if (timer != null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const resolveDelay = () => {
+      if (document.visibilityState !== 'visible') {
+        return TASK_POLLING_BACKGROUND_MS;
+      }
+      return hasActiveTasks ? TASK_POLLING_FAST_MS : TASK_POLLING_NORMAL_MS;
+    };
+
+    const scheduleNext = () => {
+      if (disposed) {
+        return;
+      }
+      clearTimer();
+      timer = window.setTimeout(() => {
+        void refreshTasks().finally(() => {
+          scheduleNext();
+        });
+      }, resolveDelay());
+    };
+
+    const handleVisibilityChange = () => {
+      if (disposed) {
+        return;
+      }
+      clearTimer();
+      if (document.visibilityState === 'visible') {
+        void refreshTasks().finally(() => {
+          scheduleNext();
+        });
+        return;
+      }
+      scheduleNext();
+    };
+
+    scheduleNext();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      disposed = true;
+      clearTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [hasActiveTasks, pluginEnabled, pluginInstalled, gatewayStatus.state, refreshTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
@@ -259,14 +325,13 @@ export function TasksPage() {
     if (statsWindow === 'all') {
       return longTasks;
     }
-    const now = Date.now();
     const days = statsWindow === '7d' ? 7 : 30;
-    const cutoff = now - days * 24 * 60 * 60 * 1000;
+    const cutoff = statsNowMs - days * 24 * 60 * 60 * 1000;
     return longTasks.filter((task) => {
       const taskTime = resolveTaskTimestampMs(task);
       return taskTime != null && taskTime >= cutoff;
     });
-  }, [longTasks, statsWindow]);
+  }, [longTasks, statsNowMs, statsWindow]);
   const filteredTasks = useMemo(
     () => statsTasks.filter((task) => matchesStatusFilter(task, statusFilter)),
     [statsTasks, statusFilter],
