@@ -18,6 +18,10 @@
     "empty": "No templates found.",
     "error": "Failed to load templates: {{message}}",
     "badge": "Template",
+    "pagination": {
+      "showing": "Showing {{shown}} / {{total}}",
+      "loadMore": "Load More Templates"
+    },
     "categories": {
       "all": "All",
       "design": "Design",

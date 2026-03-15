@@ -4,13 +4,14 @@
  * Rendered in the Header when on the Chat page.
  */
 import { RefreshCw, Brain } from 'lucide-react';
+import { memo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
-export function ChatToolbar() {
+export const ChatToolbar = memo(function ChatToolbar() {
   const refresh = useChatStore((s) => s.refresh);
   const loading = useChatStore((s) => s.loading);
   const showThinking = useChatStore((s) => s.showThinking);
@@ -58,4 +59,4 @@ export function ChatToolbar() {
       </Tooltip>
     </div>
   );
-}
+});

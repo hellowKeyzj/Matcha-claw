@@ -22,6 +22,10 @@
         "disableVisible": "批量禁用可见项",
         "installSkill": "安装技能"
     },
+    "pagination": {
+        "showing": "已显示 {{shown}} / {{total}}",
+        "loadMore": "加载更多"
+    },
     "noSkills": "未找到技能",
     "noSkillsSearch": "尝试不同的搜索词",
     "noSkillsAvailable": "暂无可用技能",

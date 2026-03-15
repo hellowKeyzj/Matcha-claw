@@ -39,6 +39,10 @@
     "stepsOverview": "チェックリスト",
     "completedTag": "完了",
     "pendingTag": "保留",
+    "pagination": {
+        "showing": "{{shown}} / {{total}} 件を表示中",
+        "loadMore": "さらに読み込む"
+    },
     "blocked": {
         "title": "確認待ちタスク",
         "pendingCount": "{{count}} 件のタスクが確認待ちです",

@@ -32,10 +32,10 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
-import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { invokeIpc } from '@/lib/api-client';
+import { cn } from '@/lib/utils';
 import {
   CHANNEL_ICONS,
   CHANNEL_NAMES,
@@ -49,6 +49,8 @@ import {
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 
+const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
+
 export function Channels() {
   const { t } = useTranslation('channels');
   const { channels, loading, error, fetchChannels, deleteChannel } = useChannelsStore();
@@ -58,10 +60,13 @@ export function Channels() {
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([]);
   const [channelToDelete, setChannelToDelete] = useState<{ id: string } | null>(null);
+  const statusRefreshPendingRef = useRef(false);
+  const statusRefreshRafRef = useRef<number | null>(null);
+  const statusRefreshLastAtRef = useRef(0);
 
   // Fetch channels on mount
   useEffect(() => {
-    fetchChannels();
+    void fetchChannels({ silent: true });
   }, [fetchChannels]);
 
   // Fetch configured channel types from config file
@@ -84,17 +89,39 @@ export function Channels() {
     void fetchConfiguredTypes();
   }, [fetchConfiguredTypes]);
 
+  const scheduleStatusRefresh = useCallback(() => {
+    if (statusRefreshPendingRef.current) {
+      return;
+    }
+    statusRefreshPendingRef.current = true;
+    statusRefreshRafRef.current = window.requestAnimationFrame(() => {
+      statusRefreshPendingRef.current = false;
+      statusRefreshRafRef.current = null;
+      const now = Date.now();
+      if (now - statusRefreshLastAtRef.current < CHANNELS_EVENT_REFRESH_COOLDOWN_MS) {
+        return;
+      }
+      statusRefreshLastAtRef.current = now;
+      void fetchChannels({ silent: true });
+      void fetchConfiguredTypes();
+    });
+  }, [fetchChannels, fetchConfiguredTypes]);
+
   useEffect(() => {
     const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
-      fetchChannels();
-      fetchConfiguredTypes();
+      scheduleStatusRefresh();
     });
     return () => {
+      if (statusRefreshRafRef.current != null) {
+        window.cancelAnimationFrame(statusRefreshRafRef.current);
+        statusRefreshRafRef.current = null;
+      }
+      statusRefreshPendingRef.current = false;
       if (typeof unsubscribe === 'function') {
         unsubscribe();
       }
     };
-  }, [fetchChannels, fetchConfiguredTypes]);
+  }, [scheduleStatusRefresh]);
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
@@ -112,14 +139,6 @@ export function Channels() {
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
 
-  if (loading) {
-    return (
-      <div className="flex h-96 items-center justify-center">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -131,8 +150,8 @@ export function Channels() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={fetchChannels}>
-            <RefreshCw className="h-4 w-4 mr-2" />
+          <Button variant="outline" onClick={() => { void fetchChannels(); }} disabled={loading}>
+            <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
             {t('refresh')}
           </Button>
           <Button onClick={() => setShowAddDialog(true)}>

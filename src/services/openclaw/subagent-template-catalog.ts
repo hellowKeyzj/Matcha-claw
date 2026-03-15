@@ -15,6 +15,11 @@ const TEMPLATE_FILE_SET = new Set<SubagentTargetFile>([
   'USER.md',
 ]);
 
+let templateCatalogCache: SubagentTemplateCatalogResult | null = null;
+let templateCatalogInflight: Promise<SubagentTemplateCatalogResult> | null = null;
+const templateDetailCache = new Map<string, SubagentTemplateDetail>();
+const templateDetailInflight = new Map<string, Promise<SubagentTemplateDetail>>();
+
 function normalizeTemplateEntry(value: unknown): SubagentTemplateSummary | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -97,7 +102,7 @@ function normalizeTemplateFileContents(value: unknown): Partial<Record<SubagentT
   return result;
 }
 
-export async function getSubagentTemplateCatalog(): Promise<SubagentTemplateCatalogResult> {
+async function fetchTemplateCatalogFromIpc(): Promise<SubagentTemplateCatalogResult> {
   const value = await invokeIpc<unknown>('openclaw:getSubagentTemplateCatalog');
   if (!value || typeof value !== 'object') {
     return {
@@ -128,7 +133,7 @@ export async function getSubagentTemplateCatalog(): Promise<SubagentTemplateCata
   };
 }
 
-export async function getSubagentTemplateById(templateId: string): Promise<SubagentTemplateDetail> {
+async function fetchTemplateDetailFromIpc(templateId: string): Promise<SubagentTemplateDetail> {
   const id = templateId.trim();
   if (!id) {
     throw new Error('Template id is required');
@@ -154,4 +159,56 @@ export async function getSubagentTemplateById(templateId: string): Promise<Subag
     ...(sourceDir ? { sourceDir } : {}),
     fileContents: normalizeTemplateFileContents(detailTemplate.fileContents),
   };
+}
+
+export async function getSubagentTemplateCatalog(): Promise<SubagentTemplateCatalogResult> {
+  if (templateCatalogCache) {
+    return templateCatalogCache;
+  }
+  if (templateCatalogInflight) {
+    return templateCatalogInflight;
+  }
+  templateCatalogInflight = fetchTemplateCatalogFromIpc()
+    .then((catalog) => {
+      templateCatalogCache = catalog;
+      return catalog;
+    })
+    .finally(() => {
+      templateCatalogInflight = null;
+    });
+  return templateCatalogInflight;
+}
+
+export async function prefetchSubagentTemplateCatalog(): Promise<void> {
+  await getSubagentTemplateCatalog();
+}
+
+export async function getSubagentTemplateById(templateId: string): Promise<SubagentTemplateDetail> {
+  const id = templateId.trim();
+  if (!id) {
+    throw new Error('Template id is required');
+  }
+  const cached = templateDetailCache.get(id);
+  if (cached) {
+    return cached;
+  }
+  const inflight = templateDetailInflight.get(id);
+  if (inflight) {
+    return inflight;
+  }
+
+  const loading = fetchTemplateDetailFromIpc(id)
+    .then((detail) => {
+      templateDetailCache.set(id, detail);
+      return detail;
+    })
+    .finally(() => {
+      templateDetailInflight.delete(id);
+    });
+  templateDetailInflight.set(id, loading);
+  return loading;
+}
+
+export async function prefetchSubagentTemplateById(templateId: string): Promise<void> {
+  await getSubagentTemplateById(templateId);
 }

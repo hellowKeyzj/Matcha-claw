@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 
 interface SubagentTemplateLoadDialogProps {
   open: boolean;
+  loading: boolean;
   template: SubagentTemplateDetail | null;
   modelOptions: ModelCatalogEntry[];
   modelsLoading: boolean;
@@ -18,6 +19,7 @@ interface SubagentTemplateLoadDialogProps {
 
 export function SubagentTemplateLoadDialog({
   open,
+  loading,
   template,
   modelOptions,
   modelsLoading,
@@ -46,7 +48,34 @@ export function SubagentTemplateLoadDialog({
     return resolvedModelOptions[0]?.id ?? '';
   }, [manualModelId, resolvedModelOptions]);
 
-  if (!open || !template) {
+  if (!open) {
+    return null;
+  }
+
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+        <section
+          role="dialog"
+          aria-label={t('templates.loading')}
+          className="w-full max-w-lg rounded-xl border bg-background p-6 shadow-xl"
+        >
+          <header className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">{t('templates.loading')}</h2>
+            <Button variant="ghost" size="icon" aria-label={t('close')} onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          </header>
+          <div className="mt-6 flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-primary border-r-transparent" />
+            <span>{t('templates.loadingButton')}</span>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (!template) {
     return null;
   }
 

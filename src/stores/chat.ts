@@ -160,6 +160,95 @@ function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
+function safeStableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return String(value);
+  }
+}
+
+function areAttachedFilesEqual(
+  left: AttachedFileMeta[] | undefined,
+  right: AttachedFileMeta[] | undefined,
+): boolean {
+  const leftItems = Array.isArray(left) ? left : [];
+  const rightItems = Array.isArray(right) ? right : [];
+  if (leftItems.length !== rightItems.length) {
+    return false;
+  }
+  for (let index = 0; index < leftItems.length; index += 1) {
+    const a = leftItems[index];
+    const b = rightItems[index];
+    if (
+      a.fileName !== b.fileName
+      || a.mimeType !== b.mimeType
+      || a.fileSize !== b.fileSize
+      || (a.preview ?? null) !== (b.preview ?? null)
+      || (a.filePath ?? null) !== (b.filePath ?? null)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areMessagesEquivalent(left: RawMessage[], right: RawMessage[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (
+      (a.id ?? null) !== (b.id ?? null)
+      || a.role !== b.role
+      || (a.timestamp ?? null) !== (b.timestamp ?? null)
+      || (a.toolCallId ?? null) !== (b.toolCallId ?? null)
+      || (a.toolName ?? null) !== (b.toolName ?? null)
+      || (a.isError ?? null) !== (b.isError ?? null)
+    ) {
+      return false;
+    }
+    if (safeStableStringify(a.content) !== safeStableStringify(b.content)) {
+      return false;
+    }
+    if (!areAttachedFilesEqual(a._attachedFiles, b._attachedFiles)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (
+      a.key !== b.key
+      || (a.label ?? null) !== (b.label ?? null)
+      || (a.displayName ?? null) !== (b.displayName ?? null)
+      || (a.thinkingLevel ?? null) !== (b.thinkingLevel ?? null)
+      || (a.model ?? null) !== (b.model ?? null)
+      || (a.updatedAt ?? null) !== (b.updatedAt ?? null)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Timer for fallback history polling during active sends.
 // If no streaming events arrive within a few seconds, we periodically
 // poll chat.history to surface intermediate tool-call turns.
@@ -186,6 +275,49 @@ function clearHistoryPoll(): void {
 
 const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
+const SESSION_HYDRATE_HEAD_LIMIT = 80;
+const SESSION_HYDRATE_BACKGROUND_LIMIT = 80;
+const SESSION_HYDRATE_HEAD_BATCH_SIZE = 2;
+const SESSION_HYDRATE_BACKGROUND_DELAY_MS = 120;
+
+interface SessionHydrationRecord {
+  sessionKey: string;
+  label: string | null;
+  lastActivity: number | null;
+}
+
+let _sessionHydrationRunId = 0;
+let _sessionHydrationTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearSessionHydrationTimer(): void {
+  if (_sessionHydrationTimer) {
+    clearTimeout(_sessionHydrationTimer);
+    _sessionHydrationTimer = null;
+  }
+}
+
+async function fetchSessionHydrationRecord(
+  sessionKey: string,
+  limit: number,
+): Promise<SessionHydrationRecord | null> {
+  try {
+    const response = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+      'chat.history',
+      { sessionKey, limit },
+    );
+    const messages = Array.isArray(response.messages) ? response.messages as RawMessage[] : [];
+    const lastMessage = messages[messages.length - 1];
+    const resolvedLabel = resolveSessionLabelFromMessages(messages);
+    const lastActivity = lastMessage?.timestamp ? toMs(lastMessage.timestamp) : null;
+    return {
+      sessionKey,
+      label: resolvedLabel || null,
+      lastActivity,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // ── Local image cache ─────────────────────────────────────────
 // The Gateway doesn't store image attachments in session content blocks,
@@ -1506,45 +1638,157 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .map((session) => [session.key, session.updatedAt!]),
         );
 
-        set((state) => ({
-          sessions: sessionsWithCurrent,
-          currentSessionKey: nextSessionKey,
-          sessionLastActivity: {
-            ...state.sessionLastActivity,
-            ...discoveredActivity,
-          },
-        }));
+        const snapshot = get();
+        const sessionsChanged = !areSessionsEquivalent(snapshot.sessions, sessionsWithCurrent);
+        const sessionKeyChanged = snapshot.currentSessionKey !== nextSessionKey;
+        const discoveredActivityChanged = Object.entries(discoveredActivity).some(
+          ([sessionKey, updatedAt]) => snapshot.sessionLastActivity[sessionKey] !== updatedAt,
+        );
+
+        if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged) {
+          set((state) => {
+            const next: Partial<ChatState> = {};
+
+            if (sessionsChanged) {
+              next.sessions = sessionsWithCurrent;
+            }
+            if (sessionKeyChanged) {
+              next.currentSessionKey = nextSessionKey;
+            }
+            if (discoveredActivityChanged) {
+              next.sessionLastActivity = {
+                ...state.sessionLastActivity,
+                ...discoveredActivity,
+              };
+            }
+
+            return next;
+          });
+        }
 
         if (currentSessionKey !== nextSessionKey) {
           get().loadHistory();
         }
 
-        // Background: hydrate session title + activity from history.
-        const sessionsToLabel = sessionsWithCurrent.filter((s) => !s.key.endsWith(':main'));
-        if (sessionsToLabel.length > 0) {
-          void Promise.all(
-            sessionsToLabel.map(async (session) => {
-              try {
-                const r = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-                  'chat.history',
-                  { sessionKey: session.key, limit: 1000 },
-                );
-                const msgs = Array.isArray(r.messages) ? r.messages as RawMessage[] : [];
-                const lastMsg = msgs[msgs.length - 1];
-                const resolvedLabel = resolveSessionLabelFromMessages(msgs);
-                set((s) => {
-                  const next: Partial<typeof s> = {};
-                  if (resolvedLabel) {
-                    next.sessionLabels = { ...s.sessionLabels, [session.key]: resolvedLabel };
+        const hydrationRunId = ++_sessionHydrationRunId;
+        clearSessionHydrationTimer();
+
+        // Background: hydrate missing session title + activity from history.
+        // Avoid re-fetching sessions that already have label/activity to reduce
+        // sidebar thrash when Chat page periodically refreshes sessions.
+        const snapshotAfterListUpdate = get();
+        const sessionsToHydrate = sessionsWithCurrent.filter((session) => {
+          if (session.key.endsWith(':main')) {
+            return false;
+          }
+          const hasLabel = Boolean(snapshotAfterListUpdate.sessionLabels[session.key]);
+          const hasActivity = typeof snapshotAfterListUpdate.sessionLastActivity[session.key] === 'number';
+          return !hasLabel || !hasActivity;
+        });
+
+        if (sessionsToHydrate.length > 0) {
+          void (async () => {
+            const applyHydrationRecords = (records: SessionHydrationRecord[]): void => {
+              const validRecords = records.filter((item): item is SessionHydrationRecord => Boolean(item));
+              if (validRecords.length === 0 || hydrationRunId !== _sessionHydrationRunId) {
+                return;
+              }
+
+              set((state) => {
+                let nextLabels = state.sessionLabels;
+                let labelsChanged = false;
+                let nextActivity = state.sessionLastActivity;
+                let activityChanged = false;
+
+                for (const record of validRecords) {
+                  if (record.label && state.sessionLabels[record.sessionKey] !== record.label) {
+                    if (!labelsChanged) {
+                      nextLabels = { ...state.sessionLabels };
+                      labelsChanged = true;
+                    }
+                    nextLabels[record.sessionKey] = record.label;
                   }
-                  if (lastMsg?.timestamp) {
-                    next.sessionLastActivity = { ...s.sessionLastActivity, [session.key]: toMs(lastMsg.timestamp) };
+                  if (
+                    typeof record.lastActivity === 'number'
+                    && state.sessionLastActivity[record.sessionKey] !== record.lastActivity
+                  ) {
+                    if (!activityChanged) {
+                      nextActivity = { ...state.sessionLastActivity };
+                      activityChanged = true;
+                    }
+                    nextActivity[record.sessionKey] = record.lastActivity;
                   }
-                  return next;
-                });
-              } catch { /* ignore per-session errors */ }
-            }),
-          );
+                }
+
+                const next: Partial<ChatState> = {};
+                if (labelsChanged) {
+                  next.sessionLabels = nextLabels;
+                }
+                if (activityChanged) {
+                  next.sessionLastActivity = nextActivity;
+                }
+                return next;
+              });
+            };
+
+            const prioritizedCurrentSession = sessionsToHydrate.find((session) => session.key === nextSessionKey);
+            const remainingSessions = sessionsToHydrate.filter((session) => session.key !== prioritizedCurrentSession?.key);
+            const headBatchSessions = remainingSessions.slice(0, SESSION_HYDRATE_HEAD_BATCH_SIZE);
+            const backgroundQueue = remainingSessions.slice(SESSION_HYDRATE_HEAD_BATCH_SIZE);
+
+            if (prioritizedCurrentSession) {
+              const primaryRecord = await fetchSessionHydrationRecord(
+                prioritizedCurrentSession.key,
+                SESSION_HYDRATE_HEAD_LIMIT,
+              );
+              if (primaryRecord) {
+                applyHydrationRecords([primaryRecord]);
+              }
+            }
+
+            if (hydrationRunId !== _sessionHydrationRunId) {
+              return;
+            }
+
+            if (headBatchSessions.length > 0) {
+              const headRecords = await Promise.all(
+                headBatchSessions.map((session) => fetchSessionHydrationRecord(session.key, SESSION_HYDRATE_HEAD_LIMIT)),
+              );
+              applyHydrationRecords(headRecords.filter((record): record is SessionHydrationRecord => Boolean(record)));
+            }
+
+            if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
+              return;
+            }
+
+            const runBackgroundHydration = async () => {
+              if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
+                return;
+              }
+
+              const session = backgroundQueue.shift();
+              if (!session) {
+                return;
+              }
+
+              const record = await fetchSessionHydrationRecord(session.key, SESSION_HYDRATE_BACKGROUND_LIMIT);
+              if (record) {
+                applyHydrationRecords([record]);
+              }
+
+              if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
+                return;
+              }
+
+              _sessionHydrationTimer = setTimeout(() => {
+                void runBackgroundHydration();
+              }, SESSION_HYDRATE_BACKGROUND_DELAY_MS);
+            };
+
+            _sessionHydrationTimer = setTimeout(() => {
+              void runBackgroundHydration();
+            }, SESSION_HYDRATE_BACKGROUND_DELAY_MS);
+          })();
         }
       }
     } catch (err) {
@@ -1817,16 +2061,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      set({ messages: finalMessages, thinkingLevel, loading: false });
+      const currentState = get();
+      const messageListChanged = !areMessagesEquivalent(currentState.messages, finalMessages);
+      const thinkingLevelChanged = currentState.thinkingLevel !== thinkingLevel;
+      const nextStatePatch: Partial<ChatState> = {};
+      if (messageListChanged) {
+        nextStatePatch.messages = finalMessages;
+      }
+      if (thinkingLevelChanged) {
+        nextStatePatch.thinkingLevel = thinkingLevel;
+      }
+      if (currentState.loading) {
+        nextStatePatch.loading = false;
+      }
+      if (Object.keys(nextStatePatch).length > 0) {
+        set(nextStatePatch);
+      }
 
       // 统一会话标题提取：优先用户首条有效消息；无用户消息时回退 assistant 首条有效消息（过滤模板句）
       const isMainSession = requestedSessionKey.endsWith(':main');
       if (!isMainSession) {
         const resolvedLabel = resolveSessionLabelFromMessages(finalMessages);
         if (resolvedLabel) {
-          set((s) => ({
-            sessionLabels: { ...s.sessionLabels, [requestedSessionKey]: resolvedLabel },
-          }));
+          const currentLabel = get().sessionLabels[requestedSessionKey];
+          if (currentLabel !== resolvedLabel) {
+            set((s) => ({
+              sessionLabels: { ...s.sessionLabels, [requestedSessionKey]: resolvedLabel },
+            }));
+          }
         }
       }
 
@@ -1834,9 +2096,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const lastMsg = finalMessages[finalMessages.length - 1];
       if (lastMsg?.timestamp) {
         const lastAt = toMs(lastMsg.timestamp);
-        set((s) => ({
-          sessionLastActivity: { ...s.sessionLastActivity, [requestedSessionKey]: lastAt },
-        }));
+        const currentLastAt = get().sessionLastActivity[requestedSessionKey];
+        if (currentLastAt !== lastAt) {
+          set((s) => ({
+            sessionLastActivity: { ...s.sessionLastActivity, [requestedSessionKey]: lastAt },
+          }));
+        }
       }
 
       // Async: load missing image previews from disk (updates in background)

@@ -6,7 +6,7 @@
  * Files are staged to disk via IPC — only lightweight path references
  * are sent with the message (no base64 over WebSocket).
  */
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { memo, useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -144,7 +144,7 @@ function buildSkillPrefixedMessage(text: string, selectedSkills: SelectedSkill[]
 
 // ── Component ────────────────────────────────────────────────────
 
-export function ChatInput({
+export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
   disabled = false,
@@ -803,7 +803,7 @@ export function ChatInput({
       </div>
     </div>
   );
-}
+});
 
 // ── Attachment Preview ───────────────────────────────────────────
 

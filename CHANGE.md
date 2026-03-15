@@ -1,5 +1,893 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-16 Dashboard Token 分阶段渲染：先摘要后明细）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/Dashboard/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Dashboard/index.tsx`：Token 历史面板拆分为两阶段渲染，先显示摘要区（窗口/分组/图表），再延后挂载明细列表与分页。
+
+### 模块依赖与边界
+
+- 不改 token 数据来源与统计口径，不改接口协议。
+- 仅调整 Dashboard renderer 渲染时序，降低首帧明细列表挂载带来的主线程峰值。
+
+### 关键决策与原因
+
+1. Dashboard token 面板中“明细列表 + 分页”属于重渲染区域，和摘要区同帧挂载会放大首屏延时。
+2. 用户感知优先级应是“先看到可用摘要，再补全明细”，符合首屏体感优化目标。
+
+### 本次变更
+
+- 新增 `usageChartReady` 与 `usageChartPrimedRef`：
+  - 在 token 数据可用后，图表区延后到下一帧 + idle 再挂载；
+  - 与明细列表解耦，形成“摘要 -> 图表 -> 明细”的三段式渲染节奏。
+- 新增轻量摘要卡：
+  - 先展示 `total/input/output/cache` 汇总数值；
+  - 用户先看到可用信息，再等待图表与明细补齐。
+- 新增 `usageDetailListReady` 与 `usageDetailPrimedRef`：
+  - 首次有 token 历史数据时，先渲染摘要区；
+  - 明细列表在下一帧 + idle/timeout 后再显示。
+- 新增明细区占位骨架：
+  - 明细未就绪时仅展示轻量 placeholder；
+  - 就绪后再渲染真实列表与分页交互。
+- Gateway 停止时重置明细阶段状态，避免状态残留影响下次进入页面。
+
+## 本次变更日志（2026-03-16 四页首屏体感优化：stale-first、静默刷新、合帧去重）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── pages/
+    │   ├── Channels/index.tsx
+    │   ├── Dashboard/index.tsx
+    │   ├── Skills/index.tsx
+    │   └── Tasks/index.tsx
+    └── stores/channels.ts
+```
+
+### 文件职责
+
+- `src/pages/Tasks/index.tsx`：进入页面优先复用已有列表，初始化与刷新分流；任务列表增加容器自动补批，降低首屏“空壳等待”。
+- `src/pages/Skills/index.tsx`：已有技能缓存时直接进入重内容渲染，不再每次切页都等待 idle 门控。
+- `src/pages/Dashboard/index.tsx`：渠道拉取改静默刷新；缓存存在时立即释放重内容区；token 历史到达后立即解锁面板渲染。
+- `src/pages/Channels/index.tsx`：`gateway:channel-status` 事件刷新改为 `requestAnimationFrame` 合帧 + 冷却，抑制高频重复刷新。
+- `src/stores/channels.ts`：静默拉取加最小间隔与并发去重；通道列表等价判断（无变化不 set），减少无效重渲染。
+
+### 模块依赖与边界
+
+- 不改 Gateway 协议，不改业务语义。
+- 仅优化 renderer 侧页面渲染时序和 store 更新策略，目标是降低切页后首帧阻塞与刷新抖动。
+
+### 关键决策与原因
+
+1. 切页动作已快，但页内首帧仍慢，主要来自“每次重挂载都等待重内容门控 + 高频刷新重复 setState”。
+2. 页面切回时应优先显示已有数据（stale-first），后台再静默刷新，而不是再次走完整等待链路。
+3. `channels` 高频状态事件若逐条触发拉取与 set，会放大 UI 卡顿，需要合帧和去重。
+
+### 本次变更
+
+- Tasks：
+  - `initialized` 后切回页面不再重复走 `init` 阻塞路径，改为后台 `refreshTasks()`。
+  - `taskHeavyContentReady` 初值改为“已有任务即就绪”，并在已有数据时立即解除重内容门控。
+  - 任务列表增加“容器未占满时自动追加批次”，减少首屏显示数量过小导致的空白感。
+- Skills：
+  - `skillsHeavyContentReady` 初值改为“已有技能即就绪”。
+  - 进入页面后若已有数据，直接解锁重内容，减少切页后占位延时。
+- Dashboard：
+  - 页面拉取 channels 改为 `fetchChannels({ silent: true })`。
+  - `dashboardHeavyContentReady` 初值支持缓存命中立即就绪。
+  - `visibleUsageHistory` 不再依赖 `dashboardHeavyContentReady`，并在历史数据到达时立即 `usagePanelReady=true`。
+- Channels：
+  - `gateway:channel-status` 监听改为 raf 合帧调度 + 400ms 冷却，避免事件风暴反复触发刷新。
+  - store 层新增 `areChannelsEquivalent`，列表无变化直接跳过 set。
+  - 静默刷新加入最小间隔（1200ms）和 inflight 复用，减少重复请求与解析峰值。
+
+## 本次变更日志（2026-03-16 Chat 首屏会话补全分阶段优化：当前优先 + 小批量 + 后台串行）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── stores/chat.ts
+```
+
+### 文件职责
+
+- `src/stores/chat.ts`：`loadSessions` 会话补全改为分阶段调度，降低首屏与切页时的渲染峰值。
+
+### 模块依赖与边界
+
+- 不改 Gateway 协议，不改 `sessions.list/chat.history` 接口语义。
+- 仅调整 renderer 侧会话补全的调度顺序、批次大小与并发策略。
+
+### 关键决策与原因
+
+1. 原逻辑对待补全会话一次性 `Promise.all + limit:1000`，会造成首开和切页时主线程压力峰值。
+2. 体感目标是“当前会话优先可用”，其余信息后台渐进补齐，而不是首帧争抢全部补全任务。
+3. 连续触发 `loadSessions` 时，旧补全任务会滞后回写，需要 runId 终止机制避免过期结果干扰。
+
+### 本次变更
+
+- 新增会话补全调度常量：
+  - `SESSION_HYDRATE_HEAD_LIMIT=80`
+  - `SESSION_HYDRATE_BACKGROUND_LIMIT=80`
+  - `SESSION_HYDRATE_HEAD_BATCH_SIZE=2`
+  - `SESSION_HYDRATE_BACKGROUND_DELAY_MS=120`
+- 新增 `fetchSessionHydrationRecord(sessionKey, limit)`：按会话拉取最小历史并提取 `label/lastActivity`。
+- `loadSessions` 改为三阶段补全：
+  1. 当前会话优先补全（同步优先）
+  2. 首屏小批量补全（最多 2 个会话并行）
+  3. 其余会话后台串行补全（定时分发）
+- 新增 runId + timer 终止机制：
+  - 每次 `loadSessions` 启动新轮次并清理上一轮定时任务；
+  - 过期轮次结果不再应用，避免旧任务回写触发无效重渲染。
+
+## 本次变更日志（2026-03-16 Cron 切页体验优化：去除整页转圈）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── pages/Cron/index.tsx
+    └── stores/cron.ts
+```
+
+### 文件职责
+
+- `src/stores/cron.ts`：`fetchJobs` 增加 `silent` 选项，支持静默拉取任务列表。
+- `src/pages/Cron/index.tsx`：挂载刷新改为静默，不再整页 loading 早返回；刷新按钮保留局部加载反馈。
+
+### 关键决策与原因
+
+1. Cron 页面原先 `if (loading) return <LoadingSpinner />` 会在切页时出现整页转圈，体感不符合“瞬开”目标。
+2. 挂载时的后台数据拉取不应阻塞页面壳子渲染，需改为静默模式。
+
+### 本次变更
+
+- `fetchJobs(options?)` 新增 `options.silent`。
+- 挂载时调用 `fetchJobs({ silent: true })`。
+- 移除 Cron 页整页 loading 早返回。
+- 刷新按钮改为局部 loading（旋转 + disabled）。
+
+## 本次变更日志（2026-03-16 Channels 切页体验优化：去除整页转圈）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/Channels/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Channels/index.tsx`：改为“页面先渲染 + 后台静默刷新”，去掉切页时整页 loading 早返回。
+
+### 关键决策与原因
+
+1. 从 Tasks/Skills 切到 Channels 时的转圈来自 `loading` 的整页早返回。
+2. 切页体验应优先保留页面壳子与布局稳定，加载状态下沉到局部按钮更平滑。
+
+### 本次变更
+
+- 移除 `if (loading) return <LoadingSpinner />` 整页阻塞逻辑。
+- 页面挂载与 `gateway:channel-status` 事件刷新改为 `fetchChannels({ silent: true })`。
+- 顶部刷新按钮保留显式加载反馈（`RefreshCw` 旋转 + 按钮禁用）。
+
+## 本次变更日志（2026-03-16 定向回退：仅回退 Tasks 的 deferred 任务源）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/Tasks/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Tasks/index.tsx`：仅回退 Tasks 页面中的 `useDeferredValue(tasks)`，恢复任务列表计算直接使用 `tasks` 源。
+
+### 模块依赖与边界
+
+- 只影响 Tasks 页面任务数据计算路径。
+- `Skills` 和 `Sidebar` 的 deferred 降优先级逻辑保持不变。
+
+### 本次变更
+
+- 删除 `useDeferredValue` 引入。
+- `tasksForView` 从 `taskHeavyContentReady ? deferredTasks : []` 改为 `taskHeavyContentReady ? tasks : []`。
+
+## 本次变更日志（2026-03-16 Agent 会话列表流畅性优化：deferred + store 去抖更新）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── components/layout/AgentSessionsPane.tsx
+    └── stores/chat.ts
+```
+
+### 文件职责
+
+- `src/components/layout/AgentSessionsPane.tsx`：会话列表订阅改为 deferred 数据源并加 memo/callback，减少高频更新时的重排抖动。
+- `src/stores/chat.ts`：`loadSessions` 改为“无变化不 set + 批量合并更新”，避免多次小更新触发列表反复重渲染。
+
+### 关键决策与原因
+
+1. Agent 会话列表原先直接订阅 `sessions/sessionLabels/sessionLastActivity`，高频状态变化会导致整列重算。
+2. `loadSessions` 原逻辑会为每个 session 单独 set 标签/活跃时间，长列表下会造成明显卡顿。
+
+### 本次变更
+
+- AgentSessionsPane：
+  - `sessions/sessionLabels/sessionLastActivity` 使用 `useDeferredValue`。
+  - 组件升级为 `memo`，交互函数使用 `useCallback` 稳定引用。
+- chat store / loadSessions：
+  - 新增 `areSessionsEquivalent`，会话列表无变化时不更新 `sessions`。
+  - `discoveredActivity` 增量合并，仅在值变化时更新 `sessionLastActivity`。
+  - 会话历史补全改为“仅补缺失字段 + Promise.all 后单次批量 set”，不再每个 session 单独 set。
+
+## 本次变更日志（2026-03-16 Chat 热修：修复 Maximum update depth exceeded）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/Chat/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Chat/index.tsx`：修复审批列表 selector 的空值回退引用不稳定问题，避免 React/Zustand 订阅层循环更新。
+
+### 关键决策与原因
+
+1. `useChatStore((s) => s.pendingApprovalsBySession[s.currentSessionKey] ?? [])` 每次会创建新数组，违反 `useSyncExternalStore` 快照稳定性要求。
+2. 在高频订阅下会触发 `Maximum update depth exceeded`。
+
+### 本次变更
+
+- 新增稳定空数组常量 `EMPTY_APPROVAL_ITEMS`。
+- 将 selector 的空值回退改为稳定引用：`?? EMPTY_APPROVAL_ITEMS`。
+
+## 本次变更日志（2026-03-16 Chat 渲染流畅性优化：子树 memo + 历史等价去重）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── pages/
+    │   └── Chat/
+    │       ├── ChatInput.tsx
+    │       ├── ChatToolbar.tsx
+    │       └── components/TaskInboxPanel.tsx
+    └── stores/chat.ts
+```
+
+### 文件职责
+
+- `src/pages/Chat/ChatInput.tsx`：输入区组件改为 memo，避免流式更新时无关重渲染。
+- `src/pages/Chat/ChatToolbar.tsx`：工具栏组件改为 memo，降低父级高频更新传播。
+- `src/pages/Chat/components/TaskInboxPanel.tsx`：任务收件箱面板改为 memo，减少聊天流式阶段的额外重绘。
+- `src/stores/chat.ts`：为 `loadHistory(quiet)` 增加消息等价判断与会话元信息去重更新，避免静默轮询触发无效重渲染。
+
+### 模块依赖与边界
+
+- 不改 Gateway 协议、不改会话数据语义，仅优化 renderer 渲染调度与组件更新边界。
+- 聊天功能、审批流程、任务收件箱行为保持一致。
+
+### 关键决策与原因
+
+1. Chat 页在流式阶段会频繁更新，输入区/工具栏/任务收件箱若跟随父级重渲染会放大卡顿。
+2. `chat.history` 静默轮询在无数据变化时重复 `set(messages)`，会触发整页更新与 markdown 重算。
+3. 通过“组件 memo + store 等价去重”可以在不改业务语义的前提下降低渲染峰值。
+
+### 本次变更
+
+- 渲染边界优化：
+  - `ChatInput` / `ChatToolbar` / `TaskInboxPanel` 改为 memo 组件。
+- store 去重优化：
+  - 新增 `areMessagesEquivalent` 与附件等价比较，`loadHistory` 无变化时跳过 `messages` 更新。
+  - `sessionLabels` / `sessionLastActivity` 仅在值发生变化时更新，减少会话侧边栏连带重渲染。
+
+## 本次变更日志（2026-03-16 频道静默预取：修复频道页悬停仪表盘触发转圈）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── components/layout/Sidebar.tsx
+    └── stores/channels.ts
+```
+
+### 文件职责
+
+- `src/stores/channels.ts`：为 `fetchChannels` 增加 `silent` 选项，支持“后台预取不切换 loading”。
+- `src/components/layout/Sidebar.tsx`：将 `/dashboard` 的悬停预取改为静默拉取 channels。
+
+### 模块依赖与边界
+
+- 不改接口协议与频道数据结构，仅调整预取时是否触发全局 `loading`。
+- 显式刷新/进入页面的正常加载语义保持不变。
+
+### 关键决策与原因
+
+1. 频道页订阅了 `channels.loading` 且使用整页 loading 早返回，悬停预取会造成可见转圈。
+2. “后台预取”和“前台加载提示”应解耦，预取不应打断当前页面交互。
+
+### 本次变更
+
+- `fetchChannels(options?)` 新增 `options.silent`。
+- `silent=true` 时：
+  - 请求前不设置 `loading=true`；
+  - 请求失败不清空列表、不改 loading；
+  - 请求成功仅更新 `channels` 数据。
+- Sidebar `/dashboard` 预取改为 `fetchChannels({ silent: true })`。
+
+## 本次变更日志（2026-03-15 Sidebar 导航优化恢复：startTransition + 交互前多页面预取）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── components/layout/Sidebar.tsx
+```
+
+### 文件职责
+
+- `src/components/layout/Sidebar.tsx`：恢复导航点击 `startTransition` 与导航交互前预取（hover/focus/mousedown）。
+
+### 模块依赖与边界
+
+- 保留既有 Sidebar 阻塞卡片 deferred/限流逻辑，仅恢复导航交互路径的调度与预取行为。
+- 不改业务接口，不改页面内部渲染逻辑。
+
+### 关键决策与原因
+
+1. 用户要求复测第4项体感收益，需要恢复导航级优化进行 A/B 对比。
+2. 恢复后可再次观察切页瞬间的交互流畅度变化。
+
+### 本次变更
+
+- 恢复 `NavItem` 的 `onFocus/onMouseDown/onNavigate` 事件路径。
+- 恢复 `startTransition` 导航。
+- 恢复按页面路径的交互预取：
+  - `/skills`：预取 skills 数据
+  - `/dashboard`：预取 channels 数据
+  - `/tasks`：初始化并刷新 task center
+  - `/subagents`：预取模板目录
+
+## 本次变更日志（2026-03-15 路由层 fallback 策略恢复：主页面改回直接渲染）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── App.tsx
+```
+
+### 文件职责
+
+- `src/App.tsx`：按用户复测反馈，恢复主页面路由直接渲染策略（Dashboard/SubAgents/Tasks/Skills/Settings），去掉路由级 `Suspense` fallback。
+
+### 模块依赖与边界
+
+- 不改业务接口，不改页面内部数据加载逻辑，仅调整主路由层渲染策略。
+- 保留页面内部的分阶段渲染与列表增量优化。
+
+### 关键决策与原因
+
+1. 用户反馈回退后“流畅感变差”，需要恢复此前体感更好的路由策略。
+2. 路由级 fallback 会引入“页面加载中”视觉切换与额外调度，直接渲染更符合当前交互目标。
+
+### 本次变更
+
+- 移除 `lazy + Suspense + RouteLoadingFallback` 的主路由包裹。
+- 移除 App 层重路由 chunk 空闲预热 effect。
+- 恢复主页面直接 `import` + 直接 `element` 渲染。
+
+## 本次变更日志（2026-03-15 定向回退：导航预取/主进程 GPU 策略/路由层 fallback）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── App.tsx
+│   └── components/layout/Sidebar.tsx
+└── electron/
+    └── main/index.ts
+```
+
+### 文件职责
+
+- `src/components/layout/Sidebar.tsx`：回退导航 `startTransition` 与 `hover/focus/mousedown` 预取逻辑，保留侧边栏高频订阅降载与 deferred 聚合逻辑。
+- `electron/main/index.ts`：回退到固定软件渲染与开发环境默认打开 DevTools 的策略。
+- `src/App.tsx`：回退主路由为 `lazy + Suspense fallback` 策略，并恢复重路由 chunk 空闲预热。
+
+### 模块依赖与边界
+
+- 仅回退用户指定的三个优化项，不触及 Tasks/Skills/Dashboard/SubAgents 的分阶段渲染与列表增量策略。
+- store 侧高频事件批处理与静默刷新保持不变。
+
+### 关键决策与原因
+
+1. 用户明确要求先撤回“收益不稳定或非渲染主路径”的优化项，聚焦保留渲染线程直接收益改动。
+2. 本次回退采取“最小范围”方式，避免影响已验证有效的页面级渲染优化。
+
+### 本次变更
+
+- 回退项 1（原第4项）：
+  - Sidebar 导航 `startTransition` 回退为默认导航。
+  - 导航交互前预取（skills/channels/tasks/subagents）回退，仅保留原有 `skills` hover 预取。
+- 回退项 2（原第7项）：
+  - 主进程 GPU 策略回退为 `app.disableHardwareAcceleration()`。
+  - Dev 模式回退为默认自动打开 DevTools。
+- 回退项 3（原第6项）：
+  - 主路由回退为 `lazy + Suspense + RouteLoadingFallback`。
+  - 恢复 App 级重路由 chunk 空闲预热 effect。
+
+## 本次变更日志（2026-03-15 模板库滚动增量：容器内滚动 + 接近底部自动追加）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/
+        └── SubAgents/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/SubAgents/index.tsx`：模板库卡片区改为固定高度滚动容器，滚动接近底部时自动追加下一批模板卡片，不再依赖按钮手动“加载更多”。
+
+### 模块依赖与边界
+
+- 不改变模板目录数据、模板详情加载与预取协议，只调整模板列表的渲染调度和交互方式。
+- 继续保留首批小批量渲染，自动追加仅在用户滚动触底附近时触发。
+
+### 关键决策与原因
+
+1. 手动“加载更多”虽然降了首帧峰值，但用户滚动时仍存在额外点击动作，交互链路不够顺滑。
+2. 容器内滚动 + 近底自动追加可把追加成本分散到滚动过程中，进一步降低卡顿感。
+3. 增加“容器未撑满时自动补批”逻辑，避免首批数量较小导致滚动容器空洞。
+
+### 本次变更
+
+- 新增模板卡片滚动阈值常量 `TEMPLATE_CARD_SCROLL_THRESHOLD_PX`。
+- 模板卡片区改为 `max-h + overflow-y-auto` 的容器，并绑定 `onScroll` 自动追加。
+- 新增 `templateCardScrollRef` 与“容器未撑满自动补批”effect，确保初始展示稳定。
+- 保留底部“已显示 x / y”提示，移除手动“加载更多”按钮。
+
+## 本次变更日志（2026-03-15 模板库展开卡顿优化：SubAgents 模板卡片按需增量渲染）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── pages/SubAgents/index.tsx
+    └── i18n/locales/
+        ├── zh/subagents.json
+        ├── en/subagents.json
+        └── ja/subagents.json
+```
+
+### 文件职责
+
+- `src/pages/SubAgents/index.tsx`：模板库展开后改为“首批卡片 + 加载更多”增量渲染，避免一次性挂载全量模板卡片造成首开卡顿。
+- `src/i18n/locales/*/subagents.json`：新增模板分页文案（showing/loadMore）。
+
+### 模块依赖与边界
+
+- 不改模板 API、模板目录数据结构与加载流程，仅优化模板库展开阶段的渲染策略。
+- 模板详情预取与加载对话框逻辑保持不变。
+
+### 关键决策与原因
+
+1. 反馈“打开模板库仍卡顿”对应的是展开瞬间渲染峰值过高，而非网络请求慢。
+2. 将全量卡片渲染改为增量渲染，优先确保点击展开动作先反馈，再按需追加内容。
+3. 使用 deferred 过滤结果与单次本地化字符串计算，进一步减少展开帧内计算量。
+
+### 本次变更
+
+- SubAgents 模板库：
+  - 新增 `INITIAL_TEMPLATE_CARD_BATCH=9`、`TEMPLATE_CARD_BATCH_SIZE=18`。
+  - 模板卡片网格从 `filteredTemplates.map` 改为 `visibleTemplates.map`。
+  - 新增“已显示 x / y + 加载更多模板”交互。
+  - `filteredTemplates` 增加 `useDeferredValue`，展开与筛选切换时降低同步阻塞。
+  - 模板卡片内名称/摘要本地化结果改为单次计算，避免重复 `tTemplate` 调用。
+
+## 本次变更日志（2026-03-15 Dashboard/SubAgents 首屏分阶段渲染）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/
+        ├── Dashboard/index.tsx
+        └── SubAgents/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Dashboard/index.tsx`：新增页面级重内容阶段门控，仪表盘先渲染壳子（统计卡与快捷操作），Recent Activity 与 Token History 在空闲阶段再挂载。
+- `src/pages/SubAgents/index.tsx`：新增页面级重内容阶段门控，模板分类/模板卡片与 Agent 卡片网格改为“先骨架后细节”。
+
+### 模块依赖与边界
+
+- 不改 Gateway API、store 协议与业务行为，仅调整页面渲染时序和计算时机。
+- 模板目录、模板预取、Agent 增删改、模板加载对话框等流程保持不变。
+
+### 关键决策与原因
+
+1. 用户反馈 Dashboard / SubAgents 首次进入仍有短暂“加载中 + 卡一下”，瓶颈在首挂载阶段重计算与重列表渲染。
+2. 采用与 Tasks/Skills 一致的 `requestAnimationFrame + requestIdleCallback` 分阶段渲染，优先保障点击后的首帧反馈。
+3. 数据请求继续在后台进行（不牺牲预热），仅把重 UI 渲染延后，兼顾“首开不卡”和“二次进入快”。
+
+### 本次变更
+
+- Dashboard：
+  - 新增 `dashboardHeavyContentReady`（idle 阶段置为 `true`）。
+  - Recent Activity 与 Recent Token History 增加骨架占位，未就绪时不挂载重内容。
+  - token 历史相关聚合计算在 heavy ready 前短路，降低首开计算压力。
+- SubAgents：
+  - 新增 `subagentsHeavyContentReady`（idle 阶段置为 `true`）。
+  - `templateCategoryCountById` / `templateCategories` / `filteredTemplates` 在 heavy ready 前早返回，避免首帧执行重筛选链路。
+  - 模板区展开后先展示骨架，再渲染真实模板筛选与卡片。
+  - Agent 卡片网格首帧显示骨架，heavy ready 后再渲染真实卡片与空态。
+
+## 本次变更日志（2026-03-15 全页面统一首开策略：移除主路由懒加载 fallback）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    ├── App.tsx
+    ├── components/layout/Sidebar.tsx
+    └── lib/
+        └── route-prewarm.ts (removed)
+```
+
+### 文件职责
+
+- `src/App.tsx`：主应用页面路由（Dashboard/SubAgents/Tasks/Skills/Settings）统一改为直接渲染，不再通过 `Suspense` 显示整页“页面加载中”。
+- `src/components/layout/Sidebar.tsx`：移除路由 chunk 预热逻辑，仅保留数据预取（tasks/skills/channels/subagent templates）。
+- `src/lib/route-prewarm.ts`：删除已不再使用的路由预热工具，避免死代码与多余调度。
+
+### 模块依赖与边界
+
+- 不改变业务接口和页面功能，仅统一路由首开渲染策略。
+- 仅移除“路由级 loading fallback”，页面内部必要的局部 loading 保留。
+
+### 关键决策与原因
+
+1. 用户明确反馈多个页面首次进入仍会看到短暂“加载中”，这属于路由级懒加载体验问题。
+2. 既然要求“每个页面都统一处理”，应去掉主路由层的懒加载差异，避免页面体验不一致。
+3. 在主路由统一直接渲染后，原路由预热逻辑失去价值，继续保留只会增加复杂度。
+
+### 本次变更
+
+- `App.tsx`：
+  - 移除 `lazy` + `Suspense` + `RouteLoadingFallback`。
+  - `Dashboard/SubAgents/Settings` 改为直接 import + 直接 route element（Tasks/Skills 已是直接 route）。
+  - 移除全局 `routeChunksPrefetchedRef` 与 route chunk 预热 effect。
+- `Sidebar.tsx`：
+  - 移除 `prewarmRouteChunk` 相关逻辑与依赖，导航预取只保留业务数据预取。
+- 删除 `src/lib/route-prewarm.ts`。
+
+## 本次变更日志（2026-03-15 首屏分阶段渲染：Tasks/Skills 先壳子后细节）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── pages/
+        ├── Tasks/index.tsx
+        └── Skills/index.tsx
+```
+
+### 文件职责
+
+- `src/pages/Tasks/index.tsx`：新增“重内容空闲阶段挂载”机制，进入页面先渲染壳子与基础交互，任务列表与详情的重渲染区在 idle 阶段再加载。
+- `src/pages/Skills/index.tsx`：新增“重内容空闲阶段挂载”机制，进入页面先渲染壳子与筛选控件，技能卡片网格在 idle 阶段再加载。
+
+### 模块依赖与边界
+
+- 不改接口与 store 语义，只调整页面渲染时序。
+- 现有分页/增量加载策略保持不变，仅改变“何时开始渲染重内容”。
+
+### 关键决策与原因
+
+1. 首次点击卡顿主要发生在“页面首次挂载时即执行大量过滤、排序、列表渲染”。
+2. 分阶段渲染将重内容后移到浏览器空闲窗口，优先保障点击后的首帧反馈。
+3. 先壳子后细节比直接整页 loading 更符合“瞬开体感”目标。
+
+### 本次变更
+
+- Tasks：
+  - 新增 `taskHeavyContentReady` 阶段状态（`requestAnimationFrame + requestIdleCallback` 调度）。
+  - 重筛选链路改为仅在阶段就绪后启用（未就绪时显示轻量占位骨架）。
+  - 列表区与详情区增加骨架占位，避免首开空白等待。
+- Skills：
+  - 新增 `skillsHeavyContentReady` 阶段状态（`requestAnimationFrame + requestIdleCallback` 调度）。
+  - 重筛选链路改为仅在阶段就绪后启用（未就绪时显示轻量卡片骨架）。
+
+## 本次变更日志（2026-03-15 首开体验修正：任务中心/技能页移除路由级加载闪屏）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── App.tsx
+│   └── pages/
+│       └── Skills/index.tsx
+```
+
+### 文件职责
+
+- `src/App.tsx`：`/tasks` 与 `/skills` 路由由懒加载改为直接加载，避免首次点击进入时出现 `Suspense` 的整页“页面加载中”。
+- `src/pages/Skills/index.tsx`：移除整页早返回 loading，改为页面内局部 loading 呈现，避免首开“白屏+转圈”体感。
+
+### 模块依赖与边界
+
+- 不改变任务中心/技能页业务逻辑，仅调整首次进入时的加载策略与视觉反馈层级。
+- 仍保留 Dashboard/SubAgents/Settings 懒加载，不影响其分包策略。
+
+### 关键决策与原因
+
+1. 用户反馈“首开显示加载中才出页面”是明显的路由级 fallback 感知问题，应优先消除整页 fallback。
+2. Skills 即使数据尚未就绪，也应优先渲染页面结构，避免“整页阻塞式 loading”。
+
+### 本次变更
+
+- `tasks`/`skills` 路由移除 `Suspense` 包裹，改为直接元素渲染。
+- Skills 首次加载时改为页面内局部 loading 卡片，不再整页替换为 loading 视图。
+
+## 本次变更日志（2026-03-15 任务中心与技能页卡顿专项：取消自动全量渲染，改为按需增量）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   └── pages/
+│       ├── Tasks/index.tsx
+│       └── Skills/index.tsx
+└── src/i18n/locales/
+    ├── zh/{tasks,skills}.json
+    ├── en/{tasks,skills}.json
+    └── ja/{tasks,skills}.json
+```
+
+### 文件职责
+
+- `src/pages/Tasks/index.tsx`：任务列表由“空闲自动追加到全量”改为“滚动触发 + 手动加载更多”，并将源数据计算改为 `useDeferredValue(tasks)`，降低切页瞬间的主线程压力。
+- `src/pages/Skills/index.tsx`：技能列表由“空闲自动追加到全量”改为“手动加载更多”，避免进入页面后后台持续渲染全部卡片。
+- `src/i18n/locales/*/{tasks,skills}.json`：新增分页文案（`pagination.showing/loadMore`）。
+
+### 模块依赖与边界
+
+- 不改变业务接口和数据语义，只调整页面渲染调度和列表展示策略。
+- 增量渲染仅影响“首屏展示数量与追加时机”，不影响搜索、筛选、批量操作结果。
+
+### 关键决策与原因
+
+1. 自动追加会在页面进入后继续占用主线程，用户会感觉“刚点开先顺一点，随后又卡一下”。
+2. 改为按需追加后，把无效渲染从“自动发生”改为“用户滚动/点击时发生”，显著降低首屏卡顿峰值。
+3. 任务页使用 deferred tasks，避免高频任务更新与页面交互抢占同一帧。
+
+### 本次变更
+
+- Tasks：
+  - 移除自动 idle 追加列表；
+  - 新增滚动阈值触发追加；
+  - 新增底部“已显示 x / y + 加载更多”交互；
+  - 任务源数据改用 `useDeferredValue` 参与筛选链路。
+- Skills：
+  - 移除自动 idle 追加列表；
+  - 新增底部“已显示 x / y + 加载更多”交互。
+- i18n：
+  - 中英日三语新增分页文案键。
+
+## 本次变更日志（2026-03-15 高频事件降噪：Gateway 批处理 + Task 静默刷新）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── src/
+    └── stores/
+        ├── gateway.ts
+        ├── task-center-store.ts
+        └── task-inbox-store.ts
+```
+
+### 文件职责
+
+- `src/stores/gateway.ts`：将高频 `task_*` 通知改为短窗口批处理分发，并缓存动态模块加载 Promise，减少微任务风暴与重复 import 开销。
+- `src/stores/task-center-store.ts`：轮询刷新改为静默刷新；增加“任务列表/阻塞队列等价性判断”，无变化时不触发 setState。
+- `src/stores/task-inbox-store.ts`：轮询刷新改为静默刷新；增加“任务列表/工作区作用域等价性判断”，无变化时不触发 setState。
+
+### 模块依赖与边界
+
+- 不改业务协议，不改 Gateway API，仅优化 renderer 状态分发与 store 更新策略。
+- `task_*` 事件仍完整处理；仅将处理时机从“每条立即分发”改为“短窗口批量分发”。
+
+### 关键决策与原因
+
+1. 高频通知下逐条 `setState` 会持续抢占主线程，直接影响页面切换体感。
+2. 轮询每轮切 `loading` 会放大页面重渲染，即使数据没变化也会触发 UI 抖动。
+3. 动态 import 虽有缓存，但每次都创建 Promise 链仍有调度开销，缓存模块 Promise 可进一步降噪。
+
+### 本次变更
+
+- `gateway.ts`
+  - 新增 `task_*` 队列 + 48ms flush（批处理 + 进度/状态事件按 task 去重）。
+  - `chat/task/channels` store 动态加载改为缓存 Promise 复用。
+- `task-center-store.ts`
+  - `refreshTasks` 去掉轮询阶段 `loading` 翻转。
+  - 新增任务列表与阻塞队列等价判断，无变化返回原状态。
+- `task-inbox-store.ts`
+  - `refreshTasks` 去掉轮询阶段 `loading` 翻转。
+  - 新增任务列表与工作区作用域等价判断，无变化返回原状态。
+
+## 本次变更日志（2026-03-15 渲染线程减载第三轮：导航 transition + 列表分批 + DevTools 开关）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── electron/
+│   └── main/
+│       └── index.ts
+└── src/
+    ├── components/layout/
+    │   └── Sidebar.tsx
+    └── pages/
+        ├── Tasks/index.tsx
+        └── Skills/index.tsx
+```
+
+### 文件职责
+
+- `src/components/layout/Sidebar.tsx`：侧边栏导航点击改为 `startTransition`，把重路由切换标记为低优先级更新。
+- `src/pages/Tasks/index.tsx`：任务列表改为分批渲染（idle 追加），降低首次进入任务中心时同步渲染峰值。
+- `src/pages/Skills/index.tsx`：技能筛选与排序基于 deferred 值计算，减少切页瞬间与输入瞬间的主线程抢占。
+- `electron/main/index.ts`：开发环境默认不自动打开 DevTools，仅在 `MATCHACLAW_OPEN_DEVTOOLS=1` 时打开。
+
+### 模块依赖与边界
+
+- 未改变数据协议和接口语义，仅调整渲染调度策略与开发期运行开销。
+- `DevTools` 策略仅影响开发模式，不影响生产包行为。
+
+### 关键决策与原因
+
+1. 切页“卡一下”多发生在同一事件循环内同步渲染，导航 transition 可以降低交互阻塞感。
+2. 任务中心列表可能较大，分批渲染比一次性全量渲染更稳定。
+3. Skills 的筛选排序在大列表下会占用主线程，deferred 可把计算延后到非紧急阶段。
+4. 开发时自动打开 DevTools 会显著放大渲染开销，默认关闭更接近真实体感。
+
+### 本次变更
+
+- Sidebar 导航项点击改为 transition 导航，同时保留 hover/focus/mousedown 预热。
+- Tasks 列表新增 `INITIAL_TASK_LIST_BATCH/TASK_LIST_BATCH_SIZE` 分批机制。
+- Skills 新增 `useDeferredValue` 以延后筛选排序计算。
+- Dev 环境仅在 `MATCHACLAW_OPEN_DEVTOOLS=1` 时自动打开 DevTools。
+
+## 本次变更日志（2026-03-15 渲染模式修正：GPU 默认 Auto）
+
+### 目录树
+
+```text
+Matcha-claw/
+└── electron/
+    └── main/
+        └── index.ts
+```
+
+### 文件职责
+
+- `electron/main/index.ts`：主进程启动阶段 GPU 策略决策，从“全局强制软件渲染”改为“默认 Auto”。
+
+### 模块依赖与边界
+
+- 不改任何业务路由与 store 逻辑，仅调整 Electron 渲染加速策略。
+- 保留 CLI 覆盖能力，不破坏已有运维排障方式。
+
+### 关键决策与原因
+
+1. 全局关闭 GPU 会显著影响页面切换与合成流畅度，和“点击瞬开体感”目标冲突。
+2. 默认 Auto 让 Chromium 自适应硬件；异常机器仍可通过 CLI 强制关闭 GPU。
+
+### 本次变更
+
+- 默认不再调用 `app.disableHardwareAcceleration()`。
+- 新增 CLI 开关策略：
+  - `--disable-gpu` / `--disable-hardware-acceleration`：强制软件渲染。
+  - `--enable-gpu`：显式保留 GPU 路径（优先于 disable 标记）。
+
+## 本次变更日志（2026-03-15 点击体感二次优化：交互前预热、重渲染降载、模板秒开反馈）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── App.tsx
+│   ├── lib/
+│   │   └── route-prewarm.ts
+│   ├── components/layout/
+│   │   └── Sidebar.tsx
+│   ├── pages/
+│   │   ├── Dashboard/index.tsx
+│   │   ├── Skills/index.tsx
+│   │   ├── Tasks/index.tsx
+│   │   └── SubAgents/
+│   │       ├── index.tsx
+│   │       └── components/SubagentTemplateLoadDialog.tsx
+│   └── services/openclaw/
+│       └── subagent-template-catalog.ts
+```
+
+### 文件职责
+
+- `src/lib/route-prewarm.ts`：统一管理重页面 chunk 预热，提供去重与串行预热能力，避免重复下载/解析。
+- `src/App.tsx`：接入共享路由预热器，保持启动后空闲串行预热。
+- `src/components/layout/Sidebar.tsx`：导航交互前（hover/focus/mousedown）预热目标页面与关键数据；阻塞卡片聚合改为 deferred + 限量扫描，降低高频更新时主线程占用。
+- `src/services/openclaw/subagent-template-catalog.ts`：模板目录与模板详情增加 in-memory cache + in-flight 合并 + 预取方法。
+- `src/pages/SubAgents/index.tsx`：模板列表空闲预取前几个模板详情；点击模板立即弹出“加载中”对话框，详情到达后无缝切换。
+- `src/pages/SubAgents/components/SubagentTemplateLoadDialog.tsx`：新增 loading 态渲染，支持“先反馈再加载”。
+- `src/pages/Dashboard/index.tsx`：重统计区（token history）延后挂载，统计计算改为 memo，减少首次切页和秒级 uptime 更新带来的重算抖动。
+- `src/pages/Skills/index.tsx`：移除 `framer-motion` 交互包装，减少首屏解析体积；初始渲染批次从 24 调整到 12，降低首帧压力。
+- `src/pages/Tasks/index.tsx`：任务清单 Markdown 解析延后到 idle 执行；状态计数合并为单次 reduce，减少切页同步计算峰值。
+
+### 模块依赖与边界
+
+- 未引入新进程、新服务，优化均发生在现有 Renderer + Zustand + React Router 体系内。
+- 路由与模板预热仅改变“何时加载/解析”，不改变业务数据语义与接口协议。
+- 模板缓存范围限定在前端内存生命周期（应用进程级），不落盘、不改变模板源。
+
+### 关键决策与原因
+
+1. 仅做“懒加载”仍会在首次点击时触发重解析，必须叠加“交互前预热”才能逼近瞬时切页体感。
+2. 全局卡顿不只来自路由，还来自高频状态导致的重计算，因此对 Sidebar 阻塞聚合做 deferred + 限流扫描。
+3. 模板点击体验问题本质是“用户反馈滞后”，通过“立刻弹窗 + 异步填充详情”先给即时反馈，再完成数据到位。
+4. Skills 页面动画包装收益低、解析成本高，优先移除重动画依赖以换取真实响应速度。
+
+### 本次变更
+
+- 新增路由预热工具并在 App/Sidebar 双点接入：启动空闲预热 + 导航交互前预热。
+- Sidebar 阻塞卡片计算改为 deferred 数据源与限量扫描（team/task/chat 均做上限）。
+- SubAgents 模板目录与详情新增缓存、并发去重和预取；点击模板支持即时 loading 弹窗。
+- Dashboard token history 区延后挂载，并将重统计逻辑 memo 化。
+- Skills 移除 framer-motion 动画包裹，降低首屏运行成本；初始渲染批次减半。
+- Tasks 将 checklist 解析移入 idle 阶段，并合并多次筛选计数遍历。
+
 ## 本次变更日志（2026-03-15 启动交互性能优化：懒加载、后台预热、降订阅、动态降频）
 
 ### 目录树

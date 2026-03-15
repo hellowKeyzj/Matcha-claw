@@ -2,7 +2,7 @@
  * Dashboard Page
  * Main overview page showing system status and quick actions
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   MessageSquare,
@@ -48,6 +48,7 @@ type UsageWindow = '7d' | '30d' | 'all';
 type UsageGroupBy = 'model' | 'day';
 const USAGE_FETCH_MAX_ATTEMPTS = 6;
 const USAGE_FETCH_RETRY_DELAY_MS = 1500;
+const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
@@ -62,8 +63,16 @@ export function Dashboard() {
   const [usageGroupBy, setUsageGroupBy] = useState<UsageGroupBy>('model');
   const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
   const [usagePage, setUsagePage] = useState(1);
+  const [dashboardHeavyContentReady, setDashboardHeavyContentReady] = useState(
+    () => channels.length > 0 || skills.length > 0,
+  );
+  const [usagePanelReady, setUsagePanelReady] = useState(false);
+  const [usageChartReady, setUsageChartReady] = useState(false);
+  const [usageDetailListReady, setUsageDetailListReady] = useState(false);
   const usageFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const usageFetchGenerationRef = useRef(0);
+  const usageChartPrimedRef = useRef(false);
+  const usageDetailPrimedRef = useRef(false);
 
   // Track page view on mount only.
   useEffect(() => {
@@ -75,7 +84,7 @@ export function Dashboard() {
   // 避免频繁切页重复触发 skills.status（会引发 Gateway skills 扫描日志噪音）。
   useEffect(() => {
     if (isGatewayRunning) {
-      fetchChannels();
+      void fetchChannels({ silent: true });
       if (skills.length === 0) {
         void fetchSkills();
       }
@@ -185,17 +194,228 @@ export function Dashboard() {
     };
   }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning]);
 
+  useEffect(() => {
+    if (dashboardHeavyContentReady) {
+      return;
+    }
+    let cancelled = false;
+    let rafId: number | undefined;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setDashboardHeavyContentReady(true);
+      }
+    };
+
+    const scheduleIdle = () => {
+      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(markReady, { timeout: DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
+      } else {
+        timeoutId = window.setTimeout(markReady, 120);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      scheduleIdle();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof rafId === 'number') {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [dashboardHeavyContentReady]);
+
+  useEffect(() => {
+    if (!dashboardHeavyContentReady && (channels.length > 0 || skills.length > 0)) {
+      setDashboardHeavyContentReady(true);
+    }
+  }, [channels.length, dashboardHeavyContentReady, skills.length]);
+
+  useEffect(() => {
+    if (usagePanelReady) {
+      return;
+    }
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setUsagePanelReady(true);
+      }
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(markReady, { timeout: 1000 });
+    } else {
+      timeoutId = window.setTimeout(markReady, 80);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [usagePanelReady]);
+
+  useEffect(() => {
+    if (!usagePanelReady && usageHistory.length > 0) {
+      setUsagePanelReady(true);
+    }
+  }, [usageHistory.length, usagePanelReady]);
+
+  useEffect(() => {
+    if (!isGatewayRunning) {
+      usageChartPrimedRef.current = false;
+      setUsageChartReady(false);
+      usageDetailPrimedRef.current = false;
+      setUsageDetailListReady(false);
+      return;
+    }
+    if (!usagePanelReady || usageHistory.length === 0 || usageDetailPrimedRef.current) {
+      return;
+    }
+
+    usageDetailPrimedRef.current = true;
+    let cancelled = false;
+    let rafId: number | undefined;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setUsageDetailListReady(true);
+      }
+    };
+
+    const scheduleIdle = () => {
+      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(markReady, { timeout: 400 });
+      } else {
+        timeoutId = window.setTimeout(markReady, 120);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      scheduleIdle();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof rafId === 'number') {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [isGatewayRunning, usageHistory.length, usagePanelReady]);
+
   // Calculate statistics safely
   const connectedChannels = Array.isArray(channels) ? channels.filter((c) => c.status === 'connected').length : 0;
-  const enabledSkills = Array.isArray(skills) ? skills.filter((s) => s.enabled).length : 0;
-  const visibleUsageHistory = isGatewayRunning ? usageHistory : [];
-  const filteredUsageHistory = filterUsageHistoryByWindow(visibleUsageHistory, usageWindow);
-  const usageGroups = groupUsageHistory(filteredUsageHistory, usageGroupBy);
+  const enabledSkillsList = useMemo(
+    () => (Array.isArray(skills) ? skills.filter((skill) => skill.enabled) : []),
+    [skills],
+  );
+  const enabledSkills = enabledSkillsList.length;
+  const visibleUsageHistory = useMemo(
+    () => (isGatewayRunning ? usageHistory : []),
+    [isGatewayRunning, usageHistory],
+  );
+  const filteredUsageHistory = useMemo(
+    () => filterUsageHistoryByWindow(visibleUsageHistory, usageWindow),
+    [usageWindow, visibleUsageHistory],
+  );
+  const usageGroups = useMemo(
+    () => groupUsageHistory(filteredUsageHistory, usageGroupBy),
+    [filteredUsageHistory, usageGroupBy],
+  );
   const usagePageSize = 5;
-  const usageTotalPages = Math.max(1, Math.ceil(filteredUsageHistory.length / usagePageSize));
-  const safeUsagePage = Math.min(usagePage, usageTotalPages);
-  const pagedUsageHistory = filteredUsageHistory.slice((safeUsagePage - 1) * usagePageSize, safeUsagePage * usagePageSize);
+  const usageTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredUsageHistory.length / usagePageSize)),
+    [filteredUsageHistory.length],
+  );
+  const safeUsagePage = useMemo(
+    () => Math.min(usagePage, usageTotalPages),
+    [usagePage, usageTotalPages],
+  );
+  const pagedUsageHistory = useMemo(
+    () => filteredUsageHistory.slice((safeUsagePage - 1) * usagePageSize, safeUsagePage * usagePageSize),
+    [filteredUsageHistory, safeUsagePage],
+  );
   const usageLoading = isGatewayRunning && visibleUsageHistory.length === 0;
+  const usageSummary = useMemo(
+    () => filteredUsageHistory.reduce(
+      (acc, entry) => ({
+        totalTokens: acc.totalTokens + entry.totalTokens,
+        inputTokens: acc.inputTokens + entry.inputTokens,
+        outputTokens: acc.outputTokens + entry.outputTokens,
+        cacheTokens: acc.cacheTokens + entry.cacheReadTokens + entry.cacheWriteTokens,
+      }),
+      { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0 },
+    ),
+    [filteredUsageHistory],
+  );
+
+  useEffect(() => {
+    if (!isGatewayRunning || !usagePanelReady || filteredUsageHistory.length === 0 || usageChartPrimedRef.current) {
+      return;
+    }
+
+    usageChartPrimedRef.current = true;
+    let cancelled = false;
+    let rafId: number | undefined;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const markReady = () => {
+      if (!cancelled) {
+        setUsageChartReady(true);
+      }
+    };
+
+    const scheduleIdle = () => {
+      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(markReady, { timeout: 260 });
+      } else {
+        timeoutId = window.setTimeout(markReady, 90);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(() => {
+      scheduleIdle();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof rafId === 'number') {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [filteredUsageHistory.length, isGatewayRunning, usagePanelReady]);
 
   // Update uptime periodically
   useEffect(() => {
@@ -302,7 +522,7 @@ export function Dashboard() {
       </div>
 
       {/* Quick Actions */}
-      <Card>
+          <Card>
         <CardHeader>
           <CardTitle>{t('quickActions.title')}</CardTitle>
           <CardDescription>{t('quickActions.description')}</CardDescription>
@@ -359,8 +579,44 @@ export function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* Recent Activity */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {!dashboardHeavyContentReady ? (
+        <>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {Array.from({ length: 2 }).map((_, index) => (
+              <Card key={`dashboard-activity-placeholder-${index}`}>
+                <CardHeader>
+                  <div className="h-5 w-32 animate-pulse rounded bg-muted" />
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {Array.from({ length: 3 }).map((__, rowIndex) => (
+                    <div key={`dashboard-activity-row-${index}-${rowIndex}`} className="rounded-lg border p-3">
+                      <div className="h-4 w-3/5 animate-pulse rounded bg-muted" />
+                      <div className="mt-2 h-3 w-2/5 animate-pulse rounded bg-muted" />
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">{t('recentTokenHistory.title')}</CardTitle>
+              <CardDescription>{t('recentTokenHistory.description')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                <div className="h-4 w-48 animate-pulse rounded bg-muted" />
+                <div className="h-20 w-full animate-pulse rounded bg-muted" />
+                <div className="h-20 w-full animate-pulse rounded bg-muted" />
+              </div>
+            </CardContent>
+          </Card>
+        </>
+      ) : (
+        <>
+          {/* Recent Activity */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Connected Channels */}
         <Card>
           <CardHeader>
@@ -411,7 +667,7 @@ export function Dashboard() {
             <CardTitle className="text-lg">{t('activeSkills')}</CardTitle>
           </CardHeader>
           <CardContent>
-            {skills.filter((s) => s.enabled).length === 0 ? (
+            {enabledSkillsList.length === 0 ? (
               <FeedbackState
                 state="empty"
                 title={t('noSkills')}
@@ -423,8 +679,7 @@ export function Dashboard() {
               />
             ) : (
               <div className="flex flex-wrap gap-2">
-                {skills
-                  .filter((s) => s.enabled)
+                {enabledSkillsList
                   .slice(0, 12)
                   .map((skill) => (
                     <Badge key={skill.id} variant="secondary">
@@ -432,9 +687,9 @@ export function Dashboard() {
                       {skill.name}
                     </Badge>
                   ))}
-                {skills.filter((s) => s.enabled).length > 12 && (
+                {enabledSkillsList.length > 12 && (
                   <Badge variant="outline">
-                    {t('more', { count: skills.filter((s) => s.enabled).length - 12 })}
+                    {t('more', { count: enabledSkillsList.length - 12 })}
                   </Badge>
                 )}
               </div>
@@ -449,7 +704,9 @@ export function Dashboard() {
           <CardDescription>{t('recentTokenHistory.description')}</CardDescription>
         </CardHeader>
         <CardContent>
-          {usageLoading ? (
+          {!usagePanelReady ? (
+            <FeedbackState state="loading" title={t('recentTokenHistory.loading')} />
+          ) : usageLoading ? (
             <FeedbackState state="loading" title={t('recentTokenHistory.loading')} />
           ) : visibleUsageHistory.length === 0 ? (
             <FeedbackState state="empty" title={t('recentTokenHistory.empty')} />
@@ -519,83 +776,134 @@ export function Dashboard() {
                 </p>
               </div>
 
-              <UsageBarChart
-                groups={usageGroups}
-                emptyLabel={t('recentTokenHistory.empty')}
-                totalLabel={t('recentTokenHistory.totalTokens')}
-                inputLabel={t('recentTokenHistory.inputShort')}
-                outputLabel={t('recentTokenHistory.outputShort')}
-                cacheLabel={t('recentTokenHistory.cacheShort')}
-              />
-
-              <div className="space-y-3">
-                {pagedUsageHistory.map((entry) => (
-                  <div
-                    key={`${entry.sessionId}-${entry.timestamp}`}
-                    className="rounded-lg border p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">
-                          {entry.model || t('recentTokenHistory.unknownModel')}
-                        </p>
-                        <p className="text-xs text-muted-foreground truncate">
-                          {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
-                        </p>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {formatUsageTimestamp(entry.timestamp)}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                      <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
-                      <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
-                      {entry.cacheReadTokens > 0 && (
-                        <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
-                      )}
-                      {entry.cacheWriteTokens > 0 && (
-                        <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
-                      )}
-                      {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
-                        <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex items-center justify-between gap-3 border-t pt-3">
-                <p className="text-xs text-muted-foreground">
-                  {t('recentTokenHistory.page', { current: safeUsagePage, total: usageTotalPages })}
-                </p>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setUsagePage((page) => Math.max(1, page - 1))}
-                    disabled={safeUsagePage <= 1}
-                  >
-                    <ChevronLeft className="h-4 w-4 mr-1" />
-                    {t('recentTokenHistory.prev')}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setUsagePage((page) => Math.min(usageTotalPages, page + 1))}
-                    disabled={safeUsagePage >= usageTotalPages}
-                  >
-                    {t('recentTokenHistory.next')}
-                    <ChevronRight className="h-4 w-4 ml-1" />
-                  </Button>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-xs text-muted-foreground">{t('recentTokenHistory.totalTokens')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.totalTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-xs text-muted-foreground">{t('recentTokenHistory.inputShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.inputTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-xs text-muted-foreground">{t('recentTokenHistory.outputShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.outputTokens)}</p>
+                </div>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-xs text-muted-foreground">{t('recentTokenHistory.cacheShort')}</p>
+                  <p className="mt-1 text-sm font-semibold">{formatTokenCount(usageSummary.cacheTokens)}</p>
                 </div>
               </div>
+
+              {!usageChartReady ? (
+                <div className="space-y-3 rounded-lg border p-4">
+                  <div className="flex items-center gap-4">
+                    <div className="h-3 w-20 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-20 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-20 animate-pulse rounded bg-muted" />
+                  </div>
+                  {Array.from({ length: 4 }).map((_, index) => (
+                    <div key={`usage-chart-placeholder-${index}`} className="space-y-2">
+                      <div className="h-3 w-1/3 animate-pulse rounded bg-muted" />
+                      <div className="h-3 w-full animate-pulse rounded bg-muted" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <UsageBarChart
+                  groups={usageGroups}
+                  emptyLabel={t('recentTokenHistory.empty')}
+                  totalLabel={t('recentTokenHistory.totalTokens')}
+                  inputLabel={t('recentTokenHistory.inputShort')}
+                  outputLabel={t('recentTokenHistory.outputShort')}
+                  cacheLabel={t('recentTokenHistory.cacheShort')}
+                />
+              )}
+
+              {!usageDetailListReady ? (
+                <div className="space-y-3">
+                  {Array.from({ length: 3 }).map((_, index) => (
+                    <div key={`usage-detail-placeholder-${index}`} className="rounded-lg border p-3">
+                      <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
+                      <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-muted" />
+                      <div className="mt-3 h-3 w-full animate-pulse rounded bg-muted" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-3">
+                    {pagedUsageHistory.map((entry) => (
+                      <div
+                        key={`${entry.sessionId}-${entry.timestamp}`}
+                        className="rounded-lg border p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">
+                              {entry.model || t('recentTokenHistory.unknownModel')}
+                            </p>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {[entry.provider, entry.agentId, entry.sessionId].filter(Boolean).join(' • ')}
+                            </p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <p className="font-semibold">{formatTokenCount(entry.totalTokens)}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatUsageTimestamp(entry.timestamp)}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>{t('recentTokenHistory.input', { value: formatTokenCount(entry.inputTokens) })}</span>
+                          <span>{t('recentTokenHistory.output', { value: formatTokenCount(entry.outputTokens) })}</span>
+                          {entry.cacheReadTokens > 0 && (
+                            <span>{t('recentTokenHistory.cacheRead', { value: formatTokenCount(entry.cacheReadTokens) })}</span>
+                          )}
+                          {entry.cacheWriteTokens > 0 && (
+                            <span>{t('recentTokenHistory.cacheWrite', { value: formatTokenCount(entry.cacheWriteTokens) })}</span>
+                          )}
+                          {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
+                            <span>{t('recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 border-t pt-3">
+                    <p className="text-xs text-muted-foreground">
+                      {t('recentTokenHistory.page', { current: safeUsagePage, total: usageTotalPages })}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsagePage((page) => Math.max(1, page - 1))}
+                        disabled={safeUsagePage <= 1}
+                      >
+                        <ChevronLeft className="h-4 w-4 mr-1" />
+                        {t('recentTokenHistory.prev')}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUsagePage((page) => Math.min(usageTotalPages, page + 1))}
+                        disabled={safeUsagePage >= usageTotalPages}
+                      >
+                        {t('recentTokenHistory.next')}
+                        <ChevronRight className="h-4 w-4 ml-1" />
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </CardContent>
-      </Card>
+          </Card>
+        </>
+      )}
     </div>
   );
 }

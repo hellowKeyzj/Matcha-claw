@@ -18,6 +18,10 @@
     "empty": "利用可能なテンプレートが見つかりません。",
     "error": "テンプレート読み込みに失敗しました: {{message}}",
     "badge": "テンプレート",
+    "pagination": {
+      "showing": "{{shown}} / {{total}} 件を表示中",
+      "loadMore": "さらに読み込む"
+    },
     "categories": {
       "all": "すべて",
       "design": "デザイン",

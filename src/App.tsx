@@ -3,47 +3,30 @@
  * Handles routing and global providers
  */
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Component, Suspense, lazy, useCallback, useEffect, useRef } from 'react';
+import { Component, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
 import { MainLayout } from './components/layout/MainLayout';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Chat } from './pages/Chat';
+import { Dashboard } from './pages/Dashboard';
 import { Channels } from './pages/Channels';
 import { TeamsPage } from './pages/Teams';
 import { TeamChatPage } from './pages/Teams/TeamChat';
 import { ProvidersPage } from './pages/Providers';
 import { SecurityPage } from './pages/Security';
+import { SubAgents } from './pages/SubAgents';
 import { Setup } from './pages/Setup';
+import { Skills } from './pages/Skills';
+import { Settings } from './pages/Settings';
+import { TasksPage } from './pages/Tasks';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useSkillsStore } from './stores/skills';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
-
-const Dashboard = lazy(() => import('./pages/Dashboard'));
-const Skills = lazy(() => import('./pages/Skills'));
-const SubAgents = lazy(() => import('./pages/SubAgents'));
-const TasksPage = lazy(() => import('./pages/Tasks'));
-const Settings = lazy(() => import('./pages/Settings'));
-
-const HEAVY_ROUTE_PREWARM_LOADERS = [
-  () => import('./pages/Tasks'),
-  () => import('./pages/Skills'),
-  () => import('./pages/SubAgents'),
-  () => import('./pages/Settings'),
-  () => import('./pages/Dashboard'),
-];
-
-function RouteLoadingFallback() {
-  return (
-    <div className="flex h-full min-h-[160px] items-center justify-center text-sm text-muted-foreground">
-      页面加载中...
-    </div>
-  );
-}
 
 
 /**
@@ -131,7 +114,6 @@ function App() {
   const gatewayState = useGatewayStore((state) => state.status.state);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const skillsPrefetchedRef = useRef(false);
-  const routeChunksPrefetchedRef = useRef(false);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -271,61 +253,6 @@ function App() {
     };
   }, [fetchSkills, gatewayState, settingsInitialized, setupComplete]);
 
-  useEffect(() => {
-    if (!settingsInitialized || !setupComplete) {
-      return;
-    }
-    if (routeChunksPrefetchedRef.current) {
-      return;
-    }
-    routeChunksPrefetchedRef.current = true;
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const sleep = (ms: number) => new Promise<void>((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
-
-    const prewarmRoutes = async () => {
-      for (const loadChunk of HEAVY_ROUTE_PREWARM_LOADERS) {
-        if (cancelled) {
-          return;
-        }
-        try {
-          await loadChunk();
-        } catch (error) {
-          console.warn('[route-prewarm] chunk prewarm failed', error);
-        }
-        if (cancelled) {
-          return;
-        }
-        await sleep(120);
-      }
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(() => {
-        void prewarmRoutes();
-      }, { timeout: 2500 });
-    } else {
-      timeoutId = window.setTimeout(() => {
-        void prewarmRoutes();
-      }, 900);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [settingsInitialized, setupComplete]);
-
   return (
     <ErrorBoundary>
       <TooltipProvider delayDuration={300}>
@@ -339,49 +266,29 @@ function App() {
             <Route path="/" element={<Chat />} />
             <Route
               path="/dashboard"
-              element={(
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <Dashboard />
-                </Suspense>
-              )}
+              element={<Dashboard />}
             />
             <Route path="/channels" element={<Channels />} />
             <Route
               path="/subagents"
-              element={(
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <SubAgents />
-                </Suspense>
-              )}
+              element={<SubAgents />}
             />
             <Route path="/teams" element={<TeamsPage />} />
             <Route path="/teams/:teamId" element={<TeamChatPage />} />
             <Route
               path="/tasks"
-              element={(
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <TasksPage />
-                </Suspense>
-              )}
+              element={<TasksPage />}
             />
             <Route path="/providers" element={<ProvidersPage />} />
             <Route
               path="/skills"
-              element={(
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <Skills />
-                </Suspense>
-              )}
+              element={<Skills />}
             />
             <Route path="/security" element={<SecurityPage />} />
             <Route path="/cron" element={<Navigate to="/tasks?tab=scheduled" replace />} />
             <Route
               path="/settings/*"
-              element={(
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <Settings />
-                </Suspense>
-              )}
+              element={<Settings />}
             />
           </Route>
         </Routes>
