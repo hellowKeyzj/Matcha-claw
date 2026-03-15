@@ -1,0 +1,16 @@
+{
+  "preset": "balanced",
+  "defaultAction": "confirm",
+  "allowCommandExecution": true,
+  "allowDependencyInstall": false,
+  "confirmStrategy": "session",
+  "capabilities": [
+    "CAP_READ_LOCAL_FILES",
+    "CAP_WRITE_LOCAL_FILES",
+    "CAP_EXECUTE_COMMAND",
+    "CAP_NETWORK_REQUEST"
+  ],
+  "networkUnknownAction": "confirm",
+  "sensitivePathAction": "confirm",
+  "highRiskAction": "confirm"
+}

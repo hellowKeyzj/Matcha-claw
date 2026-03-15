@@ -4,8 +4,8 @@
   "newSubagent": "新規サブAgent",
   "empty": "サブAgentが見つかりません。",
   "modelGuide": {
-    "description": "先に 設定 > AI モデルプロバイダー でモデルを追加してください。",
-    "action": "設定を開く"
+    "description": "先に「モデル」でモデルを追加してください。",
+    "action": "モデルを開く"
   },
   "templates": {
     "title": "プリセットテンプレート一覧",

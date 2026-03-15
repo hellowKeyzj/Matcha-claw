@@ -4,8 +4,8 @@
   "newSubagent": "New Subagent",
   "empty": "No subagents found.",
   "modelGuide": {
-    "description": "Please go to Settings > AI Providers to add a model first.",
-    "action": "Open Settings"
+    "description": "Please go to Models to add a model first.",
+    "action": "Open Models"
   },
   "templates": {
     "title": "Built-in Template Catalog",

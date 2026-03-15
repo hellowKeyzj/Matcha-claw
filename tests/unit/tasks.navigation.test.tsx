@@ -54,6 +54,8 @@ describe('tasks navigation', () => {
 
     const tasksLink = screen.getByRole('link', { name: 'Task Center' });
     expect(tasksLink).toHaveAttribute('href', '/tasks');
+    const providersLink = screen.getByRole('link', { name: 'Models' });
+    expect(providersLink).toHaveAttribute('href', '/providers');
     expect(screen.queryByRole('link', { name: 'Cron Tasks' })).not.toBeInTheDocument();
   });
 
@@ -86,5 +88,17 @@ describe('tasks navigation', () => {
 
     const scheduledTab = screen.getByRole('tab', { name: 'Scheduled Tasks' });
     expect(scheduledTab).toHaveAttribute('data-state', 'active');
+  });
+
+  it('路由 /providers 渲染模型独立页面', () => {
+    enableMainAppRoutes();
+
+    render(
+      <MemoryRouter initialEntries={['/providers']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('heading', { name: 'Models' })).toBeInTheDocument();
   });
 });

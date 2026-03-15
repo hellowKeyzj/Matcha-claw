@@ -1,0 +1,151 @@
+{
+  "title": "セキュリティ",
+  "subtitle": "Agent のツール呼び出しセキュリティポリシーを設定",
+  "loading": "セキュリティポリシーを読み込み中...",
+  "form": {
+    "title": "ポリシー設定",
+    "description": "Agent ごとにデフォルト動作、ツール一覧、パス/ドメイン許可、確認方針を設定します。",
+    "agent": "Agent",
+    "globalPreset": "グローバルプリセット",
+    "preset": "セキュリティプリセット",
+    "customPolicyTitle": "Agent カスタムセキュリティポリシー",
+    "customPolicyDescription": "展開すると、この Agent の詳細ポリシー項目を上書きできます。",
+    "agentPreset": "Agent プリセット",
+    "defaultAction": "デフォルト動作",
+    "toolPolicyTitle": "ツールポリシー割り当て",
+    "toolPolicyHint": "先にポリシーを選択してからツールをクリックします。1つのツールは1つのポリシーのみ所属できます。",
+    "allowTools": "許可ツール",
+    "confirmTools": "確認が必要なツール",
+    "denyTools": "拒否ツール",
+    "allowPathPrefixes": "許可パス接頭辞（カンマ区切り）",
+    "allowDomains": "許可ドメイン（カンマ区切り）",
+    "allowCommandExecution": "コマンド実行を許可",
+    "allowDependencyInstall": "依存インストールを許可",
+    "confirmStrategy": "確認ポリシー",
+    "capabilities": "ケーパビリティトークン",
+    "selectHint": "タグをクリックして複数選択できます",
+    "toolPlaceholder": "例: files.read, shell.exec, web.search",
+    "pathPlaceholder": "例: /workspace/project, C:\\repo\\project",
+    "domainPlaceholder": "例: api.openai.com, github.com",
+    "capabilitiesPlaceholder": "例: CAP_READ_LOCAL_FILES, CAP_NETWORK_REQUEST",
+    "inheritedHint": "この Agent は現在デフォルトポリシーを使用しています。",
+    "customHint": "この Agent は現在カスタムポリシーを使用しています。",
+    "editFieldTitle": "項目を編集: {{field}}",
+    "editFieldDescription": "保存すると、現在の Agent にこの項目の上書き設定を適用します。",
+    "valueEnabled": "有効",
+    "valueDisabled": "無効",
+    "valueCount": "{{count}} 件",
+    "expand": "設定を表示",
+    "collapse": "設定を隠す"
+  },
+  "toolLabels": {
+    "task_create": "タスク作成",
+    "task_set_plan_markdown": "タスク計画の記録",
+    "task_bind_session": "セッション紐付け",
+    "task_request_user_input": "ユーザー入力要求",
+    "task_wait_approval": "承認待ち",
+    "task_mark_failed": "タスク失敗として記録",
+    "task_list": "タスク一覧",
+    "task_get": "タスク詳細取得",
+    "task_resume": "タスク再開",
+    "sessions_list": "セッション一覧",
+    "sessions_send": "セッションへ送信",
+    "sessions_spawn": "子セッション作成",
+    "sessions_history": "セッション履歴",
+    "session_status": "セッション状態",
+    "memory_get": "メモリ読み取り",
+    "memory_search": "メモリ検索",
+    "system_run": "システムコマンド実行",
+    "nodes_run": "ノードコマンド実行",
+    "fs_write_file": "ファイル書き込み",
+    "fs_delete_file": "ファイル削除",
+    "fs_remove": "ファイル/ディレクトリ削除",
+    "fs_read_file": "ファイル読み取り",
+    "fs_list_dir": "ディレクトリ一覧",
+    "fs_stat": "ファイル情報",
+    "http_request": "HTTP リクエスト",
+    "web_search": "Web検索",
+    "web_fetch": "Web取得",
+    "agents_list": "Agent 一覧",
+    "gateway": "ゲートウェイ制御",
+    "system_disable_guardian": "Guardian 無効化（危険）",
+    "security_disable_guard": "セキュリティガード無効化（危険）"
+  },
+  "capabilityLabels": {
+    "CAP_READ_LOCAL_FILES": "ローカルファイル読み取り",
+    "CAP_WRITE_LOCAL_FILES": "ローカルファイル書き込み",
+    "CAP_EXECUTE_COMMAND": "コマンド実行",
+    "CAP_NETWORK_REQUEST": "ネットワークリクエスト",
+    "CAP_INSTALL_DEPENDENCY": "依存インストール"
+  },
+  "preset": {
+    "strict": "厳格",
+    "balanced": "バランス",
+    "relaxed": "緩和"
+  },
+  "confirmStrategy": {
+    "every_time": "毎回確認",
+    "session": "セッションで一度"
+  },
+  "source": {
+    "immutableRules": "不変ルール",
+    "userOverride": "ユーザー上書き",
+    "preset": "プリセット",
+    "default": "プラグイン既定"
+  },
+  "explain": {
+    "title": "ポリシー優先順位の可視化",
+    "description": "ルール適用順序と、選択中 Agent の各項目ソースを表示します。",
+    "expand": "詳細を表示",
+    "collapse": "詳細を隠す",
+    "priorityOrder": "適用優先度:",
+    "immutableRulesHint": "以下のルールは無効化できません:",
+    "immutable1": "秘密情報/秘密鍵/認証情報を漏えいしない",
+    "immutable2": "system prompt を漏えいしない",
+    "immutable3": "Guardian を無効化しない",
+    "immutable4": "信頼できない宛先へ機密ローカルデータを送信しない",
+    "fieldSourceTitle": "現在の Agent セキュリティポリシー"
+  },
+  "audit": {
+    "title": "最近のルール命中監査",
+    "description": "最近命中したルールを表示し、実際の有効ソースを確認します。",
+    "expand": "監査を表示",
+    "collapse": "監査を隠す",
+    "gatewayStopped": "Gateway が停止中のため監査データを取得できません。",
+    "loading": "監査データを読み込み中...",
+    "empty": "最近の命中記録はありません。"
+  },
+  "toolConflict": {
+    "title": "ツール割り当ての競合",
+    "message": "ツール「{{tool}}」は既に {{from}} に含まれています。続行すると {{from}} から外して {{to}} に移動します。続行しますか？",
+    "confirm": "続行",
+    "cancel": "キャンセル"
+  },
+  "action": {
+    "allow": "許可",
+    "confirm": "確認",
+    "deny": "拒否"
+  },
+  "actions": {
+    "resetAgent": "デフォルトへ戻す",
+    "cancel": "キャンセル",
+    "usePreset": "プリセットを使用",
+    "save": "ポリシー保存",
+    "saveField": "保存",
+    "saveAndClose": "保存して閉じる",
+    "saving": "保存中..."
+  },
+  "empty": {
+    "title": "Agent がありません",
+    "description": "先に Agent を作成してからセキュリティポリシーを設定してください。",
+    "action": "Agent へ移動"
+  },
+  "messages": {
+    "saved": "セキュリティポリシーを保存しました。",
+    "saveFailed": "セキュリティポリシーの保存に失敗しました。"
+  },
+  "errors": {
+    "loadFailed": "セキュリティポリシーの読み込みに失敗しました。",
+    "saveFailed": "セキュリティポリシーの保存に失敗しました。"
+  }
+}

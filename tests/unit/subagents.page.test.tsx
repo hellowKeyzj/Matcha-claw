@@ -157,9 +157,9 @@ describe('subagents page', () => {
 
     renderSubagentsPage(['/subagents']);
 
-    expect(screen.getByText('Please go to Settings > AI Providers to add a model first.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Open Settings' }));
-    expect(screen.getByTestId('router-location')).toHaveTextContent('/settings?section=aiProviders');
+    expect(screen.getByText('Please go to Models to add a model first.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Models' }));
+    expect(screen.getByTestId('router-location')).toHaveTextContent('/providers');
   });
 
   it('opens create dialog when clicking add button', () => {

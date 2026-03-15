@@ -8,6 +8,7 @@
         "subagents": "サブAgent",
         "tasks": "タスクセンター",
         "teams": "チーム",
+        "security": "セキュリティ",
         "agentSessions": "Agentセッション",
         "collapseAgentSessions": "Agentセッションを折りたたむ",
         "expandAgentSessions": "Agentセッションを展開",

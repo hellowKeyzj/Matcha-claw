@@ -7,10 +7,6 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import i18n from '@/i18n';
 
-vi.mock('@/components/settings/ProvidersSettings', () => ({
-  ProvidersSettings: () => <div data-testid="providers-settings-panel">mock-providers</div>,
-}));
-
 vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
@@ -90,17 +86,15 @@ describe('settings page section switch', () => {
 
     expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'General' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'AI Providers' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
 
     expect(screen.getByText('Status')).toBeInTheDocument();
-    expect(screen.queryByTestId('providers-settings-panel')).not.toBeInTheDocument();
-
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'AI Providers' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Task Plugin' }));
     });
 
-    expect(screen.getByTestId('providers-settings-panel')).toBeInTheDocument();
-    expect(screen.queryByText('Status')).not.toBeInTheDocument();
+    expect(screen.getByText('Manage the built-in task-manager plugin runtime status')).toBeInTheDocument();
+    expect(screen.queryByText('Gateway process status and controls')).not.toBeInTheDocument();
   });
 
   it('URL section=license 时默认落在授权分栏', async () => {
@@ -110,5 +104,15 @@ describe('settings page section switch', () => {
 
     expect(screen.getByRole('heading', { name: 'License' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Validate License' })).toBeInTheDocument();
+  });
+
+  it('旧的 aiProviders 分栏链接会回退到默认分栏', async () => {
+    await act(async () => {
+      renderWithRouter('/settings?section=aiProviders');
+    });
+
+    expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
+    expect(screen.getByText('Status')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
   });
 });

@@ -14,6 +14,7 @@ import enSubagents from './locales/en/subagents.json';
 import enSubagentTemplates from './locales/en/subagent-templates.json';
 import enTeams from './locales/en/teams.json';
 import enTasks from './locales/en/tasks.json';
+import enSecurity from './locales/en/security.json';
 
 // ZH
 import zhCommon from './locales/zh/common.json';
@@ -28,6 +29,7 @@ import zhSubagents from './locales/zh/subagents.json';
 import zhSubagentTemplates from './locales/zh/subagent-templates.json';
 import zhTeams from './locales/zh/teams.json';
 import zhTasks from './locales/zh/tasks.json';
+import zhSecurity from './locales/zh/security.json';
 
 // JA
 import jaCommon from './locales/ja/common.json';
@@ -42,6 +44,7 @@ import jaSubagents from './locales/ja/subagents.json';
 import jaSubagentTemplates from './locales/ja/subagent-templates.json';
 import jaTeams from './locales/ja/teams.json';
 import jaTasks from './locales/ja/tasks.json';
+import jaSecurity from './locales/ja/security.json';
 
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
@@ -65,6 +68,7 @@ const resources = {
         subagentTemplates: enSubagentTemplates,
         teams: enTeams,
         tasks: enTasks,
+        security: enSecurity,
     },
     zh: {
         common: zhCommon,
@@ -79,6 +83,7 @@ const resources = {
         subagentTemplates: zhSubagentTemplates,
         teams: zhTeams,
         tasks: zhTasks,
+        security: zhSecurity,
     },
     ja: {
         common: jaCommon,
@@ -93,6 +98,7 @@ const resources = {
         subagentTemplates: jaSubagentTemplates,
         teams: jaTeams,
         tasks: jaTasks,
+        security: jaSecurity,
     },
 };
 
@@ -103,7 +109,7 @@ i18n
         lng: 'en', // will be overridden by settings store
         fallbackLng: 'en',
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

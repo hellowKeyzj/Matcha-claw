@@ -1,0 +1,151 @@
+{
+  "title": "Security",
+  "subtitle": "Configure agent tool-call security policies",
+  "loading": "Loading security policies...",
+  "form": {
+    "title": "Policy Configuration",
+    "description": "Set default action, tool lists, path/domain allowlists and confirmation policy for each agent.",
+    "agent": "Agent",
+    "globalPreset": "Global Preset",
+    "preset": "Security Preset",
+    "customPolicyTitle": "Agent Custom Security Policy",
+    "customPolicyDescription": "Expand to override fine-grained policy fields for this agent.",
+    "agentPreset": "Agent Preset",
+    "defaultAction": "Default Action",
+    "toolPolicyTitle": "Tool Policy Assignment",
+    "toolPolicyHint": "Pick a policy first, then click tools. One tool can belong to only one policy.",
+    "allowTools": "Allowed Tools",
+    "confirmTools": "Tools Requiring Confirmation",
+    "denyTools": "Denied Tools",
+    "allowPathPrefixes": "Allowed Path Prefixes (comma separated)",
+    "allowDomains": "Allowed Domains (comma separated)",
+    "allowCommandExecution": "Allow Command Execution",
+    "allowDependencyInstall": "Allow Dependency Installation",
+    "confirmStrategy": "Confirmation Strategy",
+    "capabilities": "Capability Tokens",
+    "selectHint": "Click tags to select multiple options",
+    "toolPlaceholder": "Example: files.read, shell.exec, web.search",
+    "pathPlaceholder": "Example: /workspace/project, C:\\repo\\project",
+    "domainPlaceholder": "Example: api.openai.com, github.com",
+    "capabilitiesPlaceholder": "Example: CAP_READ_LOCAL_FILES, CAP_NETWORK_REQUEST",
+    "inheritedHint": "This agent is currently using the default policy.",
+    "customHint": "This agent is currently using a custom policy.",
+    "editFieldTitle": "Edit Field: {{field}}",
+    "editFieldDescription": "Save changes to write an override for this field on the current agent.",
+    "valueEnabled": "Enabled",
+    "valueDisabled": "Disabled",
+    "valueCount": "{{count}} items",
+    "expand": "Expand policy",
+    "collapse": "Collapse policy"
+  },
+  "toolLabels": {
+    "task_create": "Create task",
+    "task_set_plan_markdown": "Set task plan markdown",
+    "task_bind_session": "Bind session",
+    "task_request_user_input": "Request user input",
+    "task_wait_approval": "Wait for approval",
+    "task_mark_failed": "Mark task failed",
+    "task_list": "Task list",
+    "task_get": "Get task details",
+    "task_resume": "Resume task",
+    "sessions_list": "Session list",
+    "sessions_send": "Send to session",
+    "sessions_spawn": "Spawn sub-session",
+    "sessions_history": "Session history",
+    "session_status": "Session status",
+    "memory_get": "Read memory",
+    "memory_search": "Search memory",
+    "system_run": "Run system command",
+    "nodes_run": "Run node command",
+    "fs_write_file": "Write file",
+    "fs_delete_file": "Delete file",
+    "fs_remove": "Remove file/directory",
+    "fs_read_file": "Read file",
+    "fs_list_dir": "List directory",
+    "fs_stat": "File status",
+    "http_request": "HTTP request",
+    "web_search": "Web search",
+    "web_fetch": "Fetch web content",
+    "agents_list": "Agent list",
+    "gateway": "Gateway control",
+    "system_disable_guardian": "Disable guardian (dangerous)",
+    "security_disable_guard": "Disable security guard (dangerous)"
+  },
+  "capabilityLabels": {
+    "CAP_READ_LOCAL_FILES": "Read local files",
+    "CAP_WRITE_LOCAL_FILES": "Write local files",
+    "CAP_EXECUTE_COMMAND": "Execute commands",
+    "CAP_NETWORK_REQUEST": "Network request",
+    "CAP_INSTALL_DEPENDENCY": "Install dependencies"
+  },
+  "preset": {
+    "strict": "Strict",
+    "balanced": "Balanced",
+    "relaxed": "Relaxed"
+  },
+  "confirmStrategy": {
+    "every_time": "Every time",
+    "session": "Once per session"
+  },
+  "source": {
+    "immutableRules": "Immutable Rules",
+    "userOverride": "User Override",
+    "preset": "Preset",
+    "default": "Plugin Default"
+  },
+  "explain": {
+    "title": "Policy Priority Visualization",
+    "description": "Shows rule precedence and source of each field for the selected agent.",
+    "expand": "Expand details",
+    "collapse": "Collapse details",
+    "priorityOrder": "Priority order:",
+    "immutableRulesHint": "These hard rules cannot be disabled:",
+    "immutable1": "Never expose secrets/private keys/credentials",
+    "immutable2": "Never expose system prompt",
+    "immutable3": "Never disable Guardian",
+    "immutable4": "Never exfiltrate sensitive local data to untrusted destinations",
+    "fieldSourceTitle": "Current Agent Security Policy"
+  },
+  "audit": {
+    "title": "Recent Rule Hits",
+    "description": "Recent matched rules to verify effective source and behavior.",
+    "expand": "Expand audit",
+    "collapse": "Collapse audit",
+    "gatewayStopped": "Gateway is not running, audit data is unavailable.",
+    "loading": "Loading audits...",
+    "empty": "No recent hit records."
+  },
+  "toolConflict": {
+    "title": "Tool Assignment Conflict",
+    "message": "Tool \"{{tool}}\" is already in {{from}}. Continuing will remove it from {{from}} and add it to {{to}}. Continue?",
+    "confirm": "Continue",
+    "cancel": "Cancel"
+  },
+  "action": {
+    "allow": "Allow",
+    "confirm": "Confirm",
+    "deny": "Deny"
+  },
+  "actions": {
+    "resetAgent": "Reset to Default",
+    "cancel": "Cancel",
+    "usePreset": "Use Preset",
+    "save": "Save Policy",
+    "saveField": "Save",
+    "saveAndClose": "Save & Close",
+    "saving": "Saving..."
+  },
+  "empty": {
+    "title": "No Agents Yet",
+    "description": "Create at least one agent before configuring its security policy.",
+    "action": "Go to Agent"
+  },
+  "messages": {
+    "saved": "Security policy saved.",
+    "saveFailed": "Failed to save security policy."
+  },
+  "errors": {
+    "loadFailed": "Failed to load security policy.",
+    "saveFailed": "Failed to save security policy."
+  }
+}

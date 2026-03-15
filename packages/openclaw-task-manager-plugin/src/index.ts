@@ -850,6 +850,12 @@ const plugin = {
       options.respond(true, result);
     });
 
+    api.registerGatewayMethod("guardian.policy.sync", async (options: GatewayRequestHandlerOptions) => {
+      updateEventPublisher(options, guardian);
+      const result = guardian.syncPolicy(options.params);
+      options.respond(true, result);
+    });
+
     api.registerHttpRoute({
       path: "/task-manager/webhook",
       auth: "plugin",

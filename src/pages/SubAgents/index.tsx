@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
-import { buildSettingsSectionLink } from '@/lib/sections';
 import { getSubagentTemplateById, getSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -242,7 +241,7 @@ export function SubAgents() {
               type="button"
               size="sm"
               variant="outline"
-              onClick={() => navigate(buildSettingsSectionLink('aiProviders'))}
+              onClick={() => navigate('/providers')}
             >
               {t('modelGuide.action')}
             </Button>

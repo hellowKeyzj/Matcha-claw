@@ -22,8 +22,8 @@
     "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
   },
   "aiProviders": {
-    "title": "AI Providers",
-    "description": "Configure your AI model providers and API keys",
+    "title": "Models",
+    "description": "Configure models and API keys",
     "overview": {
       "title": "Provider Accounts",
       "description": "A summary of the provider accounts and models currently configured.",

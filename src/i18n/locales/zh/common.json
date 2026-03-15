@@ -8,6 +8,7 @@
         "subagents": "Agent",
         "tasks": "任务中心",
         "teams": "Agents协作",
+        "security": "安全",
         "agentSessions": "智能体会话",
         "collapseAgentSessions": "收起智能体会话",
         "expandAgentSessions": "展开智能体会话",

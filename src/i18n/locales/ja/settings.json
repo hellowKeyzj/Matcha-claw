@@ -22,8 +22,8 @@
     "avatarUpdateFailed": "ユーザーアバターの更新に失敗しました: {{error}}"
   },
   "aiProviders": {
-    "title": "AI プロバイダー",
-    "description": "AI モデルプロバイダーと API キーを設定",
+    "title": "モデル",
+    "description": "モデルと API キーを設定",
     "overview": {
       "title": "プロバイダーアカウント",
       "description": "現在設定されているプロバイダーアカウントとモデルの概要です。",

@@ -22,8 +22,8 @@
     "avatarUpdateFailed": "更新用户头像失败: {{error}}"
   },
   "aiProviders": {
-    "title": "AI 模型提供商",
-    "description": "配置 AI 模型提供商和 API 密钥",
+    "title": "模型",
+    "description": "配置模型和 API 密钥",
     "overview": {
       "title": "提供商账户",
       "description": "这里汇总当前已配置的 provider 账户与模型信息。",
