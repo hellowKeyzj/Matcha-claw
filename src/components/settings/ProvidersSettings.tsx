@@ -317,6 +317,23 @@ function ProviderCard({
     }
   }, [isEditing, account.baseUrl, account.fallbackModels, account.fallbackAccountIds, account.model]);
 
+  useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      onCancelEdit();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isEditing, onCancelEdit]);
+
   const fallbackOptions = allProviders.filter((candidate) => candidate.account.id !== account.id);
 
   const toggleFallbackProvider = (providerId: string) => {
@@ -399,7 +416,7 @@ function ProviderCard({
     <Card className={cn(isDefault && 'ring-2 ring-primary')}>
       <CardContent className="p-4">
         {/* Top row: icon + name */}
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-start justify-between mb-3 gap-3">
           <div className="flex items-center gap-3">
             {getProviderIconUrl(account.vendorId) ? (
               <img src={getProviderIconUrl(account.vendorId)} alt={typeInfo?.name || account.vendorId} className={cn('h-5 w-5', shouldInvertInDark(account.vendorId) && 'dark:invert')} />
@@ -420,13 +437,19 @@ function ProviderCard({
               </div>
             </div>
           </div>
-        </div>
-
-        {/* Key row */}
-        {isEditing ? (
-          <div className="space-y-4">
-            {account.vendorId === 'custom' && (
-              <div className="flex justify-end">
+          {isEditing && (
+            <div className="flex flex-col items-end gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={onCancelEdit}
+                aria-label={t('aiProviders.dialog.cancel')}
+                title={t('aiProviders.dialog.cancel')}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+              {account.vendorId === 'custom' && (
                 <a
                   href={i18n.language.startsWith('zh')
                     ? 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh'
@@ -438,8 +461,14 @@ function ProviderCard({
                   {t('aiProviders.dialog.customDoc')}
                   <ExternalLink className="h-3 w-3" />
                 </a>
-              </div>
-            )}
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Key row */}
+        {isEditing ? (
+          <div className="space-y-4">
             {canEditModelConfig && (
               <div className="space-y-3 rounded-md border p-3">
                 <p className="text-sm font-medium">{t('aiProviders.sections.model')}</p>
@@ -572,9 +601,6 @@ function ProviderCard({
                     ) : (
                       <Check className="h-3.5 w-3.5" />
                     )}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={onCancelEdit}>
-                    <X className="h-3.5 w-3.5" />
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">

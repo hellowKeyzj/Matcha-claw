@@ -193,6 +193,20 @@ export async function syncAllProviderAuthToRuntime(): Promise<void> {
       });
     }
   }
+
+  // 启动阶段除了同步凭据，还需要补齐默认模型：
+  // - agents.defaults.model
+  // - models.providers（由默认模型同步路径写入）
+  const defaultProviderId = await getDefaultProvider();
+  if (!defaultProviderId) {
+    return;
+  }
+
+  try {
+    await syncDefaultProviderToRuntime(defaultProviderId);
+  } catch (error) {
+    logger.warn(`Failed to sync default provider "${defaultProviderId}" during startup bootstrap:`, error);
+  }
 }
 
 async function syncProviderSecretToRuntime(
