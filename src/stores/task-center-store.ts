@@ -64,6 +64,58 @@ function sortTasksByTime(tasks: Task[]): Task[] {
   });
 }
 
+function areTaskListsEquivalent(left: Task[], right: Task[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a.id !== b.id) {
+      return false;
+    }
+    if ((a.workspaceDir || '') !== (b.workspaceDir || '')) {
+      return false;
+    }
+    if (a.status !== b.status) {
+      return false;
+    }
+    if (a.progress !== b.progress) {
+      return false;
+    }
+    if ((a.updated_at || 0) !== (b.updated_at || 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areBlockedQueuesEquivalent(left: BlockedTaskItem[], right: BlockedTaskItem[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (
+      a.taskId !== b.taskId
+      || a.confirmId !== b.confirmId
+      || a.prompt !== b.prompt
+      || a.type !== b.type
+      || a.inputMode !== b.inputMode
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function resolveBlockedInputMode(input: {
   inputMode?: unknown;
   prompt: string;
@@ -219,18 +271,26 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       return;
     }
     taskCenterRefreshPromise = (async () => {
-      set({ loading: true, error: null });
       try {
         const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);
-        set({
-          tasks,
-          blockedQueue: collectBlockedQueueFromTasks(tasks),
+        const nextBlockedQueue = collectBlockedQueueFromTasks(tasks);
+        set((state) => {
+          if (
+            areTaskListsEquivalent(state.tasks, tasks)
+            && areBlockedQueuesEquivalent(state.blockedQueue, nextBlockedQueue)
+          ) {
+            return state;
+          }
+          return {
+            ...state,
+            tasks,
+            blockedQueue: nextBlockedQueue,
+          };
         });
       } catch (error) {
         set({ error: error instanceof Error ? error.message : String(error) });
       } finally {
         taskCenterLastRefreshAtMs = Date.now();
-        set({ loading: false });
       }
     })();
     try {

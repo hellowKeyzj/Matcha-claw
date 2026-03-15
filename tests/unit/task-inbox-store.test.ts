@@ -106,4 +106,19 @@ describe('task inbox store', () => {
     const state = useTaskInboxStore.getState();
     expect(state.tasks.some((item) => item.id === 'task-created-1')).toBe(true);
   });
+
+  it('workspace scope 为空时仍会调用 task_list 预热上下文', async () => {
+    getWorkspaceDirMock.mockResolvedValue(null);
+    getTaskWorkspaceDirsMock.mockResolvedValue([]);
+    listTasksMock.mockResolvedValue([
+      task({ id: 'fallback-1', status: 'waiting_for_input' }),
+    ]);
+    const { useTaskInboxStore } = await import('@/stores/task-inbox-store');
+
+    await useTaskInboxStore.getState().init();
+
+    expect(listTasksMock).toHaveBeenCalledWith();
+    const state = useTaskInboxStore.getState();
+    expect(state.tasks.map((item) => item.id)).toEqual(['fallback-1']);
+  });
 });

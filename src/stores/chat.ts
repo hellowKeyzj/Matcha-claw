@@ -141,6 +141,7 @@ interface ChatState {
   handleApprovalRequested: (payload: Record<string, unknown>) => void;
   handleApprovalResolved: (payload: Record<string, unknown>) => void;
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
+  syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
@@ -1298,6 +1299,121 @@ function hasTimeoutSignal(error: unknown): boolean {
   return code.includes('TIMEOUT') || msg.toLowerCase().includes('timeout');
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeApprovalItemFromGateway(value: unknown): ApprovalItem | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const request = asRecord(record.request);
+  const id = asNonEmptyString(record.id)
+    ?? asNonEmptyString(record.approvalId)
+    ?? asNonEmptyString(record.requestId)
+    ?? asNonEmptyString(request?.id);
+  const sessionKey = asNonEmptyString(record.sessionKey)
+    ?? asNonEmptyString(request?.sessionKey);
+  if (!id || !sessionKey) return null;
+
+  const runId = asNonEmptyString(record.runId)
+    ?? asNonEmptyString(request?.runId);
+  const toolName = asNonEmptyString(record.toolName)
+    ?? asNonEmptyString(request?.toolName);
+  const createdAtMs = normalizeApprovalTimestampMs(record.createdAt)
+    ?? normalizeApprovalTimestampMs(record.createdAtMs)
+    ?? normalizeApprovalTimestampMs(record.requestedAt)
+    ?? normalizeApprovalTimestampMs(request?.createdAt)
+    ?? normalizeApprovalTimestampMs(request?.requestedAt)
+    ?? Date.now();
+  const expiresAtMs = normalizeApprovalTimestampMs(record.expiresAt)
+    ?? normalizeApprovalTimestampMs(record.expiresAtMs)
+    ?? normalizeApprovalTimestampMs(request?.expiresAt);
+
+  return {
+    id,
+    sessionKey,
+    ...(runId ? { runId } : {}),
+    ...(toolName ? { toolName } : {}),
+    createdAtMs,
+    ...(expiresAtMs ? { expiresAtMs } : {}),
+  };
+}
+
+function parseGatewayApprovalResponse(
+  payload: unknown,
+): { recognized: boolean; items: ApprovalItem[] } {
+  const rawRecords: unknown[] = [];
+  let recognized = false;
+
+  const collect = (candidate: unknown, forceObjectMap = false): void => {
+    if (Array.isArray(candidate)) {
+      recognized = true;
+      rawRecords.push(...candidate);
+      return;
+    }
+    const objectCandidate = asRecord(candidate);
+    if (!objectCandidate) return;
+    if (normalizeApprovalItemFromGateway(objectCandidate)) {
+      recognized = true;
+      rawRecords.push(objectCandidate);
+      return;
+    }
+    if (!forceObjectMap) return;
+    rawRecords.push(...Object.values(objectCandidate));
+    recognized = true;
+  };
+
+  if (Array.isArray(payload)) {
+    collect(payload);
+  } else {
+    const root = asRecord(payload);
+    if (root) {
+      const listKeys = ['approvals', 'items', 'pending', 'list', 'records', 'requests'];
+      for (const key of listKeys) {
+        if (Object.prototype.hasOwnProperty.call(root, key)) {
+          collect(root[key], true);
+        }
+      }
+      const containerKeys = ['data', 'result', 'payload'];
+      for (const key of containerKeys) {
+        const nested = asRecord(root[key]);
+        if (!nested) continue;
+        for (const listKey of listKeys) {
+          if (Object.prototype.hasOwnProperty.call(nested, listKey)) {
+            collect(nested[listKey], true);
+          }
+        }
+      }
+      if (!recognized) {
+        collect(root);
+      }
+    }
+  }
+
+  if (!recognized) {
+    return { recognized: false, items: [] };
+  }
+
+  const dedup = new Map<string, ApprovalItem>();
+  for (const entry of rawRecords) {
+    const normalized = normalizeApprovalItemFromGateway(entry);
+    if (!normalized) continue;
+    dedup.set(`${normalized.sessionKey}::${normalized.id}`, normalized);
+  }
+
+  return {
+    recognized: true,
+    items: [...dedup.values()].sort((a, b) => a.createdAtMs - b.createdAtMs),
+  };
+}
+
 // ── Store ────────────────────────────────────────────────────────
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -1813,6 +1929,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // ── Send message ──
 
+  syncPendingApprovals: async (sessionKeyHint?: string) => {
+    try {
+      const payload = await useGatewayStore.getState().rpc<unknown>('exec.approvals.get', {});
+      const parsed = parseGatewayApprovalResponse(payload);
+      if (!parsed.recognized) return;
+
+      const grouped: Record<string, ApprovalItem[]> = {};
+      for (const item of parsed.items) {
+        if (!grouped[item.sessionKey]) grouped[item.sessionKey] = [];
+        grouped[item.sessionKey].push(item);
+      }
+      for (const [sessionKey, items] of Object.entries(grouped)) {
+        grouped[sessionKey] = [...items].sort((a, b) => a.createdAtMs - b.createdAtMs);
+      }
+
+      set((state) => {
+        const normalizedHint = typeof sessionKeyHint === 'string' ? sessionKeyHint.trim() : '';
+        const nextApprovals = normalizedHint
+          ? { ...state.pendingApprovalsBySession, [normalizedHint]: grouped[normalizedHint] ?? [] }
+          : grouped;
+        const currentPending = nextApprovals[state.currentSessionKey] ?? [];
+        const nextApprovalStatus: ApprovalStatus = currentPending.length > 0 ? 'awaiting_approval' : 'idle';
+        const nextActiveRunId = state.activeRunId ?? currentPending.find((item) => typeof item.runId === 'string')?.runId ?? null;
+        return {
+          pendingApprovalsBySession: nextApprovals,
+          approvalStatus: nextApprovalStatus,
+          sending: currentPending.length > 0 ? true : state.sending,
+          pendingFinal: currentPending.length > 0 ? true : state.pendingFinal,
+          activeRunId: nextActiveRunId,
+        };
+      });
+    } catch {
+      // ignore
+    }
+  },
+
+  // ── Send message ──
+
   sendMessage: async (text: string, attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
@@ -1875,6 +2029,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       state.loadHistory(true);
+      void state.syncPendingApprovals(state.currentSessionKey);
       _historyPollTimer = setTimeout(pollHistory, POLL_INTERVAL);
     };
     _historyPollTimer = setTimeout(pollHistory, POLL_START_DELAY);
@@ -1964,6 +2119,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
 
       if (!result.success) {
+        await get().syncPendingApprovals(currentSessionKey);
         const state = get();
         const pendingApprovals = state.pendingApprovalsBySession[currentSessionKey] ?? [];
         if (pendingApprovals.length > 0) {
@@ -1981,6 +2137,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ activeRunId: result.result.runId });
       }
     } catch (err) {
+      if (hasTimeoutSignal(err)) {
+        await get().syncPendingApprovals(currentSessionKey);
+      }
       const state = get();
       const pendingApprovals = state.pendingApprovalsBySession[currentSessionKey] ?? [];
       const hasApprovalEvidence = pendingApprovals.length > 0
@@ -2053,6 +2212,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const expiresAtMs = normalizeApprovalTimestampMs(payload.expiresAt);
 
     set((state) => {
+      const isCurrentSession = sessionKey === state.currentSessionKey;
       const existing = state.pendingApprovalsBySession[sessionKey] ?? [];
       const filtered = existing.filter((item) => item.id !== id);
       const nextItem: ApprovalItem = {
@@ -2071,10 +2231,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       return {
         pendingApprovalsBySession: nextApprovals,
-        approvalStatus: sessionKey === state.currentSessionKey ? 'awaiting_approval' : state.approvalStatus,
-        sending: sessionKey === state.currentSessionKey ? true : state.sending,
-        pendingFinal: sessionKey === state.currentSessionKey ? true : state.pendingFinal,
-        activeRunId: sessionKey === state.currentSessionKey && runId
+        approvalStatus: isCurrentSession ? 'awaiting_approval' : state.approvalStatus,
+        sending: isCurrentSession ? true : state.sending,
+        pendingFinal: isCurrentSession ? true : state.pendingFinal,
+        // 进入审批等待态后，清理流式占位，避免工具条占位导致审批按钮不显示。
+        streamingMessage: isCurrentSession ? null : state.streamingMessage,
+        streamingText: isCurrentSession ? '' : state.streamingText,
+        streamingTools: isCurrentSession ? [] : state.streamingTools,
+        activeRunId: isCurrentSession && runId
           ? (state.activeRunId ?? runId)
           : state.activeRunId,
       };

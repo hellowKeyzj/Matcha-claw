@@ -22,6 +22,7 @@
     },
     "approval": {
         "panelTitle": "审批待处理",
+        "waitingLabel": "等待审批中...",
         "pendingTool": "工具：{{tool}}",
         "unknownTool": "未知工具",
         "allowOnce": "同意一次",

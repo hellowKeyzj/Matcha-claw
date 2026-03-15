@@ -19,7 +19,7 @@ import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToPro
 import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
-import { getSetting } from '../utils/store';
+import { getAllSettings, getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../utils/skill-config';
 import { startHostApiServer } from '../api/server';
 import { HostEventBus } from '../api/event-bus';
@@ -29,6 +29,7 @@ import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureLicenseGateBootstrapped } from '../utils/license';
 import { buildPlatformCompositionRoot } from './platform-composition-root';
+import { syncGuardianPolicyToOpenClawConfig } from '../utils/guardian-policy';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -240,8 +241,32 @@ async function initialize(): Promise<void> {
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.
+  let previousGatewayState = gatewayManager.getStatus().state;
+  const syncGuardianPolicyToRunningGateway = async (): Promise<void> => {
+    try {
+      const settings = await getAllSettings();
+      const syncResult = syncGuardianPolicyToOpenClawConfig(settings);
+      if (gatewayManager.getStatus().state !== 'running') {
+        return;
+      }
+      await gatewayManager.rpc(
+        'guardian.policy.sync',
+        syncResult.payload,
+        8000,
+      );
+      logger.debug(`Synced guardian policy to running gateway (preset=${syncResult.payload.preset})`);
+    } catch (error) {
+      logger.warn(`Failed to sync guardian policy to running gateway: ${String(error)}`);
+    }
+  };
+
   gatewayManager.on('status', (status: { state: string }) => {
     hostEventBus.emit('gateway:status', status);
+    const transitionedToRunning = status.state === 'running' && previousGatewayState !== 'running';
+    previousGatewayState = status.state;
+    if (transitionedToRunning) {
+      void syncGuardianPolicyToRunningGateway();
+    }
   });
 
   gatewayManager.on('error', (error) => {

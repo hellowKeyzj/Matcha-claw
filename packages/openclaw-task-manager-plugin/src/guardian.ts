@@ -34,11 +34,13 @@ type ToolContext = {
   runId?: string;
   toolName: string;
   toolCallId?: string;
+  execApprovalManager?: unknown;
+  broadcast?: (event: string, payload: unknown, options?: Record<string, unknown>) => void;
 };
 
 type GatewayContextLike = {
   execApprovalManager?: unknown;
-  nodeSendToAllSubscribed?: (event: string, payload: unknown) => void;
+  broadcast?: (event: string, payload: unknown, options?: Record<string, unknown>) => void;
 };
 
 type ExecApprovalRecordLike = {
@@ -121,6 +123,14 @@ type GuardPolicy = {
   highRiskAction: GuardAction;
 };
 
+type GuardDiagnostics = {
+  enabled: boolean;
+  slowBeforeToolCallMs: number;
+  slowAfterToolCallMs: number;
+  slowApprovalWaitMs: number;
+  slowAuditWriteMs: number;
+};
+
 type GuardAgentPolicyOverride = {
   preset?: GuardPreset;
   defaultAction?: GuardAction;
@@ -185,6 +195,13 @@ const DEFAULT_DENY_TOOLS = [
 const DEFAULT_APPROVAL_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_POLICY_PRESET: GuardPreset = "balanced";
 const POLICY_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../policy");
+const DEFAULT_GUARD_DIAGNOSTICS: GuardDiagnostics = {
+  enabled: true,
+  slowBeforeToolCallMs: 1200,
+  slowAfterToolCallMs: 300,
+  slowApprovalWaitMs: 1200,
+  slowAuditWriteMs: 120,
+};
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
@@ -714,6 +731,23 @@ function toInt(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function toNonNegativeInt(value: unknown, fallback: number): number {
+  const resolved = toInt(value, fallback);
+  return resolved >= 0 ? resolved : fallback;
+}
+
+function resolveDiagnosticsConfig(guardConfig: Record<string, unknown>): GuardDiagnostics {
+  const diagnosticsRaw = isObject(guardConfig.diagnostics) ? (guardConfig.diagnostics as Record<string, unknown>) : {};
+  const enabled = typeof diagnosticsRaw.enabled === "boolean" ? diagnosticsRaw.enabled : DEFAULT_GUARD_DIAGNOSTICS.enabled;
+  return {
+    enabled,
+    slowBeforeToolCallMs: toNonNegativeInt(diagnosticsRaw.slowBeforeToolCallMs, DEFAULT_GUARD_DIAGNOSTICS.slowBeforeToolCallMs),
+    slowAfterToolCallMs: toNonNegativeInt(diagnosticsRaw.slowAfterToolCallMs, DEFAULT_GUARD_DIAGNOSTICS.slowAfterToolCallMs),
+    slowApprovalWaitMs: toNonNegativeInt(diagnosticsRaw.slowApprovalWaitMs, DEFAULT_GUARD_DIAGNOSTICS.slowApprovalWaitMs),
+    slowAuditWriteMs: toNonNegativeInt(diagnosticsRaw.slowAuditWriteMs, DEFAULT_GUARD_DIAGNOSTICS.slowAuditWriteMs),
+  };
+}
+
 function normalizeDecisionText(value: GuardDecision): string {
   if (value === "allow") {
     return "allow-once";
@@ -724,6 +758,7 @@ function normalizeDecisionText(value: GuardDecision): string {
 export class GuardianController {
   private readonly api: OpenClawPluginApi;
   private basePolicy: GuardPolicy;
+  private readonly diagnostics: GuardDiagnostics;
   private securityPolicyVersion = 1;
   private agentPolicyOverrides = new Map<string, GuardAgentPolicyOverride>();
   private readonly allowAlwaysCache = new Set<string>();
@@ -737,6 +772,7 @@ export class GuardianController {
     this.api = api;
     this.basePolicy = normalizePolicy(api.pluginConfig);
     const guardConfig = isObject(api.pluginConfig?.guardian) ? (api.pluginConfig?.guardian as Record<string, unknown>) : {};
+    this.diagnostics = resolveDiagnosticsConfig(guardConfig);
     this.applyPolicyOverrides(guardConfig, false);
     const stateDirFromEnv = typeof process.env.OPENCLAW_STATE_DIR === "string" ? process.env.OPENCLAW_STATE_DIR.trim() : "";
     const stateDir = stateDirFromEnv || path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".openclaw");
@@ -745,6 +781,24 @@ export class GuardianController {
 
   bindGatewayContext(context: GatewayContextLike): void {
     this.gatewayContext = context;
+  }
+
+  private bindGatewayContextFromToolContext(ctx: ToolContext): void {
+    const nextContext: GatewayContextLike = {};
+    if (ctx.execApprovalManager) {
+      nextContext.execApprovalManager = ctx.execApprovalManager;
+    }
+    if (typeof ctx.broadcast === "function") {
+      nextContext.broadcast = ctx.broadcast;
+    }
+    if (!nextContext.execApprovalManager && !nextContext.broadcast) {
+      return;
+    }
+    const current = this.gatewayContext ?? {};
+    this.gatewayContext = {
+      execApprovalManager: nextContext.execApprovalManager ?? current.execApprovalManager,
+      broadcast: nextContext.broadcast ?? current.broadcast,
+    };
   }
 
   private resolveApprovalManager(): ExecApprovalManagerLike | null {
@@ -759,11 +813,25 @@ export class GuardianController {
   }
 
   private publish(event: string, payload: Record<string, unknown>): void {
+    const gatewayContext = this.gatewayContext;
     try {
-      this.gatewayContext?.nodeSendToAllSubscribed?.(event, payload);
+      gatewayContext?.broadcast?.(event, payload, { dropIfSlow: true });
     } catch (error) {
-      this.api.logger.warn?.(`[guardian] 发布事件失败: ${error instanceof Error ? error.message : String(error)}`);
+      this.api.logger.warn?.(`[guardian] 广播审批事件失败: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private warnSlowPath(kind: string, durationMs: number, thresholdMs: number, details: Record<string, unknown>): void {
+    if (!this.diagnostics.enabled || durationMs < thresholdMs) {
+      return;
+    }
+    const summary = Object.entries(details)
+      .filter(([, value]) => value !== undefined && value !== null && String(value).length > 0)
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(", ");
+    this.api.logger.warn?.(
+      `[guardian] ${kind} 耗时 ${durationMs}ms (阈值 ${thresholdMs}ms)${summary ? ` ${summary}` : ""}`,
+    );
   }
 
   private applyPolicyOverrides(guardConfig: Record<string, unknown>, updateBasePolicy: boolean): void {
@@ -785,26 +853,38 @@ export class GuardianController {
         "sensitivePathAction",
         "highRiskAction",
       ];
-      const hasBasePolicyPatch = basePolicyKeys.some((key) => Object.prototype.hasOwnProperty.call(guardConfig, key));
+      const basePolicyPatch: Record<string, unknown> = {};
+      for (const key of basePolicyKeys) {
+        if (Object.prototype.hasOwnProperty.call(guardConfig, key)) {
+          basePolicyPatch[key] = guardConfig[key];
+        }
+      }
+      const hasBasePolicyPatch = Object.keys(basePolicyPatch).length > 0;
       if (hasBasePolicyPatch) {
-        const currentBaseConfig: Record<string, unknown> = {
-          preset: this.basePolicy.preset,
-          defaultAction: this.basePolicy.defaultAction,
-          approvalTimeoutMs: this.basePolicy.approvalTimeoutMs,
-          allowTools: [...this.basePolicy.allowTools],
-          confirmTools: [...this.basePolicy.confirmTools],
-          denyTools: [...this.basePolicy.denyTools],
-          allowPathPrefixes: [...this.basePolicy.allowPathPrefixes],
-          allowDomains: [...this.basePolicy.allowDomains],
-          allowCommandExecution: this.basePolicy.allowCommandExecution,
-          allowDependencyInstall: this.basePolicy.allowDependencyInstall,
-          confirmStrategy: this.basePolicy.confirmStrategy,
-          capabilities: [...this.basePolicy.capabilities],
-          networkUnknownAction: this.basePolicy.networkUnknownAction,
-          sensitivePathAction: this.basePolicy.sensitivePathAction,
-          highRiskAction: this.basePolicy.highRiskAction,
-        };
-        this.basePolicy = normalizePolicy({ guardian: { ...currentBaseConfig, ...guardConfig } });
+        const patchContainsPreset = Object.prototype.hasOwnProperty.call(basePolicyPatch, "preset");
+        if (patchContainsPreset) {
+          // preset 变更时必须回到对应预设默认值，避免沿用旧 preset 的衍生动作。
+          this.basePolicy = normalizePolicy({ guardian: basePolicyPatch });
+        } else {
+          const currentBaseConfig: Record<string, unknown> = {
+            preset: this.basePolicy.preset,
+            defaultAction: this.basePolicy.defaultAction,
+            approvalTimeoutMs: this.basePolicy.approvalTimeoutMs,
+            allowTools: [...this.basePolicy.allowTools],
+            confirmTools: [...this.basePolicy.confirmTools],
+            denyTools: [...this.basePolicy.denyTools],
+            allowPathPrefixes: [...this.basePolicy.allowPathPrefixes],
+            allowDomains: [...this.basePolicy.allowDomains],
+            allowCommandExecution: this.basePolicy.allowCommandExecution,
+            allowDependencyInstall: this.basePolicy.allowDependencyInstall,
+            confirmStrategy: this.basePolicy.confirmStrategy,
+            capabilities: [...this.basePolicy.capabilities],
+            networkUnknownAction: this.basePolicy.networkUnknownAction,
+            sensitivePathAction: this.basePolicy.sensitivePathAction,
+            highRiskAction: this.basePolicy.highRiskAction,
+          };
+          this.basePolicy = normalizePolicy({ guardian: { ...currentBaseConfig, ...basePolicyPatch } });
+        }
       }
     }
     const version = toInt(guardConfig.securityPolicyVersion, 1);
@@ -1017,6 +1097,7 @@ export class GuardianController {
   }
 
   private async appendAudit(event: GuardAuditEvent): Promise<void> {
+    const appendStartedAt = Date.now();
     try {
       await this.ensureAuditDbReady();
       const stmt = this.auditDb.prepare(`
@@ -1027,6 +1108,7 @@ export class GuardianController {
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
       `);
+      const writeStartedAt = Date.now();
       stmt.run(
         event.ts,
         event.traceId,
@@ -1045,222 +1127,282 @@ export class GuardianController {
         event.ruleId,
         JSON.stringify(event.requiredCapabilities),
       );
+      const writeDurationMs = Math.max(0, Date.now() - writeStartedAt);
+      this.warnSlowPath("audit 写入", writeDurationMs, this.diagnostics.slowAuditWriteMs, {
+        runId: event.runId,
+        toolName: event.toolName,
+        decision: event.decision,
+        result: event.result,
+      });
     } catch (error) {
       this.api.logger.warn?.(`[guardian] 写审计失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      const appendDurationMs = Math.max(0, Date.now() - appendStartedAt);
+      this.warnSlowPath("audit 追加", appendDurationMs, this.diagnostics.slowAuditWriteMs, {
+        runId: event.runId,
+        toolName: event.toolName,
+        decision: event.decision,
+      });
     }
   }
 
   async beforeToolCall(event: BeforeToolEvent, ctx: ToolContext): Promise<{ block: boolean; blockReason: string } | void> {
-    const now = Date.now();
-    const traceId = `${event.runId ?? "run"}:${event.toolCallId ?? "tool"}:${sha256(`${event.toolName}:${now}`).slice(0, 8)}`;
-    const paramsPreview = buildParamsPreview(event.params);
-    const policy = this.resolveEffectivePolicy(ctx);
-    const { risk, action, reason, ruleId, requiredCapabilities } = this.evaluatePolicy(policy, event, ctx);
-    const traceKey = computeTraceKey(event, ctx);
+    const hookStartedAt = Date.now();
+    let action: GuardAction | "unknown" = "unknown";
+    let ruleId = "unknown";
+    let decisionForLog = "n/a";
+    this.bindGatewayContextFromToolContext(ctx);
+    try {
+      const now = Date.now();
+      const traceId = `${event.runId ?? "run"}:${event.toolCallId ?? "tool"}:${sha256(`${event.toolName}:${now}`).slice(0, 8)}`;
+      const paramsPreview = buildParamsPreview(event.params);
+      const policy = this.resolveEffectivePolicy(ctx);
+      const evaluated = this.evaluatePolicy(policy, event, ctx);
+      const { risk, action: resolvedAction, reason, ruleId: resolvedRuleId, requiredCapabilities } = evaluated;
+      action = resolvedAction;
+      ruleId = resolvedRuleId;
+      const traceKey = computeTraceKey(event, ctx);
 
-    if (action === "allow") {
-      this.traces.set(traceKey, {
-        traceId,
-        startedAtMs: now,
-        runId: event.runId ?? null,
-        sessionKey: ctx.sessionKey ?? null,
+      if (action === "allow") {
+        decisionForLog = "allow";
+        this.traces.set(traceKey, {
+          traceId,
+          startedAtMs: now,
+          runId: event.runId ?? null,
+          sessionKey: ctx.sessionKey ?? null,
+          agentId: ctx.agentId ?? null,
+          toolName: event.toolName,
+          risk,
+          action,
+          decision: "allow",
+          paramsPreview,
+          policyVersion: this.securityPolicyVersion,
+          policyPreset: policy.preset,
+          ruleId,
+          requiredCapabilities,
+        });
+        return;
+      }
+
+      if (action === "deny") {
+        decisionForLog = "deny";
+        await this.appendAudit({
+          traceId,
+          runId: event.runId ?? null,
+          sessionKey: ctx.sessionKey ?? null,
+          agentId: ctx.agentId ?? null,
+          toolName: event.toolName,
+          risk,
+          action,
+          decision: "deny",
+          durationMs: 0,
+          result: "blocked",
+          paramsPreview,
+          policyVersion: this.securityPolicyVersion,
+          policyPreset: policy.preset,
+          ruleId,
+          requiredCapabilities,
+          ts: now,
+        });
+        return { block: true, blockReason: `Guardian blocked: ${reason}` };
+      }
+
+      const manager = this.resolveApprovalManager();
+      if (!manager) {
+        decisionForLog = "deny";
+        await this.appendAudit({
+          traceId,
+          runId: event.runId ?? null,
+          sessionKey: ctx.sessionKey ?? null,
+          agentId: ctx.agentId ?? null,
+          toolName: event.toolName,
+          risk,
+          action,
+          decision: "deny",
+          durationMs: 0,
+          result: "blocked",
+          paramsPreview,
+          policyVersion: this.securityPolicyVersion,
+          policyPreset: policy.preset,
+          ruleId,
+          requiredCapabilities,
+          ts: now,
+        });
+        return { block: true, blockReason: "Guardian blocked: approval manager unavailable" };
+      }
+
+      const requestPayload: Record<string, unknown> = {
+        command: `${event.toolName} (guard-confirm)`,
+        host: "gateway",
+        security: "allowlist",
+        ask: "always",
         agentId: ctx.agentId ?? null,
+        sessionKey: ctx.sessionKey ?? null,
+        turnSourceChannel: "matchaclaw",
+        turnSourceTo: ctx.sessionKey ?? null,
+        turnSourceAccountId: ctx.agentId ?? null,
         toolName: event.toolName,
-        risk,
-        action,
-        decision: "allow",
+        runId: event.runId ?? null,
+        toolCallId: event.toolCallId ?? null,
         paramsPreview,
-        policyVersion: this.securityPolicyVersion,
-        policyPreset: policy.preset,
         ruleId,
-        requiredCapabilities,
-      });
-      return;
-    }
-
-    if (action === "deny") {
-      await this.appendAudit({
-        traceId,
-        runId: event.runId ?? null,
-        sessionKey: ctx.sessionKey ?? null,
-        agentId: ctx.agentId ?? null,
-        toolName: event.toolName,
-        risk,
-        action,
-        decision: "deny",
-        durationMs: 0,
-        result: "blocked",
-        paramsPreview,
-        policyVersion: this.securityPolicyVersion,
         policyPreset: policy.preset,
-        ruleId,
         requiredCapabilities,
-        ts: now,
-      });
-      return { block: true, blockReason: `Guardian blocked: ${reason}` };
-    }
+        reason,
+      };
 
-    const manager = this.resolveApprovalManager();
-    if (!manager) {
-      await this.appendAudit({
-        traceId,
-        runId: event.runId ?? null,
+      const record = manager.create(requestPayload, policy.approvalTimeoutMs, null);
+      const decisionPromise = manager.register(record, policy.approvalTimeoutMs);
+
+      this.publish("exec.approval.requested", {
+        id: record.id,
+        request: {
+          ...record.request,
+          sessionKey: ctx.sessionKey ?? null,
+          runId: event.runId ?? null,
+          toolName: event.toolName,
+        },
         sessionKey: ctx.sessionKey ?? null,
-        agentId: ctx.agentId ?? null,
+        runId: event.runId ?? null,
         toolName: event.toolName,
-        risk,
-        action,
-        decision: "deny",
-        durationMs: 0,
-        result: "blocked",
-        paramsPreview,
-        policyVersion: this.securityPolicyVersion,
-        policyPreset: policy.preset,
+        createdAt: record.createdAtMs,
+        expiresAt: record.expiresAtMs,
+      });
+
+      const approvalWaitStartedAt = Date.now();
+      const rawDecision = await decisionPromise;
+      const approvalWaitDurationMs = Math.max(0, Date.now() - approvalWaitStartedAt);
+      this.warnSlowPath("审批等待", approvalWaitDurationMs, this.diagnostics.slowApprovalWaitMs, {
+        runId: event.runId ?? null,
+        toolCallId: event.toolCallId ?? null,
+        toolName: event.toolName,
         ruleId,
-        requiredCapabilities,
-        ts: now,
       });
-      return { block: true, blockReason: "Guardian blocked: approval manager unavailable" };
-    }
-
-    const requestPayload: Record<string, unknown> = {
-      command: `${event.toolName} (guard-confirm)`,
-      host: "gateway",
-      security: "allowlist",
-      ask: "always",
-      agentId: ctx.agentId ?? null,
-      sessionKey: ctx.sessionKey ?? null,
-      turnSourceChannel: "matchaclaw",
-      turnSourceTo: ctx.sessionKey ?? null,
-      turnSourceAccountId: ctx.agentId ?? null,
-      toolName: event.toolName,
-      runId: event.runId ?? null,
-      toolCallId: event.toolCallId ?? null,
-      paramsPreview,
-      ruleId,
-      policyPreset: policy.preset,
-      requiredCapabilities,
-      reason,
-    };
-
-    const record = manager.create(requestPayload, policy.approvalTimeoutMs, null);
-    const decisionPromise = manager.register(record, policy.approvalTimeoutMs);
-
-    this.publish("exec.approval.requested", {
-      id: record.id,
-      request: {
-        ...record.request,
-        sessionKey: ctx.sessionKey ?? null,
-        runId: event.runId ?? null,
-        toolName: event.toolName,
-      },
-      sessionKey: ctx.sessionKey ?? null,
-      runId: event.runId ?? null,
-      toolName: event.toolName,
-      createdAt: record.createdAtMs,
-      expiresAt: record.expiresAtMs,
-    });
-
-    const rawDecision = await decisionPromise;
-    const decisionRaw = normalizeDecision(rawDecision) ?? "deny";
-    const decision = decisionRaw === "allow-always" && policy.confirmStrategy === "every_time"
-      ? "allow-once"
-      : decisionRaw;
-    this.publish("exec.approval.resolved", {
-      id: record.id,
-      decision,
-      resolvedBy: "user",
-      ts: Date.now(),
-      request: {
-        ...record.request,
-        sessionKey: ctx.sessionKey ?? null,
-        runId: event.runId ?? null,
-        toolName: event.toolName,
-      },
-      sessionKey: ctx.sessionKey ?? null,
-      runId: event.runId ?? null,
-      toolName: event.toolName,
-    });
-
-    if (decision === "allow-always" && policy.confirmStrategy === "session" && ruleId === "user.confirm_tools") {
-      const key = `${ctx.sessionKey ?? "global"}::${normalizeAgentId(ctx.agentId) || "agent"}::${normalizeToolName(event.toolName)}`;
-      this.allowAlwaysCache.add(key);
-    }
-
-    if (decision === "allow-once" || decision === "allow-always") {
-      this.traces.set(traceKey, {
-        traceId,
-        startedAtMs: now,
-        runId: event.runId ?? null,
-        sessionKey: ctx.sessionKey ?? null,
-        agentId: ctx.agentId ?? null,
-        toolName: event.toolName,
-        risk,
-        action,
+      const decisionRaw = normalizeDecision(rawDecision) ?? "deny";
+      const decision = decisionRaw === "allow-always" && policy.confirmStrategy === "every_time"
+        ? "allow-once"
+        : decisionRaw;
+      decisionForLog = decision;
+      this.publish("exec.approval.resolved", {
+        id: record.id,
         decision,
+        resolvedBy: "user",
+        ts: Date.now(),
+        request: {
+          ...record.request,
+          sessionKey: ctx.sessionKey ?? null,
+          runId: event.runId ?? null,
+          toolName: event.toolName,
+        },
+        sessionKey: ctx.sessionKey ?? null,
+        runId: event.runId ?? null,
+        toolName: event.toolName,
+      });
+
+      if (decision === "allow-always" && policy.confirmStrategy === "session" && ruleId === "user.confirm_tools") {
+        const key = `${ctx.sessionKey ?? "global"}::${normalizeAgentId(ctx.agentId) || "agent"}::${normalizeToolName(event.toolName)}`;
+        this.allowAlwaysCache.add(key);
+      }
+
+      if (decision === "allow-once" || decision === "allow-always") {
+        this.traces.set(traceKey, {
+          traceId,
+          startedAtMs: now,
+          runId: event.runId ?? null,
+          sessionKey: ctx.sessionKey ?? null,
+          agentId: ctx.agentId ?? null,
+          toolName: event.toolName,
+          risk,
+          action,
+          decision,
+          paramsPreview,
+          policyVersion: this.securityPolicyVersion,
+          policyPreset: policy.preset,
+          ruleId,
+          requiredCapabilities,
+        });
+        return;
+      }
+
+      await this.appendAudit({
+        traceId,
+        runId: event.runId ?? null,
+        sessionKey: ctx.sessionKey ?? null,
+        agentId: ctx.agentId ?? null,
+        toolName: event.toolName,
+        risk,
+        action,
+        decision: "deny",
+        durationMs: Date.now() - now,
+        result: "blocked",
         paramsPreview,
         policyVersion: this.securityPolicyVersion,
         policyPreset: policy.preset,
         ruleId,
         requiredCapabilities,
+        ts: Date.now(),
       });
-      return;
+      return { block: true, blockReason: "Guardian blocked: approval denied" };
+    } finally {
+      const hookDurationMs = Math.max(0, Date.now() - hookStartedAt);
+      this.warnSlowPath("before_tool_call", hookDurationMs, this.diagnostics.slowBeforeToolCallMs, {
+        runId: event.runId ?? null,
+        toolCallId: event.toolCallId ?? null,
+        toolName: event.toolName,
+        action,
+        decision: decisionForLog,
+        ruleId,
+      });
     }
-
-    await this.appendAudit({
-      traceId,
-      runId: event.runId ?? null,
-      sessionKey: ctx.sessionKey ?? null,
-      agentId: ctx.agentId ?? null,
-      toolName: event.toolName,
-      risk,
-      action,
-      decision: "deny",
-      durationMs: Date.now() - now,
-      result: "blocked",
-      paramsPreview,
-      policyVersion: this.securityPolicyVersion,
-      policyPreset: policy.preset,
-      ruleId,
-      requiredCapabilities,
-      ts: Date.now(),
-    });
-    return { block: true, blockReason: "Guardian blocked: approval denied" };
   }
 
   async afterToolCall(event: AfterToolEvent, ctx: ToolContext): Promise<void> {
-    const traceKey = computeTraceKey(event, ctx);
-    const trace = this.traces.get(traceKey);
-    if (trace) {
-      this.traces.delete(traceKey);
+    const hookStartedAt = Date.now();
+    let decisionForLog: GuardDecision = "allow";
+    this.bindGatewayContextFromToolContext(ctx);
+    try {
+      const traceKey = computeTraceKey(event, ctx);
+      const trace = this.traces.get(traceKey);
+      if (trace) {
+        this.traces.delete(traceKey);
+      }
+      const durationMs = typeof event.durationMs === "number" && Number.isFinite(event.durationMs)
+        ? Math.floor(event.durationMs)
+        : trace
+          ? Math.max(0, Date.now() - trace.startedAtMs)
+          : null;
+      const paramsPreview = trace?.paramsPreview ?? buildParamsPreview(event.params ?? {});
+      const decision = trace?.decision ?? "allow";
+      decisionForLog = decision;
+      const result = event.error ? "error" : "ok";
+      const policy = this.resolveEffectivePolicy(ctx);
+      await this.appendAudit({
+        traceId: trace?.traceId ?? `${event.runId ?? "run"}:${event.toolCallId ?? "tool"}:${sha256(`${event.toolName}:${Date.now()}`).slice(0, 8)}`,
+        runId: event.runId ?? trace?.runId ?? null,
+        sessionKey: ctx.sessionKey ?? trace?.sessionKey ?? null,
+        agentId: ctx.agentId ?? trace?.agentId ?? null,
+        toolName: event.toolName,
+        risk: trace?.risk ?? "low",
+        action: trace?.action ?? "allow",
+        decision,
+        durationMs,
+        result,
+        paramsPreview,
+        policyVersion: trace?.policyVersion ?? this.securityPolicyVersion,
+        policyPreset: trace?.policyPreset ?? policy.preset,
+        ruleId: trace?.ruleId ?? "after_tool_call",
+        requiredCapabilities: trace?.requiredCapabilities ?? deriveRequiredCapabilities(normalizeToolName(event.toolName), event.params ?? {}),
+        ts: Date.now(),
+      });
+    } finally {
+      const hookDurationMs = Math.max(0, Date.now() - hookStartedAt);
+      this.warnSlowPath("after_tool_call", hookDurationMs, this.diagnostics.slowAfterToolCallMs, {
+        runId: event.runId ?? null,
+        toolCallId: event.toolCallId ?? null,
+        toolName: event.toolName,
+        decision: decisionForLog,
+      });
     }
-    const durationMs = typeof event.durationMs === "number" && Number.isFinite(event.durationMs)
-      ? Math.floor(event.durationMs)
-      : trace
-        ? Math.max(0, Date.now() - trace.startedAtMs)
-        : null;
-    const paramsPreview = trace?.paramsPreview ?? buildParamsPreview(event.params ?? {});
-    const decision = trace?.decision ?? "allow";
-    const result = event.error ? "error" : "ok";
-    const policy = this.resolveEffectivePolicy(ctx);
-    await this.appendAudit({
-      traceId: trace?.traceId ?? `${event.runId ?? "run"}:${event.toolCallId ?? "tool"}:${sha256(`${event.toolName}:${Date.now()}`).slice(0, 8)}`,
-      runId: event.runId ?? trace?.runId ?? null,
-      sessionKey: ctx.sessionKey ?? trace?.sessionKey ?? null,
-      agentId: ctx.agentId ?? trace?.agentId ?? null,
-      toolName: event.toolName,
-      risk: trace?.risk ?? "low",
-      action: trace?.action ?? "allow",
-      decision,
-      durationMs,
-      result,
-      paramsPreview,
-      policyVersion: trace?.policyVersion ?? this.securityPolicyVersion,
-      policyPreset: trace?.policyPreset ?? policy.preset,
-      ruleId: trace?.ruleId ?? "after_tool_call",
-      requiredCapabilities: trace?.requiredCapabilities ?? deriveRequiredCapabilities(normalizeToolName(event.toolName), event.params ?? {}),
-      ts: Date.now(),
-    });
   }
 
   async queryAudits(query: GuardQuery): Promise<{

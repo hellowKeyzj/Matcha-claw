@@ -39,6 +39,50 @@ function sortTasksByTime(tasks: Task[]): Task[] {
   });
 }
 
+function areTaskListsEquivalent(left: Task[], right: Task[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a.id !== b.id) {
+      return false;
+    }
+    if ((a.workspaceDir || '') !== (b.workspaceDir || '')) {
+      return false;
+    }
+    if (a.status !== b.status) {
+      return false;
+    }
+    if (a.progress !== b.progress) {
+      return false;
+    }
+    if ((a.updated_at || 0) !== (b.updated_at || 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areStringListsEquivalent(left: string[], right: string[]): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function taskUniqueKey(task: Task): string {
   return `${task.id}@@${task.workspaceDir || ''}`;
 }
@@ -97,7 +141,12 @@ async function loadWorkspaceScope(): Promise<{ scope: string[]; label: string | 
 
 async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
   if (scope.length === 0) {
-    return [];
+    try {
+      const tasks = await listTasks();
+      return sortTasksByTime(filterUnfinishedTasks(tasks));
+    } catch {
+      return [];
+    }
   }
   const results = await Promise.allSettled(
     scope.map(async (workspaceDir) => {
@@ -183,17 +232,26 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
       return;
     }
     taskInboxRefreshPromise = (async () => {
-      set({ loading: true, error: null });
       try {
         const currentScope = get().workspaceDirs;
         const { scope, label } = currentScope.length > 0
           ? { scope: currentScope, label: get().workspaceLabel }
           : await loadWorkspaceScope();
         const tasks = await listTasksFromWorkspaceScope(scope);
-        set({
-          tasks,
-          workspaceDirs: scope,
-          workspaceLabel: label,
+        set((state) => {
+          if (
+            areTaskListsEquivalent(state.tasks, tasks)
+            && areStringListsEquivalent(state.workspaceDirs, scope)
+            && state.workspaceLabel === label
+          ) {
+            return state;
+          }
+          return {
+            ...state,
+            tasks,
+            workspaceDirs: scope,
+            workspaceLabel: label,
+          };
         });
       } catch (error) {
         set({
@@ -201,9 +259,6 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
         });
       } finally {
         taskInboxLastRefreshAtMs = Date.now();
-        set({
-          loading: false,
-        });
       }
     })();
     try {
