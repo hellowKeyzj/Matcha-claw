@@ -514,6 +514,51 @@ export function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     writeOpenClawConfigJson(nextConfig);
   }
 
+  function disableTaskPluginInConfig(pluginId: string): void {
+    const config = readOpenClawConfigJson();
+    let changed = false;
+
+    if (isRecord(config.plugins)) {
+      const plugins = { ...config.plugins };
+      if (Array.isArray(plugins.allow)) {
+        const allow = plugins.allow.filter((item): item is string => typeof item === 'string');
+        const nextAllow = allow.filter((item) => item !== pluginId);
+        if (nextAllow.length !== allow.length) {
+          plugins.allow = nextAllow;
+          changed = true;
+        }
+      }
+      if (isRecord(plugins.entries) && Object.prototype.hasOwnProperty.call(plugins.entries, pluginId)) {
+        const entries = { ...plugins.entries };
+        delete entries[pluginId];
+        plugins.entries = entries;
+        changed = true;
+      }
+      if (isRecord(plugins.installs) && Object.prototype.hasOwnProperty.call(plugins.installs, pluginId)) {
+        const installs = { ...plugins.installs };
+        delete installs[pluginId];
+        plugins.installs = installs;
+        changed = true;
+      }
+      if (changed) {
+        config.plugins = plugins;
+      }
+    }
+
+    if (isRecord(config.skills) && isRecord(config.skills.entries) && Object.prototype.hasOwnProperty.call(config.skills.entries, pluginId)) {
+      const skills = { ...config.skills };
+      const skillEntries = { ...config.skills.entries };
+      delete skillEntries[pluginId];
+      skills.entries = skillEntries;
+      config.skills = skills;
+      changed = true;
+    }
+
+    if (changed) {
+      writeOpenClawConfigJson(config);
+    }
+  }
+
   function ensurePluginInstallRecordInConfig(pluginId: string, audit: PluginInstallAudit): void {
     const config = readOpenClawConfigJson();
     const { nextConfig, changed } = upsertPluginInstallRecord(config, {
@@ -884,6 +929,38 @@ export function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
       logger.error('Failed to install task manager plugin:', error);
       return {
         success: false,
+        error: String(error),
+      };
+    }
+  });
+
+  // Uninstall and disable task-manager plugin
+  ipcMain.handle('task:pluginUninstall', async () => {
+    const pluginId = 'task-manager';
+    const pluginDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+    const wasInstalled = existsSync(pluginDir) || existsSync(manifestPath);
+    try {
+      disableTaskPluginInConfig(pluginId);
+      rmSync(pluginDir, { recursive: true, force: true });
+      scheduleGatewayChannelRestart('task:pluginUninstall');
+
+      return {
+        success: true,
+        installed: false,
+        enabled: false,
+        skillEnabled: false,
+        removedPath: pluginDir,
+        wasInstalled,
+      };
+    } catch (error) {
+      logger.error('Failed to uninstall task manager plugin:', error);
+      return {
+        success: false,
+        installed: existsSync(manifestPath),
+        enabled: false,
+        skillEnabled: false,
+        removedPath: pluginDir,
         error: String(error),
       };
     }

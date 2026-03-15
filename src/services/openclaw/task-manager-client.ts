@@ -188,3 +188,14 @@ export async function installTaskPlugin(): Promise<{
 }> {
   return invokeIpc('task:pluginInstall');
 }
+
+export async function uninstallTaskPlugin(): Promise<{
+  success: boolean;
+  installed?: boolean;
+  enabled?: boolean;
+  skillEnabled?: boolean;
+  removedPath?: string;
+  error?: string;
+}> {
+  return invokeIpc('task:pluginUninstall');
+}

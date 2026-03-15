@@ -18,6 +18,10 @@ interface TaskInboxPanelProps {
   onToggleCollapse?: () => void;
 }
 
+const TASK_INBOX_POLL_FAST_MS = 5_000;
+const TASK_INBOX_POLL_NORMAL_MS = 15_000;
+const TASK_INBOX_POLL_BACKGROUND_MS = 60_000;
+
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'running') {
     return 'default';
@@ -61,6 +65,15 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
 
   const [inputDraftByConfirmId, setInputDraftByConfirmId] = useState<Record<string, string>>({});
   const unfinishedCount = tasks.length;
+  const hasActiveTasks = useMemo(
+    () =>
+      tasks.some((task) =>
+        task.status === 'pending'
+        || task.status === 'running'
+        || task.status === 'waiting_for_input'
+        || task.status === 'waiting_approval'),
+    [tasks],
+  );
 
   useEffect(() => {
     if (!isGatewayRunning) {
@@ -77,11 +90,57 @@ export function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInbo
     if (!isGatewayRunning) {
       return;
     }
-    const timer = window.setInterval(() => {
-      void refreshTasks();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [isGatewayRunning, refreshTasks]);
+    let timer: number | undefined;
+    let disposed = false;
+
+    const clearTimer = () => {
+      if (typeof timer === 'number') {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
+    const resolveDelay = () => {
+      if (document.visibilityState !== 'visible') {
+        return TASK_INBOX_POLL_BACKGROUND_MS;
+      }
+      return hasActiveTasks ? TASK_INBOX_POLL_FAST_MS : TASK_INBOX_POLL_NORMAL_MS;
+    };
+
+    const scheduleNext = () => {
+      if (disposed) {
+        return;
+      }
+      clearTimer();
+      timer = window.setTimeout(() => {
+        void refreshTasks().finally(() => {
+          scheduleNext();
+        });
+      }, resolveDelay());
+    };
+
+    const handleVisibilityChange = () => {
+      if (disposed) {
+        return;
+      }
+      clearTimer();
+      if (document.visibilityState === 'visible') {
+        void refreshTasks().finally(() => {
+          scheduleNext();
+        });
+        return;
+      }
+      scheduleNext();
+    };
+
+    scheduleNext();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      disposed = true;
+      clearTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [hasActiveTasks, isGatewayRunning, refreshTasks]);
 
   const taskViews = useMemo(() => {
     return tasks.map((task) => {

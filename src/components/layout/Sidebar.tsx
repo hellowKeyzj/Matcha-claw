@@ -29,7 +29,7 @@ import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo } from 'react';
 
 interface NavItemProps {
   to: string;
@@ -94,70 +94,17 @@ function NavItem({ to, icon, label, collapsed, onMouseEnter }: NavItemProps) {
   );
 }
 
-export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarProps) {
-  const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
-  const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
-  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
-  const newSession = useChatStore((state) => state.newSession);
-  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
-  const sessionLabels = useChatStore((state) => state.sessionLabels);
-  const chatSessions = useChatStore((state) => state.sessions);
-  const gatewayState = useGatewayStore((state) => state.status.state);
+const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const taskCenterTasks = useTaskCenterStore((state) => state.tasks);
   const blockedQueue = useTaskCenterStore((state) => state.blockedQueue);
-  const initTaskCenter = useTaskCenterStore((state) => state.init);
-  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-
-  const navigate = useNavigate();
-  const location = useLocation();
-  const isOnChat = location.pathname === '/';
-  const { t } = useTranslation();
-
-  const openDevConsole = async () => {
-    try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        url?: string;
-        error?: string;
-      }>('/api/gateway/control-ui');
-      if (result.success && result.url) {
-        window.electron.openExternal(result.url);
-      } else {
-        console.error('Failed to get Dev Console URL:', result.error);
-      }
-    } catch (error) {
-      console.error('Error opening Dev Console:', error);
-    }
-  };
-
-  const navItems = [
-    { to: '/tasks', icon: <ListTodo className="h-5 w-5" />, label: t('sidebar.tasks') },
-    { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },
-    { to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') },
-    { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
-    { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
-    { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
-    { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
-    { to: '/security', icon: <ShieldCheck className="h-5 w-5" />, label: t('sidebar.security') },
-  ];
-
-  const prefetchSkillsOnHover = useCallback(() => {
-    if (gatewayState !== 'running') {
-      return;
-    }
-    void fetchSkills();
-  }, [fetchSkills, gatewayState]);
-
-  useEffect(() => {
-    if (gatewayState !== 'running' || taskCenterInitialized) {
-      return;
-    }
-    void initTaskCenter();
-  }, [gatewayState, initTaskCenter, taskCenterInitialized]);
+  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
+  const sessionLabels = useChatStore((state) => state.sessionLabels);
+  const chatSessions = useChatStore((state) => state.sessions);
 
   const pendingBlockers = useMemo<PendingBlockerCard[]>(() => {
     const cards: PendingBlockerCard[] = [];
@@ -263,6 +210,124 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   }, [blockedQueue, chatSessions, mailboxByTeamId, pendingApprovalsBySession, sessionLabels, t, taskCenterTasks, teams]);
 
   return (
+    <section className="mt-3 rounded-lg border border-border/70 bg-muted/30 p-2">
+      <header className="mb-2 flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-foreground">{t('sidebar.pendingBlockers')}</h3>
+        <span className="text-[11px] text-muted-foreground">{pendingBlockers.length}</span>
+      </header>
+      {pendingBlockers.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border/70 px-2 py-3 text-center text-xs text-muted-foreground">
+          {t('sidebar.pendingBlockersEmpty')}
+        </div>
+      ) : (
+        <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+          {pendingBlockers.map((card) => (
+            <button
+              key={card.id}
+              type="button"
+              className="w-full rounded-md border border-border/70 bg-background px-2 py-2 text-left transition-colors hover:bg-accent/50"
+              onClick={() => {
+                if (card.source === 'team_mailbox') {
+                  setActiveTeam(card.teamId);
+                  navigate(`/teams/${card.teamId}`);
+                  return;
+                }
+                if (card.source === 'chat_approval' && card.sessionKey) {
+                  navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
+                  return;
+                }
+                navigate('/tasks');
+              }}
+            >
+              <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <span className="truncate">
+                  {card.source === 'team_mailbox'
+                    ? card.teamName
+                    : card.source === 'chat_approval'
+                      ? t('sidebar.pendingBlockerSourceChat')
+                      : t('sidebar.pendingBlockerSourceTask')}
+                </span>
+                <span>{formatMessageTime(card.createdAt)}</span>
+              </div>
+              <div className="mt-1 truncate text-xs font-medium text-foreground">
+                {card.title}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {simplifyMessage(card.content)}
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                {card.source === 'team_mailbox'
+                  ? t('sidebar.pendingBlockerFrom', { from: card.from })
+                  : card.source === 'chat_approval'
+                    ? t('sidebar.pendingBlockerApprovalId', { id: card.from })
+                    : t('sidebar.pendingBlockerTaskId', { taskId: card.from })}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+});
+
+export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarProps) {
+  const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
+  const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const newSession = useChatStore((state) => state.newSession);
+  const gatewayState = useGatewayStore((state) => state.status.state);
+  const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
+  const initTaskCenter = useTaskCenterStore((state) => state.init);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+
+  const navigate = useNavigate();
+  const location = useLocation();
+  const isOnChat = location.pathname === '/';
+  const { t } = useTranslation();
+
+  const openDevConsole = async () => {
+    try {
+      const result = await hostApiFetch<{
+        success: boolean;
+        url?: string;
+        error?: string;
+      }>('/api/gateway/control-ui');
+      if (result.success && result.url) {
+        window.electron.openExternal(result.url);
+      } else {
+        console.error('Failed to get Dev Console URL:', result.error);
+      }
+    } catch (error) {
+      console.error('Error opening Dev Console:', error);
+    }
+  };
+
+  const navItems = [
+    { to: '/tasks', icon: <ListTodo className="h-5 w-5" />, label: t('sidebar.tasks') },
+    { to: '/subagents', icon: <Bot className="h-5 w-5" />, label: t('sidebar.subagents') },
+    { to: '/teams', icon: <Users className="h-5 w-5" />, label: t('sidebar.teams') },
+    { to: '/providers', icon: <KeyRound className="h-5 w-5" />, label: t('settings:aiProviders.title') },
+    { to: '/skills', icon: <Puzzle className="h-5 w-5" />, label: t('sidebar.skills') },
+    { to: '/channels', icon: <Radio className="h-5 w-5" />, label: t('sidebar.channels') },
+    { to: '/dashboard', icon: <Home className="h-5 w-5" />, label: t('sidebar.dashboard') },
+    { to: '/security', icon: <ShieldCheck className="h-5 w-5" />, label: t('sidebar.security') },
+  ];
+
+  const prefetchSkillsOnHover = useCallback(() => {
+    if (gatewayState !== 'running') {
+      return;
+    }
+    void fetchSkills();
+  }, [fetchSkills, gatewayState]);
+
+  useEffect(() => {
+    if (gatewayState !== 'running' || taskCenterInitialized) {
+      return;
+    }
+    void initTaskCenter();
+  }, [gatewayState, initTaskCenter, taskCenterInitialized]);
+
+  return (
     <aside
       className="relative flex shrink-0 flex-col border-r border-border/80 bg-card transition-all duration-300"
       style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
@@ -296,65 +361,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
           />
         ))}
 
-        {!sidebarCollapsed && (
-          <section className="mt-3 rounded-lg border border-border/70 bg-muted/30 p-2">
-            <header className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-semibold text-foreground">{t('sidebar.pendingBlockers')}</h3>
-              <span className="text-[11px] text-muted-foreground">{pendingBlockers.length}</span>
-            </header>
-            {pendingBlockers.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border/70 px-2 py-3 text-center text-xs text-muted-foreground">
-                {t('sidebar.pendingBlockersEmpty')}
-              </div>
-            ) : (
-              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-                {pendingBlockers.map((card) => (
-                  <button
-                    key={card.id}
-                    type="button"
-                    className="w-full rounded-md border border-border/70 bg-background px-2 py-2 text-left transition-colors hover:bg-accent/50"
-                    onClick={() => {
-                      if (card.source === 'team_mailbox') {
-                        setActiveTeam(card.teamId);
-                        navigate(`/teams/${card.teamId}`);
-                        return;
-                      }
-                      if (card.source === 'chat_approval' && card.sessionKey) {
-                        navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
-                        return;
-                      }
-                      navigate('/tasks');
-                    }}
-                  >
-                    <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                      <span className="truncate">
-                        {card.source === 'team_mailbox'
-                          ? card.teamName
-                          : card.source === 'chat_approval'
-                            ? t('sidebar.pendingBlockerSourceChat')
-                            : t('sidebar.pendingBlockerSourceTask')}
-                      </span>
-                      <span>{formatMessageTime(card.createdAt)}</span>
-                    </div>
-                    <div className="mt-1 truncate text-xs font-medium text-foreground">
-                      {card.title}
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {simplifyMessage(card.content)}
-                    </div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">
-                      {card.source === 'team_mailbox'
-                        ? t('sidebar.pendingBlockerFrom', { from: card.from })
-                        : card.source === 'chat_approval'
-                          ? t('sidebar.pendingBlockerApprovalId', { id: card.from })
-                          : t('sidebar.pendingBlockerTaskId', { taskId: card.from })}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
+        {!sidebarCollapsed && <SidebarPendingBlockers />}
       </nav>
 
       <div className="space-y-2 p-2">

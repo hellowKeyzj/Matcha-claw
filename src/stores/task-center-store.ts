@@ -123,6 +123,10 @@ function removeBlockedTask(queue: BlockedTaskItem[], taskId: string): BlockedTas
   return queue.filter((row) => row.taskId !== taskId);
 }
 
+const TASK_CENTER_REFRESH_MIN_GAP_MS = 1_200;
+let taskCenterRefreshPromise: Promise<void> | null = null;
+let taskCenterLastRefreshAtMs = 0;
+
 async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
   if (scope.length === 0) {
     const single = await listTasks();
@@ -204,20 +208,35 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
   },
 
   refreshTasks: async () => {
+    if (taskCenterRefreshPromise) {
+      await taskCenterRefreshPromise;
+      return;
+    }
+    if (Date.now() - taskCenterLastRefreshAtMs < TASK_CENTER_REFRESH_MIN_GAP_MS) {
+      return;
+    }
     if (get().loading) {
       return;
     }
-    set({ loading: true, error: null });
+    taskCenterRefreshPromise = (async () => {
+      set({ loading: true, error: null });
+      try {
+        const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);
+        set({
+          tasks,
+          blockedQueue: collectBlockedQueueFromTasks(tasks),
+        });
+      } catch (error) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        taskCenterLastRefreshAtMs = Date.now();
+        set({ loading: false });
+      }
+    })();
     try {
-      const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);
-      set({
-        tasks,
-        blockedQueue: collectBlockedQueueFromTasks(tasks),
-      });
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      await taskCenterRefreshPromise;
     } finally {
-      set({ loading: false });
+      taskCenterRefreshPromise = null;
     }
   },
 

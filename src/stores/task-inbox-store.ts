@@ -133,6 +133,10 @@ function extractTaskFromNotification(params: Record<string, unknown>): Task | un
   return params.task as Task;
 }
 
+const TASK_INBOX_REFRESH_MIN_GAP_MS = 1_200;
+let taskInboxRefreshPromise: Promise<void> | null = null;
+let taskInboxLastRefreshAtMs = 0;
+
 export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
   tasks: [],
   loading: false,
@@ -168,29 +172,44 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
   },
 
   refreshTasks: async () => {
+    if (taskInboxRefreshPromise) {
+      await taskInboxRefreshPromise;
+      return;
+    }
+    if (Date.now() - taskInboxLastRefreshAtMs < TASK_INBOX_REFRESH_MIN_GAP_MS) {
+      return;
+    }
     if (get().loading) {
       return;
     }
-    set({ loading: true, error: null });
+    taskInboxRefreshPromise = (async () => {
+      set({ loading: true, error: null });
+      try {
+        const currentScope = get().workspaceDirs;
+        const { scope, label } = currentScope.length > 0
+          ? { scope: currentScope, label: get().workspaceLabel }
+          : await loadWorkspaceScope();
+        const tasks = await listTasksFromWorkspaceScope(scope);
+        set({
+          tasks,
+          workspaceDirs: scope,
+          workspaceLabel: label,
+        });
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        taskInboxLastRefreshAtMs = Date.now();
+        set({
+          loading: false,
+        });
+      }
+    })();
     try {
-      const currentScope = get().workspaceDirs;
-      const { scope, label } = currentScope.length > 0
-        ? { scope: currentScope, label: get().workspaceLabel }
-        : await loadWorkspaceScope();
-      const tasks = await listTasksFromWorkspaceScope(scope);
-      set({
-        tasks,
-        workspaceDirs: scope,
-        workspaceLabel: label,
-      });
-    } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : String(error),
-      });
+      await taskInboxRefreshPromise;
     } finally {
-      set({
-        loading: false,
-      });
+      taskInboxRefreshPromise = null;
     }
   },
 

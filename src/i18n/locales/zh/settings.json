@@ -127,12 +127,15 @@
     "path": "插件路径",
     "install": "安装",
     "reinstall": "重装",
+    "uninstall": "卸载",
     "refresh": "刷新",
     "notInstalled": "未安装",
     "installedEnabled": "已安装并启用",
     "installedDisabled": "已安装但未启用",
     "toastInstallSuccess": "任务插件安装成功",
     "toastInstallFailed": "安装任务插件失败: {{error}}",
+    "toastUninstallSuccess": "任务插件卸载成功",
+    "toastUninstallFailed": "卸载任务插件失败: {{error}}",
     "toastStatusFailed": "读取任务插件状态失败: {{error}}"
   },
   "license": {

@@ -8,8 +8,12 @@ import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 
-const ORCHESTRATOR_TICK_MS = 2_500;
-const SNAPSHOT_REFRESH_MS = 3_000;
+const ORCHESTRATOR_TICK_ACTIVE_MS = 2_500;
+const ORCHESTRATOR_TICK_IDLE_MS = 8_000;
+const ORCHESTRATOR_TICK_BACKGROUND_MS = 20_000;
+const SNAPSHOT_REFRESH_ACTIVE_MS = 3_000;
+const SNAPSHOT_REFRESH_IDLE_MS = 10_000;
+const SNAPSHOT_REFRESH_BACKGROUND_MS = 25_000;
 const HEARTBEAT_TICK_MS = 20_000;
 const CHAT_SEND_TIMEOUT_MS = 180_000;
 const HISTORY_TIMEOUT_MS = 30_000;
@@ -187,29 +191,48 @@ function hasBlockedQuestion(mailbox: TeamMailboxMessage[], taskId: string): bool
 }
 
 export class TeamsBackgroundOrchestrator {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private busyAgentKeys = new Set<string>();
   private lastRefreshAtByTeamId = new Map<string, number>();
   private planningHandledByMessageId = new Set<string>();
   private tickRunning = false;
+  private visibilityHandlerBound = false;
+
+  private handleVisibilityChange = () => {
+    if (!useTeamsRunnerStore.getState().daemonRunning) {
+      return;
+    }
+    this.scheduleNextTick(0);
+  };
+
+  private isDocumentVisible(): boolean {
+    if (typeof document === 'undefined') {
+      return true;
+    }
+    return document.visibilityState === 'visible';
+  }
 
   start(): void {
     if (this.timer) {
       return;
     }
     useTeamsRunnerStore.getState().setDaemonRunning(true);
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, ORCHESTRATOR_TICK_MS);
-    void this.tick();
+    if (!this.visibilityHandlerBound && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+      this.visibilityHandlerBound = true;
+    }
+    this.scheduleNextTick(0);
   }
 
   stop(): void {
-    if (!this.timer) {
-      return;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
     }
-    clearInterval(this.timer);
-    this.timer = null;
+    if (this.visibilityHandlerBound && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+      this.visibilityHandlerBound = false;
+    }
     this.busyAgentKeys.clear();
     this.lastRefreshAtByTeamId.clear();
     useTeamsRunnerStore.getState().resetRuntimeState();
@@ -220,10 +243,70 @@ export class TeamsBackgroundOrchestrator {
     return useGatewayStore.getState().status.state === 'running';
   }
 
+  private hasActiveWorkForTeam(teamId: string): boolean {
+    const tasks = this.getTeamTasks(teamId);
+    return tasks.some((task) => (
+      task.status === 'todo'
+      || task.status === 'claimed'
+      || task.status === 'running'
+      || task.status === 'blocked'
+    ));
+  }
+
+  private hasAnyActiveWork(): boolean {
+    const teamsStore = useTeamsStore.getState();
+    const runnerStore = useTeamsRunnerStore.getState();
+    for (const team of teamsStore.teams) {
+      if (!runnerStore.isTeamEnabled(team.id)) {
+        continue;
+      }
+      if (this.hasActiveWorkForTeam(team.id)) {
+        return true;
+      }
+      const activeAgents = runnerStore.activeAgentIdsByTeamId[team.id] ?? [];
+      if (activeAgents.length > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private resolveTickIntervalMs(): number {
+    if (!this.isDocumentVisible()) {
+      return ORCHESTRATOR_TICK_BACKGROUND_MS;
+    }
+    return this.hasAnyActiveWork() ? ORCHESTRATOR_TICK_ACTIVE_MS : ORCHESTRATOR_TICK_IDLE_MS;
+  }
+
+  private resolveSnapshotRefreshIntervalMs(teamId: string): number {
+    if (!this.isDocumentVisible()) {
+      return SNAPSHOT_REFRESH_BACKGROUND_MS;
+    }
+    return this.hasActiveWorkForTeam(teamId) ? SNAPSHOT_REFRESH_ACTIVE_MS : SNAPSHOT_REFRESH_IDLE_MS;
+  }
+
+  private scheduleNextTick(delayMs?: number): void {
+    if (!useTeamsRunnerStore.getState().daemonRunning) {
+      return;
+    }
+    const delay = typeof delayMs === 'number' ? delayMs : this.resolveTickIntervalMs();
+    if (this.timer) {
+      clearTimeout(this.timer);
+    }
+    this.timer = setTimeout(() => {
+      void this.tick().finally(() => {
+        if (!useTeamsRunnerStore.getState().daemonRunning) {
+          return;
+        }
+        this.scheduleNextTick();
+      });
+    }, delay);
+  }
+
   private async ensureFreshSnapshot(teamId: string): Promise<void> {
     const now = Date.now();
     const lastAt = this.lastRefreshAtByTeamId.get(teamId) ?? 0;
-    if (now - lastAt < SNAPSHOT_REFRESH_MS) {
+    if (now - lastAt < this.resolveSnapshotRefreshIntervalMs(teamId)) {
       return;
     }
     this.lastRefreshAtByTeamId.set(teamId, now);
@@ -545,6 +628,9 @@ export class TeamsBackgroundOrchestrator {
 
   private async tick(): Promise<void> {
     if (this.tickRunning) {
+      return;
+    }
+    if (!useTeamsRunnerStore.getState().daemonRunning) {
       return;
     }
     this.tickRunning = true;

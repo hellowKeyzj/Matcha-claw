@@ -1,5 +1,54 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-15 启动交互性能优化：懒加载、后台预热、降订阅、动态降频）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── App.tsx
+│   ├── components/layout/
+│   │   └── Sidebar.tsx
+│   ├── features/teams/runtime/
+│   │   └── orchestrator.ts
+│   ├── pages/Chat/components/
+│   │   └── TaskInboxPanel.tsx
+│   └── stores/
+│       ├── teams.ts
+│       ├── task-center-store.ts
+│       └── task-inbox-store.ts
+```
+
+### 文件职责
+
+- `src/App.tsx`：重页面路由改为懒加载，并在空闲阶段串行后台预热页面代码 chunk。
+- `src/components/layout/Sidebar.tsx`：将待处理阻塞信息聚合从主导航壳体拆分为独立子组件，降低主 Sidebar 订阅与重渲染压力。
+- `src/features/teams/runtime/orchestrator.ts`：团队守护循环改为动态 tick 与动态快照刷新频率（活跃/空闲/后台）。
+- `src/pages/Chat/components/TaskInboxPanel.tsx`：任务收件箱轮询改为动态频率（活跃快、空闲慢、后台更慢）。
+- `src/stores/teams.ts`：`refreshSnapshot/pullMailbox` 新增并发合并与最小间隔去重，避免重复拉取。
+- `src/stores/task-center-store.ts`：任务中心刷新新增并发合并与最小间隔去重。
+- `src/stores/task-inbox-store.ts`：任务收件箱刷新新增并发合并与最小间隔去重。
+
+### 模块依赖与边界
+
+- 未引入新进程或新服务；性能优化全部在现有 Renderer + Zustand 架构内完成。
+- 路由懒加载与后台预热仅影响页面代码加载时机，不改变业务接口协议。
+- Teams/Task 的降频与去重只影响“拉取频率与并发行为”，不改变任务状态机语义。
+
+### 关键决策与原因
+
+1. 采用“懒加载 + 空闲预热”组合：兼顾启动轻量与页面瞬切体感。
+2. 将 Sidebar 重订阅聚合拆出主壳体：隔离高频状态更新对导航交互的干扰。
+3. 采用动态频率与去重：减少后台重复 IO 和无效 store 广播，稳定主线程负载。
+
+### 本次变更
+
+- 重页面（Tasks/Skills/SubAgents/Settings/Dashboard）支持懒加载并加入空闲串行预热。
+- Sidebar 的阻塞卡片改为独立 memo 子组件订阅与渲染。
+- Teams 守护循环从固定频率升级为活跃/空闲/后台动态频率。
+- Task 相关轮询改为动态频率，并在 store 层增加刷新去重（in-flight merge + 最小间隔）。
+
 ## 本次变更日志（2026-03-15 Guardian 策略语义补齐：preset/白名单/不可变红线）
 
 ### 目录树

@@ -126,12 +126,15 @@
     "path": "プラグインパス",
     "install": "インストール",
     "reinstall": "再インストール",
+    "uninstall": "アンインストール",
     "refresh": "更新",
     "notInstalled": "未インストール",
     "installedEnabled": "インストール済み・有効",
     "installedDisabled": "インストール済み・無効",
     "toastInstallSuccess": "タスクプラグインをインストールしました",
     "toastInstallFailed": "タスクプラグインのインストールに失敗しました: {{error}}",
+    "toastUninstallSuccess": "タスクプラグインをアンインストールしました",
+    "toastUninstallFailed": "タスクプラグインのアンインストールに失敗しました: {{error}}",
     "toastStatusFailed": "タスクプラグイン状態の取得に失敗しました: {{error}}"
   },
   "license": {
