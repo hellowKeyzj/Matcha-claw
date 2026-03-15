@@ -1,5 +1,60 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-15 审批同 Run 续跑 + chat.send 等待态 + Guardian 审计）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/
+│   └── openclaw-task-manager-plugin/
+│       └── src/
+│           ├── guardian.ts
+│           └── index.ts
+├── src/
+│   ├── pages/Chat/index.tsx
+│   └── i18n/locales/
+│       ├── zh/chat.json
+│       ├── en/chat.json
+│       └── ja/chat.json
+└── tests/
+    └── unit/
+        └── guardian-plugin.test.ts
+```
+
+### 文件职责
+
+- `packages/openclaw-task-manager-plugin/src/guardian.ts`：实现 Tool Guard 策略判定、`before_tool_call` 审批等待、`after_tool_call` 审计落库与脱敏查询。
+- `packages/openclaw-task-manager-plugin/src/index.ts`：接入 Guardian 控制器，绑定网关上下文并新增 `guardian.audit.query` 网关方法。
+- `src/pages/Chat/index.tsx`：在“等待审批”态展示审批卡片，提供 `allow-once / allow-always / deny` 操作。
+- `src/i18n/locales/*/chat.json`：补齐审批操作面板文案。
+- `tests/unit/guardian-plugin.test.ts`：覆盖同 Run 审批续跑、拒绝阻断与审计脱敏查询。
+
+### 模块依赖与边界
+
+- 审批等待逻辑落在 OpenClaw 插件 Hook 层，不改 OpenClaw 内核源码。
+- 聊天前端继续通过 `gateway:notification` 消费 `exec.approval.requested/resolved`，不新增前端协议。
+- 审计存储采用主进程内同进程 SQLite（`node:sqlite`），不引入独立后端服务/独立进程。
+
+### 关键决策与原因
+
+1. `before_tool_call` 内阻塞等待审批结果，确保被拦工具调用在同一 `runId` 内续跑，不走 follow-up run。
+2. 审计只记录参数脱敏摘要与哈希，不落敏感明文，满足“可追溯 + 最小泄露面”。
+3. 前端在等待审批时提供会话内就地审批动作，减少“切会话后无反馈”的误解成本。
+
+### 本次变更
+
+- 新增 Guardian 控制器并接入插件 Hook：
+  - `confirm` 路径：`request -> waitDecision -> allow/deny` 同步等待；
+  - `deny` 路径：即时阻断并落审计；
+  - `after_tool_call`：记录 `tool/risk/action/decision/duration/result`。
+- 新增 `guardian.audit.query` 网关查询（分页 + agent/run/session/risk/action/time 过滤）。
+- Chat 页面新增审批操作卡（同意一次/始终同意/拒绝）。
+- 补齐中英日审批文案。
+- 验证通过：
+  - `pnpm test -- tests/unit/guardian-plugin.test.ts tests/unit/chat-approval-flow.test.ts tests/unit/gateway-events.test.ts tests/unit/sidebar.chat-nav.test.tsx`
+  - `pnpm run typecheck`
+
 ## 本次变更日志（2026-03-15 Subagent 模板内置化 + 一键加载）
 
 ### 目录树

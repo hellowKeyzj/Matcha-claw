@@ -45,13 +45,14 @@ interface SidebarProps {
 
 interface PendingBlockerCard {
   id: string;
-  source: 'team_mailbox' | 'task_manager';
+  source: 'team_mailbox' | 'task_manager' | 'chat_approval';
   teamId: string;
   teamName: string;
   title: string;
   content: string;
   from: string;
   createdAt: number;
+  sessionKey?: string;
 }
 
 function simplifyMessage(content: string): string {
@@ -97,6 +98,9 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore((state) => state.newSession);
+  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
+  const sessionLabels = useChatStore((state) => state.sessionLabels);
+  const chatSessions = useChatStore((state) => state.sessions);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
@@ -226,10 +230,35 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
       });
     }
 
+    const sessionDisplayNameByKey = new Map(
+      chatSessions.map((session) => [session.key, session.displayName || session.key]),
+    );
+    for (const [sessionKey, approvals] of Object.entries(pendingApprovalsBySession)) {
+      for (const approval of approvals) {
+        const toolName = typeof approval.toolName === 'string' && approval.toolName.trim().length > 0
+          ? approval.toolName.trim()
+          : 'tool-call';
+        const sessionLabel = sessionLabels[sessionKey]
+          || sessionDisplayNameByKey.get(sessionKey)
+          || sessionKey;
+        cards.push({
+          id: `chat-approval:${approval.id}`,
+          source: 'chat_approval',
+          teamId: '',
+          teamName: sessionLabel,
+          title: `${t('sidebar.pendingBlockerTypeApproval')} · ${toolName}`,
+          content: t('sidebar.pendingBlockerApprovalHint'),
+          from: approval.id,
+          createdAt: approval.createdAtMs,
+          sessionKey,
+        });
+      }
+    }
+
     return cards
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, 8);
-  }, [blockedQueue, mailboxByTeamId, t, taskCenterTasks, teams]);
+  }, [blockedQueue, chatSessions, mailboxByTeamId, pendingApprovalsBySession, sessionLabels, t, taskCenterTasks, teams]);
 
   return (
     <aside
@@ -288,6 +317,10 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
                         navigate(`/teams/${card.teamId}`);
                         return;
                       }
+                      if (card.source === 'chat_approval' && card.sessionKey) {
+                        navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
+                        return;
+                      }
                       navigate('/tasks');
                     }}
                   >
@@ -295,7 +328,9 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
                       <span className="truncate">
                         {card.source === 'team_mailbox'
                           ? card.teamName
-                          : t('sidebar.pendingBlockerSourceTask')}
+                          : card.source === 'chat_approval'
+                            ? t('sidebar.pendingBlockerSourceChat')
+                            : t('sidebar.pendingBlockerSourceTask')}
                       </span>
                       <span>{formatMessageTime(card.createdAt)}</span>
                     </div>
@@ -308,7 +343,9 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
                     <div className="mt-1 text-[11px] text-muted-foreground">
                       {card.source === 'team_mailbox'
                         ? t('sidebar.pendingBlockerFrom', { from: card.from })
-                        : t('sidebar.pendingBlockerTaskId', { taskId: card.from })}
+                        : card.source === 'chat_approval'
+                          ? t('sidebar.pendingBlockerApprovalId', { id: card.from })
+                          : t('sidebar.pendingBlockerTaskId', { taskId: card.from })}
                     </div>
                   </button>
                 ))}

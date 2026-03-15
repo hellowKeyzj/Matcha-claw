@@ -30,7 +30,10 @@
         "pendingBlockerTypeApproval": "审批阻塞",
         "pendingBlockerTypeInput": "输入阻塞",
         "pendingBlockerSourceTask": "任务中心",
-        "pendingBlockerTaskId": "任务ID {{taskId}}"
+        "pendingBlockerTaskId": "任务ID {{taskId}}",
+        "pendingBlockerSourceChat": "聊天会话",
+        "pendingBlockerApprovalId": "审批ID {{id}}",
+        "pendingBlockerApprovalHint": "当前有工具调用等待审批。"
     },
     "actions": {
         "save": "保存",

@@ -70,6 +70,19 @@ export interface ToolStatus {
   updatedAt: number;
 }
 
+export type ApprovalStatus = 'idle' | 'awaiting_approval';
+export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+
+export interface ApprovalItem {
+  id: string;
+  sessionKey: string;
+  runId?: string;
+  toolName?: string;
+  createdAtMs: number;
+  expiresAtMs?: number;
+  decision?: ApprovalDecision;
+}
+
 interface SessionRuntimeSnapshot {
   messages: RawMessage[];
   sending: boolean;
@@ -80,6 +93,7 @@ interface SessionRuntimeSnapshot {
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
   pendingToolImages: AttachedFileMeta[];
+  approvalStatus: ApprovalStatus;
 }
 
 interface ChatState {
@@ -98,6 +112,8 @@ interface ChatState {
   lastUserMessageAt: number | null;
   /** Images collected from tool results, attached to the next assistant message */
   pendingToolImages: AttachedFileMeta[];
+  approvalStatus: ApprovalStatus;
+  pendingApprovalsBySession: Record<string, ApprovalItem[]>;
 
   // Sessions
   sessions: ChatSession[];
@@ -122,6 +138,9 @@ interface ChatState {
   loadHistory: (quiet?: boolean) => Promise<void>;
   sendMessage: (text: string, attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>) => Promise<void>;
   abortRun: () => Promise<void>;
+  handleApprovalRequested: (payload: Record<string, unknown>) => void;
+  handleApprovalResolved: (payload: Record<string, unknown>) => void;
+  resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
@@ -1209,6 +1228,7 @@ function createEmptySessionRuntime(): SessionRuntimeSnapshot {
     pendingFinal: false,
     lastUserMessageAt: null,
     pendingToolImages: [],
+    approvalStatus: 'idle',
   };
 }
 
@@ -1223,6 +1243,7 @@ function snapshotCurrentSessionRuntime(state: ChatState): SessionRuntimeSnapshot
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
     pendingToolImages: cloneAttachedFiles(state.pendingToolImages) ?? [],
+    approvalStatus: state.approvalStatus,
   };
 }
 
@@ -1238,7 +1259,43 @@ function resolveSessionRuntime(snapshot: SessionRuntimeSnapshot | undefined): Se
     pendingFinal: snapshot.pendingFinal,
     lastUserMessageAt: snapshot.lastUserMessageAt,
     pendingToolImages: cloneAttachedFiles(snapshot.pendingToolImages) ?? [],
+    approvalStatus: snapshot.approvalStatus ?? 'idle',
   };
+}
+
+function normalizeApprovalDecision(value: unknown): ApprovalDecision | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'allow-once') return 'allow-once';
+  if (normalized === 'allow-always') return 'allow-always';
+  if (normalized === 'deny') return 'deny';
+  return undefined;
+}
+
+function normalizeApprovalTimestampMs(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return toMs(value);
+}
+
+function resolveApprovalSessionKey(payload: Record<string, unknown>): string | undefined {
+  const directSessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (directSessionKey) return directSessionKey;
+
+  const request = (payload.request && typeof payload.request === 'object')
+    ? payload.request as Record<string, unknown>
+    : undefined;
+  const nestedSessionKey = typeof request?.sessionKey === 'string' ? request.sessionKey.trim() : '';
+  if (nestedSessionKey) return nestedSessionKey;
+
+  return undefined;
+}
+
+function hasTimeoutSignal(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as Error & { code?: unknown };
+  const msg = String(err.message || error);
+  const code = typeof err.code === 'string' ? err.code.toUpperCase() : '';
+  return code.includes('TIMEOUT') || msg.toLowerCase().includes('timeout');
 }
 
 // ── Store ────────────────────────────────────────────────────────
@@ -1256,6 +1313,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingFinal: false,
   lastUserMessageAt: null,
   pendingToolImages: [],
+  approvalStatus: 'idle',
+  pendingApprovalsBySession: {},
 
   sessions: [],
   currentSessionKey: DEFAULT_SESSION_KEY,
@@ -1393,6 +1452,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       nextSessionRuntimeByKey[currentSessionKey] = snapshotCurrentSessionRuntime(state);
     }
     const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
+    const targetPendingApprovals = state.pendingApprovalsBySession[key] ?? [];
+    const targetApprovalStatus: ApprovalStatus = targetPendingApprovals.length > 0
+      ? 'awaiting_approval'
+      : targetRuntime.approvalStatus;
 
     set((s) => ({
       currentSessionKey: key,
@@ -1406,6 +1469,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingFinal: targetRuntime.pendingFinal,
       lastUserMessageAt: targetRuntime.lastUserMessageAt,
       pendingToolImages: targetRuntime.pendingToolImages,
+      approvalStatus: targetApprovalStatus,
       sessionRuntimeByKey: nextSessionRuntimeByKey,
       ...(leavingEmpty ? {
         sessions: s.sessions.filter((s) => s.key !== currentSessionKey),
@@ -1489,11 +1553,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
             pendingFinal: nextRuntime.pendingFinal,
             lastUserMessageAt: nextRuntime.lastUserMessageAt,
             pendingToolImages: nextRuntime.pendingToolImages,
+            approvalStatus: nextRuntime.approvalStatus,
           };
         })(),
         sessions: remaining,
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+        pendingApprovalsBySession: Object.fromEntries(
+          Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
+        ),
         error: null,
         currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
       }));
@@ -1506,6 +1574,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
         sessionRuntimeByKey: Object.fromEntries(Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== key)),
+        pendingApprovalsBySession: Object.fromEntries(
+          Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
+        ),
       }));
     }
   },
@@ -1546,6 +1617,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionLastActivity: leavingEmpty
         ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
         : s.sessionLastActivity,
+      pendingApprovalsBySession: (() => {
+        if (!leavingEmpty) return s.pendingApprovalsBySession;
+        return Object.fromEntries(
+          Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== currentSessionKey),
+        );
+      })(),
       ...createEmptySessionRuntime(),
       error: null,
     }));
@@ -1571,6 +1648,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
       sessionRuntimeByKey: Object.fromEntries(
         Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== currentSessionKey),
+      ),
+      pendingApprovalsBySession: Object.fromEntries(
+        Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== currentSessionKey),
       ),
     }));
   },
@@ -1763,6 +1843,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: nowMs,
+      approvalStatus: 'idle',
     }));
 
     // 统一会话标题提取：优先用户有效文本；纯附件消息会等待 assistant 响应兜底。
@@ -1883,14 +1964,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
 
       if (!result.success) {
+        const state = get();
+        const pendingApprovals = state.pendingApprovalsBySession[currentSessionKey] ?? [];
+        if (pendingApprovals.length > 0) {
+          set({
+            error: null,
+            sending: true,
+            pendingFinal: true,
+            approvalStatus: 'awaiting_approval',
+          });
+          return;
+        }
         clearHistoryPoll();
         set({ error: result.error || 'Failed to send message', sending: false });
       } else if (result.result?.runId) {
         set({ activeRunId: result.result.runId });
       }
     } catch (err) {
+      const state = get();
+      const pendingApprovals = state.pendingApprovalsBySession[currentSessionKey] ?? [];
+      const hasApprovalEvidence = pendingApprovals.length > 0
+        || state.approvalStatus === 'awaiting_approval'
+        || state.activeRunId != null;
+      if (hasTimeoutSignal(err) && hasApprovalEvidence) {
+        set({
+          error: null,
+          sending: true,
+          pendingFinal: true,
+          approvalStatus: 'awaiting_approval',
+        });
+        return;
+      }
       clearHistoryPoll();
-      set({ error: String(err), sending: false });
+      set({ error: String(err), sending: false, approvalStatus: 'idle' });
     }
   },
 
@@ -1899,11 +2005,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
   abortRun: async () => {
     clearHistoryPoll();
     clearErrorRecoveryTimer();
-    const { currentSessionKey } = get();
-    set({ sending: false, streamingText: '', streamingMessage: null, pendingFinal: false, lastUserMessageAt: null, pendingToolImages: [] });
+    const { currentSessionKey, pendingApprovalsBySession } = get();
+    const pendingApprovals = pendingApprovalsBySession[currentSessionKey] ?? [];
+    set({
+      sending: false,
+      streamingText: '',
+      streamingMessage: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle',
+    });
     set({ streamingTools: [] });
 
     try {
+      for (const approval of pendingApprovals) {
+        await useGatewayStore.getState().rpc(
+          'exec.approval.resolve',
+          { id: approval.id, decision: 'deny' },
+        );
+      }
+      set((s) => ({
+        pendingApprovalsBySession: {
+          ...s.pendingApprovalsBySession,
+          [currentSessionKey]: [],
+        },
+      }));
       await useGatewayStore.getState().rpc(
         'chat.abort',
         { sessionKey: currentSessionKey },
@@ -1911,6 +2038,95 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       set({ error: String(err) });
     }
+  },
+
+  handleApprovalRequested: (payload: Record<string, unknown>) => {
+    const id = typeof payload.id === 'string' ? payload.id.trim() : '';
+    const sessionKey = resolveApprovalSessionKey(payload);
+    if (!id || !sessionKey) return;
+
+    const runId = typeof payload.runId === 'string' ? payload.runId.trim() : undefined;
+    const toolName = typeof payload.toolName === 'string' ? payload.toolName.trim() : undefined;
+    const createdAtMs = normalizeApprovalTimestampMs(payload.createdAt)
+      ?? normalizeApprovalTimestampMs(payload.requestedAt)
+      ?? Date.now();
+    const expiresAtMs = normalizeApprovalTimestampMs(payload.expiresAt);
+
+    set((state) => {
+      const existing = state.pendingApprovalsBySession[sessionKey] ?? [];
+      const filtered = existing.filter((item) => item.id !== id);
+      const nextItem: ApprovalItem = {
+        id,
+        sessionKey,
+        ...(runId ? { runId } : {}),
+        ...(toolName ? { toolName } : {}),
+        createdAtMs,
+        ...(expiresAtMs ? { expiresAtMs } : {}),
+      };
+      const nextSessionItems = [...filtered, nextItem].sort((a, b) => a.createdAtMs - b.createdAtMs);
+      const nextApprovals = {
+        ...state.pendingApprovalsBySession,
+        [sessionKey]: nextSessionItems,
+      };
+
+      return {
+        pendingApprovalsBySession: nextApprovals,
+        approvalStatus: sessionKey === state.currentSessionKey ? 'awaiting_approval' : state.approvalStatus,
+        sending: sessionKey === state.currentSessionKey ? true : state.sending,
+        pendingFinal: sessionKey === state.currentSessionKey ? true : state.pendingFinal,
+        activeRunId: sessionKey === state.currentSessionKey && runId
+          ? (state.activeRunId ?? runId)
+          : state.activeRunId,
+      };
+    });
+  },
+
+  handleApprovalResolved: (payload: Record<string, unknown>) => {
+    const id = typeof payload.id === 'string' ? payload.id.trim() : '';
+    if (!id) return;
+
+    const resolvedSessionKey = resolveApprovalSessionKey(payload);
+    const decision = normalizeApprovalDecision(payload.decision);
+
+    set((state) => {
+      let matchedSessionKey = resolvedSessionKey ?? '';
+      if (!matchedSessionKey) {
+        for (const [sessionKey, approvals] of Object.entries(state.pendingApprovalsBySession)) {
+          if (approvals.some((item) => item.id === id)) {
+            matchedSessionKey = sessionKey;
+            break;
+          }
+        }
+      }
+      if (!matchedSessionKey) return {};
+
+      const nextApprovals = { ...state.pendingApprovalsBySession };
+      const sessionApprovals = nextApprovals[matchedSessionKey] ?? [];
+      nextApprovals[matchedSessionKey] = sessionApprovals.filter((item) => item.id !== id);
+
+      const stillPendingCurrent = (nextApprovals[state.currentSessionKey] ?? []).length > 0;
+      return {
+        pendingApprovalsBySession: nextApprovals,
+        approvalStatus: stillPendingCurrent ? 'awaiting_approval' : 'idle',
+        ...(decision === 'deny' && matchedSessionKey === state.currentSessionKey
+          ? { pendingFinal: false, sending: false, activeRunId: null }
+          : {}),
+      };
+    });
+  },
+
+  resolveApproval: async (id: string, decision: ApprovalDecision) => {
+    const approvalId = id.trim();
+    if (!approvalId) return;
+    await useGatewayStore.getState().rpc(
+      'exec.approval.resolve',
+      { id: approvalId, decision },
+    );
+    get().handleApprovalResolved({
+      id: approvalId,
+      decision,
+      sessionKey: get().currentSessionKey,
+    });
   },
 
   // ── Handle incoming chat events from Gateway ──
@@ -2119,6 +2335,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // tool-use turns (thinking + tool blocks) from the Gateway's authoritative record.
           if (hasOutput && !toolOnly) {
             clearHistoryPoll();
+            const hasPendingApprovals = (get().pendingApprovalsBySession[get().currentSessionKey] ?? []).length > 0;
+            if (!hasPendingApprovals) {
+              set({ approvalStatus: 'idle' });
+            }
             void get().loadHistory(true);
           }
         } else {
@@ -2159,6 +2379,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           streamingTools: [],
           pendingFinal: false,
           pendingToolImages: [],
+          approvalStatus: 'idle',
         });
 
         // Don't immediately give up: the Gateway often retries internally
@@ -2202,6 +2423,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingFinal: false,
           lastUserMessageAt: null,
           pendingToolImages: [],
+          approvalStatus: 'idle',
         });
         break;
       }

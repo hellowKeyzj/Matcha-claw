@@ -11,13 +11,22 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "网关未连接...",
-        "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）"
+        "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
+        "approvalWaitingPlaceholder": "等待审批中..."
     },
     "noLogs": "（暂无日志）",
     "toolbar": {
         "refresh": "刷新聊天",
         "showThinking": "显示思考过程",
         "hideThinking": "隐藏思考过程"
+    },
+    "approval": {
+        "panelTitle": "审批待处理",
+        "pendingTool": "工具：{{tool}}",
+        "unknownTool": "未知工具",
+        "allowOnce": "同意一次",
+        "allowAlways": "始终同意",
+        "deny": "拒绝"
     },
     "historyBuckets": {
         "today": "今天",

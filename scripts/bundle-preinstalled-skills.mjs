@@ -4,6 +4,7 @@ import 'zx/globals';
 import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -55,7 +56,9 @@ function loadManifest() {
     throw new Error('Invalid preinstalled-skills manifest format');
   }
   for (const item of parsed.skills) {
-    if (!item.slug || !item.repo || !item.repoPath) {
+    const hasRepoSource = Boolean(item.repo && item.repoPath);
+    const hasUrlSource = Boolean(item.sourceUrl);
+    if (!item.slug || (!hasRepoSource && !hasUrlSource)) {
       throw new Error(`Invalid manifest entry: ${JSON.stringify(item)}`);
     }
   }
@@ -65,6 +68,9 @@ function loadManifest() {
 function groupByRepoRef(entries) {
   const grouped = new Map();
   for (const entry of entries) {
+    if (!entry.repo || !entry.repoPath) {
+      continue;
+    }
     const ref = entry.ref || 'main';
     const key = `${entry.repo}#${ref}`;
     if (!grouped.has(key)) grouped.set(key, { repo: entry.repo, ref, entries: [] });
@@ -79,6 +85,28 @@ function createRepoDirName(repo, ref) {
 
 function toShellPath(path) {
   return path.replaceAll('\\', '/');
+}
+
+async function fetchSkillFromUrl(sourceUrl) {
+  const response = await fetch(sourceUrl, {
+    headers: {
+      'User-Agent': 'MatchaClaw-preinstalled-skills-bundler',
+      Accept: 'text/plain, text/markdown, */*',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+  const content = await response.text();
+  const normalized = content.replace(/^\uFEFF/, '');
+  if (!normalized.trim()) {
+    throw new Error('Downloaded skill content is empty');
+  }
+  return normalized;
+}
+
+function hashSkillContent(content) {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
 async function fetchRepoSnapshot(repo, ref, paths, checkoutDir) {
@@ -122,7 +150,10 @@ const lock = {
   skills: [],
 };
 
-const groups = groupByRepoRef(manifestSkills);
+const repoBackedSkills = manifestSkills.filter((entry) => entry.repo && entry.repoPath);
+const urlBackedSkills = manifestSkills.filter((entry) => entry.sourceUrl);
+
+const groups = groupByRepoRef(repoBackedSkills);
 for (const group of groups) {
   const repoDir = join(TMP_ROOT, createRepoDirName(group.repo, group.ref));
   const sparsePaths = [...new Set(group.entries.map((entry) => entry.repoPath))];
@@ -162,6 +193,32 @@ for (const group of groups) {
 
     echo`   OK ${entry.slug}`;
   }
+}
+
+for (const entry of urlBackedSkills) {
+  const targetDir = join(OUTPUT_ROOT, entry.slug);
+  echo`Fetching ${entry.sourceUrl} -> ${entry.slug}`;
+  const content = await runWithRetry(`download ${entry.slug}`, async () => fetchSkillFromUrl(entry.sourceUrl));
+
+  rmSync(targetDir, { recursive: true, force: true });
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(join(targetDir, 'SKILL.md'), content, 'utf8');
+
+  const contentHash = hashSkillContent(content);
+  const requestedVersion = (entry.version || '').trim();
+  const resolvedVersion = !requestedVersion || requestedVersion === 'main'
+    ? `url-${contentHash.slice(0, 12)}`
+    : requestedVersion;
+
+  lock.skills.push({
+    slug: entry.slug,
+    version: resolvedVersion,
+    sourceUrl: entry.sourceUrl,
+    ref: 'url',
+    commit: contentHash,
+  });
+
+  echo`   OK ${entry.slug}`;
 }
 
 writeFileSync(join(OUTPUT_ROOT, '.preinstalled-lock.json'), `${JSON.stringify(lock, null, 2)}\n`, 'utf8');

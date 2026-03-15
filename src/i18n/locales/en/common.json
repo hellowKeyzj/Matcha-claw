@@ -30,7 +30,10 @@
         "pendingBlockerTypeApproval": "Approval Blocker",
         "pendingBlockerTypeInput": "Input Blocker",
         "pendingBlockerSourceTask": "Task Center",
-        "pendingBlockerTaskId": "Task ID {{taskId}}"
+        "pendingBlockerTaskId": "Task ID {{taskId}}",
+        "pendingBlockerSourceChat": "Chat",
+        "pendingBlockerApprovalId": "Approval ID {{id}}",
+        "pendingBlockerApprovalHint": "A tool call is waiting for your approval."
     },
     "actions": {
         "save": "Save",

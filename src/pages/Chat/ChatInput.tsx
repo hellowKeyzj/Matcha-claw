@@ -46,6 +46,7 @@ interface ChatInputProps {
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
+  approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
 }
 
@@ -148,6 +149,7 @@ export function ChatInput({
   onStop,
   disabled = false,
   sending = false,
+  approvalWaiting = false,
   mentionCandidates = [],
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
@@ -446,7 +448,11 @@ export function ChatInput({
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
-  const canSend = (input.trim() || attachments.length > 0 || selectedSkills.length > 0) && allReady && !disabled && !sending;
+  const canSend = (input.trim() || attachments.length > 0 || selectedSkills.length > 0)
+    && allReady
+    && !disabled
+    && !sending
+    && !approvalWaiting;
   const canStop = sending && !disabled && !!onStop;
 
   const handleSend = useCallback(() => {
@@ -634,7 +640,7 @@ export function ChatInput({
             size="icon"
             className="shrink-0 h-[44px] w-[44px]"
             onClick={pickFiles}
-            disabled={disabled || sending}
+            disabled={disabled || sending || approvalWaiting}
             title="Attach files"
           >
             <Paperclip className="h-4 w-4" />
@@ -685,7 +691,11 @@ export function ChatInput({
                   isComposingRef.current = false;
                 }}
                 onPaste={handlePaste}
-                placeholder={disabled ? t('input.gatewayDisconnectedPlaceholder') : t('input.messagePlaceholder')}
+                placeholder={disabled
+                  ? t('input.gatewayDisconnectedPlaceholder')
+                  : approvalWaiting
+                    ? t('input.approvalWaitingPlaceholder')
+                    : t('input.messagePlaceholder')}
                 disabled={disabled}
                 className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent p-0 pr-1 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
                 rows={1}
