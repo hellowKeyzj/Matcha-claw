@@ -11,13 +11,22 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
-        "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）"
+        "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）",
+        "approvalWaitingPlaceholder": "承認待ちです..."
     },
     "noLogs": "（ログはまだありません）",
     "toolbar": {
         "refresh": "チャットを更新",
         "showThinking": "思考を表示",
         "hideThinking": "思考を非表示"
+    },
+    "approval": {
+        "panelTitle": "承認待ち",
+        "pendingTool": "ツール: {{tool}}",
+        "unknownTool": "不明なツール",
+        "allowOnce": "今回のみ許可",
+        "allowAlways": "常に許可",
+        "deny": "拒否"
     },
     "historyBuckets": {
         "today": "今日",

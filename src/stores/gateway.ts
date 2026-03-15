@@ -38,6 +38,47 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     return;
   }
 
+  const extractApprovalPayload = (params: Record<string, unknown>): Record<string, unknown> => {
+    const request = (params.request && typeof params.request === 'object')
+      ? params.request as Record<string, unknown>
+      : undefined;
+    const data = (params.data && typeof params.data === 'object')
+      ? params.data as Record<string, unknown>
+      : undefined;
+    const sessionKey = params.sessionKey ?? data?.sessionKey ?? request?.sessionKey;
+    const runId = params.runId ?? data?.runId ?? request?.runId;
+    const toolName = params.toolName ?? data?.toolName ?? request?.toolName;
+    const createdAt = params.createdAt ?? data?.createdAt ?? request?.createdAt;
+    const expiresAt = params.expiresAt ?? data?.expiresAt ?? request?.expiresAt;
+    return {
+      ...params,
+      ...(request ? { request } : {}),
+      ...(sessionKey != null ? { sessionKey } : {}),
+      ...(runId != null ? { runId } : {}),
+      ...(toolName != null ? { toolName } : {}),
+      ...(createdAt != null ? { createdAt } : {}),
+      ...(expiresAt != null ? { expiresAt } : {}),
+    };
+  };
+
+  if (payload.method === 'exec.approval.requested') {
+    import('./chat')
+      .then(({ useChatStore }) => {
+        useChatStore.getState().handleApprovalRequested(extractApprovalPayload(payload.params!));
+      })
+      .catch(() => {});
+    return;
+  }
+
+  if (payload.method === 'exec.approval.resolved') {
+    import('./chat')
+      .then(({ useChatStore }) => {
+        useChatStore.getState().handleApprovalResolved(extractApprovalPayload(payload.params!));
+      })
+      .catch(() => {});
+    return;
+  }
+
   if (typeof payload.method === 'string' && payload.method.startsWith('task_')) {
     import('./task-inbox-store')
       .then(({ useTaskInboxStore }) => {

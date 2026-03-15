@@ -11,13 +11,22 @@
     },
     "input": {
         "gatewayDisconnectedPlaceholder": "Gateway not connected...",
-        "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)"
+        "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
+        "approvalWaitingPlaceholder": "Waiting for approval..."
     },
     "noLogs": "(No logs available yet)",
     "toolbar": {
         "refresh": "Refresh chat",
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
+    },
+    "approval": {
+        "panelTitle": "Approval required",
+        "pendingTool": "Tool: {{tool}}",
+        "unknownTool": "Unknown tool",
+        "allowOnce": "Allow once",
+        "allowAlways": "Always allow",
+        "deny": "Deny"
     },
     "historyBuckets": {
         "today": "Today",

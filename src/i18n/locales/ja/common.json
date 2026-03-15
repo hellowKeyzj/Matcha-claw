@@ -30,7 +30,10 @@
         "pendingBlockerTypeApproval": "承認待ち阻害",
         "pendingBlockerTypeInput": "入力待ち阻害",
         "pendingBlockerSourceTask": "タスクセンター",
-        "pendingBlockerTaskId": "タスクID {{taskId}}"
+        "pendingBlockerTaskId": "タスクID {{taskId}}",
+        "pendingBlockerSourceChat": "チャット",
+        "pendingBlockerApprovalId": "承認ID {{id}}",
+        "pendingBlockerApprovalHint": "ツール呼び出しが承認待ちです。"
     },
     "actions": {
         "save": "保存",

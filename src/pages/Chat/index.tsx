@@ -8,7 +8,7 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
-import { useChatStore, type RawMessage } from '@/stores/chat';
+import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
@@ -87,6 +87,9 @@ export function Chat() {
   const streamingMessage = useChatStore((s) => s.streamingMessage);
   const streamingTools = useChatStore((s) => s.streamingTools);
   const pendingFinal = useChatStore((s) => s.pendingFinal);
+  const approvalStatus = useChatStore((s) => s.approvalStatus);
+  const pendingApprovalsBySession = useChatStore((s) => s.pendingApprovalsBySession);
+  const resolveApproval = useChatStore((s) => s.resolveApproval);
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const switchSession = useChatStore((s) => s.switchSession);
@@ -241,6 +244,8 @@ export function Chat() {
   const hasStreamToolStatus = streamingTools.length > 0;
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
+  const waitingApproval = approvalStatus === 'awaiting_approval';
+  const currentPendingApprovals = pendingApprovalsBySession[currentSessionKey] ?? [];
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
   const assistantAvatarEmoji = resolveAgentEmoji(
@@ -307,11 +312,23 @@ export function Chat() {
                   />
                 )}
 
-                {sending && pendingFinal && !shouldRenderStreaming && (
+                {sending && waitingApproval && !shouldRenderStreaming && (
+                  <>
+                    <ActivityIndicator phase="approval_waiting" />
+                    {currentPendingApprovals.length > 0 && (
+                      <ApprovalActionsPanel
+                        approvals={currentPendingApprovals}
+                        onResolve={(id, decision) => void resolveApproval(id, decision)}
+                      />
+                    )}
+                  </>
+                )}
+
+                {sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && (
                   <ActivityIndicator phase="tool_processing" />
                 )}
 
-                {sending && !pendingFinal && !hasAnyStreamContent && (
+                {sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && (
                   <TypingIndicator />
                 )}
               </>
@@ -343,6 +360,7 @@ export function Chat() {
           onStop={abortRun}
           disabled={!isGatewayRunning}
           sending={sending}
+          approvalWaiting={waitingApproval}
         />
       </div>
 
@@ -417,8 +435,10 @@ function TypingIndicator() {
 
 // ── Activity Indicator (shown between tool cycles) ─────────────
 
-function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
-  void phase;
+function ActivityIndicator({ phase }: { phase: 'tool_processing' | 'approval_waiting' }) {
+  const label = phase === 'approval_waiting'
+    ? 'Waiting for approval...'
+    : 'Processing tool results...';
   return (
     <div className="flex gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-blue-600 text-white">
@@ -427,8 +447,55 @@ function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
       <div className="bg-muted rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>Processing tool results…</span>
+          <span>{label}</span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalActionsPanel({
+  approvals,
+  onResolve,
+}: {
+  approvals: ApprovalItem[];
+  onResolve: (id: string, decision: ApprovalDecision) => void;
+}) {
+  const { t } = useTranslation('chat');
+  return (
+    <div className="ml-11 rounded-xl border border-primary/20 bg-card p-3">
+      <div className="mb-2 text-sm font-medium text-foreground">{t('approval.panelTitle')}</div>
+      <div className="space-y-2">
+        {approvals.map((approval) => (
+          <div key={approval.id} className="rounded-lg border border-border/70 bg-background/70 p-2">
+            <div className="mb-2 text-xs text-muted-foreground">
+              {t('approval.pendingTool', { tool: approval.toolName || t('approval.unknownTool') })}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => onResolve(approval.id, 'allow-once')}
+                className="rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15"
+              >
+                {t('approval.allowOnce')}
+              </button>
+              <button
+                type="button"
+                onClick={() => onResolve(approval.id, 'allow-always')}
+                className="rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15"
+              >
+                {t('approval.allowAlways')}
+              </button>
+              <button
+                type="button"
+                onClick={() => onResolve(approval.id, 'deny')}
+                className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs font-medium text-destructive transition hover:bg-destructive/15"
+              >
+                {t('approval.deny')}
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

@@ -12,7 +12,7 @@ import i18n from '@/i18n';
 
 function LocationEcho() {
   const location = useLocation();
-  return <div data-testid="location-echo">{location.pathname}</div>;
+  return <div data-testid="location-echo">{`${location.pathname}${location.search}`}</div>;
 }
 
 function mountSidebar(initialPath: string) {
@@ -210,5 +210,33 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText(/Approval Blocker/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Deploy release pipeline/i }));
     expect(screen.getByTestId('location-echo')).toHaveTextContent('/tasks');
+  });
+
+  it('renders chat approval blockers and navigates to target chat session', () => {
+    setupSidebarState();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:analytics:main', displayName: 'agent:analytics:main' },
+      ],
+      pendingApprovalsBySession: {
+        'agent:analytics:main': [
+          {
+            id: 'approval-chat-1',
+            sessionKey: 'agent:analytics:main',
+            runId: 'run-chat-1',
+            toolName: 'browser.fetch',
+            createdAtMs: Date.now(),
+          },
+        ],
+      },
+    } as never);
+
+    mountSidebar('/dashboard');
+
+    expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Approval Blocker · browser.fetch/i }));
+    expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
   });
 });

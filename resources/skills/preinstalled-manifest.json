@@ -71,6 +71,12 @@
       "ref": "main",
       "version": "main",
       "autoEnable": true
+    },
+    {
+      "slug": "TuanziGuardianClaw",
+      "sourceUrl": "https://claw.mytuanzi.com/SKILL.md",
+      "version": "2026-03-15",
+      "autoEnable": true
     }
   ]
 }

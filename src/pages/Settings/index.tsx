@@ -1050,23 +1050,17 @@ export function Settings() {
                   {t('appearance.clearAvatar')}
                 </Button>
               </div>
-              <div className="ml-auto flex w-auto max-w-full items-center gap-3">
-                <div className="max-w-[240px]">
-                  <Label className="text-[15px] font-medium text-foreground/80">{t('appearance.launchAtStartup')}</Label>
-                  <p className="text-[13px] text-muted-foreground mt-1">
-                    {t('appearance.launchAtStartupDesc')}
-                  </p>
+                <div className="ml-auto flex w-auto max-w-full items-center gap-3">
+                  <div className="max-w-[240px]">
+                    <Label className="text-[15px] font-medium text-foreground/80">{t('appearance.launchAtStartup')}</Label>
+                  </div>
+                  <Switch
+                    checked={launchAtStartup}
+                    onCheckedChange={setLaunchAtStartup}
+                  />
                 </div>
-                <Switch
-                  checked={launchAtStartup}
-                  onCheckedChange={setLaunchAtStartup}
-                />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              {t('appearance.userAvatarHint')}
-            </p>
-          </div>
         </CardContent>
       </Card>
           )}
