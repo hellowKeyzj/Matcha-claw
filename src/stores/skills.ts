@@ -49,8 +49,10 @@ type MarketplaceSearchResult = {
 };
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
-const SKILLS_FETCH_MIN_INTERVAL_MS = 1500;
 const CLAWHUB_LIST_CACHE_TTL_MS = 30000;
+// Keep the top-level skills fetch cadence aligned with clawhub list cache TTL
+// so frequent page switching/hover prefetch doesn't re-trigger skills.status.
+const SKILLS_FETCH_MIN_INTERVAL_MS = CLAWHUB_LIST_CACHE_TTL_MS;
 const marketplaceSearchCache = new Map<string, {
   timestamp: number;
   results: MarketplaceSkill[];

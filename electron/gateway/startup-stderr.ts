@@ -28,6 +28,11 @@ export function classifyGatewayStderrMessage(message: string): GatewayStderrClas
   if (msg.includes('node: --require is not allowed in NODE_OPTIONS')) {
     return { level: 'debug', normalized: msg };
   }
+  // OpenClaw 在扫描 skills 时会对越界路径给出保护性告警。
+  // 该告警不影响 Gateway 生命周期，且在页面高频查询技能状态时会反复出现。
+  if (msg.includes('Skipping skill path that resolves outside its configured root')) {
+    return { level: 'debug', normalized: msg };
+  }
 
   return { level: 'warn', normalized: msg };
 }

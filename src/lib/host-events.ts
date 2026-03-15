@@ -42,7 +42,12 @@ export function subscribeHostEvent<T = unknown>(
     const listener = (payload: unknown) => {
       handler(payload as T);
     };
-    ipc.on(ipcChannel, listener);
+    const unsubscribe = ipc.on(ipcChannel, listener);
+    if (typeof unsubscribe === 'function') {
+      return () => {
+        unsubscribe();
+      };
+    }
     return () => {
       ipc.off(ipcChannel, listener);
     };

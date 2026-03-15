@@ -71,12 +71,16 @@ export function Dashboard() {
   }, []);
 
   // Fetch channels/skills only when gateway is running.
+  // 技能列表在 App 启动后已经预热过一次，仪表盘切换时仅在本地为空时再拉取，
+  // 避免频繁切页重复触发 skills.status（会引发 Gateway skills 扫描日志噪音）。
   useEffect(() => {
     if (isGatewayRunning) {
       fetchChannels();
-      fetchSkills();
+      if (skills.length === 0) {
+        void fetchSkills();
+      }
     }
-  }, [fetchChannels, fetchSkills, isGatewayRunning]);
+  }, [fetchChannels, fetchSkills, isGatewayRunning, skills.length]);
 
   // Fetch token usage history with retry when Gateway just restarted and
   // history data may not be ready yet.

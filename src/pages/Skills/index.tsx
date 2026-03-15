@@ -630,12 +630,14 @@ export function Skills() {
     return () => clearTimeout(timer);
   }, [isGatewayRunning]);
 
-  // Fetch skills on mount
+  // Fetch skills on mount.
+  // 技能数据通常在 App 启动预热/其他页面交互后已存在，切页进入技能页时
+  // 仅在本地为空才自动拉取，避免重复触发 skills.status 带来日志噪音。
   useEffect(() => {
-    if (isGatewayRunning) {
-      fetchSkills();
+    if (isGatewayRunning && skills.length === 0) {
+      void fetchSkills();
     }
-  }, [fetchSkills, isGatewayRunning]);
+  }, [fetchSkills, isGatewayRunning, skills.length]);
 
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
