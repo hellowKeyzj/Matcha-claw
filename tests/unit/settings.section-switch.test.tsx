@@ -7,18 +7,23 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
 import i18n from '@/i18n';
 
+const getTaskPluginStatusMock = vi.fn().mockResolvedValue({
+  installed: false,
+  enabled: false,
+  skillEnabled: false,
+  pluginDir: '/tmp/task-plugin',
+});
+const installTaskPluginMock = vi.fn().mockResolvedValue({ success: true });
+const uninstallTaskPluginMock = vi.fn().mockResolvedValue({ success: true });
+
 vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
-  getTaskPluginStatus: vi.fn().mockResolvedValue({
-    installed: false,
-    enabled: false,
-    skillEnabled: false,
-    pluginDir: '/tmp/task-plugin',
-  }),
-  installTaskPlugin: vi.fn().mockResolvedValue({ success: true }),
+  getTaskPluginStatus: (...args: unknown[]) => getTaskPluginStatusMock(...args),
+  installTaskPlugin: (...args: unknown[]) => installTaskPluginMock(...args),
+  uninstallTaskPlugin: (...args: unknown[]) => uninstallTaskPluginMock(...args),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -51,6 +56,17 @@ describe('settings page section switch', () => {
 
   beforeEach(() => {
     i18n.changeLanguage('en');
+    getTaskPluginStatusMock.mockReset();
+    installTaskPluginMock.mockReset();
+    uninstallTaskPluginMock.mockReset();
+    getTaskPluginStatusMock.mockResolvedValue({
+      installed: false,
+      enabled: false,
+      skillEnabled: false,
+      pluginDir: '/tmp/task-plugin',
+    });
+    installTaskPluginMock.mockResolvedValue({ success: true });
+    uninstallTaskPluginMock.mockResolvedValue({ success: true });
 
     useSettingsStore.setState((state) => ({
       ...state,
@@ -114,5 +130,27 @@ describe('settings page section switch', () => {
     expect(screen.getByRole('button', { name: 'Gateway' })).toBeInTheDocument();
     expect(screen.getByText('Status')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'AI Providers' })).not.toBeInTheDocument();
+  });
+
+  it('task plugin 已安装时显示卸载按钮并触发卸载', async () => {
+    getTaskPluginStatusMock.mockResolvedValue({
+      installed: true,
+      enabled: true,
+      skillEnabled: true,
+      version: '1.0.0',
+      pluginDir: '/tmp/task-plugin',
+    });
+    await act(async () => {
+      renderWithRouter('/settings?section=taskPlugin');
+    });
+
+    const uninstallButton = screen.getByRole('button', { name: 'Uninstall' });
+    expect(uninstallButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(uninstallButton);
+    });
+
+    expect(uninstallTaskPluginMock).toHaveBeenCalledTimes(1);
   });
 });

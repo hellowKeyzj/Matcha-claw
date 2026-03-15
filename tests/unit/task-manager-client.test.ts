@@ -48,17 +48,21 @@ describe('task manager client', () => {
     }, 60000);
   });
 
-  it('getTaskPluginStatus/installTaskPlugin 走 task:* IPC', async () => {
+  it('getTaskPluginStatus/installTaskPlugin/uninstallTaskPlugin 走 task:* IPC', async () => {
     invokeIpcMock.mockResolvedValueOnce({ installed: true, enabled: true, skillEnabled: true, pluginDir: 'x' });
     invokeIpcMock.mockResolvedValueOnce({ success: true, installed: true });
-    const { getTaskPluginStatus, installTaskPlugin } = await import('@/services/openclaw/task-manager-client');
+    invokeIpcMock.mockResolvedValueOnce({ success: true, installed: false });
+    const { getTaskPluginStatus, installTaskPlugin, uninstallTaskPlugin } = await import('@/services/openclaw/task-manager-client');
 
     const status = await getTaskPluginStatus();
     const install = await installTaskPlugin();
+    const uninstall = await uninstallTaskPlugin();
 
     expect(status.installed).toBe(true);
     expect(install.success).toBe(true);
+    expect(uninstall.success).toBe(true);
     expect(invokeIpcMock).toHaveBeenNthCalledWith(1, 'task:pluginStatus');
     expect(invokeIpcMock).toHaveBeenNthCalledWith(2, 'task:pluginInstall');
+    expect(invokeIpcMock).toHaveBeenNthCalledWith(3, 'task:pluginUninstall');
   });
 });

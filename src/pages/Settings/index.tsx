@@ -52,7 +52,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApiFetch } from '@/lib/host-api';
-import { getTaskPluginStatus, installTaskPlugin } from '@/services/openclaw/task-manager-client';
+import { getTaskPluginStatus, installTaskPlugin, uninstallTaskPlugin } from '@/services/openclaw/task-manager-client';
 import {
   DEFAULT_SETTINGS_SECTION,
   parseSettingsSectionFromSearch,
@@ -454,6 +454,23 @@ export function Settings() {
       await loadTaskPluginStatus(true);
     } catch (error) {
       toast.error(t('taskPlugin.toastInstallFailed', { error: String(error) }));
+    } finally {
+      setTaskPluginBusy(false);
+    }
+  }, [loadTaskPluginStatus, t]);
+
+  const handleUninstallTaskPlugin = useCallback(async () => {
+    setTaskPluginBusy(true);
+    try {
+      const result = await uninstallTaskPlugin();
+      if (!result.success) {
+        toast.error(t('taskPlugin.toastUninstallFailed', { error: result.error || 'unknown error' }));
+        return;
+      }
+      toast.success(t('taskPlugin.toastUninstallSuccess'));
+      await loadTaskPluginStatus(true);
+    } catch (error) {
+      toast.error(t('taskPlugin.toastUninstallFailed', { error: String(error) }));
     } finally {
       setTaskPluginBusy(false);
     }
@@ -1256,6 +1273,12 @@ export function Settings() {
                 <Wrench className="mr-2 h-4 w-4" />
                 {taskPluginInfo?.installed ? t('taskPlugin.reinstall') : t('taskPlugin.install')}
               </Button>
+              {taskPluginInfo?.installed ? (
+                <Button variant="destructive" onClick={() => void handleUninstallTaskPlugin()} disabled={taskPluginBusy}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {t('taskPlugin.uninstall')}
+                </Button>
+              ) : null}
             </div>
           </div>
 

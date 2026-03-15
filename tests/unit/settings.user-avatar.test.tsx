@@ -23,6 +23,7 @@ vi.mock('@/services/openclaw/task-manager-client', () => ({
     pluginDir: '/tmp/task-plugin',
   }),
   installTaskPlugin: vi.fn().mockResolvedValue({ success: true }),
+  uninstallTaskPlugin: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 vi.mock('@/lib/host-api', () => ({

@@ -141,6 +141,7 @@ const electronAPI = {
         // Task manager plugin
         'task:pluginStatus',
         'task:pluginInstall',
+        'task:pluginUninstall',
       ];
 
       if (validChannels.includes(channel)) {

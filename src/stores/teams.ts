@@ -95,6 +95,37 @@ function upsertTaskList(current: TeamTask[], task: TeamTask): TeamTask[] {
   return next;
 }
 
+const TEAM_SYNC_MIN_GAP_ACTIVE_MS = 2_500;
+const TEAM_SYNC_MIN_GAP_IDLE_MS = 8_000;
+const TEAM_SYNC_MIN_GAP_BACKGROUND_MS = 20_000;
+const snapshotInFlightByTeamId = new Map<string, Promise<void>>();
+const snapshotLastAtByTeamId = new Map<string, number>();
+const mailboxInFlightByTeamId = new Map<string, Promise<void>>();
+const mailboxLastAtByTeamId = new Map<string, number>();
+
+function isDocumentVisible(): boolean {
+  if (typeof document === 'undefined') {
+    return true;
+  }
+  return document.visibilityState === 'visible';
+}
+
+function hasTeamWorkload(tasks: TeamTask[]): boolean {
+  return tasks.some((task) => (
+    task.status === 'todo'
+    || task.status === 'claimed'
+    || task.status === 'running'
+    || task.status === 'blocked'
+  ));
+}
+
+function resolveTeamSyncMinGapMs(tasks: TeamTask[]): number {
+  if (!isDocumentVisible()) {
+    return TEAM_SYNC_MIN_GAP_BACKGROUND_MS;
+  }
+  return hasTeamWorkload(tasks) ? TEAM_SYNC_MIN_GAP_ACTIVE_MS : TEAM_SYNC_MIN_GAP_IDLE_MS;
+}
+
 export const useTeamsStore = create<TeamsState>()(
   persist(
     (set, get) => ({
@@ -187,37 +218,60 @@ export const useTeamsStore = create<TeamsState>()(
         }
       },
       refreshSnapshot: async (teamId) => {
-        const cursor = get().mailboxCursorByTeamId[teamId];
-        const snapshot = await teamSnapshot({
-          teamId,
-          mailboxCursor: cursor,
-          mailboxLimit: 200,
-        });
-        set((state) => ({
-          runMetaByTeamId: {
-            ...state.runMetaByTeamId,
-            [teamId]: snapshot.run ?? undefined,
-          },
-          tasksByTeamId: {
-            ...state.tasksByTeamId,
-            [teamId]: snapshot.tasks,
-          },
-          mailboxByTeamId: {
-            ...state.mailboxByTeamId,
-            [teamId]: mergeMailboxMessages(
-              state.mailboxByTeamId[teamId] ?? [],
-              snapshot.mailbox.messages,
-            ),
-          },
-          mailboxCursorByTeamId: {
-            ...state.mailboxCursorByTeamId,
-            [teamId]: snapshot.mailbox.nextCursor ?? cursor,
-          },
-          eventsByTeamId: {
-            ...state.eventsByTeamId,
-            [teamId]: snapshot.events,
-          },
-        }));
+        const inFlight = snapshotInFlightByTeamId.get(teamId);
+        if (inFlight) {
+          await inFlight;
+          return;
+        }
+        const tasks = get().tasksByTeamId[teamId] ?? [];
+        const minGapMs = resolveTeamSyncMinGapMs(tasks);
+        const lastAt = snapshotLastAtByTeamId.get(teamId) ?? 0;
+        if (Date.now() - lastAt < minGapMs) {
+          return;
+        }
+
+        const run = async () => {
+          const cursor = get().mailboxCursorByTeamId[teamId];
+          const snapshot = await teamSnapshot({
+            teamId,
+            mailboxCursor: cursor,
+            mailboxLimit: 200,
+          });
+          set((state) => ({
+            runMetaByTeamId: {
+              ...state.runMetaByTeamId,
+              [teamId]: snapshot.run ?? undefined,
+            },
+            tasksByTeamId: {
+              ...state.tasksByTeamId,
+              [teamId]: snapshot.tasks,
+            },
+            mailboxByTeamId: {
+              ...state.mailboxByTeamId,
+              [teamId]: mergeMailboxMessages(
+                state.mailboxByTeamId[teamId] ?? [],
+                snapshot.mailbox.messages,
+              ),
+            },
+            mailboxCursorByTeamId: {
+              ...state.mailboxCursorByTeamId,
+              [teamId]: snapshot.mailbox.nextCursor ?? cursor,
+            },
+            eventsByTeamId: {
+              ...state.eventsByTeamId,
+              [teamId]: snapshot.events,
+            },
+          }));
+        };
+
+        const promise = run();
+        snapshotInFlightByTeamId.set(teamId, promise);
+        try {
+          await promise;
+        } finally {
+          snapshotInFlightByTeamId.delete(teamId);
+          snapshotLastAtByTeamId.set(teamId, Date.now());
+        }
       },
       planUpsert: async (teamId, tasks) => {
         const result = await teamPlanUpsert({ teamId, tasks });
@@ -297,18 +351,41 @@ export const useTeamsStore = create<TeamsState>()(
         }));
       },
       pullMailbox: async (teamId, limit) => {
-        const cursor = get().mailboxCursorByTeamId[teamId];
-        const result = await teamMailboxPull({ teamId, cursor, limit });
-        set((state) => ({
-          mailboxByTeamId: {
-            ...state.mailboxByTeamId,
-            [teamId]: mergeMailboxMessages(state.mailboxByTeamId[teamId] ?? [], result.messages),
-          },
-          mailboxCursorByTeamId: {
-            ...state.mailboxCursorByTeamId,
-            [teamId]: result.nextCursor ?? cursor,
-          },
-        }));
+        const inFlight = mailboxInFlightByTeamId.get(teamId);
+        if (inFlight) {
+          await inFlight;
+          return;
+        }
+        const tasks = get().tasksByTeamId[teamId] ?? [];
+        const minGapMs = resolveTeamSyncMinGapMs(tasks);
+        const lastAt = mailboxLastAtByTeamId.get(teamId) ?? 0;
+        if (Date.now() - lastAt < minGapMs) {
+          return;
+        }
+
+        const run = async () => {
+          const cursor = get().mailboxCursorByTeamId[teamId];
+          const result = await teamMailboxPull({ teamId, cursor, limit });
+          set((state) => ({
+            mailboxByTeamId: {
+              ...state.mailboxByTeamId,
+              [teamId]: mergeMailboxMessages(state.mailboxByTeamId[teamId] ?? [], result.messages),
+            },
+            mailboxCursorByTeamId: {
+              ...state.mailboxCursorByTeamId,
+              [teamId]: result.nextCursor ?? cursor,
+            },
+          }));
+        };
+
+        const promise = run();
+        mailboxInFlightByTeamId.set(teamId, promise);
+        try {
+          await promise;
+        } finally {
+          mailboxInFlightByTeamId.delete(teamId);
+          mailboxLastAtByTeamId.set(teamId, Date.now());
+        }
       },
       releaseClaim: async (teamId, taskId, agentId, sessionKey) => {
         const result = await teamReleaseClaim({ teamId, taskId, agentId, sessionKey });
