@@ -104,13 +104,13 @@ Communicate with AI agents through a modern chat experience. Support for multipl
 Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, and controlled apply flow help you evolve `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md` safely.
 
 ### ✅ Task Board & Team Discussion Hub
-Plan and track task execution in `/tasks`, inspect structured checklist progress, and coordinate discussions from the chat-side task inbox.
+Plan and track task execution in `/tasks`, inspect structured checklist progress, and coordinate discussions from the chat-side task inbox. The Task Center now includes two tabs: **Long Tasks** and **Scheduled Tasks**.
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.
 
 ### ⏰ Cron-Based Automation
-Schedule AI tasks to run automatically. Define triggers, set intervals, and let your AI agents work around the clock without manual intervention.
+Schedule AI tasks to run automatically. Define triggers, set intervals, and let your AI agents work around the clock without manual intervention (accessible from the **Scheduled Tasks** tab in `/tasks`).
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, and manage skills through the integrated skill panel—no package managers required.

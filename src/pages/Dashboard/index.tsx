@@ -318,7 +318,7 @@ export function Dashboard() {
               </Link>
             </Button>
             <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
-              <Link to="/cron" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'create_cron' })}>
+              <Link to="/tasks?tab=scheduled" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'create_cron' })}>
                 <Clock className="h-5 w-5" />
                 <span>{t('quickActions.createCron')}</span>
               </Link>

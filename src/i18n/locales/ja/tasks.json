@@ -1,9 +1,13 @@
 {
     "title": "タスクセンター",
-    "subtitle": "タスクボードとチームディスカッションセンター",
+    "subtitle": "タスク実行とスケジューリング",
     "workspace": "ワークスペース",
     "installPlugin": "タスクプラグインをインストール",
     "refresh": "更新",
+    "tabs": {
+        "long": "長期タスク",
+        "scheduled": "定期タスク"
+    },
     "gatewayNotRunning": "ゲートウェイが停止中です",
     "plugin": {
         "title": "Task Manager プラグインが必要です",
@@ -12,7 +16,20 @@
     "stats": {
         "running": "実行中",
         "waiting": "待機中",
-        "completed": "完了"
+        "completed": "完了",
+        "incomplete": "未完了"
+    },
+    "timeWindow": {
+        "title": "統計期間",
+        "all": "全期間",
+        "last7Days": "過去7日",
+        "last30Days": "過去30日"
+    },
+    "filters": {
+        "dateRange": "日付範囲",
+        "from": "開始日",
+        "to": "終了日",
+        "clear": "クリア"
     },
     "listTitle": "タスク一覧",
     "empty": "タスクはありません",

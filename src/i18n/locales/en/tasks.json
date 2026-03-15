@@ -1,9 +1,13 @@
 {
     "title": "Task Center",
-    "subtitle": "Task board and team discussion center",
+    "subtitle": "Task execution and scheduling",
     "workspace": "Workspace",
     "installPlugin": "Install Task Plugin",
     "refresh": "Refresh",
+    "tabs": {
+        "long": "Long Tasks",
+        "scheduled": "Scheduled Tasks"
+    },
     "gatewayNotRunning": "Gateway is not running",
     "plugin": {
         "title": "Task Manager Plugin Required",
@@ -12,7 +16,20 @@
     "stats": {
         "running": "Running",
         "waiting": "Waiting",
-        "completed": "Completed"
+        "completed": "Completed",
+        "incomplete": "Incomplete"
+    },
+    "timeWindow": {
+        "title": "Statistics Time Window",
+        "all": "All Time",
+        "last7Days": "Last 7 Days",
+        "last30Days": "Last 30 Days"
+    },
+    "filters": {
+        "dateRange": "Date Range",
+        "from": "Start Date",
+        "to": "End Date",
+        "clear": "Clear"
     },
     "listTitle": "Tasks",
     "empty": "No tasks available",
