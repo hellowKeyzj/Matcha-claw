@@ -606,7 +606,7 @@ export function Skills() {
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
-  const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('all');
+  const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
   const [visibleSkillCount, setVisibleSkillCount] = useState(INITIAL_SKILLS_BATCH);
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 

@@ -1,0 +1,580 @@
+{
+  "templates": {
+    "accessibility-auditor": {
+      "name": "Accessibility Auditor",
+      "summary": "If it's not tested with a screen reader, it's not accessible."
+    },
+    "account-strategist": {
+      "name": "Account Strategist",
+      "summary": "Maps the org, finds the whitespace, and turns customers into platforms."
+    },
+    "accounts-payable-agent": {
+      "name": "Accounts Payable Agent",
+      "summary": "Moves money across any rail — crypto, fiat, stablecoins — so you don't have to."
+    },
+    "ad-creative-strategist": {
+      "name": "Ad Creative Strategist",
+      "summary": "Turns ad creative from guesswork into a repeatable science."
+    },
+    "agentic-identity-trust-architect": {
+      "name": "Agentic Identity & Trust Architect",
+      "summary": "Ensures every AI agent can prove who it is, what it's allowed to do, and what it actually did."
+    },
+    "agents-orchestrator": {
+      "name": "Agents Orchestrator",
+      "summary": "The conductor who runs the entire dev pipeline from spec to ship."
+    },
+    "ai-data-remediation-engineer": {
+      "name": "AI Data Remediation Engineer",
+      "summary": "Fixes your broken data with surgical AI precision — no rows left behind."
+    },
+    "ai-engineer": {
+      "name": "AI Engineer",
+      "summary": "Turns ML models into production features that actually scale."
+    },
+    "analytics-reporter": {
+      "name": "Analytics Reporter",
+      "summary": "Transforms raw data into the insights that drive your next decision."
+    },
+    "api-tester": {
+      "name": "API Tester",
+      "summary": "Breaks your API before your users do."
+    },
+    "app-store-optimizer": {
+      "name": "App Store Optimizer",
+      "summary": "Gets your app found, downloaded, and loved in the store."
+    },
+    "automation-governance-architect": {
+      "name": "Automation Governance Architect",
+      "summary": "Calm, skeptical, and operations-focused. Prefer reliable systems over automation hype."
+    },
+    "autonomous-optimization-architect": {
+      "name": "Autonomous Optimization Architect",
+      "summary": "The system governor that makes things faster without bankrupting you."
+    },
+    "backend-architect": {
+      "name": "Backend Architect",
+      "summary": "Designs the systems that hold everything up — databases, APIs, cloud, scale."
+    },
+    "baidu-seo-specialist": {
+      "name": "🇨🇳 Baidu SEO Specialist",
+      "summary": "Masters Baidu's algorithm so your brand ranks in China's search ecosystem."
+    },
+    "behavioral-nudge-engine": {
+      "name": "Behavioral Nudge Engine",
+      "summary": "Adapts software interactions to maximize user motivation through behavioral psychology."
+    },
+    "bilibili-content-strategist": {
+      "name": "Bilibili Content Strategist",
+      "summary": "Speaks fluent danmaku and grows your brand on B站."
+    },
+    "blockchain-security-auditor": {
+      "name": "Blockchain Security Auditor",
+      "summary": "Finds the exploit in your smart contract before the attacker does."
+    },
+    "book-co-author": {
+      "name": "Book Co-Author",
+      "summary": "Turns rough expertise into a recognizable book people can quote, remember, and buy into."
+    },
+    "brand-guardian": {
+      "name": "Brand Guardian",
+      "summary": "Your brand's fiercest protector and most passionate advocate."
+    },
+    "carousel-growth-engine": {
+      "name": "Carousel Growth Engine",
+      "summary": "Autonomously generates viral carousels from any URL and publishes them to feed."
+    },
+    "china-e-commerce-operator": {
+      "name": "China E-Commerce Operator",
+      "summary": "Runs your Taobao, Tmall, Pinduoduo, and JD storefronts like a native operator."
+    },
+    "code-reviewer": {
+      "name": "Code Reviewer",
+      "summary": "Reviews code like a mentor, not a gatekeeper. Every comment teaches something."
+    },
+    "compliance-auditor": {
+      "name": "Compliance Auditor",
+      "summary": "Walks you from readiness assessment through evidence collection to SOC 2 certification."
+    },
+    "content-creator": {
+      "name": "Content Creator",
+      "summary": "Crafts compelling stories across every platform your audience lives on."
+    },
+    "corporate-training-designer": {
+      "name": "Corporate Training Designer",
+      "summary": "Designs training programs that drive real behavior change — from needs analysis to Kirkpatrick Level 3 evaluation — because good training is measured by what learners do, not what instructors say."
+    },
+    "cross-border-e-commerce-specialist": {
+      "name": "Cross-Border E-Commerce Specialist",
+      "summary": "Takes your products from Chinese factories to global bestseller lists."
+    },
+    "cultural-intelligence-strategist": {
+      "name": "Cultural Intelligence Strategist",
+      "summary": "Detects invisible exclusion and ensures your software resonates across cultures."
+    },
+    "data-consolidation-agent": {
+      "name": "Data Consolidation Agent",
+      "summary": "Consolidates scattered sales data into live reporting dashboards."
+    },
+    "data-engineer": {
+      "name": "Data Engineer",
+      "summary": "Builds the pipelines that turn raw data into trusted, analytics-ready assets."
+    },
+    "database-optimizer": {
+      "name": "Database Optimizer",
+      "summary": "Indexes, query plans, and schema design — databases that don't wake you at 3am."
+    },
+    "deal-strategist": {
+      "name": "Deal Strategist",
+      "summary": "Qualifies deals like a surgeon and kills happy ears on contact."
+    },
+    "developer-advocate": {
+      "name": "Developer Advocate",
+      "summary": "Bridges your product team and the developer community through authentic engagement."
+    },
+    "devops-automator": {
+      "name": "DevOps Automator",
+      "summary": "Automates infrastructure so your team ships faster and sleeps better."
+    },
+    "discovery-coach": {
+      "name": "Discovery Coach",
+      "summary": "Asks one more question than everyone else — and that's the one that closes the deal."
+    },
+    "document-generator": {
+      "name": "Document Generator",
+      "summary": "Professional documents from code — PDFs, slides, spreadsheets, and reports."
+    },
+    "douyin-strategist": {
+      "name": "Douyin Strategist",
+      "summary": "Masters the Douyin algorithm so your short videos actually get seen."
+    },
+    "embedded-firmware-engineer": {
+      "name": "Embedded Firmware Engineer",
+      "summary": "Writes production-grade firmware for hardware that can't afford to crash."
+    },
+    "evidence-collector": {
+      "name": "Evidence Collector",
+      "summary": "Screenshot-obsessed QA who won't approve anything without visual proof."
+    },
+    "executive-summary-generator": {
+      "name": "Executive Summary Generator",
+      "summary": "Thinks like a McKinsey consultant, writes for the C-suite."
+    },
+    "experiment-tracker": {
+      "name": "Experiment Tracker",
+      "summary": "Designs experiments, tracks results, and lets the data decide."
+    },
+    "feedback-synthesizer": {
+      "name": "Feedback Synthesizer",
+      "summary": "Distills a thousand user voices into the five things you need to build next."
+    },
+    "feishu-integration-developer": {
+      "name": "Feishu Integration Developer",
+      "summary": "Builds enterprise integrations on the Feishu (Lark) platform — bots, approvals, data sync, and SSO — so your team's workflows run on autopilot."
+    },
+    "finance-tracker": {
+      "name": "Finance Tracker",
+      "summary": "Keeps the books clean, the cash flowing, and the forecasts honest."
+    },
+    "frontend-developer": {
+      "name": "Frontend Developer",
+      "summary": "Builds responsive, accessible web apps with pixel-perfect precision."
+    },
+    "game-audio-engineer": {
+      "name": "Game Audio Engineer",
+      "summary": "Makes every gunshot, footstep, and musical cue feel alive in the game world."
+    },
+    "game-designer": {
+      "name": "Game Designer",
+      "summary": "Thinks in loops, levers, and player motivations to architect compelling gameplay."
+    },
+    "git-workflow-master": {
+      "name": "Git Workflow Master",
+      "summary": "Clean history, atomic commits, and branches that tell a story."
+    },
+    "godot-gameplay-scripter": {
+      "name": "Godot Gameplay Scripter",
+      "summary": "Builds Godot 4 gameplay systems with the discipline of a software architect."
+    },
+    "godot-multiplayer-engineer": {
+      "name": "Godot Multiplayer Engineer",
+      "summary": "Masters Godot's MultiplayerAPI to make real-time netcode feel seamless."
+    },
+    "godot-shader-developer": {
+      "name": "Godot Shader Developer",
+      "summary": "Bends light and pixels through Godot's shading language to create stunning effects."
+    },
+    "government-digital-presales-consultant": {
+      "name": "Government Digital Presales Consultant",
+      "summary": "Navigates the Chinese government IT procurement maze — from policy signals to winning bids — so your team lands digital transformation projects."
+    },
+    "growth-hacker": {
+      "name": "Growth Hacker",
+      "summary": "Finds the growth channel nobody's exploited yet — then scales it."
+    },
+    "healthcare-marketing-compliance-specialist": {
+      "name": "Healthcare Marketing Compliance Specialist",
+      "summary": "Keeps your healthcare marketing legal in China's tightly regulated landscape — reviewing content, flagging violations, and finding creative space within compliance boundaries."
+    },
+    "identity-graph-operator": {
+      "name": "Identity Graph Operator",
+      "summary": "Ensures every agent in a multi-agent system gets the same canonical answer for \"who is this?\""
+    },
+    "image-prompt-engineer": {
+      "name": "Image Prompt Engineer",
+      "summary": "Translates visual concepts into precise prompts that produce stunning AI photography."
+    },
+    "incident-response-commander": {
+      "name": "Incident Response Commander",
+      "summary": "Turns production chaos into structured resolution."
+    },
+    "inclusive-visuals-specialist": {
+      "name": "Inclusive Visuals Specialist",
+      "summary": "Defeats systemic AI biases to generate culturally accurate, affirming imagery."
+    },
+    "infrastructure-maintainer": {
+      "name": "Infrastructure Maintainer",
+      "summary": "Keeps the lights on, the servers humming, and the alerts quiet."
+    },
+    "instagram-curator": {
+      "name": "Instagram Curator",
+      "summary": "Masters the grid aesthetic and turns scrollers into an engaged community."
+    },
+    "jira-workflow-steward": {
+      "name": "Jira Workflow Steward",
+      "summary": "Enforces traceable commits, structured PRs, and release-safe branch strategy."
+    },
+    "kuaishou-strategist": {
+      "name": "Kuaishou Strategist",
+      "summary": "Grows grassroots audiences and drives live commerce on 快手."
+    },
+    "legal-compliance-checker": {
+      "name": "Legal Compliance Checker",
+      "summary": "Ensures your operations comply with the law across every jurisdiction that matters."
+    },
+    "level-designer": {
+      "name": "Level Designer",
+      "summary": "Treats every level as an authored experience where space tells the story."
+    },
+    "linkedin-content-creator": {
+      "name": "LinkedIn Content Creator",
+      "summary": "Turns professional expertise into scroll-stopping content that makes the right people find you."
+    },
+    "livestream-commerce-coach": {
+      "name": "Livestream Commerce Coach",
+      "summary": "Coaches your livestream hosts from awkward beginners to million-yuan sellers."
+    },
+    "lsp-index-engineer": {
+      "name": "LSP/Index Engineer",
+      "summary": "Builds unified code intelligence through LSP orchestration and semantic indexing."
+    },
+    "macos-spatial-metal-engineer": {
+      "name": "macOS Spatial/Metal Engineer",
+      "summary": "Pushes Metal to its limits for 3D rendering on macOS and Vision Pro."
+    },
+    "mcp-builder": {
+      "name": "MCP Builder",
+      "summary": "Builds the tools that make AI agents actually useful in the real world."
+    },
+    "mobile-app-builder": {
+      "name": "Mobile App Builder",
+      "summary": "Ships native-quality apps on iOS and Android, fast."
+    },
+    "model-qa-specialist": {
+      "name": "Model QA Specialist",
+      "summary": "Audits ML models end-to-end — from data reconstruction to calibration testing."
+    },
+    "narrative-designer": {
+      "name": "Narrative Designer",
+      "summary": "Architects story systems where narrative and gameplay are inseparable."
+    },
+    "outbound-strategist": {
+      "name": "Outbound Strategist",
+      "summary": "Turns buying signals into booked meetings before the competition even notices."
+    },
+    "paid-media-auditor": {
+      "name": "Paid Media Auditor",
+      "summary": "Finds the waste in your ad spend before your CFO does."
+    },
+    "paid-social-strategist": {
+      "name": "Paid Social Strategist",
+      "summary": "Makes every dollar on Meta, LinkedIn, and TikTok ads work harder."
+    },
+    "performance-benchmarker": {
+      "name": "Performance Benchmarker",
+      "summary": "Measures everything, optimizes what matters, and proves the improvement."
+    },
+    "pipeline-analyst": {
+      "name": "Pipeline Analyst",
+      "summary": "Tells you your forecast is wrong before you realize it yourself."
+    },
+    "podcast-strategist": {
+      "name": "Podcast Strategist",
+      "summary": "Guides your podcast from concept to loyal audience in China's booming audio scene."
+    },
+    "ppc-campaign-strategist": {
+      "name": "PPC Campaign Strategist",
+      "summary": "Architects PPC campaigns that scale from $10K to $10M+ monthly."
+    },
+    "private-domain-operator": {
+      "name": "Private Domain Operator",
+      "summary": "Builds your WeChat private traffic empire from first contact to lifetime value."
+    },
+    "programmatic-display-buyer": {
+      "name": "Programmatic & Display Buyer",
+      "summary": "Buys display and video inventory at scale with surgical precision."
+    },
+    "project-shepherd": {
+      "name": "Project Shepherd",
+      "summary": "Herds cross-functional chaos into on-time, on-scope delivery."
+    },
+    "proposal-strategist": {
+      "name": "Proposal Strategist",
+      "summary": "Turns RFP responses into stories buyers can't put down."
+    },
+    "rapid-prototyper": {
+      "name": "Rapid Prototyper",
+      "summary": "Turns an idea into a working prototype before the meeting's over."
+    },
+    "reality-checker": {
+      "name": "Reality Checker",
+      "summary": "Defaults to \"NEEDS WORK\" — requires overwhelming proof for production readiness."
+    },
+    "recruitment-specialist": {
+      "name": "Recruitment Specialist",
+      "summary": "Builds your full-cycle recruiting engine across China's hiring platforms, from sourcing to onboarding to compliance."
+    },
+    "reddit-community-builder": {
+      "name": "Reddit Community Builder",
+      "summary": "Speaks fluent Reddit and builds community trust the authentic way."
+    },
+    "report-distribution-agent": {
+      "name": "Report Distribution Agent",
+      "summary": "Automates delivery of consolidated sales reports to the right reps."
+    },
+    "roblox-avatar-creator": {
+      "name": "Roblox Avatar Creator",
+      "summary": "Masters the UGC pipeline from rigging to Creator Marketplace submission."
+    },
+    "roblox-experience-designer": {
+      "name": "Roblox Experience Designer",
+      "summary": "Designs engagement loops and monetization systems that keep players coming back."
+    },
+    "roblox-systems-scripter": {
+      "name": "Roblox Systems Scripter",
+      "summary": "Builds scalable Roblox experiences with rock-solid Luau and client-server security."
+    },
+    "sales-coach": {
+      "name": "Sales Coach",
+      "summary": "Asks the question that makes the rep rethink the entire deal."
+    },
+    "sales-data-extraction-agent": {
+      "name": "Sales Data Extraction Agent",
+      "summary": "Watches your Excel files and extracts the metrics that matter."
+    },
+    "sales-engineer": {
+      "name": "Sales Engineer",
+      "summary": "Wins the technical decision before the deal even hits procurement."
+    },
+    "search-query-analyst": {
+      "name": "Search Query Analyst",
+      "summary": "Mines search queries to find the gold your competitors are missing."
+    },
+    "security-engineer": {
+      "name": "Security Engineer",
+      "summary": "Models threats, reviews code, and designs security architecture that actually holds."
+    },
+    "senior-developer": {
+      "name": "Senior Developer",
+      "summary": "Premium full-stack craftsperson — Laravel, Livewire, Three.js, advanced CSS."
+    },
+    "senior-project-manager": {
+      "name": "Senior Project Manager",
+      "summary": "Converts specs to tasks with realistic scope — no gold-plating, no fantasy."
+    },
+    "seo-specialist": {
+      "name": "SEO Specialist",
+      "summary": "Drives sustainable organic traffic through technical SEO and content strategy."
+    },
+    "short-video-editing-coach": {
+      "name": "Short-Video Editing Coach",
+      "summary": "Turns raw footage into scroll-stopping short videos with professional polish."
+    },
+    "social-media-strategist": {
+      "name": "Social Media Strategist",
+      "summary": "Orchestrates cross-platform campaigns that build community and drive engagement."
+    },
+    "software-architect": {
+      "name": "Software Architect",
+      "summary": "Designs systems that survive the team that built them. Every decision has a trade-off — name it."
+    },
+    "solidity-smart-contract-engineer": {
+      "name": "Solidity Smart Contract Engineer",
+      "summary": "Battle-hardened Solidity developer who lives and breathes the EVM."
+    },
+    "sprint-prioritizer": {
+      "name": "Sprint Prioritizer",
+      "summary": "Maximizes sprint value through data-driven prioritization and ruthless focus."
+    },
+    "sre-site-reliability-engineer": {
+      "name": "SRE (Site Reliability Engineer)",
+      "summary": "Reliability is a feature. Error budgets fund velocity — spend them wisely."
+    },
+    "studio-operations": {
+      "name": "Studio Operations",
+      "summary": "Keeps the studio running smoothly — processes, tools, and people in sync."
+    },
+    "studio-producer": {
+      "name": "Studio Producer",
+      "summary": "Aligns creative vision with business objectives across complex initiatives."
+    },
+    "study-abroad-advisor": {
+      "name": "Study Abroad Advisor",
+      "summary": "Guides Chinese students through the entire study abroad journey — from school selection and essays to visas — with data-driven advice and zero anxiety selling."
+    },
+    "supply-chain-strategist": {
+      "name": "Supply Chain Strategist",
+      "summary": "Builds your procurement engine and supply chain resilience across China's manufacturing ecosystem, from supplier sourcing to risk management."
+    },
+    "support-responder": {
+      "name": "Support Responder",
+      "summary": "Turns frustrated users into loyal advocates, one interaction at a time."
+    },
+    "technical-artist": {
+      "name": "Technical Artist",
+      "summary": "The bridge between artistic vision and engine reality."
+    },
+    "technical-writer": {
+      "name": "Technical Writer",
+      "summary": "Writes the docs that developers actually read and use."
+    },
+    "terminal-integration-specialist": {
+      "name": "Terminal Integration Specialist",
+      "summary": "Masters terminal emulation and text rendering in modern Swift applications."
+    },
+    "test-results-analyzer": {
+      "name": "Test Results Analyzer",
+      "summary": "Reads test results like a detective reads evidence — nothing gets past."
+    },
+    "threat-detection-engineer": {
+      "name": "Threat Detection Engineer",
+      "summary": "Builds the detection layer that catches attackers after they bypass prevention."
+    },
+    "tiktok-strategist": {
+      "name": "TikTok Strategist",
+      "summary": "Rides the algorithm and builds community through authentic TikTok culture."
+    },
+    "tool-evaluator": {
+      "name": "Tool Evaluator",
+      "summary": "Tests and recommends the right tools so your team doesn't waste time on the wrong ones."
+    },
+    "tracking-measurement-specialist": {
+      "name": "Tracking & Measurement Specialist",
+      "summary": "If it's not tracked correctly, it didn't happen."
+    },
+    "trend-researcher": {
+      "name": "Trend Researcher",
+      "summary": "Spots emerging trends before they hit the mainstream."
+    },
+    "twitter-engager": {
+      "name": "Twitter Engager",
+      "summary": "Builds thought leadership and brand authority 280 characters at a time."
+    },
+    "ui-designer": {
+      "name": "UI Designer",
+      "summary": "Creates beautiful, consistent, accessible interfaces that feel just right."
+    },
+    "unity-architect": {
+      "name": "Unity Architect",
+      "summary": "Designs data-driven, decoupled Unity systems that scale without spaghetti."
+    },
+    "unity-editor-tool-developer": {
+      "name": "Unity Editor Tool Developer",
+      "summary": "Builds custom Unity editor tools that save teams hours every week."
+    },
+    "unity-multiplayer-engineer": {
+      "name": "Unity Multiplayer Engineer",
+      "summary": "Makes networked Unity gameplay feel local through smart sync and prediction."
+    },
+    "unity-shader-graph-artist": {
+      "name": "Unity Shader Graph Artist",
+      "summary": "Crafts real-time visual magic through Shader Graph and custom render passes."
+    },
+    "unreal-multiplayer-architect": {
+      "name": "Unreal Multiplayer Architect",
+      "summary": "Architects server-authoritative Unreal multiplayer that feels lag-free."
+    },
+    "unreal-systems-engineer": {
+      "name": "Unreal Systems Engineer",
+      "summary": "Masters the C++/Blueprint continuum for AAA-grade Unreal Engine projects."
+    },
+    "unreal-technical-artist": {
+      "name": "Unreal Technical Artist",
+      "summary": "Bridges Niagara VFX, Material Editor, and PCG into polished UE5 visuals."
+    },
+    "unreal-world-builder": {
+      "name": "Unreal World Builder",
+      "summary": "Builds seamless open worlds with World Partition, Nanite, and procedural foliage."
+    },
+    "ux-architect": {
+      "name": "UX Architect",
+      "summary": "Gives developers solid foundations, CSS systems, and clear implementation paths."
+    },
+    "ux-researcher": {
+      "name": "UX Researcher",
+      "summary": "Validates design decisions with real user data, not assumptions."
+    },
+    "visionos-spatial-engineer": {
+      "name": "visionOS Spatial Engineer",
+      "summary": "Builds native volumetric interfaces and Liquid Glass experiences for visionOS."
+    },
+    "visual-storyteller": {
+      "name": "Visual Storyteller",
+      "summary": "Transforms complex information into visual narratives that move people."
+    },
+    "wechat-mini-program-developer": {
+      "name": "WeChat Mini Program Developer",
+      "summary": "Builds performant Mini Programs that thrive in the WeChat ecosystem."
+    },
+    "wechat-official-account-manager": {
+      "name": "WeChat Official Account Manager",
+      "summary": "Grows loyal WeChat subscriber communities through consistent value delivery."
+    },
+    "weibo-strategist": {
+      "name": "Weibo Strategist",
+      "summary": "Makes your brand trend on Weibo and keeps the conversation going."
+    },
+    "whimsy-injector": {
+      "name": "Whimsy Injector",
+      "summary": "Adds the unexpected moments of delight that make brands unforgettable."
+    },
+    "workflow-optimizer": {
+      "name": "Workflow Optimizer",
+      "summary": "Finds the bottleneck, fixes the process, automates the rest."
+    },
+    "xiaohongshu-specialist": {
+      "name": "Xiaohongshu Specialist",
+      "summary": "Masters lifestyle content and aesthetic storytelling on 小红书."
+    },
+    "xr-cockpit-interaction-specialist": {
+      "name": "XR Cockpit Interaction Specialist",
+      "summary": "Designs immersive cockpit control systems that feel natural in XR."
+    },
+    "xr-immersive-developer": {
+      "name": "XR Immersive Developer",
+      "summary": "Builds browser-based AR/VR/XR experiences that push WebXR to its limits."
+    },
+    "xr-interface-architect": {
+      "name": "XR Interface Architect",
+      "summary": "Designs spatial interfaces where interaction feels like instinct, not instruction."
+    },
+    "zhihu-strategist": {
+      "name": "Zhihu Strategist",
+      "summary": "Builds brand authority through expert knowledge-sharing on 知乎."
+    },
+    "zk-steward": {
+      "name": "ZK Steward",
+      "summary": "Channels Luhmann's Zettelkasten to build connected, validated knowledge bases."
+    }
+  }
+}

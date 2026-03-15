@@ -14,6 +14,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
+import { useTranslation } from 'react-i18next';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -149,6 +150,7 @@ export function ChatInput({
   sending = false,
   mentionCandidates = [],
 }: ChatInputProps) {
+  const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -683,7 +685,7 @@ export function ChatInput({
                   isComposingRef.current = false;
                 }}
                 onPaste={handlePaste}
-                placeholder={disabled ? 'Gateway not connected...' : 'Message (Enter to send, Shift+Enter for new line)'}
+                placeholder={disabled ? t('input.gatewayDisconnectedPlaceholder') : t('input.messagePlaceholder')}
                 disabled={disabled}
                 className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent p-0 pr-1 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
                 rows={1}

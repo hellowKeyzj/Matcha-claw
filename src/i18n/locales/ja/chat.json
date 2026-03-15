@@ -9,6 +9,10 @@
         "creativeTasks": "クリエイティブタスク",
         "creativeTasksDesc": "ライティング、ブレスト、アイデア"
     },
+    "input": {
+        "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
+        "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）"
+    },
     "noLogs": "（ログはまだありません）",
     "toolbar": {
         "refresh": "チャットを更新",

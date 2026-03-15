@@ -28,6 +28,7 @@ import type {
   ModelCatalogEntry,
   PreviewDiffByFile,
   SubagentSummary,
+  SubagentTemplateDetail,
   SubagentTargetFile,
 } from '@/types/subagent';
 
@@ -141,6 +142,11 @@ interface SubagentsState {
     workspace: string;
     model?: string;
     emoji?: string;
+  }) => Promise<string>;
+  createAgentFromTemplate: (input: {
+    template: SubagentTemplateDetail;
+    model: string;
+    localizedName?: string;
   }) => Promise<string>;
   updateAgent: (input: {
     agentId: string;
@@ -564,10 +570,10 @@ function resolveDefaultAgentFromState(agents: SubagentSummary[]): SubagentSummar
   return agents.find((agent) => agent.isDefault);
 }
 
-function assertMutableAgent(agentId: string, agents: SubagentSummary[]): void {
+function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void {
   const defaultAgent = resolveDefaultAgentFromState(agents);
   if (defaultAgent && defaultAgent.id === agentId) {
-    throw new Error('Default agent is read-only');
+    throw new Error('Default agent cannot be deleted');
   }
 }
 
@@ -661,6 +667,26 @@ function isLikelyEmojiToken(value: string): boolean {
   return true;
 }
 
+function extractHeadingEmojiFromIdentityMarkdown(content: string): string | undefined {
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('#')) {
+      continue;
+    }
+    const heading = trimmed.replace(/^#+\s*/, '').trim();
+    if (!heading) {
+      return undefined;
+    }
+    const firstToken = heading.split(/\s+/)[0];
+    if (firstToken && isLikelyEmojiToken(firstToken)) {
+      return firstToken;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 function resolveIdentityEmojiFromAgentMeta(agent: SubagentSummary): string | undefined {
   const directEmoji = getOptionalString((agent as { emoji?: unknown }).emoji);
   if (directEmoji && isLikelyEmojiToken(directEmoji)) {
@@ -693,6 +719,19 @@ async function fetchIdentityEmojiFromAgentIdentity(agentId: string): Promise<str
     const avatar = getOptionalString(result?.avatar);
     if (avatar && isLikelyEmojiToken(avatar)) {
       return avatar;
+    }
+    try {
+      const identityFile = await rpc<AgentFileGetResult>('agents.files.get', {
+        agentId,
+        name: 'IDENTITY.md',
+      });
+      const content = normalizeAgentFileContent(identityFile);
+      const fromIdentityMarkdown = extractHeadingEmojiFromIdentityMarkdown(content);
+      if (fromIdentityMarkdown) {
+        return fromIdentityMarkdown;
+      }
+    } catch {
+      // ignore file-read fallback failures
     }
     return undefined;
   } catch {
@@ -1077,7 +1116,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     },
   })),
   cancelDraft: async (agentId) => {
-    assertMutableAgent(agentId, get().agents);
     try {
       await cleanupDraftSessionForAgent(agentId, get);
     } catch (error) {
@@ -1176,6 +1214,90 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   }),
 
+  createAgentFromTemplate: async ({ template, model, localizedName }) => {
+    const modelId = getOptionalString(model);
+    if (!modelId) {
+      throw new Error('Model is required');
+    }
+    const templateName = getOptionalString(template.name);
+    if (!templateName) {
+      throw new Error('Template name is required');
+    }
+    const localizedTemplateName = getOptionalString(localizedName);
+    const createdAgentId = await get().createAgent({
+      name: templateName,
+      workspace: '',
+      model: modelId,
+      emoji: getOptionalString(template.emoji),
+    });
+    if (localizedTemplateName && localizedTemplateName !== templateName) {
+      const createdAgent = get().agents.find((agent) => agent.id === createdAgentId);
+      const workspace = getOptionalString(createdAgent?.workspace);
+      if (workspace) {
+        await get().updateAgent({
+          agentId: createdAgentId,
+          name: localizedTemplateName,
+          workspace,
+          model: modelId,
+        });
+      }
+    }
+    const templateEmoji = getOptionalString(template.emoji);
+
+    const fileEntries = SUBAGENT_TARGET_FILES
+      .map((fileName) => {
+        const content = template.fileContents[fileName];
+        if (typeof content !== 'string') {
+          return undefined;
+        }
+        return [fileName, content] as const;
+      })
+      .filter((entry): entry is readonly [SubagentTargetFile, string] => Boolean(entry));
+
+    if (fileEntries.length === 0) {
+      return createdAgentId;
+    }
+
+    set({ loading: true, error: null });
+    try {
+      for (const [name, content] of fileEntries) {
+        await rpc('agents.files.set', {
+          agentId: createdAgentId,
+          name,
+          content,
+        });
+      }
+      identityEmojiCache.delete(createdAgentId);
+      identityEmojiLoadTasks.delete(createdAgentId);
+      if (templateEmoji && isLikelyEmojiToken(templateEmoji)) {
+        identityEmojiCache.set(createdAgentId, {
+          checkedAt: Date.now(),
+          emoji: templateEmoji,
+        });
+      }
+      await rpc('agents.files.list', { agentId: createdAgentId });
+      await get().loadAgents();
+      set((state) => ({
+        loading: false,
+        persistedFilesByAgent: {
+          ...state.persistedFilesByAgent,
+          [createdAgentId]: {
+            ...(state.persistedFilesByAgent[createdAgentId] ?? {}),
+            ...Object.fromEntries(fileEntries) as Partial<Record<SubagentTargetFile, string>>,
+          },
+        },
+      }));
+      return createdAgentId;
+    } catch (error) {
+      const message = getErrorMessage(error) || `Agent "${createdAgentId}" created, but template file copy failed`;
+      set({
+        loading: false,
+        error: message,
+      });
+      throw error instanceof Error ? error : new Error(message, { cause: error });
+    }
+  },
+
   updateAgent: async ({ agentId, name, workspace, model }) => runSerializedAgentMutation(async () => {
     const current = get().agents.find((agent) => agent.id === agentId);
     if (
@@ -1193,7 +1315,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
-      assertMutableAgent(agentId, get().agents);
       await rpc('agents.update', {
         agentId,
         name: nextName,
@@ -1212,7 +1333,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   deleteAgent: async (agentId) => runSerializedAgentMutation(async () => {
     try {
-      assertMutableAgent(agentId, get().agents);
+      assertDeletableAgent(agentId, get().agents);
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to delete subagent',
@@ -1263,7 +1384,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   }),
 
   generateDraftFromPrompt: async (agentId, prompt) => {
-    assertMutableAgent(agentId, get().agents);
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       throw new Error('Prompt cannot be empty');
@@ -1410,7 +1530,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   applyDraft: async (agentId) => {
-    assertMutableAgent(agentId, get().agents);
     const draftEntries = Object.entries(get().draftByFile)
       .filter(([, draft]) => draft && !draft.needsReview) as [SubagentTargetFile, NonNullable<DraftByFile[SubagentTargetFile]>][];
 

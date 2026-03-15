@@ -9,6 +9,10 @@
         "creativeTasks": "创意任务",
         "creativeTasksDesc": "写作、头脑风暴、创意"
     },
+    "input": {
+        "gatewayDisconnectedPlaceholder": "网关未连接...",
+        "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）"
+    },
     "noLogs": "（暂无日志）",
     "toolbar": {
         "refresh": "刷新聊天",

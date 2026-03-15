@@ -1,5 +1,62 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-15 Subagent 模板内置化 + 一键加载）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── features/
+│   │   └── subagents/
+│   │       └── templates/
+│   │           └── <144 template workspaces>/
+│   │               ├── AGENTS.md
+│   │               ├── SOUL.md
+│   │               ├── TOOLS.md
+│   │               ├── IDENTITY.md
+│   │               └── USER.md
+│   ├── pages/SubAgents/
+│   │   ├── index.tsx
+│   │   └── components/SubagentTemplateLoadDialog.tsx
+│   ├── services/openclaw/subagent-template-catalog.ts
+│   └── types/subagent.ts
+├── electron/
+│   ├── adapters/platform/ipc/openclaw-ipc.ts
+│   └── preload/index.ts
+```
+
+### 文件职责
+
+- `src/features/subagents/templates/*`：项目内置 subagent 模板库（打包资源源目录）。
+- `electron/adapters/platform/ipc/openclaw-ipc.ts`：模板目录扫描、模板目录/模板详情 IPC 提供。
+- `electron/preload/index.ts`：暴露模板目录相关安全 IPC 白名单。
+- `src/services/openclaw/subagent-template-catalog.ts`：renderer 模板目录/详情读取服务。
+- `src/pages/SubAgents/index.tsx`：模板展示与“加载模板”交互编排。
+- `src/pages/SubAgents/components/SubagentTemplateLoadDialog.tsx`：仅模型选择的模板加载弹窗。
+- `src/types/subagent.ts`：模板目录/模板详情类型定义。
+- `electron-builder.yml`：将 `src/features/subagents/templates` 打包到 `resources/subagent-templates`。
+
+### 模块依赖与边界
+
+- 模板读取仍走 `renderer -> preload -> main ipc`，保持主进程文件系统访问边界。
+- 业务编排保持在 `src/stores/subagents.ts`：创建 agent 后按模板拷贝 5 个 md 文件。
+- 主进程仅提供模板元数据与文件内容，不做业务态创建决策。
+
+### 关键决策与原因
+
+1. 模板目录迁入 Matcha-claw 仓库，避免运行时依赖外部 `agency-agents` 邻仓存在。
+2. 打包使用 `extraResources` 固化模板资源，保证安装包离线可用。
+3. “加载模板”流程只要求选择模型，名称和 emoji 继承模板，满足快速创建诉求。
+
+### 本次变更
+
+- 将 `agency-agents/integrations/openclaw` 全量同步到 `Matcha-claw/src/features/subagents/templates`（144 模板）。
+- 新增 `openclaw:getSubagentTemplateCatalog` 与 `openclaw:getSubagentTemplate` IPC。
+- SubAgents 页面新增模板卡片与“加载模板”入口。
+- 新增模板加载弹窗：只选择模型，创建后自动拷贝模板 md 文件。
+- 验证通过：`pnpm run typecheck`、`pnpm test -- tests/unit/subagents.page.test.tsx tests/unit/subagents.store.test.ts`。
+
 ## 本次变更日志（2026-03-15 目录分层重构：services/features + team-runtime 迁移）
 
 ### 目录树

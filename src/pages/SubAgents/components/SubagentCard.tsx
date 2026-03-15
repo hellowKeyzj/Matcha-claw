@@ -4,7 +4,9 @@ import { useTranslation } from 'react-i18next';
 
 interface SubagentCardProps {
   agent: SubagentSummary;
-  locked?: boolean;
+  editLocked?: boolean;
+  deleteLocked?: boolean;
+  manageLocked?: boolean;
   modelReady?: boolean;
   onEdit: () => void;
   onDelete: () => void;
@@ -14,7 +16,9 @@ interface SubagentCardProps {
 
 export function SubagentCard({
   agent,
-  locked = false,
+  editLocked = false,
+  deleteLocked = false,
+  manageLocked = false,
   modelReady = true,
   onEdit,
   onDelete,
@@ -52,7 +56,7 @@ export function SubagentCard({
           variant="outline"
           size="sm"
           aria-label={`Edit ${agent.id}`}
-          disabled={locked}
+          disabled={editLocked}
           onClick={onEdit}
         >
           {t('card.actions.edit')}
@@ -61,7 +65,7 @@ export function SubagentCard({
           variant="outline"
           size="sm"
           aria-label={`Delete ${agent.id}`}
-          disabled={locked}
+          disabled={deleteLocked}
           onClick={onDelete}
         >
           {t('card.actions.delete')}
@@ -69,7 +73,7 @@ export function SubagentCard({
         <Button
           size="sm"
           aria-label={`Manage ${agent.id}`}
-          disabled={locked || runDisabled}
+          disabled={manageLocked || runDisabled}
           title={runDisabled ? t('card.modelMissingHint') : undefined}
           onClick={onManage}
         >

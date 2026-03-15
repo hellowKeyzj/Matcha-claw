@@ -9,6 +9,10 @@
         "creativeTasks": "Creative Tasks",
         "creativeTasksDesc": "Writing, brainstorming, ideas"
     },
+    "input": {
+        "gatewayDisconnectedPlaceholder": "Gateway not connected...",
+        "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)"
+    },
     "noLogs": "(No logs available yet)",
     "toolbar": {
         "refresh": "Refresh chat",

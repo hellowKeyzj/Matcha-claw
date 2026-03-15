@@ -4,7 +4,7 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
@@ -111,15 +111,6 @@ export function Chat() {
     }
   });
   const [taskInboxWidth, setTaskInboxWidth] = useState<number>(() => loadTaskInboxWidth());
-
-  const mentionCandidates = useMemo(
-    () => agents.map((agent) => ({
-      id: agent.id,
-      label: agent.name || agent.id,
-      insertText: `@${agent.id} `,
-    })),
-    [agents],
-  );
 
   useEffect(() => {
     try {
@@ -352,7 +343,6 @@ export function Chat() {
           onStop={abortRun}
           disabled={!isGatewayRunning}
           sending={sending}
-          mentionCandidates={mentionCandidates}
         />
       </div>
 

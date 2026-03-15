@@ -21,6 +21,34 @@ export interface SubagentSummary {
   isDefault?: boolean;
 }
 
+export interface SubagentTemplateSummary {
+  id: string;
+  name: string;
+  emoji?: string;
+  summary?: string;
+  categoryId?: string;
+  subcategoryId?: string;
+  order?: number;
+  sourcePath?: string;
+  files: SubagentTargetFile[];
+}
+
+export interface SubagentTemplateCategory {
+  id: string;
+  order?: number;
+}
+
+export interface SubagentTemplateCatalogResult {
+  sourceDir?: string;
+  categories: SubagentTemplateCategory[];
+  templates: SubagentTemplateSummary[];
+}
+
+export interface SubagentTemplateDetail extends SubagentTemplateSummary {
+  sourceDir?: string;
+  fileContents: Partial<Record<SubagentTargetFile, string>>;
+}
+
 export interface AgentsListResult {
   agents: SubagentSummary[];
   defaultId?: string;
