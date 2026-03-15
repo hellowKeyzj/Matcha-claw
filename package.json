@@ -33,6 +33,8 @@
     "test": "vitest run",
     "test:contract": "vitest run tests/contract",
     "check:trait-boundary": "node scripts/check-trait-boundary.mjs",
+    "templates:catalog": "node scripts/generate-subagent-template-catalog.mjs",
+    "templates:i18n": "node scripts/generate-subagent-template-i18n.mjs",
     "uv:download": "zx scripts/download-bundled-uv.mjs",
     "uv:download:mac": "zx scripts/download-bundled-uv.mjs --platform=mac",
     "uv:download:win": "zx scripts/download-bundled-uv.mjs --platform=win",

@@ -11,6 +11,7 @@ import enSkills from './locales/en/skills.json';
 import enCron from './locales/en/cron.json';
 import enSetup from './locales/en/setup.json';
 import enSubagents from './locales/en/subagents.json';
+import enSubagentTemplates from './locales/en/subagent-templates.json';
 import enTeams from './locales/en/teams.json';
 import enTasks from './locales/en/tasks.json';
 
@@ -24,6 +25,7 @@ import zhSkills from './locales/zh/skills.json';
 import zhCron from './locales/zh/cron.json';
 import zhSetup from './locales/zh/setup.json';
 import zhSubagents from './locales/zh/subagents.json';
+import zhSubagentTemplates from './locales/zh/subagent-templates.json';
 import zhTeams from './locales/zh/teams.json';
 import zhTasks from './locales/zh/tasks.json';
 
@@ -37,6 +39,7 @@ import jaSkills from './locales/ja/skills.json';
 import jaCron from './locales/ja/cron.json';
 import jaSetup from './locales/ja/setup.json';
 import jaSubagents from './locales/ja/subagents.json';
+import jaSubagentTemplates from './locales/ja/subagent-templates.json';
 import jaTeams from './locales/ja/teams.json';
 import jaTasks from './locales/ja/tasks.json';
 
@@ -59,6 +62,7 @@ const resources = {
         cron: enCron,
         setup: enSetup,
         subagents: enSubagents,
+        subagentTemplates: enSubagentTemplates,
         teams: enTeams,
         tasks: enTasks,
     },
@@ -72,6 +76,7 @@ const resources = {
         cron: zhCron,
         setup: zhSetup,
         subagents: zhSubagents,
+        subagentTemplates: zhSubagentTemplates,
         teams: zhTeams,
         tasks: zhTasks,
     },
@@ -85,6 +90,7 @@ const resources = {
         cron: jaCron,
         setup: jaSetup,
         subagents: jaSubagents,
+        subagentTemplates: jaSubagentTemplates,
         teams: jaTeams,
         tasks: jaTasks,
     },
@@ -97,7 +103,7 @@ i18n
         lng: 'en', // will be overridden by settings store
         fallbackLng: 'en',
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'teams', 'tasks'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

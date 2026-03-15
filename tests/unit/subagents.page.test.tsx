@@ -22,6 +22,7 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
 
 describe('subagents page', () => {
   const createAgent = vi.fn().mockResolvedValue('writer');
+  const createAgentFromTemplate = vi.fn().mockResolvedValue('brand-guardian');
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
   const loadAgents = vi.fn().mockResolvedValue(undefined);
@@ -32,6 +33,7 @@ describe('subagents page', () => {
 
   beforeEach(() => {
     createAgent.mockClear();
+    createAgentFromTemplate.mockClear();
     updateAgent.mockClear();
     deleteAgent.mockClear();
     loadAgents.mockClear();
@@ -99,6 +101,7 @@ describe('subagents page', () => {
       loadPersistedFilesForAgent,
       selectAgent: vi.fn(),
       createAgent,
+      createAgentFromTemplate,
       updateAgent,
       deleteAgent,
       generateDraftFromPrompt,
@@ -386,12 +389,12 @@ describe('subagents page', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
-  it('disables edit/delete/manage but keeps chat available for main agent', () => {
+  it('keeps main editable/manageable but still blocks deletion', () => {
     renderSubagentsPage();
 
-    expect(screen.getByRole('button', { name: 'Edit main' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Edit main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Delete main' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Manage main' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Manage main' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Chat main' })).toBeEnabled();
   });
 
@@ -481,5 +484,73 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Chat agent-alpha' }));
 
     expect(screen.getByTestId('router-location')).toHaveTextContent('/?agent=agent-alpha');
+  });
+
+  it('loads a template and creates subagent with template defaults', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, ...args) => {
+      if (channel === 'openclaw:getSubagentTemplateCatalog') {
+        return {
+          sourceDir: '/repo/integrations/openclaw',
+          templates: [
+            {
+              id: 'brand-guardian',
+              name: 'Brand Guardian',
+              emoji: '🎨',
+              summary: 'Brand guard template',
+              files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+            },
+          ],
+        };
+      }
+      if (channel === 'openclaw:getSubagentTemplate' && args[0] === 'brand-guardian') {
+        return {
+          sourceDir: '/repo/integrations/openclaw',
+          template: {
+            id: 'brand-guardian',
+            name: 'Brand Guardian',
+            emoji: '🎨',
+            summary: 'Brand guard template',
+            files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+            fileContents: {
+              'AGENTS.md': 'agents',
+              'SOUL.md': 'soul',
+              'TOOLS.md': 'tools',
+              'IDENTITY.md': 'identity',
+              'USER.md': 'user',
+            },
+          },
+        };
+      }
+      return undefined;
+    });
+
+    renderSubagentsPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Expand Template Library' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Template Library' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load Template' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Load Template: Brand Guardian' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load' }));
+
+    await waitFor(() => {
+      expect(createAgentFromTemplate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'gpt-4.1-mini',
+          template: expect.objectContaining({
+            id: 'brand-guardian',
+            name: 'Brand Guardian',
+            emoji: '🎨',
+          }),
+        }),
+      );
+    });
   });
 });

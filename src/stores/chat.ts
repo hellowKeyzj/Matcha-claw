@@ -70,6 +70,18 @@ export interface ToolStatus {
   updatedAt: number;
 }
 
+interface SessionRuntimeSnapshot {
+  messages: RawMessage[];
+  sending: boolean;
+  activeRunId: string | null;
+  streamingText: string;
+  streamingMessage: unknown | null;
+  streamingTools: ToolStatus[];
+  pendingFinal: boolean;
+  lastUserMessageAt: number | null;
+  pendingToolImages: AttachedFileMeta[];
+}
+
 interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -94,6 +106,8 @@ interface ChatState {
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
+  /** Per-session runtime snapshot to avoid blank UI while switching sessions */
+  sessionRuntimeByKey: Record<string, SessionRuntimeSnapshot>;
 
   // Thinking
   showThinking: boolean;
@@ -1168,6 +1182,65 @@ function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
   return false;
 }
 
+function cloneAttachedFiles(files: AttachedFileMeta[] | undefined): AttachedFileMeta[] | undefined {
+  if (!files) return undefined;
+  return files.map((file) => ({ ...file }));
+}
+
+function cloneMessages(messages: RawMessage[]): RawMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    _attachedFiles: cloneAttachedFiles(message._attachedFiles),
+  }));
+}
+
+function cloneStreamingTools(streamingTools: ToolStatus[]): ToolStatus[] {
+  return streamingTools.map((tool) => ({ ...tool }));
+}
+
+function createEmptySessionRuntime(): SessionRuntimeSnapshot {
+  return {
+    messages: [],
+    sending: false,
+    activeRunId: null,
+    streamingText: '',
+    streamingMessage: null,
+    streamingTools: [],
+    pendingFinal: false,
+    lastUserMessageAt: null,
+    pendingToolImages: [],
+  };
+}
+
+function snapshotCurrentSessionRuntime(state: ChatState): SessionRuntimeSnapshot {
+  return {
+    messages: cloneMessages(state.messages),
+    sending: state.sending,
+    activeRunId: state.activeRunId,
+    streamingText: state.streamingText,
+    streamingMessage: state.streamingMessage,
+    streamingTools: cloneStreamingTools(state.streamingTools),
+    pendingFinal: state.pendingFinal,
+    lastUserMessageAt: state.lastUserMessageAt,
+    pendingToolImages: cloneAttachedFiles(state.pendingToolImages) ?? [],
+  };
+}
+
+function resolveSessionRuntime(snapshot: SessionRuntimeSnapshot | undefined): SessionRuntimeSnapshot {
+  if (!snapshot) return createEmptySessionRuntime();
+  return {
+    messages: cloneMessages(snapshot.messages),
+    sending: snapshot.sending,
+    activeRunId: snapshot.activeRunId,
+    streamingText: snapshot.streamingText,
+    streamingMessage: snapshot.streamingMessage,
+    streamingTools: cloneStreamingTools(snapshot.streamingTools),
+    pendingFinal: snapshot.pendingFinal,
+    lastUserMessageAt: snapshot.lastUserMessageAt,
+    pendingToolImages: cloneAttachedFiles(snapshot.pendingToolImages) ?? [],
+  };
+}
+
 // ── Store ────────────────────────────────────────────────────────
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -1188,6 +1261,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentSessionKey: DEFAULT_SESSION_KEY,
   sessionLabels: {},
   sessionLastActivity: {},
+  sessionRuntimeByKey: {},
 
   showThinking: true,
   thinkingLevel: null,
@@ -1306,19 +1380,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
-    const { currentSessionKey, messages } = get();
+    clearHistoryPoll();
+    clearErrorRecoveryTimer();
+    const state = get();
+    const { currentSessionKey, messages } = state;
     const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const nextSessionRuntimeByKey = { ...state.sessionRuntimeByKey };
+
+    if (leavingEmpty) {
+      delete nextSessionRuntimeByKey[currentSessionKey];
+    } else {
+      nextSessionRuntimeByKey[currentSessionKey] = snapshotCurrentSessionRuntime(state);
+    }
+    const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
+
     set((s) => ({
       currentSessionKey: key,
-      messages: [],
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      activeRunId: null,
+      messages: targetRuntime.messages,
+      sending: targetRuntime.sending,
+      streamingText: targetRuntime.streamingText,
+      streamingMessage: targetRuntime.streamingMessage,
+      streamingTools: targetRuntime.streamingTools,
+      activeRunId: targetRuntime.activeRunId,
       error: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
+      pendingFinal: targetRuntime.pendingFinal,
+      lastUserMessageAt: targetRuntime.lastUserMessageAt,
+      pendingToolImages: targetRuntime.pendingToolImages,
+      sessionRuntimeByKey: nextSessionRuntimeByKey,
       ...(leavingEmpty ? {
         sessions: s.sessions.filter((s) => s.key !== currentSessionKey),
         sessionLabels: Object.fromEntries(
@@ -1329,7 +1417,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
       } : {}),
     }));
-    get().loadHistory();
+    // 切回正在运行的会话时，重启历史轮询，避免 UI 卡在旧快照状态
+    if (targetRuntime.sending) {
+      const POLL_INTERVAL = 4_000;
+      const pollHistory = () => {
+        const current = get();
+        if (!current.sending) {
+          clearHistoryPoll();
+          return;
+        }
+        if (!current.streamingMessage) {
+          void current.loadHistory(true);
+        }
+        _historyPollTimer = setTimeout(pollHistory, POLL_INTERVAL);
+      };
+      _historyPollTimer = setTimeout(pollHistory, 1_000);
+    }
+    void get().loadHistory(true);
   },
 
   // ── Delete session ──
@@ -1364,21 +1468,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const remaining = sessions.filter((s) => s.key !== key);
 
     if (currentSessionKey === key) {
+      clearHistoryPoll();
+      clearErrorRecoveryTimer();
       // Switched away from deleted session — pick the first remaining or create new
       const next = remaining[0];
       set((s) => ({
+        ...(function buildNextState() {
+          const runtimeMap = Object.fromEntries(
+            Object.entries(s.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key),
+          );
+          const nextRuntime = resolveSessionRuntime(runtimeMap[next?.key ?? '']);
+          return {
+            sessionRuntimeByKey: runtimeMap,
+            messages: nextRuntime.messages,
+            sending: nextRuntime.sending,
+            streamingText: nextRuntime.streamingText,
+            streamingMessage: nextRuntime.streamingMessage,
+            streamingTools: nextRuntime.streamingTools,
+            activeRunId: nextRuntime.activeRunId,
+            pendingFinal: nextRuntime.pendingFinal,
+            lastUserMessageAt: nextRuntime.lastUserMessageAt,
+            pendingToolImages: nextRuntime.pendingToolImages,
+          };
+        })(),
         sessions: remaining,
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        messages: [],
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
         error: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
         currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
       }));
       if (next) {
@@ -1389,6 +1505,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessions: remaining,
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+        sessionRuntimeByKey: Object.fromEntries(Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== key)),
       }));
     }
   },
@@ -1396,6 +1513,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── New session ──
 
   newSession: () => {
+    clearHistoryPoll();
+    clearErrorRecoveryTimer();
     // Generate a new unique session key and switch to it.
     // NOTE: We intentionally do NOT call sessions.reset on the old session.
     // sessions.reset archives (renames) the session JSONL file, making old
@@ -1406,6 +1525,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const newKey = `${prefix}:session-${Date.now()}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
     set((s) => ({
+      sessionRuntimeByKey: (() => {
+        const next = { ...s.sessionRuntimeByKey };
+        if (leavingEmpty) {
+          delete next[currentSessionKey];
+        } else {
+          next[currentSessionKey] = snapshotCurrentSessionRuntime(s);
+        }
+        delete next[newKey];
+        return next;
+      })(),
       currentSessionKey: newKey,
       sessions: [
         ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
@@ -1417,15 +1546,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionLastActivity: leavingEmpty
         ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
         : s.sessionLastActivity,
-      messages: [],
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      activeRunId: null,
+      ...createEmptySessionRuntime(),
       error: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
     }));
   },
 
@@ -1446,6 +1568,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
       sessionLastActivity: Object.fromEntries(
         Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+      ),
+      sessionRuntimeByKey: Object.fromEntries(
+        Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== currentSessionKey),
       ),
     }));
   },

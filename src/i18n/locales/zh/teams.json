@@ -1,6 +1,6 @@
 {
-  "title": "团队协作中心",
-  "subtitle": "任务看板与团队讨论中心",
+  "title": "Agents协作",
+  "subtitle": "多 Agent 任务协同与讨论",
   "defaultValues": {
     "teamName": "新团队"
   },

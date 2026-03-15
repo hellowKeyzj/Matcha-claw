@@ -1,13 +1,48 @@
 {
-  "title": "智能体管理台",
-  "subtitle": "管理智能体与模型配置",
-  "newSubagent": "新增智能体",
+  "title": "Agent",
+  "subtitle": "管理 Agent 与模型",
+  "newSubagent": "新增Agent",
   "empty": "暂无智能体",
   "modelGuide": {
     "description": "请先到 设置 > AI 模型提供商 添加模型",
     "action": "前往设置"
   },
-  "createDialogTitle": "新增智能体",
+  "templates": {
+    "title": "预置模板库",
+    "subtitle": "可预览并加载，加载时只需选择模型。共 {{count}} 个模板",
+    "expand": "展开模板库",
+    "collapse": "收起模板库",
+    "loading": "模板加载中...",
+    "loadingButton": "加载中...",
+    "load": "加载模板",
+    "empty": "未发现可用模板。",
+    "error": "模板加载失败：{{message}}",
+    "badge": "模板",
+    "categories": {
+      "all": "全部",
+      "design": "设计",
+      "engineering": "工程",
+      "game-development": "游戏开发",
+      "marketing": "营销",
+      "paid-media": "付费投放",
+      "sales": "销售",
+      "product": "产品",
+      "project-management": "项目管理",
+      "testing": "测试",
+      "support": "支持",
+      "spatial-computing": "空间计算",
+      "specialized": "专项"
+    },
+    "source": "来源：{{source}}",
+    "loadDialog": {
+      "title": "加载模板：{{name}}",
+      "model": "模型",
+      "files": "将拷贝文件：{{files}}",
+      "confirm": "确认加载",
+      "loading": "加载中..."
+    }
+  },
+  "createDialogTitle": "新增Agent",
   "editDialogTitle": "编辑子Agent",
   "manageTitle": "配置人设：{{agentId}}",
   "manage": {

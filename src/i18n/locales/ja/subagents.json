@@ -7,6 +7,41 @@
     "description": "先に 設定 > AI モデルプロバイダー でモデルを追加してください。",
     "action": "設定を開く"
   },
+  "templates": {
+    "title": "プリセットテンプレート一覧",
+    "subtitle": "プレビューして直接読み込み可能。読み込み時はモデル選択のみ。{{count}} 件のテンプレート",
+    "expand": "テンプレート一覧を展開",
+    "collapse": "テンプレート一覧を折りたたむ",
+    "loading": "テンプレートを読み込み中...",
+    "loadingButton": "読み込み中...",
+    "load": "テンプレートを読み込む",
+    "empty": "利用可能なテンプレートが見つかりません。",
+    "error": "テンプレート読み込みに失敗しました: {{message}}",
+    "badge": "テンプレート",
+    "categories": {
+      "all": "すべて",
+      "design": "デザイン",
+      "engineering": "エンジニアリング",
+      "game-development": "ゲーム開発",
+      "marketing": "マーケティング",
+      "paid-media": "有料広告",
+      "sales": "営業",
+      "product": "プロダクト",
+      "project-management": "プロジェクト管理",
+      "testing": "テスト",
+      "support": "サポート",
+      "spatial-computing": "空間コンピューティング",
+      "specialized": "専門特化"
+    },
+    "source": "ソース: {{source}}",
+    "loadDialog": {
+      "title": "テンプレート読込: {{name}}",
+      "model": "モデル",
+      "files": "コピーされるファイル: {{files}}",
+      "confirm": "読み込む",
+      "loading": "読み込み中..."
+    }
+  },
   "createDialogTitle": "サブAgentを作成",
   "editDialogTitle": "サブAgentを編集",
   "manageTitle": "管理中: {{agentId}}",

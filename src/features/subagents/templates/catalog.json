@@ -1,0 +1,934 @@
+{
+  "version": 1,
+  "generatedAt": "2026-03-15T01:24:46.640Z",
+  "categories": [
+    {
+      "id": "design",
+      "order": 10
+    },
+    {
+      "id": "engineering",
+      "order": 20
+    },
+    {
+      "id": "game-development",
+      "order": 30
+    },
+    {
+      "id": "marketing",
+      "order": 40
+    },
+    {
+      "id": "paid-media",
+      "order": 50
+    },
+    {
+      "id": "sales",
+      "order": 60
+    },
+    {
+      "id": "product",
+      "order": 70
+    },
+    {
+      "id": "project-management",
+      "order": 80
+    },
+    {
+      "id": "testing",
+      "order": 90
+    },
+    {
+      "id": "support",
+      "order": 100
+    },
+    {
+      "id": "spatial-computing",
+      "order": 110
+    },
+    {
+      "id": "specialized",
+      "order": 120
+    }
+  ],
+  "templates": [
+    {
+      "id": "accessibility-auditor",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-accessibility-auditor.md",
+      "order": 1
+    },
+    {
+      "id": "account-strategist",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-account-strategist.md",
+      "order": 2
+    },
+    {
+      "id": "accounts-payable-agent",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/accounts-payable-agent.md",
+      "order": 3
+    },
+    {
+      "id": "ad-creative-strategist",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-creative-strategist.md",
+      "order": 4
+    },
+    {
+      "id": "agentic-identity-trust-architect",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/agentic-identity-trust.md",
+      "order": 5
+    },
+    {
+      "id": "agents-orchestrator",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/agents-orchestrator.md",
+      "order": 6
+    },
+    {
+      "id": "ai-data-remediation-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-ai-data-remediation-engineer.md",
+      "order": 7
+    },
+    {
+      "id": "ai-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-ai-engineer.md",
+      "order": 8
+    },
+    {
+      "id": "analytics-reporter",
+      "categoryId": "support",
+      "sourcePath": "support/support-analytics-reporter.md",
+      "order": 9
+    },
+    {
+      "id": "api-tester",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-api-tester.md",
+      "order": 10
+    },
+    {
+      "id": "app-store-optimizer",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-app-store-optimizer.md",
+      "order": 11
+    },
+    {
+      "id": "automation-governance-architect",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/automation-governance-architect.md",
+      "order": 12
+    },
+    {
+      "id": "autonomous-optimization-architect",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-autonomous-optimization-architect.md",
+      "order": 13
+    },
+    {
+      "id": "backend-architect",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-backend-architect.md",
+      "order": 14
+    },
+    {
+      "id": "baidu-seo-specialist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-baidu-seo-specialist.md",
+      "order": 15
+    },
+    {
+      "id": "behavioral-nudge-engine",
+      "categoryId": "product",
+      "sourcePath": "product/product-behavioral-nudge-engine.md",
+      "order": 16
+    },
+    {
+      "id": "bilibili-content-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-bilibili-content-strategist.md",
+      "order": 17
+    },
+    {
+      "id": "blockchain-security-auditor",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/blockchain-security-auditor.md",
+      "order": 18
+    },
+    {
+      "id": "book-co-author",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-book-co-author.md",
+      "order": 19
+    },
+    {
+      "id": "brand-guardian",
+      "categoryId": "design",
+      "sourcePath": "design/design-brand-guardian.md",
+      "order": 20
+    },
+    {
+      "id": "carousel-growth-engine",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-carousel-growth-engine.md",
+      "order": 21
+    },
+    {
+      "id": "china-e-commerce-operator",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-china-ecommerce-operator.md",
+      "order": 22
+    },
+    {
+      "id": "code-reviewer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-code-reviewer.md",
+      "order": 23
+    },
+    {
+      "id": "compliance-auditor",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/compliance-auditor.md",
+      "order": 24
+    },
+    {
+      "id": "content-creator",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-content-creator.md",
+      "order": 25
+    },
+    {
+      "id": "corporate-training-designer",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/corporate-training-designer.md",
+      "order": 26
+    },
+    {
+      "id": "cross-border-e-commerce-specialist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-cross-border-ecommerce.md",
+      "order": 27
+    },
+    {
+      "id": "cultural-intelligence-strategist",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/specialized-cultural-intelligence-strategist.md",
+      "order": 28
+    },
+    {
+      "id": "data-consolidation-agent",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/data-consolidation-agent.md",
+      "order": 29
+    },
+    {
+      "id": "data-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-data-engineer.md",
+      "order": 30
+    },
+    {
+      "id": "database-optimizer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-database-optimizer.md",
+      "order": 31
+    },
+    {
+      "id": "deal-strategist",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-deal-strategist.md",
+      "order": 32
+    },
+    {
+      "id": "developer-advocate",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/specialized-developer-advocate.md",
+      "order": 33
+    },
+    {
+      "id": "devops-automator",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-devops-automator.md",
+      "order": 34
+    },
+    {
+      "id": "discovery-coach",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-discovery-coach.md",
+      "order": 35
+    },
+    {
+      "id": "document-generator",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/specialized-document-generator.md",
+      "order": 36
+    },
+    {
+      "id": "douyin-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-douyin-strategist.md",
+      "order": 37
+    },
+    {
+      "id": "embedded-firmware-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-embedded-firmware-engineer.md",
+      "order": 38
+    },
+    {
+      "id": "evidence-collector",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-evidence-collector.md",
+      "order": 39
+    },
+    {
+      "id": "executive-summary-generator",
+      "categoryId": "support",
+      "sourcePath": "support/support-executive-summary-generator.md",
+      "order": 40
+    },
+    {
+      "id": "experiment-tracker",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-management-experiment-tracker.md",
+      "order": 41
+    },
+    {
+      "id": "feedback-synthesizer",
+      "categoryId": "product",
+      "sourcePath": "product/product-feedback-synthesizer.md",
+      "order": 42
+    },
+    {
+      "id": "feishu-integration-developer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-feishu-integration-developer.md",
+      "order": 43
+    },
+    {
+      "id": "finance-tracker",
+      "categoryId": "support",
+      "sourcePath": "support/support-finance-tracker.md",
+      "order": 44
+    },
+    {
+      "id": "frontend-developer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-frontend-developer.md",
+      "order": 45
+    },
+    {
+      "id": "game-audio-engineer",
+      "categoryId": "game-development",
+      "sourcePath": "game-development/game-audio-engineer.md",
+      "order": 46
+    },
+    {
+      "id": "game-designer",
+      "categoryId": "game-development",
+      "sourcePath": "game-development/game-designer.md",
+      "order": 47
+    },
+    {
+      "id": "git-workflow-master",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-git-workflow-master.md",
+      "order": 48
+    },
+    {
+      "id": "godot-gameplay-scripter",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/godot",
+      "sourcePath": "game-development/godot/godot-gameplay-scripter.md",
+      "order": 49
+    },
+    {
+      "id": "godot-multiplayer-engineer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/godot",
+      "sourcePath": "game-development/godot/godot-multiplayer-engineer.md",
+      "order": 50
+    },
+    {
+      "id": "godot-shader-developer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/godot",
+      "sourcePath": "game-development/godot/godot-shader-developer.md",
+      "order": 51
+    },
+    {
+      "id": "government-digital-presales-consultant",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/government-digital-presales-consultant.md",
+      "order": 52
+    },
+    {
+      "id": "growth-hacker",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-growth-hacker.md",
+      "order": 53
+    },
+    {
+      "id": "healthcare-marketing-compliance-specialist",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/healthcare-marketing-compliance.md",
+      "order": 54
+    },
+    {
+      "id": "identity-graph-operator",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/identity-graph-operator.md",
+      "order": 55
+    },
+    {
+      "id": "image-prompt-engineer",
+      "categoryId": "design",
+      "sourcePath": "design/design-image-prompt-engineer.md",
+      "order": 56
+    },
+    {
+      "id": "incident-response-commander",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-incident-response-commander.md",
+      "order": 57
+    },
+    {
+      "id": "inclusive-visuals-specialist",
+      "categoryId": "design",
+      "sourcePath": "design/design-inclusive-visuals-specialist.md",
+      "order": 58
+    },
+    {
+      "id": "infrastructure-maintainer",
+      "categoryId": "support",
+      "sourcePath": "support/support-infrastructure-maintainer.md",
+      "order": 59
+    },
+    {
+      "id": "instagram-curator",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-instagram-curator.md",
+      "order": 60
+    },
+    {
+      "id": "jira-workflow-steward",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-management-jira-workflow-steward.md",
+      "order": 61
+    },
+    {
+      "id": "kuaishou-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-kuaishou-strategist.md",
+      "order": 62
+    },
+    {
+      "id": "legal-compliance-checker",
+      "categoryId": "support",
+      "sourcePath": "support/support-legal-compliance-checker.md",
+      "order": 63
+    },
+    {
+      "id": "level-designer",
+      "categoryId": "game-development",
+      "sourcePath": "game-development/level-designer.md",
+      "order": 64
+    },
+    {
+      "id": "linkedin-content-creator",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-linkedin-content-creator.md",
+      "order": 65
+    },
+    {
+      "id": "livestream-commerce-coach",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-livestream-commerce-coach.md",
+      "order": 66
+    },
+    {
+      "id": "lsp-index-engineer",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/lsp-index-engineer.md",
+      "order": 67
+    },
+    {
+      "id": "macos-spatial-metal-engineer",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/macos-spatial-metal-engineer.md",
+      "order": 68
+    },
+    {
+      "id": "mcp-builder",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/specialized-mcp-builder.md",
+      "order": 69
+    },
+    {
+      "id": "mobile-app-builder",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-mobile-app-builder.md",
+      "order": 70
+    },
+    {
+      "id": "model-qa-specialist",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/specialized-model-qa.md",
+      "order": 71
+    },
+    {
+      "id": "narrative-designer",
+      "categoryId": "game-development",
+      "sourcePath": "game-development/narrative-designer.md",
+      "order": 72
+    },
+    {
+      "id": "outbound-strategist",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-outbound-strategist.md",
+      "order": 73
+    },
+    {
+      "id": "paid-media-auditor",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-auditor.md",
+      "order": 74
+    },
+    {
+      "id": "paid-social-strategist",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-paid-social-strategist.md",
+      "order": 75
+    },
+    {
+      "id": "performance-benchmarker",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-performance-benchmarker.md",
+      "order": 76
+    },
+    {
+      "id": "pipeline-analyst",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-pipeline-analyst.md",
+      "order": 77
+    },
+    {
+      "id": "podcast-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-podcast-strategist.md",
+      "order": 78
+    },
+    {
+      "id": "ppc-campaign-strategist",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-ppc-strategist.md",
+      "order": 79
+    },
+    {
+      "id": "private-domain-operator",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-private-domain-operator.md",
+      "order": 80
+    },
+    {
+      "id": "programmatic-display-buyer",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-programmatic-buyer.md",
+      "order": 81
+    },
+    {
+      "id": "project-shepherd",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-management-project-shepherd.md",
+      "order": 82
+    },
+    {
+      "id": "proposal-strategist",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-proposal-strategist.md",
+      "order": 83
+    },
+    {
+      "id": "rapid-prototyper",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-rapid-prototyper.md",
+      "order": 84
+    },
+    {
+      "id": "reality-checker",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-reality-checker.md",
+      "order": 85
+    },
+    {
+      "id": "recruitment-specialist",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/recruitment-specialist.md",
+      "order": 86
+    },
+    {
+      "id": "reddit-community-builder",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-reddit-community-builder.md",
+      "order": 87
+    },
+    {
+      "id": "report-distribution-agent",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/report-distribution-agent.md",
+      "order": 88
+    },
+    {
+      "id": "roblox-avatar-creator",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/roblox-studio",
+      "sourcePath": "game-development/roblox-studio/roblox-avatar-creator.md",
+      "order": 89
+    },
+    {
+      "id": "roblox-experience-designer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/roblox-studio",
+      "sourcePath": "game-development/roblox-studio/roblox-experience-designer.md",
+      "order": 90
+    },
+    {
+      "id": "roblox-systems-scripter",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/roblox-studio",
+      "sourcePath": "game-development/roblox-studio/roblox-systems-scripter.md",
+      "order": 91
+    },
+    {
+      "id": "sales-coach",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-coach.md",
+      "order": 92
+    },
+    {
+      "id": "sales-data-extraction-agent",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/sales-data-extraction-agent.md",
+      "order": 93
+    },
+    {
+      "id": "sales-engineer",
+      "categoryId": "sales",
+      "sourcePath": "sales/sales-engineer.md",
+      "order": 94
+    },
+    {
+      "id": "search-query-analyst",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-search-query-analyst.md",
+      "order": 95
+    },
+    {
+      "id": "security-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-security-engineer.md",
+      "order": 96
+    },
+    {
+      "id": "senior-developer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-senior-developer.md",
+      "order": 97
+    },
+    {
+      "id": "senior-project-manager",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-manager-senior.md",
+      "order": 98
+    },
+    {
+      "id": "seo-specialist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-seo-specialist.md",
+      "order": 99
+    },
+    {
+      "id": "short-video-editing-coach",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-short-video-editing-coach.md",
+      "order": 100
+    },
+    {
+      "id": "social-media-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-social-media-strategist.md",
+      "order": 101
+    },
+    {
+      "id": "software-architect",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-software-architect.md",
+      "order": 102
+    },
+    {
+      "id": "solidity-smart-contract-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-solidity-smart-contract-engineer.md",
+      "order": 103
+    },
+    {
+      "id": "sprint-prioritizer",
+      "categoryId": "product",
+      "sourcePath": "product/product-sprint-prioritizer.md",
+      "order": 104
+    },
+    {
+      "id": "sre-site-reliability-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-sre.md",
+      "order": 105
+    },
+    {
+      "id": "studio-operations",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-management-studio-operations.md",
+      "order": 106
+    },
+    {
+      "id": "studio-producer",
+      "categoryId": "project-management",
+      "sourcePath": "project-management/project-management-studio-producer.md",
+      "order": 107
+    },
+    {
+      "id": "study-abroad-advisor",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/study-abroad-advisor.md",
+      "order": 108
+    },
+    {
+      "id": "supply-chain-strategist",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/supply-chain-strategist.md",
+      "order": 109
+    },
+    {
+      "id": "support-responder",
+      "categoryId": "support",
+      "sourcePath": "support/support-support-responder.md",
+      "order": 110
+    },
+    {
+      "id": "technical-artist",
+      "categoryId": "game-development",
+      "sourcePath": "game-development/technical-artist.md",
+      "order": 111
+    },
+    {
+      "id": "technical-writer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-technical-writer.md",
+      "order": 112
+    },
+    {
+      "id": "terminal-integration-specialist",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/terminal-integration-specialist.md",
+      "order": 113
+    },
+    {
+      "id": "test-results-analyzer",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-test-results-analyzer.md",
+      "order": 114
+    },
+    {
+      "id": "threat-detection-engineer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-threat-detection-engineer.md",
+      "order": 115
+    },
+    {
+      "id": "tiktok-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-tiktok-strategist.md",
+      "order": 116
+    },
+    {
+      "id": "tool-evaluator",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-tool-evaluator.md",
+      "order": 117
+    },
+    {
+      "id": "tracking-measurement-specialist",
+      "categoryId": "paid-media",
+      "sourcePath": "paid-media/paid-media-tracking-specialist.md",
+      "order": 118
+    },
+    {
+      "id": "trend-researcher",
+      "categoryId": "product",
+      "sourcePath": "product/product-trend-researcher.md",
+      "order": 119
+    },
+    {
+      "id": "twitter-engager",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-twitter-engager.md",
+      "order": 120
+    },
+    {
+      "id": "ui-designer",
+      "categoryId": "design",
+      "sourcePath": "design/design-ui-designer.md",
+      "order": 121
+    },
+    {
+      "id": "unity-architect",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unity",
+      "sourcePath": "game-development/unity/unity-architect.md",
+      "order": 122
+    },
+    {
+      "id": "unity-editor-tool-developer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unity",
+      "sourcePath": "game-development/unity/unity-editor-tool-developer.md",
+      "order": 123
+    },
+    {
+      "id": "unity-multiplayer-engineer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unity",
+      "sourcePath": "game-development/unity/unity-multiplayer-engineer.md",
+      "order": 124
+    },
+    {
+      "id": "unity-shader-graph-artist",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unity",
+      "sourcePath": "game-development/unity/unity-shader-graph-artist.md",
+      "order": 125
+    },
+    {
+      "id": "unreal-multiplayer-architect",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unreal-engine",
+      "sourcePath": "game-development/unreal-engine/unreal-multiplayer-architect.md",
+      "order": 126
+    },
+    {
+      "id": "unreal-systems-engineer",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unreal-engine",
+      "sourcePath": "game-development/unreal-engine/unreal-systems-engineer.md",
+      "order": 127
+    },
+    {
+      "id": "unreal-technical-artist",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unreal-engine",
+      "sourcePath": "game-development/unreal-engine/unreal-technical-artist.md",
+      "order": 128
+    },
+    {
+      "id": "unreal-world-builder",
+      "categoryId": "game-development",
+      "subcategoryId": "game-development/unreal-engine",
+      "sourcePath": "game-development/unreal-engine/unreal-world-builder.md",
+      "order": 129
+    },
+    {
+      "id": "ux-architect",
+      "categoryId": "design",
+      "sourcePath": "design/design-ux-architect.md",
+      "order": 130
+    },
+    {
+      "id": "ux-researcher",
+      "categoryId": "design",
+      "sourcePath": "design/design-ux-researcher.md",
+      "order": 131
+    },
+    {
+      "id": "visionos-spatial-engineer",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/visionos-spatial-engineer.md",
+      "order": 132
+    },
+    {
+      "id": "visual-storyteller",
+      "categoryId": "design",
+      "sourcePath": "design/design-visual-storyteller.md",
+      "order": 133
+    },
+    {
+      "id": "wechat-mini-program-developer",
+      "categoryId": "engineering",
+      "sourcePath": "engineering/engineering-wechat-mini-program-developer.md",
+      "order": 134
+    },
+    {
+      "id": "wechat-official-account-manager",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-wechat-official-account.md",
+      "order": 135
+    },
+    {
+      "id": "weibo-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-weibo-strategist.md",
+      "order": 136
+    },
+    {
+      "id": "whimsy-injector",
+      "categoryId": "design",
+      "sourcePath": "design/design-whimsy-injector.md",
+      "order": 137
+    },
+    {
+      "id": "workflow-optimizer",
+      "categoryId": "testing",
+      "sourcePath": "testing/testing-workflow-optimizer.md",
+      "order": 138
+    },
+    {
+      "id": "xiaohongshu-specialist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-xiaohongshu-specialist.md",
+      "order": 139
+    },
+    {
+      "id": "xr-cockpit-interaction-specialist",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/xr-cockpit-interaction-specialist.md",
+      "order": 140
+    },
+    {
+      "id": "xr-immersive-developer",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/xr-immersive-developer.md",
+      "order": 141
+    },
+    {
+      "id": "xr-interface-architect",
+      "categoryId": "spatial-computing",
+      "sourcePath": "spatial-computing/xr-interface-architect.md",
+      "order": 142
+    },
+    {
+      "id": "zhihu-strategist",
+      "categoryId": "marketing",
+      "sourcePath": "marketing/marketing-zhihu-strategist.md",
+      "order": 143
+    },
+    {
+      "id": "zk-steward",
+      "categoryId": "specialized",
+      "sourcePath": "specialized/zk-steward.md",
+      "order": 144
+    }
+  ]
+}

@@ -7,6 +7,41 @@
     "description": "Please go to Settings > AI Providers to add a model first.",
     "action": "Open Settings"
   },
+  "templates": {
+    "title": "Built-in Template Catalog",
+    "subtitle": "Preview and load directly. Only model selection is required. {{count}} templates available",
+    "expand": "Expand Template Library",
+    "collapse": "Collapse Template Library",
+    "loading": "Loading templates...",
+    "loadingButton": "Loading...",
+    "load": "Load Template",
+    "empty": "No templates found.",
+    "error": "Failed to load templates: {{message}}",
+    "badge": "Template",
+    "categories": {
+      "all": "All",
+      "design": "Design",
+      "engineering": "Engineering",
+      "game-development": "Game Dev",
+      "marketing": "Marketing",
+      "paid-media": "Paid Media",
+      "sales": "Sales",
+      "product": "Product",
+      "project-management": "Project Mgmt",
+      "testing": "Testing",
+      "support": "Support",
+      "spatial-computing": "Spatial",
+      "specialized": "Specialized"
+    },
+    "source": "Source: {{source}}",
+    "loadDialog": {
+      "title": "Load Template: {{name}}",
+      "model": "Model",
+      "files": "Files to copy: {{files}}",
+      "confirm": "Load",
+      "loading": "Loading..."
+    }
+  },
   "createDialogTitle": "Create Subagent",
   "editDialogTitle": "Edit Subagent",
   "manageTitle": "Managing: {{agentId}}",
