@@ -50,6 +50,23 @@ export interface AppSettings {
   selectedBundles: string[];
   enabledSkills: string[];
   disabledSkills: string[];
+
+  // Security
+  securityPreset: 'strict' | 'balanced' | 'relaxed';
+  securityPolicyVersion: number;
+  securityPolicyByAgent: Record<string, {
+    preset?: 'strict' | 'balanced' | 'relaxed';
+    defaultAction?: 'allow' | 'confirm' | 'deny';
+    allowTools?: string[];
+    confirmTools?: string[];
+    denyTools?: string[];
+    allowPathPrefixes?: string[];
+    allowDomains?: string[];
+    allowCommandExecution?: boolean;
+    allowDependencyInstall?: boolean;
+    confirmStrategy?: 'every_time' | 'session';
+    capabilities?: string[];
+  }>;
 }
 
 /**
@@ -86,6 +103,11 @@ const defaults: AppSettings = {
   selectedBundles: ['productivity', 'developer'],
   enabledSkills: [],
   disabledSkills: [],
+
+  // Security
+  securityPreset: 'balanced',
+  securityPolicyVersion: 1,
+  securityPolicyByAgent: {},
 };
 
 /**

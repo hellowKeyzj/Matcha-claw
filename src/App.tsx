@@ -18,6 +18,8 @@ import { TeamsPage } from './pages/Teams';
 import { TeamChatPage } from './pages/Teams/TeamChat';
 import { TasksPage } from './pages/Tasks';
 import { Settings } from './pages/Settings';
+import { ProvidersPage } from './pages/Providers';
+import { SecurityPage } from './pages/Security';
 import { Setup } from './pages/Setup';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
@@ -268,7 +270,9 @@ function App() {
             <Route path="/teams" element={<TeamsPage />} />
             <Route path="/teams/:teamId" element={<TeamChatPage />} />
             <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/providers" element={<ProvidersPage />} />
             <Route path="/skills" element={<Skills />} />
+            <Route path="/security" element={<SecurityPage />} />
             <Route path="/cron" element={<Navigate to="/tasks?tab=scheduled" replace />} />
             <Route path="/settings/*" element={<Settings />} />
           </Route>

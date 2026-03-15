@@ -16,7 +16,6 @@ import {
   ChevronRight,
   Terminal,
   ExternalLink,
-  Key,
   Download,
   Copy,
   FileText,
@@ -36,7 +35,6 @@ import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
-import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   getGatewayWsDiagnosticEnabled,
@@ -778,7 +776,6 @@ export function Settings() {
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.title') },
     { key: 'appearance', label: t('appearance.title') },
-    { key: 'aiProviders', label: t('aiProviders.title') },
     { key: 'taskPlugin', label: t('taskPlugin.title') },
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
@@ -1064,22 +1061,6 @@ export function Settings() {
         </CardContent>
       </Card>
           )}
-
-      {/* AI Providers */}
-      {activeSection === 'aiProviders' && (
-      <Card className="order-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Key className="h-5 w-5" />
-            {t('aiProviders.title')}
-          </CardTitle>
-          <CardDescription>{t('aiProviders.description')}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ProvidersSettings />
-        </CardContent>
-      </Card>
-      )}
 
       {/* Gateway */}
       {activeSection === 'gateway' && (

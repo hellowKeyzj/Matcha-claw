@@ -3,6 +3,7 @@
  * Manage AI provider configurations and API keys
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Plus,
   Trash2,
@@ -21,7 +22,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -932,18 +933,30 @@ function AddProviderDialog({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>{t('aiProviders.dialog.title')}</CardTitle>
-          <CardDescription>
-            {t('aiProviders.dialog.desc')}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-4">
+      <section
+        role="dialog"
+        aria-label={t('aiProviders.dialog.title')}
+        className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border bg-background p-6 shadow-xl"
+      >
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">{t('aiProviders.dialog.title')}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">{t('aiProviders.dialog.desc')}</p>
+          </div>
+          <Button variant="ghost" size="icon" aria-label={t('aiProviders.dialog.cancel')} onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </header>
+
+        <div className="mt-5 space-y-4">
           {!selectedType ? (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
               {availableTypes.map((type) => (
                 <button
                   key={type.id}
@@ -1258,8 +1271,10 @@ function AddProviderDialog({
               {t('aiProviders.dialog.add')}
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
+    ,
+    document.body
   );
 }

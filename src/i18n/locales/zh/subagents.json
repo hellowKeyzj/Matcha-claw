@@ -4,8 +4,8 @@
   "newSubagent": "新增Agent",
   "empty": "暂无智能体",
   "modelGuide": {
-    "description": "请先到 设置 > AI 模型提供商 添加模型",
-    "action": "前往设置"
+    "description": "请先前往「模型」添加模型",
+    "action": "前往模型"
   },
   "templates": {
     "title": "预置模板库",

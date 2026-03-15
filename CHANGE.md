@@ -1,5 +1,181 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-15 Guardian 策略语义补齐：preset/白名单/不可变红线）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── electron/
+│   ├── api/routes/
+│   │   └── settings.ts
+│   └── utils/
+│       ├── store.ts
+│       └── guardian-policy.ts
+├── packages/
+│   └── openclaw-task-manager-plugin/
+│       ├── policy/
+│       │   ├── default.json
+│       │   └── presets/
+│       │       ├── strict.json
+│       │       ├── balanced.json
+│       │       └── relaxed.json
+│       └── src/
+│           └── guardian.ts
+├── src/
+│   ├── pages/Security/
+│   │   └── index.tsx
+│   └── i18n/locales/
+│       ├── zh/security.json
+│       ├── en/security.json
+│       └── ja/security.json
+└── tests/
+    └── unit/
+        └── guardian-plugin.test.ts
+```
+
+### 文件职责
+
+- `packages/openclaw-task-manager-plugin/policy/*`：定义插件内默认策略与预设档位（strict/balanced/relaxed）。
+- `packages/openclaw-task-manager-plugin/src/guardian.ts`：实现不可变红线、风险判定增强、目录/域名/能力令牌约束、确认策略与审计扩展。
+- `electron/utils/store.ts`：扩展安全策略配置结构（preset、路径/域名白名单、命令/安装开关、confirmStrategy、capabilities）。
+- `electron/utils/guardian-policy.ts`：将策略同步到 `openclaw.json`，并额外写出 `~/.openclaw/policies/guardian.policy.json`。
+- `src/pages/Security/index.tsx`：新增安全页细粒度配置项与预设选择。
+- `tests/unit/guardian-plugin.test.ts`：补充 immutable 规则与 confirmStrategy 行为测试。
+
+### 模块依赖与边界
+
+- 策略仍在主进程受控存储中维护，通过 settings 路由同步到网关，不引入独立后端或独立进程。
+- Guardian 规则执行仍在插件 Hook 层（`before_tool_call/after_tool_call`），不修改 OpenClaw 内核源码。
+- 预设策略文件仅作为“默认与模板源”，用户覆盖策略写入受控配置区。
+
+### 关键决策与原因
+
+1. 增加 `strict/balanced/relaxed` 预设，降低用户首次配置成本，同时保留按 Agent 细粒度覆盖。
+2. 将“禁用守卫、提示词注入、敏感外发”提升为不可变红线，避免被普通策略覆盖。
+3. 审计记录附带 `policyVersion/policyPreset/ruleId/requiredCapabilities`，提升可追溯性与运营诊断能力。
+
+### 本次变更
+
+- Guardian 策略引擎新增：
+  - 预设档位；
+  - 路径白名单、域名白名单；
+  - 命令执行与依赖安装开关；
+  - 能力令牌（CAP_*）缺失拦截；
+  - 每次确认/会话确认策略。
+- 新增策略文件落点：
+  - `packages/openclaw-task-manager-plugin/policy/default.json`
+  - `packages/openclaw-task-manager-plugin/policy/presets/{strict,balanced,relaxed}.json`
+- 策略同步新增用户可编辑落点：
+  - `~/.openclaw/policies/guardian.policy.json`
+- 安全页面新增细粒度配置项并接入保存链路。
+- 安全页面新增“策略优先级可视化”与“最近命中审计”面板，可直接查看命中来源（immutable/user/preset/default）。
+- 修复策略来源判定：改为按字段 patch 存储与加载压缩，避免“仅改一个字段却全部显示用户覆盖”。
+- 单测新增并通过：immutable 拦截 + confirmStrategy 不缓存。
+
+## 本次变更日志（2026-03-15 Security 页面策略接入 Guardian 执行链路）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── electron/
+│   ├── api/routes/
+│   │   └── settings.ts
+│   └── utils/
+│       └── guardian-policy.ts
+├── packages/
+│   └── openclaw-task-manager-plugin/
+│       └── src/
+│           ├── guardian.ts
+│           └── index.ts
+└── tests/
+    └── unit/
+        └── guardian-plugin.test.ts
+```
+
+### 文件职责
+
+- `electron/utils/guardian-policy.ts`：将应用受控设置中的安全策略规范化并同步到 `~/.openclaw/openclaw.json`（`plugins.entries.task-manager.guardian`）。
+- `electron/api/routes/settings.ts`：在设置写入时触发 Guardian 策略同步，并在网关运行中调用 `guardian.policy.sync` 热更新。
+- `packages/openclaw-task-manager-plugin/src/guardian.ts`：支持按 `agentId` 覆盖策略（`defaultAction` + tool lists），并支持运行时同步。
+- `packages/openclaw-task-manager-plugin/src/index.ts`：新增 `guardian.policy.sync` 网关方法。
+- `tests/unit/guardian-plugin.test.ts`：新增“按 agent 覆盖策略即时生效”测试用例。
+
+### 模块依赖与边界
+
+- 页面配置仍写入主进程受控 settings（`electron-store`），不允许前端直写 OpenClaw 配置文件。
+- Guardian 执行层仍位于 task-manager 插件 Hook（`before_tool_call/after_tool_call`），不改 OpenClaw 内核源码。
+- 热更新通过网关方法下发，不引入独立服务或独立进程。
+
+### 关键决策与原因
+
+1. 使用“设置持久化 + openclaw.json 镜像 + 运行时热同步”三段式，兼顾重启后可恢复与运行中即时生效。
+2. 按 `agentId` 覆盖策略，仅覆盖声明字段，未声明字段继承全局 Guardian 基线，减少配置冗余。
+3. 按 `agentId` 做增量覆盖（仅覆盖声明字段），未声明字段继承全局 Guardian 基线，保证默认行为稳定。
+
+### 本次变更
+
+- 新增 Guardian 策略同步工具并接入 settings 路由。
+- 保存 `securityPolicyVersion/securityPolicyByAgent` 后自动：
+  - 写入 `openclaw.json` 的 task-manager guardian 配置；
+  - 在网关运行时调用 `guardian.policy.sync` 热更新。
+- Guardian 新增按 agent 覆盖策略解析与运行时 `syncPolicy`。
+- 新增 `guardian.policy.sync` gateway method。
+- 单测新增并通过：按 agent 覆盖可即时生效。
+
+## 本次变更日志（2026-03-15 新增 Security 菜单页与按 Agent 策略配置）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── src/
+│   ├── pages/
+│   │   └── Security/
+│   │       └── index.tsx
+│   ├── components/layout/
+│   │   └── Sidebar.tsx
+│   ├── i18n/
+│   │   ├── index.ts
+│   │   └── locales/
+│   │       ├── zh/security.json
+│   │       ├── en/security.json
+│   │       ├── ja/security.json
+│   │       └── */common.json
+│   └── App.tsx
+└── electron/
+    └── utils/
+        └── store.ts
+```
+
+### 文件职责
+
+- `src/pages/Security/index.tsx`：提供独立“安全”页面，支持按 Agent 编辑 `defaultAction/allowTools/confirmTools/denyTools`。
+- `src/components/layout/Sidebar.tsx`：新增 `Security` 菜单项，并放在 `Settings` 上方。
+- `src/App.tsx`：新增 `/security` 路由入口。
+- `src/i18n/locales/*/security.json` 与 `src/i18n/index.ts`：新增安全页三语文案与命名空间注册。
+- `electron/utils/store.ts`：新增安全策略持久化字段（`securityPolicyVersion/securityPolicyByAgent`）。
+
+### 模块依赖与边界
+
+- 安全页通过既有 `hostApiFetch('/api/settings')` 与主进程受控存储交互，不新增独立服务/进程。
+- 策略编辑作用域为“每个 Agent 一份配置”，页面不直接修改 OpenClaw 内核。
+
+### 关键决策与原因
+
+1. 将安全能力做成独立菜单页，避免塞入 Settings，符合“上方独立入口”的产品要求。
+2. 策略结构先落地为受控持久化字段，保证后续 Guardian 执行层可直接读取并演进。
+3. 使用三语 i18n 资源，避免新增页面回退为硬编码文案。
+
+### 本次变更
+
+- 新增 Security 页面并支持按 Agent 保存策略。
+- 侧边栏新增 Security 菜单，位置在 Settings 上方。
+- 新增 `/security` 路由。
+- settings 持久化结构新增安全策略字段。
+- 新增 `security` i18n namespace（zh/en/ja）。
+
 ## 本次变更日志（2026-03-15 审批同 Run 续跑 + chat.send 等待态 + Guardian 审计）
 
 ### 目录树

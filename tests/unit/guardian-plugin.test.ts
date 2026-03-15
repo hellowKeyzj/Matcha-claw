@@ -248,4 +248,227 @@ describe('guardian plugin hooks', () => {
     const preview = (paramsPreview?.preview as Record<string, unknown>) ?? {};
     expect(preview.authorization).toBe('[REDACTED]');
   });
+
+  it('guardian.policy.sync 可按 agent 覆盖策略并即时生效', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: { defaultAction: 'deny' },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const syncPolicy = gatewayMethods.get('guardian.policy.sync');
+    expect(syncPolicy).toBeTypeOf('function');
+    let syncPayload: Record<string, unknown> | null = null;
+    await syncPolicy?.({
+      params: {
+        securityPolicyVersion: 2,
+        securityPolicyByAgent: {
+          main: {
+            defaultAction: 'allow',
+          },
+        },
+      },
+      context,
+      respond: (ok: boolean, body?: Record<string, unknown>) => {
+        expect(ok).toBe(true);
+        syncPayload = body ?? null;
+      },
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+    expect(syncPayload?.securityPolicyVersion).toBe(2);
+    expect(syncPayload?.overrideAgentCount).toBe(1);
+
+    const mainAgentResult = await beforeToolCall?.(
+      { toolName: 'custom.echo', params: { text: 'hello' }, runId: 'run-4', toolCallId: 'tc-4' },
+      { toolName: 'custom.echo', runId: 'run-4', toolCallId: 'tc-4', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(mainAgentResult).toBeUndefined();
+
+    const otherAgentResult = await beforeToolCall?.(
+      { toolName: 'custom.echo', params: { text: 'hello' }, runId: 'run-5', toolCallId: 'tc-5' },
+      { toolName: 'custom.echo', runId: 'run-5', toolCallId: 'tc-5', sessionKey: 'agent:analytics-reporter:main', agentId: 'analytics-reporter' },
+    );
+    expect(otherAgentResult?.block).toBe(true);
+  });
+
+  it('immutable 规则生效：禁用 guardian 指令必须被阻断', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: { defaultAction: 'allow' },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.disable_guardian', params: {}, runId: 'run-6', toolCallId: 'tc-6' },
+      { toolName: 'system.disable_guardian', runId: 'run-6', toolCallId: 'tc-6', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it('confirmStrategy=every_time 时不缓存 allow-always', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: {
+        confirmTools: ['system.run'],
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+    const context = {
+      execApprovalManager: createApprovalManager('allow-always'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+    const syncPolicy = gatewayMethods.get('guardian.policy.sync');
+    await syncPolicy?.({
+      params: {
+        securityPolicyVersion: 3,
+        securityPolicyByAgent: {
+          main: {
+            confirmStrategy: 'every_time',
+            confirmTools: ['system.run'],
+          },
+        },
+      },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const first = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo 1' }, runId: 'run-7', toolCallId: 'tc-7' },
+      { toolName: 'system.run', runId: 'run-7', toolCallId: 'tc-7', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    const second = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo 2' }, runId: 'run-8', toolCallId: 'tc-8' },
+      { toolName: 'system.run', runId: 'run-8', toolCallId: 'tc-8', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(first).toBeUndefined();
+    expect(second).toBeUndefined();
+    expect(context.execApprovalManager.register).toHaveBeenCalledTimes(2);
+  });
+
+  it('会话缓存只用于 confirm_tools，不可绕过路径白名单判定', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: {
+        confirmTools: ['system.run'],
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+    const context = {
+      execApprovalManager: createApprovalManager('allow-always'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+    const syncPolicy = gatewayMethods.get('guardian.policy.sync');
+    await syncPolicy?.({
+      params: {
+        securityPolicyVersion: 4,
+        securityPolicyByAgent: {
+          main: {
+            confirmStrategy: 'session',
+            confirmTools: ['system.run'],
+            allowPathPrefixes: ['C:\\safe-root'],
+          },
+        },
+      },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const first = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo first' }, runId: 'run-9', toolCallId: 'tc-9' },
+      { toolName: 'system.run', runId: 'run-9', toolCallId: 'tc-9', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    const second = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo second', path: 'C:\\outside-root\\secret.txt' }, runId: 'run-10', toolCallId: 'tc-10' },
+      { toolName: 'system.run', runId: 'run-10', toolCallId: 'tc-10', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+
+    expect(first).toBeUndefined();
+    expect(second).toBeUndefined();
+    expect(context.execApprovalManager.register).toHaveBeenCalledTimes(2);
+  });
+
+  it('relaxed 预设默认不走 confirm_tools 审批', async () => {
+    const { hooks, gatewayMethods } = createFakeApi(tempDir, {
+      guardian: {
+        preset: 'relaxed',
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+    const context = {
+      execApprovalManager: createApprovalManager('allow-once'),
+      nodeSendToAllSubscribed: vi.fn(),
+    };
+    const taskList = gatewayMethods.get('task_list');
+    await taskList?.({
+      params: { workspaceDir: tempDir },
+      context,
+      respond: () => {},
+      req: {},
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'echo relaxed' }, runId: 'run-11', toolCallId: 'tc-11' },
+      { toolName: 'system.run', runId: 'run-11', toolCallId: 'tc-11', sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+
+    expect(result).toBeUndefined();
+    expect(context.execApprovalManager.register).not.toHaveBeenCalled();
+  });
 });
