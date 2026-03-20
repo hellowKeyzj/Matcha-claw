@@ -1,5 +1,756 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-19 security-core：恢复 MEM-004/COST-004/DEGRAD 可配置语义并迁移到 canonical 字段）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/openclaw-security-plugin/
+│   ├── openclaw.plugin.json
+│   └── src/
+│       ├── core/{types.ts,policy.ts}
+│       ├── application/security-runtime.ts
+│       └── vendor/
+│           ├── secureclaw-runtime-bridge.ts
+│           └── secureclaw-runtime/src/{types.ts,auditor.ts}
+├── electron/utils/security-policy.ts
+└── src/pages/Security/index.tsx
+```
+
+### 新增 canonical 字段
+
+- `runtime.auditEgressAllowlist: string[]`（MEM-004）
+- `runtime.auditDailyCostLimitUsd: number`（COST-004）
+- `runtime.auditFailureMode: "block_all" | "safe_mode" | "read_only" | null`（DEGRAD）
+
+### 本次变更
+
+- 类型与策略解析：
+  - `core/types.ts` 与 `core/policy.ts` 新增并解析上述 3 个字段。
+  - `application/security-runtime.ts` 的不可变快照加入 `auditEgressAllowlist` 冻结。
+- 审计运行时：
+  - `secureclaw-runtime-bridge.ts` 将 runtime canonical 字段注入 `context.config.securityCore`。
+  - `secureclaw-runtime/src/auditor.ts`：
+    - MEM-004 改为优先读取 `securityCore.auditEgressAllowlist`（为空回退内置基线）。
+    - COST-004 改为读取 `securityCore.auditDailyCostLimitUsd`（非法值回退 5）。
+    - 恢复 DEGRAD-001，读取 `securityCore.auditFailureMode`。
+  - `secureclaw-runtime/src/types.ts` 增加 `SecurityCoreAuditConfig` 与 `OpenClawConfig.securityCore`。
+- 配置与前端：
+  - `openclaw.plugin.json` 新增 3 个 canonical 字段 schema（并移除 `allowlist.pathPrefixes/domains`）。
+  - `electron/utils/security-policy.ts` 与 `src/pages/Security/index.tsx` 同步支持这 3 个字段的模板/归一化/编辑。
+
+### 验证
+
+- `pnpm typecheck` 通过。
+- `pnpm exec vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx tests/unit/security-destructive-detector.test.ts` 通过（47/47）。
+
+## 本次变更日志（2026-03-19 security-core：清理剩余兼容语义入口）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/openclaw-security-plugin/src/core/policy.ts
+├── electron/utils/security-policy.ts
+├── src/pages/Security/index.tsx
+└── packages/openclaw-security-plugin/src/vendor/secureclaw-runtime/src/{auditor.ts,types.ts}
+```
+
+### 文件职责
+
+- 策略解析链路改为只接受 canonical 字段，不再接受历史别名字段。
+- 审计子集移除 `gateway.authToken` 的 legacy 兼容读取，统一走 `gateway.auth.*`。
+- 前端策略归一化与后端保持一致，去掉 `allowlist` 中 path/domain 旧别名解析。
+
+### 本次变更
+
+- `core/policy.ts`
+  - `allowlistedTools` / `allowlistedSessions` 仅从 `allowlist.tools/sessions` 读取。
+  - `allowPathPrefixes` / `allowDomains` 仅从顶层 `runtime.allowPathPrefixes/allowDomains` 读取。
+- `electron/utils/security-policy.ts`
+  - 删除 `allowlist.pathPrefixes/allowPathPrefixes`、`allowlist.domains/allowDomains` 兼容解析。
+  - `SecurityRuntimePolicy.allowlist` 收敛为仅 `{ tools, sessions }`。
+- `src/pages/Security/index.tsx`
+  - 前端归一化删除同样的 alias 读取，保持与后端 canonical 一致。
+- `vendor/secureclaw-runtime/src/auditor.ts`
+  - 移除 `gateway.authToken` legacy fallback。
+  - 移除对 `secureclaw.failureMode` 的审计依赖。
+  - `MEM-004` 的域名白名单改为固定基线，不再读取 `secureclaw.network.egressAllowlist`。
+- `vendor/secureclaw-runtime/src/types.ts`
+  - 删除 `GatewayConfig.authToken` 字段定义。
+
+### 验证
+
+- `pnpm typecheck` 通过。
+- `pnpm exec vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx tests/unit/security-destructive-detector.test.ts` 通过（47/47）。
+
+## 本次变更日志（2026-03-19 security-core：移除兼容转发层，统一直连分层实现）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/
+├── index.ts
+├── adapters/openclaw/plugin.ts
+├── application/security-runtime.ts
+├── core/{types,policy,runtime-guard}.ts
+├── infrastructure/{actions,auditor,monitors/selected-monitors.ts}
+└── vendor/secureclaw-runtime-bridge.ts
+
+已删除兼容转发文件：
+- src/actions.ts
+- src/auditor.ts
+- src/policy.ts
+- src/runtime-guard.ts
+- src/types.ts
+- src/monitors/selected-monitors.ts
+```
+
+### 文件职责
+
+- `src` 顶层不再保留 re-export 兼容壳，调用方统一走 `application/core/infrastructure` 分层路径。
+- `secureclaw-runtime-bridge.ts` 改为直接依赖 `core/types.ts`，不再经过顶层 `src/types.ts` 转发。
+
+### 模块依赖与边界
+
+- 运行时主链路不变：`adapters -> application -> core/infrastructure/vendor`。
+- 删除兼容层后，模块边界更清晰，消除“同名目录 + 转发壳”带来的歧义。
+
+### 关键决策与原因
+
+1. 当前仓库内已无业务代码依赖这些转发壳，保留只会增加维护噪音。
+2. 用户明确“不需要向后兼容”，因此执行彻底净化。
+3. 保持行为不变，只做路径收敛和边界清理。
+
+### 验证
+
+- `pnpm typecheck` 通过。
+- `pnpm exec vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx tests/unit/security-destructive-detector.test.ts` 通过（47/47）。
+
+## 本次变更日志（2026-03-19 security-core：废除 Capability 矩阵）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/openclaw-security-plugin/
+│   ├── openclaw.plugin.json (改：删除 capability 配置项)
+│   └── src/
+│       ├── application/security-runtime.ts (改：删除 capability 快照冻结字段)
+│       ├── core/policy.ts (改：删除 capability 解析)
+│       ├── core/types.ts (改：删除 capability 类型定义)
+│       ├── core/runtime-guard.ts (改：删除 capability 启用判定)
+│       └── core/runtime-engine/detector.ts (改：删除 capability 规则)
+├── electron/utils/security-policy.ts (改：删除 capability 字段及预设)
+├── src/pages/Security/index.tsx (改：删除 capability 开关与矩阵 UI)
+└── tests/unit/security-core-plugin.test.ts (改：删除 capability 相关用例)
+```
+
+### 文件职责
+
+- security-core 仅保留 destructive / secrets / path / domain / prompt-injection 策略语义。
+- 前端安全页不再暴露 capability 配置入口，策略配置统一收敛到当前可执行语义。
+
+### 模块依赖与边界
+
+- `before_tool_call` 不再执行 capability 判定分支。
+- 策略持久化与 plugin schema 不再接受 capability 字段。
+- 单测移除 capability 场景，保持现有策略链路覆盖。
+
+### 关键决策与原因
+
+1. capability 不属于 openclaw 基础工具约束模型，保留会增加无效认知负担。
+2. 废除后策略表达更直接，避免“配置存在但运行价值不明确”的伪能力。
+3. 删除整条链路后可降低维护成本与误配置风险。
+
+### 本次变更
+
+- 后端：删除 capability 类型、解析、运行时判定、schema 字段。
+- 前端：删除 capability 开关、capabilityTokens、toolCapabilityRequirements 可视化矩阵。
+- 测试：删除 capability 守卫与免检工具测试。
+
+### 验证
+
+- `pnpm typecheck` 通过。
+- `pnpm exec vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx tests/unit/security-destructive-detector.test.ts` 通过（47/47）。
+
+## 本次变更日志（2026-03-19 security-core：策略快照“写时替换 + 共享只读引用”）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/application/
+└── security-runtime.ts (改：runtimeConfig 快照不可变 + 指针替换)
+```
+
+### 文件职责
+
+- `security-runtime.ts`：策略同步链路采用“生成不可变快照 -> 原子替换引用”的运行时配置管理方式。
+
+### 模块依赖与边界
+
+- 所有 hook 判定共享同一 `runtimeConfig` 引用，不做判定时深拷贝。
+- 策略更新仅在 `security.policy.sync` 中发生，更新方式为引用替换，不在原对象上就地修改。
+
+### 关键决策与原因
+
+1. 避免大对象深拷贝带来的 CPU/内存消耗。
+2. 避免并发判定过程中出现“对象被中途改写”的状态不一致。
+3. 去除 `JSON.stringify` 全量比较，改为监控相关字段定向比较，降低同步开销。
+
+### 本次变更
+
+- 新增 `freezeRuntimeConfigSnapshot(...)`：对策略对象及其关键嵌套结构做冻结。
+- `runtimeConfig` 初始化与同步更新统一走快照化。
+- `security.policy.sync`：
+  - 先算 `mergedRuntimeConfig`
+  - 再按引用切换 `runtimeConfig`
+  - 监控重配使用 `shouldReconcileMonitors(...)` 定向比较。
+- `startSelectedMonitors` 改为读取同一份 `activeRuntimeConfig` 快照，避免异步过程中读到不同版本。
+
+### 验证
+
+- `pnpm typecheck` 通过。
+- `pnpm vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx` 通过（32/32）。
+
+## 本次变更日志（2026-03-19 security-core：Policy Guard 改为 Rule Pipeline）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/core/runtime-engine/
+└── detector.ts (改：policy 检测改为规则数组 + 统一执行器)
+```
+
+### 文件职责
+
+- `detector.ts`：policy 检测从“顺序 if 判断”重构为 `POLICY_RULE_PIPELINE`，并通过统一执行器短路返回。
+
+### 模块依赖与边界
+
+- 规则执行顺序保持不变：`capability -> allowPathPrefixes -> allowDomains -> promptInjection`。
+- 引入 `PolicyRuleContext` 惰性缓存，避免单次请求中重复提取 path/domain/capability 数据。
+
+### 关键决策与原因
+
+1. 扩展性：新增规则只需追加 pipeline 项，不需要改主流程控制分支。
+2. 可维护性：规则逻辑和执行机制分离，降低函数复杂度。
+3. 性能：保留短路语义与缓存策略，不增加热路径额外扫描次数。
+
+### 本次变更
+
+- 新增 `PolicyRule` / `PolicyRuleContext` / `executePolicyRulePipeline`。
+- capability/path/domain/prompt 四类策略重构为独立规则执行函数。
+- `buildPolicyDetection` 改为 pipeline 执行入口。
+- 验证：
+  - `pnpm typecheck` 通过
+  - `pnpm vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-destructive-detector.test.ts` 通过
+
+## 本次变更日志（2026-03-19 security-core：高性能策略守卫补齐 1/2/3）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/core/
+├── runtime-engine/detector.ts (重写：新增 policy guard + 缓存化检测)
+└── runtime-guard.ts (新增：无检测项时快速短路)
+
+Matcha-claw/src/pages/Security/
+└── index.tsx (新增 runtime 字段映射与配置 UI)
+
+Matcha-claw/tests/unit/
+└── security-core-plugin.test.ts (新增 policy guard 行为用例)
+```
+
+### 文件职责
+
+- `runtime-engine/detector.ts`：统一执行 `before_tool_call` 检测，新增路径白名单、域名白名单、prompt injection、capability token 四类 policy 检测。
+- `runtime-guard.ts`：新增“检查项关闭时快速返回”逻辑，降低无策略场景下的调用开销。
+- `src/pages/Security/index.tsx`：前端策略模型与保存链路同步新增字段，避免“后端支持但保存丢字段”。
+- `security-core-plugin.test.ts`：覆盖新增策略检测与放行/阻断行为。
+
+### 模块依赖与边界
+
+- `before_tool_call` 新顺序：`policy guard -> destructive -> secret`，策略违规优先硬阻断。
+- policy guard 在引擎内独立于 destructive/secrets 语义，决策层统一走 `kind: policy` 的 block 分支。
+
+### 关键决策与原因
+
+1. 以“短路优先”保证性能：先做 capability/path/domain 快速判定，再做 destructive/secret 扫描。
+2. 以“缓存优先”减少热路径分配：正则编译与 allowlist 归一化结果全部做模块级缓存。
+3. 保持契约稳定：不改 gateway method 与 hook 入口，只增强检测器能力和前端策略表达。
+
+### 本次变更
+
+- `detector.ts` 新增：
+  - `allowPathPrefixes` 硬拦截（含 `apply_patch` 文件路径解析）
+  - `allowDomains` 硬拦截（URL/域名提取 + 子域匹配）
+  - `enablePromptInjectionGuard` 检测（基线 + 扩展 regex，缓存编译）
+  - `capabilityGuardEnabled` + `toolCapabilityRequirements` + `capabilityTokens` 判定
+- `runtime-guard.ts` 新增 `hasBeforeToolChecksEnabled()` 快速短路。
+- `Security` 页面新增字段并可编辑：
+  - `enablePromptInjectionGuard`
+  - `capabilityGuardEnabled`
+  - `allowPathPrefixes`
+  - `allowDomains`
+  - `capabilityTokens`
+  - `promptInjectionPatterns`
+  - `toolCapabilityRequirements`
+- 新增单测：
+  - 路径越界阻断
+  - 域名越界阻断
+  - prompt injection 阻断
+  - capability token 缺失阻断
+
+### 验证结果
+
+- `pnpm vitest run tests/unit/security-core-plugin.test.ts tests/unit/security-routes.test.ts tests/unit/security.page.api.test.tsx tests/unit/security-destructive-detector.test.ts` 通过（48/48）。
+- `pnpm typecheck` 通过。
+- `SECURITY_BENCH=1 pnpm vitest run tests/benchmark/security-runtime-benchmark.test.ts` 实测：
+  - benign p95 `0.1852ms`
+  - destructive block p95 `0.1682ms`
+  - secret block p95 `0.1893ms`
+  - secret redact p95 `0.1963ms`
+
+## 本次变更日志（2026-03-19 security-core：Destructive 检测器切换为“外置规则 + 预编译缓存引擎”）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/vendor/clawguardian-destructive/
+├── detector.ts (重写：配置驱动 + 编译缓存)
+└── destructive-rules.json (新增：Destructive 全量规则外置文件)
+```
+
+### 文件职责
+
+- `detector.ts`：负责规则加载、正则预编译、command -> bucket 分发与检测执行。
+- `destructive-rules.json`：承载 destructive 规则数据（system/sql/path/rce/powershell/truncation）。
+
+### 模块依赖与边界
+
+- 运行时链路：`runtime-engine/detector -> vendor/clawguardian-destructive/detector -> destructive-rules.json`。
+- 检测热路径不再创建规则对象与正则，全部使用模块级缓存。
+- 规则改动主入口从 TS 代码迁移为 JSON 配置文件。
+
+### 关键决策与原因
+
+1. 满足“改规则不改代码”诉求：规则从代码常量迁移到 JSON。
+2. 保持性能稳定：采用“首次编译 + 内存缓存”，避免每次 `before_tool_call` 重复编译。
+3. 保持语义一致：保留原有导出函数与检测流程，先通过单测确保行为未缩水。
+
+### 本次变更
+
+- 新增 `destructive-rules.json`，覆盖：
+  - SQL destructive 正则
+  - 系统命令规则（universal/linux/windows/macos）与命令集合
+  - 敏感路径规则
+  - RCE 模式
+  - 截断文件规则
+  - PowerShell destructive 规则
+- 重写 `detector.ts`：
+  - `command -> rule bucket` 分发
+  - 规则/正则预编译缓存
+  - 保留 `detectDestructive/isDestructiveSystem/isDestructiveGit/...` 对外函数
+- 新增缓存重置测试钩子：`resetDestructiveRuleCacheForTests()`
+- 验证结果：
+  - `tests/unit/security-destructive-detector.test.ts` 通过（16/16）
+  - `tests/unit/security-core-plugin.test.ts` 通过（21/21）
+  - `tests/unit/security-routes.test.ts` + `tests/unit/security.page.api.test.tsx` 通过（7/7）
+  - `pnpm typecheck` 通过
+  - `SECURITY_BENCH=1` 实测：
+    - benign p95 `0.1688ms`
+    - destructive p95 `0.1626ms`
+    - secret block p95 `0.1731ms`
+    - secret redact p95 `0.1791ms`
+
+## 本次变更日志（2026-03-18 security-core：移除 `agent-confirm`，统一 `confirm` 可配置语义）
+
+### 关键决策与原因
+
+1. 废弃 `agent-confirm`，避免用户在动作矩阵里出现重复语义（`confirm` 与 `agent-confirm`）造成认知负担。
+2. 保留 `confirm` 并覆盖所有工具：exec-style 继续走 `ask: "always"`，非 exec-style 走 `_clawguardian_confirm` 二次确认闸门。
+
+### 本次变更
+
+- `SecurityGuardAction` 从 `block/redact/confirm/agent-confirm/warn/log` 收敛为 `block/redact/confirm/warn/log`。
+- `before_tool_call` 决策分支移除 `agent-confirm`，审计 decision 改为 `confirm-required/confirm-approved` 语义。
+- `tool_result_persist` 同步 hook 的 `confirm` 继续安全降级为 `block`。
+- 同步更新：
+  - `packages/openclaw-security-plugin/openclaw.plugin.json` 动作枚举
+  - `electron/utils/security-policy.ts` 策略归一化
+  - `src/pages/Security/index.tsx` 前端动作枚举（secrets 支持显式配置 `confirm`）
+  - `tests/unit/security-core-plugin.test.ts` 用例与断言
+
+## 本次变更日志（2026-03-18 security-core v2 Phase D+：彻底干净化，移除顶层 vendor 快照目录）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/
+├── src/vendor/
+│   ├── secureclaw-runtime-bridge.ts
+│   └── secureclaw-runtime/...
+└── vendor/ (已删除)
+```
+
+### 文件职责
+
+- `src/vendor/secureclaw-runtime/*`：唯一审计运行时来源。
+- `src/vendor/secureclaw-runtime-bridge.ts`：唯一审计桥接入口。
+- 顶层 `packages/openclaw-security-plugin/vendor`：已彻底移除，不再保留快照副本。
+
+### 关键决策与原因
+
+1. 用户要求“完全新模块、无快照残留”，因此删除顶层 `vendor` 目录。
+2. 不迁移许可证声明，按当前交付要求保持最小变更面。
+
+### 本次变更
+
+- 删除 `packages/openclaw-security-plugin/vendor` 全目录。
+- 更新 `MODULE_BOUNDARIES.md`，去除快照目录现态描述。
+- 更新 `src/vendor/secureclaw-runtime/README.md`，去除对顶层快照目录的依赖说明。
+
+## 本次变更日志（2026-03-18 security-core v2 Phase D：桥接重命名 + 规则引擎三层拆分）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/
+├── vendor/
+│   ├── secureclaw-runtime-bridge.ts (由 secureclaw-original-bridge.ts 重命名)
+│   └── secureclaw-runtime/...
+└── core/
+    ├── runtime-guard.ts (改：仅保留编排职责)
+    └── runtime-engine/ (新增)
+        ├── types.ts
+        ├── detector.ts
+        ├── decision.ts
+        ├── action.ts
+        └── shared.ts
+```
+
+### 文件职责
+
+- `vendor/secureclaw-runtime-bridge.ts`：审计桥接入口，语义与目录名统一为 runtime。
+- `core/runtime-engine/detector.ts`：检测层，仅负责 destructive/secrets 命中识别与证据聚合。
+- `core/runtime-engine/decision.ts`：决策层，仅负责 `severity -> action` 与确认语义决策。
+- `core/runtime-engine/action.ts`：动作层，仅负责把决策物化为 `block/params/audit` 输出。
+- `core/runtime-guard.ts`：编排层，串联“三层引擎”并处理 allowlist/confirm 标记清理。
+
+### 模块依赖与边界
+
+- 新运行时链路：`runtime-guard(orchestrator) -> detector -> decision -> action`。
+- 各层单一职责，不再在一个文件中混合“检测 + 决策 + 动作”逻辑。
+- 审计桥接命名统一为 `secureclaw-runtime-bridge`，与 `src/vendor/secureclaw-runtime` 保持一致。
+
+### 关键决策与原因
+
+1. 先改名桥接文件，消除 `original` 与 `runtime` 混用导致的语义歧义。
+2. 规则引擎按“检测/决策/动作”硬拆层，降低 `before_tool_call` 路径的分支耦合度。
+3. 保留外部契约不变（Gateway 方法、5 hooks、策略字段），仅做内部结构升级。
+
+### 本次变更
+
+- 重命名桥接文件：`secureclaw-original-bridge.ts` -> `secureclaw-runtime-bridge.ts`。
+- 新增 `core/runtime-engine/*` 五个文件并完成 `before_tool_call` 逻辑迁移。
+- `core/runtime-guard.ts` 收敛为编排器实现，复用三层引擎输出。
+
+## 本次变更日志（2026-03-18 security-core v2 Phase C：审计运行时与上游快照解耦）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/
+├── src/vendor/
+│   ├── secureclaw-runtime-bridge.ts (改：导入改为本地 runtime 子集)
+│   └── secureclaw-runtime/ (新增)
+│       ├── README.md
+│       ├── src/
+│       │   ├── auditor.ts
+│       │   ├── types.ts
+│       │   └── utils/{hash.ts,ioc-db.ts}
+│       └── ioc/indicators.json
+├── MODULE_BOUNDARIES.md (更新)
+└── vendor/secureclaw-original/ (保留：上游快照，仅参考)
+```
+
+### 文件职责
+
+- `src/vendor/secureclaw-runtime/*`：安全插件运行时实际使用的 secureclaw 审计最小子集。
+- `src/vendor/secureclaw-runtime-bridge.ts`：审计桥接层，统一从 `src/vendor/secureclaw-runtime` 导入审计实现与类型。
+- `vendor/secureclaw-original/*`：上游原版镜像，仅用于溯源/比对，不再被运行时代码导入。
+- `MODULE_BOUNDARIES.md`：新增“禁止运行时直连顶层 vendor/src”边界约束。
+
+### 模块依赖与边界
+
+- 新运行时链路：`infrastructure/auditor -> secureclaw-runtime-bridge -> src/vendor/secureclaw-runtime`。
+- 旧链路 `-> vendor/secureclaw-original/src/*` 已移除。
+- 顶层 `vendor` 目录从“运行时依赖”降级为“上游快照仓”。
+
+### 关键决策与原因
+
+1. 解决 `vendor` 与 `src/vendor` 双层并存导致的语义混乱，先切断运行时跨层导入。
+2. 保留上游快照可追溯性（许可证、对比、后续升级 diff），同时保证运行时模块内聚。
+3. 采用最小子集迁移而非全量搬迁，降低重构风险并保持现有行为稳定。
+
+### 本次变更
+
+- 新增 `src/vendor/secureclaw-runtime` 最小运行时子集。
+- 修改 `src/vendor/secureclaw-runtime-bridge.ts` 导入路径，移除对 `vendor/secureclaw-original/src/*` 的运行时依赖。
+- 更新模块边界文档并新增子集说明文档。
+
+## 本次变更日志（2026-03-18 security-core v2 Phase B：模块分层落地）
+
+### 目录树
+
+```text
+Matcha-claw/packages/openclaw-security-plugin/src/
+├── adapters/
+│   └── openclaw/plugin.ts
+├── application/
+│   └── security-runtime.ts
+├── core/
+│   ├── policy.ts
+│   ├── runtime-guard.ts
+│   └── types.ts
+├── infrastructure/
+│   ├── actions.ts
+│   ├── auditor.ts
+│   └── monitors/selected-monitors.ts
+├── index.ts
+├── actions.ts (re-export)
+├── auditor.ts (re-export)
+├── policy.ts (re-export)
+├── runtime-guard.ts (re-export)
+├── monitors/selected-monitors.ts (re-export)
+└── types.ts (re-export)
+```
+
+### 文件职责
+
+- `adapters/openclaw/plugin.ts`：插件适配入口，固定插件元信息并委派到应用层。
+- `application/security-runtime.ts`：承接原 `index.ts` 的运行时编排逻辑（hook/gateway 注册与流程控制）。
+- `core/{types,policy,runtime-guard}.ts`：安全核心模型、策略决策与运行时拦截内核。
+- `infrastructure/{actions,auditor,monitors}.ts`：基础设施能力下沉，负责安全动作、启动审计与监控实现。
+- `src/{types,policy,runtime-guard,actions,auditor,monitors/*}.ts`：保留为薄 re-export 层，避免外部引用一次性断裂。
+- `MODULE_BOUNDARIES.md`：记录新分层边界与依赖方向约束。
+
+### 模块依赖与边界
+
+- 新依赖方向：`adapters -> application -> core`。
+- `vendor` 仍保留，但只在 `core/runtime-guard` 与桥接层被消费，不再由插件入口直接拼装。
+
+### 关键决策与原因
+
+1. 先做“无行为变化的结构迁移”，把单文件入口拆成分层，降低后续继续内聚重构风险。
+2. 通过 re-export 过渡，保证路径迁移不会影响现有测试与集成点。
+
+### 本次变更
+
+- `src/index.ts` 降级为适配入口 re-export。
+- 抽出 `application/security-runtime.ts` 承载编排逻辑。
+- 建立 `core` 层并下沉 `types/policy/runtime-guard` 实现。
+- 建立 `infrastructure` 层并下沉 `actions/auditor/monitors` 实现。
+- 新增模块边界文档 `packages/openclaw-security-plugin/MODULE_BOUNDARIES.md`。
+- 安全相关单测全量通过（33/33）。
+
+## 本次变更日志（2026-03-18 security-core 语义纯化：移除 guardian/secureclaw 兼容入口）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/openclaw-security-plugin/src/
+│   ├── index.ts
+│   ├── policy.ts
+│   └── types.ts
+├── electron/utils/security-policy.ts
+└── tests/unit/security-core-plugin.test.ts
+```
+
+### 文件职责
+
+- `packages/openclaw-security-plugin/src/index.ts`：仅暴露 `security.*` 网关方法，不再注册 `guardian.*` 别名。
+- `packages/openclaw-security-plugin/src/policy.ts`：运行时配置只接受 `runtime` 主语义，不再接受 `secureclaw` 兼容字段。
+- `packages/openclaw-security-plugin/src/types.ts`：删除 `SecurityPolicyPayload.secureclaw` 兼容字段定义。
+- `electron/utils/security-policy.ts`：策略文件读取只认 `security.policy.json`，不再回退 `guardian.policy.json`。
+- `tests/unit/security-core-plugin.test.ts`：同步断言到纯 `security.*` 方法集合。
+
+### 模块依赖与边界
+
+- 前端/Host API/插件的策略主链路统一为：`security.policy.json` -> `/api/security` -> `security.policy.sync` -> `runtime`。
+- 插件不再承担 guardian 命名兼容层；上层如果仍调用 `guardian.*`，将显式失败。
+
+### 关键决策与原因
+
+1. 当前处于未发布阶段，按要求执行“一次性彻底切换”，避免继续维持双语义模型。
+2. 删除 `secureclaw` payload 兼容字段，防止配置源出现多份事实源（`runtime` vs `secureclaw`）。
+3. 删除 `guardian.policy.json` 回退，避免重启后误读旧策略文件导致行为漂移。
+
+### 本次变更
+
+- 移除 gateway 方法兼容别名：`guardian.policy.sync`、`guardian.audit.query`、`guardian.audit.latest`。
+- 移除策略字段兼容入口：`payload.secureclaw`、`pluginConfig.secureclaw`。
+- 移除策略文件兼容回退：`guardian.policy.json`。
+- 更新单测断言，确保纯 `security-core` 语义下通过。
+- 新增重构护栏文档：`packages/openclaw-security-plugin/REFACTOR_ACCEPTANCE_CHECKLIST.md`。
+- 补齐重构前缺口测试（`message_received`、`after_tool_call`、allowlist、扩展 patterns、skills/advisories/remediation 返回语义）。
+
+## 本次变更日志（2026-03-17 secureclaw 原版迁移 + security 插件独立化）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── packages/
+│   ├── openclaw-security-plugin/
+│   │   ├── openclaw.plugin.json
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── policy.ts
+│   │   │   ├── auditor.ts
+│   │   │   ├── runtime-guard.ts
+│   │   │   ├── types.ts
+│   │   │   └── vendor/
+│   │   │       ├── secureclaw-runtime-bridge.ts
+│   │   │       ├── clawguardian-destructive/
+│   │   │       └── shield-core/
+│   │   └── vendor/
+│   │       └── secureclaw-original/
+│   └── openclaw-task-manager-plugin/
+│       └── src/index.ts
+├── electron/
+│   ├── utils/
+│   │   ├── security-policy.ts
+│   │   └── guardian-policy.ts
+│   ├── api/routes/security.ts
+│   └── main/index.ts
+├── src/pages/Security/index.tsx
+└── tests/unit/
+    ├── security-core-plugin.test.ts
+    ├── security-routes.test.ts
+    └── security.page.api.test.tsx
+```
+
+### 文件职责
+
+- `packages/openclaw-security-plugin/vendor/secureclaw-original/*`：拷贝上游 secureclaw 原版代码作为底座镜像，不在该目录直接改业务逻辑。
+- `packages/openclaw-security-plugin/src/vendor/secureclaw-runtime-bridge.ts`：封装原版审计入口与状态目录解析，提供本项目可控桥接层。
+- `packages/openclaw-security-plugin/src/vendor/clawguardian-destructive/detector.ts`：移植 clawguardian destructive 规则集，作为破坏性命令检测基线。
+- `packages/openclaw-security-plugin/src/runtime-guard.ts`：在 before_tool_call 中执行 destructive/secret 双检测，secret 正则走缓存编译。
+- `packages/openclaw-security-plugin/src/index.ts`：统一插件入口，主接口切换到 `security.*`，保留 `guardian.*` 兼容别名。
+- `electron/utils/security-policy.ts`：安全策略文件读写与标准化（`security.policy.json`）。
+- `electron/api/routes/security.ts`、`electron/main/index.ts`：主进程与 Host API 统一使用 `security.policy.sync / security.audit.query`。
+
+### 模块依赖与边界
+
+- Task Manager 插件不再承担安全职责，安全能力全部收敛到 `security-core` 独立插件。
+- `security-core` 采用“双层架构”：
+  1. secureclaw 原版审计层（gateway_start）
+  2. shield 风格运行时拦截层（before_tool_call）
+- 上游镜像代码与项目适配代码分层，降低后续升级 secureclaw 原版时的冲突风险。
+
+### 关键决策与原因
+
+1. 先拷贝 secureclaw 原版再裁剪，避免“参考实现”丢失导致后续无法对齐上游。
+2. 运行时拦截继续保留，并切换到 shield 模式扫描器，维持你们现有前置阻断能力。
+3. 主链路全面从 guardian 命名迁移到 security 命名，但保留 gateway 方法别名，避免迁移期断连。
+
+### 本次变更
+
+- 废弃 `riskProfile / failureMode` 的运行时可配置能力，避免“可选但不生效”的策略项继续暴露到 UI。
+- 安全页移除“风险档位 / 失效模式”下拉，运行时策略只保留真实生效的开关与动作矩阵。
+- `electron/utils/security-policy.ts` 与 `packages/openclaw-security-plugin/src/policy.ts` 同步移除上述字段的读写与标准化逻辑。
+- `packages/openclaw-security-plugin/openclaw.plugin.json` 删除 `riskProfile / failureMode` 配置 schema。
+- 审计桥接 `secureclaw-runtime-bridge.ts` 不再把 `riskProfile / failureMode` 写入 `config.secureclaw.*`，彻底取消对齐原版该语义的桥接行为。
+
+- 完成 secureclaw 原版代码镜像导入（`vendor/secureclaw-original`）。
+- 重构 `security-core` 插件：
+  - 启动审计改为调用 secureclaw 原版 `runAudit`
+  - before_tool_call 改为 `clawguardian` destructive 规则 + shield 风格 secret 基线 + `policy.ts` 扩展规则
+  - 移除 kill switch 运行时阻断机制（不再在 hook 与应急动作中写入/依赖 killswitch 文件）
+  - 启动审计过滤 `SC-KILL-001`，避免 UI 与日志继续暴露 kill switch 语义
+  - 运行时动作从“单一 block”升级为完整策略动作：`block / confirm / agent-confirm / warn / log / redact`
+  - destructive 支持分类开关（fileDelete/git/sql/system/process/network/privilegeEscalation）与按严重级别动作映射
+  - secret 支持按严重级别动作映射，`redact`/`confirm` 分支会对参数执行脱敏改写后再放行
+  - 支持 runtime allowlist（tools/sessions）与检测日志开关（`logging.logDetections`）
+  - 接入 5 个运行时 hook：`before_agent_start`、`before_tool_call`、`tool_result_persist`、`message_received`、`after_tool_call`
+  - 新增 hook 耗时统计：按 hook 维度记录 `count / p50 / p95 / last / max`，通过 `security.monitor.status` 返回
+  - `tool_result_persist` 增加输出扫描与脱敏/阻断（secret + PII）策略链，避免仅依赖输入侧阻断
+  - `tool_result_persist` 升级为严格按 `severity -> action` 分流：`block/redact/warn/log`；`confirm/agent-confirm` 在该同步 hook 内安全降级为 `block`
+  - secret 扩展正则编译增加缓存，避免每次工具调用重复编译
+  - 新增运行时审计事件记录并支持分页查询
+  - 启用可选监控服务并默认开启 `credential-monitor` 与 `memory-integrity`（`cost-monitor` 默认关闭）
+  - 监控实现采用项目内精简实现（无 `chokidar` 额外依赖），并接入 gateway 生命周期启动/停止
+- 主应用侧 `guardian-policy` 能力迁移到 `security-policy`：
+  - 策略文件默认路径改为 `~/.openclaw/policies/security.policy.json`
+  - 读取时兼容旧 `guardian.policy.json`
+- 前后端接口迁移：
+  - `security.policy.sync` 取代 `guardian.policy.sync`
+  - `security.audit.query` 取代 `guardian.audit.query`
+- Security 页面审计查询改用 `security.audit.query`。
+- 新增桌面一键安全动作（替代原 skill CLI 脚本）：
+  - 一键体检：`/api/security/quick-audit` → `security.quick_audit.run`
+  - 一键应急：`/api/security/emergency-response` → `security.emergency.run`
+  - 完整性校验/重建：`security.integrity.check / security.integrity.rebaseline`
+  - 技能扫描：`security.skills.scan`
+  - 通告检查：`security.advisories.check`
+  - 修复动作（预览/应用/回滚）：`security.remediation.preview / apply / rollback`
+
+## 本次变更日志（2026-03-17 安全策略模型一次性切换到 runtime config）
+
+### 目录树
+
+```text
+Matcha-claw/
+├── electron/
+│   └── utils/
+│       ├── security-policy.ts
+│       └── guardian-policy.ts
+├── packages/
+│   └── openclaw-security-plugin/
+│       └── src/
+│           ├── index.ts
+│           ├── policy.ts
+│           └── types.ts
+└── src/pages/Security/index.tsx
+```
+
+### 文件职责
+
+- `electron/utils/security-policy.ts`：策略文件结构从旧 guardian 字段改为 `runtime` 全量配置（destructive/secrets/severity/actions/categories/allowlist/patterns）。
+- `packages/openclaw-security-plugin/src/index.ts`：`security.policy.sync` 不再只同步 preset，新增 runtime 热应用并在配置变更后重协同监控状态。
+- `packages/openclaw-security-plugin/src/policy.ts`：新增 `mergeRuntimeConfig`，把策略 payload 的 runtime 归一化并覆盖当前运行配置。
+- `src/pages/Security/index.tsx`：前端策略页彻底改为 runtime config 编辑器，移除旧 `allowTools/confirmTools/denyTools` 表达。
+
+### 模块依赖与边界
+
+- 前端 `/api/security` 与插件 `security.policy.sync` 统一使用同一 runtime 模型，避免“前端可配但插件不消费”。
+- 兼容别名仅保留在 gateway 方法命名层（`guardian.*`），策略字段层不再做旧模型兼容编辑。
+
+### 关键决策与原因
+
+1. 用户明确要求“未发布阶段一次性改好”，因此直接放弃兼容层，做模型直切。
+2. 如果不改 `policy.sync` 热应用，前端保存策略仍然无法实时影响 runtime guard，必须在插件侧补齐。
+3. 策略页保留“安全动作中心”能力，避免在模型切换时损失现有桌面化运维入口。
+
+### 本次变更
+
+- 安全策略持久化改为：
+  - `preset`
+  - `securityPolicyVersion`
+  - `runtime`（完整运行时配置）
+- `security-core` 插件新增 runtime 热更新能力：
+  - `security.policy.sync` 收到 `runtime` 后立即覆盖当前配置
+  - 配置变化后自动重协同监控启动状态（stop/start）
+- Security 页面完成一次性重构：
+  - 新增 destructive/secrets 默认动作与 severity 动作矩阵配置
+  - 新增 destructive 分类开关配置
+  - 新增 allowlist 与扩展 regex 配置
+  - 保留一键体检/一键应急/完整性/扫描/修复预览与回滚等动作入口
+
 ## 本次变更日志（2026-03-16 Dashboard Token 分阶段渲染：先摘要后明细）
 
 ### 目录树
@@ -2247,3 +2998,97 @@ tests/unit/
   - `openclaw:getTaskWorkspaceDirs` 始终包含主工作区，并合并子代理 workspace
   - 任务收件箱与任务页 store 兼容 `task_created/task_create` 等 `task_*` 新增事件入列
   - 补齐 scope 解析与事件入列单测，防止回归
+
+---
+
+## 目录树（本次 guardian -> shield+secureclaw 融合替换）
+
+```text
+packages/openclaw-task-manager-plugin/
+├── openclaw.plugin.json (扩展 security schema：guardian.shield / guardian.secureclaw)
+└── src/
+    ├── guardian.ts (内部实现替换为 shield + secureclaw 融合引擎)
+    └── index.ts (接入 security_shield_gate、tool_result_persist、message_received)
+
+tests/unit/
+└── guardian-plugin.test.ts (新增 kill switch / destructive / output redaction 用例)
+```
+
+## 文件职责（关键模块）
+
+- `packages/openclaw-task-manager-plugin/src/guardian.ts`：统一承载策略决策、审批、审计，并新增 Shield 层（Prompt Guard / Tool Blocker / Output Scanner / Input Audit / Gate）与 SecureClaw 层（Kill Switch / 行为基线）。
+- `packages/openclaw-task-manager-plugin/src/index.ts`：插件入口，负责注册新安全 gate 工具与相关 hook，同时保持 `guardian.*` RPC 兼容。
+- `packages/openclaw-task-manager-plugin/openclaw.plugin.json`：声明新的安全配置结构，避免运行时隐式字段漂移。
+- `tests/unit/guardian-plugin.test.ts`：验证融合替换后的关键安全行为与回归边界。
+
+## 模块依赖与边界
+
+- 仅替换 Task Manager 插件内部 guardian 执行层，不改 Electron Host API 协议与 Security 页路由。
+- 保留 `guardian.policy.sync` / `guardian.audit.query` 对外契约；新增 `security.policy.sync` / `security.audit.query` 作为新别名能力。
+- Shield/secureclaw 能力全部内聚于插件内部，不要求主工程新增外部 npm 依赖。
+
+## 关键决策与原因
+
+1. 以“外部接口兼容 + 内部执行替换”方式落地，避免一次性改 UI/路由造成连锁回归。
+2. 将 `openclaw-shield` 的运行时拦截能力优先接入 Hook 链路（`before_agent_start`、`before_tool_call`、`tool_result_persist`、`message_received`），保证安全动作与工具调用同链执行。
+3. 将 `secureclaw` 的 kill switch 与行为基线并入 `before_tool_call` 主路径，形成硬阻断兜底，而非仅做旁路告警。
+
+## 本次变更日志
+
+- 日期：2026-03-17
+- 变更主题：`refactor(security): use secureclaw + openclaw-shield to replace guardian runtime`
+- 主要结果：
+  - 新增 `security_shield_gate` 工具，覆盖命令/敏感文件门控。
+  - `before_tool_call` 新增 SecureClaw kill switch 阻断与行为基线日志。
+  - `tool_result_persist` 新增 secrets/PII 输出脱敏（支持 enforce/audit 模式）。
+  - 新增 `message_received` 输入审计与 `before_agent_start` 安全策略注入。
+  - 保持 guardian 既有策略同步与审计查询 RPC 兼容，并增加 security 别名 RPC。
+
+---
+
+## 目录树（本次拆分：Task Manager 纯化 + 独立 Security 插件）
+
+```text
+packages/
+├── openclaw-task-manager-plugin/
+│   ├── openclaw.plugin.json (移除 guardian/security schema)
+│   └── src/
+│       └── index.ts (移除所有 guardian/security 逻辑，仅保留任务管理能力)
+└── openclaw-security-plugin/ (新增)
+    ├── package.json
+    ├── openclaw.plugin.json
+    └── src/
+        └── index.ts (独立承接 guardian/security 网关方法骨架)
+
+scripts/
+├── bundle-openclaw-plugins.mjs (新增 security-core 本地插件打包入口)
+└── after-pack.cjs (新增 security-core 打包产物拷贝入口)
+```
+
+## 文件职责（关键模块）
+
+- `packages/openclaw-task-manager-plugin/src/index.ts`：回归纯任务编排插件，不再承担任何安全策略执行职责。
+- `packages/openclaw-security-plugin/src/index.ts`：独立安全插件骨架，单独注册 `guardian.*`/`security.*` 网关方法，作为后续 secureclaw 裁剪落地承载点。
+- `scripts/bundle-openclaw-plugins.mjs` 与 `scripts/after-pack.cjs`：确保新安全插件可进入构建与打包分发链路。
+
+## 模块依赖与边界
+
+- Task 管理域与安全域彻底解耦：Task 插件不再依赖安全规则、审计存储、审批策略。
+- 前端安全页代码暂时保持不变，通过独立 security 插件兼容网关方法。
+- 后续 secureclaw 能力接入仅改 `openclaw-security-plugin`，不再侵入 task-manager。
+
+## 关键决策与原因
+
+1. 将安全逻辑继续留在 task-manager 会导致职责混叠与维护边界失真，先做架构分层比继续补丁更稳定。
+2. 先提供独立 security 插件骨架，再按能力清单逐步迁移 secureclaw，能降低一次性替换风险。
+3. 保留 `guardian.*`/`security.*` 方法名兼容层，可避免前端立即联动改造。
+
+## 本次变更日志
+
+- 日期：2026-03-17
+- 变更主题：`refactor(plugin-boundary): make task-manager pure and split security into standalone plugin`
+- 主要结果：
+  - 删除 task-manager 内所有 guardian/security 执行逻辑与相关代码文件。
+  - 新增独立 `openclaw-security-plugin`，承接安全网关方法骨架。
+  - 从 `secureclaw` 过滤拷贝核心检测能力到 `openclaw-security-plugin/src/vendor/secureclaw-lite.ts`，并接入 `before_tool_call` 的 P0 阻断链（kill switch / destructive / secret）。
+  - 构建/打包脚本接入独立安全插件产物。
