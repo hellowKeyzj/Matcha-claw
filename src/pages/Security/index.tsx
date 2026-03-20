@@ -1,1192 +1,1271 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
-import { useGatewayStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
+import { useGatewayStore } from '@/stores/gateway';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, X } from 'lucide-react';
-import { cn } from '@/lib/utils';
 
-type SecurityAction = 'allow' | 'confirm' | 'deny';
-type SecurityPreset = 'strict' | 'balanced' | 'relaxed';
-type ConfirmStrategy = 'every_time' | 'session';
-type ToolPolicyField = 'allowTools' | 'confirmTools' | 'denyTools';
-type EditableFieldKey = Exclude<keyof AgentSecurityPolicy, 'preset'>;
-type ToolConflictState = {
-  toolName: string;
-  targetField: ToolPolicyField;
-  fromFields: ToolPolicyField[];
-};
+type Preset = 'strict' | 'balanced' | 'relaxed';
+type Action = 'block' | 'redact' | 'confirm' | 'warn' | 'log';
+type Severity = 'critical' | 'high' | 'medium' | 'low';
+type FailureMode = 'block_all' | 'safe_mode' | 'read_only' | null;
 
-interface AgentSecurityPolicy {
-  preset: SecurityPreset;
-  defaultAction: SecurityAction;
-  allowTools: string[];
-  confirmTools: string[];
-  denyTools: string[];
+type RuntimePolicy = {
+  enabled: boolean;
+  runtimeGuardEnabled: boolean;
+  auditOnGatewayStart: boolean;
+  autoHarden: boolean;
+  enablePromptInjectionGuard: boolean;
+  blockDestructive: boolean;
+  blockSecrets: boolean;
+  monitors: { credentials: boolean; memory: boolean; cost: boolean };
+  logging: { logDetections: boolean };
   allowPathPrefixes: string[];
   allowDomains: string[];
-  allowCommandExecution: boolean;
-  allowDependencyInstall: boolean;
-  confirmStrategy: ConfirmStrategy;
-  capabilities: string[];
-}
+  auditEgressAllowlist: string[];
+  auditDailyCostLimitUsd: number;
+  auditFailureMode: FailureMode;
+  promptInjectionPatterns: string[];
+  allowlist: { tools: string[]; sessions: string[] };
+  destructive: {
+    action: Action;
+    severityActions: Record<Severity, Action>;
+    categories: {
+      fileDelete: boolean;
+      gitDestructive: boolean;
+      sqlDestructive: boolean;
+      systemDestructive: boolean;
+      processKill: boolean;
+      networkDestructive: boolean;
+      privilegeEscalation: boolean;
+    };
+  };
+  secrets: {
+    action: Action;
+    severityActions: Record<Severity, Action>;
+  };
+  destructivePatterns: string[];
+  secretPatterns: string[];
+};
 
-type AgentSecurityPolicyPatch = Partial<AgentSecurityPolicy>;
+type SecurityPolicy = {
+  preset: Preset;
+  securityPolicyVersion: number;
+  runtime: RuntimePolicy;
+};
 
-interface SettingsPayload {
-  securityPreset?: unknown;
-  securityPolicyVersion?: unknown;
-  securityPolicyByAgent?: unknown;
-}
-
-interface EffectiveToolsPayload {
-  success?: boolean;
-  tools?: Array<{ id?: unknown; name?: unknown }>;
-}
-
-type PolicySource = 'immutableRules' | 'userOverride' | 'preset' | 'default';
-
-interface GuardianAuditItem {
+type AuditItem = {
   ts: number;
   toolName: string;
   risk: string;
   action: string;
   decision: string;
-  policyPreset?: string;
   ruleId?: string;
+  detail?: string;
+};
+
+type RemediationActionItem = {
+  id: string;
+  title: string;
+  description: string;
+  risk: string;
+};
+
+type PlatformTool = {
+  id: string;
+  name?: string;
+  source?: string;
+  enabled?: boolean;
+  description?: string;
+  version?: string;
+};
+type AllowlistRegexTab = 'allowlistTools' | 'allowlistSessions' | 'destructivePatterns' | 'secretPatterns';
+type RuleCatalogPlatform = 'all' | 'universal' | 'linux' | 'windows' | 'macos' | 'powershell';
+type RuleCatalogItem = {
+  platform: Exclude<RuleCatalogPlatform, 'all'>;
+  command: string;
+  category: string;
+  severity: string;
+  reason: string;
+};
+type SecuritySectionKey =
+  | 'meta'
+  | 'runtime'
+  | 'matrix'
+  | 'ruleCatalog'
+  | 'allowlistRegex'
+  | 'policyGuards'
+  | 'actionCenter'
+  | 'auditHits';
+
+const ALL_ACTIONS: Action[] = ['block', 'redact', 'confirm', 'warn', 'log'];
+const DESTRUCTIVE_ACTIONS: Action[] = ['block', 'confirm', 'warn', 'log'];
+const SECRET_ACTIONS: Action[] = ['block', 'redact', 'confirm', 'warn', 'log'];
+const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low'];
+
+function normalizeDestructiveAction(value: Action): Action {
+  if (value === 'redact') return 'warn';
+  return value;
 }
 
-interface GuardianAuditQueryResult {
-  page: number;
-  pageSize: number;
-  total: number;
-  items: GuardianAuditItem[];
-}
-
-const DEFAULT_ALLOW_TOOLS = [
-  'task_create',
-  'task_set_plan_markdown',
-  'task_bind_session',
-  'task_request_user_input',
-  'task_wait_approval',
-  'task_mark_failed',
-  'task_list',
-  'task_get',
-  'task_resume',
-  'sessions_list',
-  'memory_get',
-  'memory_search',
-];
-
-const DEFAULT_CONFIRM_TOOLS = [
-  'system.run',
-  'nodes.run',
-  'fs.write_file',
-  'fs.delete_file',
-  'fs.remove',
-  'http.request',
-];
-
-const DEFAULT_DENY_TOOLS = [
-  'system.disable_guardian',
-  'security.disable_guard',
-];
-
-const TOOL_OPTION_CATALOG = [
-  ...DEFAULT_ALLOW_TOOLS,
-  ...DEFAULT_CONFIRM_TOOLS,
-  ...DEFAULT_DENY_TOOLS,
-  'fs.read_file',
-  'fs.list_dir',
-  'fs.stat',
-  'sessions_send',
-  'sessions_spawn',
-  'sessions_history',
-  'session_status',
-  'agents_list',
-  'web_search',
-  'web_fetch',
-  'gateway',
-];
-
-const CAPABILITY_OPTION_CATALOG = [
-  'CAP_READ_LOCAL_FILES',
-  'CAP_WRITE_LOCAL_FILES',
-  'CAP_EXECUTE_COMMAND',
-  'CAP_NETWORK_REQUEST',
-  'CAP_INSTALL_DEPENDENCY',
-];
-
-const TOOL_LABEL_KEY_MAP: Record<string, string> = {
-  task_create: 'task_create',
-  task_set_plan_markdown: 'task_set_plan_markdown',
-  task_bind_session: 'task_bind_session',
-  task_request_user_input: 'task_request_user_input',
-  task_wait_approval: 'task_wait_approval',
-  task_mark_failed: 'task_mark_failed',
-  task_list: 'task_list',
-  task_get: 'task_get',
-  task_resume: 'task_resume',
-  sessions_list: 'sessions_list',
-  sessions_send: 'sessions_send',
-  sessions_spawn: 'sessions_spawn',
-  sessions_history: 'sessions_history',
-  session_status: 'session_status',
-  memory_get: 'memory_get',
-  memory_search: 'memory_search',
-  'system.run': 'system_run',
-  'nodes.run': 'nodes_run',
-  'fs.write_file': 'fs_write_file',
-  'fs.delete_file': 'fs_delete_file',
-  'fs.remove': 'fs_remove',
-  'fs.read_file': 'fs_read_file',
-  'fs.list_dir': 'fs_list_dir',
-  'fs.stat': 'fs_stat',
-  'http.request': 'http_request',
-  web_search: 'web_search',
-  web_fetch: 'web_fetch',
-  agents_list: 'agents_list',
-  gateway: 'gateway',
-  'system.disable_guardian': 'system_disable_guardian',
-  'security.disable_guard': 'security_disable_guard',
-};
-
-const PRESET_BASE_CONFIG: Record<SecurityPreset, {
-  defaultAction: SecurityAction;
-  allowCommandExecution: boolean;
-  allowDependencyInstall: boolean;
-  confirmStrategy: ConfirmStrategy;
-  capabilities: string[];
-}> = {
+const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
   strict: {
-    defaultAction: 'deny',
-    allowCommandExecution: false,
-    allowDependencyInstall: false,
-    confirmStrategy: 'every_time',
-    capabilities: ['CAP_READ_LOCAL_FILES', 'CAP_NETWORK_REQUEST'],
-  },
-  balanced: {
-    defaultAction: 'confirm',
-    allowCommandExecution: true,
-    allowDependencyInstall: false,
-    confirmStrategy: 'session',
-    capabilities: ['CAP_READ_LOCAL_FILES', 'CAP_WRITE_LOCAL_FILES', 'CAP_EXECUTE_COMMAND', 'CAP_NETWORK_REQUEST'],
-  },
-  relaxed: {
-    defaultAction: 'allow',
-    allowCommandExecution: true,
-    allowDependencyInstall: true,
-    confirmStrategy: 'every_time',
-    capabilities: ['CAP_READ_LOCAL_FILES', 'CAP_WRITE_LOCAL_FILES', 'CAP_EXECUTE_COMMAND', 'CAP_NETWORK_REQUEST', 'CAP_INSTALL_DEPENDENCY'],
-  },
-};
-
-const PRESET_TOOL_CONFIG: Record<SecurityPreset, {
-  allowTools: string[];
-  confirmTools: string[];
-  denyTools: string[];
-}> = {
-  strict: {
-    allowTools: [...DEFAULT_ALLOW_TOOLS],
-    confirmTools: [...DEFAULT_CONFIRM_TOOLS],
-    denyTools: [...DEFAULT_DENY_TOOLS],
-  },
-  balanced: {
-    allowTools: [...DEFAULT_ALLOW_TOOLS],
-    confirmTools: [...DEFAULT_CONFIRM_TOOLS],
-    denyTools: [...DEFAULT_DENY_TOOLS],
-  },
-  relaxed: {
-    allowTools: [...DEFAULT_ALLOW_TOOLS],
-    confirmTools: [],
-    denyTools: [...DEFAULT_DENY_TOOLS],
-  },
-};
-
-function buildPresetPolicy(preset: SecurityPreset): AgentSecurityPolicy {
-  const base = PRESET_BASE_CONFIG[preset] ?? PRESET_BASE_CONFIG.balanced;
-  const toolBase = PRESET_TOOL_CONFIG[preset] ?? PRESET_TOOL_CONFIG.balanced;
-  return {
-    preset,
-    defaultAction: base.defaultAction,
-    allowTools: [...toolBase.allowTools],
-    confirmTools: [...toolBase.confirmTools],
-    denyTools: [...toolBase.denyTools],
+    enabled: true,
+    runtimeGuardEnabled: true,
+    auditOnGatewayStart: true,
+    autoHarden: false,
+    enablePromptInjectionGuard: true,
+    blockDestructive: true,
+    blockSecrets: true,
+    monitors: { credentials: true, memory: true, cost: true },
+    logging: { logDetections: true },
     allowPathPrefixes: [],
     allowDomains: [],
-    allowCommandExecution: base.allowCommandExecution,
-    allowDependencyInstall: base.allowDependencyInstall,
-    confirmStrategy: base.confirmStrategy,
-    capabilities: [...base.capabilities],
+    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
+    auditDailyCostLimitUsd: 5,
+    auditFailureMode: null,
+    promptInjectionPatterns: [],
+    allowlist: { tools: [], sessions: [] },
+    destructive: {
+      action: 'block',
+      severityActions: { critical: 'block', high: 'block', medium: 'confirm', low: 'warn' },
+      categories: {
+        fileDelete: true,
+        gitDestructive: true,
+        sqlDestructive: true,
+        systemDestructive: true,
+        processKill: true,
+        networkDestructive: true,
+        privilegeEscalation: true,
+      },
+    },
+    secrets: {
+      action: 'block',
+      severityActions: { critical: 'block', high: 'block', medium: 'block', low: 'redact' },
+    },
+    destructivePatterns: [],
+    secretPatterns: [],
+  },
+  balanced: {
+    enabled: true,
+    runtimeGuardEnabled: true,
+    auditOnGatewayStart: true,
+    autoHarden: false,
+    enablePromptInjectionGuard: true,
+    blockDestructive: true,
+    blockSecrets: true,
+    monitors: { credentials: true, memory: true, cost: false },
+    logging: { logDetections: true },
+    allowPathPrefixes: [],
+    allowDomains: [],
+    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
+    auditDailyCostLimitUsd: 5,
+    auditFailureMode: null,
+    promptInjectionPatterns: [],
+    allowlist: { tools: [], sessions: [] },
+    destructive: {
+      action: 'confirm',
+      severityActions: { critical: 'block', high: 'confirm', medium: 'confirm', low: 'warn' },
+      categories: {
+        fileDelete: true,
+        gitDestructive: true,
+        sqlDestructive: true,
+        systemDestructive: true,
+        processKill: true,
+        networkDestructive: true,
+        privilegeEscalation: true,
+      },
+    },
+    secrets: {
+      action: 'block',
+      severityActions: { critical: 'block', high: 'block', medium: 'redact', low: 'warn' },
+    },
+    destructivePatterns: [],
+    secretPatterns: [],
+  },
+  relaxed: {
+    enabled: true,
+    runtimeGuardEnabled: true,
+    auditOnGatewayStart: true,
+    autoHarden: false,
+    enablePromptInjectionGuard: true,
+    blockDestructive: true,
+    blockSecrets: true,
+    monitors: { credentials: true, memory: true, cost: false },
+    logging: { logDetections: true },
+    allowPathPrefixes: [],
+    allowDomains: [],
+    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
+    auditDailyCostLimitUsd: 5,
+    auditFailureMode: null,
+    promptInjectionPatterns: [],
+    allowlist: { tools: [], sessions: [] },
+    destructive: {
+      action: 'warn',
+      severityActions: { critical: 'confirm', high: 'warn', medium: 'warn', low: 'log' },
+      categories: {
+        fileDelete: true,
+        gitDestructive: true,
+        sqlDestructive: true,
+        systemDestructive: true,
+        processKill: true,
+        networkDestructive: true,
+        privilegeEscalation: true,
+      },
+    },
+    secrets: {
+      action: 'redact',
+      severityActions: { critical: 'block', high: 'redact', medium: 'warn', low: 'log' },
+    },
+    destructivePatterns: [],
+    secretPatterns: [],
+  },
+};
+
+const RULE_CATALOG_REASON_KEY_MAP: Record<string, string> = {
+  '递归强删目录树': 'recursive_force_delete_tree',
+  '终止进程（-9 提升风险）': 'process_kill_with_signal',
+  '系统关机/重启': 'system_shutdown_reboot',
+  '磁盘/分区破坏': 'disk_partition_destruction',
+  '路由表变更（flush 为 critical）': 'route_change_flush_critical',
+  '提权执行命令': 'privilege_escalation_command',
+  '防火墙策略改动': 'firewall_policy_change',
+  '防火墙策略变更': 'firewall_policy_change',
+  '递归权限改动可能破坏系统': 'recursive_permission_change_system',
+  '系统服务停用（关键服务为 critical）': 'system_service_disable_critical',
+  '服务停用（关键服务为 critical）': 'system_service_disable_critical',
+  '递归删除目录树': 'recursive_directory_delete',
+  '强制/递归删除文件': 'forced_recursive_file_delete',
+  '终止进程（/f 提升风险）': 'taskkill_force_risk',
+  '删除注册表键值': 'registry_delete',
+  '磁盘分区破坏': 'diskpart_destruction',
+  '防火墙重置': 'firewall_reset',
+  '路由表变更': 'route_change',
+  '递归 ACL 改动': 'recursive_acl_change',
+  '接管系统文件所有权': 'take_ownership_system_files',
+  '服务停用/删除': 'service_disable_or_delete',
+  '磁盘抹除/重分区': 'disk_erase_repartition',
+  '系统/用户服务停用': 'launchctl_service_disable',
+  '关闭 SIP 保护': 'disable_sip',
+  '启停 PF 规则': 'pf_toggle',
+  '重载 PF 规则文件': 'pf_reload',
+  '防火墙规则变更': 'firewall_rule_change',
+  '强制终止进程': 'force_kill_process',
+};
+
+const RULE_CATALOG_COMMAND_TOKEN_KEY_MAP: Record<string, string> = {
+  '系统路径': 'system_path',
+  '关键服务 critical': 'critical_service',
+  'flush 为 critical': 'flush_is_critical',
+};
+
+function cloneRuntimeTemplate(preset: Preset): RuntimePolicy {
+  return JSON.parse(JSON.stringify(PRESET_RUNTIME_TEMPLATES[preset])) as RuntimePolicy;
+}
+
+const DEFAULT_POLICY: SecurityPolicy = {
+  preset: 'balanced',
+  securityPolicyVersion: 1,
+  runtime: cloneRuntimeTemplate('balanced'),
+};
+
+function list(text: string): string[] {
+  return [...new Set(text.split(/[\n,]/g).map((v) => v.trim()).filter(Boolean))];
+}
+
+function text(items: string[]): string {
+  return items.join(', ');
+}
+
+function normalizeRuleReasonText(reason: string): string {
+  return reason
+    .trim()
+    .replaceAll('（', '(')
+    .replaceAll('）', ')')
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizePolicy(raw: unknown): SecurityPolicy {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return DEFAULT_POLICY;
+  }
+  const record = raw as Record<string, unknown>;
+  const runtimeRaw = (record.runtime && typeof record.runtime === 'object' && !Array.isArray(record.runtime))
+    ? record.runtime as Record<string, unknown>
+    : {};
+  const monitors = (runtimeRaw.monitors && typeof runtimeRaw.monitors === 'object' && !Array.isArray(runtimeRaw.monitors))
+    ? runtimeRaw.monitors as Record<string, unknown>
+    : {};
+  const logging = (runtimeRaw.logging && typeof runtimeRaw.logging === 'object' && !Array.isArray(runtimeRaw.logging))
+    ? runtimeRaw.logging as Record<string, unknown>
+    : {};
+  const allowlist = (runtimeRaw.allowlist && typeof runtimeRaw.allowlist === 'object' && !Array.isArray(runtimeRaw.allowlist))
+    ? runtimeRaw.allowlist as Record<string, unknown>
+    : {};
+  const destructive = (runtimeRaw.destructive && typeof runtimeRaw.destructive === 'object' && !Array.isArray(runtimeRaw.destructive))
+    ? runtimeRaw.destructive as Record<string, unknown>
+    : {};
+  const secrets = (runtimeRaw.secrets && typeof runtimeRaw.secrets === 'object' && !Array.isArray(runtimeRaw.secrets))
+    ? runtimeRaw.secrets as Record<string, unknown>
+    : {};
+  const categories = (destructive.categories && typeof destructive.categories === 'object' && !Array.isArray(destructive.categories))
+    ? destructive.categories as Record<string, unknown>
+    : {};
+  const preset = record.preset === 'strict' || record.preset === 'balanced' || record.preset === 'relaxed'
+    ? record.preset
+    : DEFAULT_POLICY.preset;
+  const runtimeTemplate = cloneRuntimeTemplate(preset);
+  const version = Number(record.securityPolicyVersion);
+  const securityPolicyVersion = Number.isFinite(version) && version > 0 ? Math.floor(version) : 1;
+  const toBool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
+  const toAction = (v: unknown, d: Action) => (ALL_ACTIONS.includes(v as Action) ? v as Action : d);
+  const toPositiveNumber = (v: unknown, d: number) => {
+    const raw = Number(v);
+    return Number.isFinite(raw) && raw > 0 ? raw : d;
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function normalizeToolList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const unique = new Set<string>();
-  for (const item of value) {
-    if (typeof item !== 'string') {
-      continue;
-    }
-    const normalized = item.trim();
-    if (!normalized) {
-      continue;
-    }
-    unique.add(normalized);
-  }
-  return [...unique];
-}
-
-function normalizePolicyOverride(value: unknown): AgentSecurityPolicyPatch {
-  if (!isRecord(value)) {
-    return {};
-  }
-
-  const output: AgentSecurityPolicyPatch = {};
-  const preset = value.preset === 'strict' || value.preset === 'balanced' || value.preset === 'relaxed'
-    ? value.preset
-    : undefined;
-  const defaultAction = value.defaultAction === 'allow' || value.defaultAction === 'confirm' || value.defaultAction === 'deny'
-    ? value.defaultAction
-    : undefined;
-  const confirmStrategy = value.confirmStrategy === 'every_time' || value.confirmStrategy === 'session'
-    ? value.confirmStrategy
-    : undefined;
-  if (preset) output.preset = preset;
-  if (defaultAction) output.defaultAction = defaultAction;
-  if (confirmStrategy) output.confirmStrategy = confirmStrategy;
-
-  const assignList = (key: keyof AgentSecurityPolicyPatch) => {
-    if (Object.prototype.hasOwnProperty.call(value, key)) {
-      output[key] = normalizeToolList(value[key]) as never;
-    }
+  const toFailureMode = (v: unknown, d: FailureMode): FailureMode => {
+    if (v === null || v === undefined) return d;
+    if (v === 'block_all' || v === 'safe_mode' || v === 'read_only') return v;
+    return d;
   };
-  assignList('allowTools');
-  assignList('confirmTools');
-  assignList('denyTools');
-  assignList('allowPathPrefixes');
-  assignList('allowDomains');
-  assignList('capabilities');
-
-  if (Object.prototype.hasOwnProperty.call(value, 'allowCommandExecution') && typeof value.allowCommandExecution === 'boolean') {
-    output.allowCommandExecution = value.allowCommandExecution;
-  }
-  if (Object.prototype.hasOwnProperty.call(value, 'allowDependencyInstall') && typeof value.allowDependencyInstall === 'boolean') {
-    output.allowDependencyInstall = value.allowDependencyInstall;
-  }
-  return output;
-}
-
-function normalizePolicyMap(value: unknown): Record<string, AgentSecurityPolicyPatch> {
-  if (!isRecord(value)) {
-    return {};
-  }
-  const result: Record<string, AgentSecurityPolicyPatch> = {};
-  for (const [agentId, policyValue] of Object.entries(value)) {
-    const normalizedAgentId = agentId.trim();
-    if (!normalizedAgentId) {
-      continue;
-    }
-    result[normalizedAgentId] = normalizePolicyOverride(policyValue);
-  }
-  return result;
-}
-
-function parseToolListText(input: string): string[] {
-  const normalizedInput = input.replace(/\n/g, ',');
-  return normalizeToolList(normalizedInput.split(',').map((item) => item.trim()));
-}
-
-function formatToolListText(list: string[]): string {
-  return list.join(', ');
-}
-
-function listEqual(a: string[] | undefined, b: string[]): boolean {
-  const left = Array.isArray(a) ? a : [];
-  if (left.length !== b.length) {
-    return false;
-  }
-  return left.every((item, index) => item === b[index]);
-}
-
-function uniqueList(items: string[]): string[] {
-  const seen = new Set<string>();
-  const output: string[] = [];
-  for (const item of items) {
-    const normalized = item.trim();
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    output.push(normalized);
-  }
-  return output;
-}
-
-function clonePolicyMap(map: Record<string, AgentSecurityPolicyPatch>): Record<string, AgentSecurityPolicyPatch> {
-  const cloned: Record<string, AgentSecurityPolicyPatch> = {};
-  for (const [agentId, patch] of Object.entries(map)) {
-    cloned[agentId] = {
-      ...patch,
-      ...(Array.isArray(patch.allowTools) ? { allowTools: [...patch.allowTools] } : {}),
-      ...(Array.isArray(patch.confirmTools) ? { confirmTools: [...patch.confirmTools] } : {}),
-      ...(Array.isArray(patch.denyTools) ? { denyTools: [...patch.denyTools] } : {}),
-      ...(Array.isArray(patch.allowPathPrefixes) ? { allowPathPrefixes: [...patch.allowPathPrefixes] } : {}),
-      ...(Array.isArray(patch.allowDomains) ? { allowDomains: [...patch.allowDomains] } : {}),
-      ...(Array.isArray(patch.capabilities) ? { capabilities: [...patch.capabilities] } : {}),
+  const toSeverityActions = (v: unknown, defaults: Record<Severity, Action>) => {
+    const rawActions = v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
+    return {
+      critical: toAction(rawActions.critical, defaults.critical),
+      high: toAction(rawActions.high, defaults.high),
+      medium: toAction(rawActions.medium, defaults.medium),
+      low: toAction(rawActions.low, defaults.low),
     };
-  }
-  return cloned;
-}
-
-function compactPolicyOverride(
-  override: AgentSecurityPolicyPatch,
-  globalPreset: SecurityPreset,
-): AgentSecurityPolicyPatch {
-  const preset = override.preset ?? globalPreset;
-  const baseline = buildPresetPolicy(preset);
-  const compact: AgentSecurityPolicyPatch = {};
-
-  if (override.preset && override.preset !== globalPreset) {
-    compact.preset = override.preset;
-  }
-  if (override.defaultAction && override.defaultAction !== baseline.defaultAction) {
-    compact.defaultAction = override.defaultAction;
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'allowTools') && !listEqual(override.allowTools, baseline.allowTools)) {
-    compact.allowTools = override.allowTools ?? [];
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'confirmTools') && !listEqual(override.confirmTools, baseline.confirmTools)) {
-    compact.confirmTools = override.confirmTools ?? [];
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'denyTools') && !listEqual(override.denyTools, baseline.denyTools)) {
-    compact.denyTools = override.denyTools ?? [];
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'allowPathPrefixes') && !listEqual(override.allowPathPrefixes, baseline.allowPathPrefixes)) {
-    compact.allowPathPrefixes = override.allowPathPrefixes ?? [];
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'allowDomains') && !listEqual(override.allowDomains, baseline.allowDomains)) {
-    compact.allowDomains = override.allowDomains ?? [];
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'allowCommandExecution')
-    && typeof override.allowCommandExecution === 'boolean'
-    && override.allowCommandExecution !== baseline.allowCommandExecution) {
-    compact.allowCommandExecution = override.allowCommandExecution;
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'allowDependencyInstall')
-    && typeof override.allowDependencyInstall === 'boolean'
-    && override.allowDependencyInstall !== baseline.allowDependencyInstall) {
-    compact.allowDependencyInstall = override.allowDependencyInstall;
-  }
-  if (override.confirmStrategy && override.confirmStrategy !== baseline.confirmStrategy) {
-    compact.confirmStrategy = override.confirmStrategy;
-  }
-  if (Object.prototype.hasOwnProperty.call(override, 'capabilities') && !listEqual(override.capabilities, baseline.capabilities)) {
-    compact.capabilities = override.capabilities ?? [];
-  }
-  return compact;
-}
-
-function resolveRuleSource(ruleId: string | undefined): PolicySource {
-  if (!ruleId) {
-    return 'default';
-  }
-  if (ruleId.startsWith('immutable.')) {
-    return 'immutableRules';
-  }
-  if (ruleId.startsWith('user.')) {
-    return 'userOverride';
-  }
-  if (ruleId.startsWith('preset.')) {
-    return 'preset';
-  }
-  if (ruleId.startsWith('policy.')) {
-    return 'default';
-  }
-  return 'preset';
-}
-
-function sourceBadgeVariant(source: PolicySource): 'destructive' | 'default' | 'secondary' | 'outline' {
-  if (source === 'immutableRules') {
-    return 'destructive';
-  }
-  if (source === 'userOverride') {
-    return 'default';
-  }
-  if (source === 'preset') {
-    return 'secondary';
-  }
-  return 'outline';
+  };
+  return {
+    preset,
+    securityPolicyVersion,
+    runtime: {
+      enabled: toBool(runtimeRaw.enabled, runtimeTemplate.enabled),
+      runtimeGuardEnabled: toBool(runtimeRaw.runtimeGuardEnabled, runtimeTemplate.runtimeGuardEnabled),
+      auditOnGatewayStart: toBool(runtimeRaw.auditOnGatewayStart, runtimeTemplate.auditOnGatewayStart),
+      autoHarden: toBool(runtimeRaw.autoHarden, runtimeTemplate.autoHarden),
+      enablePromptInjectionGuard: toBool(runtimeRaw.enablePromptInjectionGuard, runtimeTemplate.enablePromptInjectionGuard),
+      blockDestructive: toBool(runtimeRaw.blockDestructive, runtimeTemplate.blockDestructive),
+      blockSecrets: toBool(runtimeRaw.blockSecrets, runtimeTemplate.blockSecrets),
+      monitors: {
+        credentials: toBool(monitors.credentials, runtimeTemplate.monitors.credentials),
+        memory: toBool(monitors.memory, runtimeTemplate.monitors.memory),
+        cost: toBool(monitors.cost, runtimeTemplate.monitors.cost),
+      },
+      logging: {
+        logDetections: toBool(logging.logDetections, runtimeTemplate.logging.logDetections),
+      },
+      allowPathPrefixes: normalizeStringList(
+        runtimeRaw.allowPathPrefixes ?? runtimeTemplate.allowPathPrefixes,
+      ),
+      allowDomains: normalizeStringList(
+        runtimeRaw.allowDomains ?? runtimeTemplate.allowDomains,
+      ),
+      auditEgressAllowlist: normalizeStringList(
+        runtimeRaw.auditEgressAllowlist ?? runtimeTemplate.auditEgressAllowlist,
+      ),
+      auditDailyCostLimitUsd: toPositiveNumber(
+        runtimeRaw.auditDailyCostLimitUsd,
+        runtimeTemplate.auditDailyCostLimitUsd,
+      ),
+      auditFailureMode: toFailureMode(
+        runtimeRaw.auditFailureMode,
+        runtimeTemplate.auditFailureMode,
+      ),
+      promptInjectionPatterns: normalizeStringList(runtimeRaw.promptInjectionPatterns ?? runtimeTemplate.promptInjectionPatterns),
+      allowlist: {
+        tools: normalizeStringList(allowlist.tools),
+        sessions: normalizeStringList(allowlist.sessions),
+      },
+      destructive: {
+        action: normalizeDestructiveAction(toAction(destructive.action, runtimeTemplate.destructive.action)),
+        severityActions: (() => {
+          const actions = toSeverityActions(destructive.severityActions, runtimeTemplate.destructive.severityActions);
+          return {
+            critical: normalizeDestructiveAction(actions.critical),
+            high: normalizeDestructiveAction(actions.high),
+            medium: normalizeDestructiveAction(actions.medium),
+            low: normalizeDestructiveAction(actions.low),
+          };
+        })(),
+        categories: {
+          fileDelete: toBool(categories.fileDelete, runtimeTemplate.destructive.categories.fileDelete),
+          gitDestructive: toBool(categories.gitDestructive, runtimeTemplate.destructive.categories.gitDestructive),
+          sqlDestructive: toBool(categories.sqlDestructive, runtimeTemplate.destructive.categories.sqlDestructive),
+          systemDestructive: toBool(categories.systemDestructive, runtimeTemplate.destructive.categories.systemDestructive),
+          processKill: toBool(categories.processKill, runtimeTemplate.destructive.categories.processKill),
+          networkDestructive: toBool(categories.networkDestructive, runtimeTemplate.destructive.categories.networkDestructive),
+          privilegeEscalation: toBool(categories.privilegeEscalation, runtimeTemplate.destructive.categories.privilegeEscalation),
+        },
+      },
+      secrets: {
+        action: toAction(secrets.action, runtimeTemplate.secrets.action),
+        severityActions: toSeverityActions(secrets.severityActions, runtimeTemplate.secrets.severityActions),
+      },
+      destructivePatterns: Array.isArray(runtimeRaw.destructivePatterns)
+        ? runtimeRaw.destructivePatterns.filter((x): x is string => typeof x === 'string')
+        : [],
+      secretPatterns: Array.isArray(runtimeRaw.secretPatterns)
+        ? runtimeRaw.secretPatterns.filter((x): x is string => typeof x === 'string')
+        : [],
+    },
+  };
 }
 
 export function SecurityPage() {
-  const { t } = useTranslation('security');
-  const navigate = useNavigate();
-  const agents = useSubagentsStore((state) => state.agents);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const { t, i18n } = useTranslation('security');
   const gatewayState = useGatewayStore((state) => state.status.state);
   const gatewayRpc = useGatewayStore((state) => state.rpc);
-  const wasGatewayRunningRef = useRef(gatewayState === 'running');
 
-  const [loadingPolicies, setLoadingPolicies] = useState(true);
-  const [savingPolicies, setSavingPolicies] = useState(false);
-  const [securityPreset, setSecurityPreset] = useState<SecurityPreset>('balanced');
-  const [policyVersion, setPolicyVersion] = useState(1);
-  const [policyByAgent, setPolicyByAgent] = useState<Record<string, AgentSecurityPolicyPatch>>({});
-  const [selectedAgentId, setSelectedAgentId] = useState('');
-  const [auditItems, setAuditItems] = useState<GuardianAuditItem[]>([]);
-  const [effectiveToolIds, setEffectiveToolIds] = useState<string[]>([]);
-  const [effectiveToolNames, setEffectiveToolNames] = useState<Record<string, string>>({});
-  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [policy, setPolicy] = useState<SecurityPolicy>(DEFAULT_POLICY);
+  const [savedPolicySnapshot, setSavedPolicySnapshot] = useState<SecurityPolicy>(DEFAULT_POLICY);
   const [error, setError] = useState<string | null>(null);
-  const [showExplainDetails, setShowExplainDetails] = useState(false);
-  const [showAuditDetails, setShowAuditDetails] = useState(false);
-  const [editingField, setEditingField] = useState<EditableFieldKey | null>(null);
-  const [editorSnapshot, setEditorSnapshot] = useState<Record<string, AgentSecurityPolicyPatch> | null>(null);
-  const [toolConflict, setToolConflict] = useState<ToolConflictState | null>(null);
+  const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [securityOpBusy, setSecurityOpBusy] = useState<string | null>(null);
+  const [securityOpResult, setSecurityOpResult] = useState('');
+  const [remediationActions, setRemediationActions] = useState<RemediationActionItem[]>([]);
+  const [selectedRemediationActions, setSelectedRemediationActions] = useState<string[]>([]);
+  const [lastRemediationSnapshotId, setLastRemediationSnapshotId] = useState<string | null>(null);
+  const [platformTools, setPlatformTools] = useState<PlatformTool[]>([]);
+  const [loadingPlatformTools, setLoadingPlatformTools] = useState(false);
+  const [platformToolsError, setPlatformToolsError] = useState<string | null>(null);
+  const [allowlistRegexTab, setAllowlistRegexTab] = useState<AllowlistRegexTab>('allowlistTools');
+  const [ruleCatalog, setRuleCatalog] = useState<RuleCatalogItem[]>([]);
+  const [loadingRuleCatalog, setLoadingRuleCatalog] = useState(false);
+  const [ruleCatalogError, setRuleCatalogError] = useState<string | null>(null);
+  const [ruleCatalogPlatform, setRuleCatalogPlatform] = useState<RuleCatalogPlatform>('all');
+  const [activeSection, setActiveSection] = useState<SecuritySectionKey>('meta');
 
-  useEffect(() => {
-    void loadAgents();
-  }, [loadAgents]);
+  const updateRuntime = useCallback((updater: (current: RuntimePolicy) => RuntimePolicy) => {
+    setPolicy((prev) => ({ ...prev, runtime: updater(prev.runtime) }));
+  }, []);
+  const getActionLabel = useCallback((action: Action) => t(`matrix.action.${action}`), [t]);
+  const getSeverityLabel = useCallback((severity: Severity) => t(`matrix.severity.${severity}`), [t]);
+  const getCategoryLabel = useCallback(
+    (key: keyof RuntimePolicy['destructive']['categories']) => t(`matrix.category.${key}`),
+    [t],
+  );
 
-  useEffect(() => {
-    const isGatewayRunning = gatewayState === 'running';
-    if (isGatewayRunning && !wasGatewayRunningRef.current) {
-      void loadAgents();
-    }
-    wasGatewayRunningRef.current = isGatewayRunning;
-  }, [gatewayState, loadAgents]);
+  const applyPresetTemplate = useCallback((nextPreset: Preset) => {
+    setPolicy((prev) => ({
+      ...prev,
+      preset: nextPreset,
+      runtime: cloneRuntimeTemplate(nextPreset),
+    }));
+  }, []);
 
-  const loadPolicies = useCallback(async () => {
-    setLoadingPolicies(true);
-    setError(null);
+  const loadPolicy = useCallback(async () => {
+    setLoading(true);
     try {
-      const payload = await hostApiFetch<SettingsPayload>('/api/settings');
-      const nextPreset = payload.securityPreset === 'strict' || payload.securityPreset === 'balanced' || payload.securityPreset === 'relaxed'
-        ? payload.securityPreset
-        : 'balanced';
-      const nextVersion = typeof payload.securityPolicyVersion === 'number'
-        ? payload.securityPolicyVersion
-        : 1;
-      const nextPolicyMapRaw = normalizePolicyMap(payload.securityPolicyByAgent);
-      const nextPolicyMap: Record<string, AgentSecurityPolicyPatch> = {};
-      for (const [agentId, override] of Object.entries(nextPolicyMapRaw)) {
-        const compact = compactPolicyOverride(override, nextPreset);
-        if (Object.keys(compact).length > 0) {
-          nextPolicyMap[agentId] = compact;
-        }
-      }
-      setSecurityPreset(nextPreset);
-      setPolicyVersion(nextVersion);
-      setPolicyByAgent(nextPolicyMap);
-    } catch (loadError) {
-      const message = loadError instanceof Error ? loadError.message : t('errors.loadFailed');
-      setError(message);
+      const payload = await hostApiFetch<unknown>('/api/security');
+      const normalized = normalizePolicy(payload);
+      setPolicy(normalized);
+      setSavedPolicySnapshot(normalized);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('errors.loadFailed'));
     } finally {
-      setLoadingPolicies(false);
+      setLoading(false);
     }
   }, [t]);
 
   useEffect(() => {
-    void loadPolicies();
-  }, [loadPolicies]);
+    void loadPolicy();
+  }, [loadPolicy]);
 
-  useEffect(() => {
-    if (agents.length === 0) {
-      setSelectedAgentId('');
-      return;
-    }
-    const hasSelected = selectedAgentId && agents.some((agent) => agent.id === selectedAgentId);
-    if (!hasSelected) {
-      setSelectedAgentId(agents[0].id);
-    }
-  }, [agents, selectedAgentId]);
-
-  const selectedPolicyRaw = selectedAgentId ? policyByAgent[selectedAgentId] : undefined;
-  const selectedPreset = (selectedPolicyRaw?.preset ?? securityPreset) as SecurityPreset;
-  const selectedPolicy = useMemo(() => ({
-    ...buildPresetPolicy(selectedPreset),
-    ...(selectedPolicyRaw ?? {}),
-    preset: selectedPreset,
-  }), [selectedPreset, selectedPolicyRaw]);
-  const selectedPolicyRawRecord = selectedPolicyRaw && isRecord(selectedPolicyRaw)
-    ? selectedPolicyRaw
-    : undefined;
-  const toolOptions = useMemo(
-    () => uniqueList([
-      ...TOOL_OPTION_CATALOG,
-      ...effectiveToolIds,
-      ...auditItems.map((item) => item.toolName || ''),
-    ]),
-    [auditItems, effectiveToolIds],
-  );
-
-  const resolveFieldSource = (field: keyof AgentSecurityPolicy): PolicySource => {
-    if (selectedPolicyRawRecord && Object.prototype.hasOwnProperty.call(selectedPolicyRawRecord, field)) {
-      return 'userOverride';
-    }
-    return 'preset';
-  };
-
-  const policySourceRows: Array<{ key: keyof AgentSecurityPolicy; label: string }> = useMemo(() => ([
-    { key: 'defaultAction', label: t('form.defaultAction') },
-    { key: 'allowTools', label: t('form.allowTools') },
-    { key: 'confirmTools', label: t('form.confirmTools') },
-    { key: 'denyTools', label: t('form.denyTools') },
-    { key: 'allowPathPrefixes', label: t('form.allowPathPrefixes') },
-    { key: 'allowDomains', label: t('form.allowDomains') },
-    { key: 'allowCommandExecution', label: t('form.allowCommandExecution') },
-    { key: 'allowDependencyInstall', label: t('form.allowDependencyInstall') },
-    { key: 'confirmStrategy', label: t('form.confirmStrategy') },
-    { key: 'capabilities', label: t('form.capabilities') },
-  ]), [t]);
-
-  const applyGlobalPreset = (nextPreset: SecurityPreset) => {
-    setSecurityPreset(nextPreset);
-    setPolicyByAgent((prev) => {
-      const next: Record<string, AgentSecurityPolicyPatch> = {};
-      for (const [agentId, override] of Object.entries(prev)) {
-        const compact = compactPolicyOverride(override, nextPreset);
-        if (Object.keys(compact).length > 0) {
-          next[agentId] = compact;
-        }
-      }
-      return next;
-    });
-  };
-
-  const updateSelectedPolicy = (patch: Partial<AgentSecurityPolicy>) => {
-    if (!selectedAgentId) {
-      return;
-    }
-    setPolicyByAgent((prev) => {
-      const current = prev[selectedAgentId] ?? {};
-      const merged: AgentSecurityPolicyPatch = {
-        ...current,
-        ...patch,
-      };
-      const compact = compactPolicyOverride(merged, securityPreset);
-      if (Object.keys(compact).length === 0) {
-        if (!prev[selectedAgentId]) {
-          return prev;
-        }
-        const next = { ...prev };
-        delete next[selectedAgentId];
-        return next;
-      }
-      return {
-        ...prev,
-        [selectedAgentId]: compact,
-      };
-    });
-  };
-  const toggleCapabilityValue = useCallback((value: string) => {
-    const current = selectedPolicy.capabilities;
-    const exists = current.includes(value);
-    const next = exists ? current.filter((item) => item !== value) : [...current, value];
-    updateSelectedPolicy({ capabilities: next });
-  }, [selectedPolicy, updateSelectedPolicy]);
-  const applyToolSelection = useCallback((field: ToolPolicyField, toolName: string) => {
-    const allow = selectedPolicy.allowTools.filter((item) => item !== toolName);
-    const confirm = selectedPolicy.confirmTools.filter((item) => item !== toolName);
-    const deny = selectedPolicy.denyTools.filter((item) => item !== toolName);
-    if (field === 'allowTools') {
-      updateSelectedPolicy({
-        allowTools: [...allow, toolName],
-        confirmTools: confirm,
-        denyTools: deny,
-      });
-      return;
-    }
-    if (field === 'confirmTools') {
-      updateSelectedPolicy({
-        allowTools: allow,
-        confirmTools: [...confirm, toolName],
-        denyTools: deny,
-      });
-      return;
-    }
-    updateSelectedPolicy({
-      allowTools: allow,
-      confirmTools: confirm,
-      denyTools: [...deny, toolName],
-    });
-  }, [selectedPolicy.allowTools, selectedPolicy.confirmTools, selectedPolicy.denyTools, updateSelectedPolicy]);
-  const toggleToolInField = useCallback((field: ToolPolicyField, toolName: string) => {
-    const current =
-      field === 'allowTools' ? selectedPolicy.allowTools
-        : field === 'confirmTools' ? selectedPolicy.confirmTools
-          : selectedPolicy.denyTools;
-    const existsInTarget = current.includes(toolName);
-    if (existsInTarget) {
-      updateSelectedPolicy({ [field]: current.filter((item) => item !== toolName) });
-      return;
-    }
-
-    const fromFields: ToolPolicyField[] = [];
-    if (field !== 'allowTools' && selectedPolicy.allowTools.includes(toolName)) {
-      fromFields.push('allowTools');
-    }
-    if (field !== 'confirmTools' && selectedPolicy.confirmTools.includes(toolName)) {
-      fromFields.push('confirmTools');
-    }
-    if (field !== 'denyTools' && selectedPolicy.denyTools.includes(toolName)) {
-      fromFields.push('denyTools');
-    }
-
-    if (fromFields.length > 0) {
-      setToolConflict({ toolName, targetField: field, fromFields });
-      return;
-    }
-    applyToolSelection(field, toolName);
-  }, [applyToolSelection, selectedPolicy.allowTools, selectedPolicy.confirmTools, selectedPolicy.denyTools, updateSelectedPolicy]);
-  const formatToolLabel = useCallback((toolId: string): string => {
-    const fromGateway = effectiveToolNames[toolId];
-    if (fromGateway && fromGateway.trim().length > 0 && fromGateway !== toolId) {
-      return fromGateway;
-    }
-    const key = TOOL_LABEL_KEY_MAP[toolId];
-    if (!key) {
-      return toolId;
-    }
-    return t(`toolLabels.${key}`, { defaultValue: toolId });
-  }, [effectiveToolNames, t]);
-  const formatCapabilityLabel = useCallback((capability: string): string => (
-    t(`capabilityLabels.${capability}`, { defaultValue: capability })
-  ), [t]);
-  const handleSave = async (
-    nextPreset: SecurityPreset = securityPreset,
-    nextPolicyByAgent: Record<string, AgentSecurityPolicyPatch> = policyByAgent,
-  ) => {
-    setSavingPolicies(true);
-    setError(null);
+  const savePolicy = useCallback(async () => {
+    setSaving(true);
     try {
-      await hostApiFetch('/api/settings', {
-        method: 'PUT',
-        body: JSON.stringify({
-          securityPreset: nextPreset,
-          securityPolicyVersion: policyVersion || 1,
-          securityPolicyByAgent: nextPolicyByAgent,
-        }),
-      });
+      const payload: SecurityPolicy = policy;
+      await hostApiFetch('/api/security', { method: 'PUT', body: JSON.stringify(payload) });
+      setPolicy(payload);
+      setSavedPolicySnapshot(payload);
       toast.success(t('messages.saved'));
-    } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : t('errors.saveFailed');
-      setError(message);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('errors.saveFailed'));
       toast.error(t('messages.saveFailed'));
     } finally {
-      setSavingPolicies(false);
+      setSaving(false);
     }
-  };
+  }, [policy, t]);
 
-  const handleResetAgentPolicy = () => {
-    if (!selectedAgentId) {
-      return;
+  const loadPlatformTools = useCallback(async () => {
+    setLoadingPlatformTools(true);
+    try {
+      const payload = await hostApiFetch<{ success?: boolean; tools?: PlatformTool[] }>('/api/platform/tools?includeDisabled=true');
+      const tools = Array.isArray(payload?.tools) ? payload.tools : [];
+      const normalized = tools
+        .filter((tool): tool is PlatformTool => Boolean(tool && typeof tool.id === 'string' && tool.id.trim().length > 0))
+        .map((tool) => ({
+          id: tool.id.trim(),
+          name: typeof tool.name === 'string' ? tool.name : undefined,
+          source: typeof tool.source === 'string' ? tool.source : undefined,
+          enabled: typeof tool.enabled === 'boolean' ? tool.enabled : undefined,
+          description: typeof tool.description === 'string' ? tool.description : undefined,
+          version: typeof tool.version === 'string' ? tool.version : undefined,
+        }))
+        .sort((a, b) => {
+          const enabledRankA = a.enabled === false ? 1 : 0;
+          const enabledRankB = b.enabled === false ? 1 : 0;
+          if (enabledRankA !== enabledRankB) return enabledRankA - enabledRankB;
+          return a.id.localeCompare(b.id);
+        });
+      setPlatformTools(normalized);
+      setPlatformToolsError(null);
+    } catch (e) {
+      setPlatformTools([]);
+      setPlatformToolsError(e instanceof Error ? e.message : t('errors.loadToolsFailed'));
+    } finally {
+      setLoadingPlatformTools(false);
     }
-    setPolicyByAgent((prev) => {
-      if (!prev[selectedAgentId]) {
-        return prev;
-      }
-      const next = { ...prev };
-      delete next[selectedAgentId];
-      return next;
-    });
-  };
+  }, [t]);
 
-  const formatFieldPreview = useCallback((field: EditableFieldKey): string => {
-    if (field === 'defaultAction') {
-      return t(`action.${selectedPolicy.defaultAction}`);
+  const loadRuleCatalog = useCallback(async () => {
+    setLoadingRuleCatalog(true);
+    try {
+      const payload = await hostApiFetch<{ success?: boolean; items?: RuleCatalogItem[] }>('/api/security/destructive-rule-catalog');
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const allowedPlatforms = new Set<Exclude<RuleCatalogPlatform, 'all'>>(['universal', 'linux', 'windows', 'macos', 'powershell']);
+      const normalized = items.filter((item): item is RuleCatalogItem => {
+        if (!item || typeof item !== 'object') return false;
+        if (!item.platform || typeof item.platform !== 'string' || !allowedPlatforms.has(item.platform as Exclude<RuleCatalogPlatform, 'all'>)) return false;
+        if (!item.command || typeof item.command !== 'string') return false;
+        if (!item.category || typeof item.category !== 'string') return false;
+        if (!item.severity || typeof item.severity !== 'string') return false;
+        return typeof item.reason === 'string';
+      });
+      setRuleCatalog(normalized);
+      setRuleCatalogError(null);
+    } catch (e) {
+      setRuleCatalog([]);
+      setRuleCatalogError(e instanceof Error ? e.message : t('errors.loadRuleCatalogFailed'));
+    } finally {
+      setLoadingRuleCatalog(false);
     }
-    if (field === 'allowCommandExecution' || field === 'allowDependencyInstall') {
-      return selectedPolicy[field] ? t('form.valueEnabled') : t('form.valueDisabled');
-    }
-    if (field === 'confirmStrategy') {
-      return t(`confirmStrategy.${selectedPolicy.confirmStrategy}`);
-    }
-    if (field === 'allowPathPrefixes' || field === 'allowDomains' || field === 'capabilities' || field === 'allowTools' || field === 'confirmTools' || field === 'denyTools') {
-      return t('form.valueCount', { count: selectedPolicy[field].length });
-    }
-    return '-';
-  }, [selectedPolicy, t]);
-
-  const openFieldEditor = useCallback((field: EditableFieldKey) => {
-    setEditorSnapshot(clonePolicyMap(policyByAgent));
-    setEditingField(field);
-  }, [policyByAgent]);
-
-  const closeFieldEditor = useCallback((restore: boolean) => {
-    if (restore && editorSnapshot) {
-      setPolicyByAgent(clonePolicyMap(editorSnapshot));
-    }
-    setToolConflict(null);
-    setEditingField(null);
-    setEditorSnapshot(null);
-  }, [editorSnapshot]);
-
-  const handleSaveFieldEditor = useCallback(async () => {
-    await handleSave();
-    setEditorSnapshot(clonePolicyMap(policyByAgent));
-  }, [handleSave, policyByAgent]);
-
-  const handleUsePresetForField = useCallback(async () => {
-    if (!editingField || !selectedAgentId) {
-      return;
-    }
-    const current = policyByAgent[selectedAgentId];
-    if (!current || !Object.prototype.hasOwnProperty.call(current, editingField)) {
-      closeFieldEditor(false);
-      return;
-    }
-    const merged: AgentSecurityPolicyPatch = { ...current };
-    delete (merged as Record<string, unknown>)[editingField];
-    const compact = compactPolicyOverride(merged, securityPreset);
-    const nextMap = clonePolicyMap(policyByAgent);
-    if (Object.keys(compact).length === 0) {
-      delete nextMap[selectedAgentId];
-    } else {
-      nextMap[selectedAgentId] = compact;
-    }
-    setPolicyByAgent(nextMap);
-    await handleSave(securityPreset, nextMap);
-    closeFieldEditor(false);
-  }, [closeFieldEditor, editingField, handleSave, policyByAgent, securityPreset, selectedAgentId]);
+  }, [t]);
 
   const loadRecentAudits = useCallback(async () => {
-    if (!selectedAgentId || gatewayState !== 'running') {
+    if (gatewayState !== 'running') {
       setAuditItems([]);
       return;
     }
     setLoadingAudit(true);
     try {
-      const result = await gatewayRpc<GuardianAuditQueryResult>(
-        'guardian.audit.query',
-        { agentId: selectedAgentId, page: 1, pageSize: 8 },
-        8000,
-      );
+      const result = await gatewayRpc<{ items?: AuditItem[] }>('security.audit.query', { page: 1, pageSize: 8 }, 8000);
       setAuditItems(Array.isArray(result.items) ? result.items : []);
     } catch {
       setAuditItems([]);
     } finally {
       setLoadingAudit(false);
     }
-  }, [gatewayRpc, gatewayState, selectedAgentId]);
-
-  const loadEffectiveTools = useCallback(async () => {
-    if (gatewayState !== 'running') {
-      setEffectiveToolIds([]);
-      setEffectiveToolNames({});
-      return;
-    }
-    try {
-      const payload = await hostApiFetch<EffectiveToolsPayload>('/api/skills/effective');
-      if (!payload?.success || !Array.isArray(payload.tools)) {
-        setEffectiveToolIds([]);
-        setEffectiveToolNames({});
-        return;
-      }
-      const nextNames: Record<string, string> = {};
-      const ids = payload.tools
-        .map((tool) => {
-          const id = typeof tool?.id === 'string' ? tool.id.trim() : '';
-          const name = typeof tool?.name === 'string' ? tool.name.trim() : '';
-          if (id && name) {
-            nextNames[id] = name;
-          }
-          return id || name;
-        })
-        .filter((item) => item.length > 0);
-      setEffectiveToolIds(uniqueList(ids));
-      setEffectiveToolNames(nextNames);
-    } catch {
-      setEffectiveToolIds([]);
-      setEffectiveToolNames({});
-    }
-  }, [gatewayState]);
+  }, [gatewayRpc, gatewayState]);
 
   useEffect(() => {
     void loadRecentAudits();
   }, [loadRecentAudits]);
 
   useEffect(() => {
-    void loadEffectiveTools();
-  }, [loadEffectiveTools]);
+    void loadPlatformTools();
+  }, [loadPlatformTools]);
 
-  if (loadingPolicies) {
-    return (
-      <section className="space-y-4">
-        <header>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
-        </header>
-        <p className="text-sm text-muted-foreground">{t('loading')}</p>
-      </section>
-    );
+  useEffect(() => {
+    void loadRuleCatalog();
+  }, [loadRuleCatalog]);
+
+  const runSecurityOp = useCallback(async (name: string, runner: () => Promise<unknown>) => {
+    if (gatewayState !== 'running') {
+      toast.error(t('actionCenter.gatewayNotRunning'));
+      return;
+    }
+    setSecurityOpBusy(name);
+    try {
+      const result = await runner();
+      setSecurityOpResult(JSON.stringify(result, null, 2));
+      toast.success(t('actionCenter.runSuccess', { name }));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setSecurityOpResult(`ERROR: ${message}`);
+      toast.error(t('actionCenter.runFailed', { name }));
+    } finally {
+      setSecurityOpBusy(null);
+    }
+  }, [gatewayState, t]);
+
+  const runtime = policy.runtime;
+  const isDirty = useMemo(
+    () => JSON.stringify(policy) !== JSON.stringify(savedPolicySnapshot),
+    [policy, savedPolicySnapshot],
+  );
+  const selectedToolCount = runtime.allowlist.tools.length;
+  const selectedToolSet = new Set(runtime.allowlist.tools);
+  const enabledPlatformToolIds = platformTools
+    .filter((tool) => tool.enabled !== false)
+    .map((tool) => tool.id);
+  const displayedRuleCatalog = ruleCatalog
+    .filter((item) => ruleCatalogPlatform === 'all' ? true : item.platform === ruleCatalogPlatform || item.platform === 'universal')
+    .sort((a, b) => {
+      if (a.platform === b.platform) return a.command.localeCompare(b.command);
+      return a.platform.localeCompare(b.platform);
+    });
+  const sectionItems: Array<{ key: SecuritySectionKey; label: string }> = [
+    { key: 'meta', label: t('runtimePreset.nav') },
+    { key: 'runtime', label: t('sections.runtime') },
+    { key: 'matrix', label: t('sections.matrix') },
+    { key: 'ruleCatalog', label: t('sections.ruleCatalog') },
+    { key: 'allowlistRegex', label: t('sections.allowlistRegex') },
+    { key: 'policyGuards', label: t('sections.policyGuards') },
+    { key: 'actionCenter', label: t('sections.actionCenter') },
+    { key: 'auditHits', label: t('sections.auditHits') },
+  ];
+
+  const updateAllowlistTools = (nextTools: string[]) => {
+    const deduped = [...new Set(nextTools.map((item) => item.trim()).filter(Boolean))];
+    updateRuntime((current) => ({
+      ...current,
+      allowlist: { ...current.allowlist, tools: deduped },
+    }));
+  };
+
+  const toggleAllowlistTool = (toolId: string) => {
+    if (selectedToolSet.has(toolId)) {
+      updateAllowlistTools(runtime.allowlist.tools.filter((item) => item !== toolId));
+      return;
+    }
+    updateAllowlistTools([...runtime.allowlist.tools, toolId]);
+  };
+
+  const toggleCategory = (key: keyof RuntimePolicy['destructive']['categories'], checked: boolean) => {
+    updateRuntime((current) => ({
+      ...current,
+      destructive: {
+        ...current.destructive,
+        categories: { ...current.destructive.categories, [key]: checked },
+      },
+    }));
+  };
+
+  const localizeAuditDetail = useCallback((item: AuditItem): string => {
+    if (!item.detail) return '';
+    if (item.ruleId === 'SC-SKILL-001') {
+      const matched = item.detail.match(/^(\d+)\s+skill\(s\)\s+installed$/i);
+      if (matched) {
+        const count = Number(matched[1]);
+        return t('audit.findings.SC-SKILL-001', { count, defaultValue: item.detail });
+      }
+    }
+    if (item.ruleId) {
+      return t(`audit.findings.${item.ruleId}`, { defaultValue: item.detail });
+    }
+    return item.detail;
+  }, [t]);
+
+  const localizeRuleCatalogPlatform = useCallback((platform: string): string => (
+    t(`ruleCatalog.platform.${platform}`, { defaultValue: platform })
+  ), [t]);
+
+  const localizeRuleCatalogCategory = useCallback((category: string): string => (
+    t(`ruleCatalog.category.${category}`, { defaultValue: category })
+  ), [t]);
+
+  const localizeRuleCatalogSeverity = useCallback((severity: string): string => {
+    const parts = severity.split('|').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 0) {
+      return severity;
+    }
+    return parts
+      .map((part) => t(`ruleCatalog.severity.${part}`, { defaultValue: part }))
+      .join(' / ');
+  }, [t]);
+
+  const localizeRuleCatalogReason = useCallback((reason: string): string => {
+    const normalizedReason = normalizeRuleReasonText(reason);
+    const candidates = [
+      reason,
+      normalizedReason,
+      reason.replace('系统服务停用', '服务停用'),
+      normalizedReason.replace('系统服务停用', '服务停用'),
+      reason.replace('服务停用', '系统服务停用'),
+      normalizedReason.replace('服务停用', '系统服务停用'),
+    ];
+    const mappedKey = candidates
+      .map((candidate) => RULE_CATALOG_REASON_KEY_MAP[candidate])
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    if (!mappedKey) {
+      return reason;
+    }
+    return t(`ruleCatalog.reason.${mappedKey}`, { defaultValue: reason });
+  }, [t]);
+
+  const localizeRuleCatalogCommand = useCallback((command: string): string => {
+    let output = command;
+    Object.entries(RULE_CATALOG_COMMAND_TOKEN_KEY_MAP).forEach(([token, key]) => {
+      const translated = t(`ruleCatalog.commandToken.${key}`, { defaultValue: token });
+      output = output
+        .replaceAll(`（${token}）`, `(${translated})`)
+        .replaceAll(`(${token})`, `(${translated})`);
+    });
+    return output;
+  }, [t]);
+
+  const localizeAuditRisk = useCallback((risk: string): string => (
+    t(`audit.risk.${risk}`, { defaultValue: risk })
+  ), [t]);
+
+  const localizeAuditAction = useCallback((action: string): string => (
+    t(`audit.action.${action}`, { defaultValue: action })
+  ), [t]);
+
+  const localizeToolSource = useCallback((source?: string): string => {
+    if (!source) return t('allowlistRegex.source.unknown');
+    return t(`allowlistRegex.source.${source}`, { defaultValue: source });
+  }, [t]);
+
+  const localizeToolDisplayName = useCallback((tool: PlatformTool): string => {
+    const localized = t(`toolLabels.${tool.id}`, { defaultValue: '' }).trim();
+    if (localized) return localized;
+    const rawName = typeof tool.name === 'string' ? tool.name.trim() : '';
+    if (rawName) {
+      if (i18n.language.toLowerCase().startsWith('zh')) return rawName;
+      if (!/[\u3400-\u9FFF]/u.test(rawName)) return rawName;
+    }
+    return tool.id;
+  }, [i18n.language, t]);
+
+  const localizeToolDescription = useCallback((tool: PlatformTool): string => {
+    const localized = t(`toolDescriptions.${tool.id}`, { defaultValue: '' }).trim();
+    if (localized) return localized;
+    const rawDescription = typeof tool.description === 'string' ? tool.description.trim() : '';
+    if (!rawDescription) return '';
+    if (i18n.language.toLowerCase().startsWith('zh')) return rawDescription;
+    return /[\u3400-\u9FFF]/u.test(rawDescription) ? '' : rawDescription;
+  }, [i18n.language, t]);
+
+  if (loading) {
+    return <section className="space-y-4"><p className="text-sm text-muted-foreground">{t('loading')}</p></section>;
   }
 
   return (
-    <section className="space-y-4">
-      <header className="flex items-center justify-between gap-2">
+    <section className="flex flex-col gap-6 p-6">
+      <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">{t('title')}</h1>
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
+        <div className="flex items-center gap-2">
+          {isDirty && (
+            <Badge variant="outline" className="border-amber-500 text-amber-700">
+              {t('page.unsaved')}
+            </Badge>
+          )}
+          <Button onClick={() => void savePolicy()} disabled={saving || !isDirty}>
+            {saving ? t('actions.saving') : t('actions.save')}
+          </Button>
+        </div>
       </header>
 
-      {error && (
-        <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {error}
-        </p>
-      )}
+      {error && <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
 
-      {agents.length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('empty.title')}</CardTitle>
-            <CardDescription>{t('empty.description')}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={() => navigate('/subagents')}>{t('empty.action')}</Button>
+      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <Card className="h-fit border-border/60 bg-card/80">
+          <CardContent className="p-2.5">
+            <nav className="space-y-1" aria-label={t('sections.navAria')}>
+              {sectionItems.map((section) => (
+                <Button
+                  key={section.key}
+                  type="button"
+                  variant="ghost"
+                  className={`h-10 w-full justify-start rounded-lg border border-transparent px-2.5 text-sm font-medium transition-colors ${
+                    activeSection === section.key
+                      ? 'bg-primary/12 text-primary hover:bg-primary/18'
+                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'
+                  }`}
+                  onClick={() => setActiveSection(section.key)}
+                >
+                  <span
+                    aria-hidden
+                    className={`mr-2 h-1.5 w-1.5 rounded-full transition-colors ${
+                      activeSection === section.key ? 'bg-primary' : 'bg-transparent'
+                    }`}
+                  />
+                  <span className="truncate">{section.label}</span>
+                </Button>
+              ))}
+            </nav>
           </CardContent>
         </Card>
-      ) : (
-        <>
-          <div className="flex flex-col gap-4">
-          <Card className="order-1">
-            <CardHeader className="flex flex-row items-start justify-between gap-2">
-              <div className="space-y-1">
-                <CardTitle>{t('explain.title')}</CardTitle>
-                <CardDescription>{t('explain.description')}</CardDescription>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2">
-                  <Label htmlFor="security-global-preset" className="shrink-0 text-xs text-muted-foreground">{t('form.globalPreset')}</Label>
+
+        <div className="space-y-6">
+
+      {activeSection === 'meta' && (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('runtimePreset.title')}</CardTitle>
+          <CardDescription>{t('runtimePreset.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-1">
+          <div><Label htmlFor="security-preset">{t('runtimePreset.mode')}</Label><Select id="security-preset" value={policy.preset} onChange={(e) => applyPresetTemplate(e.target.value as Preset)}><option value="strict">{t('preset.strict')}</option><option value="balanced">{t('preset.balanced')}</option><option value="relaxed">{t('preset.relaxed')}</option></Select></div>
+        </CardContent>
+      </Card>
+      )}
+
+      {activeSection === 'runtime' && (
+      <Card>
+        <CardHeader><CardTitle>{t('runtime.title')}</CardTitle><CardDescription>{t('runtime.description')}</CardDescription></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-2 md:grid-cols-2">
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.enabled')}</span><Switch checked={runtime.enabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, enabled: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.runtimeGuardEnabled')}</span><Switch checked={runtime.runtimeGuardEnabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, runtimeGuardEnabled: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.auditOnGatewayStart')}</span><Switch checked={runtime.auditOnGatewayStart} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, auditOnGatewayStart: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.autoHarden')}</span><Switch checked={runtime.autoHarden} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, autoHarden: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockDestructive')}</span><Switch checked={runtime.blockDestructive} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockDestructive: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.blockSecrets')}</span><Switch checked={runtime.blockSecrets} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, blockSecrets: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.enablePromptInjectionGuard')}</span><Switch checked={runtime.enablePromptInjectionGuard} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, enablePromptInjectionGuard: checked }))} /></label>
+            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.logDetections')}</span><Switch checked={runtime.logging.logDetections} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, logging: { ...current.logging, logDetections: checked } }))} /></label>
+          </div>
+        </CardContent>
+      </Card>
+      )}
+
+      {activeSection === 'matrix' && (
+      <>
+      <Card>
+        <CardHeader><CardTitle>{t('matrix.title')}</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div><Label>{t('matrix.destructiveDefaultAction')}</Label><Select value={runtime.destructive.action} onChange={(e) => updateRuntime((current) => ({ ...current, destructive: { ...current.destructive, action: e.target.value as Action } }))}>{DESTRUCTIVE_ACTIONS.map((action) => <option key={`destructive-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
+            <div><Label>{t('matrix.secretsDefaultAction')}</Label><Select value={runtime.secrets.action} onChange={(e) => updateRuntime((current) => ({ ...current, secrets: { ...current.secrets, action: e.target.value as Action } }))}>{SECRET_ACTIONS.map((action) => <option key={`secrets-${action}`} value={action}>{getActionLabel(action)}</option>)}</Select></div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">{t('matrix.destructiveBySeverity')}</p>
+              {SEVERITIES.map((severity) => (
+                <div key={`d-${severity}`} className="grid grid-cols-[minmax(0,1fr)_120px] items-center gap-2">
+                  <Label className="min-w-0 truncate">{getSeverityLabel(severity)}</Label>
                   <Select
-                    id="security-global-preset"
-                    className="w-44"
-                    value={securityPreset}
-                    onChange={(event) => applyGlobalPreset(event.target.value as SecurityPreset)}
+                    className="w-[120px]"
+                    value={runtime.destructive.severityActions[severity]}
+                    onChange={(e) => updateRuntime((current) => ({
+                      ...current,
+                      destructive: {
+                        ...current.destructive,
+                        severityActions: {
+                          ...current.destructive.severityActions,
+                          [severity]: e.target.value as Action,
+                        },
+                      },
+                    }))}
                   >
-                    <option value="strict">{t('preset.strict')}</option>
-                    <option value="balanced">{t('preset.balanced')}</option>
-                    <option value="relaxed">{t('preset.relaxed')}</option>
+                    {DESTRUCTIVE_ACTIONS.map((action) => (
+                      <option key={`d-${severity}-${action}`} value={action}>{getActionLabel(action)}</option>
+                    ))}
                   </Select>
                 </div>
+              ))}
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">{t('matrix.secretsBySeverity')}</p>
+              {SEVERITIES.map((severity) => (
+                <div key={`s-${severity}`} className="grid grid-cols-[minmax(0,1fr)_120px] items-center gap-2">
+                  <Label className="min-w-0 truncate">{getSeverityLabel(severity)}</Label>
+                  <Select
+                    className="w-[120px]"
+                    value={runtime.secrets.severityActions[severity]}
+                    onChange={(e) => updateRuntime((current) => ({
+                      ...current,
+                      secrets: {
+                        ...current.secrets,
+                        severityActions: {
+                          ...current.secrets.severityActions,
+                          [severity]: e.target.value as Action,
+                        },
+                      },
+                    }))}
+                  >
+                    {SECRET_ACTIONS.map((action) => (
+                      <option key={`s-${severity}-${action}`} value={action}>{getActionLabel(action)}</option>
+                    ))}
+                  </Select>
+                </div>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>{t('matrix.destructiveCategoryTitle')}</CardTitle></CardHeader>
+        <CardContent className="grid gap-2 md:grid-cols-2">
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('fileDelete')}</span><Switch checked={runtime.destructive.categories.fileDelete} onCheckedChange={(checked) => toggleCategory('fileDelete', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('gitDestructive')}</span><Switch checked={runtime.destructive.categories.gitDestructive} onCheckedChange={(checked) => toggleCategory('gitDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('sqlDestructive')}</span><Switch checked={runtime.destructive.categories.sqlDestructive} onCheckedChange={(checked) => toggleCategory('sqlDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('systemDestructive')}</span><Switch checked={runtime.destructive.categories.systemDestructive} onCheckedChange={(checked) => toggleCategory('systemDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('processKill')}</span><Switch checked={runtime.destructive.categories.processKill} onCheckedChange={(checked) => toggleCategory('processKill', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('networkDestructive')}</span><Switch checked={runtime.destructive.categories.networkDestructive} onCheckedChange={(checked) => toggleCategory('networkDestructive', checked)} /></label>
+          <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{getCategoryLabel('privilegeEscalation')}</span><Switch checked={runtime.destructive.categories.privilegeEscalation} onCheckedChange={(checked) => toggleCategory('privilegeEscalation', checked)} /></label>
+        </CardContent>
+      </Card>
+      </>
+      )}
+
+      {activeSection === 'ruleCatalog' && (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle>{t('ruleCatalog.title')}</CardTitle>
+            <CardDescription>{t('ruleCatalog.description')}</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" disabled={loadingRuleCatalog} onClick={() => void loadRuleCatalog()}>
+            {t('ruleCatalog.refresh')}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+            <div>
+              <Label htmlFor="rule-catalog-platform">{t('ruleCatalog.platformFilter')}</Label>
+              <Select
+                id="rule-catalog-platform"
+                value={ruleCatalogPlatform}
+                onChange={(e) => setRuleCatalogPlatform(e.target.value as RuleCatalogPlatform)}
+              >
+                <option value="all">{t('ruleCatalog.platform.all')}</option>
+                <option value="universal">{t('ruleCatalog.platform.universal')}</option>
+                <option value="linux">{t('ruleCatalog.platform.linux')}</option>
+                <option value="windows">{t('ruleCatalog.platform.windows')}</option>
+                <option value="macos">{t('ruleCatalog.platform.macos')}</option>
+                <option value="powershell">{t('ruleCatalog.platform.powershell')}</option>
+              </Select>
+            </div>
+            <div className="flex items-end text-xs text-muted-foreground">
+              {t('ruleCatalog.count', { count: displayedRuleCatalog.length })}
+            </div>
+          </div>
+
+          {ruleCatalogError && (
+            <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+              {ruleCatalogError}
+            </p>
+          )}
+
+          <div className="max-h-80 overflow-y-auto rounded-md border p-2">
+            {loadingRuleCatalog ? (
+              <p className="text-xs text-muted-foreground">{t('ruleCatalog.loading')}</p>
+            ) : displayedRuleCatalog.length === 0 ? (
+              <p className="text-xs text-muted-foreground">{t('ruleCatalog.empty')}</p>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {displayedRuleCatalog.map((item, index) => (
+                  <div key={`${item.platform}-${item.command}-${index}`} className="min-w-0 rounded-md border p-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1">
+                      <Badge variant="outline">{localizeRuleCatalogPlatform(item.platform)}</Badge>
+                      <Badge variant="outline">{localizeRuleCatalogCategory(item.category)}</Badge>
+                      <Badge variant={item.severity.includes('critical') ? 'destructive' : 'outline'}>
+                        {localizeRuleCatalogSeverity(item.severity)}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 break-all font-mono text-xs leading-5">{localizeRuleCatalogCommand(item.command)}</p>
+                    <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">{localizeRuleCatalogReason(item.reason)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+      )}
+
+      {activeSection === 'allowlistRegex' && (
+      <Card>
+        <CardHeader><CardTitle>{t('allowlistRegex.title')}</CardTitle></CardHeader>
+        <CardContent>
+          <Tabs value={allowlistRegexTab} onValueChange={(value) => setAllowlistRegexTab(value as AllowlistRegexTab)}>
+            <TabsList className="grid h-auto w-full grid-cols-2 gap-1 md:grid-cols-4">
+              <TabsTrigger value="allowlistTools">{t('allowlistRegex.tabs.allowlistTools')}</TabsTrigger>
+              <TabsTrigger value="allowlistSessions">{t('allowlistRegex.tabs.allowlistSessions')}</TabsTrigger>
+              <TabsTrigger value="destructivePatterns">{t('allowlistRegex.tabs.destructivePatterns')}</TabsTrigger>
+              <TabsTrigger value="secretPatterns">{t('allowlistRegex.tabs.secretPatterns')}</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="allowlistTools" className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label>{t('allowlistRegex.labels.allowlistTools')}</Label>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>{t('allowlistRegex.selectedCount', { count: selectedToolCount })}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={loadingPlatformTools}
+                    onClick={() => void loadPlatformTools()}
+                  >
+                    {t('allowlistRegex.refresh')}
+                  </Button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
-                  size="icon"
                   variant="outline"
-                  onClick={() => setShowExplainDetails((prev) => !prev)}
-                  aria-label={showExplainDetails ? t('explain.collapse') : t('explain.expand')}
-                  title={showExplainDetails ? t('explain.collapse') : t('explain.expand')}
+                  size="sm"
+                  disabled={enabledPlatformToolIds.length === 0}
+                  onClick={() => updateAllowlistTools(enabledPlatformToolIds)}
                 >
-                  <ChevronDown className={`h-4 w-4 transition-transform ${showExplainDetails ? 'rotate-180' : ''}`} />
+                  {t('allowlistRegex.writeEnabledTools')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={selectedToolCount === 0}
+                  onClick={() => updateAllowlistTools([])}
+                >
+                  {t('allowlistRegex.clearSelection')}
                 </Button>
               </div>
-            </CardHeader>
-            {showExplainDetails && (
-              <CardContent className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="text-muted-foreground">{t('explain.priorityOrder')}</span>
-                  <Badge variant={sourceBadgeVariant('immutableRules')}>{t('source.immutableRules')}</Badge>
-                  <span className="text-muted-foreground">→</span>
-                  <Badge variant={sourceBadgeVariant('userOverride')}>{t('source.userOverride')}</Badge>
-                  <span className="text-muted-foreground">→</span>
-                  <Badge variant={sourceBadgeVariant('preset')}>{t('source.preset')}</Badge>
-                  <span className="text-muted-foreground">→</span>
-                  <Badge variant={sourceBadgeVariant('default')}>{t('source.default')}</Badge>
-                </div>
-                <div className="rounded-md border p-3 text-xs text-muted-foreground">
-                  <p>{t('explain.immutableRulesHint')}</p>
-                  <p className="mt-1">1. {t('explain.immutable1')}</p>
-                  <p>2. {t('explain.immutable2')}</p>
-                  <p>3. {t('explain.immutable3')}</p>
-                  <p>4. {t('explain.immutable4')}</p>
-                </div>
-                <div className="rounded-md border p-3">
-                  <div className="mb-2 flex flex-wrap items-end gap-2">
-                    <div className="min-w-48 flex-1 space-y-1">
-                      <p className="text-xs text-muted-foreground">{t('explain.fieldSourceTitle')}</p>
-                      <Select
-                        id="security-agent-in-explain"
-                        value={selectedAgentId}
-                        onChange={(event) => setSelectedAgentId(event.target.value)}
-                      >
-                        {agents.map((agent) => (
-                          <option key={agent.id} value={agent.id}>
-                            {agent.name || agent.id}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                  </div>
-                  <div className="grid gap-2 md:grid-cols-2">
-                    {policySourceRows.map((row) => {
-                      const fieldKey = row.key as EditableFieldKey;
-                      const source = resolveFieldSource(fieldKey);
+              {platformToolsError && (
+                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                  {platformToolsError}
+                </p>
+              )}
+              <div className="max-h-80 overflow-x-hidden overflow-y-auto rounded-md border p-2">
+                {loadingPlatformTools ? (
+                  <p className="text-xs text-muted-foreground">{t('allowlistRegex.loadingTools')}</p>
+                ) : platformTools.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">{t('allowlistRegex.emptyTools')}</p>
+                ) : (
+                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {platformTools.map((tool) => {
+                      const selected = selectedToolSet.has(tool.id);
+                      const displayName = localizeToolDisplayName(tool);
+                      const displayDescription = localizeToolDescription(tool);
                       return (
                         <button
-                          key={row.key}
+                          key={tool.id}
                           type="button"
-                          onClick={() => openFieldEditor(fieldKey)}
-                          className="flex items-center justify-between rounded border px-2 py-2 text-left transition-colors hover:bg-muted/40"
+                          onClick={() => toggleAllowlistTool(tool.id)}
+                          className={`h-full min-w-0 rounded-md border px-3 py-2 text-left transition ${
+                            selected
+                              ? 'border-primary bg-primary/10'
+                              : 'border-border hover:border-primary/40 hover:bg-muted/30'
+                          }`}
                         >
-                          <div className="space-y-0.5">
-                            <span className="text-xs">{row.label}</span>
-                            <p className="text-xs text-muted-foreground">{formatFieldPreview(fieldKey)}</p>
+                          <div className="flex items-start gap-2">
+                            <span className="min-w-0 flex-1 truncate font-medium">{displayName}</span>
+                            <div className="flex max-w-full flex-wrap items-center justify-end gap-1">
+                              <Badge variant="outline">{localizeToolSource(tool.source)}</Badge>
+                              <Badge variant={tool.enabled === false ? 'destructive' : 'outline'}>
+                                {tool.enabled === false ? t('allowlistRegex.status.disabled') : t('allowlistRegex.status.enabled')}
+                              </Badge>
+                            </div>
                           </div>
-                          <Badge variant={sourceBadgeVariant(source)}>{t(`source.${source}`)}</Badge>
+                          <p className="mt-1 font-mono text-xs text-muted-foreground">{tool.id}</p>
+                          {displayDescription && <p className="mt-1 text-xs text-muted-foreground">{displayDescription}</p>}
                         </button>
                       );
                     })}
                   </div>
-                </div>
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Button type="button" variant="outline" onClick={handleResetAgentPolicy}>
-                    {t('actions.resetAgent')}
-                  </Button>
-                  <Button type="button" onClick={() => void handleSave()} disabled={savingPolicies}>
-                    {savingPolicies ? t('actions.saving') : t('actions.save')}
-                  </Button>
-                </div>
-              </CardContent>
-            )}
-          </Card>
-
-          <Card className="order-3">
-            <CardHeader className="flex flex-row items-start justify-between gap-2">
-              <div className="space-y-1">
-                <CardTitle>{t('audit.title')}</CardTitle>
-                <CardDescription>{t('audit.description')}</CardDescription>
+                )}
               </div>
-              <Button
-                type="button"
-                size="icon"
-                variant="outline"
-                onClick={() => setShowAuditDetails((prev) => !prev)}
-                aria-label={showAuditDetails ? t('audit.collapse') : t('audit.expand')}
-                title={showAuditDetails ? t('audit.collapse') : t('audit.expand')}
-              >
-                <ChevronDown className={`h-4 w-4 transition-transform ${showAuditDetails ? 'rotate-180' : ''}`} />
-              </Button>
-            </CardHeader>
-            {showAuditDetails && (
-            <CardContent className="space-y-3">
-              {gatewayState !== 'running' ? (
-                <p className="text-sm text-muted-foreground">{t('audit.gatewayStopped')}</p>
-              ) : loadingAudit ? (
-                <p className="text-sm text-muted-foreground">{t('audit.loading')}</p>
-              ) : auditItems.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t('audit.empty')}</p>
-              ) : (
-                <div className="space-y-2">
-                  {auditItems.map((item, index) => {
-                    const source = resolveRuleSource(item.ruleId);
-                    return (
-                      <div key={`${item.ts}-${index}`} className="rounded-md border p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-sm font-medium">{item.toolName || '-'}</div>
-                          <div className="flex items-center gap-2">
-                            <Badge variant={sourceBadgeVariant(source)}>{t(`source.${source}`)}</Badge>
-                            <Badge variant="outline">{item.risk}</Badge>
-                            <Badge variant="outline">{item.action}</Badge>
-                          </div>
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {new Date(item.ts).toLocaleString()} · rule: {item.ruleId || '-'} · preset: {item.policyPreset || '-'} · decision: {item.decision || '-'}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-            )}
-          </Card>
+            </TabsContent>
 
-          {editingField && (
-            <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-              <section
-                role="dialog"
-                aria-label={t('form.editFieldTitle', { field: t(`form.${editingField}`) })}
-                className="w-full max-w-3xl rounded-xl border bg-background p-6 shadow-xl"
-              >
-                <header className="flex items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-semibold">{t('form.editFieldTitle', { field: t(`form.${editingField}`) })}</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">{t('form.editFieldDescription')}</p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => closeFieldEditor(true)}
-                    aria-label={t('actions.cancel')}
-                    title={t('actions.cancel')}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </header>
+            <TabsContent value="allowlistSessions" className="space-y-1">
+              <Label>{t('allowlistRegex.labels.allowlistSessions')}</Label>
+              <Textarea rows={8} value={text(runtime.allowlist.sessions)} onChange={(e) => updateRuntime((current) => ({ ...current, allowlist: { ...current.allowlist, sessions: list(e.target.value) } }))} />
+            </TabsContent>
 
-                <div className="mt-4 max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-                  {editingField === 'defaultAction' && (
-                    <div className="space-y-1">
-                      <Label htmlFor="security-editor-default-action">{t('form.defaultAction')}</Label>
-                      <Select
-                        id="security-editor-default-action"
-                        value={selectedPolicy.defaultAction}
-                        onChange={(event) => updateSelectedPolicy({ defaultAction: event.target.value as SecurityAction })}
-                      >
-                        <option value="allow">{t('action.allow')}</option>
-                        <option value="confirm">{t('action.confirm')}</option>
-                        <option value="deny">{t('action.deny')}</option>
-                      </Select>
-                    </div>
-                  )}
+            <TabsContent value="destructivePatterns" className="space-y-1">
+              <Label>{t('allowlistRegex.labels.destructivePatterns')}</Label>
+              <Textarea rows={8} value={text(runtime.destructivePatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, destructivePatterns: list(e.target.value) }))} />
+            </TabsContent>
 
-                  {editingField === 'confirmStrategy' && (
-                    <div className="space-y-1">
-                      <Label htmlFor="security-editor-confirm-strategy">{t('form.confirmStrategy')}</Label>
-                      <Select
-                        id="security-editor-confirm-strategy"
-                        value={selectedPolicy.confirmStrategy}
-                        onChange={(event) => updateSelectedPolicy({ confirmStrategy: event.target.value as ConfirmStrategy })}
-                      >
-                        <option value="every_time">{t('confirmStrategy.every_time')}</option>
-                        <option value="session">{t('confirmStrategy.session')}</option>
-                      </Select>
-                    </div>
-                  )}
+            <TabsContent value="secretPatterns" className="space-y-1">
+              <Label>{t('allowlistRegex.labels.secretPatterns')}</Label>
+              <Textarea rows={8} value={text(runtime.secretPatterns)} onChange={(e) => updateRuntime((current) => ({ ...current, secretPatterns: list(e.target.value) }))} />
+            </TabsContent>
+          </Tabs>
+        </CardContent>
+      </Card>
+      )}
 
-                  {(editingField === 'allowCommandExecution' || editingField === 'allowDependencyInstall') && (
-                    <div className="flex items-center justify-between rounded-md border p-3">
-                      <Label htmlFor={`security-editor-switch-${editingField}`} className="cursor-pointer">
-                        {t(`form.${editingField}`)}
-                      </Label>
-                      <Switch
-                        id={`security-editor-switch-${editingField}`}
-                        checked={selectedPolicy[editingField]}
-                        onCheckedChange={(checked) => updateSelectedPolicy({ [editingField]: checked })}
-                      />
-                    </div>
-                  )}
+      {activeSection === 'policyGuards' && (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('policyGuards.title')}</CardTitle>
+          <CardDescription>{t('policyGuards.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2">
+          <div className="space-y-1">
+            <Label>{t('policyGuards.labels.allowPathPrefixes')}</Label>
+            <Textarea
+              rows={6}
+              value={text(runtime.allowPathPrefixes)}
+              onChange={(e) => updateRuntime((current) => ({ ...current, allowPathPrefixes: list(e.target.value) }))}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label>{t('policyGuards.labels.allowDomains')}</Label>
+            <Textarea
+              rows={6}
+              value={text(runtime.allowDomains)}
+              onChange={(e) => updateRuntime((current) => ({ ...current, allowDomains: list(e.target.value) }))}
+            />
+          </div>
+          <div className="space-y-1 md:col-span-2">
+            <Label>{t('policyGuards.labels.auditEgressAllowlist')}</Label>
+            <Textarea
+              rows={4}
+              value={text(runtime.auditEgressAllowlist)}
+              onChange={(e) => updateRuntime((current) => ({ ...current, auditEgressAllowlist: list(e.target.value) }))}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="auditDailyCostLimitUsd">{t('policyGuards.labels.auditDailyCostLimitUsd')}</Label>
+            <input
+              id="auditDailyCostLimitUsd"
+              type="number"
+              min={0.01}
+              step={0.01}
+              value={runtime.auditDailyCostLimitUsd}
+              onChange={(e) => updateRuntime((current) => ({
+                ...current,
+                auditDailyCostLimitUsd: Number.isFinite(Number(e.target.value)) && Number(e.target.value) > 0
+                  ? Number(e.target.value)
+                  : current.auditDailyCostLimitUsd,
+              }))}
+              className="h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="auditFailureMode">{t('policyGuards.labels.auditFailureMode')}</Label>
+            <Select
+              id="auditFailureMode"
+              value={runtime.auditFailureMode ?? ''}
+              onChange={(e) => updateRuntime((current) => ({
+                ...current,
+                auditFailureMode: e.target.value === '' ? null : e.target.value as Exclude<FailureMode, null>,
+              }))}
+            >
+              <option value="">{t('policyGuards.failureMode.unset')}</option>
+              <option value="block_all">{t('policyGuards.failureMode.block_all')}</option>
+              <option value="safe_mode">{t('policyGuards.failureMode.safe_mode')}</option>
+              <option value="read_only">{t('policyGuards.failureMode.read_only')}</option>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <Label>{t('policyGuards.labels.promptInjectionPatterns')}</Label>
+            <Textarea
+              rows={6}
+              value={text(runtime.promptInjectionPatterns)}
+              onChange={(e) => updateRuntime((current) => ({ ...current, promptInjectionPatterns: list(e.target.value) }))}
+            />
+          </div>
+        </CardContent>
+      </Card>
+      )}
 
-                  {(editingField === 'allowPathPrefixes' || editingField === 'allowDomains') && (
-                    <div className="space-y-1">
-                      <Label htmlFor={`security-editor-list-${editingField}`}>{t(`form.${editingField}`)}</Label>
-                      <Textarea
-                        id={`security-editor-list-${editingField}`}
-                        value={formatToolListText(selectedPolicy[editingField])}
-                        placeholder={editingField === 'allowPathPrefixes' ? t('form.pathPlaceholder') : t('form.domainPlaceholder')}
-                        onChange={(event) => updateSelectedPolicy({ [editingField]: parseToolListText(event.target.value) })}
-                        rows={4}
-                      />
-                    </div>
-                  )}
+      {activeSection === 'actionCenter' && (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('actionCenter.title')}</CardTitle>
+          <CardDescription>{t('actionCenter.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              title={t('actionCenter.quickAuditTitle')}
+              variant="outline"
+              disabled={securityOpBusy !== null}
+              onClick={() => void runSecurityOp(t('actionCenter.quickAudit'), async () => hostApiFetch('/api/security/quick-audit', { method: 'POST' }))}
+            >
+              {t('actionCenter.quickAudit')}
+            </Button>
+            <Button
+              title={t('actionCenter.emergencyTitle')}
+              variant="destructive"
+              disabled={securityOpBusy !== null}
+              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async () => hostApiFetch('/api/security/emergency-response', { method: 'POST' }))}
+            >
+              {t('actionCenter.emergency')}
+            </Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.integrity'), async () => hostApiFetch('/api/security/integrity'))}>{t('actionCenter.integrity')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.rebaseline'), async () => hostApiFetch('/api/security/integrity/rebaseline', { method: 'POST' }))}>{t('actionCenter.rebaseline')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.skillScan'), async () => hostApiFetch('/api/security/skills/scan', { method: 'POST', body: '{}' }))}>{t('actionCenter.skillScan')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.advisories'), async () => hostApiFetch('/api/security/advisories'))}>{t('actionCenter.advisories')}</Button>
+          </div>
 
-                  {(editingField === 'allowTools' || editingField === 'confirmTools' || editingField === 'denyTools') && (
-                    <div className="space-y-2">
-                      <Label>{t('form.toolPolicyTitle')}</Label>
-                      <p className="text-xs text-muted-foreground">{t('form.toolPolicyHint')}</p>
-                      <div className="flex flex-wrap gap-2 rounded-md border p-3">
-                        {toolOptions.map((toolName) => {
-                          const selected = selectedPolicy[editingField].includes(toolName);
-                          return (
-                            <Button
-                              key={`tool-editor-${editingField}-${toolName}`}
-                              type="button"
-                              size="sm"
-                              variant={selected ? 'default' : 'outline'}
-                              className={cn('h-7 px-2 text-xs', selected ? '' : 'text-muted-foreground')}
-                              onClick={() => toggleToolInField(editingField, toolName)}
-                              title={formatToolLabel(toolName) === toolName ? toolName : `${formatToolLabel(toolName)} (${toolName})`}
-                            >
-                              {formatToolLabel(toolName)}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationPreview'), async () => {
+              const payload = await hostApiFetch<{ actions?: RemediationActionItem[] }>('/api/security/remediation/preview');
+              const actions = Array.isArray(payload.actions) ? payload.actions : [];
+              setRemediationActions(actions);
+              setSelectedRemediationActions(actions.map((item) => item.id));
+              return payload;
+            })}>{t('actionCenter.remediationPreview')}</Button>
+            <Button disabled={securityOpBusy !== null || selectedRemediationActions.length === 0} onClick={() => void runSecurityOp(t('actionCenter.remediationApply'), async () => {
+              const payload = await hostApiFetch<{ snapshotId?: string }>('/api/security/remediation/apply', { method: 'POST', body: JSON.stringify({ actions: selectedRemediationActions }) });
+              if (payload.snapshotId) setLastRemediationSnapshotId(payload.snapshotId);
+              return payload;
+            })}>{t('actionCenter.remediationApply')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationRollback'), async () => hostApiFetch('/api/security/remediation/rollback', { method: 'POST', body: JSON.stringify(lastRemediationSnapshotId ? { snapshotId: lastRemediationSnapshotId } : {}) }))}>{t('actionCenter.remediationRollback')}</Button>
+          </div>
 
-                  {editingField === 'capabilities' && (
-                    <div className="space-y-2">
-                      <Label>{t('form.capabilities')}</Label>
-                      <p className="text-xs text-muted-foreground">{t('form.selectHint')}</p>
-                      <div className="flex flex-wrap gap-2 rounded-md border p-3">
-                        {CAPABILITY_OPTION_CATALOG.map((capability) => {
-                          const selected = selectedPolicy.capabilities.includes(capability);
-                          return (
-                            <Button
-                              key={`cap-editor-${capability}`}
-                              type="button"
-                              size="sm"
-                              variant={selected ? 'default' : 'outline'}
-                              className={cn('h-7 px-2 text-xs', selected ? '' : 'text-muted-foreground')}
-                              onClick={() => toggleCapabilityValue(capability)}
-                              title={formatCapabilityLabel(capability) === capability ? capability : `${formatCapabilityLabel(capability)} (${capability})`}
-                            >
-                              {formatCapabilityLabel(capability)}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-5 flex flex-wrap justify-end gap-2 border-t pt-3">
-                  <Button type="button" variant="outline" onClick={() => void handleUsePresetForField()} disabled={savingPolicies}>
-                    {t('actions.usePreset')}
-                  </Button>
-                  <Button type="button" onClick={() => void handleSaveFieldEditor()} disabled={savingPolicies}>
-                    {savingPolicies ? t('actions.saving') : t('actions.saveField')}
-                  </Button>
-                </div>
-              </section>
+          {remediationActions.length > 0 && (
+            <div className="space-y-2 rounded-md border p-3">
+              {remediationActions.map((item) => (
+                <label key={item.id} className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" className="mt-1" checked={selectedRemediationActions.includes(item.id)} onChange={(e) => setSelectedRemediationActions((prev) => (e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id)))} />
+                  <span><span className="font-medium">{item.title}</span><span className="ml-2 text-xs text-muted-foreground">[{item.risk}]</span><p className="text-xs text-muted-foreground">{item.description}</p></span>
+                </label>
+              ))}
             </div>
           )}
 
-          <ConfirmDialog
-            open={Boolean(toolConflict)}
-            title={t('toolConflict.title')}
-            message={toolConflict
-              ? t('toolConflict.message', {
-                tool: formatToolLabel(toolConflict.toolName),
-                from: toolConflict.fromFields.map((field) => t(`form.${field}`)).join(' / '),
-                to: t(`form.${toolConflict.targetField}`),
-              })
-              : ''}
-            confirmLabel={t('toolConflict.confirm')}
-            cancelLabel={t('toolConflict.cancel')}
-            onConfirm={() => {
-              if (!toolConflict) {
-                return;
-              }
-              applyToolSelection(toolConflict.targetField, toolConflict.toolName);
-              setToolConflict(null);
-            }}
-            onCancel={() => setToolConflict(null)}
-          />
-
-          </div>
-        </>
+          {securityOpResult && <pre className="max-h-64 overflow-auto rounded-md border bg-muted/30 p-2 text-xs">{securityOpResult}</pre>}
+        </CardContent>
+      </Card>
       )}
+
+      {activeSection === 'auditHits' && (
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div><CardTitle>{t('audit.title')}</CardTitle><CardDescription>{t('audit.description')}</CardDescription></div>
+          <Button variant="outline" size="sm" onClick={() => void loadRecentAudits()}>{t('audit.refresh')}</Button>
+        </CardHeader>
+        <CardContent>
+          {gatewayState !== 'running' ? <p className="text-sm text-muted-foreground">{t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (
+            <div className="space-y-2">
+              {auditItems.map((item, index) => (
+                <div key={`${item.ts}-${index}`} className="rounded-md border p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-medium">{item.toolName || '-'}</div>
+                    <div className="flex items-center gap-2"><Badge variant="outline">{localizeAuditRisk(item.risk)}</Badge><Badge variant="outline">{localizeAuditAction(item.action)}</Badge></div>
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">{new Date(item.ts).toLocaleString()} · {t('audit.ruleLabel')}: {item.ruleId || '-'} · {t('audit.decisionLabel')}: {item.decision || '-'}</div>
+                  {item.detail && <p className="mt-1 text-xs text-muted-foreground">{localizeAuditDetail(item)}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+      )}
+        </div>
+      </div>
     </section>
   );
 }

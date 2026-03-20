@@ -29,6 +29,7 @@
         "dateRange": "日付範囲",
         "from": "開始日",
         "to": "終了日",
+        "isoDatePlaceholder": "YYYY-MM-DD",
         "clear": "クリア"
     },
     "listTitle": "タスク一覧",
@@ -39,6 +40,10 @@
     "stepsOverview": "チェックリスト",
     "completedTag": "完了",
     "pendingTag": "保留",
+    "rows": {
+        "completion": "完了状況",
+        "evidence": "証拠"
+    },
     "pagination": {
         "showing": "{{shown}} / {{total}} 件を表示中",
         "loadMore": "さらに読み込む"
