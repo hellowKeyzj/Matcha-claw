@@ -1212,7 +1212,7 @@ export function Settings() {
                   </p>
                 </div>
 
-                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/40 p-3">
                   <p className="text-sm text-muted-foreground">
                     {t('gateway.proxyRestartNote')}
                   </p>
@@ -1243,10 +1243,10 @@ export function Settings() {
           <CardDescription>{t('taskPlugin.description')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="space-y-1">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 flex-1 space-y-1">
               <Label>{t('taskPlugin.status')}</Label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={taskPluginBadgeVariant}>{taskPluginStatusLabel}</Badge>
                 {taskPluginInfo?.version ? (
                   <span className="text-xs text-muted-foreground">
@@ -1260,7 +1260,7 @@ export function Settings() {
                 </p>
               ) : null}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
               <Button
                 variant="outline"
                 onClick={() => void loadTaskPluginStatus(false)}

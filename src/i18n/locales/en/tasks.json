@@ -29,6 +29,7 @@
         "dateRange": "Date Range",
         "from": "Start Date",
         "to": "End Date",
+        "isoDatePlaceholder": "YYYY-MM-DD",
         "clear": "Clear"
     },
     "listTitle": "Tasks",
@@ -39,6 +40,10 @@
     "stepsOverview": "Checklist",
     "completedTag": "Completed",
     "pendingTag": "Pending",
+    "rows": {
+        "completion": "Completion",
+        "evidence": "Evidence"
+    },
     "pagination": {
         "showing": "Showing {{shown}} / {{total}}",
         "loadMore": "Load more"

@@ -83,6 +83,200 @@
     "balanced": "Balanced",
     "relaxed": "Relaxed"
   },
+  "runtimePreset": {
+    "nav": "Security Preset",
+    "title": "Security Preset",
+    "description": "Choose a default protection mode (Strict / Balanced / Relaxed) to auto-fill strategy settings on this page.",
+    "mode": "Protection Mode"
+  },
+  "page": {
+    "unsaved": "Unsaved changes"
+  },
+  "sections": {
+    "runtime": "Runtime Switches",
+    "matrix": "Action Matrix",
+    "ruleCatalog": "Rule Coverage",
+    "allowlistRegex": "Allowlist & Extended Regex",
+    "policyGuards": "Policy Guards Extension",
+    "actionCenter": "Security Action Center",
+    "auditHits": "Recent Audit Hits",
+    "navAria": "Security sections"
+  },
+  "runtime": {
+    "title": "Runtime Switches",
+    "description": "Global switch and monitoring",
+    "enabled": "Enable plugin",
+    "runtimeGuardEnabled": "Enable runtime guard",
+    "auditOnGatewayStart": "Run startup audit",
+    "autoHarden": "Auto harden",
+    "blockDestructive": "Block destructive",
+    "blockSecrets": "Block secrets",
+    "enablePromptInjectionGuard": "Block prompt injection",
+    "logDetections": "Log detections"
+  },
+  "ruleCatalog": {
+    "title": "Rule Coverage (Command → Category → Severity)",
+    "description": "Visualize current destructive detection coverage",
+    "refresh": "Refresh",
+    "platformFilter": "Platform Filter",
+    "count": "Total {{count}}",
+    "loading": "Loading rule coverage...",
+    "empty": "No rule entries",
+    "platform": {
+      "all": "All",
+      "universal": "Universal",
+      "linux": "Linux",
+      "windows": "Windows",
+      "macos": "macOS",
+      "powershell": "PowerShell"
+    },
+    "category": {
+      "file_delete": "File deletion",
+      "git_destructive": "Git destructive",
+      "sql_destructive": "SQL destructive",
+      "system_destructive": "System destructive",
+      "process_kill": "Process kill",
+      "network_destructive": "Network destructive",
+      "privilege_escalation": "Privilege escalation"
+    },
+    "severity": {
+      "critical": "Critical",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low",
+      "info": "Info"
+    },
+    "reason": {
+      "recursive_force_delete_tree": "Recursively force-deletes directory trees",
+      "process_kill_with_signal": "Terminates processes (signal -9 raises risk)",
+      "system_shutdown_reboot": "System shutdown/reboot operations",
+      "disk_partition_destruction": "Disk/partition destructive operations",
+      "route_change_flush_critical": "Route table changes (flush is critical)",
+      "privilege_escalation_command": "Privilege escalation command execution",
+      "firewall_policy_change": "Firewall policy modification",
+      "recursive_permission_change_system": "Recursive permission changes may break system",
+      "system_service_disable_critical": "System service disable (critical for key services)",
+      "recursive_directory_delete": "Recursive directory deletion",
+      "forced_recursive_file_delete": "Forced/recursive file deletion",
+      "taskkill_force_risk": "Terminates processes (/f raises risk)",
+      "registry_delete": "Registry key/value deletion",
+      "diskpart_destruction": "Disk partition destructive operation",
+      "firewall_reset": "Firewall reset",
+      "route_change": "Route table changes",
+      "recursive_acl_change": "Recursive ACL changes",
+      "take_ownership_system_files": "Takes ownership of system files",
+      "service_disable_or_delete": "Service disable/delete",
+      "disk_erase_repartition": "Disk erase/repartition",
+      "launchctl_service_disable": "System/user service disable",
+      "disable_sip": "Disables SIP protection",
+      "pf_toggle": "Enable/disable PF rules",
+      "pf_reload": "Reload PF rule file",
+      "firewall_rule_change": "Firewall rule changes",
+      "force_kill_process": "Force-kill process"
+    },
+    "commandToken": {
+      "system_path": "system path",
+      "critical_service": "critical service",
+      "flush_is_critical": "flush is critical"
+    }
+  },
+  "allowlistRegex": {
+    "title": "Allowlist & Extended Regex",
+    "selectedCount": "Selected {{count}}",
+    "refresh": "Refresh",
+    "writeEnabledTools": "Use all enabled tools",
+    "clearSelection": "Clear selection",
+    "loadingTools": "Loading tools...",
+    "emptyTools": "No tools available",
+    "tabs": {
+      "allowlistTools": "Tool Allowlist",
+      "allowlistSessions": "Session Allowlist",
+      "destructivePatterns": "Destructive Patterns",
+      "secretPatterns": "Secret Patterns"
+    },
+    "labels": {
+      "allowlistTools": "Tool allowlist (real-time tool selection)",
+      "allowlistSessions": "Session allowlist",
+      "destructivePatterns": "Destructive patterns",
+      "secretPatterns": "Secret patterns"
+    },
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "source": {
+      "unknown": "Unknown",
+      "native": "Native",
+      "plugin": "Plugin",
+      "skill": "Skill"
+    }
+  },
+  "policyGuards": {
+    "title": "Policy Guards Extension",
+    "description": "Path/domain allowlists, prompt-injection extensions, and audit strategies",
+    "labels": {
+      "allowPathPrefixes": "Allowed path prefixes",
+      "allowDomains": "Allowed domains",
+      "auditEgressAllowlist": "Audit egress allowlist (MEM-004)",
+      "auditDailyCostLimitUsd": "Audit daily cost limit (USD, COST-004)",
+      "auditFailureMode": "Audit failure mode (DEGRAD)",
+      "promptInjectionPatterns": "Prompt-injection extension patterns"
+    },
+    "failureMode": {
+      "unset": "Not set",
+      "block_all": "Block all (block_all)",
+      "safe_mode": "Safe mode (safe_mode)",
+      "read_only": "Read-only mode (read_only)"
+    }
+  },
+  "actionCenter": {
+    "title": "Security Action Center",
+    "description": "Run security checks and emergency response with one click from desktop",
+    "gatewayNotRunning": "Gateway is not running, security actions are unavailable",
+    "runSuccess": "{{name}} succeeded",
+    "runFailed": "{{name}} failed",
+    "quickAuditTitle": "Checks only, does not modify policy",
+    "quickAudit": "Routine check",
+    "emergencyTitle": "Trigger emergency response and generate incident report",
+    "emergency": "Emergency stop-loss",
+    "integrity": "Check config integrity",
+    "rebaseline": "Record config baseline",
+    "skillScan": "Scan Skills",
+    "advisories": "Check latest advisories",
+    "remediationPreview": "Remediation preview",
+    "remediationApply": "Apply selected remediations",
+    "remediationRollback": "Rollback last remediation"
+  },
+  "matrix": {
+    "title": "Destructive/Secrets Action Matrix",
+    "destructiveDefaultAction": "Default action for destructive risk",
+    "secretsDefaultAction": "Default action for secret risk",
+    "destructiveBySeverity": "Destructive risk actions by severity",
+    "secretsBySeverity": "Secret risk actions by severity",
+    "destructiveCategoryTitle": "Destructive Category Switches",
+    "severity": {
+      "critical": "Critical",
+      "high": "High",
+      "medium": "Medium",
+      "low": "Low"
+    },
+    "action": {
+      "block": "Block",
+      "redact": "Redact",
+      "confirm": "Confirm",
+      "warn": "Warn",
+      "log": "Log only"
+    },
+    "category": {
+      "fileDelete": "File deletion",
+      "gitDestructive": "Git destructive operations",
+      "sqlDestructive": "SQL destructive operations",
+      "systemDestructive": "System destructive operations",
+      "processKill": "Process termination",
+      "networkDestructive": "Network destructive operations",
+      "privilegeEscalation": "Privilege escalation"
+    }
+  },
   "confirmStrategy": {
     "every_time": "Every time",
     "session": "Once per session"
@@ -113,7 +307,38 @@
     "collapse": "Collapse audit",
     "gatewayStopped": "Gateway is not running, audit data is unavailable.",
     "loading": "Loading audits...",
-    "empty": "No recent hit records."
+    "empty": "No recent hit records.",
+    "refresh": "Refresh",
+    "ruleLabel": "rule",
+    "decisionLabel": "decision",
+    "risk": {
+      "critical": "critical",
+      "high": "high",
+      "medium": "medium",
+      "low": "low",
+      "info": "info"
+    },
+    "action": {
+      "audit": "audit",
+      "allow": "allow",
+      "block": "block"
+    },
+    "findings": {
+      "SC-CROSS-001": "Cross-layer compound attack surface detected",
+      "SC-DEGRAD-001": "No graceful degradation mode configured",
+      "SC-CTRL-001": "Default control tokens in use",
+      "SC-COST-001": "No LLM provider spending limits configured",
+      "SC-SKILL-001": "{{count}} skill(s) installed",
+      "SC-EXEC-003": "Sandbox mode not set to \"all\"",
+      "SC-CRED-008": "API key found in configuration file",
+      "SC-RUNTIME-GUARD-000": "Runtime guard disabled",
+      "SC-GW-001": "Gateway not bound to loopback",
+      "SC-GW-002": "Gateway authentication disabled",
+      "SC-GW-003": "Weak gateway authentication token",
+      "SC-GW-006": "TLS not enabled on gateway",
+      "SC-COST-004": "Daily cost threshold exceeded",
+      "SC-IOC-001": "Connection to known C2 infrastructure detected"
+    }
   },
   "toolConflict": {
     "title": "Tool Assignment Conflict",
@@ -146,6 +371,8 @@
   },
   "errors": {
     "loadFailed": "Failed to load security policy.",
-    "saveFailed": "Failed to save security policy."
+    "saveFailed": "Failed to save security policy.",
+    "loadToolsFailed": "Failed to load platform tools.",
+    "loadRuleCatalogFailed": "Failed to load rule catalog."
   }
 }

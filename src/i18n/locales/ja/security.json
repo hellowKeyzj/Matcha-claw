@@ -83,6 +83,200 @@
     "balanced": "バランス",
     "relaxed": "緩和"
   },
+  "runtimePreset": {
+    "nav": "セキュリティプリセット",
+    "title": "セキュリティプリセット",
+    "description": "既定の防護モード（厳格 / バランス / 緩和）を選択すると、このページの戦略設定を自動反映します。",
+    "mode": "防護モード"
+  },
+  "page": {
+    "unsaved": "未保存の変更"
+  },
+  "sections": {
+    "runtime": "ランタイム設定",
+    "matrix": "アクション行列",
+    "ruleCatalog": "ルール網羅",
+    "allowlistRegex": "許可リストと拡張正規表現",
+    "policyGuards": "ポリシーガード拡張",
+    "actionCenter": "セキュリティ操作センター",
+    "auditHits": "最近の監査ヒット",
+    "navAria": "セキュリティセクション"
+  },
+  "runtime": {
+    "title": "ランタイム設定",
+    "description": "全体スイッチと監視",
+    "enabled": "プラグインを有効化",
+    "runtimeGuardEnabled": "ランタイムガードを有効化",
+    "auditOnGatewayStart": "起動時監査",
+    "autoHarden": "自動ハードニング",
+    "blockDestructive": "destructive をブロック",
+    "blockSecrets": "secrets をブロック",
+    "enablePromptInjectionGuard": "prompt injection をブロック",
+    "logDetections": "検知ログを記録"
+  },
+  "ruleCatalog": {
+    "title": "ルール網羅（コマンド → カテゴリ → 重大度）",
+    "description": "現在の destructive 検出カバレッジを可視化",
+    "refresh": "更新",
+    "platformFilter": "プラットフォーム",
+    "count": "合計 {{count}} 件",
+    "loading": "ルール網羅を読み込み中...",
+    "empty": "ルール項目はありません",
+    "platform": {
+      "all": "すべて",
+      "universal": "共通",
+      "linux": "Linux",
+      "windows": "Windows",
+      "macos": "macOS",
+      "powershell": "PowerShell"
+    },
+    "category": {
+      "file_delete": "ファイル削除",
+      "git_destructive": "Git 破壊操作",
+      "sql_destructive": "SQL 破壊操作",
+      "system_destructive": "システム破壊操作",
+      "process_kill": "プロセス停止",
+      "network_destructive": "ネットワーク破壊操作",
+      "privilege_escalation": "権限昇格"
+    },
+    "severity": {
+      "critical": "重大",
+      "high": "高",
+      "medium": "中",
+      "low": "低",
+      "info": "情報"
+    },
+    "reason": {
+      "recursive_force_delete_tree": "ディレクトリツリーを再帰的に強制削除",
+      "process_kill_with_signal": "プロセス停止（-9 シグナルでリスク増）",
+      "system_shutdown_reboot": "システムのシャットダウン/再起動操作",
+      "disk_partition_destruction": "ディスク/パーティション破壊操作",
+      "route_change_flush_critical": "ルートテーブル変更（flush は重大）",
+      "privilege_escalation_command": "権限昇格コマンド実行",
+      "firewall_policy_change": "ファイアウォールポリシー変更",
+      "recursive_permission_change_system": "再帰的権限変更でシステム破壊の恐れ",
+      "system_service_disable_critical": "システムサービス停止（重要サービスは重大）",
+      "recursive_directory_delete": "ディレクトリツリーを再帰削除",
+      "forced_recursive_file_delete": "強制/再帰ファイル削除",
+      "taskkill_force_risk": "プロセス停止（/f でリスク増）",
+      "registry_delete": "レジストリ キー/値の削除",
+      "diskpart_destruction": "diskpart による破壊操作",
+      "firewall_reset": "ファイアウォールのリセット",
+      "route_change": "ルートテーブル変更",
+      "recursive_acl_change": "再帰 ACL 変更",
+      "take_ownership_system_files": "システムファイル所有権の取得",
+      "service_disable_or_delete": "サービスの停止/削除",
+      "disk_erase_repartition": "ディスク消去/再パーティション",
+      "launchctl_service_disable": "システム/ユーザーサービス停止",
+      "disable_sip": "SIP 保護を無効化",
+      "pf_toggle": "PF ルールの有効/無効切替",
+      "pf_reload": "PF ルールファイル再読み込み",
+      "firewall_rule_change": "ファイアウォールルール変更",
+      "force_kill_process": "プロセスを強制停止"
+    },
+    "commandToken": {
+      "system_path": "システムパス",
+      "critical_service": "重要サービス",
+      "flush_is_critical": "flush は重大"
+    }
+  },
+  "allowlistRegex": {
+    "title": "許可リストと拡張正規表現",
+    "selectedCount": "選択 {{count}}",
+    "refresh": "更新",
+    "writeEnabledTools": "有効ツールを一括反映",
+    "clearSelection": "選択をクリア",
+    "loadingTools": "ツール一覧を読み込み中...",
+    "emptyTools": "ツール一覧がありません",
+    "tabs": {
+      "allowlistTools": "ツール許可リスト",
+      "allowlistSessions": "セッション許可リスト",
+      "destructivePatterns": "破壊系拡張ルール",
+      "secretPatterns": "機密情報拡張ルール"
+    },
+    "labels": {
+      "allowlistTools": "ツール許可リスト（リアルタイム選択）",
+      "allowlistSessions": "セッション許可リスト",
+      "destructivePatterns": "破壊系拡張ルール",
+      "secretPatterns": "機密情報拡張ルール"
+    },
+    "status": {
+      "enabled": "有効",
+      "disabled": "無効"
+    },
+    "source": {
+      "unknown": "不明",
+      "native": "ネイティブ",
+      "plugin": "プラグイン",
+      "skill": "スキル"
+    }
+  },
+  "policyGuards": {
+    "title": "ポリシーガード拡張",
+    "description": "パス/ドメイン許可リスト、プロンプト注入拡張、監査ポリシー",
+    "labels": {
+      "allowPathPrefixes": "許可パス接頭辞",
+      "allowDomains": "許可ドメイン",
+      "auditEgressAllowlist": "監査外部通信許可リスト（MEM-004）",
+      "auditDailyCostLimitUsd": "監査日次コスト上限（USD、COST-004）",
+      "auditFailureMode": "監査失効モード（DEGRAD）",
+      "promptInjectionPatterns": "プロンプト注入拡張ルール"
+    },
+    "failureMode": {
+      "unset": "未設定",
+      "block_all": "全遮断（block_all）",
+      "safe_mode": "セーフモード（safe_mode）",
+      "read_only": "読み取り専用（read_only）"
+    }
+  },
+  "actionCenter": {
+    "title": "セキュリティ操作センター",
+    "description": "デスクトップからワンクリックで安全点検と緊急対応を実行",
+    "gatewayNotRunning": "Gateway が停止中のためセキュリティ操作を実行できません",
+    "runSuccess": "{{name}} の実行に成功しました",
+    "runFailed": "{{name}} の実行に失敗しました",
+    "quickAuditTitle": "チェックのみ実行し、ポリシーは変更しません",
+    "quickAudit": "通常点検",
+    "emergencyTitle": "緊急対応を実行し、インシデントレポートを生成します",
+    "emergency": "緊急停止",
+    "integrity": "設定ファイル完全性チェック",
+    "rebaseline": "設定ファイル基線を記録",
+    "skillScan": "Skills をスキャン",
+    "advisories": "最新セキュリティ情報を確認",
+    "remediationPreview": "修復プレビュー",
+    "remediationApply": "選択した修復を適用",
+    "remediationRollback": "前回の修復をロールバック"
+  },
+  "matrix": {
+    "title": "破壊/機密情報 アクション行列",
+    "destructiveDefaultAction": "破壊リスクのデフォルト動作",
+    "secretsDefaultAction": "機密情報リスクのデフォルト動作",
+    "destructiveBySeverity": "破壊リスクの重大度別動作",
+    "secretsBySeverity": "機密情報リスクの重大度別動作",
+    "destructiveCategoryTitle": "破壊カテゴリの切り替え",
+    "severity": {
+      "critical": "重大",
+      "high": "高",
+      "medium": "中",
+      "low": "低"
+    },
+    "action": {
+      "block": "ブロック",
+      "redact": "マスキング",
+      "confirm": "確認",
+      "warn": "警告",
+      "log": "記録のみ"
+    },
+    "category": {
+      "fileDelete": "ファイル削除",
+      "gitDestructive": "Git 破壊操作",
+      "sqlDestructive": "SQL 破壊操作",
+      "systemDestructive": "システム破壊操作",
+      "processKill": "プロセス停止",
+      "networkDestructive": "ネットワーク破壊操作",
+      "privilegeEscalation": "権限昇格"
+    }
+  },
   "confirmStrategy": {
     "every_time": "毎回確認",
     "session": "セッションで一度"
@@ -113,7 +307,38 @@
     "collapse": "監査を隠す",
     "gatewayStopped": "Gateway が停止中のため監査データを取得できません。",
     "loading": "監査データを読み込み中...",
-    "empty": "最近の命中記録はありません。"
+    "empty": "最近の命中記録はありません。",
+    "refresh": "更新",
+    "ruleLabel": "rule",
+    "decisionLabel": "decision",
+    "risk": {
+      "critical": "critical",
+      "high": "high",
+      "medium": "medium",
+      "low": "low",
+      "info": "info"
+    },
+    "action": {
+      "audit": "audit",
+      "allow": "allow",
+      "block": "block"
+    },
+    "findings": {
+      "SC-CROSS-001": "クロスレイヤー複合攻撃面を検出",
+      "SC-DEGRAD-001": "適切な劣化モードが未設定",
+      "SC-CTRL-001": "デフォルト制御トークンを使用中",
+      "SC-COST-001": "LLM プロバイダの利用上限が未設定",
+      "SC-SKILL-001": "インストール済みスキル: {{count}} 件",
+      "SC-EXEC-003": "サンドボックスモードが \"all\" ではありません",
+      "SC-CRED-008": "設定ファイル内に API キーを検出",
+      "SC-RUNTIME-GUARD-000": "ランタイムガードが無効です",
+      "SC-GW-001": "Gateway がループバックにバインドされていません",
+      "SC-GW-002": "Gateway 認証が無効です",
+      "SC-GW-003": "Gateway 認証トークンが弱すぎます",
+      "SC-GW-006": "Gateway で TLS が有効化されていません",
+      "SC-COST-004": "日次コスト閾値を超過",
+      "SC-IOC-001": "既知 C2 インフラへの接続を検出"
+    }
   },
   "toolConflict": {
     "title": "ツール割り当ての競合",
@@ -146,6 +371,8 @@
   },
   "errors": {
     "loadFailed": "セキュリティポリシーの読み込みに失敗しました。",
-    "saveFailed": "セキュリティポリシーの保存に失敗しました。"
+    "saveFailed": "セキュリティポリシーの保存に失敗しました。",
+    "loadToolsFailed": "プラットフォームツールの読み込みに失敗しました。",
+    "loadRuleCatalogFailed": "ルールカタログの読み込みに失敗しました。"
   }
 }

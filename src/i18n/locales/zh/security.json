@@ -83,6 +83,200 @@
     "balanced": "平衡",
     "relaxed": "宽松"
   },
+  "runtimePreset": {
+    "nav": "安全预设",
+    "title": "安全预设",
+    "description": "选择默认防护模式",
+    "mode": "防护模式"
+  },
+  "page": {
+    "unsaved": "未保存改动"
+  },
+  "sections": {
+    "runtime": "运行时开关",
+    "matrix": "动作矩阵",
+    "ruleCatalog": "规则覆盖",
+    "allowlistRegex": "白名单与扩展正则",
+    "policyGuards": "策略防护扩展",
+    "actionCenter": "安全动作中心",
+    "auditHits": "最近命中审计",
+    "navAria": "安全分区"
+  },
+  "runtime": {
+    "title": "运行时开关",
+    "description": "总开关、监控",
+    "enabled": "启用插件",
+    "runtimeGuardEnabled": "启用运行时守卫",
+    "auditOnGatewayStart": "启动时审计",
+    "autoHarden": "自动加固",
+    "blockDestructive": "拦截 destructive",
+    "blockSecrets": "拦截 secrets",
+    "enablePromptInjectionGuard": "拦截 prompt injection",
+    "logDetections": "记录检测日志"
+  },
+  "ruleCatalog": {
+    "title": "规则覆盖（命令 → 类别 → 等级）",
+    "description": "可视化查看当前 destructive 检测覆盖范围",
+    "refresh": "刷新",
+    "platformFilter": "平台筛选",
+    "count": "共 {{count}} 条",
+    "loading": "正在加载规则覆盖清单...",
+    "empty": "暂无规则条目",
+    "platform": {
+      "all": "全部",
+      "universal": "通用",
+      "linux": "Linux",
+      "windows": "Windows",
+      "macos": "macOS",
+      "powershell": "PowerShell"
+    },
+    "category": {
+      "file_delete": "文件删除",
+      "git_destructive": "Git 破坏操作",
+      "sql_destructive": "SQL 破坏操作",
+      "system_destructive": "系统破坏操作",
+      "process_kill": "进程终止",
+      "network_destructive": "网络破坏操作",
+      "privilege_escalation": "权限提升"
+    },
+    "severity": {
+      "critical": "严重",
+      "high": "高",
+      "medium": "中",
+      "low": "低",
+      "info": "提示"
+    },
+    "reason": {
+      "recursive_force_delete_tree": "递归强删目录树",
+      "process_kill_with_signal": "终止进程（-9 提升风险）",
+      "system_shutdown_reboot": "系统关机/重启",
+      "disk_partition_destruction": "磁盘/分区破坏",
+      "route_change_flush_critical": "路由表变更（flush 为 critical）",
+      "privilege_escalation_command": "提权执行命令",
+      "firewall_policy_change": "防火墙策略改动",
+      "recursive_permission_change_system": "递归权限改动可能破坏系统",
+      "system_service_disable_critical": "系统服务停用（关键服务为 critical）",
+      "recursive_directory_delete": "递归删除目录树",
+      "forced_recursive_file_delete": "强制/递归删除文件",
+      "taskkill_force_risk": "终止进程（/f 提升风险）",
+      "registry_delete": "删除注册表键值",
+      "diskpart_destruction": "磁盘分区破坏",
+      "firewall_reset": "防火墙重置",
+      "route_change": "路由表变更",
+      "recursive_acl_change": "递归 ACL 改动",
+      "take_ownership_system_files": "接管系统文件所有权",
+      "service_disable_or_delete": "服务停用/删除",
+      "disk_erase_repartition": "磁盘抹除/重分区",
+      "launchctl_service_disable": "系统/用户服务停用",
+      "disable_sip": "关闭 SIP 保护",
+      "pf_toggle": "启停 PF 规则",
+      "pf_reload": "重载 PF 规则文件",
+      "firewall_rule_change": "防火墙规则变更",
+      "force_kill_process": "强制终止进程"
+    },
+    "commandToken": {
+      "system_path": "系统路径",
+      "critical_service": "关键服务",
+      "flush_is_critical": "flush 为 critical"
+    }
+  },
+  "allowlistRegex": {
+    "title": "白名单与扩展正则",
+    "selectedCount": "已选 {{count}}",
+    "refresh": "刷新",
+    "writeEnabledTools": "一键写入已启用工具",
+    "clearSelection": "清空选择",
+    "loadingTools": "正在加载工具清单...",
+    "emptyTools": "暂无工具清单",
+    "tabs": {
+      "allowlistTools": "工具白名单",
+      "allowlistSessions": "会话白名单",
+      "destructivePatterns": "破坏性扩展规则",
+      "secretPatterns": "敏感信息扩展规则"
+    },
+    "labels": {
+      "allowlistTools": "工具白名单（实时工具选择）",
+      "allowlistSessions": "会话白名单",
+      "destructivePatterns": "破坏性扩展规则",
+      "secretPatterns": "敏感信息扩展规则"
+    },
+    "status": {
+      "enabled": "启用",
+      "disabled": "禁用"
+    },
+    "source": {
+      "unknown": "未知",
+      "native": "原生",
+      "plugin": "插件",
+      "skill": "技能"
+    }
+  },
+  "policyGuards": {
+    "title": "策略防护扩展",
+    "description": "路径/域名白名单、提示词注入扩展、审计策略",
+    "labels": {
+      "allowPathPrefixes": "允许路径前缀",
+      "allowDomains": "允许域名",
+      "auditEgressAllowlist": "审计外联白名单（MEM-004）",
+      "auditDailyCostLimitUsd": "审计每日成本阈值（USD，COST-004）",
+      "auditFailureMode": "审计失效模式（DEGRAD）",
+      "promptInjectionPatterns": "提示词注入扩展规则"
+    },
+    "failureMode": {
+      "unset": "未设置",
+      "block_all": "全部阻断（block_all）",
+      "safe_mode": "安全模式（safe_mode）",
+      "read_only": "只读模式（read_only）"
+    }
+  },
+  "actionCenter": {
+    "title": "安全动作中心",
+    "description": "桌面一键执行安全检查与应急处置",
+    "gatewayNotRunning": "Gateway 未运行，无法执行安全动作",
+    "runSuccess": "{{name}} 执行成功",
+    "runFailed": "{{name}} 执行失败",
+    "quickAuditTitle": "只执行检查，不会改动策略",
+    "quickAudit": "常规体检",
+    "emergencyTitle": "触发应急处置并生成事件报告",
+    "emergency": "紧急止损",
+    "integrity": "检查配置文件完整性",
+    "rebaseline": "记录配置文件基线",
+    "skillScan": "扫描 Skills",
+    "advisories": "检查最新安全通告",
+    "remediationPreview": "修复预览",
+    "remediationApply": "应用勾选修复",
+    "remediationRollback": "回滚上次修复"
+  },
+  "matrix": {
+    "title": "破坏性/敏感信息 动作矩阵",
+    "destructiveDefaultAction": "破坏性风险 默认动作",
+    "secretsDefaultAction": "敏感信息风险 默认动作",
+    "destructiveBySeverity": "破坏性风险按级别动作",
+    "secretsBySeverity": "敏感信息风险按级别动作",
+    "destructiveCategoryTitle": "破坏性类别开关",
+    "severity": {
+      "critical": "严重",
+      "high": "高",
+      "medium": "中",
+      "low": "低"
+    },
+    "action": {
+      "block": "阻断",
+      "redact": "脱敏",
+      "confirm": "确认",
+      "warn": "警告",
+      "log": "仅记录"
+    },
+    "category": {
+      "fileDelete": "文件删除",
+      "gitDestructive": "Git 破坏操作",
+      "sqlDestructive": "SQL 破坏操作",
+      "systemDestructive": "系统破坏操作",
+      "processKill": "进程终止",
+      "networkDestructive": "网络破坏操作",
+      "privilegeEscalation": "权限提升"
+    }
+  },
   "confirmStrategy": {
     "every_time": "每次确认",
     "session": "会话内一次确认"
@@ -109,11 +303,42 @@
   "audit": {
     "title": "最近命中审计",
     "description": "展示近期规则命中，便于核对命中来源是否符合预期。",
+    "refresh": "刷新",
+    "ruleLabel": "rule",
+    "decisionLabel": "decision",
     "expand": "展开审计",
     "collapse": "收起审计",
     "gatewayStopped": "Gateway 未运行，无法读取审计。",
     "loading": "正在加载审计...",
-    "empty": "暂无命中记录。"
+    "empty": "暂无命中记录。",
+    "risk": {
+      "critical": "严重",
+      "high": "高",
+      "medium": "中",
+      "low": "低",
+      "info": "提示"
+    },
+    "action": {
+      "audit": "审计",
+      "allow": "放行",
+      "block": "阻断"
+    },
+    "findings": {
+      "SC-CROSS-001": "检测到跨层复合攻击面",
+      "SC-DEGRAD-001": "未配置优雅降级模式",
+      "SC-CTRL-001": "仍在使用默认控制令牌",
+      "SC-COST-001": "未配置 LLM 提供商费用上限",
+      "SC-SKILL-001": "已安装技能：{{count}} 个",
+      "SC-EXEC-003": "沙箱模式未设置为 \"all\"",
+      "SC-CRED-008": "在配置文件中发现 API 密钥",
+      "SC-RUNTIME-GUARD-000": "运行时守卫已禁用",
+      "SC-GW-001": "Gateway 未绑定到本机回环地址",
+      "SC-GW-002": "Gateway 未启用认证",
+      "SC-GW-003": "Gateway 认证令牌强度不足",
+      "SC-GW-006": "Gateway 未启用 TLS",
+      "SC-COST-004": "超出每日费用阈值",
+      "SC-IOC-001": "检测到疑似已知 C2 基础设施连接"
+    }
   },
   "toolConflict": {
     "title": "工具归属冲突",
@@ -146,6 +371,8 @@
   },
   "errors": {
     "loadFailed": "加载安全策略失败。",
-    "saveFailed": "保存安全策略失败。"
+    "saveFailed": "保存安全策略失败。",
+    "loadToolsFailed": "加载工具清单失败",
+    "loadRuleCatalogFailed": "加载规则覆盖清单失败"
   }
 }

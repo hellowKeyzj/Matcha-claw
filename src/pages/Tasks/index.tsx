@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -96,11 +97,15 @@ function StepSection({
   defaultOpen,
   doneLabel,
   pendingLabel,
+  completionLabel,
+  evidenceLabel,
 }: {
   step: ChecklistItem;
   defaultOpen: boolean;
   doneLabel: string;
   pendingLabel: string;
+  completionLabel: string;
+  evidenceLabel: string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const progress = useMemo(() => countProgress(step), [step]);
@@ -159,7 +164,7 @@ function StepSection({
                   className="rounded-md border border-green-200 bg-green-50/70 p-2 text-xs text-green-800 dark:border-green-900 dark:bg-green-950/20 dark:text-green-300"
                   style={{ marginLeft: `${row.depth * 16}px` }}
                 >
-                  {row.text ? `完成情况：${row.text}` : '完成情况：'}
+                  {row.text ? `${completionLabel}: ${row.text}` : `${completionLabel}:`}
                   {row.details.length > 0 ? (
                     <ul className="mt-1 list-disc space-y-0.5 pl-4">
                       {row.details.map((detail, detailIndex) => (
@@ -178,7 +183,7 @@ function StepSection({
                   className="rounded-md border border-blue-200 bg-blue-50/70 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-300"
                   style={{ marginLeft: `${row.depth * 16}px` }}
                 >
-                  证据：
+                  {evidenceLabel}:
                   <ul className="mt-1 list-disc space-y-0.5 pl-4">
                     {row.details.map((detail, detailIndex) => (
                       <li key={`${row.id}-detail-${detailIndex}`}>{detail}</li>
@@ -632,22 +637,38 @@ export function TasksPage() {
                   {t('installPlugin')}
                 </Button>
               ) : null}
-              <input
-                id="tasks-date-from"
-                aria-label={t('filters.from')}
-                type="date"
-                value={dateFrom}
-                onChange={(event) => setDateFrom(event.target.value)}
-                className="h-9 w-40 rounded-md border bg-background px-3 text-sm"
-              />
-              <input
-                id="tasks-date-to"
-                aria-label={t('filters.to')}
-                type="date"
-                value={dateTo}
-                onChange={(event) => setDateTo(event.target.value)}
-                className="h-9 w-40 rounded-md border bg-background px-3 text-sm"
-              />
+              <label htmlFor="tasks-date-from" className="relative h-9 w-40 cursor-pointer">
+                <div className="flex h-9 items-center justify-between rounded-md border border-input bg-background px-3 text-sm">
+                  <span className={cn('truncate', !dateFrom && 'text-muted-foreground')}>
+                    {dateFrom || t('filters.isoDatePlaceholder')}
+                  </span>
+                  <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </div>
+                <input
+                  id="tasks-date-from"
+                  aria-label={t('filters.from')}
+                  type="date"
+                  value={dateFrom}
+                  onChange={(event) => setDateFrom(event.target.value)}
+                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                />
+              </label>
+              <label htmlFor="tasks-date-to" className="relative h-9 w-40 cursor-pointer">
+                <div className="flex h-9 items-center justify-between rounded-md border border-input bg-background px-3 text-sm">
+                  <span className={cn('truncate', !dateTo && 'text-muted-foreground')}>
+                    {dateTo || t('filters.isoDatePlaceholder')}
+                  </span>
+                  <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />
+                </div>
+                <input
+                  id="tasks-date-to"
+                  aria-label={t('filters.to')}
+                  type="date"
+                  value={dateTo}
+                  onChange={(event) => setDateTo(event.target.value)}
+                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                />
+              </label>
               <Button
                 type="button"
                 size="sm"
@@ -894,6 +915,8 @@ export function TasksPage() {
                                 defaultOpen={index === 0}
                                 doneLabel={t('completedTag')}
                                 pendingLabel={t('pendingTag')}
+                                completionLabel={t('rows.completion')}
+                                evidenceLabel={t('rows.evidence')}
                               />
                             ))}
                           </div>

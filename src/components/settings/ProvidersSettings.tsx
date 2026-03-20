@@ -306,6 +306,22 @@ function ProviderCard({
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
   const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
 
+  const resolveAccountLabel = (candidate: ProviderAccount): string => {
+    const rawLabel = (candidate.label ?? '').trim();
+    if (candidate.vendorId !== 'custom') {
+      return rawLabel || candidate.vendorId;
+    }
+    if (!rawLabel) {
+      return t('aiProviders.custom');
+    }
+    const lower = rawLabel.toLowerCase();
+    if (lower === 'custom' || rawLabel === '自定义' || rawLabel === 'カスタム') {
+      return t('aiProviders.custom');
+    }
+    return rawLabel;
+  };
+  const displayAccountLabel = resolveAccountLabel(account);
+
   useEffect(() => {
     if (isEditing) {
       setNewKey('');
@@ -416,18 +432,18 @@ function ProviderCard({
     <Card className={cn(isDefault && 'ring-2 ring-primary')}>
       <CardContent className="p-4">
         {/* Top row: icon + name */}
-        <div className="flex items-start justify-between mb-3 gap-3">
-          <div className="flex items-center gap-3">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             {getProviderIconUrl(account.vendorId) ? (
               <img src={getProviderIconUrl(account.vendorId)} alt={typeInfo?.name || account.vendorId} className={cn('h-5 w-5', shouldInvertInDark(account.vendorId) && 'dark:invert')} />
             ) : (
               <span className="text-xl">{vendor?.icon || typeInfo?.icon || '⚙️'}</span>
             )}
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-semibold">{account.label}</span>
-                <Badge variant="secondary">{vendor?.name || account.vendorId}</Badge>
-                <Badge variant="outline">{getAuthModeLabel(account.authMode, t)}</Badge>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="min-w-0 truncate font-semibold">{displayAccountLabel}</span>
+                <Badge variant="secondary" className="shrink-0">{vendor?.name || account.vendorId}</Badge>
+                <Badge variant="outline" className="shrink-0">{getAuthModeLabel(account.authMode, t)}</Badge>
               </div>
               <div className="mt-1 space-y-0.5">
                 <p className="text-xs text-muted-foreground capitalize">{account.vendorId}</p>
@@ -640,13 +656,16 @@ function ProviderCard({
                   names: [
                     ...normalizeFallbackModels(account.fallbackModels),
                     ...normalizeFallbackProviderIds(account.fallbackAccountIds)
-                      .map((fallbackId) => allProviders.find((candidate) => candidate.account.id === fallbackId)?.account.label)
+                      .map((fallbackId) => {
+                        const candidate = allProviders.find((provider) => provider.account.id === fallbackId);
+                        return candidate ? resolveAccountLabel(candidate.account) : null;
+                      })
                       .filter(Boolean),
                   ].join(', ') || t('aiProviders.card.none'),
                 })}
               </p>
             </div>
-            <div className="flex gap-0.5 shrink-0 ml-2">
+            <div className="ml-2 flex shrink-0 gap-0.5">
               <Button
                 variant="ghost"
                 size="icon"
@@ -1005,14 +1024,14 @@ function AddProviderDialog({
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted">
+              <div className="flex min-w-0 items-center gap-3 rounded-lg bg-muted p-3">
                 {getProviderIconUrl(selectedType!) ? (
                   <img src={getProviderIconUrl(selectedType!)} alt={typeInfo?.name} className={cn('h-7 w-7', shouldInvertInDark(selectedType!) && 'dark:invert')} />
                 ) : (
                   <span className="text-2xl">{typeInfo?.icon}</span>
                 )}
-                <div>
-                  <p className="font-medium">{typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name}</p>
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name}</p>
                   <button
                     onClick={() => {
                       setSelectedType(null);
