@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "name": "rm_rf",
+      "commands": ["rm"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)-[^\\s]*r[^\\s]*f[^\\s]*(?:\\s|$)|--recursive.*--force|--force.*--recursive"
+      ],
+      "result": {
+        "category": "file_delete",
+        "severity": "critical",
+        "reason": "Recursive force deletion (rm -rf)",
+        "pattern": "rm -rf"
+      }
+    },
+    {
+      "name": "git_reset_hard",
+      "commands": ["git"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)reset(?:\\s|$)",
+        "(?:^|\\s)--hard(?:\\s|$)"
+      ],
+      "result": {
+        "category": "git_destructive",
+        "severity": "critical",
+        "reason": "git reset --hard can lose uncommitted changes",
+        "pattern": "git reset"
+      }
+    },
+    {
+      "name": "taskkill_force",
+      "commands": ["taskkill"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)/f(?:\\s|$)"
+      ],
+      "result": {
+        "category": "process_kill",
+        "severity": "high",
+        "reason": "taskkill /f terminates processes",
+        "pattern": "taskkill /f"
+      }
+    },
+    {
+      "name": "netsh_advfirewall_reset",
+      "commands": ["netsh"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)advfirewall(?:\\s|$)",
+        "(?:^|\\s)reset(?:\\s|$)"
+      ],
+      "result": {
+        "category": "network_destructive",
+        "severity": "critical",
+        "reason": "netsh advfirewall modifies or resets firewall policy",
+        "pattern": "netsh advfirewall"
+      }
+    },
+    {
+      "name": "pfctl_reload",
+      "commands": ["pfctl"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)-f(?:\\s|$)"
+      ],
+      "result": {
+        "category": "network_destructive",
+        "severity": "critical",
+        "reason": "pfctl can enable/disable or reload packet filter rules",
+        "pattern": "pfctl"
+      }
+    },
+    {
+      "name": "systemctl_disable_sshd",
+      "commands": ["systemctl"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)disable(?:\\s|$)",
+        "(?:^|\\s)sshd(?:\\s|$)"
+      ],
+      "result": {
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "systemctl disable can disable or stop system services",
+        "pattern": "systemctl disable"
+      }
+    },
+    {
+      "name": "route_delete_change",
+      "commands": ["route"],
+      "target": "args",
+      "require": [
+        "(?:^|\\s)(?:delete|change)(?:\\s|$)"
+      ],
+      "result": {
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "route delete/change modifies routing table",
+        "pattern": "route delete"
+      }
+    }
+  ]
+}
