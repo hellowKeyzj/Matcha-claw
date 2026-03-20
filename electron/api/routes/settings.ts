@@ -2,8 +2,6 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { applyProxySettings } from '../../main/proxy';
 import { syncLaunchAtStartupSettingFromStore } from '../../main/launch-at-startup';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../../utils/store';
-import { syncGuardianPolicyToOpenClawConfig } from '../../utils/guardian-policy';
-import { logger } from '../../utils/logger';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -25,29 +23,6 @@ function patchTouchesProxy(patch: Partial<AppSettings>): boolean {
 
 function patchTouchesLaunchAtStartup(patch: Partial<AppSettings>): boolean {
   return Object.prototype.hasOwnProperty.call(patch, 'launchAtStartup');
-}
-
-function patchTouchesGuardianPolicy(patch: Partial<AppSettings>): boolean {
-  return Object.prototype.hasOwnProperty.call(patch, 'securityPreset')
-    || Object.prototype.hasOwnProperty.call(patch, 'securityPolicyVersion')
-    || Object.prototype.hasOwnProperty.call(patch, 'securityPolicyByAgent');
-}
-
-async function syncGuardianPolicy(ctx: HostApiContext): Promise<void> {
-  const settings = await getAllSettings();
-  const syncResult = syncGuardianPolicyToOpenClawConfig(settings);
-  if (ctx.gatewayManager.getStatus().state !== 'running') {
-    return;
-  }
-  try {
-    await ctx.gatewayManager.rpc(
-      'guardian.policy.sync',
-      syncResult.payload,
-      8000,
-    );
-  } catch (error) {
-    logger.warn(`Failed to sync guardian policy to running gateway: ${String(error)}`);
-  }
 }
 
 export async function handleSettingsRoutes(
@@ -73,9 +48,6 @@ export async function handleSettingsRoutes(
       }
       if (patchTouchesLaunchAtStartup(patch)) {
         await syncLaunchAtStartupSettingFromStore();
-      }
-      if (patchTouchesGuardianPolicy(patch)) {
-        await syncGuardianPolicy(ctx);
       }
       sendJson(res, 200, { success: true });
     } catch (error) {
@@ -109,9 +81,6 @@ export async function handleSettingsRoutes(
       if (key === 'launchAtStartup') {
         await syncLaunchAtStartupSettingFromStore();
       }
-      if (key === 'securityPreset' || key === 'securityPolicyVersion' || key === 'securityPolicyByAgent') {
-        await syncGuardianPolicy(ctx);
-      }
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -124,7 +93,6 @@ export async function handleSettingsRoutes(
       await resetSettings();
       await handleProxySettingsChange(ctx);
       await syncLaunchAtStartupSettingFromStore();
-      await syncGuardianPolicy(ctx);
       sendJson(res, 200, { success: true, settings: await getAllSettings() });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

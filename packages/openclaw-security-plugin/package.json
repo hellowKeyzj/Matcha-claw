@@ -1,0 +1,15 @@
+{
+  "name": "@matchaclaw/openclaw-security-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone security plugin for Matcha-claw",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

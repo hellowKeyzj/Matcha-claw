@@ -6,7 +6,6 @@ import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/p
 import { TaskStore, TaskStoreError, type Task } from "./task-store.js";
 import { createBeforeAgentStartHandler } from "./hooks/before-agent-start.js";
 import { assessTaskComplexity } from "./trigger-detector.js";
-import { GuardianController } from "./guardian.js";
 
 const PLUGIN_ID = "task-manager";
 const DEFAULT_WEBHOOK_TTL_SECONDS = 900;
@@ -322,13 +321,12 @@ function publishTaskEvent(event: string, payload: Record<string, unknown>): void
   }
 }
 
-function updateEventPublisher(options: GatewayRequestHandlerOptions, guardian?: GuardianController): void {
+function updateEventPublisher(options: GatewayRequestHandlerOptions): void {
   eventPublisher = (event, payload) => {
     try {
       options.context.broadcast(event, payload, { dropIfSlow: true });
     } catch {}
   };
-  guardian?.bindGatewayContext(options.context);
 }
 
 function asTaskPayload(task: Task, workspaceDir: string): Record<string, unknown> {
@@ -550,7 +548,6 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     defaultWorkspaceDir = resolveWorkspaceDir((api.config as { workspaceDir?: unknown })?.workspaceDir);
     guardStatePath = resolveGuardStatePath();
-    const guardian = new GuardianController(api);
     void writeLoadedProbe(api.logger, { workspaceDir: defaultWorkspaceDir, guardStatePath });
 
     api.registerTool((toolCtx) => ({
@@ -780,7 +777,7 @@ const plugin = {
     }));
 
     api.registerGatewayMethod("task_list", async (options: GatewayRequestHandlerOptions) => {
-      updateEventPublisher(options, guardian);
+      updateEventPublisher(options);
       const workspaceDir = resolveWorkspaceDir(options.params.workspaceDir);
       const store = resolveStore(workspaceDir);
       const tasks = await store.listTasks();
@@ -788,7 +785,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod("task_get", async (options: GatewayRequestHandlerOptions) => {
-      updateEventPublisher(options, guardian);
+      updateEventPublisher(options);
       const workspaceDir = resolveWorkspaceDir(options.params.workspaceDir);
       const taskId = typeof options.params.taskId === "string" ? options.params.taskId.trim() : "";
       if (!taskId) {
@@ -801,7 +798,7 @@ const plugin = {
     });
 
     api.registerGatewayMethod("task_resume", async (options: GatewayRequestHandlerOptions) => {
-      updateEventPublisher(options, guardian);
+      updateEventPublisher(options);
       const workspaceDir = resolveWorkspaceDir(options.params.workspaceDir);
       const taskId = typeof options.params.taskId === "string" ? options.params.taskId.trim() : "";
       const confirmId = typeof options.params.confirmId === "string" ? options.params.confirmId.trim() : "";
@@ -844,18 +841,6 @@ const plugin = {
           message: mapped.message,
         });
       }
-    });
-
-    api.registerGatewayMethod("guardian.audit.query", async (options: GatewayRequestHandlerOptions) => {
-      updateEventPublisher(options, guardian);
-      const result = await guardian.queryAudits(options.params);
-      options.respond(true, result);
-    });
-
-    api.registerGatewayMethod("guardian.policy.sync", async (options: GatewayRequestHandlerOptions) => {
-      updateEventPublisher(options, guardian);
-      const result = guardian.syncPolicy(options.params);
-      options.respond(true, result);
     });
 
     api.registerHttpRoute({
@@ -997,11 +982,6 @@ const plugin = {
           );
         }
       }
-      return guardian.beforeToolCall(event, ctx);
-    });
-
-    api.on("after_tool_call", async (event, ctx) => {
-      await guardian.afterToolCall(event, ctx);
     });
   },
 };

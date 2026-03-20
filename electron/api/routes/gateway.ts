@@ -195,8 +195,22 @@ export async function handleGatewayRoutes(
     }
     try {
       const includeDisabled = url.searchParams.get('includeDisabled') === 'true';
-      const tools = await ctx.platformFacade.listEffectiveTools({ includeDisabled });
-      sendJson(res, 200, { success: true, tools });
+      const refresh = url.searchParams.get('refresh') !== 'false';
+
+      if (refresh) {
+        try {
+          const health = await ctx.platformFacade.runtimeHealth();
+          if (health.status === 'running') {
+            await ctx.platformFacade.reconcileNativeTools();
+          }
+        } catch {
+          // 运行时同步失败时，保持可读性，继续返回当前注册表快照
+        }
+      }
+
+      let tools = await ctx.platformFacade.listEffectiveTools({ includeDisabled });
+
+      sendJson(res, 200, { success: true, tools, refreshed: refresh });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

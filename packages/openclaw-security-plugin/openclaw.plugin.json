@@ -1,0 +1,117 @@
+{
+  "id": "security-core",
+  "name": "Security Core",
+  "description": "Standalone security plugin based on SecureClaw original code with trimmed runtime guard.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": true },
+      "monitors": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "credentials": { "type": "boolean", "default": true },
+          "memory": { "type": "boolean", "default": true },
+          "cost": { "type": "boolean", "default": false }
+        }
+      },
+      "cost": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hourlyLimitUsd": { "type": "number" },
+          "dailyLimitUsd": { "type": "number" },
+          "monthlyLimitUsd": { "type": "number" },
+          "circuitBreakerEnabled": { "type": "boolean" }
+        }
+      },
+      "autoHarden": { "type": "boolean", "default": false },
+      "auditOnGatewayStart": { "type": "boolean", "default": true },
+      "runtimeGuardEnabled": { "type": "boolean", "default": true },
+      "enablePromptInjectionGuard": { "type": "boolean", "default": true },
+      "blockDestructive": { "type": "boolean", "default": true },
+      "blockSecrets": { "type": "boolean", "default": true },
+      "allowPathPrefixes": { "type": "array", "items": { "type": "string" }, "default": [] },
+      "allowDomains": { "type": "array", "items": { "type": "string" }, "default": [] },
+      "auditEgressAllowlist": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"]
+      },
+      "auditDailyCostLimitUsd": { "type": "number", "default": 5 },
+      "auditFailureMode": {
+        "anyOf": [
+          { "type": "string", "enum": ["block_all", "safe_mode", "read_only"] },
+          { "type": "null" }
+        ],
+        "default": null
+      },
+      "promptInjectionPatterns": { "type": "array", "items": { "type": "string" }, "default": [] },
+      "allowlist": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "tools": { "type": "array", "items": { "type": "string" } },
+          "sessions": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "logging": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "logDetections": { "type": "boolean", "default": true }
+        }
+      },
+      "destructive": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "confirm" },
+          "severityActions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "critical": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "block" },
+              "high": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "confirm" },
+              "medium": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "confirm" },
+              "low": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "warn" }
+            }
+          },
+          "categories": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "fileDelete": { "type": "boolean", "default": true },
+              "gitDestructive": { "type": "boolean", "default": true },
+              "sqlDestructive": { "type": "boolean", "default": true },
+              "systemDestructive": { "type": "boolean", "default": true },
+              "processKill": { "type": "boolean", "default": true },
+              "networkDestructive": { "type": "boolean", "default": true },
+              "privilegeEscalation": { "type": "boolean", "default": true }
+            }
+          }
+        }
+      },
+      "secrets": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "block" },
+          "severityActions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "critical": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "block" },
+              "high": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "block" },
+              "medium": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "redact" },
+              "low": { "type": "string", "enum": ["block", "redact", "confirm", "warn", "log"], "default": "warn" }
+            }
+          }
+        }
+      },
+      "destructivePatterns": { "type": "array", "items": { "type": "string" } },
+      "secretPatterns": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}
