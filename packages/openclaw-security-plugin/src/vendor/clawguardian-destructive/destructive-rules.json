@@ -1,0 +1,363 @@
+{
+  "version": 1,
+  "sqlPatterns": [
+    {
+      "name": "DROP",
+      "pattern": "\\bDROP\\s+(TABLE|DATABASE|SCHEMA|INDEX)\\b",
+      "reason": "SQL DROP statement permanently removes data",
+      "severity": "critical"
+    },
+    {
+      "name": "TRUNCATE",
+      "pattern": "\\bTRUNCATE\\s+TABLE\\b",
+      "reason": "SQL TRUNCATE removes all rows from table",
+      "severity": "critical"
+    },
+    {
+      "name": "DELETE without WHERE",
+      "pattern": "\\bDELETE\\s+FROM\\s+\\w+\\s*(?:;|$)",
+      "reason": "DELETE without WHERE clause removes all rows",
+      "severity": "critical"
+    },
+    {
+      "name": "UPDATE without WHERE",
+      "pattern": "\\bUPDATE\\s+\\w+\\s+SET\\s+(?!.*\\bWHERE\\b)",
+      "reason": "UPDATE without WHERE clause modifies all rows",
+      "severity": "high"
+    },
+    {
+      "name": "ALTER TABLE DROP",
+      "pattern": "\\bALTER\\s+TABLE\\s+\\w+\\s+DROP\\b",
+      "reason": "ALTER TABLE DROP removes column/constraint",
+      "severity": "high"
+    }
+  ],
+  "remoteCodeExecutionPatterns": [
+    { "name": "curl|bash", "pattern": "\\b(?:curl|wget)\\b[^|]*\\|\\s*(?:bash|sh|zsh|ksh|fish)\\b" },
+    { "name": "curl|sudo bash", "pattern": "\\b(?:curl|wget)\\b[^|]*\\|\\s*(?:sudo\\s+)?(?:bash|sh|zsh|ksh|fish)\\b" },
+    { "name": "python remote exec", "pattern": "\\bpython[23]?\\s+-c\\s+[\"'].*(?:urllib|requests).*exec" },
+    { "name": "eval $(curl)", "pattern": "\\beval\\s+[\"'`]\\$\\((?:curl|wget)" }
+  ],
+  "dangerousPaths": [
+    { "pattern": "^/$", "reason": "Root directory", "severity": "critical" },
+    { "pattern": "^~$", "reason": "Home directory", "severity": "critical" },
+    { "pattern": "^\\$HOME$", "reason": "Home directory", "severity": "critical" },
+    { "pattern": "^/etc\\b", "reason": "System config directory", "severity": "critical" },
+    { "pattern": "^/usr\\b", "reason": "System directory", "severity": "critical" },
+    { "pattern": "^/bin\\b", "reason": "System binaries", "severity": "critical" },
+    { "pattern": "^/sbin\\b", "reason": "System binaries", "severity": "critical" },
+    { "pattern": "^/boot\\b", "reason": "Boot directory", "severity": "critical" },
+    { "pattern": "^/var/log\\b", "reason": "System logs", "severity": "high" },
+    { "pattern": "^/var/lib\\b", "reason": "System data", "severity": "high" },
+    { "pattern": "^C:\\\\Windows", "reason": "Windows system directory", "severity": "critical" },
+    { "pattern": "^C:\\\\Program Files", "reason": "Windows programs", "severity": "critical" },
+    { "pattern": "System32", "reason": "Windows system directory", "severity": "critical" },
+    { "pattern": "\\.ssh\\b", "reason": "SSH configuration", "severity": "high" },
+    { "pattern": "\\.gnupg\\b", "reason": "GPG configuration", "severity": "high" },
+    { "pattern": "\\*\\s*$", "reason": "Wildcard pattern", "severity": "medium" }
+  ],
+  "fileTruncation": {
+    "pattern": "(?:^|[;&|])\\s*>[\\s|]*([^\\s;&|]+)",
+    "dangerousPrefixes": ["/etc/", "/usr/", "/bin/", "/sbin/", "/boot/", "/var/"],
+    "dangerousEquals": ["/dev/null"]
+  },
+  "powershellRules": [
+    {
+      "allContains": ["remove-item", "-recurse"],
+      "anyContains": ["-force", "-confirm:$false"],
+      "category": "file_delete",
+      "severity": "critical",
+      "reason": "PowerShell Remove-Item with recurse+force can delete directory trees",
+      "pattern": "powershell remove-item -recurse -force"
+    },
+    {
+      "allContains": ["stop-process", "-force"],
+      "category": "process_kill",
+      "severity": "high",
+      "reason": "PowerShell Stop-Process -Force terminates processes",
+      "pattern": "powershell stop-process -force"
+    },
+    {
+      "anyContains": ["new-netfirewallrule", "set-netfirewallrule", "remove-netfirewallrule", "netsh advfirewall"],
+      "category": "network_destructive",
+      "severity": "high",
+      "reason": "PowerShell firewall command can change host/network access policy",
+      "pattern": "powershell firewall rule change"
+    }
+  ],
+  "system": {
+    "commandSets": {
+      "linux": ["iptables", "firewall-cmd", "ufw", "nft", "chmod", "chown", "chgrp", "systemctl", "service", "ip"],
+      "windows": ["rmdir", "rd", "del", "erase", "taskkill", "reg", "diskpart", "netsh", "route", "icacls", "takeown", "sc"],
+      "macos": ["diskutil", "launchctl", "csrutil", "pfctl", "route"]
+    },
+    "universal": [
+      {
+        "commands": ["shutdown", "reboot", "halt", "poweroff", "init"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "{command} will shut down or restart the system",
+        "pattern": "{command}"
+      },
+      {
+        "commands": ["format", "fdisk", "mkfs", "dd", "parted", "gdisk"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "{command} can destroy disk data",
+        "pattern": "{command}"
+      },
+      {
+        "commands": ["kill", "pkill", "killall"],
+        "allRegex": ["(?:^|\\s)-(?:9|KILL|SIGKILL)(?:\\s|$)"],
+        "category": "process_kill",
+        "severity": "high",
+        "reason": "{command} -9 terminates processes",
+        "pattern": "{command}"
+      },
+      {
+        "commands": ["kill", "pkill", "killall"],
+        "category": "process_kill",
+        "severity": "medium",
+        "reason": "{command} terminates processes",
+        "pattern": "{command}"
+      },
+      {
+        "commands": ["ip"],
+        "allRegex": ["(?:^|\\s)route(?:\\s|$)", "(?:^|\\s)flush(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "critical",
+        "reason": "ip route flush modifies routing table",
+        "pattern": "ip route flush"
+      },
+      {
+        "commands": ["ip"],
+        "allRegex": ["(?:^|\\s)route(?:\\s|$)"],
+        "anyRegex": ["(?:^|\\s)(?:add|del|delete|replace|change)(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "ip route modifies routing table",
+        "pattern": "ip route"
+      },
+      {
+        "commands": ["route"],
+        "anyRegex": ["(?:^|\\s)(?:add|del|delete|change)(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "route modifies routing table",
+        "pattern": "route"
+      }
+    ],
+    "linux": [
+      {
+        "commands": ["iptables", "firewall-cmd", "ufw", "nft"],
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "{command} modifies firewall rules",
+        "pattern": "{command}"
+      },
+      {
+        "commands": ["chmod", "chown", "chgrp"],
+        "allRegex": [
+          "(?:^|\\s)(?:-R|--recursive)(?:\\s|$)",
+          "(?:^|\\s)(?:/|~|/etc\\S*|/usr\\S*|/bin\\S*|/sbin\\S*)(?:\\s|$)"
+        ],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "{command} -R on system directory can break the system",
+        "pattern": "{command} -R"
+      },
+      {
+        "commands": ["systemctl"],
+        "allRegex": [
+          "(?:^|\\s)(?:stop|disable|mask|reboot|poweroff|halt|kexec)(?:\\s|$)",
+          "(?:^|\\s)\\S*(?:ssh|network|firewalld|systemd|dbus|resolved)\\S*(?:\\s|$)"
+        ],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "systemctl can disable or stop critical system services",
+        "pattern": "systemctl"
+      },
+      {
+        "commands": ["systemctl"],
+        "allRegex": ["(?:^|\\s)(?:stop|disable|mask|reboot|poweroff|halt|kexec)(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "high",
+        "reason": "systemctl can disable or stop system services",
+        "pattern": "systemctl"
+      },
+      {
+        "commands": ["service"],
+        "allRegex": [
+          "(?:^|\\s)(?:stop|disable)(?:\\s|$)",
+          "(?:^|\\s)\\S*(?:ssh|network|firewalld|systemd|dbus|resolved)\\S*(?:\\s|$)"
+        ],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "service can disable or stop critical services",
+        "pattern": "service"
+      },
+      {
+        "commands": ["service"],
+        "allRegex": ["(?:^|\\s)(?:stop|disable)(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "high",
+        "reason": "service can disable or stop services",
+        "pattern": "service"
+      }
+    ],
+    "windows": [
+      {
+        "commands": ["rmdir", "rd"],
+        "allRegex": ["(?:^|\\s)/s(?:\\s|$)"],
+        "category": "file_delete",
+        "severity": "critical",
+        "reason": "{command} /s recursively deletes directory tree",
+        "pattern": "{command} /s"
+      },
+      {
+        "commands": ["del", "erase"],
+        "anyRegex": ["(?:^|\\s)/(?:f|s|q|p)(?:\\s|$)"],
+        "category": "file_delete",
+        "severity": "high",
+        "reason": "{command} with force/recursive flags deletes files",
+        "pattern": "{command} /f"
+      },
+      {
+        "commands": ["taskkill"],
+        "allRegex": ["(?:^|\\s)/f(?:\\s|$)"],
+        "category": "process_kill",
+        "severity": "high",
+        "reason": "taskkill /f terminates processes",
+        "pattern": "taskkill /f"
+      },
+      {
+        "commands": ["taskkill"],
+        "category": "process_kill",
+        "severity": "medium",
+        "reason": "taskkill terminates processes",
+        "pattern": "taskkill"
+      },
+      {
+        "commands": ["reg"],
+        "allRegex": ["(?:^|\\s)delete(?:\\s|$)", "(?:^|\\s)/f(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "reg delete /f removes registry keys/values",
+        "pattern": "reg delete /f"
+      },
+      {
+        "commands": ["diskpart"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "diskpart can modify or destroy partitions",
+        "pattern": "diskpart"
+      },
+      {
+        "commands": ["netsh"],
+        "allRegex": ["(?:^|\\s)advfirewall(?:\\s|$)", "(?:^|\\s)reset(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "critical",
+        "reason": "netsh advfirewall modifies or resets firewall policy",
+        "pattern": "netsh advfirewall"
+      },
+      {
+        "commands": ["netsh"],
+        "allRegex": ["(?:^|\\s)advfirewall(?:\\s|$)"],
+        "anyRegex": ["(?:^|\\s)(?:add|set|delete|import|export)(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "netsh advfirewall modifies firewall policy",
+        "pattern": "netsh advfirewall"
+      },
+      {
+        "commands": ["icacls"],
+        "allRegex": [
+          "(?:^|\\s)/t(?:\\s|$)",
+          "(?:^|\\s)(?:C:\\\\Windows\\S*|\\S*System32\\S*|C:\\\\Program Files\\S*)(?:\\s|$)"
+        ],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "icacls /t on Windows system paths can break permissions",
+        "pattern": "icacls /t"
+      },
+      {
+        "commands": ["takeown"],
+        "allRegex": [
+          "(?:^|\\s)/r(?:\\s|$)",
+          "(?:^|\\s)(?:C:\\\\Windows\\S*|\\S*System32\\S*|C:\\\\Program Files\\S*)(?:\\s|$)"
+        ],
+        "category": "privilege_escalation",
+        "severity": "critical",
+        "reason": "takeown /r on system paths can seize ownership of critical files",
+        "pattern": "takeown /r"
+      },
+      {
+        "commands": ["sc"],
+        "allRegex": ["(?:^|\\s)delete(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "sc delete can remove Windows services",
+        "pattern": "sc delete"
+      },
+      {
+        "commands": ["sc"],
+        "allRegex": ["(?:^|\\s)stop(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "high",
+        "reason": "sc stop can disable Windows services",
+        "pattern": "sc stop"
+      },
+      {
+        "commands": ["sc"],
+        "allRegex": ["(?:^|\\s)config(?:\\s|$)"],
+        "anyRegex": ["start\\s*=\\s*disabled", "start=disabled"],
+        "category": "system_destructive",
+        "severity": "high",
+        "reason": "sc config start=disabled can disable Windows services",
+        "pattern": "sc config"
+      }
+    ],
+    "macos": [
+      {
+        "commands": ["diskutil"],
+        "anyRegex": ["(?:^|\\s)erasedisk(?:\\s|$)", "(?:^|\\s)erasevolume(?:\\s|$)", "(?:^|\\s)partitiondisk(?:\\s|$)", "apfs\\s+deletecontainer"],
+        "category": "system_destructive",
+        "severity": "critical",
+        "reason": "diskutil destructive operation can erase or repartition disks",
+        "pattern": "diskutil erase/partition"
+      },
+      {
+        "commands": ["launchctl"],
+        "anyRegex": ["(?:^|\\s)(?:bootout|unload|disable|remove|kill)(?:\\s|$)"],
+        "category": "system_destructive",
+        "severity": "high",
+        "reason": "launchctl can disable or terminate system/user services",
+        "pattern": "launchctl"
+      },
+      {
+        "commands": ["csrutil"],
+        "allRegex": ["(?:^|\\s)disable(?:\\s|$)"],
+        "category": "privilege_escalation",
+        "severity": "critical",
+        "reason": "csrutil disable weakens system integrity protection",
+        "pattern": "csrutil disable"
+      },
+      {
+        "commands": ["pfctl"],
+        "allRegex": ["(?:^|\\s)-f(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "critical",
+        "reason": "pfctl can enable/disable or reload packet filter rules",
+        "pattern": "pfctl -f"
+      },
+      {
+        "commands": ["pfctl"],
+        "anyRegex": ["(?:^|\\s)-e(?:\\s|$)", "(?:^|\\s)-d(?:\\s|$)"],
+        "category": "network_destructive",
+        "severity": "high",
+        "reason": "pfctl can enable/disable packet filter rules",
+        "pattern": "pfctl"
+      }
+    ]
+  }
+}

@@ -5,6 +5,7 @@ import type { HostApiContext } from './context';
 import { handleAppRoutes } from './routes/app';
 import { handleGatewayRoutes } from './routes/gateway';
 import { handleSettingsRoutes } from './routes/settings';
+import { handleSecurityRoutes } from './routes/security';
 import { handleProviderRoutes } from './routes/providers';
 import { handleChannelRoutes } from './routes/channels';
 import { handleLogRoutes } from './routes/logs';
@@ -28,6 +29,7 @@ const routeHandlers: RouteHandler[] = [
   handleAppRoutes,
   handleGatewayRoutes,
   handleSettingsRoutes,
+  handleSecurityRoutes,
   handleProviderRoutes,
   handleChannelRoutes,
   handleSkillRoutes,

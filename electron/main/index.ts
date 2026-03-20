@@ -19,7 +19,7 @@ import { autoInstallCliIfNeeded, generateCompletionCache, installCompletionToPro
 import { isQuitting, setQuitting } from './app-state';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
-import { getAllSettings, getSetting } from '../utils/store';
+import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../utils/skill-config';
 import { startHostApiServer } from '../api/server';
 import { HostEventBus } from '../api/event-bus';
@@ -29,7 +29,7 @@ import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureLicenseGateBootstrapped } from '../utils/license';
 import { buildPlatformCompositionRoot } from './platform-composition-root';
-import { syncGuardianPolicyToOpenClawConfig } from '../utils/guardian-policy';
+import { readSecurityPolicyFromFile } from '../utils/security-policy';
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -242,21 +242,20 @@ async function initialize(): Promise<void> {
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.
   let previousGatewayState = gatewayManager.getStatus().state;
-  const syncGuardianPolicyToRunningGateway = async (): Promise<void> => {
+  const syncSecurityPolicyToRunningGateway = async (): Promise<void> => {
     try {
-      const settings = await getAllSettings();
-      const syncResult = syncGuardianPolicyToOpenClawConfig(settings);
+      const policy = readSecurityPolicyFromFile();
       if (gatewayManager.getStatus().state !== 'running') {
         return;
       }
       await gatewayManager.rpc(
-        'guardian.policy.sync',
-        syncResult.payload,
+        'security.policy.sync',
+        policy,
         8000,
       );
-      logger.debug(`Synced guardian policy to running gateway (preset=${syncResult.payload.preset})`);
+      logger.debug(`Synced security policy to running gateway (preset=${policy.preset})`);
     } catch (error) {
-      logger.warn(`Failed to sync guardian policy to running gateway: ${String(error)}`);
+      logger.warn(`Failed to sync security policy to running gateway: ${String(error)}`);
     }
   };
 
@@ -265,7 +264,7 @@ async function initialize(): Promise<void> {
     const transitionedToRunning = status.state === 'running' && previousGatewayState !== 'running';
     previousGatewayState = status.state;
     if (transitionedToRunning) {
-      void syncGuardianPolicyToRunningGateway();
+      void syncSecurityPolicyToRunningGateway();
     }
   });
 

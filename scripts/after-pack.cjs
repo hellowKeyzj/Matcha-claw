@@ -373,6 +373,13 @@ exports.default = async function afterPack(context) {
         join(__dirname, '..', 'packages', 'openclaw-task-manager-plugin'),
       ],
     },
+    {
+      pluginId: 'security-core',
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'security-core'),
+        join(__dirname, '..', 'packages', 'openclaw-security-plugin'),
+      ],
+    },
   ];
 
   mkdirSync(pluginsDestRoot, { recursive: true });
