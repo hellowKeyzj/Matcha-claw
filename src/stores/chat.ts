@@ -2547,15 +2547,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
   resolveApproval: async (id: string, decision: ApprovalDecision) => {
     const approvalId = id.trim();
     if (!approvalId) return;
-    await useGatewayStore.getState().rpc(
-      'exec.approval.resolve',
-      { id: approvalId, decision },
-    );
-    get().handleApprovalResolved({
-      id: approvalId,
-      decision,
-      sessionKey: get().currentSessionKey,
-    });
+    try {
+      await useGatewayStore.getState().rpc(
+        'exec.approval.resolve',
+        { id: approvalId, decision },
+      );
+      get().handleApprovalResolved({
+        id: approvalId,
+        decision,
+        sessionKey: get().currentSessionKey,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isStaleApprovalError = /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
+      if (isStaleApprovalError) {
+        get().handleApprovalResolved({
+          id: approvalId,
+          decision: 'deny',
+          sessionKey: get().currentSessionKey,
+        });
+      }
+      set({ error: message });
+      await get().syncPendingApprovals(get().currentSessionKey);
+    }
   },
 
   // ── Handle incoming chat events from Gateway ──

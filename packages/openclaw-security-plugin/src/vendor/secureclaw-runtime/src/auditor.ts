@@ -19,7 +19,6 @@ import type {
   AuditSummary,
   IOCDatabase,
   MaestroLayer,
-  NistAttackType,
   Severity,
 } from './types.js';
 

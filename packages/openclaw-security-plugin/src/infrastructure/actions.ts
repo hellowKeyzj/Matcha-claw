@@ -110,9 +110,14 @@ function makeRel(baseDir: string, absPath: string): string {
 
 async function walkFiles(rootDir: string, maxDepth = 5, depth = 0): Promise<string[]> {
   if (depth > maxDepth) return [];
-  let entries: Awaited<ReturnType<typeof readdir>> = [];
+  let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }> = [];
   try {
-    entries = await readdir(rootDir, { withFileTypes: true });
+    const dirents = await readdir(rootDir, { withFileTypes: true, encoding: "utf8" });
+    entries = dirents.map((entry) => ({
+      name: entry.name,
+      isDirectory: () => entry.isDirectory(),
+      isFile: () => entry.isFile(),
+    }));
   } catch {
     return [];
   }
