@@ -120,6 +120,8 @@ type CompiledRules = {
 
 const destructiveRulesConfig = destructiveRulesRaw as DestructiveRuleConfig;
 let compiledRulesCache: CompiledRules | undefined;
+const EXEC_STYLE_TOOL_RE = /(?:^|\.)(exec|bash|run|shell|command)$/i;
+const DELETE_COMMANDS = new Set(["rm", "rmdir", "rd", "del", "erase", "remove", "remove-item"]);
 
 function compileRegex(pattern: string, flags = "i"): RegExp {
   return new RegExp(pattern, flags);
@@ -196,12 +198,15 @@ function renderTemplate(template: string, context: SystemRuleContext): string {
 }
 
 /**
- * Check if rm command has both recursive and force flags (SafeExec pattern).
- * Gates: rm -rf, rm -fr, rm --recursive --force
+ * Check rm/rm-alias destructive intent.
+ * - rm -rf / rm --recursive --force => critical
+ * - rm -r / rm -R / rm -d / rm --dir => high
  */
 export function isDestructiveRm(args: string[]): DestructiveMatch | undefined {
   let force = false;
   let recursive = false;
+  let dirDelete = false;
+  let wildcard = false;
 
   for (const arg of args) {
     if (arg === "--") {
@@ -213,26 +218,46 @@ export function isDestructiveRm(args: string[]): DestructiveMatch | undefined {
     if (arg === "--recursive") {
       recursive = true;
     }
+    if (arg === "--dir") {
+      dirDelete = true;
+    }
+    if (arg.includes("*") || arg.includes("?")) {
+      wildcard = true;
+    }
     if (arg.startsWith("-") && arg !== "-" && arg !== "--") {
       const hasForceFlag = arg.includes("f");
       const hasRecursiveFlag = arg.includes("r") || arg.includes("R");
+      const hasDirFlag = arg.includes("d");
       if (hasForceFlag) {
         force = true;
       }
       if (hasRecursiveFlag) {
         recursive = true;
       }
+      if (hasDirFlag) {
+        dirDelete = true;
+      }
     }
   }
 
-  if (force && recursive) {
+  if (recursive || force || wildcard) {
     return {
       category: "file_delete",
-      reason: "Recursive force deletion (rm -rf)",
+      reason: "Potential destructive rm (recursive/force/wildcard)",
       severity: "critical",
-      pattern: "rm -rf",
+      pattern: "rm",
     };
   }
+
+  if (recursive || dirDelete) {
+    return {
+      category: "file_delete",
+      reason: recursive ? "Recursive directory deletion (rm -r)" : "Directory deletion (rm -d/--dir)",
+      severity: "high",
+      pattern: recursive ? "rm -r" : "rm -d",
+    };
+  }
+
   return undefined;
 }
 
@@ -632,6 +657,90 @@ function normalizeCommandName(rawCommand: string): string {
   return (parts[parts.length - 1] ?? "").toLowerCase();
 }
 
+function normalizeArgForPathCheck(arg: string): string {
+  return arg.replace(/^['"]+|['"]+$/g, "");
+}
+
+function hasWildcardToken(args: string[]): boolean {
+  return args.some((arg) => {
+    const normalized = normalizeArgForPathCheck(arg);
+    return normalized.includes("*") || normalized.includes("?");
+  });
+}
+
+function resolveDeletionFlags(command: string, args: string[]): { recursive: boolean; force: boolean } {
+  const normalizedCommand = command.toLowerCase();
+  let recursive = false;
+  let force = false;
+
+  for (const rawArg of args) {
+    const arg = rawArg.toLowerCase();
+    if (normalizedCommand === "rm" || normalizedCommand === "remove") {
+      if (arg === "--recursive") recursive = true;
+      if (arg === "--force") force = true;
+      if (arg.startsWith("-") && arg !== "-" && arg !== "--") {
+        if (arg.includes("r")) recursive = true;
+        if (arg.includes("f")) force = true;
+      }
+      continue;
+    }
+
+    if (normalizedCommand === "rmdir" || normalizedCommand === "rd") {
+      if (arg === "/s") recursive = true;
+      if (arg === "/q") force = true;
+      continue;
+    }
+
+    if (normalizedCommand === "del" || normalizedCommand === "erase") {
+      if (arg === "/s") recursive = true;
+      if (arg === "/f" || arg === "/q") force = true;
+      continue;
+    }
+
+    if (normalizedCommand === "remove-item") {
+      if (arg === "-recurse" || arg === "-recursive") recursive = true;
+      if (arg === "-force" || arg === "-confirm:$false") force = true;
+      continue;
+    }
+  }
+
+  return { recursive, force };
+}
+
+function detectDeletionByCommand(command: string, args: string[], underPrivilegeEscalation = false): DestructiveMatch | undefined {
+  const normalizedCommand = command.toLowerCase();
+  if (!DELETE_COMMANDS.has(normalizedCommand)) {
+    return undefined;
+  }
+
+  const normalizedArgs = args.map(String);
+  const { recursive, force } = resolveDeletionFlags(normalizedCommand, normalizedArgs);
+  const wildcard = hasWildcardToken(normalizedArgs);
+  const systemPath = hasDangerousPath(normalizedArgs.map(normalizeArgForPathCheck));
+
+  if (underPrivilegeEscalation || recursive || force || wildcard || systemPath) {
+    const criticalSignals: string[] = [];
+    if (underPrivilegeEscalation) criticalSignals.push("privilege");
+    if (recursive) criticalSignals.push("recursive");
+    if (force) criticalSignals.push("force");
+    if (wildcard) criticalSignals.push("wildcard");
+    if (systemPath) criticalSignals.push("system-path");
+    return {
+      category: "file_delete",
+      reason: `${normalizedCommand} deletion marked critical (${criticalSignals.join(",")})`,
+      severity: "critical",
+      pattern: normalizedCommand,
+    };
+  }
+
+  return {
+    category: "file_delete",
+    reason: `${normalizedCommand} deletion command`,
+    severity: "high",
+    pattern: normalizedCommand,
+  };
+}
+
 function applyPowershellRules(script: string): DestructiveMatch | undefined {
   const compiled = getCompiledRules();
   for (const rule of compiled.powershellRules) {
@@ -701,9 +810,22 @@ export function detectDestructive(
 
   const cmdName = normalizeCommandName(command) || name;
 
+  // exec-style 工具下，支持直接 PowerShell cmdlet（例如 Remove-Item ...）
+  // 不要求必须以 "powershell/pwsh" 作为命令前缀。
+  if (fullCommand && EXEC_STYLE_TOOL_RE.test(name)) {
+    const psMatch = applyPowershellRules(fullCommand.toLowerCase());
+    if (psMatch) {
+      return psMatch;
+    }
+  }
+
   const privEsc = checkPrivilegeEscalation(cmdName, args);
   if (privEsc) {
     const innerCmdName = normalizeCommandName(privEsc.innerCommand);
+    const privilegedDeletionMatch = detectDeletionByCommand(innerCmdName, privEsc.innerArgs, true);
+    if (privilegedDeletionMatch) {
+      return privilegedDeletionMatch;
+    }
 
     if (innerCmdName === "rm" || innerCmdName === "del" || innerCmdName === "remove") {
       const rmMatch = isDestructiveRm(privEsc.innerArgs);
@@ -763,6 +885,11 @@ export function detectDestructive(
     return privEsc.match;
   }
 
+  const deletionMatch = detectDeletionByCommand(cmdName, args);
+  if (deletionMatch) {
+    return deletionMatch;
+  }
+
   if (cmdName === "rm" || cmdName === "del" || cmdName === "remove") {
     const rmMatch = isDestructiveRm(args);
     if (rmMatch) {
@@ -788,14 +915,6 @@ export function detectDestructive(
     const xargsMatch = isDestructiveXargs(args);
     if (xargsMatch) {
       return xargsMatch;
-    }
-  }
-
-  if (cmdName === "powershell" || cmdName === "pwsh") {
-    const psScript = [command, ...args].join(" ").toLowerCase();
-    const psMatch = applyPowershellRules(psScript);
-    if (psMatch) {
-      return psMatch;
     }
   }
 

@@ -6,7 +6,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { app, shell } from 'electron';
-import { getOpenClawConfigDir, ensureDir, getClawHubCliBinPath, getClawHubCliEntryPath, quoteForCmd } from '../utils/paths';
+import { getOpenClawConfigDir, ensureDir, getClawHubCliBinPath, getClawHubCliEntryPath } from '../utils/paths';
 
 export interface ClawHubSearchParams {
     query: string;
@@ -50,7 +50,9 @@ export class ClawHubService {
         const entryPath = getClawHubCliEntryPath();
 
         this.cliEntryPath = entryPath;
-        if (!app.isPackaged && fs.existsSync(binPath)) {
+        const forceNodeRunner = process.platform === 'win32';
+
+        if (!forceNodeRunner && !app.isPackaged && fs.existsSync(binPath)) {
             this.cliPath = binPath;
             this.useNodeRunner = false;
         } else {
@@ -135,8 +137,6 @@ export class ClawHubService {
             const displayCommand = [this.cliPath, ...commandArgs].join(' ');
             console.log(`Running ClawHub command: ${displayCommand}`);
 
-            const isWin = process.platform === 'win32';
-            const useShell = isWin && !this.useNodeRunner;
             const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
             const env = {
                 ...baseEnv,
@@ -146,11 +146,9 @@ export class ClawHubService {
             if (this.useNodeRunner) {
                 env.ELECTRON_RUN_AS_NODE = '1';
             }
-            const spawnCmd = useShell ? quoteForCmd(this.cliPath) : this.cliPath;
-            const spawnArgs = useShell ? commandArgs.map(a => quoteForCmd(a)) : commandArgs;
-            const child = spawn(spawnCmd, spawnArgs, {
+            const child = spawn(this.cliPath, commandArgs, {
                 cwd: this.workDir,
-                shell: useShell,
+                shell: false,
                 env: {
                     ...env,
                     CLAWHUB_WORKDIR: this.workDir,

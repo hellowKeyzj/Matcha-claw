@@ -1,5 +1,5 @@
 {
-  "name": "@matchaclaw/openclaw-security-plugin",
+  "name": "@matchaclaw/security-core",
   "version": "0.1.0",
   "private": true,
   "description": "Standalone security plugin for Matcha-claw",

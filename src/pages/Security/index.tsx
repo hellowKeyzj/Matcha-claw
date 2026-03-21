@@ -445,6 +445,7 @@ export function SecurityPage() {
   const [platformTools, setPlatformTools] = useState<PlatformTool[]>([]);
   const [loadingPlatformTools, setLoadingPlatformTools] = useState(false);
   const [platformToolsError, setPlatformToolsError] = useState<string | null>(null);
+  const [platformToolsHydrated, setPlatformToolsHydrated] = useState(false);
   const [allowlistRegexTab, setAllowlistRegexTab] = useState<AllowlistRegexTab>('allowlistTools');
   const [ruleCatalog, setRuleCatalog] = useState<RuleCatalogItem[]>([]);
   const [loadingRuleCatalog, setLoadingRuleCatalog] = useState(false);
@@ -506,10 +507,14 @@ export function SecurityPage() {
     }
   }, [policy, t]);
 
-  const loadPlatformTools = useCallback(async () => {
+  const loadPlatformTools = useCallback(async (options?: { refresh?: boolean }) => {
+    const refresh = options?.refresh === true;
     setLoadingPlatformTools(true);
+    setPlatformToolsHydrated(true);
     try {
-      const payload = await hostApiFetch<{ success?: boolean; tools?: PlatformTool[] }>('/api/platform/tools?includeDisabled=true');
+      const payload = await hostApiFetch<{ success?: boolean; tools?: PlatformTool[] }>(
+        `/api/platform/tools?includeDisabled=true&refresh=${refresh ? 'true' : 'false'}`,
+      );
       const tools = Array.isArray(payload?.tools) ? payload.tools : [];
       const normalized = tools
         .filter((tool): tool is PlatformTool => Boolean(tool && typeof tool.id === 'string' && tool.id.trim().length > 0))
@@ -582,8 +587,10 @@ export function SecurityPage() {
   }, [loadRecentAudits]);
 
   useEffect(() => {
-    void loadPlatformTools();
-  }, [loadPlatformTools]);
+    if (activeSection !== 'allowlistRegex') return;
+    if (platformToolsHydrated) return;
+    void loadPlatformTools({ refresh: false });
+  }, [activeSection, loadPlatformTools, platformToolsHydrated]);
 
   useEffect(() => {
     void loadRuleCatalog();
@@ -1011,7 +1018,7 @@ export function SecurityPage() {
                     variant="outline"
                     size="sm"
                     disabled={loadingPlatformTools}
-                    onClick={() => void loadPlatformTools()}
+                    onClick={() => void loadPlatformTools({ refresh: true })}
                   >
                     {t('allowlistRegex.refresh')}
                   </Button>

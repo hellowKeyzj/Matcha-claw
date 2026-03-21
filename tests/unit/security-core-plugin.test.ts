@@ -286,6 +286,69 @@ describe('security-core plugin', () => {
     expect(result?.block).toBe(true);
   });
 
+  it('rm -r 目录删除（无 force）至少命中 high 并可阻断', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'block',
+          high: 'block',
+          medium: 'warn',
+          low: 'log',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'rm -r /tmp/demo' } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it('rm（无参数）至少命中 high 并可阻断，不允许降为低风险放行', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'block',
+          high: 'block',
+          medium: 'warn',
+          low: 'log',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'system.run', params: { command: 'rm /tmp/demo.txt' } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it('Windows rmdir（无 /s）目录删除至少命中 high 并可阻断', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'block',
+          high: 'block',
+          medium: 'warn',
+          low: 'log',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'exec', params: { command: 'rmdir D:\\demo' } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
+  });
+
   it('命中 secret 模式时阻断工具调用', async () => {
     const { hooks } = createFakeApi();
     const beforeToolCall = hooks.get('before_tool_call');
@@ -298,7 +361,7 @@ describe('security-core plugin', () => {
     expect(result?.block).toBe(true);
   });
 
-  it('destructive 动作为 confirm 时，exec 类工具改写 ask=always', async () => {
+  it('destructive 动作为 confirm 时，exec 显式确认后会注入 ask=always 并放行', async () => {
     const { hooks } = createFakeApi({
       destructive: {
         severityActions: {
@@ -313,11 +376,76 @@ describe('security-core plugin', () => {
     expect(beforeToolCall).toBeTypeOf('function');
 
     const result = await beforeToolCall?.(
-      { toolName: 'system.run', params: { command: 'rm -rf /tmp/demo' } },
+      { toolName: 'system.run', params: { command: 'rm -rf /tmp/demo', _clawguardian_confirm: true } },
       { sessionKey: 'agent:main:main', agentId: 'main' },
     );
     expect(result?.block).toBeUndefined();
     expect(result?.params?.ask).toBe('always');
+    expect(result?.params?._clawguardian_confirm).toBeUndefined();
+  });
+
+  it('destructive 动作为 confirm 时，exec 直接执行 PowerShell cmdlet 且显式确认后会注入 ask=always', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'confirm',
+          high: 'confirm',
+          medium: 'confirm',
+          low: 'confirm',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'exec', params: { command: 'Remove-Item -Recurse -Force D:\\test', _clawguardian_confirm: true } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBeUndefined();
+    expect(result?.params?.ask).toBe('always');
+  });
+
+  it('PowerShell Remove-Item -Recurse（不带 -Force）应命中 destructive 并可阻断', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'block',
+          high: 'block',
+          medium: 'warn',
+          low: 'log',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'exec', params: { command: 'Remove-Item -Recurse D:\\test' } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
+  });
+
+  it('PowerShell Remove-Item（无 Recurse/Force）至少命中 high 并可阻断', async () => {
+    const { hooks } = createFakeApi({
+      destructive: {
+        severityActions: {
+          critical: 'block',
+          high: 'block',
+          medium: 'warn',
+          low: 'log',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      { toolName: 'exec', params: { command: 'Remove-Item D:\\test\\demo.txt' } },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBe(true);
   });
 
   it('destructive 动作为 confirm 时，非 exec 工具需要确认标记后才放行', async () => {
@@ -403,6 +531,36 @@ describe('security-core plugin', () => {
     expect(allowed?.block).toBeUndefined();
     expect(String(allowed?.params?.authorization ?? '')).toContain('[REDACTED');
     expect(allowed?.params?._clawguardian_confirm).toBeUndefined();
+  });
+
+  it('secret 动作为 confirm 时，exec 类工具确认后会附带 ask=always', async () => {
+    const { hooks } = createFakeApi({
+      secrets: {
+        severityActions: {
+          critical: 'confirm',
+          high: 'confirm',
+          medium: 'confirm',
+          low: 'confirm',
+        },
+      },
+    });
+    const beforeToolCall = hooks.get('before_tool_call');
+    expect(beforeToolCall).toBeTypeOf('function');
+
+    const result = await beforeToolCall?.(
+      {
+        toolName: 'process.run',
+        params: {
+          command: 'echo token',
+          authorization: 'Bearer sk-proj-1234567890abcdefghijklmn',
+          _clawguardian_confirm: true,
+        },
+      },
+      { sessionKey: 'agent:main:main', agentId: 'main' },
+    );
+    expect(result?.block).toBeUndefined();
+    expect(result?.params?.ask).toBe('always');
+    expect(String(result?.params?.authorization ?? '')).toContain('[REDACTED');
   });
 
   it('destructive 动作为 warn 时，仅告警不阻断', async () => {

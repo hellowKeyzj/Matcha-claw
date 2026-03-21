@@ -63,12 +63,33 @@
   },
   "powershellRules": [
     {
-      "allContains": ["remove-item", "-recurse"],
-      "anyContains": ["-force", "-confirm:$false"],
+      "allContains": ["remove-item"],
+      "anyContains": [
+        "-recurse",
+        "-recursive",
+        "-force",
+        "-confirm:$false",
+        "*",
+        "?",
+        "c:\\windows",
+        "system32",
+        "/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/boot"
+      ],
       "category": "file_delete",
       "severity": "critical",
-      "reason": "PowerShell Remove-Item with recurse+force can delete directory trees",
-      "pattern": "powershell remove-item -recurse -force"
+      "reason": "PowerShell Remove-Item with recursive/force/wildcard/system-path signals is critical",
+      "pattern": "remove-item (critical signals)"
+    },
+    {
+      "allContains": ["remove-item"],
+      "category": "file_delete",
+      "severity": "high",
+      "reason": "PowerShell Remove-Item deletion command",
+      "pattern": "remove-item"
     },
     {
       "allContains": ["stop-process", "-force"],
@@ -87,9 +108,9 @@
   ],
   "system": {
     "commandSets": {
-      "linux": ["iptables", "firewall-cmd", "ufw", "nft", "chmod", "chown", "chgrp", "systemctl", "service", "ip"],
+      "linux": ["iptables", "firewall-cmd", "ufw", "nft", "chmod", "chown", "chgrp", "systemctl", "service", "ip", "rmdir"],
       "windows": ["rmdir", "rd", "del", "erase", "taskkill", "reg", "diskpart", "netsh", "route", "icacls", "takeown", "sc"],
-      "macos": ["diskutil", "launchctl", "csrutil", "pfctl", "route"]
+      "macos": ["diskutil", "launchctl", "csrutil", "pfctl", "route", "rmdir"]
     },
     "universal": [
       {
@@ -148,6 +169,13 @@
       }
     ],
     "linux": [
+      {
+        "commands": ["rmdir"],
+        "category": "file_delete",
+        "severity": "high",
+        "reason": "rmdir deletes directories",
+        "pattern": "rmdir"
+      },
       {
         "commands": ["iptables", "firewall-cmd", "ufw", "nft"],
         "category": "network_destructive",
@@ -213,6 +241,13 @@
         "severity": "critical",
         "reason": "{command} /s recursively deletes directory tree",
         "pattern": "{command} /s"
+      },
+      {
+        "commands": ["rmdir", "rd"],
+        "category": "file_delete",
+        "severity": "high",
+        "reason": "{command} deletes directories",
+        "pattern": "{command}"
       },
       {
         "commands": ["del", "erase"],
@@ -318,6 +353,13 @@
       }
     ],
     "macos": [
+      {
+        "commands": ["rmdir"],
+        "category": "file_delete",
+        "severity": "high",
+        "reason": "rmdir deletes directories",
+        "pattern": "rmdir"
+      },
       {
         "commands": ["diskutil"],
         "anyRegex": ["(?:^|\\s)erasedisk(?:\\s|$)", "(?:^|\\s)erasevolume(?:\\s|$)", "(?:^|\\s)partitiondisk(?:\\s|$)", "apfs\\s+deletecontainer"],
