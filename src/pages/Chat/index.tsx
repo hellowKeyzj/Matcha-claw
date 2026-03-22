@@ -224,6 +224,10 @@ export function Chat() {
     };
   }, []);
 
+  useEffect(() => {
+    shouldStickToBottomRef.current = true;
+  }, [currentSessionKey]);
+
   // Auto-scroll on new messages, streaming, or activity changes.
   // Keep smooth behavior for non-stream updates; use auto during streaming to avoid animation thrash.
   useEffect(() => {
@@ -243,7 +247,7 @@ export function Chat() {
         autoScrollRafRef.current = null;
       }
     };
-  }, [messages, streamingMessage, sending, pendingFinal]);
+  }, [messages, streamingMessage, sending, pendingFinal, currentSessionKey]);
 
   // Update timestamp when sending starts
   useEffect(() => {
@@ -254,19 +258,6 @@ export function Chat() {
       setStreamingTimestamp(0);
     }
   }, [sending, streamingTimestamp]);
-
-  // Gateway not running
-  if (!isGatewayRunning) {
-    return (
-      <div className="flex h-[calc(100vh-8rem)] flex-col items-center justify-center text-center p-8">
-        <AlertCircle className="h-12 w-12 text-yellow-500 mb-4" />
-        <h2 className="text-xl font-semibold mb-2">{t('gatewayNotRunning')}</h2>
-        <p className="text-muted-foreground max-w-md">
-          {t('gatewayRequired')}
-        </p>
-      </div>
-    );
-  }
 
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as unknown as { role?: string; content?: unknown; timestamp?: number }
@@ -289,6 +280,19 @@ export function Chat() {
     currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
     Boolean(currentAgent?.isDefault),
   );
+
+  // Gateway not running
+  if (!isGatewayRunning) {
+    return (
+      <div className="flex h-[calc(100vh-8rem)] flex-col items-center justify-center text-center p-8">
+        <AlertCircle className="h-12 w-12 text-yellow-500 mb-4" />
+        <h2 className="text-xl font-semibold mb-2">{t('gatewayNotRunning')}</h2>
+        <p className="text-muted-foreground max-w-md">
+          {t('gatewayRequired')}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div
