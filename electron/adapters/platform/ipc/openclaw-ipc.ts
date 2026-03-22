@@ -837,12 +837,12 @@ export function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
           join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId),
         ]
       : [
-          join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
-          join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
-          join(__dirname, '../../build/openclaw-plugins/task-manager'),
           join(process.cwd(), 'packages', 'openclaw-task-manager-plugin'),
           join(app.getAppPath(), 'packages', 'openclaw-task-manager-plugin'),
           join(__dirname, '../../packages/openclaw-task-manager-plugin'),
+          join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
+          join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
+          join(__dirname, '../../build/openclaw-plugins/task-manager'),
         ];
 
     const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));

@@ -6,7 +6,6 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "enabled": { "type": "boolean", "default": true },
       "monitors": {
         "type": "object",
         "additionalProperties": false,

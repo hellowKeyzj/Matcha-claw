@@ -36,7 +36,6 @@ export type SecurityPolicyPayload = {
 };
 
 export type SecurityCoreRuntimeConfig = {
-  enabled: boolean;
   autoHarden: boolean;
   enableCredentialMonitor: boolean;
   enableMemoryIntegrityMonitor: boolean;

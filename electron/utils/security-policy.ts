@@ -18,7 +18,6 @@ export type SecurityDestructiveCategories = {
 };
 
 export type SecurityRuntimePolicy = {
-  enabled: boolean;
   autoHarden: boolean;
   monitors: {
     credentials: boolean;
@@ -91,7 +90,6 @@ const DEFAULT_DESTRUCTIVE_CATEGORIES: SecurityDestructiveCategories = {
 
 const PRESET_RUNTIME_TEMPLATES: Record<SecurityPreset, SecurityRuntimePolicy> = {
   strict: {
-    enabled: true,
     autoHarden: false,
     monitors: {
       credentials: true,
@@ -139,7 +137,6 @@ const PRESET_RUNTIME_TEMPLATES: Record<SecurityPreset, SecurityRuntimePolicy> = 
     secretPatterns: [],
   },
   balanced: {
-    enabled: true,
     autoHarden: false,
     monitors: {
       credentials: true,
@@ -177,7 +174,6 @@ const PRESET_RUNTIME_TEMPLATES: Record<SecurityPreset, SecurityRuntimePolicy> = 
     secretPatterns: [],
   },
   relaxed: {
-    enabled: true,
     autoHarden: false,
     monitors: {
       credentials: true,
@@ -323,7 +319,6 @@ function normalizeRuntimePolicy(value: unknown, fallback: SecurityRuntimePolicy)
   const destructive = isRecord(raw.destructive) ? raw.destructive : {};
   const secrets = isRecord(raw.secrets) ? raw.secrets : {};
   return {
-    enabled: normalizeBoolean(raw.enabled, fallback.enabled),
     autoHarden: normalizeBoolean(raw.autoHarden, fallback.autoHarden),
     monitors: {
       credentials: normalizeBoolean(monitors.credentials, fallback.monitors.credentials),
