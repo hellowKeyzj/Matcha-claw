@@ -26,6 +26,7 @@ import { HostEventBus } from '../api/event-bus';
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
+import { weixinLoginManager } from '../utils/weixin-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureLicenseGateBootstrapped } from '../utils/license';
 import { buildPlatformCompositionRoot } from './platform-composition-root';
@@ -330,6 +331,18 @@ async function initialize(): Promise<void> {
 
   whatsAppLoginManager.on('error', (error) => {
     hostEventBus.emit('channel:whatsapp-error', error);
+  });
+
+  weixinLoginManager.on('qr', (data) => {
+    hostEventBus.emit('channel:weixin-qr', data);
+  });
+
+  weixinLoginManager.on('success', (data) => {
+    hostEventBus.emit('channel:weixin-success', data);
+  });
+
+  weixinLoginManager.on('error', (error) => {
+    hostEventBus.emit('channel:weixin-error', error);
   });
 
   // Start Gateway automatically (this seeds missing bootstrap files with full templates)

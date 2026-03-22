@@ -1,5 +1,37 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-22 任务中心：共性层视觉统一（标题区/统计卡/基础卡片））
+
+### 目录树
+
+```text
+Matcha-claw/src/
+├── components/task-center/page-title.tsx (新增)
+├── components/task-center/stat-card.tsx (新增)
+├── components/task-center/styles.ts (新增)
+├── pages/Tasks/index.tsx (改：统计卡改为复用共享组件)
+└── pages/Cron/index.tsx (改：统计卡/标题区/基础卡片改为复用共享样式)
+```
+
+### 文件职责
+
+- `components/task-center/page-title.tsx`：任务中心页标题区统一组件（标题 + 副标题）。
+- `components/task-center/stat-card.tsx`：任务中心统计卡统一视觉组件，支持可点击/不可点击两种模式。
+- `components/task-center/styles.ts`：任务中心卡片基础样式常量。
+- `pages/Tasks/index.tsx`：长任务页接入统一标题区、统计卡与基础卡片样式。
+- `pages/Cron/index.tsx`：定时任务页接入统一标题区、统计卡与基础卡片样式。
+
+### 本次变更
+
+- 抽取共享标题组件 `TaskCenterPageTitle`，统一标题区层级与副标题字号。
+- 抽取共享统计卡组件 `TaskCenterStatCard`，统一图标容器、数字字号、标签字号、间距与激活态样式。
+- 抽取 `TASK_CENTER_SURFACE_CARD_CLASS`，统一任务中心基础卡片边框与阴影风格。
+- 长任务页与定时任务页均改为复用上述共性组件/样式；操作区仍按场景分化（长任务：筛选；定时任务：新建/编辑/执行）。
+
+### 验证
+
+- `pnpm -C Matcha-claw typecheck` 通过。
+
 ## 本次变更日志（2026-03-19 security-core：恢复 MEM-004/COST-004/DEGRAD 可配置语义并迁移到 canonical 字段）
 
 ### 目录树

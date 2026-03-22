@@ -21,6 +21,8 @@ import {
   AlertCircle,
   CheckCircle,
   ShieldCheck,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,6 +52,61 @@ import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 
 const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
+const QR_API_BASE_BY_TYPE: Partial<Record<ChannelType, string>> = {
+  whatsapp: '/api/channels/whatsapp',
+  'openclaw-weixin': '/api/channels/openclaw-weixin',
+};
+const QR_EVENT_PREFIX_BY_TYPE: Partial<Record<ChannelType, string>> = {
+  whatsapp: 'channel:whatsapp',
+  'openclaw-weixin': 'channel:weixin',
+};
+const WEIXIN_ADVANCED_FIELD_KEYS = new Set(['baseUrl', 'cdnBaseUrl', 'logUploadUrl', 'routeTag']);
+const QR_GENERATE_TIMEOUT_MS = 12_000;
+
+function tryDecodeUriComponent(value: string): string {
+  if (!/%[0-9A-Fa-f]{2}/.test(value)) {
+    return value;
+  }
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function isLikelyBase64(value: string): boolean {
+  const normalized = value.replace(/\s+/g, '');
+  return normalized.length > 64 && /^[A-Za-z0-9+/=]+$/.test(normalized);
+}
+
+function normalizeQrImageSource(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = tryDecodeUriComponent(value.trim());
+  if (!trimmed) {
+    return null;
+  }
+  if (/^data:image\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  const compact = trimmed.replace(/\s+/g, '');
+  if (isLikelyBase64(compact)) {
+    return `data:image/png;base64,${compact}`;
+  }
+  return null;
+}
+
+function resolveQrImageSource(payload: { qrDataUrl?: string; qr?: string; raw?: string }): string | null {
+  return (
+    normalizeQrImageSource(payload.qrDataUrl)
+    ?? normalizeQrImageSource(payload.qr)
+    ?? normalizeQrImageSource(payload.raw)
+  );
+}
 
 export function Channels() {
   const { t } = useTranslation('channels');
@@ -59,7 +116,7 @@ export function Channels() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [selectedChannelType, setSelectedChannelType] = useState<ChannelType | null>(null);
   const [configuredTypes, setConfiguredTypes] = useState<string[]>([]);
-  const [channelToDelete, setChannelToDelete] = useState<{ id: string } | null>(null);
+  const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType } | null>(null);
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
   const statusRefreshLastAtRef = useRef(0);
@@ -238,7 +295,7 @@ export function Channels() {
                 <ChannelCard
                   key={channel.id}
                   channel={channel}
-                  onDelete={() => setChannelToDelete({ id: channel.id })}
+                  onDelete={() => setChannelToDelete({ id: channel.id, type: channel.type })}
                 />
               ))}
             </div>
@@ -322,6 +379,8 @@ export function Channels() {
         onConfirm={async () => {
           if (channelToDelete) {
             await deleteChannel(channelToDelete.id);
+            await fetchChannels({ silent: true });
+            await fetchConfiguredTypes();
             setChannelToDelete(null);
           }
         }}
@@ -393,30 +452,45 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const [connecting, setConnecting] = useState(false);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [qrCode, setQrCode] = useState<string | null>(null);
+  const [qrImageFailed, setQrImageFailed] = useState(false);
   const [validating, setValidating] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [isExistingConfig, setIsExistingConfig] = useState(false);
+  const qrGenerateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
   const [validationResult, setValidationResult] = useState<{
     valid: boolean;
     errors: string[];
     warnings: string[];
   } | null>(null);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   const meta: ChannelMeta | null = selectedType ? CHANNEL_META[selectedType] : null;
+
+  const clearQrGenerateTimeout = useCallback(() => {
+    if (qrGenerateTimeoutRef.current) {
+      clearTimeout(qrGenerateTimeoutRef.current);
+      qrGenerateTimeoutRef.current = null;
+    }
+  }, []);
 
   // Load existing config when a channel type is selected
   useEffect(() => {
     if (!selectedType) {
+      clearQrGenerateTimeout();
+      setConnecting(false);
       setConfigValues({});
       setChannelName('');
       setIsExistingConfig(false);
-      setChannelName('');
-      setIsExistingConfig(false);
-      // Ensure we clean up any pending QR session if switching away
-      hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
+      setQrCode(null);
+      setQrImageFailed(false);
+      setShowAdvancedSettings(false);
+      // 清理可能存在的二维码会话
+      void hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
+      void hostApiFetch('/api/channels/openclaw-weixin/cancel', { method: 'POST' }).catch(() => { });
       return;
     }
+    setShowAdvancedSettings(false);
 
     let cancelled = false;
     setLoadingConfig(true);
@@ -448,7 +522,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     })();
 
     return () => { cancelled = true; };
-  }, [selectedType]);
+  }, [selectedType, clearQrGenerateTimeout]);
 
   // Focus first input when form is ready (avoids Windows focus loss after native dialogs)
   useEffect(() => {
@@ -457,63 +531,87 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     }
   }, [selectedType, loadingConfig]);
 
-  // Listen for WhatsApp QR events
+  // 监听二维码渠道事件（WhatsApp / WeChat）
   useEffect(() => {
-    if (selectedType !== 'whatsapp') return;
+    if (!selectedType || CHANNEL_META[selectedType].connectionType !== 'qr') return;
+    const eventPrefix = QR_EVENT_PREFIX_BY_TYPE[selectedType];
+    const qrApiBase = QR_API_BASE_BY_TYPE[selectedType];
+    if (!eventPrefix || !qrApiBase) return;
 
-    const onQr = (...args: unknown[]) => {
-      const data = args[0] as { qr: string; raw: string };
-      setQrCode(`data:image/png;base64,${data.qr}`);
+    const onQr = (data: { qr?: string; qrDataUrl?: string; raw?: string }) => {
+      clearQrGenerateTimeout();
+      const resolved = resolveQrImageSource(data ?? {});
+      if (resolved) {
+        setQrImageFailed(false);
+        setQrCode(resolved);
+        setConnecting(false);
+      } else {
+        setQrCode(null);
+      }
     };
 
-    const onSuccess = async (...args: unknown[]) => {
-      const data = args[0] as { accountId?: string } | undefined;
-      toast.success(t('toast.whatsappConnected'));
+    const onSuccess = async (data?: { accountId?: string }) => {
+      clearQrGenerateTimeout();
+      if (selectedType === 'whatsapp') {
+        toast.success(t('toast.whatsappConnected'));
+      } else {
+        toast.success(t('toast.channelSaved', { name: CHANNEL_NAMES[selectedType] }));
+      }
       const accountId = data?.accountId || channelName.trim() || 'default';
-      try {
-        const saveResult = await hostApiFetch<{ success?: boolean; error?: string }>('/api/channels/config', {
-          method: 'POST',
-          body: JSON.stringify({ channelType: 'whatsapp', config: { enabled: true } }),
-        });
-        if (!saveResult?.success) {
-          console.error('Failed to save WhatsApp config:', saveResult?.error);
-        } else {
-          console.info('Saved WhatsApp config for account:', accountId);
+      if (selectedType === 'whatsapp') {
+        try {
+          const saveResult = await hostApiFetch<{ success?: boolean; error?: string }>('/api/channels/config', {
+            method: 'POST',
+            body: JSON.stringify({ channelType: 'whatsapp', config: { enabled: true } }),
+          });
+          if (!saveResult?.success) {
+            console.error('Failed to save WhatsApp config:', saveResult?.error);
+          } else {
+            console.info('Saved WhatsApp config for account:', accountId);
+          }
+        } catch (error) {
+          console.error('Failed to save WhatsApp config:', error);
         }
-      } catch (error) {
-        console.error('Failed to save WhatsApp config:', error);
       }
       // Register the channel locally so it shows up immediately
       addChannel({
-        type: 'whatsapp',
-        name: channelName || 'WhatsApp',
+        type: selectedType,
+        name: channelName || CHANNEL_NAMES[selectedType],
       }).then(() => {
         // Restart gateway to pick up the new session
         useGatewayStore.getState().restart().catch(console.error);
         onChannelAdded();
       });
-    };
-
-    const onError = (...args: unknown[]) => {
-      const err = args[0] as string;
-      console.error('WhatsApp Login Error:', err);
-      toast.error(t('toast.whatsappFailed', { error: err }));
-      setQrCode(null);
       setConnecting(false);
     };
 
-    const removeQrListener = subscribeHostEvent('channel:whatsapp-qr', onQr);
-    const removeSuccessListener = subscribeHostEvent('channel:whatsapp-success', onSuccess);
-    const removeErrorListener = subscribeHostEvent('channel:whatsapp-error', onError);
+    const onError = (raw: unknown) => {
+      clearQrGenerateTimeout();
+      const err = typeof raw === 'string' ? raw : String(raw ?? '');
+      console.error('QR Login Error:', err);
+      if (selectedType === 'whatsapp') {
+        toast.error(t('toast.whatsappFailed', { error: err }));
+      } else {
+        toast.error(t('toast.configFailed', { error: err }));
+      }
+      setQrCode(null);
+      setQrImageFailed(false);
+      setConnecting(false);
+    };
+
+    const removeQrListener = subscribeHostEvent(`${eventPrefix}-qr`, onQr);
+    const removeSuccessListener = subscribeHostEvent(`${eventPrefix}-success`, onSuccess);
+    const removeErrorListener = subscribeHostEvent(`${eventPrefix}-error`, onError);
 
     return () => {
       if (typeof removeQrListener === 'function') removeQrListener();
       if (typeof removeSuccessListener === 'function') removeSuccessListener();
       if (typeof removeErrorListener === 'function') removeErrorListener();
+      clearQrGenerateTimeout();
       // Cancel when unmounting or switching types
-      hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
+      void hostApiFetch(`${qrApiBase}/cancel`, { method: 'POST' }).catch(() => { });
     };
-  }, [selectedType, addChannel, channelName, onChannelAdded, t]);
+  }, [selectedType, addChannel, channelName, onChannelAdded, t, clearQrGenerateTimeout]);
 
   const handleValidate = async () => {
     if (!selectedType) return;
@@ -567,10 +665,22 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     try {
       // For QR-based channels, request QR code
       if (meta.connectionType === 'qr') {
+        const qrApiBase = QR_API_BASE_BY_TYPE[selectedType];
+        if (!qrApiBase) {
+          throw new Error(`Unsupported QR channel type: ${selectedType}`);
+        }
+        clearQrGenerateTimeout();
+        qrGenerateTimeoutRef.current = setTimeout(() => {
+          setConnecting(false);
+          toast.error(t('toast.qrGenerateTimeout'));
+        }, QR_GENERATE_TIMEOUT_MS);
         const accountId = channelName.trim() || 'default';
-        await hostApiFetch('/api/channels/whatsapp/start', {
+        await hostApiFetch(`${qrApiBase}/start`, {
           method: 'POST',
-          body: JSON.stringify({ accountId }),
+          body: JSON.stringify({
+            accountId,
+            config: configValues,
+          }),
         });
         // The QR code will be set via event listener
         return;
@@ -660,6 +770,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       await new Promise((resolve) => setTimeout(resolve, 800));
       onChannelAdded();
     } catch (error) {
+      clearQrGenerateTimeout();
       toast.error(t('toast.configFailed', { error }));
       setConnecting(false);
     }
@@ -700,6 +811,12 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   const toggleSecretVisibility = (key: string) => {
     setShowSecrets((prev) => ({ ...prev, [key]: !prev[key] }));
   };
+
+  const isWeixinChannel = selectedType === 'openclaw-weixin';
+  const regularFields = meta?.configFields.filter((field) => !WEIXIN_ADVANCED_FIELD_KEYS.has(field.key)) ?? [];
+  const advancedFields = isWeixinChannel
+    ? meta?.configFields.filter((field) => WEIXIN_ADVANCED_FIELD_KEYS.has(field.key)) ?? []
+    : [];
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
@@ -748,8 +865,13 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
             // QR Code display
             <div className="text-center space-y-4">
               <div className="bg-white p-4 rounded-lg inline-block shadow-sm border">
-                {qrCode.startsWith('data:image') ? (
-                  <img src={qrCode} alt="Scan QR Code" className="w-64 h-64 object-contain" />
+                {!qrImageFailed ? (
+                  <img
+                    src={qrCode}
+                    alt={t('dialog.qrImageAlt', { name: meta?.name || 'QR Code' })}
+                    className="w-64 h-64 object-contain"
+                    onError={() => setQrImageFailed(true)}
+                  />
                 ) : (
                   <div className="w-64 h-64 bg-gray-100 flex items-center justify-center">
                     <QrCode className="h-32 w-32 text-gray-400" />
@@ -762,6 +884,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
               <div className="flex justify-center gap-2">
                 <Button variant="outline" onClick={() => {
                   setQrCode(null);
+                  setQrImageFailed(false);
                   handleConnect(); // Retry
                 }}>
                   {t('dialog.refreshCode')}
@@ -819,7 +942,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
               </div>
 
               {/* Configuration fields */}
-              {meta?.configFields.map((field) => (
+              {regularFields.map((field) => (
                 <ConfigField
                   key={field.key}
                   field={field}
@@ -829,6 +952,38 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
                   onToggleSecret={() => toggleSecretVisibility(field.key)}
                 />
               ))}
+
+              {/* Weixin optional advanced settings */}
+              {isWeixinChannel && advancedFields.length > 0 && (
+                <div className="rounded-lg border border-border/80 bg-muted/20 p-3 space-y-3">
+                  <button
+                    type="button"
+                    className="w-full flex items-center justify-between text-sm font-medium"
+                    onClick={() => setShowAdvancedSettings((prev) => !prev)}
+                  >
+                    <span>{t('dialog.advancedSettings')}</span>
+                    {showAdvancedSettings ? (
+                      <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                    )}
+                  </button>
+                  {showAdvancedSettings && (
+                    <div className="space-y-4">
+                      {advancedFields.map((field) => (
+                        <ConfigField
+                          key={field.key}
+                          field={field}
+                          value={configValues[field.key] || ''}
+                          onChange={(value) => updateConfigValue(field.key, value)}
+                          showSecret={showSecrets[field.key] || false}
+                          onToggleSecret={() => toggleSecretVisibility(field.key)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Validation Results */}
               {validationResult && (

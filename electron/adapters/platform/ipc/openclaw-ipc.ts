@@ -751,6 +751,66 @@ export function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
   }
 
+  async function ensureWeixinPluginInstalled(): Promise<ManagedPluginInstallResult> {
+    const pluginId = 'openclaw-weixin';
+    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+    const targetManifest = join(targetDir, 'openclaw.plugin.json');
+
+    if (existsSync(targetManifest)) {
+      logger.info('Weixin plugin already installed from local mirror');
+      return {
+        installed: true,
+        installedPath: targetDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
+    }
+
+    const candidateSources = app.isPackaged
+      ? [
+          join(process.resourcesPath, 'openclaw-plugins', pluginId),
+          join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginId),
+          join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId)
+        ]
+      : [
+          join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
+          join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
+          join(__dirname, `../../build/openclaw-plugins/${pluginId}`),
+        ];
+
+    const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+    if (!sourceDir) {
+      logger.warn('Bundled Weixin plugin mirror not found in candidate paths', { candidateSources });
+      return {
+        installed: false,
+        warning: `Bundled Weixin plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
+      };
+    }
+
+    try {
+      mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
+      rmSync(targetDir, { recursive: true, force: true });
+      cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+
+      if (!existsSync(targetManifest)) {
+        return { installed: false, warning: 'Failed to install Weixin plugin mirror (manifest missing).' };
+      }
+
+      logger.info(`Installed Weixin plugin from bundled mirror: ${sourceDir}`);
+      return {
+        installed: true,
+        installedPath: targetDir,
+        sourcePath: sourceDir,
+        version: getInstalledPluginVersion(pluginId),
+      };
+    } catch (error) {
+      logger.warn('Failed to install Weixin plugin from bundled mirror:', error);
+      return {
+        installed: false,
+        warning: 'Failed to install bundled Weixin plugin mirror',
+      };
+    }
+  }
+
   async function ensureTaskManagerPluginInstalled(): Promise<{
     installed: boolean;
     warning?: string;
@@ -1027,6 +1087,33 @@ export function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
         }
         await saveChannelConfig(channelType, config);
         ensurePluginInstallRecordInConfig('qqbot', {
+          source: 'path',
+          installPath: installResult.installedPath,
+          sourcePath: installResult.sourcePath,
+          version: installResult.version,
+        });
+        if (gatewayManager.getStatus().state !== 'stopped') {
+          logger.info(`Scheduling Gateway reload after channel:saveConfig (${channelType})`);
+          gatewayManager.debouncedReload();
+        } else {
+          logger.info(`Gateway is stopped; skip immediate reload after channel:saveConfig (${channelType})`);
+        }
+        return {
+          success: true,
+          pluginInstalled: installResult.installed,
+          warning: installResult.warning,
+        };
+      }
+      if (channelType === 'openclaw-weixin') {
+        const installResult = await ensureWeixinPluginInstalled();
+        if (!installResult.installed) {
+          return {
+            success: false,
+            error: installResult.warning || 'Weixin plugin install failed',
+          };
+        }
+        await saveChannelConfig(channelType, config);
+        ensurePluginInstallRecordInConfig('openclaw-weixin', {
           source: 'path',
           installPath: installResult.installedPath,
           sourcePath: installResult.sourcePath,

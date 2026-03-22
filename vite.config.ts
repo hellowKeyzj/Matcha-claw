@@ -4,6 +4,9 @@ import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
 
+const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//];
+const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
+
 // https://vitejs.dev/config/
 export default defineConfig({
   // Required for Electron: all asset URLs must be relative because the renderer
@@ -24,7 +27,13 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron/main',
             rollupOptions: {
-              external: ['electron-store', 'electron-updater', 'ws'],
+              external: [
+                'electron-store',
+                'electron-updater',
+                'ws',
+                ...nativeAddonExternal,
+                ...qrTerminalExternal,
+              ],
             },
           },
         },
@@ -59,5 +68,11 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      external: [
+        ...nativeAddonExternal,
+        ...qrTerminalExternal,
+      ],
+    },
   },
 });

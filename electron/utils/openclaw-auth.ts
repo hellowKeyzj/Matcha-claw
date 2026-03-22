@@ -942,18 +942,25 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     console.log('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
   }
 
-  // ── plugins.entries.feishu cleanup ──────────────────────────────
-  // The official feishu plugin registers its channel AS 'feishu' via
-  // openclaw.plugin.json.  An explicit entries.feishu.enabled=false
-  // (set by older ClawX to disable the legacy built-in) blocks the
-  // official plugin's channel from starting.  Delete it.
-  if (typeof plugins === 'object' && !Array.isArray(plugins)) {
+  // ── plugins.entries cleanup ─────────────────────────────────────
+  // feishu: remove legacy stale key that may block official plugin load.
+  const plugins = config.plugins;
+  if (plugins && typeof plugins === 'object' && !Array.isArray(plugins)) {
     const pluginsObj = plugins as Record<string, unknown>;
     const pEntries = pluginsObj.entries as Record<string, Record<string, unknown>> | undefined;
-    if (pEntries?.feishu) {
-      console.log('[sanitize] Removing stale plugins.entries.feishu that blocks the official feishu plugin channel');
-      delete pEntries.feishu;
-      modified = true;
+    if (pEntries && typeof pEntries === 'object') {
+      let cleaned = false;
+      if (pEntries.feishu) {
+        console.log('[sanitize] Removing stale plugins.entries.feishu that blocks the official feishu plugin channel');
+        delete pEntries.feishu;
+        cleaned = true;
+      }
+      if (cleaned) {
+        if (Object.keys(pEntries).length === 0) {
+          delete pluginsObj.entries;
+        }
+        modified = true;
+      }
     }
   }
 
@@ -992,4 +999,3 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 }
 
 export { getProviderEnvVar } from './provider-registry';
-
