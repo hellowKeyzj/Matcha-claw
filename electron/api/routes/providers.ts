@@ -18,6 +18,20 @@ import { getProviderService } from '../../services/providers/provider-service';
 import { providerAccountToConfig } from '../../services/providers/provider-store';
 import type { ProviderAccount } from '../../shared/providers/types';
 
+function pickFallbackDefaultAccount(accounts: ProviderAccount[]): ProviderAccount | null {
+  if (accounts.length === 0) {
+    return null;
+  }
+  const sorted = [...accounts].sort((left, right) => {
+    const byUpdatedAt = right.updatedAt.localeCompare(left.updatedAt);
+    if (byUpdatedAt !== 0) {
+      return byUpdatedAt;
+    }
+    return left.id.localeCompare(right.id);
+  });
+  return sorted[0] ?? null;
+}
+
 export async function handleProviderRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -198,6 +212,7 @@ export async function handleProviderRoutes(
     const accountId = decodeURIComponent(accountMatch[1]);
     try {
       const existing = await providerService.getAccount(accountId);
+      const defaultAccountIdBeforeDelete = await providerService.getDefaultAccountId();
       const runtimeProviderKey = existing?.authMode === 'oauth_browser'
         ? (existing.vendorId === 'google'
           ? 'google-gemini-cli'
@@ -220,6 +235,16 @@ export async function handleProviderRoutes(
         ctx.gatewayManager,
         runtimeProviderKey,
       );
+
+      if (defaultAccountIdBeforeDelete === accountId) {
+        const remainingAccounts = await providerService.listAccounts();
+        const fallbackDefault = pickFallbackDefaultAccount(remainingAccounts);
+        if (fallbackDefault) {
+          await providerService.setDefaultAccount(fallbackDefault.id);
+          await syncDefaultProviderToRuntime(fallbackDefault.id, ctx.gatewayManager);
+        }
+      }
+
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

@@ -176,7 +176,6 @@ export function resolveRuntimeConfig(rawConfig: unknown): SecurityCoreRuntimeCon
     ? config.logging as Record<string, unknown>
     : {};
   return {
-    enabled: typeof config.enabled === "boolean" ? config.enabled : true,
     autoHarden: typeof config.autoHarden === "boolean" ? config.autoHarden : false,
     enableCredentialMonitor: typeof monitors.credentials === "boolean" ? monitors.credentials : true,
     enableMemoryIntegrityMonitor: typeof monitors.memory === "boolean" ? monitors.memory : true,

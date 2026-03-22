@@ -214,7 +214,6 @@ function shouldReconcileMonitors(prev: SecurityCoreRuntimeConfig, next: Security
 function buildEmergencyLockdownConfig(base: SecurityCoreRuntimeConfig): SecurityCoreRuntimeConfig {
   return {
     ...base,
-    enabled: true,
     runtimeGuardEnabled: true,
     auditOnGatewayStart: true,
     enablePromptInjectionGuard: true,

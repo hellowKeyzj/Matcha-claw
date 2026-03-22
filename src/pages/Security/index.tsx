@@ -18,7 +18,6 @@ type Severity = 'critical' | 'high' | 'medium' | 'low';
 type FailureMode = 'block_all' | 'safe_mode' | 'read_only' | null;
 
 type RuntimePolicy = {
-  enabled: boolean;
   runtimeGuardEnabled: boolean;
   auditOnGatewayStart: boolean;
   autoHarden: boolean;
@@ -96,7 +95,6 @@ type RuleCatalogItem = {
   reason: string;
 };
 type SecuritySectionKey =
-  | 'meta'
   | 'runtime'
   | 'matrix'
   | 'ruleCatalog'
@@ -117,7 +115,6 @@ function normalizeDestructiveAction(value: Action): Action {
 
 const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
   strict: {
-    enabled: true,
     runtimeGuardEnabled: true,
     auditOnGatewayStart: true,
     autoHarden: false,
@@ -154,7 +151,6 @@ const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
     secretPatterns: [],
   },
   balanced: {
-    enabled: true,
     runtimeGuardEnabled: true,
     auditOnGatewayStart: true,
     autoHarden: false,
@@ -191,7 +187,6 @@ const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
     secretPatterns: [],
   },
   relaxed: {
-    enabled: true,
     runtimeGuardEnabled: true,
     auditOnGatewayStart: true,
     autoHarden: false,
@@ -353,7 +348,6 @@ function normalizePolicy(raw: unknown): SecurityPolicy {
     preset,
     securityPolicyVersion,
     runtime: {
-      enabled: toBool(runtimeRaw.enabled, runtimeTemplate.enabled),
       runtimeGuardEnabled: toBool(runtimeRaw.runtimeGuardEnabled, runtimeTemplate.runtimeGuardEnabled),
       auditOnGatewayStart: toBool(runtimeRaw.auditOnGatewayStart, runtimeTemplate.auditOnGatewayStart),
       autoHarden: toBool(runtimeRaw.autoHarden, runtimeTemplate.autoHarden),
@@ -451,7 +445,7 @@ export function SecurityPage() {
   const [loadingRuleCatalog, setLoadingRuleCatalog] = useState(false);
   const [ruleCatalogError, setRuleCatalogError] = useState<string | null>(null);
   const [ruleCatalogPlatform, setRuleCatalogPlatform] = useState<RuleCatalogPlatform>('all');
-  const [activeSection, setActiveSection] = useState<SecuritySectionKey>('meta');
+  const [activeSection, setActiveSection] = useState<SecuritySectionKey>('runtime');
 
   const updateRuntime = useCallback((updater: (current: RuntimePolicy) => RuntimePolicy) => {
     setPolicy((prev) => ({ ...prev, runtime: updater(prev.runtime) }));
@@ -632,7 +626,6 @@ export function SecurityPage() {
       return a.platform.localeCompare(b.platform);
     });
   const sectionItems: Array<{ key: SecuritySectionKey; label: string }> = [
-    { key: 'meta', label: t('runtimePreset.nav') },
     { key: 'runtime', label: t('sections.runtime') },
     { key: 'matrix', label: t('sections.matrix') },
     { key: 'ruleCatalog', label: t('sections.ruleCatalog') },
@@ -820,24 +813,23 @@ export function SecurityPage() {
 
         <div className="space-y-6">
 
-      {activeSection === 'meta' && (
-      <Card>
-        <CardHeader>
-          <CardTitle>{t('runtimePreset.title')}</CardTitle>
-          <CardDescription>{t('runtimePreset.description')}</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-1">
-          <div><Label htmlFor="security-preset">{t('runtimePreset.mode')}</Label><Select id="security-preset" value={policy.preset} onChange={(e) => applyPresetTemplate(e.target.value as Preset)}><option value="strict">{t('preset.strict')}</option><option value="balanced">{t('preset.balanced')}</option><option value="relaxed">{t('preset.relaxed')}</option></Select></div>
-        </CardContent>
-      </Card>
-      )}
-
       {activeSection === 'runtime' && (
       <Card>
         <CardHeader><CardTitle>{t('runtime.title')}</CardTitle><CardDescription>{t('runtime.description')}</CardDescription></CardHeader>
         <CardContent className="space-y-3">
+          <div className="space-y-2 rounded-md border p-3">
+            <Label htmlFor="security-preset">{t('runtimePreset.mode')}</Label>
+            <Select
+              id="security-preset"
+              value={policy.preset}
+              onChange={(e) => applyPresetTemplate(e.target.value as Preset)}
+            >
+              <option value="strict">{t('preset.strict')}</option>
+              <option value="balanced">{t('preset.balanced')}</option>
+              <option value="relaxed">{t('preset.relaxed')}</option>
+            </Select>
+          </div>
           <div className="grid gap-2 md:grid-cols-2">
-            <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.enabled')}</span><Switch checked={runtime.enabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, enabled: checked }))} /></label>
             <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.runtimeGuardEnabled')}</span><Switch checked={runtime.runtimeGuardEnabled} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, runtimeGuardEnabled: checked }))} /></label>
             <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.auditOnGatewayStart')}</span><Switch checked={runtime.auditOnGatewayStart} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, auditOnGatewayStart: checked }))} /></label>
             <label className="flex items-center justify-between rounded-md border p-3"><span className="text-sm">{t('runtime.autoHarden')}</span><Switch checked={runtime.autoHarden} onCheckedChange={(checked) => updateRuntime((current) => ({ ...current, autoHarden: checked }))} /></label>

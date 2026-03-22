@@ -55,9 +55,6 @@ export async function evaluateBeforeToolCall(params: {
   const confirmed = hasConfirmFlag(toolParams);
   const strippedParams = stripConfirmFlag(toolParams);
 
-  if (!runtimeConfig.enabled) {
-    return;
-  }
   if (!runtimeConfig.runtimeGuardEnabled) {
     return;
   }
