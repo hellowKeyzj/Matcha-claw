@@ -6,13 +6,15 @@
  * Files are staged to disk via IPC — only lightweight path references
  * are sent with the message (no base64 over WebSocket).
  */
-import { memo, useState, useRef, useEffect, useCallback } from 'react';
+import { memo, useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
+import { useChatStore } from '@/stores/chat';
 import { useSkillsStore } from '@/stores/skills';
+import { useSubagentsStore } from '@/stores/subagents';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
@@ -172,6 +174,21 @@ export const ChatInput = memo(function ChatInput({
   const skills = useSkillsStore((state) => state.skills);
   const skillsLoading = useSkillsStore((state) => state.loading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const agents = useSubagentsStore((state) => state.agents);
+  const allowedSkillIdSet = useMemo(() => {
+    const matched = currentSessionKey.match(/^agent:([^:]+):/i);
+    const currentAgentId = matched?.[1] ?? 'main';
+    const currentAgent = agents.find((agent) => agent.id === currentAgentId);
+    if (!Array.isArray(currentAgent?.skills)) {
+      return null;
+    }
+    const normalized = currentAgent.skills
+      .filter((id): id is string => typeof id === 'string')
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+    return new Set(normalized);
+  }, [agents, currentSessionKey]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -203,6 +220,16 @@ export const ChatInput = memo(function ChatInput({
     const activeNode = slashItemRefs.current[slashActiveIndex];
     activeNode?.scrollIntoView?.({ block: 'center' });
   }, [slashActiveIndex, slashItems.length, slashOpen]);
+
+  useEffect(() => {
+    if (!allowedSkillIdSet) {
+      return;
+    }
+    setSelectedSkills((prev) => {
+      const next = prev.filter((skill) => allowedSkillIdSet.has(skill.id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [allowedSkillIdSet]);
 
   const closeMention = useCallback(() => {
     setMentionOpen(false);
@@ -272,7 +299,12 @@ export const ChatInput = memo(function ChatInput({
     const query = normalizeSearchText(range.query);
     const selectedIds = new Set(selectedSkills.map((skill) => skill.id));
     const matched = skills
-      .filter((skill) => skill.enabled && skill.eligible === true && !selectedIds.has(skill.id))
+      .filter((skill) => (
+        skill.enabled
+        && skill.eligible === true
+        && !selectedIds.has(skill.id)
+        && (!allowedSkillIdSet || allowedSkillIdSet.has(skill.id))
+      ))
       .filter((skill) => {
         if (!query) {
           return true;
@@ -291,7 +323,7 @@ export const ChatInput = memo(function ChatInput({
     setSlashItems(matched);
     setSlashActiveIndex((prev) => (prev >= matched.length ? 0 : prev));
     closeMention();
-  }, [closeMention, closeSlash, selectedSkills, skills]);
+  }, [allowedSkillIdSet, closeMention, closeSlash, selectedSkills, skills]);
 
   const applySlashSelection = useCallback((candidate: SelectedSkill) => {
     if (!textareaRef.current || slashStart < 0 || slashEnd < slashStart) {

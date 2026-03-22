@@ -21,9 +21,25 @@ const skillsStoreState: {
   loading: false,
   fetchSkills: fetchSkillsMock,
 };
+const chatStoreState: {
+  currentSessionKey: string;
+} = {
+  currentSessionKey: 'agent:main:main',
+};
+const subagentsStoreState: {
+  agents: Array<{ id: string; skills?: string[] }>;
+} = {
+  agents: [],
+};
 
 vi.mock('@/stores/skills', () => ({
   useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
+}));
+vi.mock('@/stores/chat', () => ({
+  useChatStore: (selector: (state: typeof chatStoreState) => unknown) => selector(chatStoreState),
+}));
+vi.mock('@/stores/subagents', () => ({
+  useSubagentsStore: (selector: (state: typeof subagentsStoreState) => unknown) => selector(subagentsStoreState),
 }));
 
 describe('chat input slash skills', () => {
@@ -31,6 +47,8 @@ describe('chat input slash skills', () => {
     vi.clearAllMocks();
     skillsStoreState.skills = [];
     skillsStoreState.loading = false;
+    chatStoreState.currentSessionKey = 'agent:main:main';
+    subagentsStoreState.agents = [];
   });
 
   it('slash 只展示可用技能（enabled 且 eligible=true）', () => {
@@ -50,6 +68,23 @@ describe('chat input slash skills', () => {
     expect(screen.queryByRole('option', { name: /missing skill/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /disabled skill/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /unknown skill/i })).not.toBeInTheDocument();
+  });
+
+  it('slash 支持按当前会话 agent 的技能白名单过滤', () => {
+    skillsStoreState.skills = [
+      { id: 'web-search', name: 'Web Search', description: '', enabled: true, eligible: true, icon: '🌐' },
+      { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, eligible: true, icon: '📄' },
+    ];
+    chatStoreState.currentSessionKey = 'agent:test:main';
+    subagentsStoreState.agents = [{ id: 'test', skills: ['feishu-doc'] }];
+
+    render(<ChatInput onSend={vi.fn()} />);
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '/', selectionStart: 1 } });
+
+    expect(screen.getByRole('option', { name: /feishu doc/i })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /web search/i })).not.toBeInTheDocument();
   });
 
   it('slash 列表按上下键切换时会滚动到激活项', async () => {
