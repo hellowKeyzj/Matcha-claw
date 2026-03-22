@@ -11,7 +11,6 @@ import type { GatewayStatus } from '../types/gateway';
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
 let chatStoreModulePromise: Promise<typeof import('./chat')> | null = null;
-let taskInboxStoreModulePromise: Promise<typeof import('./task-inbox-store')> | null = null;
 let taskCenterStoreModulePromise: Promise<typeof import('./task-center-store')> | null = null;
 let channelsStoreModulePromise: Promise<typeof import('./channels')> | null = null;
 const TASK_NOTIFICATION_FLUSH_MS = 48;
@@ -55,13 +54,6 @@ function syncPendingApprovalsFromChatStore(): void {
       void state.syncPendingApprovals();
     })
     .catch(() => {});
-}
-
-function getTaskInboxStoreModule() {
-  if (!taskInboxStoreModulePromise) {
-    taskInboxStoreModulePromise = import('./task-inbox-store');
-  }
-  return taskInboxStoreModulePromise;
 }
 
 function getTaskCenterStoreModule() {
@@ -120,12 +112,8 @@ async function flushTaskNotifications(): Promise<void> {
   const compacted = coalesceTaskNotifications(pending);
 
   try {
-    const [{ useTaskInboxStore }, { useTaskCenterStore }] = await Promise.all([
-      getTaskInboxStoreModule(),
-      getTaskCenterStoreModule(),
-    ]);
+    const { useTaskCenterStore } = await getTaskCenterStoreModule();
     for (const payload of compacted) {
-      useTaskInboxStore.getState().handleGatewayNotification(payload);
       useTaskCenterStore.getState().handleGatewayNotification(payload);
     }
   } catch {

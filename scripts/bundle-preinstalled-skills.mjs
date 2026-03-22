@@ -116,24 +116,19 @@ async function fetchRepoSnapshot(repo, ref, paths, checkoutDir) {
 
   await runWithRetry(`git clone ${repo}@${ref}`, async () => {
     rmSync(checkoutDir, { recursive: true, force: true });
-    await $`git clone --depth 1 --filter=blob:none --no-checkout --branch ${ref} ${remote} ${checkoutShellPath}`;
+    // 保留 no-checkout，避免 Windows 在全仓检出时踩到非法路径；
+    // 去掉 blob:none，避免按路径 checkout 时出现缺失对象（unable to read sha1）。
+    await $`git clone --depth 1 --no-checkout --branch ${ref} ${remote} ${checkoutShellPath}`;
   });
 
-  await runWithRetry(`git sparse-checkout init ${repo}@${ref}`, async () => {
-    await $`git -C ${checkoutShellPath} sparse-checkout init --no-cone`;
-  });
-
+  // 仅按 manifest 指定路径做定向 checkout，避免在 Windows 上因仓库中无关非法路径导致整体 checkout 失败。
+  const commit = (await $`git -C ${checkoutShellPath} rev-parse HEAD`).stdout.trim();
   for (const repoPath of paths) {
-    await runWithRetry(`git sparse-checkout add ${repoPath} (${repo}@${ref})`, async () => {
-      await $`git -C ${checkoutShellPath} sparse-checkout add ${repoPath}`;
+    await runWithRetry(`git checkout ${repoPath} (${repo}@${ref})`, async () => {
+      await $`git -C ${checkoutShellPath} checkout --force ${commit} -- ${repoPath}`;
     });
   }
 
-  await runWithRetry(`git checkout ${repo}@${ref}`, async () => {
-    await $`git -C ${checkoutShellPath} checkout ${ref}`;
-  });
-
-  const commit = (await $`git -C ${checkoutShellPath} rev-parse HEAD`).stdout.trim();
   return commit;
 }
 
