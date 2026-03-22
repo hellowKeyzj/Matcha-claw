@@ -15,6 +15,17 @@ function parseSessionUpdatedAtMs(value: unknown): number | undefined {
   }
   return undefined;
 }
+
+function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
+  if (typeof agentId !== 'string') {
+    return null;
+  }
+  const normalized = agentId.trim();
+  if (!normalized) {
+    return null;
+  }
+  return `agent:${normalized}`;
+}
 export function createSessionActions(
   set: ChatSet,
   get: ChatGet,
@@ -231,14 +242,16 @@ export function createSessionActions(
 
     // ── New session ──
 
-    newSession: () => {
+    newSession: (agentId?: string) => {
       // Generate a new unique session key and switch to it.
       // NOTE: We intentionally do NOT call sessions.reset on the old session.
       // sessions.reset archives (renames) the session JSONL file, making old
       // conversation history inaccessible when the user switches back to it.
       const { currentSessionKey, messages } = get();
       const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
-      const prefix = getCanonicalPrefixFromSessions(get().sessions, currentSessionKey) ?? DEFAULT_CANONICAL_PREFIX;
+      const prefix = resolveCanonicalPrefixForAgent(agentId)
+        ?? getCanonicalPrefixFromSessions(get().sessions, currentSessionKey)
+        ?? DEFAULT_CANONICAL_PREFIX;
       const newKey = `${prefix}:session-${Date.now()}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
       set((s) => ({

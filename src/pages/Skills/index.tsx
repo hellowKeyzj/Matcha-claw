@@ -1055,12 +1055,12 @@ export function Skills() {
                         onClick={() => setSelectedSkill(skill)}
                       >
                         <CardHeader className="pb-3">
-                          <div className="flex items-start justify-between">
-                            <div className="flex items-center gap-3">
+                          <div className="flex items-start gap-3">
+                            <div className="flex min-w-0 flex-1 items-center gap-3">
                               <span className="text-2xl">{skill.icon || '🧩'}</span>
-                              <div>
-                                <CardTitle className="text-base flex items-center gap-2">
-                                  {skill.name}
+                              <div className="min-w-0">
+                                <CardTitle className="flex min-w-0 items-center gap-2 text-base">
+                                  <span className="min-w-0 truncate">{skill.name}</span>
                                   {skill.isCore ? (
                                     <Lock className="h-3 w-3 text-muted-foreground" />
                                   ) : skill.isBundled ? (
@@ -1069,19 +1069,19 @@ export function Skills() {
                                     <Globe className="h-3 w-3 text-purple-500/70" />
                                   )}
                                   {skill.slug && skill.slug !== skill.name ? (
-                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-black/10 dark:border-white/10 text-muted-foreground">
+                                    <span className="shrink-0 rounded border border-black/10 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground dark:border-white/10">
                                       {skill.slug}
                                     </span>
                                   ) : null}
                                 </CardTitle>
                               </div>
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex w-[88px] shrink-0 items-center justify-end gap-2">
                               {!skill.isBundled && !skill.isCore && (
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleUninstall(skill.id);

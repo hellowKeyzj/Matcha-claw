@@ -212,3 +212,10 @@ export async function getSubagentTemplateById(templateId: string): Promise<Subag
 export async function prefetchSubagentTemplateById(templateId: string): Promise<void> {
   await getSubagentTemplateById(templateId);
 }
+
+export function __resetSubagentTemplateCatalogCacheForTest(): void {
+  templateCatalogCache = null;
+  templateCatalogInflight = null;
+  templateDetailCache.clear();
+  templateDetailInflight.clear();
+}

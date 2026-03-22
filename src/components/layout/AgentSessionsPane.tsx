@@ -23,8 +23,14 @@ interface AgentSessionNode {
   sessions: ChatSession[];
 }
 
-const AGENT_GROUP_COLLAPSE_STORAGE_KEY = 'layout:agent-session-group-collapsed';
-const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:agent-session-time-bucket-collapsed';
+interface SessionListNode {
+  session: ChatSession;
+  agentId: string;
+  agentName: string;
+  identityEmoji?: string;
+}
+
+const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
 const SESSION_TITLE_MAX_LENGTH = 48;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -125,29 +131,8 @@ function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean
   return isDefault ? '⚙️' : '🤖';
 }
 
-function loadCollapsedAgentGroupMap(): Record<string, true> {
-  try {
-    const raw = window.localStorage.getItem(AGENT_GROUP_COLLAPSE_STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return {};
-    }
-    return parsed.reduce<Record<string, true>>((acc, item) => {
-      if (typeof item === 'string' && item.trim()) {
-        acc[item] = true;
-      }
-      return acc;
-    }, {});
-  } catch {
-    return {};
-  }
-}
-
-function createSessionBucketStateKey(agentId: string, bucketId: SessionBucketSpec['id']): string {
-  return `${agentId}::${bucketId}`;
+function createSessionBucketStateKey(bucketId: SessionBucketSpec['id']): string {
+  return bucketId;
 }
 
 function loadCollapsedSessionBucketMap(): Record<string, boolean> {
@@ -283,7 +268,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const deferredSessions = useDeferredValue(sessions);
   const deferredSessionLabels = useDeferredValue(sessionLabels);
   const deferredSessionLastActivity = useDeferredValue(sessionLastActivity);
-  const [collapsedAgentGroups, setCollapsedAgentGroups] = useState<Record<string, true>>(() => loadCollapsedAgentGroupMap());
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
     () => loadCollapsedSessionBucketMap(),
   );
@@ -349,27 +333,57 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
       });
   }, [agents, deferredSessionLastActivity, deferredSessions]);
 
-  const collapsedAgentGroupsInView = useMemo<Record<string, true>>(() => {
-    const activeAgentIds = new Set(agentSessionNodes.map((item) => item.agentId));
-    const next: Record<string, true> = {};
-    for (const agentId of Object.keys(collapsedAgentGroups)) {
-      if (activeAgentIds.has(agentId)) {
-        next[agentId] = true;
+  const preferredSessionKeyByAgent = useMemo(() => {
+    return new Map(
+      agentSessionNodes.map((node) => [node.agentId, resolvePreferredSessionKey(node.agentId, node.sessions)] as const),
+    );
+  }, [agentSessionNodes]);
+
+  const activeAgentId = useMemo(() => {
+    const current = parseAgentIdFromSessionKey(currentSessionKey);
+    if (current) {
+      return current;
+    }
+    return agentSessionNodes[0]?.agentId ?? 'main';
+  }, [agentSessionNodes, currentSessionKey]);
+
+  const globalSessionNodes = useMemo<SessionListNode[]>(() => {
+    const nodes: SessionListNode[] = [];
+    for (const agentNode of agentSessionNodes) {
+      const preferredSessionKey = preferredSessionKeyByAgent.get(agentNode.agentId);
+      for (const session of agentNode.sessions) {
+        if (session.key === preferredSessionKey) {
+          continue;
+        }
+        nodes.push({
+          session,
+          agentId: agentNode.agentId,
+          agentName: agentNode.agentName,
+          identityEmoji: agentNode.identityEmoji,
+        });
       }
     }
-    return next;
-  }, [agentSessionNodes, collapsedAgentGroups]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        AGENT_GROUP_COLLAPSE_STORAGE_KEY,
-        JSON.stringify(Object.keys(collapsedAgentGroupsInView)),
-      );
-    } catch {
-      // ignore localStorage failures
+    nodes.sort((left, right) => {
+      const leftActivity = deferredSessionLastActivity[left.session.key] ?? parseSessionTimestamp(left.session.key) ?? 0;
+      const rightActivity = deferredSessionLastActivity[right.session.key] ?? parseSessionTimestamp(right.session.key) ?? 0;
+      if (leftActivity !== rightActivity) {
+        return rightActivity - leftActivity;
+      }
+      return left.session.key.localeCompare(right.session.key);
+    });
+    return nodes;
+  }, [agentSessionNodes, deferredSessionLastActivity, preferredSessionKeyByAgent]);
+
+  const globalSessions = useMemo(() => globalSessionNodes.map((node) => node.session), [globalSessionNodes]);
+
+  const globalSessionOwnerByKey = useMemo(() => {
+    const map = new Map<string, SessionListNode>();
+    for (const node of globalSessionNodes) {
+      map.set(node.session.key, node);
     }
-  }, [collapsedAgentGroupsInView]);
+    return map;
+  }, [globalSessionNodes]);
 
   useEffect(() => {
     try {
@@ -387,23 +401,13 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     navigate('/');
   }, [navigate, switchSession]);
 
-  const toggleAgentGroup = useCallback((agentId: string) => {
-    setCollapsedAgentGroups((prev) => {
-      if (prev[agentId]) {
-        const next = { ...prev };
-        delete next[agentId];
-        return next;
-      }
-      return { ...prev, [agentId]: true };
-    });
-  }, []);
+  const handleCreateSessionForAgent = useCallback((agentId: string) => {
+    newSession(agentId);
+    navigate('/');
+  }, [navigate, newSession]);
 
-  const toggleSessionBucket = useCallback((
-    agentId: string,
-    bucketId: SessionBucketSpec['id'],
-    defaultCollapsed: boolean,
-  ) => {
-    const stateKey = createSessionBucketStateKey(agentId, bucketId);
+  const toggleSessionBucket = useCallback((bucketId: SessionBucketSpec['id'], defaultCollapsed: boolean) => {
+    const stateKey = createSessionBucketStateKey(bucketId);
     setCollapsedSessionBuckets((prev) => {
       const current = Object.prototype.hasOwnProperty.call(prev, stateKey)
         ? Boolean(prev[stateKey])
@@ -485,144 +489,161 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0"
-              onClick={newSession}
+              onClick={() => handleCreateSessionForAgent(activeAgentId)}
               aria-label={t('sidebar.newSession')}
               title={t('sidebar.newSession')}
             >
               <Plus className="h-4 w-4" />
             </Button>
           </div>
-          <div className="flex-1 space-y-2 overflow-auto p-2">
-            {agentSessionNodes.length === 0 ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>
-            ) : (
-              agentSessionNodes.map((node) => {
-                const preferredSessionKey = resolvePreferredSessionKey(node.agentId, node.sessions);
-                const childSessions = node.sessions.filter((session) => session.key !== preferredSessionKey);
-                const groupCollapsed = Boolean(collapsedAgentGroupsInView[node.agentId]);
-                const isMainSessionActive = currentSessionKey === preferredSessionKey;
-
-                return (
-                  <div key={node.agentId} className="space-y-1">
-                    <button
-                      type="button"
+          <div className="flex-1 space-y-3 overflow-auto p-2">
+            <section className="space-y-1">
+              <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t('sidebar.subagents')}
+              </p>
+              {agentSessionNodes.length === 0 ? (
+                <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>
+              ) : (
+                agentSessionNodes.map((node) => {
+                  const preferredSessionKey = preferredSessionKeyByAgent.get(node.agentId) ?? `agent:${node.agentId}:main`;
+                  const isAgentActive = activeAgentId === node.agentId;
+                  return (
+                    <div
+                      key={node.agentId}
                       className={cn(
-                        'flex min-w-0 w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[15px] font-medium transition-colors',
-                        'hover:bg-accent hover:text-accent-foreground',
-                        isMainSessionActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground',
+                        'group flex items-center gap-1 rounded-lg pr-1 transition-colors',
+                        isAgentActive
+                          ? 'bg-accent text-accent-foreground'
+                          : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
                       )}
-                      onClick={() => {
-                        if (!isMainSessionActive) {
-                          handleSwitchSession(preferredSessionKey);
-                          return;
-                        }
-                        toggleAgentGroup(node.agentId);
-                      }}
                     >
-                      <span
-                        aria-hidden
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs leading-none"
+                      <button
+                        type="button"
+                        data-testid={`agent-item-${node.agentId}`}
+                        className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left text-sm font-medium"
+                        onClick={() => handleSwitchSession(preferredSessionKey)}
                       >
-                        {node.identityEmoji}
-                      </span>
-                      <span className="truncate">{node.agentName}</span>
-                    </button>
+                        <span
+                          aria-hidden
+                          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs leading-none"
+                        >
+                          {node.identityEmoji}
+                        </span>
+                        <span className="truncate">{node.agentName}</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`agent-new-session-${node.agentId}`}
+                        className="shrink-0 rounded p-1 text-muted-foreground/80 opacity-0 transition group-hover:opacity-100 hover:bg-accent"
+                        aria-label={`${t('sidebar.newSession')} ${node.agentName}`}
+                        title={`${t('sidebar.newSession')} ${node.agentName}`}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          handleCreateSessionForAgent(node.agentId);
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </section>
 
-                    {!groupCollapsed && (
-                      <div className="ml-5 space-y-1">
-                        {childSessions.length === 0 ? (
-                          <p className="px-2 py-1 text-xs text-muted-foreground">
-                            {t('sidebar.noAgentSessions')}
-                          </p>
+            <section className="space-y-1 border-t border-border/70 pt-3">
+              <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t('sidebar.agentSessions')}
+              </p>
+              {globalSessions.length === 0 ? (
+                <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noAgentSessions')}</p>
+              ) : (
+                buildSessionBuckets(globalSessions, deferredSessionLastActivity, t).map((bucket) => {
+                  const bucketStateKey = createSessionBucketStateKey(bucket.id);
+                  const bucketCollapsed = Object.prototype.hasOwnProperty.call(collapsedSessionBuckets, bucketStateKey)
+                    ? Boolean(collapsedSessionBuckets[bucketStateKey])
+                    : bucket.defaultCollapsed;
+                  return (
+                    <div key={bucket.id} className="space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleSessionBucket(bucket.id, bucket.defaultCollapsed)}
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground"
+                      >
+                        {bucketCollapsed ? (
+                          <ChevronRight className="h-3 w-3 shrink-0" />
                         ) : (
-                          buildSessionBuckets(childSessions, deferredSessionLastActivity, t).map((bucket) => {
-                            const bucketStateKey = createSessionBucketStateKey(node.agentId, bucket.id);
-                            const bucketCollapsed = Object.prototype.hasOwnProperty.call(collapsedSessionBuckets, bucketStateKey)
-                              ? Boolean(collapsedSessionBuckets[bucketStateKey])
-                              : bucket.defaultCollapsed;
+                          <ChevronDown className="h-3 w-3 shrink-0" />
+                        )}
+                        <span className="truncate">{bucket.label}</span>
+                        <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                          {bucket.sessions.length}
+                        </span>
+                      </button>
+
+                      {!bucketCollapsed && (
+                        <div className="space-y-1">
+                          {bucket.sessions.map((session) => {
+                            const sessionTitle = resolveSessionTitle(session);
+                            const sessionOwner = globalSessionOwnerByKey.get(session.key);
+                            const activityMs = resolveSessionActivityMs(session, deferredSessionLastActivity);
+                            const deleting = Boolean(deletingSessionKeys[session.key]);
                             return (
-                              <div key={bucket.id} className="space-y-1">
+                              <div
+                                key={session.key}
+                                className={cn(
+                                  'group flex items-center gap-1 rounded-lg transition-colors',
+                                  currentSessionKey === session.key
+                                    ? 'bg-accent text-accent-foreground'
+                                    : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
+                                )}
+                              >
                                 <button
                                   type="button"
-                                  onClick={() => toggleSessionBucket(node.agentId, bucket.id, bucket.defaultCollapsed)}
-                                  className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground"
+                                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm"
+                                  onClick={() => handleSwitchSession(session.key)}
                                 >
-                                  {bucketCollapsed ? (
-                                    <ChevronRight className="h-3 w-3 shrink-0" />
-                                  ) : (
-                                    <ChevronDown className="h-3 w-3 shrink-0" />
-                                  )}
-                                  <span className="truncate">{bucket.label}</span>
-                                  <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                                    {bucket.sessions.length}
+                                  <span
+                                    aria-hidden
+                                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted/80 text-[10px] leading-none"
+                                  >
+                                    {sessionOwner?.identityEmoji ?? '🤖'}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate">{sessionTitle}</span>
+                                    <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
+                                      {sessionOwner
+                                        ? `${sessionOwner.agentName} / ${formatSessionMeta(session, activityMs, i18n.language)}`
+                                        : formatSessionMeta(session, activityMs, i18n.language)}
+                                    </span>
                                   </span>
                                 </button>
-
-                                {!bucketCollapsed && (
-                                  <div className="space-y-1">
-                                    {bucket.sessions.map((session) => {
-                                      const sessionTitle = resolveSessionTitle(session);
-                                      const activityMs = resolveSessionActivityMs(session, deferredSessionLastActivity);
-                                      const deleting = Boolean(deletingSessionKeys[session.key]);
-                                      return (
-                                        <div
-                                          key={session.key}
-                                          className={cn(
-                                            'group flex items-center gap-1 rounded-lg transition-colors',
-                                            currentSessionKey === session.key
-                                              ? 'bg-accent text-accent-foreground'
-                                              : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
-                                          )}
-                                        >
-                                          <button
-                                            type="button"
-                                            className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm"
-                                            onClick={() => handleSwitchSession(session.key)}
-                                          >
-                                            <span
-                                              aria-hidden
-                                              className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted/80 text-[10px] leading-none"
-                                            >
-                                              {node.identityEmoji}
-                                            </span>
-                                            <span className="min-w-0 flex-1">
-                                              <span className="block truncate">{sessionTitle}</span>
-                                              <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
-                                                {formatSessionMeta(session, activityMs, i18n.language)}
-                                              </span>
-                                            </span>
-                                          </button>
-                                          {!session.key.endsWith(':main') && (
-                                            <button
-                                              type="button"
-                                              className="mr-1 shrink-0 rounded p-1 text-muted-foreground/70 opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
-                                              aria-label={t('sidebar.deleteSessionAria', { title: sessionTitle })}
-                                              title={t('sidebar.deleteSessionAria', { title: sessionTitle })}
-                                              disabled={deleting}
-                                              onClick={(event) => {
-                                                event.preventDefault();
-                                                event.stopPropagation();
-                                                requestDeleteSession(session);
-                                              }}
-                                            >
-                                              <Trash2 className="h-3.5 w-3.5" />
-                                            </button>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
+                                {!session.key.endsWith(':main') && (
+                                  <button
+                                    type="button"
+                                    className="mr-1 shrink-0 rounded p-1 text-muted-foreground/70 opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                    aria-label={t('sidebar.deleteSessionAria', { title: sessionTitle })}
+                                    title={t('sidebar.deleteSessionAria', { title: sessionTitle })}
+                                    disabled={deleting}
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      requestDeleteSession(session);
+                                    }}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
                                 )}
                               </div>
                             );
-                          })
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </section>
           </div>
         </>
       )}

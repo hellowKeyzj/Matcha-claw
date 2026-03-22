@@ -42,6 +42,15 @@ describe('chat store newSession agent targeting', () => {
     nowSpy.mockRestore();
   });
 
+  it('显式传入 agentId 时，应强制创建到目标 agent 会话下', () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_733_333_333_333);
+
+    useChatStore.getState().newSession('main');
+
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:main:session-1733333333333');
+    nowSpy.mockRestore();
+  });
+
   it('切换到其他 agent 会话时，应清理当前会话的发送态，避免跨会话锁死输入', () => {
     useChatStore.setState({
       sending: true,

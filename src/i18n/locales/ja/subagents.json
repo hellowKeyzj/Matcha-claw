@@ -72,6 +72,10 @@
   "form": {
     "basicInfo": "基本情報",
     "aiConfig": "AI 設定",
+    "skillConfig": "スキル設定",
+    "useAllSkills": "すべてのスキルを使用",
+    "skillsLoading": "スキルを読み込み中...",
+    "noSkillOptions": "利用可能なスキルがありません。",
     "name": "名前",
     "workspace": "ワークスペース",
     "model": "モデル",
