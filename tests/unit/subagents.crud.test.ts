@@ -219,6 +219,83 @@ describe('subagents crud', () => {
     );
   });
 
+  it('updateAgent 传入 skills allowlist 时应写入 agents.list[].skills', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'main', workspace: '/home/dev/.openclaw/workspace', isDefault: true },
+        {
+          id: 'writer',
+          name: 'writer-v2',
+          workspace: '/tmp/writer-v2',
+          model: 'gpt-4.1-mini',
+          isDefault: false,
+        },
+      ],
+      loadAgents,
+    });
+
+    invoke.mockImplementation(async (channel, method, params) => {
+      if (channel !== 'gateway:rpc') {
+        throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash-1',
+            config: {
+              agents: {
+                list: [
+                  {
+                    id: 'writer',
+                    name: 'writer-v2',
+                    workspace: '/tmp/writer-v2',
+                    model: 'gpt-4.1-mini',
+                  },
+                ],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string; baseHash?: string };
+        expect(payload.baseHash).toBe('cfg-hash-1');
+        expect(typeof payload.raw).toBe('string');
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; skills?: string[] }> };
+        };
+        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
+        expect(writer?.skills).toEqual(['web-search', 'feishu-doc']);
+        return { success: true, result: { ok: true } };
+      }
+      if (method === 'agents.update') {
+        return { success: true, result: {} };
+      }
+      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'writer-v2',
+      workspace: '/tmp/writer-v2',
+      model: 'gpt-4.1-mini',
+      skills: ['web-search', 'feishu-doc'],
+    });
+
+    expect(invoke).toHaveBeenCalledWith('gateway:rpc', 'config.get', {});
+    expect(invoke).toHaveBeenCalledWith(
+      'gateway:rpc',
+      'config.set',
+      expect.objectContaining({
+        baseHash: 'cfg-hash-1',
+      }),
+    );
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+  });
+
   it('skips update when payload has no effective changes', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     const loadAgents = vi.fn().mockResolvedValue(undefined);

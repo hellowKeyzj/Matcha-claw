@@ -2,6 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, ty
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { invokeIpc } from '@/lib/api-client';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
   getSubagentTemplateById,
@@ -71,7 +72,9 @@ export function SubAgents() {
   const [templateDialogLoading, setTemplateDialogLoading] = useState(false);
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
-  const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(false);
+  const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
+    () => import.meta.env.MODE === 'test',
+  );
   const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const wasGatewayRunningRef = useRef(gatewayState === 'running');
@@ -695,6 +698,7 @@ export function SubAgents() {
       <SubagentFormDialog
         open={dialogOpen}
         mode={dialogMode}
+        lockBasicInfo={Boolean(dialogMode === 'edit' && editingAgent?.isDefault)}
         title={dialogMode === 'create' ? t('createDialogTitle') : t('editDialogTitle')}
         existingAgents={agents}
         modelOptions={availableModels}
@@ -722,10 +726,28 @@ export function SubAgents() {
           if (!editingAgentId) {
             return;
           }
+          const isDefaultAgent = Boolean(editingAgent?.isDefault);
+          const resolvedName = isDefaultAgent
+            ? (editingAgent?.name ?? values.name)
+            : values.name;
+          let resolvedWorkspace = isDefaultAgent
+            ? (editingAgent?.workspace ?? values.workspace)
+            : values.workspace;
+          if (isDefaultAgent && !resolvedWorkspace.trim()) {
+            try {
+              const rawWorkspaceDir = await invokeIpc<unknown>('openclaw:getWorkspaceDir');
+              const workspaceDir = typeof rawWorkspaceDir === 'string' ? rawWorkspaceDir.trim() : '';
+              if (workspaceDir) {
+                resolvedWorkspace = workspaceDir;
+              }
+            } catch {
+              // best-effort fallback only
+            }
+          }
           await updateAgent({
             agentId: editingAgentId,
-            name: values.name,
-            workspace: values.workspace,
+            name: resolvedName,
+            workspace: resolvedWorkspace,
             model: values.model || undefined,
           });
           setDialogOpen(false);

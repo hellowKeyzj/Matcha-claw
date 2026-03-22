@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -10,9 +10,12 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 
-describe('chat slash skill behavior', () => {
+describe('chat agent skill configuration', () => {
+  const updateAgent = vi.fn().mockResolvedValue(undefined);
+
   beforeEach(() => {
     i18n.changeLanguage('en');
+    updateAgent.mockClear();
 
     useGatewayStore.setState({
       status: { state: 'running', port: 18789 },
@@ -24,6 +27,7 @@ describe('chat slash skill behavior', () => {
         { id: 'test', name: 'Test Agent', workspace: '/workspace/test', model: 'gpt-4.1-mini', isDefault: false },
       ],
       loadAgents: vi.fn().mockResolvedValue(undefined),
+      updateAgent,
     } as never);
 
     useTaskInboxStore.setState({
@@ -88,7 +92,7 @@ describe('chat slash skill behavior', () => {
     });
   });
 
-  it('chat 页面不显示技能配置按钮', () => {
+  it('shows chat skill config button and updates current agent allowlist', async () => {
     render(
       <MemoryRouter initialEntries={['/']}>
         <TooltipProvider>
@@ -97,7 +101,22 @@ describe('chat slash skill behavior', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByRole('button', { name: 'Skill Configuration' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Skill Configuration' }));
+
+    expect(screen.getByRole('dialog', { name: 'Skill Configuration · Test Agent' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Web Search' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Feishu Doc' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Disabled Skill' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Web Search' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(updateAgent).toHaveBeenCalledWith(expect.objectContaining({
+        agentId: 'test',
+        skills: ['feishu-doc'],
+      }));
+    });
   });
 
   it('slash 只展示当前 agent 已配置的技能', async () => {

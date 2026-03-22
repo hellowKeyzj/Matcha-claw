@@ -99,6 +99,7 @@ interface ModelsListResult {
 interface ConfigAgentDisplaySnapshot {
   workspace?: string;
   model?: string;
+  skills?: string[];
 }
 
 interface ConfigDisplaySnapshot {
@@ -153,6 +154,7 @@ interface SubagentsState {
     name: string;
     workspace: string;
     model?: string;
+    skills?: string[] | null;
   }) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
   generateDraftFromPrompt: (agentId: string, prompt: string) => Promise<void>;
@@ -193,6 +195,37 @@ function getOptionalStringArray(value: unknown): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function normalizeSkillAllowlist(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const deduped = Array.from(new Set(getOptionalStringArray(value)));
+  return deduped;
+}
+
+function equalSkillAllowlist(
+  left: string[] | undefined,
+  right: string[] | undefined,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  for (let index = 0; index < sortedLeft.length; index += 1) {
+    if (sortedLeft[index] !== sortedRight[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function equalOptionalTrimmedString(a: unknown, b: unknown): boolean {
@@ -302,6 +335,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
         continue;
       }
       const workspace = getOptionalString((item as { workspace?: unknown }).workspace);
+      const skills = normalizeSkillAllowlist((item as { skills?: unknown }).skills);
       let model: string | undefined;
       for (const modelId of collectModelIdsFromAgentModelValue((item as { model?: unknown }).model)) {
         if (!model) {
@@ -315,6 +349,7 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
       byAgentId.set(normalizedAgentId, {
         workspace,
         model,
+        skills,
       });
     }
   }
@@ -555,12 +590,15 @@ function normalizeAgents(
     const model = configAgent?.model
       ?? extractModelId(runtimeAgent?.model)
       ?? configSnapshot?.defaultModel;
+    const skills = configAgent?.skills
+      ?? normalizeSkillAllowlist(runtimeAgent?.skills);
     return {
       ...(runtimeAgent ?? { id: agentId }),
       id: agentId,
       name: runtimeName ?? fallbackName,
       workspace,
       model,
+      skills,
       isDefault: agentId === defaultId,
     };
   });
@@ -575,6 +613,84 @@ function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void 
   if (defaultAgent && defaultAgent.id === agentId) {
     throw new Error('Default agent cannot be deleted');
   }
+}
+
+function cloneConfigForWrite(config: ConfigGetResult['config'] | undefined): ConfigGetResult['config'] {
+  if (!config || typeof config !== 'object') {
+    return {};
+  }
+  try {
+    return JSON.parse(JSON.stringify(config)) as ConfigGetResult['config'];
+  } catch {
+    return {};
+  }
+}
+
+function upsertAgentSkillsInConfig(params: {
+  config: ConfigGetResult['config'];
+  agentId: string;
+  skills: string[] | undefined;
+}): ConfigGetResult['config'] {
+  const nextConfig = cloneConfigForWrite(params.config);
+  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
+    ? { ...nextConfig.agents }
+    : {};
+  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
+  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
+  if (!normalizedTargetId) {
+    return nextConfig;
+  }
+
+  const targetIndex = list.findIndex((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return false;
+    }
+    const id = getOptionalString((entry as { id?: unknown }).id);
+    if (!id) {
+      return false;
+    }
+    return normalizeAgentIdForComparison(id) === normalizedTargetId;
+  });
+
+  const current = targetIndex >= 0
+    ? list[targetIndex]
+    : { id: normalizedTargetId };
+  const nextEntry = (current && typeof current === 'object')
+    ? { ...current } as Record<string, unknown>
+    : ({ id: normalizedTargetId } as Record<string, unknown>);
+
+  if (params.skills === undefined) {
+    delete nextEntry.skills;
+  } else {
+    nextEntry.skills = params.skills;
+  }
+
+  if (targetIndex >= 0) {
+    list[targetIndex] = nextEntry as typeof list[number];
+  } else {
+    list.push(nextEntry as typeof list[number]);
+  }
+
+  nextAgents.list = list;
+  nextConfig.agents = nextAgents;
+  return nextConfig;
+}
+
+async function updateAgentSkillsConfig(agentId: string, skills: string[] | undefined): Promise<void> {
+  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
+  if (!hash) {
+    throw new Error('Missing config hash for skills update');
+  }
+  const nextConfig = upsertAgentSkillsInConfig({
+    config: configGetResult.config,
+    agentId,
+    skills,
+  });
+  await rpc('config.set', {
+    raw: JSON.stringify(nextConfig),
+    baseHash: hash,
+  });
 }
 
 function getErrorMessage(error: unknown): string {
@@ -1298,13 +1414,24 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  updateAgent: async ({ agentId, name, workspace, model }) => runSerializedAgentMutation(async () => {
+  updateAgent: async ({ agentId, name, workspace, model, skills }) => runSerializedAgentMutation(async () => {
     const current = get().agents.find((agent) => agent.id === agentId);
-    if (
+    const skillChangeRequested = skills !== undefined;
+    const nextSkills = skills === null
+      ? undefined
+      : normalizeSkillAllowlist(skills);
+    const currentSkills = normalizeSkillAllowlist(current?.skills);
+    const skillsChanged = skillChangeRequested && !equalSkillAllowlist(currentSkills, nextSkills);
+    const basicChanged = !(
       current
       && equalOptionalTrimmedString(current.name, name)
       && equalOptionalTrimmedString(current.workspace, workspace)
       && equalOptionalTrimmedString(current.model, model)
+    );
+
+    if (
+      !basicChanged
+      && !skillsChanged
     ) {
       return;
     }
@@ -1315,12 +1442,17 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
-      await rpc('agents.update', {
-        agentId,
-        name: nextName,
-        workspace: nextWorkspace,
-        model: nextModel,
-      });
+      if (basicChanged) {
+        await rpc('agents.update', {
+          agentId,
+          name: nextName,
+          workspace: nextWorkspace,
+          model: nextModel,
+        });
+      }
+      if (skillsChanged) {
+        await updateAgentSkillsConfig(agentId, nextSkills);
+      }
       invalidateConfigDisplayCache();
       await get().loadAgents();
     } catch (error) {

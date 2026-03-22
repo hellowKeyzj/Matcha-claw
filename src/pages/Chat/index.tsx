@@ -4,12 +4,14 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { AlertCircle, Bot, Loader2, MessageSquare, Settings2, Sparkles, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -28,6 +30,12 @@ const TASK_INBOX_DEFAULT_WIDTH = 360;
 const TASK_INBOX_RESIZER_WIDTH = 6;
 const CHAT_MAIN_MIN_WIDTH = 520;
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
+
+interface AgentSkillOption {
+  id: string;
+  name: string;
+  icon?: string;
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -100,6 +108,10 @@ export function Chat() {
   const clearError = useChatStore((s) => s.clearError);
   const agents = useSubagentsStore((s) => s.agents);
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
+  const updateAgent = useSubagentsStore((s) => s.updateAgent);
+  const skills = useSkillsStore((s) => s.skills);
+  const skillsLoading = useSkillsStore((s) => s.loading);
+  const fetchSkills = useSkillsStore((s) => s.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((s) => s.userAvatarDataUrl);
 
   const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
@@ -118,6 +130,9 @@ export function Chat() {
     }
   });
   const [taskInboxWidth, setTaskInboxWidth] = useState<number>(() => loadTaskInboxWidth());
+  const [skillConfigOpen, setSkillConfigOpen] = useState(false);
+  const [skillConfigSaving, setSkillConfigSaving] = useState(false);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
 
   useEffect(() => {
     try {
@@ -276,10 +291,67 @@ export function Chat() {
   const waitingApproval = approvalStatus === 'awaiting_approval';
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
+  const availableSkillOptions = useMemo<AgentSkillOption[]>(
+    () => skills
+      .filter((skill) => skill.enabled !== false && skill.eligible !== false)
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        icon: skill.icon,
+      })),
+    [skills],
+  );
+  const availableSkillIds = useMemo(
+    () => availableSkillOptions.map((skill) => skill.id),
+    [availableSkillOptions],
+  );
+  const availableSkillSet = useMemo(
+    () => new Set(availableSkillIds),
+    [availableSkillIds],
+  );
   const assistantAvatarEmoji = resolveAgentEmoji(
     currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
     Boolean(currentAgent?.isDefault),
   );
+  const openSkillConfigDialog = useCallback(() => {
+    if (!currentAgent) {
+      return;
+    }
+    setSkillConfigOpen(true);
+    if (skills.length === 0 && !skillsLoading) {
+      void fetchSkills();
+    }
+  }, [currentAgent, fetchSkills, skills.length, skillsLoading]);
+
+  useEffect(() => {
+    if (!skillConfigOpen || !currentAgent) {
+      return;
+    }
+    const currentSkills = Array.isArray(currentAgent.skills)
+      ? currentAgent.skills
+      : availableSkillIds;
+    const normalized = Array.from(new Set(currentSkills.filter((id) => availableSkillSet.has(id))));
+    setSelectedSkillIds(normalized);
+  }, [availableSkillIds, availableSkillSet, currentAgent, skillConfigOpen]);
+
+  const handleSaveSkillConfig = useCallback(async () => {
+    if (!currentAgent) {
+      return;
+    }
+    setSkillConfigSaving(true);
+    try {
+      await updateAgent({
+        agentId: currentAgent.id,
+        name: currentAgent.name || currentAgent.id,
+        workspace: currentAgent.workspace ?? '',
+        model: currentAgent.model,
+        skills: selectedSkillIds,
+      });
+      setSkillConfigOpen(false);
+    } finally {
+      setSkillConfigSaving(false);
+    }
+  }, [currentAgent, selectedSkillIds, updateAgent]);
 
   // Gateway not running
   if (!isGatewayRunning) {
@@ -308,6 +380,17 @@ export function Chat() {
     >
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         <div className="flex shrink-0 items-center justify-end px-4 py-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="mr-2 h-8"
+            disabled={!currentAgent}
+            onClick={openSkillConfigDialog}
+          >
+            <Settings2 className="mr-1 h-3.5 w-3.5" />
+            {t('toolbar.skillConfig')}
+          </Button>
           <ChatToolbar />
         </div>
 
@@ -405,6 +488,30 @@ export function Chat() {
           sending={sending}
           approvalWaiting={waitingApproval}
         />
+
+        <AgentSkillConfigDialog
+          open={skillConfigOpen}
+          title={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}
+          skillOptions={availableSkillOptions}
+          skillsLoading={skillsLoading}
+          selectedSkillIds={selectedSkillIds}
+          submitting={skillConfigSaving}
+          onToggleSkill={(skillId, checked) => {
+            setSelectedSkillIds((prev) => {
+              if (checked) {
+                if (prev.includes(skillId)) {
+                  return prev;
+                }
+                return [...prev, skillId];
+              }
+              return prev.filter((id) => id !== skillId);
+            });
+          }}
+          onClose={() => setSkillConfigOpen(false)}
+          onSubmit={() => {
+            void handleSaveSkillConfig();
+          }}
+        />
       </div>
 
       {!taskInboxCollapsed && (
@@ -421,6 +528,96 @@ export function Chat() {
         collapsed={taskInboxCollapsed}
         onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
       />
+    </div>
+  );
+}
+
+function AgentSkillConfigDialog({
+  open,
+  title,
+  skillOptions,
+  skillsLoading,
+  selectedSkillIds,
+  submitting,
+  onToggleSkill,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  title: string;
+  skillOptions: AgentSkillOption[];
+  skillsLoading: boolean;
+  selectedSkillIds: string[];
+  submitting: boolean;
+  onToggleSkill: (skillId: string, checked: boolean) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const { t } = useTranslation('chat');
+  if (!open) {
+    return null;
+  }
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+      <section
+        role="dialog"
+        aria-label={title}
+        className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-xl border bg-background p-5 shadow-xl"
+      >
+        <header className="flex items-center justify-between">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={t('common:actions.close')}
+            onClick={onClose}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </header>
+        <div className="mt-4 rounded-lg border bg-muted/20 p-3">
+          {skillsLoading ? (
+            <p className="text-sm text-muted-foreground">{t('skillConfigDialog.loading')}</p>
+          ) : skillOptions.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t('skillConfigDialog.empty')}</p>
+          ) : (
+            <div className="grid gap-2 md:grid-cols-2">
+              {skillOptions.map((skill) => {
+                const checked = selectedSkillIds.includes(skill.id);
+                const inputId = `chat-agent-skill-${skill.id}`;
+                return (
+                  <label
+                    key={skill.id}
+                    htmlFor={inputId}
+                    className={cn(
+                      'flex items-center gap-2 rounded-md border px-2 py-1.5 text-sm',
+                      checked ? 'border-primary bg-primary/5' : 'border-border bg-background',
+                    )}
+                  >
+                    <input
+                      id={inputId}
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => onToggleSkill(skill.id, event.target.checked)}
+                    />
+                    <span aria-hidden>{skill.icon?.trim() || '🧩'}</span>
+                    <span className="truncate">{skill.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2 border-t pt-3">
+          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+            {t('skillConfigDialog.cancel')}
+          </Button>
+          <Button type="button" onClick={onSubmit} disabled={submitting}>
+            {t('skillConfigDialog.save')}
+          </Button>
+        </div>
+      </section>
     </div>
   );
 }

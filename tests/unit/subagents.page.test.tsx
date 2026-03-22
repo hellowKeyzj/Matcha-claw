@@ -337,6 +337,15 @@ describe('subagents page', () => {
     expect(deleteAgent).toHaveBeenCalledWith('agent-alpha');
   });
 
+  it('edit dialog no longer renders skill configuration section', () => {
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+    expect(screen.queryByText('Skill Configuration')).toBeNull();
+    expect(screen.queryByText('Web Search')).toBeNull();
+    expect(screen.queryByText('Feishu Doc')).toBeNull();
+  });
+
   it('编辑时不应把已删除模型补回下拉选项，并在单模型场景自动回填', () => {
     useSubagentsStore.setState({
       agents: [
@@ -532,6 +541,9 @@ describe('subagents page', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Expand Template Library' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Load Template' })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Load Template' }));
 
     await waitFor(() => {
