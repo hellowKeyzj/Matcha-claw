@@ -37,7 +37,15 @@
     "detailTitle": "任务详情",
     "selectTask": "请选择一个任务查看详情",
     "noMarkdown": "暂无计划 Markdown",
-    "stepsOverview": "步骤清单",
+    "noSteps": "暂无结构化步骤",
+    "stepsOverview": "步骤概览",
+    "currentStep": "当前步骤",
+    "dependsOn": "依赖",
+    "createdAt": "创建于",
+    "startedAt": "开始于",
+    "finishedAt": "结束于",
+    "checkpointsTitle": "检查点",
+    "noCheckpoints": "暂无检查点",
     "completedTag": "已完成",
     "pendingTag": "待办",
     "rows": {
@@ -57,8 +65,13 @@
         "reject": "拒绝",
         "confirm": "确认"
     },
+    "actions": {
+        "delete": "删除任务",
+        "deleteConfirm": "确认删除这个任务吗？删除后不可恢复。"
+    },
     "toast": {
         "pluginInstalled": "任务插件安装成功",
-        "resumed": "任务已恢复执行"
+        "resumed": "任务已恢复执行",
+        "deleted": "任务已删除"
     }
 }

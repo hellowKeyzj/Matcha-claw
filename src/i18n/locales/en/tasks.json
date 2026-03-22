@@ -37,7 +37,15 @@
     "detailTitle": "Task Detail",
     "selectTask": "Select a task to view detail",
     "noMarkdown": "No plan markdown available",
-    "stepsOverview": "Checklist",
+    "noSteps": "No structured steps available",
+    "stepsOverview": "Steps Overview",
+    "currentStep": "Current Step",
+    "dependsOn": "Depends on",
+    "createdAt": "Created",
+    "startedAt": "Started",
+    "finishedAt": "Finished",
+    "checkpointsTitle": "Checkpoints",
+    "noCheckpoints": "No checkpoints yet",
     "completedTag": "Completed",
     "pendingTag": "Pending",
     "rows": {
@@ -57,8 +65,13 @@
         "reject": "Reject",
         "confirm": "Confirm"
     },
+    "actions": {
+        "delete": "Delete Task",
+        "deleteConfirm": "Delete this task? This action cannot be undone."
+    },
     "toast": {
         "pluginInstalled": "Task plugin installed",
-        "resumed": "Task resumed"
+        "resumed": "Task resumed",
+        "deleted": "Task deleted"
     }
 }

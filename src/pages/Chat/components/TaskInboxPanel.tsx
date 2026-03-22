@@ -166,10 +166,6 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
     if (result.switched) {
       return;
     }
-    if (result.reason === 'missing_assigned_session') {
-      toast.warning(t('taskInbox.unboundSession'));
-      return;
-    }
     toast.error(t('taskInbox.taskNotFound'));
   };
 
