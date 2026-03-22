@@ -16,6 +16,7 @@ function setupBaseState() {
   useSubagentsStore.setState({
     agents: [
       { id: 'main', name: 'main', isDefault: true, identity: { emoji: '🐱' } },
+      { id: 'test', name: 'test', isDefault: false, identity: { emoji: '🤖' } },
     ],
     loadAgents: vi.fn().mockResolvedValue(undefined),
   } as never);
@@ -36,28 +37,23 @@ describe('agent sessions pane', () => {
     setupBaseState();
   });
 
-  it('按 3/7/30 天分组，较旧分组默认折叠', async () => {
+  it('将 agent 列表放在上方，会话历史在下方统一展示', async () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessions: [
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
-        { key: 'agent:main:session-2', displayName: 'agent:main:session-2' },
-        { key: 'agent:main:session-3', displayName: 'agent:main:session-3' },
-        { key: 'agent:main:session-4', displayName: 'agent:main:session-4' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ],
       sessionLabels: {
-        'agent:main:session-1': '今天记录',
-        'agent:main:session-2': '五天前记录',
-        'agent:main:session-3': '十天前记录',
-        'agent:main:session-4': '四十天前记录',
+        'agent:main:session-1': '主Agent会话',
+        'agent:test:session-2': '测试Agent会话',
       },
       sessionLastActivity: {
         'agent:main:session-1': now - 1 * 24 * 60 * 60 * 1000,
-        'agent:main:session-2': now - 5 * 24 * 60 * 60 * 1000,
-        'agent:main:session-3': now - 10 * 24 * 60 * 60 * 1000,
-        'agent:main:session-4': now - 40 * 24 * 60 * 60 * 1000,
+        'agent:test:session-2': now - 2 * 24 * 60 * 60 * 1000,
       },
       switchSession: vi.fn(),
       newSession: vi.fn(),
@@ -67,23 +63,35 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText(/Last 3 Days/i)).toBeInTheDocument();
-    expect(screen.getByText(/Last 7 Days/i)).toBeInTheDocument();
-    expect(screen.getByText(/Last 30 Days/i)).toBeInTheDocument();
-    expect(screen.getByText(/Older Than 30 Days/i)).toBeInTheDocument();
-
-    expect(screen.getByText('今天记录')).toBeInTheDocument();
-    expect(screen.queryByText('五天前记录')).not.toBeInTheDocument();
-    expect(screen.queryByText('十天前记录')).not.toBeInTheDocument();
-    expect(screen.queryByText('四十天前记录')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /Last 7 Days/i }));
-    await waitFor(() => {
-      expect(screen.getByText('五天前记录')).toBeInTheDocument();
-    });
+    expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
+    expect(screen.getByText('主Agent会话')).toBeInTheDocument();
+    expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
   });
 
-  it('可删除子会话并触发 deleteSession', async () => {
+  it('点击某个 agent 的新会话按钮，应按对应 agent 创建', async () => {
+    const newSession = vi.fn();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      switchSession: vi.fn(),
+      newSession,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    fireEvent.click(screen.getByTestId('agent-new-session-test'));
+    expect(newSession).toHaveBeenCalledWith('test');
+  });
+
+  it('可删除会话并触发 deleteSession', async () => {
     const deleteSession = vi.fn().mockResolvedValue(undefined);
     const now = Date.now();
 

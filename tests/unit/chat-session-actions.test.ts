@@ -120,6 +120,22 @@ describe('chat session actions', () => {
     nowSpy.mockRestore();
   });
 
+  it('newSession with target agentId should create session for that agent', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1713333333333);
+    const { createSessionActions } = await import('@/stores/chat/session-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main' }, { key: 'agent:main:main' }],
+      messages: [],
+    });
+    const actions = createSessionActions(h.set as never, h.get as never);
+
+    actions.newSession('main');
+    const next = h.read();
+    expect(next.currentSessionKey).toBe('agent:main:session-1713333333333');
+    nowSpy.mockRestore();
+  });
+
   it('seeds sessionLastActivity from backend updatedAt metadata', async () => {
     const { createSessionActions } = await import('@/stores/chat/session-actions');
     const h = makeHarness({

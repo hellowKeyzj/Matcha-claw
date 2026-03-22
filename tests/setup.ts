@@ -5,6 +5,7 @@
 import { vi } from 'vitest';
 import '@testing-library/jest-dom';
 import { __resetSubagentsStoreInternalCachesForTest } from '@/stores/subagents';
+import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
 
 // Mock window.electron API
 const mockElectron = {
@@ -42,5 +43,6 @@ Object.defineProperty(window, 'matchMedia', {
 // Reset mocks after each test
 afterEach(() => {
   __resetSubagentsStoreInternalCachesForTest();
+  __resetSubagentTemplateCatalogCacheForTest();
   vi.clearAllMocks();
 });

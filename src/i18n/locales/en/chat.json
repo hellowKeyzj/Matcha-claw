@@ -17,8 +17,16 @@
     "noLogs": "(No logs available yet)",
     "toolbar": {
         "refresh": "Refresh chat",
+        "skillConfig": "Skill Configuration",
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
+    },
+    "skillConfigDialog": {
+        "titleWithAgent": "Skill Configuration · {{agent}}",
+        "loading": "Loading skills...",
+        "empty": "No available skills.",
+        "cancel": "Cancel",
+        "save": "Save"
     },
     "approval": {
         "panelTitle": "Approval required",

@@ -75,6 +75,10 @@
   "form": {
     "basicInfo": "基本信息",
     "aiConfig": "AI 配置",
+    "skillConfig": "技能配置",
+    "useAllSkills": "使用全部技能",
+    "skillsLoading": "技能加载中...",
+    "noSkillOptions": "暂无可选技能。",
     "name": "名称",
     "workspace": "工作区",
     "model": "模型",

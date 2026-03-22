@@ -29,6 +29,9 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { TaskCenterPageTitle } from '@/components/task-center/page-title';
+import { TaskCenterStatCard } from '@/components/task-center/stat-card';
+import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
 import { formatRelativeTime, cn } from '@/lib/utils';
@@ -384,6 +387,7 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
 
   return (
     <Card className={cn(
+      TASK_CENTER_SURFACE_CARD_CLASS,
       'transition-colors',
       job.enabled && 'border-primary/30'
     )}>
@@ -546,12 +550,7 @@ export function Cron({ embedded = false }: CronProps) {
       {/* Header */}
       <div className={cn('flex items-center', embedded ? 'justify-end' : 'justify-between')}>
         {!embedded && (
-          <div>
-            <h1 className="text-2xl font-bold">{t('title')}</h1>
-            <p className="text-muted-foreground">
-              {t('subtitle')}
-            </p>
-          </div>
+          <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
         )}
         <div className="flex gap-2">
           <Button
@@ -589,58 +588,34 @@ export function Cron({ embedded = false }: CronProps) {
 
       {/* Statistics */}
       <div className="grid grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-4">
-              <div className="rounded-full bg-primary/10 p-3">
-                <Clock className="h-6 w-6 text-primary" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold">{jobs.length}</p>
-                <p className="text-sm text-muted-foreground">{t('stats.total')}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-4">
-              <div className="rounded-full bg-green-100 p-3 dark:bg-green-900/30">
-                <Play className="h-6 w-6 text-green-600" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold">{runningJobs.length}</p>
-                <p className="text-sm text-muted-foreground">{t('stats.running')}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-4">
-              <div className="rounded-full bg-yellow-100 p-3 dark:bg-yellow-900/30">
-                <Pause className="h-6 w-6 text-yellow-600" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold">{pausedJobs.length}</p>
-                <p className="text-sm text-muted-foreground">{t('stats.paused')}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center gap-4">
-              <div className="rounded-full bg-red-100 p-3 dark:bg-red-900/30">
-                <XCircle className="h-6 w-6 text-red-600" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold">{failedJobs.length}</p>
-                <p className="text-sm text-muted-foreground">{t('stats.failed')}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <TaskCenterStatCard
+          value={jobs.length}
+          label={t('stats.total')}
+          icon={Clock}
+          iconWrapClassName="bg-primary/10"
+          iconClassName="text-primary"
+        />
+        <TaskCenterStatCard
+          value={runningJobs.length}
+          label={t('stats.running')}
+          icon={Play}
+          iconWrapClassName="bg-green-100 dark:bg-green-900/30"
+          iconClassName="text-green-600"
+        />
+        <TaskCenterStatCard
+          value={pausedJobs.length}
+          label={t('stats.paused')}
+          icon={Pause}
+          iconWrapClassName="bg-yellow-100 dark:bg-yellow-900/30"
+          iconClassName="text-yellow-600"
+        />
+        <TaskCenterStatCard
+          value={failedJobs.length}
+          label={t('stats.failed')}
+          icon={XCircle}
+          iconWrapClassName="bg-red-100 dark:bg-red-900/30"
+          iconClassName="text-red-600"
+        />
       </div>
 
       {/* Error Display */}
@@ -655,7 +630,7 @@ export function Cron({ embedded = false }: CronProps) {
 
       {/* Jobs List */}
       {jobs.length === 0 ? (
-        <Card>
+        <Card className={TASK_CENTER_SURFACE_CARD_CLASS}>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Clock className="h-12 w-12 text-muted-foreground mb-4" />
             <h3 className="text-lg font-medium mb-2">{t('empty.title')}</h3>

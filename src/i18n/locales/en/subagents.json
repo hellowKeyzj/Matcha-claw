@@ -75,6 +75,10 @@
   "form": {
     "basicInfo": "Basic Information",
     "aiConfig": "AI Configuration",
+    "skillConfig": "Skill Configuration",
+    "useAllSkills": "Use all skills",
+    "skillsLoading": "Loading skills...",
+    "noSkillOptions": "No available skills.",
     "name": "Name",
     "workspace": "Workspace",
     "model": "Model",
