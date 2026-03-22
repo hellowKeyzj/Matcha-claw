@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import {
+  deleteTask,
   getWorkspaceDir,
   getTaskWorkspaceDirs,
   getTaskPluginStatus,
@@ -39,6 +40,7 @@ interface TaskCenterState {
     decision?: 'approve' | 'reject';
     userInput?: string;
   }) => Promise<void>;
+  deleteTaskById: (payload: { taskId: string }) => Promise<void>;
   closeBlockedDialog: (payload: { taskId: string; confirmId: string }) => void;
   handleGatewayNotification: (notification: unknown) => void;
 }
@@ -173,6 +175,13 @@ function upsertBlockedTask(queue: BlockedTaskItem[], nextItem: BlockedTaskItem):
 
 function removeBlockedTask(queue: BlockedTaskItem[], taskId: string): BlockedTaskItem[] {
   return queue.filter((row) => row.taskId !== taskId);
+}
+
+function shouldAutoWakeByResumeReason(reason: string): boolean {
+  return reason === 'task_created'
+    || reason === 'tool_resume'
+    || reason === 'user_input'
+    || reason === 'approval_webhook';
 }
 
 const TASK_CENTER_REFRESH_MIN_GAP_MS = 1_200;
@@ -358,6 +367,29 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
   },
 
+  deleteTaskById: async ({ taskId }) => {
+    if (!taskId) {
+      return;
+    }
+    set({ loading: true, error: null });
+    try {
+      const taskWorkspace = get().tasks.find((row) => row.id === taskId)?.workspaceDir;
+      await deleteTask(taskId, {
+        workspaceDir: typeof taskWorkspace === 'string' && taskWorkspace.trim().length > 0
+          ? taskWorkspace
+          : undefined,
+      });
+      set((state) => ({
+        tasks: state.tasks.filter((task) => task.id !== taskId),
+        blockedQueue: removeBlockedTask(state.blockedQueue, taskId),
+      }));
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
   closeBlockedDialog: ({ taskId, confirmId }) => {
     if (!taskId || !confirmId) {
       return;
@@ -429,6 +461,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     if (payload.method === 'task_needs_resume') {
       const task = params.task as Task | undefined;
       const taskId = typeof params.taskId === 'string' ? params.taskId : task?.id;
+      const resumeReason = typeof params.resumeReason === 'string' ? params.resumeReason : '';
       const userInput = typeof params.userInput === 'string' ? params.userInput : undefined;
       if (task) {
         set((state) => ({
@@ -440,16 +473,30 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
         set((state) => ({
           blockedQueue: removeBlockedTask(state.blockedQueue, taskId),
         }));
-        const knownTask = task ?? get().tasks.find((row) => row.id === taskId);
-        void wakeTaskSession(taskId, {
-          message: userInput,
-          assignedSession: knownTask?.assigned_session,
-        }).catch((error) => {
-          set({
-            error: error instanceof Error ? error.message : String(error),
+        if (shouldAutoWakeByResumeReason(resumeReason)) {
+          const knownTask = task ?? get().tasks.find((row) => row.id === taskId);
+          void wakeTaskSession(taskId, {
+            message: userInput,
+            assignedSession: knownTask?.assigned_session,
+          }).catch((error) => {
+            set({
+              error: error instanceof Error ? error.message : String(error),
+            });
           });
-        });
+        }
       }
+      return;
+    }
+
+    if (payload.method === 'task_deleted') {
+      const taskId = typeof params.taskId === 'string' ? params.taskId : '';
+      if (!taskId) {
+        return;
+      }
+      set((state) => ({
+        tasks: state.tasks.filter((task) => task.id !== taskId),
+        blockedQueue: removeBlockedTask(state.blockedQueue, taskId),
+      }));
       return;
     }
 

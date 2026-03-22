@@ -37,7 +37,15 @@
     "detailTitle": "タスク詳細",
     "selectTask": "タスクを選択して詳細を表示",
     "noMarkdown": "計画 Markdown がありません",
-    "stepsOverview": "チェックリスト",
+    "noSteps": "構造化ステップはありません",
+    "stepsOverview": "ステップ概要",
+    "currentStep": "現在のステップ",
+    "dependsOn": "依存",
+    "createdAt": "作成",
+    "startedAt": "開始",
+    "finishedAt": "終了",
+    "checkpointsTitle": "チェックポイント",
+    "noCheckpoints": "チェックポイントはありません",
     "completedTag": "完了",
     "pendingTag": "保留",
     "rows": {
@@ -57,8 +65,13 @@
         "reject": "却下",
         "confirm": "承認"
     },
+    "actions": {
+        "delete": "タスク削除",
+        "deleteConfirm": "このタスクを削除しますか？この操作は元に戻せません。"
+    },
     "toast": {
         "pluginInstalled": "タスクプラグインをインストールしました",
-        "resumed": "タスクを再開しました"
+        "resumed": "タスクを再開しました",
+        "deleted": "タスクを削除しました"
     }
 }

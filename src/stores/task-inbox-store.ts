@@ -12,7 +12,7 @@ import { filterUnfinishedTasks } from '@/lib/task-inbox';
 
 type OpenTaskSessionResult =
   | { switched: true }
-  | { switched: false; reason: 'task_not_found' | 'missing_assigned_session' };
+  | { switched: false; reason: 'task_not_found' };
 
 interface TaskInboxState {
   tasks: Task[];
@@ -173,6 +173,21 @@ function appendSubmittingTaskId(list: string[], taskId: string): string[] {
 
 function removeSubmittingTaskId(list: string[], taskId: string): string[] {
   return list.filter((id) => id !== taskId);
+}
+
+function parseAgentIdFromSessionKey(sessionKey?: string): string | null {
+  if (!sessionKey) {
+    return null;
+  }
+  const matched = sessionKey.match(/^agent:([^:]+):/i);
+  return matched?.[1] ?? null;
+}
+
+function shouldAutoWakeByResumeReason(reason: string): boolean {
+  return reason === 'task_created'
+    || reason === 'tool_resume'
+    || reason === 'user_input'
+    || reason === 'approval_webhook';
 }
 
 function extractTaskFromNotification(params: Record<string, unknown>): Task | undefined {
@@ -352,10 +367,10 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
       return { switched: false, reason: 'task_not_found' as const };
     }
     const assignedSession = typeof task.assigned_session === 'string' ? task.assigned_session.trim() : '';
-    if (!assignedSession) {
-      return { switched: false, reason: 'missing_assigned_session' as const };
-    }
-    useChatStore.getState().switchSession(assignedSession);
+    const chatState = useChatStore.getState();
+    const fallbackAgentId = parseAgentIdFromSessionKey(chatState.currentSessionKey) ?? 'main';
+    const targetSession = assignedSession || `agent:${fallbackAgentId}:main`;
+    chatState.switchSession(targetSession);
     return { switched: true as const };
   },
 
@@ -406,6 +421,31 @@ export const useTaskInboxStore = create<TaskInboxState>((set, get) => ({
           tasks: upsertTask(state.tasks, task),
         }));
       }
+      const resumeReason = typeof params.resumeReason === 'string' ? params.resumeReason : '';
+      const taskId = typeof params.taskId === 'string' ? params.taskId : task?.id;
+      if (taskId && shouldAutoWakeByResumeReason(resumeReason)) {
+        const userInput = typeof params.userInput === 'string' ? params.userInput : undefined;
+        const knownTask = task ?? get().tasks.find((row) => row.id === taskId);
+        void wakeTaskSession(taskId, {
+          message: userInput,
+          assignedSession: knownTask?.assigned_session,
+        }).catch((error) => {
+          set({
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      return;
+    }
+
+    if (payload.method === 'task_deleted') {
+      const taskId = typeof params.taskId === 'string' ? params.taskId : '';
+      if (!taskId) {
+        return;
+      }
+      set((state) => ({
+        tasks: removeTaskById(state.tasks, taskId),
+      }));
       return;
     }
 

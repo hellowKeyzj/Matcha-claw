@@ -3,11 +3,10 @@ import {
   AlertCircle,
   Calendar,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   PauseCircle,
   PlayCircle,
   RefreshCw,
+  Trash2,
   Wrench,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -18,18 +17,29 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { TaskCenterPageTitle } from '@/components/task-center/page-title';
+import { TaskCenterStatCard } from '@/components/task-center/stat-card';
+import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import type { Task } from '@/services/openclaw/task-manager-client';
-import { buildStepDetailRows, countProgress, parseChecklist, type ChecklistItem, type ProgressCounter } from './checklist-parser';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'completed') return 'success';
   if (status === 'failed') return 'destructive';
   if (status === 'running') return 'default';
   return 'secondary';
+}
+
+function statusDotClass(status: string): string {
+  if (status === 'completed') return 'bg-emerald-500';
+  if (status === 'failed') return 'bg-red-500';
+  if (status === 'running') return 'bg-blue-500';
+  if (status === 'waiting_for_input' || status === 'waiting_approval') return 'bg-amber-500';
+  return 'bg-slate-400';
 }
 
 type TaskCenterTab = 'long' | 'scheduled';
@@ -92,120 +102,18 @@ function matchesStatusFilter(task: Task, filter: TaskStatusFilter): boolean {
   return isIncompleteTask(task);
 }
 
-function StepSection({
-  step,
-  defaultOpen,
-  doneLabel,
-  pendingLabel,
-  completionLabel,
-  evidenceLabel,
-}: {
-  step: ChecklistItem;
-  defaultOpen: boolean;
-  doneLabel: string;
-  pendingLabel: string;
-  completionLabel: string;
-  evidenceLabel: string;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const progress = useMemo(() => countProgress(step), [step]);
-  const rows = useMemo(() => buildStepDetailRows(step), [step]);
-  const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+function stepBadgeVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'destructive';
+  if (status === 'running') return 'default';
+  return 'secondary';
+}
 
-  return (
-    <div className="rounded-lg border bg-background/70">
-      <button
-        type="button"
-        className="flex w-full items-start justify-between gap-3 px-3 py-3 text-left hover:bg-accent/30"
-        onClick={() => setOpen((prev) => !prev)}
-      >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            {open ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
-            <p className="truncate text-sm font-semibold">{step.text}</p>
-          </div>
-          <p className="mt-1 pl-5 text-xs text-muted-foreground">
-            {progress.done}/{progress.total}
-          </p>
-        </div>
-        <div className="w-48 max-w-[45%] pt-0.5">
-          <Progress
-            value={percent}
-            className={cn(
-              'h-1.5 bg-muted/70',
-              percent === 100 ? '[&>div]:bg-emerald-500' : '[&>div]:bg-slate-500/80',
-            )}
-          />
-          <p className="mt-1 text-right text-xs text-muted-foreground">{percent}%</p>
-        </div>
-      </button>
-
-      {open ? (
-        <div className="space-y-2 border-t px-3 pb-3 pt-2">
-          {rows.map((row) => {
-            if (row.type === 'item') {
-              return (
-                <div key={row.id} className="rounded-md border bg-background/80 p-2" style={{ marginLeft: `${row.depth * 16}px` }}>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="line-clamp-1 text-xs font-medium">{row.text}</p>
-                    <Badge variant={row.percent === 100 ? 'success' : 'secondary'}>{row.percent === 100 ? doneLabel : pendingLabel}</Badge>
-                  </div>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {row.done}/{row.total}
-                  </p>
-                </div>
-              );
-            }
-
-            if (row.type === 'completion') {
-              return (
-                <div
-                  key={row.id}
-                  className="rounded-md border border-green-200 bg-green-50/70 p-2 text-xs text-green-800 dark:border-green-900 dark:bg-green-950/20 dark:text-green-300"
-                  style={{ marginLeft: `${row.depth * 16}px` }}
-                >
-                  {row.text ? `${completionLabel}: ${row.text}` : `${completionLabel}:`}
-                  {row.details.length > 0 ? (
-                    <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                      {row.details.map((detail, detailIndex) => (
-                        <li key={`${row.id}-detail-${detailIndex}`}>{detail}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              );
-            }
-
-            if (row.type === 'evidence') {
-              return (
-                <div
-                  key={row.id}
-                  className="rounded-md border border-blue-200 bg-blue-50/70 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-300"
-                  style={{ marginLeft: `${row.depth * 16}px` }}
-                >
-                  {evidenceLabel}:
-                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                    {row.details.map((detail, detailIndex) => (
-                      <li key={`${row.id}-detail-${detailIndex}`}>{detail}</li>
-                    ))}
-                  </ul>
-                </div>
-              );
-            }
-
-            return (
-              <div key={row.id} className="rounded-md border bg-background/80 p-2" style={{ marginLeft: `${row.depth * 16}px` }}>
-                <div className="flex items-center justify-between gap-2">
-                  <p className="line-clamp-1 text-xs">{row.text}</p>
-                  <Badge variant={row.checked ? 'success' : 'secondary'}>{row.checked ? doneLabel : pendingLabel}</Badge>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
+function formatDateTime(value: number | undefined): string {
+  if (!Number.isFinite(value)) {
+    return '-';
+  }
+  return new Date(Number(value)).toLocaleString();
 }
 
 export function TasksPage() {
@@ -224,6 +132,7 @@ export function TasksPage() {
     refreshTasks,
     installPlugin,
     resumeBlockedTask,
+    deleteTaskById,
     closeBlockedDialog,
   } = useTaskCenterStore();
 
@@ -236,6 +145,7 @@ export function TasksPage() {
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
   const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0);
+  const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
   const tasksForView = taskHeavyContentReady ? tasks : [];
@@ -459,57 +369,20 @@ export function TasksPage() {
     () => filteredTasks.find((task) => task.id === effectiveSelectedTaskId) ?? null,
     [effectiveSelectedTaskId, filteredTasks],
   );
-  const [selectedTaskChecklist, setSelectedTaskChecklist] = useState<ChecklistItem[]>([]);
-
-  useEffect(() => {
-    const markdown = selectedTask?.plan_markdown ?? '';
-    if (!markdown) {
-      setSelectedTaskChecklist([]);
-      return;
-    }
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const parse = () => {
-      if (cancelled) {
-        return;
-      }
-      setSelectedTaskChecklist(parseChecklist(markdown));
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(parse, { timeout: 280 });
-    } else {
-      timeoutId = window.setTimeout(parse, 16);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [selectedTask?.plan_markdown]);
-
-  const checklistSummary = useMemo(
-    () =>
-      selectedTaskChecklist.reduce<ProgressCounter>(
-        (acc, step) => {
-          const current = countProgress(step);
-          return {
-            done: acc.done + current.done,
-            total: acc.total + current.total,
-          };
-        },
-        { done: 0, total: 0 },
-      ),
-    [selectedTaskChecklist],
+  const selectedTaskSteps = useMemo(() => selectedTask?.steps ?? [], [selectedTask?.steps]);
+  const selectedTaskCheckpoints = useMemo(
+    () => (selectedTask?.checkpoints ?? []).slice().sort((a, b) => b.created_at - a.created_at),
+    [selectedTask?.checkpoints],
   );
+  const currentStep = useMemo(
+    () => selectedTaskSteps.find((step) => step.id === selectedTask?.current_step_id) ?? null,
+    [selectedTask?.current_step_id, selectedTaskSteps],
+  );
+  const stepsSummary = useMemo(() => {
+    const total = selectedTaskSteps.length;
+    const done = selectedTaskSteps.filter((step) => step.status === 'completed').length;
+    return { done, total };
+  }, [selectedTaskSteps]);
 
   const taskStatusSummary = useMemo(() => {
     return statsTasks.reduce(
@@ -561,6 +434,31 @@ export function TasksPage() {
     toast.success(t('toast.resumed'));
   };
 
+  const handleDeleteTask = (taskId: string) => {
+    if (!taskId) {
+      return;
+    }
+    setTaskToDelete({ id: taskId });
+  };
+
+  const confirmDeleteTask = async () => {
+    const deletingTaskId = taskToDelete?.id;
+    if (!deletingTaskId) {
+      return;
+    }
+    await deleteTaskById({ taskId: deletingTaskId });
+    const next = useTaskCenterStore.getState();
+    if (next.error) {
+      toast.error(next.error);
+      return;
+    }
+    toast.success(t('toast.deleted'));
+    if (selectedTaskId === deletingTaskId) {
+      setSelectedTaskId(null);
+    }
+    setTaskToDelete(null);
+  };
+
   const handleTabChange = (nextValue: string) => {
     const nextTab = resolveTaskCenterTab(nextValue);
     const nextParams = new URLSearchParams(searchParams);
@@ -582,10 +480,7 @@ export function TasksPage() {
   return (
     <section className="space-y-6">
       <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('title')}</h1>
-          <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
-        </div>
+        <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
       </header>
       <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
         <TabsList className="grid w-full max-w-sm grid-cols-2">
@@ -718,82 +613,46 @@ export function TasksPage() {
           )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-            <button
-              type="button"
-              aria-label={t('stats.running')}
-              aria-pressed={statusFilter === 'running'}
+            <TaskCenterStatCard
+              value={runningCount}
+              label={t('stats.running')}
+              icon={PlayCircle}
+              iconWrapClassName="bg-green-100 dark:bg-green-900/30"
+              iconClassName="text-green-600"
+              active={statusFilter === 'running'}
+              ariaLabel={t('stats.running')}
               onClick={() => setStatusFilter((prev) => (prev === 'running' ? 'all' : 'running'))}
-              className="text-left"
-            >
-              <Card className={cn('transition-colors', statusFilter === 'running' && 'border-primary bg-primary/5')}>
-                <CardContent className="pt-6">
-                  <div className="flex items-center gap-3">
-                    <PlayCircle className="h-5 w-5 text-primary" />
-                    <div>
-                      <p className="text-2xl font-bold">{runningCount}</p>
-                      <p className="text-xs text-muted-foreground">{t('stats.running')}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </button>
-            <button
-              type="button"
-              aria-label={t('stats.waiting')}
-              aria-pressed={statusFilter === 'waiting'}
+            />
+            <TaskCenterStatCard
+              value={waitingCount}
+              label={t('stats.waiting')}
+              icon={PauseCircle}
+              iconWrapClassName="bg-yellow-100 dark:bg-yellow-900/30"
+              iconClassName="text-yellow-600"
+              active={statusFilter === 'waiting'}
+              ariaLabel={t('stats.waiting')}
               onClick={() => setStatusFilter((prev) => (prev === 'waiting' ? 'all' : 'waiting'))}
-              className="text-left"
-            >
-              <Card className={cn('transition-colors', statusFilter === 'waiting' && 'border-primary bg-primary/5')}>
-                <CardContent className="pt-6">
-                  <div className="flex items-center gap-3">
-                    <PauseCircle className="h-5 w-5 text-yellow-500" />
-                    <div>
-                      <p className="text-2xl font-bold">{waitingCount}</p>
-                      <p className="text-xs text-muted-foreground">{t('stats.waiting')}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </button>
-            <button
-              type="button"
-              aria-label={t('stats.completed')}
-              aria-pressed={statusFilter === 'completed'}
+            />
+            <TaskCenterStatCard
+              value={completedCount}
+              label={t('stats.completed')}
+              icon={CheckCircle2}
+              iconWrapClassName="bg-emerald-100 dark:bg-emerald-900/30"
+              iconClassName="text-emerald-600"
+              active={statusFilter === 'completed'}
+              ariaLabel={t('stats.completed')}
               onClick={() => setStatusFilter((prev) => (prev === 'completed' ? 'all' : 'completed'))}
-              className="text-left"
-            >
-              <Card className={cn('transition-colors', statusFilter === 'completed' && 'border-primary bg-primary/5')}>
-                <CardContent className="pt-6">
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="h-5 w-5 text-green-600" />
-                    <div>
-                      <p className="text-2xl font-bold">{completedCount}</p>
-                      <p className="text-xs text-muted-foreground">{t('stats.completed')}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </button>
-            <button
-              type="button"
-              aria-label={t('stats.incomplete')}
-              aria-pressed={statusFilter === 'incomplete'}
+            />
+            <TaskCenterStatCard
+              value={incompleteCount}
+              label={t('stats.incomplete')}
+              icon={AlertCircle}
+              iconWrapClassName="bg-red-100 dark:bg-red-900/30"
+              iconClassName="text-red-600"
+              active={statusFilter === 'incomplete'}
+              ariaLabel={t('stats.incomplete')}
               onClick={() => setStatusFilter((prev) => (prev === 'incomplete' ? 'all' : 'incomplete'))}
-              className="text-left"
-            >
-              <Card className={cn('transition-colors', statusFilter === 'incomplete' && 'border-primary bg-primary/5')}>
-                <CardContent className="pt-6">
-                  <div className="flex items-center gap-3">
-                    <AlertCircle className="h-5 w-5 text-orange-500" />
-                    <div>
-                      <p className="text-2xl font-bold">{incompleteCount}</p>
-                      <p className="text-xs text-muted-foreground">{t('stats.incomplete')}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </button>
+            />
           </div>
 
           {error && (
@@ -804,7 +663,7 @@ export function TasksPage() {
 
           {!initialized ? null : (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
-              <Card className="flex h-[70vh] flex-col overflow-hidden">
+              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
                 <CardHeader className="shrink-0">
                   <CardTitle>{t('listTitle')}</CardTitle>
                 </CardHeader>
@@ -835,7 +694,11 @@ export function TasksPage() {
                         >
                           <div className="flex items-start justify-between gap-2">
                             <p className="line-clamp-2 text-sm font-medium">{task.goal}</p>
-                            <Badge variant={statusVariant(task.status)}>{task.status}</Badge>
+                            <span
+                              className={cn('mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full', statusDotClass(task.status))}
+                              title={task.status}
+                              aria-label={task.status}
+                            />
                           </div>
                           <div className="mt-3 space-y-1">
                             <Progress
@@ -864,10 +727,27 @@ export function TasksPage() {
                 </CardContent>
               </Card>
 
-              <Card className="flex h-[70vh] flex-col overflow-hidden">
+              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
                 <CardHeader className="shrink-0">
-                  <CardTitle>{selectedTask ? selectedTask.goal : t('detailTitle')}</CardTitle>
-                  <CardDescription>{selectedTask?.id || '-'}</CardDescription>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <CardTitle>{selectedTask ? selectedTask.goal : t('detailTitle')}</CardTitle>
+                      <CardDescription>{selectedTask?.id || '-'}</CardDescription>
+                    </div>
+                    {selectedTask ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0"
+                        onClick={() => void handleDeleteTask(selectedTask.id)}
+                        disabled={loading}
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                        <span className="ml-1 text-destructive">{t('actions.delete')}</span>
+                      </Button>
+                    ) : null}
+                  </div>
                 </CardHeader>
                 <CardContent className="min-h-0 flex-1 overflow-y-auto">
                   {!taskHeavyContentReady ? (
@@ -896,28 +776,69 @@ export function TasksPage() {
                       ) : null}
                       <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
                         <p className="text-sm font-medium text-muted-foreground">{t('detailTitle')}</p>
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between rounded-md border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                            <span>{t('stepsOverview')}</span>
+                            <span>
+                              {stepsSummary.done}/{stepsSummary.total} {t('completedTag')}
+                            </span>
+                          </div>
 
-                        {selectedTaskChecklist.length === 0 ? (
-                          <p className="text-sm text-muted-foreground">{t('noMarkdown')}</p>
+                          {currentStep ? (
+                            <div className="rounded-md border border-blue-300 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-300">
+                              {t('currentStep')}: {currentStep.title}
+                            </div>
+                          ) : null}
+
+                          {selectedTaskSteps.length === 0 ? (
+                            <p className="text-sm text-muted-foreground">{t('noSteps')}</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {selectedTaskSteps.map((step) => (
+                                <div key={`${selectedTask.id}-${step.id}`} className="rounded-md border bg-background/80 p-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0 flex-1">
+                                      <p className="truncate text-sm font-medium">{step.title}</p>
+                                      {step.description ? (
+                                        <p className="mt-1 text-xs text-muted-foreground">{step.description}</p>
+                                      ) : null}
+                                      {step.depends_on.length > 0 ? (
+                                        <p className="mt-1 text-xs text-muted-foreground">
+                                          {t('dependsOn')}: {step.depends_on.join(', ')}
+                                        </p>
+                                      ) : null}
+                                    </div>
+                                    <Badge variant={stepBadgeVariant(step.status)}>{step.status}</Badge>
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                                    <span>{t('createdAt')}: {formatDateTime(step.created_at)}</span>
+                                    {step.started_at ? <span>{t('startedAt')}: {formatDateTime(step.started_at)}</span> : null}
+                                    {step.finished_at ? <span>{t('finishedAt')}: {formatDateTime(step.finished_at)}</span> : null}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm font-medium text-muted-foreground">{t('checkpointsTitle')}</p>
+                          <span className="text-xs text-muted-foreground">{selectedTaskCheckpoints.length}</span>
+                        </div>
+                        {selectedTaskCheckpoints.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">{t('noCheckpoints')}</p>
                         ) : (
                           <div className="space-y-2">
-                            <div className="flex items-center justify-between rounded-md border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                              <span>{t('stepsOverview')}</span>
-                              <span>
-                                {checklistSummary.done}/{checklistSummary.total} {t('completedTag')}
-                              </span>
-                            </div>
-
-                            {selectedTaskChecklist.map((step, index) => (
-                              <StepSection
-                                key={`${selectedTask.id}-${step.id}`}
-                                step={step}
-                                defaultOpen={index === 0}
-                                doneLabel={t('completedTag')}
-                                pendingLabel={t('pendingTag')}
-                                completionLabel={t('rows.completion')}
-                                evidenceLabel={t('rows.evidence')}
-                              />
+                            {selectedTaskCheckpoints.slice(0, 8).map((checkpoint) => (
+                              <div key={checkpoint.id} className="rounded-md border bg-background/80 p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <Badge variant="secondary">{checkpoint.kind}</Badge>
+                                  <span className="text-[11px] text-muted-foreground">{formatDateTime(checkpoint.created_at)}</span>
+                                </div>
+                                <p className="mt-2 text-sm">{checkpoint.summary}</p>
+                              </div>
                             ))}
                           </div>
                         )}
@@ -1025,6 +946,19 @@ export function TasksPage() {
           </Card>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!taskToDelete}
+        title={t('common:actions.confirm', 'Confirm')}
+        message={t('actions.deleteConfirm')}
+        confirmLabel={t('common:actions.delete', 'Delete')}
+        cancelLabel={t('common:actions.cancel', 'Cancel')}
+        variant="destructive"
+        onConfirm={() => {
+          void confirmDeleteTask();
+        }}
+        onCancel={() => setTaskToDelete(null)}
+      />
     </section>
   );
 }

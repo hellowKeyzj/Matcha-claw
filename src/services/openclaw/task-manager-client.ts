@@ -11,6 +11,7 @@ export type TaskStatus =
 export interface TaskBlockedInfo {
   reason: 'need_user_confirm' | 'waiting_external_approval';
   confirm_id?: string;
+  grace_until?: number;
   input_mode?: 'decision' | 'free_text';
   question?: string;
   description?: string;
@@ -18,14 +19,43 @@ export interface TaskBlockedInfo {
   expires_at?: number;
 }
 
+export type TaskStepStatus = 'pending' | 'running' | 'blocked' | 'completed' | 'failed';
+
+export interface TaskStep {
+  id: string;
+  title: string;
+  description?: string;
+  depends_on: string[];
+  status: TaskStepStatus;
+  created_at: number;
+  updated_at: number;
+  started_at?: number;
+  finished_at?: number;
+}
+
+export type TaskCheckpointKind = 'checkpoint' | 'block' | 'resume' | 'finish';
+
+export interface TaskCheckpoint {
+  id: string;
+  kind: TaskCheckpointKind;
+  summary: string;
+  created_at: number;
+  payload?: Record<string, unknown>;
+}
+
 export interface Task {
   id: string;
   goal: string;
   status: TaskStatus;
   progress: number;
-  plan_markdown: string;
+  steps: TaskStep[];
+  current_step_id?: string;
+  checkpoints: TaskCheckpoint[];
   assigned_session?: string;
   blocked_info?: TaskBlockedInfo;
+  result_summary?: string;
+  failure_reason?: string;
+  finished_at?: number;
   created_at: number;
   updated_at: number;
   workspaceDir?: string;
@@ -50,6 +80,7 @@ export type TaskNotification =
         question?: string;
         description?: string;
         expiresAt?: number;
+        graceUntil?: number;
         task?: Task;
       };
     }
@@ -61,6 +92,15 @@ export type TaskNotification =
         resumeReason: string;
         decision?: 'approve' | 'reject';
         userInput?: string;
+        resumePacket?: Record<string, unknown>;
+        task?: Task;
+      };
+    }
+  | {
+      method: 'task_deleted';
+      params: {
+        taskId: string;
+        reason?: string;
         task?: Task;
       };
     };
@@ -141,6 +181,23 @@ export async function resumeTask(
   return result.task;
 }
 
+export async function deleteTask(
+  taskId: string,
+  options?: { workspaceDir?: string; reason?: string },
+): Promise<{ deleted: boolean; taskId: string }> {
+  return gatewayRpc<{ deleted: boolean; taskId: string }>(
+    'task_delete',
+    {
+      taskId,
+      ...(options?.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
+      ...(typeof options?.reason === 'string' && options.reason.trim().length > 0
+        ? { reason: options.reason.trim() }
+        : {}),
+    },
+    TASK_RPC_TIMEOUT_MS,
+  );
+}
+
 function parseAgentIdFromSessionKey(sessionKey?: string): string | null {
   if (!sessionKey) {
     return null;
@@ -150,10 +207,11 @@ function parseAgentIdFromSessionKey(sessionKey?: string): string | null {
 }
 
 function resolveResumeTarget(assignedSession?: string): { agentId: string; sessionKey: string } {
-  const agentId = parseAgentIdFromSessionKey(assignedSession) ?? 'main';
+  const normalizedAssigned = typeof assignedSession === 'string' ? assignedSession.trim() : '';
+  const agentId = parseAgentIdFromSessionKey(normalizedAssigned) ?? 'main';
   return {
     agentId,
-    sessionKey: `agent:${agentId}:main`,
+    sessionKey: normalizedAssigned || `agent:${agentId}:main`,
   };
 }
 
