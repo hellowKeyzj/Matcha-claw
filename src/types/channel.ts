@@ -11,6 +11,7 @@ export type ChannelType =
   | 'dingtalk'
   | 'telegram'
   | 'discord'
+  | 'openclaw-weixin'
   | 'signal'
   | 'feishu'
   | 'wecom'
@@ -84,6 +85,7 @@ export const CHANNEL_ICONS: Record<ChannelType, string> = {
   dingtalk: '💬',
   telegram: '✈️',
   discord: '🎮',
+  'openclaw-weixin': '🧧',
   signal: '🔒',
   feishu: '🐦',
   wecom: '💼',
@@ -104,6 +106,7 @@ export const CHANNEL_NAMES: Record<ChannelType, string> = {
   dingtalk: 'DingTalk',
   telegram: 'Telegram',
   discord: 'Discord',
+  'openclaw-weixin': 'WeChat',
   signal: 'Signal',
   feishu: 'Feishu / Lark',
   wecom: 'WeCom',
@@ -120,6 +123,52 @@ export const CHANNEL_NAMES: Record<ChannelType, string> = {
  * Channel metadata with configuration information
  */
 export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
+  'openclaw-weixin': {
+    id: 'openclaw-weixin',
+    name: 'WeChat',
+    icon: '🧧',
+    description: 'channels:meta.openclaw-weixin.description',
+    connectionType: 'qr',
+    docsUrl: 'channels:meta.openclaw-weixin.docsUrl',
+    configFields: [
+      {
+        key: 'baseUrl',
+        label: 'channels:meta.openclaw-weixin.fields.baseUrl.label',
+        type: 'text',
+        placeholder: 'channels:meta.openclaw-weixin.fields.baseUrl.placeholder',
+        required: false,
+      },
+      {
+        key: 'cdnBaseUrl',
+        label: 'channels:meta.openclaw-weixin.fields.cdnBaseUrl.label',
+        type: 'text',
+        placeholder: 'channels:meta.openclaw-weixin.fields.cdnBaseUrl.placeholder',
+        required: false,
+      },
+      {
+        key: 'logUploadUrl',
+        label: 'channels:meta.openclaw-weixin.fields.logUploadUrl.label',
+        type: 'text',
+        placeholder: 'channels:meta.openclaw-weixin.fields.logUploadUrl.placeholder',
+        required: false,
+      },
+      {
+        key: 'routeTag',
+        label: 'channels:meta.openclaw-weixin.fields.routeTag.label',
+        type: 'text',
+        placeholder: 'channels:meta.openclaw-weixin.fields.routeTag.placeholder',
+        required: false,
+      },
+    ],
+    instructions: [
+      'channels:meta.openclaw-weixin.instructions.0',
+      'channels:meta.openclaw-weixin.instructions.1',
+      'channels:meta.openclaw-weixin.instructions.2',
+      'channels:meta.openclaw-weixin.instructions.3',
+      'channels:meta.openclaw-weixin.instructions.4',
+    ],
+    isPlugin: true,
+  },
   qqbot: {
     id: 'qqbot',
     name: 'QQ Bot',
@@ -562,7 +611,7 @@ export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
  * Get primary supported channels (non-plugin, commonly used)
  */
 export function getPrimaryChannels(): ChannelType[] {
-  return ['telegram', 'discord', 'whatsapp', 'dingtalk', 'feishu', 'wecom', 'qqbot'];
+  return ['telegram', 'discord', 'whatsapp', 'dingtalk', 'feishu', 'wecom', 'openclaw-weixin', 'qqbot'];
 }
 
 /**

@@ -241,8 +241,15 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   deleteChannel: async (channelId) => {
-    // Extract channel type from the channelId (format: "channelType-accountId")
-    const channelType = channelId.split('-')[0];
+    const channelTypeFromState = get().channels.find((channel) => channel.id === channelId)?.type;
+    const placeholderMatch = channelId.match(/^(.*)-default$/);
+    const channelType = channelTypeFromState ?? (placeholderMatch?.[1] as ChannelType | undefined);
+    if (!channelType) {
+      set((state) => ({
+        channels: state.channels.filter((c) => c.id !== channelId),
+      }));
+      return;
+    }
 
     try {
       // Delete the channel configuration from openclaw.json

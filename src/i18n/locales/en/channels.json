@@ -23,7 +23,8 @@
         "channelSaved": "Channel {{name}} saved",
         "channelConnecting": "Connecting to {{name}}...",
         "restartManual": "Please restart the gateway manually",
-        "configFailed": "Configuration failed: {{error}}"
+        "configFailed": "Configuration failed: {{error}}",
+        "qrGenerateTimeout": "QR code generation timed out, please retry"
     },
     "dialog": {
         "updateTitle": "Update {{name}}",
@@ -34,6 +35,7 @@
         "qrCode": "QRCode",
         "token": "Token",
         "scanQR": "Scan this QR code with {{name}}",
+        "qrImageAlt": "{{name}} login QR code",
         "refreshCode": "Refresh Code",
         "loadingConfig": "Loading configuration...",
         "existingHint": "You have an existing configuration for this channel",
@@ -51,6 +53,7 @@
         "validateConfig": "Validate Configuration",
         "generatingQR": "Generating QR...",
         "validatingAndSaving": "Validating & Saving...",
+        "advancedSettings": "Advanced settings (optional)",
         "generateQRCode": "Generate QR Code",
         "updateAndReconnect": "Update & Reconnect",
         "saveAndConnect": "Save & Connect",
@@ -147,6 +150,35 @@
                 "Create a DingTalk internal app and enable Stream mode",
                 "Fill in Client ID and Client Secret (required)",
                 "Fill in Robot Code / Corp ID / Agent ID if your setup requires them"
+            ]
+        },
+        "openclaw-weixin": {
+            "description": "Connect WeChat via Tencent openclaw-weixin plugin (QR login)",
+            "docsUrl": "https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin",
+            "fields": {
+                "baseUrl": {
+                    "label": "Base URL (optional)",
+                    "placeholder": "https://api.weixin.qq.com/cgi-bin/ilink"
+                },
+                "cdnBaseUrl": {
+                    "label": "CDN Base URL (optional)",
+                    "placeholder": "https://api.weixin.qq.com/cgi-bin/ilink-cdn"
+                },
+                "logUploadUrl": {
+                    "label": "Log Upload URL (optional)",
+                    "placeholder": "https://your-host/path/to/log-upload"
+                },
+                "routeTag": {
+                    "label": "Route Tag (optional)",
+                    "placeholder": "e.g. 1001"
+                }
+            },
+            "instructions": [
+                "Save this form to auto-enable and install openclaw-weixin plugin",
+                "Click \"Generate QR Code\" to start login in-app",
+                "Scan the QR code with WeChat and confirm authorization",
+                "Restart gateway after login (or restart from this app)",
+                "Return to this page and click Refresh to verify channel status"
             ]
         },
         "signal": {

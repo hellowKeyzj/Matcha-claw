@@ -16,6 +16,7 @@ const OPENCLAW_DIR = join(homedir(), '.openclaw');
 const CONFIG_FILE = join(OPENCLAW_DIR, 'openclaw.json');
 const WECOM_PLUGIN_ID = 'wecom-openclaw-plugin';
 const FEISHU_PLUGIN_ID = 'feishu-openclaw-plugin';
+const WEIXIN_PLUGIN_ID = 'openclaw-weixin';
 const DEFAULT_ACCOUNT_ID = 'default';
 const CHANNEL_TOP_LEVEL_KEYS_TO_KEEP = new Set(['accounts', 'defaultAccount', 'enabled']);
 
@@ -174,6 +175,29 @@ function ensurePluginAllowlist(currentConfig: OpenClawConfig, channelType: strin
             : [];
         if (!allow.includes('qqbot')) {
             currentConfig.plugins.allow = [...allow, 'qqbot'];
+        }
+    }
+
+    if (channelType === 'openclaw-weixin') {
+        if (!currentConfig.plugins) {
+            currentConfig.plugins = {};
+        }
+        currentConfig.plugins.enabled = true;
+        const allow = Array.isArray(currentConfig.plugins.allow)
+            ? currentConfig.plugins.allow as string[]
+            : [];
+        if (!allow.includes(WEIXIN_PLUGIN_ID)) {
+            currentConfig.plugins.allow = [...allow, WEIXIN_PLUGIN_ID];
+        }
+        const entries = currentConfig.plugins.entries;
+        if (entries && typeof entries === 'object') {
+            const entry = entries[WEIXIN_PLUGIN_ID];
+            if (entry && typeof entry === 'object') {
+                entries[WEIXIN_PLUGIN_ID] = {
+                    ...entry,
+                    enabled: true,
+                };
+            }
         }
     }
 }

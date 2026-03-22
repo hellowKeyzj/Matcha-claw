@@ -14,6 +14,7 @@ import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings
 import { logger } from '../utils/logger';
 import { checkUvInstalled, installUv, setupManagedPython } from '../utils/uv-setup';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
+import { weixinLoginManager } from '../utils/weixin-login';
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { applyProxySettings } from './proxy';
@@ -113,7 +114,7 @@ export function registerIpcHandlers(
   registerWindowHandlers(mainWindow);
 
   // WhatsApp handlers
-  registerWhatsAppHandlers(mainWindow);
+  registerChannelQrHandlers(mainWindow);
 
   // Device OAuth handlers (Code Plan)
   registerDeviceOAuthHandlers(mainWindow);
@@ -669,9 +670,9 @@ function registerLogHandlers(): void {
 
 
 /**
- * WhatsApp Login Handlers
+ * Channel QR Login Handlers
  */
-function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
+function registerChannelQrHandlers(mainWindow: BrowserWindow): void {
   // Request WhatsApp QR code
   ipcMain.handle('channel:requestWhatsAppQr', async (_, accountId: string) => {
     try {
@@ -698,6 +699,29 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
   // Check WhatsApp status (is it active?)
   // ipcMain.handle('channel:checkWhatsAppStatus', ...)
 
+  // Request Weixin QR code
+  ipcMain.handle('channel:requestWeixinQr', async (_, payload: { accountId?: string; baseUrl?: string; routeTag?: string }) => {
+    try {
+      logger.info('channel:requestWeixinQr', payload);
+      weixinLoginManager.startInBackground(payload ?? {});
+      return { success: true, queued: true };
+    } catch (error) {
+      logger.error('channel:requestWeixinQr failed', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Cancel Weixin login
+  ipcMain.handle('channel:cancelWeixinQr', async () => {
+    try {
+      await weixinLoginManager.stop();
+      return { success: true };
+    } catch (error) {
+      logger.error('channel:cancelWeixinQr failed', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // Forward events to renderer
   whatsAppLoginManager.on('qr', (data) => {
     if (!mainWindow.isDestroyed()) {
@@ -716,6 +740,26 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
     if (!mainWindow.isDestroyed()) {
       logger.error('whatsapp:login-error', error);
       mainWindow.webContents.send('channel:whatsapp-error', error);
+    }
+  });
+
+  weixinLoginManager.on('qr', (data) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('channel:weixin-qr', data);
+    }
+  });
+
+  weixinLoginManager.on('success', (data) => {
+    if (!mainWindow.isDestroyed()) {
+      logger.info('weixin:login-success', data);
+      mainWindow.webContents.send('channel:weixin-success', data);
+    }
+  });
+
+  weixinLoginManager.on('error', (error) => {
+    if (!mainWindow.isDestroyed()) {
+      logger.error('weixin:login-error', error);
+      mainWindow.webContents.send('channel:weixin-error', error);
     }
   });
 }

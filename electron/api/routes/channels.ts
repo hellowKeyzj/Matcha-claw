@@ -16,6 +16,7 @@ import {
 } from '../../utils/channel-config';
 import { upsertPluginInstallRecord } from '../../utils/plugin-install-record';
 import { whatsAppLoginManager } from '../../utils/whatsapp-login';
+import { weixinLoginManager } from '../../utils/weixin-login';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -34,6 +35,71 @@ type ManagedPluginInstallResult = {
   sourcePath?: string;
   version?: string;
 };
+
+type PendingWeixinPersist = {
+  config: Record<string, unknown>;
+  installResult: ManagedPluginInstallResult;
+  startedAt: number;
+};
+
+const pendingWeixinPersists = new Map<string, PendingWeixinPersist>();
+let weixinPersistHooked = false;
+
+function normalizeSessionKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+async function commitWeixinConfigAfterLoginSuccess(data: unknown): Promise<void> {
+  const payload = (data && typeof data === 'object' ? data : {}) as {
+    sessionKey?: unknown;
+    requestedAccountId?: unknown;
+    accountId?: unknown;
+  };
+
+  const bySession = normalizeSessionKey(payload.sessionKey);
+  const byRequested = normalizeSessionKey(payload.requestedAccountId);
+  const key = bySession ?? byRequested ?? (pendingWeixinPersists.size === 1 ? [...pendingWeixinPersists.keys()][0] : undefined);
+  if (!key) {
+    return;
+  }
+
+  const pending = pendingWeixinPersists.get(key);
+  if (!pending) {
+    return;
+  }
+  pendingWeixinPersists.delete(key);
+
+  const resolvedAccountId = normalizeSessionKey(payload.accountId);
+  const persistedConfig = {
+    ...pending.config,
+    enabled: true,
+  };
+
+  await recordChannelPluginInstall('openclaw-weixin', pending.installResult);
+  await saveChannelConfig('openclaw-weixin', persistedConfig, resolvedAccountId);
+}
+
+function ensureWeixinPersistHooks(): void {
+  if (weixinPersistHooked) {
+    return;
+  }
+  weixinPersistHooked = true;
+
+  weixinLoginManager.on('success', (data) => {
+    void commitWeixinConfigAfterLoginSuccess(data).catch((error) => {
+      console.error('[channels] Failed to persist weixin config after login success:', error);
+    });
+  });
+
+  weixinLoginManager.on('error', () => {
+    // Weixin login manager currently supports a single active login session.
+    pendingWeixinPersists.clear();
+  });
+}
 
 function getInstalledPluginVersion(pluginId: string): string | undefined {
   const pkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
@@ -265,12 +331,65 @@ async function ensureQQBotPluginInstalled(): Promise<ManagedPluginInstallResult>
   }
 }
 
+async function ensureWeixinPluginInstalled(): Promise<ManagedPluginInstallResult> {
+  const pluginId = 'openclaw-weixin';
+  const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
+  const targetManifest = join(targetDir, 'openclaw.plugin.json');
+
+  if (existsSync(targetManifest)) {
+    return {
+      installed: true,
+      installedPath: targetDir,
+      version: getInstalledPluginVersion(pluginId),
+    };
+  }
+
+  const candidateSources = app.isPackaged
+    ? [
+      join(process.resourcesPath, 'openclaw-plugins', pluginId),
+      join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginId),
+      join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId),
+    ]
+    : [
+      join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
+      join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
+      join(__dirname, `../../../build/openclaw-plugins/${pluginId}`),
+    ];
+
+  const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+  if (!sourceDir) {
+    return {
+      installed: false,
+      warning: `Bundled Weixin plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
+    };
+  }
+
+  try {
+    mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
+    rmSync(targetDir, { recursive: true, force: true });
+    cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+    if (!existsSync(targetManifest)) {
+      return { installed: false, warning: 'Failed to install Weixin plugin mirror (manifest missing).' };
+    }
+    return {
+      installed: true,
+      installedPath: targetDir,
+      sourcePath: sourceDir,
+      version: getInstalledPluginVersion(pluginId),
+    };
+  } catch {
+    return { installed: false, warning: 'Failed to install bundled Weixin plugin mirror' };
+  }
+}
+
 export async function handleChannelRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
   ctx: HostApiContext,
 ): Promise<boolean> {
+  ensureWeixinPersistHooks();
+
   if (url.pathname === '/api/channels/configured' && req.method === 'GET') {
     sendJson(res, 200, { success: true, channels: await listConfiguredChannels() });
     return true;
@@ -317,6 +436,50 @@ export async function handleChannelRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/channels/openclaw-weixin/start' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ accountId?: string; config?: Record<string, unknown> }>(req);
+      const installResult = await ensureWeixinPluginInstalled();
+      if (!installResult.installed) {
+        sendJson(res, 500, { success: false, error: installResult.warning || 'Weixin plugin install failed' });
+        return true;
+      }
+      const sessionKey = normalizeSessionKey(body.accountId) ?? 'default';
+      const config = {
+        ...(body.config && typeof body.config === 'object' ? body.config : {}),
+        enabled: true,
+      };
+      pendingWeixinPersists.set(sessionKey, {
+        config,
+        installResult,
+        startedAt: Date.now(),
+      });
+
+      const routeTag = typeof config.routeTag === 'string' ? config.routeTag : undefined;
+      const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : undefined;
+      weixinLoginManager.startInBackground({
+        accountId: sessionKey,
+        baseUrl,
+        routeTag,
+      });
+      sendJson(res, 200, { success: true, queued: true, sessionKey });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/channels/openclaw-weixin/cancel' && req.method === 'POST') {
+    try {
+      await weixinLoginManager.stop();
+      pendingWeixinPersists.clear();
+      sendJson(res, 200, { success: true });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/channels/config' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ channelType: string; config: Record<string, unknown>; accountId?: string }>(req);
@@ -351,6 +514,14 @@ export async function handleChannelRoutes(
           return true;
         }
         await recordChannelPluginInstall('feishu-openclaw-plugin', installResult);
+      }
+      if (body.channelType === 'openclaw-weixin') {
+        const installResult = await ensureWeixinPluginInstalled();
+        if (!installResult.installed) {
+          sendJson(res, 500, { success: false, error: installResult.warning || 'Weixin plugin install failed' });
+          return true;
+        }
+        await recordChannelPluginInstall('openclaw-weixin', installResult);
       }
       await saveChannelConfig(body.channelType, body.config, body.accountId);
       scheduleGatewayChannelRestart(ctx, `channel:saveConfig:${body.channelType}`);

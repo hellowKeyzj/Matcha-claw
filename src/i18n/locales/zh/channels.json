@@ -23,7 +23,8 @@
         "channelSaved": "频道 {{name}} 已保存",
         "channelConnecting": "正在连接 {{name}}...",
         "restartManual": "请手动重启网关",
-        "configFailed": "配置失败: {{error}}"
+        "configFailed": "配置失败: {{error}}",
+        "qrGenerateTimeout": "二维码生成超时，请重试"
     },
     "dialog": {
         "updateTitle": "更新 {{name}}",
@@ -34,6 +35,7 @@
         "qrCode": "二维码",
         "token": "令牌",
         "scanQR": "使用 {{name}} 扫描此二维码",
+        "qrImageAlt": "{{name}} 登录二维码",
         "refreshCode": "刷新代码",
         "loadingConfig": "正在加载配置...",
         "existingHint": "您已配置过此频道",
@@ -51,6 +53,7 @@
         "validateConfig": "验证配置",
         "generatingQR": "正在生成二维码...",
         "validatingAndSaving": "正在验证并保存...",
+        "advancedSettings": "高级设置（可选）",
         "generateQRCode": "生成二维码",
         "updateAndReconnect": "更新并重新连接",
         "saveAndConnect": "保存并连接",
@@ -147,6 +150,35 @@
                 "在钉钉开发者后台创建企业内部应用并开启 Stream 模式",
                 "填写 Client ID 和 Client Secret（必填）",
                 "根据你的应用配置按需填写 Robot Code / Corp ID / Agent ID"
+            ]
+        },
+        "openclaw-weixin": {
+            "description": "通过腾讯微信插件连接微信（扫码登录）",
+            "docsUrl": "https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin",
+            "fields": {
+                "baseUrl": {
+                    "label": "服务地址（可选）",
+                    "placeholder": "https://api.weixin.qq.com/cgi-bin/ilink"
+                },
+                "cdnBaseUrl": {
+                    "label": "CDN 服务地址（可选）",
+                    "placeholder": "https://api.weixin.qq.com/cgi-bin/ilink-cdn"
+                },
+                "logUploadUrl": {
+                    "label": "日志上传地址（可选）",
+                    "placeholder": "https://your-host/path/to/log-upload"
+                },
+                "routeTag": {
+                    "label": "路由标记 routeTag（可选）",
+                    "placeholder": "例如 1001"
+                }
+            },
+            "instructions": [
+                "保存后会自动启用并安装 openclaw-weixin 插件",
+                "点击“生成二维码”，在应用内完成扫码登录",
+                "使用手机微信扫码并确认授权",
+                "扫码完成后重启网关（或在应用里重启网关）",
+                "返回本页点击刷新，确认渠道在线"
             ]
         },
         "signal": {
