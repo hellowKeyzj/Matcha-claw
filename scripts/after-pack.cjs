@@ -19,8 +19,9 @@
  *      @mariozechner/clipboard).
  */
 
-const { cpSync, existsSync, readdirSync, rmSync, statSync, mkdirSync, realpathSync } = require('fs');
+const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync } = require('fs');
 const { join, dirname, basename } = require('path');
+const STRIP_LINKER_ARTIFACTS = process.env.MATCHACLAW_STRIP_LINKER_ARTIFACTS === '1';
 
 // On Windows, paths in pnpm's virtual store can exceed the default MAX_PATH
 // limit (260 chars). Node.js 18.17+ respects the system LongPathsEnabled
@@ -60,7 +61,13 @@ function cleanupUnnecessaryFiles(dir) {
   const REMOVE_DIRS = new Set([
     'test', 'tests', '__tests__', '.github', 'examples', 'example',
   ]);
-  const REMOVE_FILE_EXTS = ['.d.ts', '.d.ts.map', '.js.map', '.mjs.map', '.ts.map', '.markdown'];
+  const REMOVE_FILE_EXTS = [
+    '.d.ts', '.d.ts.map', '.js.map', '.mjs.map', '.ts.map', '.map', '.markdown',
+    // 调试符号文件，删除不影响运行。
+    '.pdb', '.ipdb', '.iobj',
+    // 链接中间产物默认不删；仅在显式开启激进瘦身时删除。
+    ...(STRIP_LINKER_ARTIFACTS ? ['.lib', '.exp', '.ilk', '.obj', '.o'] : []),
+  ];
   const REMOVE_FILE_NAMES = new Set([
     '.DS_Store', 'README.md', 'CHANGELOG.md', 'LICENSE.md', 'CONTRIBUTING.md',
     'tsconfig.json', '.npmignore', '.eslintrc', '.prettierrc', '.editorconfig',
@@ -118,6 +125,8 @@ const PLATFORM_NATIVE_SCOPES = {
   '@napi-rs': /^canvas-(darwin|linux|win32)-(x64|arm64)/,
   '@img': /^sharp(?:-libvips)?-(darwin|linux|win32)-(x64|arm64)/,
   '@mariozechner': /^clipboard-(darwin|linux|win32)-(x64|arm64|universal)/,
+  // @lydell/node-pty-win32-x64, @lydell/node-pty-linux-x64-musl, ...
+  '@lydell': /^node-pty-(darwin|linux|win32)-(x64|arm64|ia32|armv7l)(?:-.+)?/,
 };
 
 function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {

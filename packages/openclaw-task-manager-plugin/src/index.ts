@@ -74,6 +74,16 @@ const TASK_DRAFT_CONTEXT = [
   "- 决策块只能输出 1 个，且必须放在回复末尾（approve_create 且已成功调用 task_create 时可省略）",
   "- 若无法判断，decision 统一输出 fallback_direct",
 ].join("\n");
+
+const TASK_EXECUTION_PROTOCOL = [
+  "当前处于任务执行子会话，请严格围绕 [TASK_ACTIVE_CONTEXT] 执行，不要回到路由/草案判定。",
+  "执行要求：",
+  "- 优先按 activeTask.goal、activeTask.currentStep、activeTask.steps 推进。",
+  "- 如需用户输入或审批，调用 task_block。",
+  "- 任务完成时调用 task_finish(status=completed, resultSummary=...)。",
+  "- 任务失败时调用 task_finish(status=failed, reason=...)。",
+  "- 禁止在执行子会话调用 task_create，避免重复创建任务。",
+].join("\n");
 const DECISION_BLOCK_PATTERN = /```(?:task_router_decision_json|task_draft_decision_json)\s*[\r\n]+[\s\S]*?```/gim;
 const TASK_ROUTER_DECISION_PATTERN = /```task_router_decision_json\s*[\r\n]+([\s\S]*?)```/im;
 const TASK_DRAFT_DECISION_PATTERN = /```task_draft_decision_json\s*[\r\n]+([\s\S]*?)```/im;
@@ -445,6 +455,32 @@ interface RunningTaskFact {
   latestCheckpointSummary?: string;
 }
 
+interface ActiveTaskFact {
+  id: string;
+  goal: string;
+  status: string;
+  progress: number;
+  assignedSession?: string;
+  currentStepId?: string;
+  currentStepTitle?: string;
+  currentStepDescription?: string;
+  blockedReason?: string;
+  waitingQuestion?: string;
+  waitingDescription?: string;
+  steps: Array<{
+    id: string;
+    title: string;
+    status: string;
+    description?: string;
+  }>;
+  checkpointsTail: Array<{
+    id: string;
+    kind: string;
+    summary: string;
+    createdAt: number;
+  }>;
+}
+
 type ResumeMeta = {
   confirmId: string;
   decision?: TaskDecision;
@@ -492,6 +528,37 @@ function writeSessionState(
   };
   sessionState.set(key, next);
   return next;
+}
+
+function normalizeSessionKey(sessionKey?: unknown): string {
+  if (typeof sessionKey !== "string") {
+    return "";
+  }
+  return sessionKey.trim();
+}
+
+function bindTaskToAssignedSession(task: Task): void {
+  const assignedSessionKey = normalizeSessionKey(task.assigned_session);
+  if (!assignedSessionKey) {
+    return;
+  }
+  writeSessionState(
+    assignedSessionKey,
+    { activeTaskId: task.id },
+    "direct",
+  );
+}
+
+function clearTaskFromActiveSessions(taskId: string): void {
+  const normalizedTaskId = taskId.trim();
+  if (!normalizedTaskId) {
+    return;
+  }
+  for (const [sessionKey, state] of sessionState.entries()) {
+    if (state.activeTaskId === normalizedTaskId) {
+      writeSessionState(sessionKey, { activeTaskId: undefined }, "direct");
+    }
+  }
 }
 
 function clearDeletedTaskFromSessionStates(taskId: string): void {
@@ -719,10 +786,13 @@ function asTaskPayload(task: Task, workspaceDir: string): Record<string, unknown
   };
 }
 
+function isTaskOpen(task: Task): boolean {
+  return task.status === "running" || task.status === "waiting_for_input" || task.status === "waiting_approval";
+}
+
 function toRunningTaskFacts(tasks: Task[]): RunningTaskFact[] {
   return tasks
-    .filter((task) =>
-      task.status === "running" || task.status === "waiting_for_input" || task.status === "waiting_approval")
+    .filter((task) => isTaskOpen(task))
     .map((task) => {
       const latestCheckpoint = task.checkpoints[task.checkpoints.length - 1];
       const currentStep = task.steps.find((step) => step.id === task.current_step_id);
@@ -740,6 +810,92 @@ function toRunningTaskFacts(tasks: Task[]): RunningTaskFact[] {
         ...(latestCheckpoint?.summary ? { latestCheckpointSummary: latestCheckpoint.summary } : {}),
       };
     });
+}
+
+function pickTaskAssignedToSession(tasks: Task[], sessionKey: string): Task | null {
+  if (!sessionKey) {
+    return null;
+  }
+  const candidates = tasks
+    .filter((task) => isTaskOpen(task) && normalizeSessionKey(task.assigned_session) === sessionKey)
+    .sort((left, right) => right.updated_at - left.updated_at);
+  return candidates[0] ?? null;
+}
+
+function toActiveTaskFact(task: Task): ActiveTaskFact {
+  const currentStep = task.steps.find((step) => step.id === task.current_step_id);
+  return {
+    id: task.id,
+    goal: task.goal,
+    status: task.status,
+    progress: task.progress,
+    ...(task.assigned_session ? { assignedSession: task.assigned_session } : {}),
+    ...(task.current_step_id ? { currentStepId: task.current_step_id } : {}),
+    ...(currentStep?.title ? { currentStepTitle: currentStep.title } : {}),
+    ...(currentStep?.description ? { currentStepDescription: currentStep.description } : {}),
+    ...(task.blocked_info?.reason ? { blockedReason: task.blocked_info.reason } : {}),
+    ...(task.blocked_info?.question ? { waitingQuestion: task.blocked_info.question } : {}),
+    ...(task.blocked_info?.description ? { waitingDescription: task.blocked_info.description } : {}),
+    steps: task.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      status: step.status,
+      ...(step.description ? { description: step.description } : {}),
+    })),
+    checkpointsTail: task.checkpoints.slice(-5).map((checkpoint) => ({
+      id: checkpoint.id,
+      kind: checkpoint.kind,
+      summary: checkpoint.summary,
+      createdAt: checkpoint.created_at,
+    })),
+  };
+}
+
+function buildTaskActiveContext(activeTask: ActiveTaskFact): string {
+  return [
+    "[TASK_ACTIVE_CONTEXT]",
+    `activeTask=${JSON.stringify(activeTask)}`,
+  ].join("\n");
+}
+
+function resolvePromptActiveTask(input: {
+  tasks: Task[];
+  sessionKey?: string;
+  state: SessionTaskState;
+}): Task | null {
+  const normalizedSessionKey = normalizeSessionKey(input.sessionKey);
+  if (normalizedSessionKey) {
+    const sessionTask = pickTaskAssignedToSession(input.tasks, normalizedSessionKey);
+    if (sessionTask) {
+      return sessionTask;
+    }
+  }
+  const activeTaskId = typeof input.state.activeTaskId === "string" ? input.state.activeTaskId.trim() : "";
+  if (activeTaskId) {
+    return input.tasks.find((task) => task.id === activeTaskId && isTaskOpen(task)) ?? null;
+  }
+  return null;
+}
+
+function isExecutionSession(params: { sessionKey?: string; activeTask: Task | null }): boolean {
+  const sessionKey = normalizeSessionKey(params.sessionKey);
+  const assignedSession = normalizeSessionKey(params.activeTask?.assigned_session);
+  return Boolean(params.activeTask && sessionKey && assignedSession && assignedSession === sessionKey);
+}
+
+function syncExecutionSessionState(sessionKey: string | undefined, taskId: string): void {
+  const normalizedTaskId = typeof taskId === "string" ? taskId.trim() : "";
+  if (!normalizedTaskId) {
+    return;
+  }
+  writeSessionState(
+    sessionKey,
+    {
+      activeTaskId: normalizedTaskId,
+      draft: undefined,
+    },
+    "direct",
+  );
 }
 
 function buildTaskRuntimeFacts(input: {
@@ -956,6 +1112,7 @@ const plugin = {
           },
           "direct",
         );
+        bindTaskToAssignedSession(task);
         publishTaskEvent("task_status_changed", {
           taskId: task.id,
           from: null,
@@ -1147,6 +1304,7 @@ const plugin = {
           ...(userInput ? { userInput } : {}),
           ...(toolCtx.sessionKey ? { sessionKey: toolCtx.sessionKey } : {}),
         });
+        bindTaskToAssignedSession(task);
         await publishStatusChange(store, before, task, "resumed");
         await publishResumeEvent(store, task, {
           confirmId,
@@ -1198,7 +1356,7 @@ const plugin = {
           ...(checkpointSummary ? { checkpointSummary } : {}),
         });
         await publishStatusChange(store, before, task, "finished");
-        writeSessionState(toolCtx.sessionKey, { activeTaskId: undefined }, "direct");
+        clearTaskFromActiveSessions(task.id);
 
         publishTaskEvent("task_progress_update", {
           taskId: task.id,
@@ -1304,6 +1462,7 @@ const plugin = {
           ...(decision ? { decision } : {}),
           ...(userInput ? { userInput } : {}),
         });
+        bindTaskToAssignedSession(task);
         await publishStatusChange(store, before, task, "resumed");
         await publishResumeEvent(store, task, {
           confirmId,
@@ -1391,6 +1550,7 @@ const plugin = {
             confirmId,
             decision: "approve",
           });
+          bindTaskToAssignedSession(task);
           await publishStatusChange(store, before, task, "approval_webhook");
           await publishResumeEvent(store, task, {
             confirmId,
@@ -1415,13 +1575,28 @@ const plugin = {
 
     api.on("before_prompt_build", async (_event, ctx) => {
       const state = readSessionState(ctx?.sessionKey);
+      const workspaceDir = resolveWorkspaceDir(ctx?.workspaceDir);
+      const store = resolveStore(workspaceDir);
+      const tasks = await store.listTasks();
+      const activeTask = resolvePromptActiveTask({
+        tasks,
+        sessionKey: ctx?.sessionKey,
+        state,
+      });
+      const useExecutionProtocol = isExecutionSession({
+        sessionKey: ctx?.sessionKey,
+        activeTask,
+      });
+      if (useExecutionProtocol && activeTask) {
+        syncExecutionSessionState(ctx?.sessionKey, activeTask.id);
+        return {
+          prependSystemContext: `${TASK_EXECUTION_PROTOCOL}\n\n${buildTaskActiveContext(toActiveTaskFact(activeTask))}`,
+        };
+      }
       if (state.mode === "task_draft") {
         return { prependSystemContext: buildPromptContextByState(state) };
       }
 
-      const workspaceDir = resolveWorkspaceDir(ctx?.workspaceDir);
-      const store = resolveStore(workspaceDir);
-      const tasks = await store.listTasks();
       const runningTasks = toRunningTaskFacts(tasks);
       const runtimeFacts = buildTaskRuntimeFacts({ runningTasks });
 
@@ -1436,6 +1611,18 @@ const plugin = {
         return;
       }
       const state = readSessionState(ctx.sessionKey);
+      const workspaceDir = resolveWorkspaceDir(ctx?.workspaceDir);
+      const store = resolveStore(workspaceDir);
+      const tasks = await store.listTasks();
+      const activeTask = resolvePromptActiveTask({
+        tasks,
+        sessionKey: ctx?.sessionKey,
+        state,
+      });
+      if (activeTask && isExecutionSession({ sessionKey: ctx?.sessionKey, activeTask })) {
+        syncExecutionSessionState(ctx?.sessionKey, activeTask.id);
+        return;
+      }
       if (state.mode === "task_draft") {
         const draftDecision = parseDraftDecision(joined);
         if (draftDecision) {

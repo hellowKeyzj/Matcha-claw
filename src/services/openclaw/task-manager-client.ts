@@ -215,12 +215,45 @@ function resolveResumeTarget(assignedSession?: string): { agentId: string; sessi
   };
 }
 
-export async function wakeTaskSession(taskId: string, options?: { message?: string; assignedSession?: string }): Promise<void> {
+function buildWakeTaskMessage(
+  taskId: string,
+  options?: {
+    message?: string;
+    task?: Task;
+  },
+): string {
+  const lines: string[] = [`请恢复执行任务 ${taskId}。`];
+  const task = options?.task;
+  if (task) {
+    lines.push(`任务目标：${task.goal}`);
+    lines.push(`任务状态：${task.status}（progress=${task.progress}）`);
+    const currentStep = task.steps.find((step) => step.id === task.current_step_id);
+    if (currentStep) {
+      lines.push(`当前步骤：${currentStep.title}`);
+      if (currentStep.description) {
+        lines.push(`步骤说明：${currentStep.description}`);
+      }
+    }
+    if (task.workspaceDir) {
+      lines.push(`任务文件路径：${task.workspaceDir}\\.task-manager\\tasks.json`);
+    }
+  }
+  if (options?.message) {
+    lines.push(`附加信息：${options.message}`);
+  }
+  lines.push('请优先依据任务上下文推进，不要假设任务目录是 .tasks。');
+  return lines.join('\n');
+}
+
+export async function wakeTaskSession(
+  taskId: string,
+  options?: { message?: string; assignedSession?: string; task?: Task },
+): Promise<void> {
   const target = resolveResumeTarget(options?.assignedSession);
   await gatewayRpc('agent', {
     agentId: target.agentId,
     sessionKey: target.sessionKey,
-    message: `请恢复执行任务 ${taskId}${options?.message ? `。附加信息：${options.message}` : ''}`,
+    message: buildWakeTaskMessage(taskId, options),
     idempotencyKey: `task-resume:${target.agentId}:${taskId}:${resolveRandomId()}`,
   });
 }

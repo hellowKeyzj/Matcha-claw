@@ -4,15 +4,21 @@ import type { Task } from '@/services/openclaw/task-manager-client';
 
 const getWorkspaceDirMock = vi.fn<() => Promise<string | null>>();
 const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
+const getTaskPluginStatusMock = vi.fn();
+const installTaskPluginMock = vi.fn();
 const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
 const resumeTaskMock = vi.fn();
+const deleteTaskMock = vi.fn();
 const wakeTaskSessionMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   getWorkspaceDir: (...args: unknown[]) => getWorkspaceDirMock(...args),
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
+  getTaskPluginStatus: (...args: unknown[]) => getTaskPluginStatusMock(...args),
+  installTaskPlugin: (...args: unknown[]) => installTaskPluginMock(...args),
   listTasks: (...args: unknown[]) => listTasksMock(...args),
   resumeTask: (...args: unknown[]) => resumeTaskMock(...args),
+  deleteTask: (...args: unknown[]) => deleteTaskMock(...args),
   wakeTaskSession: (...args: unknown[]) => wakeTaskSessionMock(...args),
 }));
 
@@ -34,9 +40,21 @@ describe('task inbox store', () => {
   beforeEach(async () => {
     getWorkspaceDirMock.mockReset();
     getTaskWorkspaceDirsMock.mockReset();
+    getTaskPluginStatusMock.mockReset();
+    installTaskPluginMock.mockReset();
     listTasksMock.mockReset();
     resumeTaskMock.mockReset();
+    deleteTaskMock.mockReset();
     wakeTaskSessionMock.mockReset();
+    getTaskPluginStatusMock.mockResolvedValue({
+      installed: true,
+      enabled: true,
+      skillEnabled: true,
+      version: '1.0.0',
+      pluginDir: 'x',
+    });
+    installTaskPluginMock.mockResolvedValue({ success: true, installed: true });
+    deleteTaskMock.mockResolvedValue({ deleted: true, taskId: 'task-1' });
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       messages: [],

@@ -359,6 +359,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       await wakeTaskSession(taskId, {
         message: userInput ?? decision,
         assignedSession: task.assigned_session,
+        task,
       });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
@@ -478,6 +479,7 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
           void wakeTaskSession(taskId, {
             message: userInput,
             assignedSession: knownTask?.assigned_session,
+            task: knownTask,
           }).catch((error) => {
             set({
               error: error instanceof Error ? error.message : String(error),
