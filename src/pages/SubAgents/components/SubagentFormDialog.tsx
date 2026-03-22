@@ -29,6 +29,7 @@ interface SubagentFormDialogProps {
   open: boolean;
   title: string;
   mode: SubagentFormMode;
+  lockBasicInfo?: boolean;
   existingAgents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[];
   modelOptions: ModelCatalogEntry[];
   modelsLoading: boolean;
@@ -57,6 +58,7 @@ export function SubagentFormDialog({
   open,
   title,
   mode,
+  lockBasicInfo = false,
   existingAgents,
   modelOptions,
   modelsLoading,
@@ -68,6 +70,7 @@ export function SubagentFormDialog({
   const [values, setValues] = useState<SubagentFormValues>(EMPTY_VALUES);
   const [submitting, setSubmitting] = useState(false);
   const [fallbackWorkspaceRoot, setFallbackWorkspaceRoot] = useState<string | undefined>(undefined);
+  const basicInfoLocked = mode === 'edit' && lockBasicInfo;
   const resolvedModelOptions = useMemo(() => {
     const byId = new Map<string, ModelCatalogEntry>();
     for (const model of modelOptions) {
@@ -107,7 +110,13 @@ export function SubagentFormDialog({
       prompt: initialValues?.prompt ?? '',
     });
     setSubmitting(false);
-  }, [buildWorkspaceValue, initialValues, mode, modelOptions, open]);
+  }, [
+    buildWorkspaceValue,
+    initialValues,
+    mode,
+    modelOptions,
+    open,
+  ]);
 
   useEffect(() => {
     if (!open || mode !== 'create') {
@@ -155,6 +164,40 @@ export function SubagentFormDialog({
   }, [buildWorkspaceValue, mode, open]);
 
   useEffect(() => {
+    if (!open || mode !== 'edit' || !basicInfoLocked) {
+      return;
+    }
+    if (values.workspace.trim()) {
+      return;
+    }
+    let cancelled = false;
+    const loadMainWorkspace = async () => {
+      try {
+        const rawWorkspaceDir = await invokeIpc<unknown>('openclaw:getWorkspaceDir');
+        const workspaceDir = typeof rawWorkspaceDir === 'string' ? rawWorkspaceDir.trim() : '';
+        if (!workspaceDir || cancelled) {
+          return;
+        }
+        setValues((prev) => {
+          if (prev.workspace.trim()) {
+            return prev;
+          }
+          return {
+            ...prev,
+            workspace: workspaceDir,
+          };
+        });
+      } catch {
+        // best-effort fallback only
+      }
+    };
+    void loadMainWorkspace();
+    return () => {
+      cancelled = true;
+    };
+  }, [basicInfoLocked, mode, open, values.workspace]);
+
+  useEffect(() => {
     if (!open || values.model || modelOptions.length !== 1) {
       return;
     }
@@ -187,7 +230,7 @@ export function SubagentFormDialog({
   const hasModelOptions = resolvedModelOptions.length > 0;
   const canSubmit = !submitting
     && !!values.name.trim()
-    && !!values.workspace.trim()
+    && (basicInfoLocked || !!values.workspace.trim())
     && !duplicateName
     && !missingModel
     && hasModelOptions
@@ -274,7 +317,12 @@ export function SubagentFormDialog({
                   <Input
                     id="subagent-name"
                     value={values.name}
+                    readOnly={basicInfoLocked}
+                    className={basicInfoLocked ? 'text-muted-foreground' : undefined}
                     onChange={(event) => {
+                      if (basicInfoLocked) {
+                        return;
+                      }
                       const nextName = event.target.value;
                       setValues((prev) => ({
                         ...prev,

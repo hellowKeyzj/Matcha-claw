@@ -16,6 +16,7 @@ export interface SubagentSummary {
   name?: string;
   workspace?: string;
   model?: string;
+  skills?: string[];
   identity?: AgentIdentitySummary;
   identityEmoji?: string;
   isDefault?: boolean;
@@ -74,6 +75,7 @@ export interface AgentConfigEntry {
   id: string;
   default?: boolean;
   model?: AgentModelValue;
+  skills?: string[];
   [key: string]: unknown;
 }
 
