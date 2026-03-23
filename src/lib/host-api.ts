@@ -21,6 +21,10 @@ type HostApiProxyResponse = {
   text?: string;
 };
 
+type HostApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
 type HostApiProxyData = {
   status?: number;
   ok?: boolean;
@@ -129,7 +133,7 @@ function shouldFallbackToBrowser(message: string): boolean {
     || normalized.includes('window is not defined');
 }
 
-export async function hostApiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
   // In Electron renderer, always proxy through main process to avoid CORS.
@@ -139,6 +143,7 @@ export async function hostApiFetch<T>(path: string, init?: RequestInit): Promise
       method,
       headers: headersToRecord(init?.headers),
       body: init?.body ?? null,
+      timeoutMs: init?.timeoutMs,
     });
 
     if (typeof response?.ok === 'boolean' && 'data' in response) {

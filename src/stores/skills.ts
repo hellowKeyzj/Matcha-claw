@@ -37,11 +37,6 @@ type GatewaySkillsStatusResult = {
   skills?: GatewaySkillStatus[];
 };
 
-type ClawHubListResult = {
-  slug: string;
-  version?: string;
-};
-
 type MarketplaceSearchResult = {
   success: boolean;
   results?: MarketplaceSkill[];
@@ -49,10 +44,7 @@ type MarketplaceSearchResult = {
 };
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
-const CLAWHUB_LIST_CACHE_TTL_MS = 30000;
-// Keep the top-level skills fetch cadence aligned with clawhub list cache TTL
-// so frequent page switching/hover prefetch doesn't re-trigger skills.status.
-const SKILLS_FETCH_MIN_INTERVAL_MS = CLAWHUB_LIST_CACHE_TTL_MS;
+const SKILLS_FETCH_MIN_INTERVAL_MS = 30000;
 const marketplaceSearchCache = new Map<string, {
   timestamp: number;
   results: MarketplaceSkill[];
@@ -60,8 +52,6 @@ const marketplaceSearchCache = new Map<string, {
 const inflightMarketplaceSearch = new Map<string, Promise<MarketplaceSearchResult>>();
 let inflightSkillsFetch: Promise<void> | null = null;
 let lastSkillsFetchAt = 0;
-let cachedClawhubList: { timestamp: number; results: ClawHubListResult[] } | null = null;
-let inflightClawhubList: Promise<{ success: boolean; results?: ClawHubListResult[]; error?: string }> | null = null;
 
 function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissingRequirements | undefined {
   if (!missing) {
@@ -150,80 +140,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       try {
         const gatewayPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
         const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
-        const clawhubPromise = (() => {
-          const cacheFresh =
-            !force &&
-            cachedClawhubList &&
-            now - cachedClawhubList.timestamp < CLAWHUB_LIST_CACHE_TTL_MS;
-          if (cacheFresh) {
-            return Promise.resolve<{ success: boolean; results?: ClawHubListResult[]; error?: string }>({
-              success: true,
-              results: cachedClawhubList!.results,
-            });
-          }
-
-          if (!inflightClawhubList) {
-            inflightClawhubList = Promise.resolve(
-              hostApiFetch<{ success: boolean; results?: ClawHubListResult[]; error?: string }>('/api/clawhub/list'),
-            )
-              .then((result) => {
-                const normalized =
-                  result && typeof result === 'object'
-                    ? result
-                    : ({ success: false, error: 'Invalid ClawHub list response' } as {
-                      success: boolean;
-                      results?: ClawHubListResult[];
-                      error?: string;
-                    });
-                if (normalized.success && normalized.results) {
-                  cachedClawhubList = {
-                    timestamp: Date.now(),
-                    results: normalized.results,
-                  };
-                }
-                return normalized;
-              })
-              .finally(() => {
-                inflightClawhubList = null;
-              });
-          }
-          return inflightClawhubList;
-        })();
 
         const [gatewayData, configResult] = await Promise.all([
           gatewayPromise,
           configPromise,
         ]);
-
-        const mergeWithClawhub = (
-          baseSkills: Skill[],
-          clawhubResults?: ClawHubListResult[],
-        ): Skill[] => {
-          if (!Array.isArray(clawhubResults) || clawhubResults.length === 0) {
-            return baseSkills;
-          }
-          const merged = [...baseSkills];
-          clawhubResults.forEach((cs: ClawHubListResult) => {
-            const existing = merged.find((s) => s.id === cs.slug);
-            if (!existing) {
-              const directConfig = configResult[cs.slug] || {};
-              merged.push({
-                id: cs.slug,
-                slug: cs.slug,
-                name: cs.slug,
-                description: 'Recently installed, initializing...',
-                enabled: false,
-                icon: '⌛',
-                version: cs.version || 'unknown',
-                author: undefined,
-                config: directConfig,
-                isCore: false,
-                isBundled: false,
-              });
-            }
-          });
-          return merged;
-        };
 
         let combinedSkills: Skill[] = [];
         const currentSkills = get().skills;
@@ -261,21 +182,6 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
         lastSkillsFetchAt = Date.now();
         set({ skills: combinedSkills, loading: false, error: null });
-
-        // Merge ClawHub list in the background to avoid blocking page entry.
-        void clawhubPromise
-          .then((clawhubResult) => {
-            if (!clawhubResult.success || !clawhubResult.results) {
-              return;
-            }
-            const mergedSkills = mergeWithClawhub(combinedSkills, clawhubResult.results);
-            if (mergedSkills.length !== combinedSkills.length) {
-              set({ skills: mergedSkills, loading: false, error: null });
-            }
-          })
-          .catch((error) => {
-            console.warn('ClawHub list merge skipped:', error);
-          });
       } catch (error) {
         console.error('Failed to fetch skills:', error);
         const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });

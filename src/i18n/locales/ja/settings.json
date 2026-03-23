@@ -207,7 +207,19 @@
     "proxyBypassHelp": "直接接続するホストをセミコロン、カンマ、または改行で区切って指定します。",
     "proxyRestartNote": "保存すると Electron のネットワーク設定を再適用し、Gateway をすぐ再起動します。",
     "proxySaved": "プロキシ設定を保存しました",
-    "proxySaveFailed": "プロキシ設定の保存に失敗しました"
+    "proxySaveFailed": "プロキシ設定の保存に失敗しました",
+    "clawHubTokenTitle": "ClawHub トークン",
+    "clawHubTokenDesc": "ClawHub ログイントークンの設定に使用します。",
+    "clawHubTokenPlaceholder": "ClawHub トークンを入力（例: clh_xxx）",
+    "clawHubTokenSaved": "ClawHub トークンを保存しました",
+    "clawHubTokenCleared": "ClawHub トークンをクリアしました",
+    "clawHubTokenSaveFailed": "ClawHub トークンの保存に失敗しました",
+    "clawHubTokenClearFailed": "ClawHub トークンのクリアに失敗しました",
+    "clawHubOpenSite": "ClawHub を開く",
+    "clawHubAutoLogin": "ログインして自動取得",
+    "clawHubAutoLoginWaiting": "ブラウザを開きました。ClawHub ページで認可を完了してください...",
+    "clawHubTokenAutoSynced": "ClawHub にログインしてトークンを自動同期しました",
+    "clawHubTokenAutoSyncFailed": "ClawHub の自動ログインに失敗しました"
   },
   "updates": {
     "title": "アップデート",
