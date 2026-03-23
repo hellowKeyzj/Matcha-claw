@@ -3,10 +3,14 @@
  * Manages interactions with the ClawHub CLI for skills management
  */
 import { spawn } from 'child_process';
+import { createServer } from 'http';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { app, shell } from 'electron';
 import { getOpenClawConfigDir, ensureDir, getClawHubCliBinPath, getClawHubCliEntryPath } from '../utils/paths';
+import { getSetting, setSetting } from '../utils/store';
+import { proxyAwareFetch } from '../utils/proxy-fetch';
 
 export interface ClawHubSearchParams {
     query: string;
@@ -32,6 +36,74 @@ export interface ClawHubSkillResult {
     downloads?: number;
     stars?: number;
 }
+
+type ClawHubSearchResponse = {
+    results?: Array<{
+        slug?: string;
+        displayName?: string;
+        summary?: string | null;
+        version?: string | null;
+    }>;
+};
+
+type ClawHubExploreResponse = {
+    items?: Array<{
+        slug?: string;
+        displayName?: string;
+        summary?: string | null;
+        latestVersion?: {
+            version?: string;
+        } | null;
+    }>;
+};
+
+const CLAWHUB_DEFAULT_REGISTRY = 'https://clawhub.ai';
+const CLAWHUB_BROWSER_AUTH_TIMEOUT_MS = 5 * 60_000;
+const CLAWHUB_CALLBACK_HTML = `<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClawHub Login</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; padding: 24px; }
+    .card { max-width: 560px; margin: 40px auto; padding: 18px 16px; border: 1px solid rgba(127,127,127,.35); border-radius: 12px; }
+  </style>
+  <body>
+    <div class="card">
+      <h1 style="margin: 0 0 10px; font-size: 18px;">Completing login…</h1>
+      <p id="status" style="margin: 0; opacity: .8;">Waiting for token.</p>
+    </div>
+    <script>
+      const statusEl = document.getElementById('status')
+      const params = new URLSearchParams(location.hash.replace(/^#/, ''))
+      const token = params.get('token')
+      const registry = params.get('registry')
+      const state = params.get('state')
+      if (!token) {
+        statusEl.textContent = 'Missing token in URL. You can close this tab and try again.'
+      } else if (!state) {
+        statusEl.textContent = 'Missing state in URL. You can close this tab and try again.'
+      } else {
+        fetch('/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, registry, state }),
+        }).then(() => {
+          statusEl.textContent = 'Logged in. You can close this tab.'
+          setTimeout(() => window.close(), 250)
+        }).catch(() => {
+          statusEl.textContent = 'Failed to send token to app. You can close this tab and try again.'
+        })
+      }
+    </script>
+  </body>
+</html>`;
+
+type ClawHubLoopbackAuthResult = {
+    token: string;
+    registry?: string;
+};
 
 export class ClawHubService {
     private workDir: string;
@@ -184,6 +256,215 @@ export class ClawHubService {
         });
     }
 
+    private resolveRegistryBase(): string {
+        const explicitRegistry = (process.env.CLAWHUB_REGISTRY || process.env.CLAWDHUB_REGISTRY || '').trim();
+        const registry = explicitRegistry || CLAWHUB_DEFAULT_REGISTRY;
+        return registry.replace(/\/+$/, '');
+    }
+
+    private async readClawHubToken(): Promise<string | undefined> {
+        try {
+            const token = await getSetting('clawHubToken');
+            if (typeof token !== 'string') {
+                return undefined;
+            }
+            const normalized = token.trim().replace(/^Bearer\s+/i, '').trim();
+            return normalized.length > 0 ? normalized : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private buildCliAuthUrl(params: { siteUrl: string; redirectUri: string; state: string; label?: string }): string {
+        const url = new URL('/cli/auth', params.siteUrl);
+        url.searchParams.set('redirect_uri', params.redirectUri);
+        if (params.label) {
+            url.searchParams.set('label_b64', Buffer.from(params.label, 'utf8').toString('base64url'));
+        }
+        url.searchParams.set('state', params.state);
+        return url.toString();
+    }
+
+    private async startLoopbackAuthServer(timeoutMs = CLAWHUB_BROWSER_AUTH_TIMEOUT_MS): Promise<{
+        redirectUri: string;
+        state: string;
+        waitForResult: () => Promise<ClawHubLoopbackAuthResult>;
+        close: () => void;
+    }> {
+        const expectedState = randomBytes(16).toString('hex');
+        let resolveResult: ((value: ClawHubLoopbackAuthResult) => void) | null = null;
+        let rejectResult: ((reason?: unknown) => void) | null = null;
+        const resultPromise = new Promise<ClawHubLoopbackAuthResult>((resolve, reject) => {
+            resolveResult = resolve;
+            rejectResult = reject;
+        });
+
+        const server = createServer((req, res) => {
+            const method = req.method || 'GET';
+            const url = req.url || '/';
+            if (method === 'GET' && (url === '/' || url.startsWith('/callback'))) {
+                res.statusCode = 200;
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.end(CLAWHUB_CALLBACK_HTML);
+                return;
+            }
+            if (method === 'POST' && url === '/token') {
+                const chunks: Buffer[] = [];
+                req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+                req.on('end', () => {
+                    try {
+                        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+                            token?: unknown;
+                            state?: unknown;
+                            registry?: unknown;
+                        };
+                        if (!parsed || typeof parsed !== 'object') {
+                            throw new Error('invalid payload');
+                        }
+                        const token = typeof parsed.token === 'string' ? parsed.token.trim() : '';
+                        const state = typeof parsed.state === 'string' ? parsed.state : '';
+                        if (!token) {
+                            throw new Error('token required');
+                        }
+                        if (!state || state !== expectedState) {
+                            throw new Error('state mismatch');
+                        }
+                        const registry = typeof parsed.registry === 'string' ? parsed.registry.trim() : undefined;
+                        res.statusCode = 200;
+                        res.setHeader('Content-Type', 'application/json');
+                        res.end(JSON.stringify({ ok: true }));
+                        resolveResult?.({ token, registry });
+                    } catch (error) {
+                        res.statusCode = 400;
+                        res.setHeader('Content-Type', 'application/json');
+                        res.end(JSON.stringify({ ok: false }));
+                        rejectResult?.(error);
+                    } finally {
+                        server.close();
+                    }
+                });
+                return;
+            }
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.end('Not found');
+        });
+
+        await new Promise<void>((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(0, '127.0.0.1', () => resolve());
+        });
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+            server.close();
+            throw new Error('Failed to bind loopback auth server');
+        }
+
+        const timer = setTimeout(() => {
+            server.close();
+            rejectResult?.(new Error('Timed out waiting for browser login'));
+        }, timeoutMs);
+        resultPromise.finally(() => clearTimeout(timer)).catch(() => {});
+
+        return {
+            redirectUri: `http://127.0.0.1:${address.port}/callback`,
+            state: expectedState,
+            waitForResult: () => resultPromise,
+            close: () => server.close(),
+        };
+    }
+
+    private async verifyToken(token: string): Promise<void> {
+        const registryBase = this.resolveRegistryBase();
+        const url = new URL('/api/v1/whoami', registryBase);
+        const response = await proxyAwareFetch(url.toString(), {
+            method: 'GET',
+            headers: {
+                Accept: 'application/json',
+                Authorization: `Bearer ${token}`,
+            },
+        });
+        if (!response.ok) {
+            const text = (await response.text()).trim();
+            throw new Error(text || `Token verification failed (HTTP ${response.status})`);
+        }
+    }
+
+    private async fetchRegistryJson<T>(
+        routePath: string,
+        query: Record<string, string> = {},
+    ): Promise<T> {
+        const registryBase = this.resolveRegistryBase();
+        const url = new URL(routePath, registryBase);
+        Object.entries(query).forEach(([key, value]) => {
+            if (value.trim().length > 0) {
+                url.searchParams.set(key, value);
+            }
+        });
+
+        const token = await this.readClawHubToken();
+        const headers: Record<string, string> = {
+            Accept: 'application/json',
+        };
+        if (token) {
+            headers.Authorization = `Bearer ${token}`;
+        }
+
+        const response = await proxyAwareFetch(url.toString(), {
+            method: 'GET',
+            headers,
+        });
+        const rawText = await response.text();
+        if (!response.ok) {
+            const message = rawText.trim();
+            if (response.status === 429) {
+                throw new Error('Rate limit exceeded');
+            }
+            throw new Error(message || `HTTP ${response.status}`);
+        }
+
+        if (!rawText.trim()) {
+            return {} as T;
+        }
+
+        try {
+            return JSON.parse(rawText) as T;
+        } catch {
+            throw new Error('Invalid ClawHub registry response');
+        }
+    }
+
+    private mapSearchResults(payload: ClawHubSearchResponse): ClawHubSkillResult[] {
+        const results = Array.isArray(payload.results) ? payload.results : [];
+        return results
+            .map((item) => {
+                const slug = (item.slug || '').trim();
+                if (!slug) return null;
+                return {
+                    slug,
+                    name: (item.displayName || slug).trim() || slug,
+                    description: (item.summary || '').trim(),
+                    version: (item.version || 'latest').trim() || 'latest',
+                } satisfies ClawHubSkillResult;
+            })
+            .filter((item): item is ClawHubSkillResult => item !== null);
+    }
+
+    private async searchByKeyword(query: string, limit?: number): Promise<ClawHubSkillResult[]> {
+        const normalizedQuery = query.trim();
+        if (!normalizedQuery) {
+            return [];
+        }
+        const boundedLimit = limit && Number.isFinite(limit)
+            ? Math.min(Math.max(1, Math.floor(limit)), 200)
+            : 50;
+        const payload = await this.fetchRegistryJson<ClawHubSearchResponse>('/api/v1/search', {
+            q: normalizedQuery,
+            limit: String(boundedLimit),
+        });
+        return this.mapSearchResults(payload);
+    }
+
     /**
      * Search for skills
      */
@@ -193,59 +474,7 @@ export class ClawHubService {
             if (!params.query || params.query.trim() === '') {
                 return this.explore({ limit: params.limit });
             }
-
-            const args = ['search', params.query];
-            if (params.limit) {
-                args.push('--limit', String(params.limit));
-            }
-
-            const output = await this.runCommand(args);
-            if (!output || output.includes('No skills found')) {
-                return [];
-            }
-
-            const lines = output.split('\n').filter(l => l.trim());
-            return lines.map(line => {
-                const cleanLine = this.stripAnsi(line);
-
-                // Format could be: slug vversion description (score)
-                // Or sometimes: slug  vversion  description
-                let match = cleanLine.match(/^(\S+)\s+v?(\d+\.\S+)\s+(.+)$/);
-                if (match) {
-                    const slug = match[1];
-                    const version = match[2];
-                    let description = match[3];
-
-                    // Clean up score if present at the end
-                    description = description.replace(/\(\d+\.\d+\)$/, '').trim();
-
-                    return {
-                        slug,
-                        name: slug,
-                        version,
-                        description,
-                    };
-                }
-
-                // Fallback for new clawhub search format without version:
-                // slug  name/description  (score)
-                match = cleanLine.match(/^(\S+)\s+(.+)$/);
-                if (match) {
-                    const slug = match[1];
-                    let description = match[2];
-
-                    // Clean up score if present at the end
-                    description = description.replace(/\(\d+\.\d+\)$/, '').trim();
-
-                    return {
-                        slug,
-                        name: slug,
-                        version: 'latest', // Fallback version since it's not provided
-                        description,
-                    };
-                }
-                return null;
-            }).filter((s): s is ClawHubSkillResult => s !== null);
+            return this.searchByKeyword(params.query, params.limit);
         } catch (error) {
             console.error('ClawHub search error:', error);
             throw error;
@@ -257,34 +486,52 @@ export class ClawHubService {
      */
     async explore(params: { limit?: number } = {}): Promise<ClawHubSkillResult[]> {
         try {
-            const args = ['explore'];
-            if (params.limit) {
-                args.push('--limit', String(params.limit));
-            }
-
-            const output = await this.runCommand(args);
-            if (!output) return [];
-
-            const lines = output.split('\n').filter(l => l.trim());
-            return lines.map(line => {
-                const cleanLine = this.stripAnsi(line);
-
-                // Format: slug vversion time description
-                // Example: my-skill v1.0.0 2 hours ago A great skill
-                const match = cleanLine.match(/^(\S+)\s+v?(\d+\.\S+)\s+(.+? ago|just now|yesterday)\s+(.+)$/i);
-                if (match) {
+            const boundedLimit = params.limit && Number.isFinite(params.limit)
+                ? Math.min(Math.max(1, Math.floor(params.limit)), 200)
+                : 25;
+            const payload = await this.fetchRegistryJson<ClawHubExploreResponse>('/api/v1/skills', {
+                limit: String(boundedLimit),
+                sort: 'updated',
+            });
+            const items = Array.isArray(payload.items) ? payload.items : [];
+            return items
+                .map((item) => {
+                    const slug = (item.slug || '').trim();
+                    if (!slug) return null;
+                    const latestVersion = item.latestVersion?.version || 'latest';
                     return {
-                        slug: match[1],
-                        name: match[1],
-                        version: match[2],
-                        description: match[4],
-                    };
-                }
-                return null;
-            }).filter((s): s is ClawHubSkillResult => s !== null);
+                        slug,
+                        name: (item.displayName || slug).trim() || slug,
+                        version: latestVersion.trim() || 'latest',
+                        description: (item.summary || '').trim(),
+                    } satisfies ClawHubSkillResult;
+                })
+                .filter((item): item is ClawHubSkillResult => item !== null);
         } catch (error) {
             console.error('ClawHub explore error:', error);
             throw error;
+        }
+    }
+
+    async loginAndSyncToken(): Promise<void> {
+        const receiver = await this.startLoopbackAuthServer();
+        try {
+            const authUrl = this.buildCliAuthUrl({
+                siteUrl: this.resolveRegistryBase(),
+                redirectUri: receiver.redirectUri,
+                state: receiver.state,
+                label: 'MatchaClaw',
+            });
+            await shell.openExternal(authUrl);
+            const result = await receiver.waitForResult();
+            const normalizedToken = result.token.trim().replace(/^Bearer\s+/i, '').trim();
+            if (!normalizedToken) {
+                throw new Error('Received empty token from ClawHub login callback.');
+            }
+            await this.verifyToken(normalizedToken);
+            await setSetting('clawHubToken', normalizedToken);
+        } finally {
+            receiver.close();
         }
     }
 

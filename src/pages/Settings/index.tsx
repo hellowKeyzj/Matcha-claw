@@ -184,33 +184,32 @@ export function Settings() {
   const { t } = useTranslation('settings');
   const location = useLocation();
   const navigate = useNavigate();
-  const {
-    theme,
-    setTheme,
-    language,
-    setLanguage,
-    userAvatarDataUrl,
-    setUserAvatarDataUrl,
-    clearUserAvatar,
-    launchAtStartup,
-    setLaunchAtStartup,
-    gatewayAutoStart,
-    setGatewayAutoStart,
-    proxyEnabled,
-    proxyServer,
-    proxyBypassRules,
-    setProxyEnabled,
-    setProxyServer,
-    setProxyBypassRules,
-    autoCheckUpdate,
-    setAutoCheckUpdate,
-    autoDownloadUpdate,
-    setAutoDownloadUpdate,
-    devModeUnlocked,
-    setDevModeUnlocked,
-  } = useSettingsStore();
+  const theme = useSettingsStore((state) => state.theme);
+  const setTheme = useSettingsStore((state) => state.setTheme);
+  const language = useSettingsStore((state) => state.language);
+  const setLanguage = useSettingsStore((state) => state.setLanguage);
+  const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
+  const setUserAvatarDataUrl = useSettingsStore((state) => state.setUserAvatarDataUrl);
+  const clearUserAvatar = useSettingsStore((state) => state.clearUserAvatar);
+  const launchAtStartup = useSettingsStore((state) => state.launchAtStartup);
+  const setLaunchAtStartup = useSettingsStore((state) => state.setLaunchAtStartup);
+  const gatewayAutoStart = useSettingsStore((state) => state.gatewayAutoStart);
+  const setGatewayAutoStart = useSettingsStore((state) => state.setGatewayAutoStart);
+  const proxyEnabled = useSettingsStore((state) => state.proxyEnabled);
+  const proxyServer = useSettingsStore((state) => state.proxyServer);
+  const proxyBypassRules = useSettingsStore((state) => state.proxyBypassRules);
+  const setProxyEnabled = useSettingsStore((state) => state.setProxyEnabled);
+  const setProxyServer = useSettingsStore((state) => state.setProxyServer);
+  const setProxyBypassRules = useSettingsStore((state) => state.setProxyBypassRules);
+  const autoCheckUpdate = useSettingsStore((state) => state.autoCheckUpdate);
+  const setAutoCheckUpdate = useSettingsStore((state) => state.setAutoCheckUpdate);
+  const autoDownloadUpdate = useSettingsStore((state) => state.autoDownloadUpdate);
+  const setAutoDownloadUpdate = useSettingsStore((state) => state.setAutoDownloadUpdate);
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
 
-  const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
+  const gatewayStatus = useGatewayStore((state) => state.status);
+  const restartGateway = useGatewayStore((state) => state.restart);
   const updateSetAutoDownload = useUpdateStore((state) => state.setAutoDownload);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
@@ -220,6 +219,10 @@ export function Settings() {
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState(false);
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
+  const [clawHubTokenInput, setClawHubTokenInput] = useState('');
+  const [showClawHubTokenPlain, setShowClawHubTokenPlain] = useState(false);
+  const [savingClawHubToken, setSavingClawHubToken] = useState(false);
+  const [loggingInClawHub, setLoggingInClawHub] = useState(false);
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
@@ -635,6 +638,14 @@ export function Settings() {
   }, [proxyBypassRules]);
 
   useEffect(() => {
+    void hostApiFetch<{ value: string }>('/api/settings/clawHubToken')
+      .then((payload) => {
+        setClawHubTokenInput(typeof payload.value === 'string' ? payload.value : '');
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     void loadTaskPluginStatus(true);
   }, [loadTaskPluginStatus]);
 
@@ -684,6 +695,67 @@ export function Settings() {
       setSavingProxy(false);
     }
   };
+
+  const handleSaveClawHubToken = useCallback(async () => {
+    setSavingClawHubToken(true);
+    try {
+      const normalizedToken = clawHubTokenInput.trim().replace(/^Bearer\s+/i, '').trim();
+      await hostApiFetch('/api/settings/clawHubToken', {
+        method: 'PUT',
+        body: JSON.stringify({ value: normalizedToken }),
+      });
+      setClawHubTokenInput(normalizedToken);
+      toast.success(t('gateway.clawHubTokenSaved'));
+      trackUiEvent('settings.clawhub_token_saved', { hasToken: normalizedToken.length > 0 });
+    } catch (error) {
+      toast.error(`${t('gateway.clawHubTokenSaveFailed')}: ${toUserMessage(error)}`);
+    } finally {
+      setSavingClawHubToken(false);
+    }
+  }, [clawHubTokenInput, t]);
+
+  const handleClearClawHubToken = useCallback(async () => {
+    setSavingClawHubToken(true);
+    try {
+      await hostApiFetch('/api/settings/clawHubToken', {
+        method: 'PUT',
+        body: JSON.stringify({ value: '' }),
+      });
+      setClawHubTokenInput('');
+      setShowClawHubTokenPlain(false);
+      toast.success(t('gateway.clawHubTokenCleared'));
+      trackUiEvent('settings.clawhub_token_cleared');
+    } catch (error) {
+      toast.error(`${t('gateway.clawHubTokenClearFailed')}: ${toUserMessage(error)}`);
+    } finally {
+      setSavingClawHubToken(false);
+    }
+  }, [t]);
+
+  const handleOpenClawHubSite = useCallback(() => {
+    void invokeIpc('shell:openExternal', 'https://clawhub.ai');
+  }, []);
+
+  const handleLoginAndSyncClawHubToken = useCallback(async () => {
+    setLoggingInClawHub(true);
+    toast.info(t('gateway.clawHubAutoLoginWaiting'));
+    try {
+      await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/auth/login', {
+        method: 'POST',
+        timeoutMs: 180000,
+      });
+      const payload = await hostApiFetch<{ value: string }>('/api/settings/clawHubToken');
+      const normalizedToken = typeof payload.value === 'string' ? payload.value : '';
+      setClawHubTokenInput(normalizedToken);
+      setShowClawHubTokenPlain(false);
+      toast.success(t('gateway.clawHubTokenAutoSynced'));
+      trackUiEvent('settings.clawhub_token_auto_synced', { hasToken: normalizedToken.length > 0 });
+    } catch (error) {
+      toast.error(`${t('gateway.clawHubTokenAutoSyncFailed')}: ${toUserMessage(error)}`);
+    } finally {
+      setLoggingInClawHub(false);
+    }
+  }, [t]);
 
   const telemetryStats = useMemo(() => {
     let errorCount = 0;
@@ -1150,6 +1222,88 @@ export function Settings() {
               checked={gatewayAutoStart}
               onCheckedChange={setGatewayAutoStart}
             />
+          </div>
+
+          <Separator />
+
+          <div className="space-y-2 rounded-md border border-border/60 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <Label>{t('gateway.clawHubTokenTitle')}</Label>
+                <p className="text-sm text-muted-foreground">
+                  {t('gateway.clawHubTokenDesc')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleOpenClawHubSite}
+                >
+                  <ExternalLink className="mr-2 h-4 w-4" />
+                  {t('gateway.clawHubOpenSite')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    void handleLoginAndSyncClawHubToken();
+                  }}
+                  disabled={loggingInClawHub}
+                >
+                  {loggingInClawHub ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : null}
+                  {t('gateway.clawHubAutoLogin')}
+                </Button>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={clawHubTokenInput}
+                onChange={(event) => setClawHubTokenInput(event.target.value)}
+                type={showClawHubTokenPlain ? 'text' : 'password'}
+                placeholder={t('gateway.clawHubTokenPlaceholder')}
+                className="font-mono"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setShowClawHubTokenPlain((prev) => !prev)}
+              >
+                {showClawHubTokenPlain ? (
+                  <EyeOff className="h-4 w-4" />
+                ) : (
+                  <Eye className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  void handleClearClawHubToken();
+                }}
+                disabled={savingClawHubToken || loggingInClawHub || clawHubTokenInput.trim().length === 0}
+              >
+                {t('common:actions.clear')}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => {
+                  void handleSaveClawHubToken();
+                }}
+                disabled={savingClawHubToken || loggingInClawHub}
+              >
+                {savingClawHubToken ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : null}
+                {t('common:actions.save')}
+              </Button>
+            </div>
           </div>
 
           <Separator />

@@ -34,6 +34,7 @@ export interface AppSettings {
   proxyEnabled: boolean;
   proxyServer: string;
   proxyBypassRules: string;
+  clawHubToken: string;
   
   // Update
   updateChannel: 'stable' | 'beta' | 'dev';
@@ -87,6 +88,7 @@ const defaults: AppSettings = {
   proxyEnabled: false,
   proxyServer: '',
   proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
+  clawHubToken: '',
   
   // Update
   updateChannel: 'stable',

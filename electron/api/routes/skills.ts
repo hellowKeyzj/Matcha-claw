@@ -60,6 +60,16 @@ export async function handleSkillRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/clawhub/auth/login' && req.method === 'POST') {
+    try {
+      await ctx.clawHubService.loginAndSyncToken();
+      sendJson(res, 200, { success: true });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/clawhub/install' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<Record<string, unknown>>(req);

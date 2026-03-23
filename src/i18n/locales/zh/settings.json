@@ -208,7 +208,19 @@
     "proxyBypassHelp": "使用分号、逗号或换行分隔需要直连的主机。",
     "proxyRestartNote": "保存后会立即重新应用 Electron 网络代理，并自动重启 Gateway。",
     "proxySaved": "代理设置已保存",
-    "proxySaveFailed": "保存代理设置失败"
+    "proxySaveFailed": "保存代理设置失败",
+    "clawHubTokenTitle": "ClawHub 登录令牌",
+    "clawHubTokenDesc": "用于配置 ClawHub 登录令牌。",
+    "clawHubTokenPlaceholder": "输入 ClawHub token（例如 clh_xxx）",
+    "clawHubTokenSaved": "ClawHub 令牌已保存",
+    "clawHubTokenCleared": "ClawHub 令牌已清除",
+    "clawHubTokenSaveFailed": "保存 ClawHub 令牌失败",
+    "clawHubTokenClearFailed": "清除 ClawHub 令牌失败",
+    "clawHubOpenSite": "打开 ClawHub",
+    "clawHubAutoLogin": "登录并自动获取",
+    "clawHubAutoLoginWaiting": "已打开浏览器，请在 ClawHub 页面完成授权...",
+    "clawHubTokenAutoSynced": "已登录 ClawHub 并自动同步令牌",
+    "clawHubTokenAutoSyncFailed": "ClawHub 自动登录失败"
   },
   "updates": {
     "title": "更新",
