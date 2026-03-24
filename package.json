@@ -76,6 +76,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@sliverp/qqbot": "^1.5.4",
     "@soimy/dingtalk": "^3.1.4",
+    "@tanstack/react-virtual": "^3.13.23",
     "@tencent-weixin/openclaw-weixin": "^1.0.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

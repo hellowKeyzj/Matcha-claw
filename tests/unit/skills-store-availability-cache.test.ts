@@ -53,9 +53,6 @@ describe('skills store availability and search cache', () => {
     });
 
     hostApiFetchMock.mockImplementation(async (path: string) => {
-      if (path === '/api/clawhub/list') {
-        return { success: true, results: [] };
-      }
       if (path === '/api/skills/configs') {
         return {};
       }
@@ -118,4 +115,3 @@ describe('skills store availability and search cache', () => {
     expect(useSkillsStore.getState().searchResults[0]?.slug).toBe('cache-skill');
   });
 });
-

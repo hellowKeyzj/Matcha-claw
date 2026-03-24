@@ -4,9 +4,10 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { AlertCircle, Bot, Loader2, MessageSquare, Settings2, Sparkles, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
@@ -29,12 +30,22 @@ const TASK_INBOX_MAX_WIDTH = 560;
 const TASK_INBOX_DEFAULT_WIDTH = 360;
 const TASK_INBOX_RESIZER_WIDTH = 6;
 const CHAT_MAIN_MIN_WIDTH = 520;
+const CHAT_STICKY_BOTTOM_THRESHOLD_PX = 120;
+const CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX = 168;
+const CHAT_VIRTUAL_OVERSCAN = 8;
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 
 interface AgentSkillOption {
   id: string;
   name: string;
   icon?: string;
+}
+
+interface SessionScrollSnapshot {
+  atBottom: boolean;
+  anchorKey?: string;
+  anchorOffsetWithin?: number;
+  fallbackScrollTop: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -81,6 +92,16 @@ function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean
   return isDefault ? '⚙️' : '🤖';
 }
 
+function resolveMessageAnchorKey(message: RawMessage, index: number): string {
+  if (typeof message.id === 'string' && message.id.trim()) {
+    return `id:${message.id}`;
+  }
+  const role = typeof message.role === 'string' ? message.role : 'unknown';
+  const timestamp = typeof message.timestamp === 'number' ? message.timestamp : 'na';
+  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
+  return `fallback:${role}:${timestamp}:${toolCallId}:${index}`;
+}
+
 export function Chat() {
   const { t } = useTranslation('chat');
   const location = useLocation();
@@ -119,8 +140,11 @@ export function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
+  const resizeRafRef = useRef<number | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const autoScrollRafRef = useRef<number | null>(null);
+  const sessionScrollSnapshotRef = useRef<Map<string, SessionScrollSnapshot>>(new Map());
+  const pendingScrollRestoreSessionKeyRef = useRef<string | null>(currentSessionKey);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
   const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
     try {
@@ -133,6 +157,25 @@ export function Chat() {
   const [skillConfigOpen, setSkillConfigOpen] = useState(false);
   const [skillConfigSaving, setSkillConfigSaving] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const messageAnchorKeys = useMemo(
+    () => messages.map((message, index) => resolveMessageAnchorKey(message, index)),
+    [messages],
+  );
+  const messageAnchorIndexByKey = useMemo(() => {
+    const map = new Map<string, number>();
+    messageAnchorKeys.forEach((key, index) => {
+      map.set(key, index);
+    });
+    return map;
+  }, [messageAnchorKeys]);
+  const messageVirtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => messagesViewportRef.current,
+    estimateSize: () => CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX,
+    overscan: CHAT_VIRTUAL_OVERSCAN,
+    getItemKey: (index) => messageAnchorKeys[index] ?? `idx:${index}`,
+  });
+  const virtualMessageItems = messageVirtualizer.getVirtualItems();
 
   useEffect(() => {
     try {
@@ -151,13 +194,33 @@ export function Chat() {
   }, [taskInboxWidth]);
 
   useEffect(() => {
-    const handleResize = () => {
+    const applyResize = () => {
       const containerWidth = chatLayoutRef.current?.clientWidth ?? window.innerWidth;
-      setTaskInboxWidth((prev) => clampTaskInboxWidth(prev, containerWidth));
+      setTaskInboxWidth((prev) => {
+        const next = clampTaskInboxWidth(prev, containerWidth);
+        return next === prev ? prev : next;
+      });
     };
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    const scheduleResize = () => {
+      if (resizeRafRef.current != null) {
+        return;
+      }
+      resizeRafRef.current = window.requestAnimationFrame(() => {
+        resizeRafRef.current = null;
+        applyResize();
+      });
+    };
+
+    scheduleResize();
+    window.addEventListener('resize', scheduleResize);
+    return () => {
+      window.removeEventListener('resize', scheduleResize);
+      if (resizeRafRef.current != null) {
+        window.cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
+    };
   }, []);
 
   const startTaskInboxResize = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -229,7 +292,22 @@ export function Chat() {
 
     const evaluateStickiness = () => {
       const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      shouldStickToBottomRef.current = distanceToBottom <= 120;
+      const atBottom = distanceToBottom <= CHAT_STICKY_BOTTOM_THRESHOLD_PX;
+      shouldStickToBottomRef.current = atBottom;
+
+      const nextSnapshot: SessionScrollSnapshot = {
+        atBottom,
+        fallbackScrollTop: viewport.scrollTop,
+      };
+      if (!atBottom && messages.length > 0) {
+        const virtualItems = messageVirtualizer.getVirtualItems();
+        const anchorItem = virtualItems.find((item) => (item.start + item.size) > viewport.scrollTop) ?? virtualItems[0];
+        if (anchorItem) {
+          nextSnapshot.anchorKey = messageAnchorKeys[anchorItem.index];
+          nextSnapshot.anchorOffsetWithin = Math.max(0, viewport.scrollTop - anchorItem.start);
+        }
+      }
+      sessionScrollSnapshotRef.current.set(currentSessionKey, nextSnapshot);
     };
 
     evaluateStickiness();
@@ -237,14 +315,61 @@ export function Chat() {
     return () => {
       viewport.removeEventListener('scroll', evaluateStickiness);
     };
-  }, []);
+  }, [currentSessionKey, messageAnchorKeys, messageVirtualizer, messages.length]);
 
   useEffect(() => {
     shouldStickToBottomRef.current = true;
+    pendingScrollRestoreSessionKeyRef.current = currentSessionKey;
   }, [currentSessionKey]);
 
+  useEffect(() => {
+    if (pendingScrollRestoreSessionKeyRef.current !== currentSessionKey) {
+      return;
+    }
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const snapshot = sessionScrollSnapshotRef.current.get(currentSessionKey);
+    const restoreRaf = window.requestAnimationFrame(() => {
+      if (pendingScrollRestoreSessionKeyRef.current !== currentSessionKey) {
+        return;
+      }
+      if (!snapshot || snapshot.atBottom) {
+        shouldStickToBottomRef.current = true;
+        viewport.scrollTop = viewport.scrollHeight;
+        pendingScrollRestoreSessionKeyRef.current = null;
+        return;
+      }
+
+      shouldStickToBottomRef.current = false;
+      const anchorIndex = snapshot.anchorKey ? messageAnchorIndexByKey.get(snapshot.anchorKey) : undefined;
+      if (typeof anchorIndex === 'number') {
+        messageVirtualizer.scrollToIndex(anchorIndex, { align: 'start' });
+        window.requestAnimationFrame(() => {
+          const latestViewport = messagesViewportRef.current;
+          if (!latestViewport) {
+            return;
+          }
+          const maxTop = Math.max(0, latestViewport.scrollHeight - latestViewport.clientHeight);
+          const offsetWithin = snapshot.anchorOffsetWithin ?? 0;
+          latestViewport.scrollTop = Math.min(maxTop, Math.max(0, latestViewport.scrollTop + offsetWithin));
+          pendingScrollRestoreSessionKeyRef.current = null;
+        });
+        return;
+      }
+
+      const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = Math.min(maxTop, Math.max(0, snapshot.fallbackScrollTop));
+      pendingScrollRestoreSessionKeyRef.current = null;
+    });
+    return () => {
+      window.cancelAnimationFrame(restoreRaf);
+    };
+  }, [currentSessionKey, messageAnchorIndexByKey, messageVirtualizer, messages.length]);
+
   // Auto-scroll on new messages, streaming, or activity changes.
-  // Keep smooth behavior for non-stream updates; use auto during streaming to avoid animation thrash.
+  // Use auto behavior to avoid scroll animation blur/ghosting under heavy render load.
   useEffect(() => {
     if (!shouldStickToBottomRef.current) {
       return;
@@ -253,7 +378,7 @@ export function Chat() {
       window.cancelAnimationFrame(autoScrollRafRef.current);
     }
     autoScrollRafRef.current = window.requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: sending ? 'auto' : 'smooth' });
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
       autoScrollRafRef.current = null;
     });
     return () => {
@@ -267,7 +392,6 @@ export function Chat() {
   // Update timestamp when sending starts
   useEffect(() => {
     if (sending && streamingTimestamp === 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStreamingTimestamp(Date.now() / 1000);
     } else if (!sending && streamingTimestamp !== 0) {
       setStreamingTimestamp(0);
@@ -395,7 +519,7 @@ export function Chat() {
         </div>
 
         <div ref={messagesViewportRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          <div className="mx-auto max-w-4xl space-y-4">
+          <div className="mx-auto max-w-4xl">
             {loading && !sending ? (
               <div className="flex h-full items-center justify-center py-20">
                 <LoadingSpinner size="lg" />
@@ -404,42 +528,65 @@ export function Chat() {
               <WelcomeScreen />
             ) : (
               <>
-                <ChatMessageHistoryList
-                  messages={messages}
-                  showThinking={showThinking}
-                  assistantAvatarEmoji={assistantAvatarEmoji}
-                  userAvatarImageUrl={userAvatarDataUrl}
-                />
+                <div
+                  className="relative w-full"
+                  style={{ height: messageVirtualizer.getTotalSize() }}
+                >
+                  {virtualMessageItems.map((virtualItem) => {
+                    const message = messages[virtualItem.index];
+                    if (!message) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={messageVirtualizer.measureElement}
+                        className="absolute left-0 top-0 w-full pb-4"
+                        style={{ transform: `translateY(${virtualItem.start}px)` }}
+                      >
+                        <ChatMessage
+                          message={message}
+                          showThinking={showThinking}
+                          assistantAvatarEmoji={assistantAvatarEmoji}
+                          userAvatarImageUrl={userAvatarDataUrl}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
 
-                {shouldRenderStreaming && (
-                  <ChatMessage
-                    message={(streamMsg
-                      ? {
-                          ...(streamMsg as Record<string, unknown>),
-                          role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-                          content: streamMsg.content ?? streamText,
-                          timestamp: streamMsg.timestamp ?? streamingTimestamp,
-                        }
-                      : {
-                          role: 'assistant',
-                          content: streamText,
-                          timestamp: streamingTimestamp,
-                        }) as RawMessage}
-                    showThinking={showThinking}
-                    isStreaming
-                    streamingTools={streamingTools}
-                    assistantAvatarEmoji={assistantAvatarEmoji}
-                    userAvatarImageUrl={userAvatarDataUrl}
-                  />
-                )}
+                <div className="space-y-4">
+                  {shouldRenderStreaming && (
+                    <ChatMessage
+                      message={(streamMsg
+                        ? {
+                            ...(streamMsg as Record<string, unknown>),
+                            role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
+                            content: streamMsg.content ?? streamText,
+                            timestamp: streamMsg.timestamp ?? streamingTimestamp,
+                          }
+                        : {
+                            role: 'assistant',
+                            content: streamText,
+                            timestamp: streamingTimestamp,
+                          }) as RawMessage}
+                      showThinking={showThinking}
+                      isStreaming
+                      streamingTools={streamingTools}
+                      assistantAvatarEmoji={assistantAvatarEmoji}
+                      userAvatarImageUrl={userAvatarDataUrl}
+                    />
+                  )}
 
-                {sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && (
-                  <ActivityIndicator />
-                )}
+                  {sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && (
+                    <ActivityIndicator />
+                  )}
 
-                {sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && (
-                  <TypingIndicator />
-                )}
+                  {sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && (
+                    <TypingIndicator />
+                  )}
+                </div>
               </>
             )}
 
@@ -740,29 +887,3 @@ function ApprovalActionsPanel({
 }
 
 export default Chat;
-
-const ChatMessageHistoryList = memo(function ChatMessageHistoryList({
-  messages,
-  showThinking,
-  assistantAvatarEmoji,
-  userAvatarImageUrl,
-}: {
-  messages: RawMessage[];
-  showThinking: boolean;
-  assistantAvatarEmoji: string;
-  userAvatarImageUrl: string | null;
-}) {
-  return (
-    <>
-      {messages.map((msg, idx) => (
-        <ChatMessage
-          key={msg.id || `msg-${idx}`}
-          message={msg}
-          showThinking={showThinking}
-          assistantAvatarEmoji={assistantAvatarEmoji}
-          userAvatarImageUrl={userAvatarImageUrl}
-        />
-      ))}
-    </>
-  );
-});

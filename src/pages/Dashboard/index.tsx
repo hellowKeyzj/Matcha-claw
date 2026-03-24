@@ -27,6 +27,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { FeedbackState } from '@/components/common/FeedbackState';
 import { hostApiFetch } from '@/lib/host-api';
+import { scheduleIdleReady } from '@/lib/idle-ready';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 
@@ -53,8 +54,10 @@ const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const { channels, fetchChannels } = useChannelsStore();
-  const { skills, fetchSkills } = useSkillsStore();
+  const channels = useChannelsStore((state) => state.channels);
+  const fetchChannels = useChannelsStore((state) => state.fetchChannels);
+  const skills = useSkillsStore((state) => state.skills);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -71,8 +74,7 @@ export function Dashboard() {
   const [usageDetailListReady, setUsageDetailListReady] = useState(false);
   const usageFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const usageFetchGenerationRef = useRef(0);
-  const usageChartPrimedRef = useRef(false);
-  const usageDetailPrimedRef = useRef(false);
+  const usageVisualizationPrimedRef = useRef(false);
 
   // Track page view on mount only.
   useEffect(() => {
@@ -141,9 +143,12 @@ export function Dashboard() {
             reason: 'empty',
             restartMarker,
           });
+          const nextDelay = document.visibilityState === 'visible'
+            ? USAGE_FETCH_RETRY_DELAY_MS
+            : Math.max(USAGE_FETCH_RETRY_DELAY_MS, 5000);
           usageFetchTimerRef.current = setTimeout(() => {
             void fetchUsageHistoryWithRetry(attempt + 1);
-          }, USAGE_FETCH_RETRY_DELAY_MS);
+          }, nextDelay);
         } else if (normalized.length === 0) {
           trackUiEvent('dashboard.token_usage_fetch_exhausted', {
             generation,
@@ -169,9 +174,12 @@ export function Dashboard() {
             reason: 'error',
             restartMarker,
           });
+          const nextDelay = document.visibilityState === 'visible'
+            ? USAGE_FETCH_RETRY_DELAY_MS
+            : Math.max(USAGE_FETCH_RETRY_DELAY_MS, 5000);
           usageFetchTimerRef.current = setTimeout(() => {
             void fetchUsageHistoryWithRetry(attempt + 1);
-          }, USAGE_FETCH_RETRY_DELAY_MS);
+          }, nextDelay);
           return;
         }
         setUsageHistory([]);
@@ -198,135 +206,77 @@ export function Dashboard() {
     if (dashboardHeavyContentReady) {
       return;
     }
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setDashboardHeavyContentReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
-      } else {
-        timeoutId = window.setTimeout(markReady, 120);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
+    const cancel = scheduleIdleReady(() => {
+      setDashboardHeavyContentReady(true);
+    }, {
+      idleTimeoutMs: DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
+      fallbackDelayMs: 120,
+      useAnimationFrame: true,
     });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
+    return cancel;
   }, [dashboardHeavyContentReady]);
 
   useEffect(() => {
     if (!dashboardHeavyContentReady && (channels.length > 0 || skills.length > 0)) {
-      setDashboardHeavyContentReady(true);
+      const cancel = scheduleIdleReady(() => {
+        setDashboardHeavyContentReady(true);
+      }, {
+        idleTimeoutMs: 120,
+        fallbackDelayMs: 48,
+        useAnimationFrame: false,
+      });
+      return cancel;
     }
+    return undefined;
   }, [channels.length, dashboardHeavyContentReady, skills.length]);
 
   useEffect(() => {
     if (usagePanelReady) {
       return;
     }
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setUsagePanelReady(true);
-      }
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(markReady, { timeout: 1000 });
-    } else {
-      timeoutId = window.setTimeout(markReady, 80);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
+    const cancel = scheduleIdleReady(() => {
+      setUsagePanelReady(true);
+    }, {
+      idleTimeoutMs: 1000,
+      fallbackDelayMs: 80,
+      useAnimationFrame: false,
+    });
+    return cancel;
   }, [usagePanelReady]);
 
   useEffect(() => {
     if (!usagePanelReady && usageHistory.length > 0) {
-      setUsagePanelReady(true);
+      const cancel = scheduleIdleReady(() => {
+        setUsagePanelReady(true);
+      }, {
+        idleTimeoutMs: 120,
+        fallbackDelayMs: 48,
+        useAnimationFrame: false,
+      });
+      return cancel;
     }
+    return undefined;
   }, [usageHistory.length, usagePanelReady]);
 
   useEffect(() => {
-    if (!isGatewayRunning) {
-      usageChartPrimedRef.current = false;
-      setUsageChartReady(false);
-      usageDetailPrimedRef.current = false;
-      setUsageDetailListReady(false);
+    if (!isGatewayRunning || !usagePanelReady || usageHistory.length === 0) {
+      usageVisualizationPrimedRef.current = false;
       return;
     }
-    if (!usagePanelReady || usageHistory.length === 0 || usageDetailPrimedRef.current) {
+    if (usageVisualizationPrimedRef.current || (usageChartReady && usageDetailListReady)) {
       return;
     }
-
-    usageDetailPrimedRef.current = true;
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setUsageDetailListReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: 400 });
-      } else {
-        timeoutId = window.setTimeout(markReady, 120);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
+    usageVisualizationPrimedRef.current = true;
+    const cancel = scheduleIdleReady(() => {
+      setUsageChartReady((prev) => (prev ? prev : true));
+      setUsageDetailListReady((prev) => (prev ? prev : true));
+    }, {
+      idleTimeoutMs: 320,
+      fallbackDelayMs: 100,
+      useAnimationFrame: true,
     });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [isGatewayRunning, usageHistory.length, usagePanelReady]);
+    return cancel;
+  }, [isGatewayRunning, usageChartReady, usageDetailListReady, usageHistory.length, usagePanelReady]);
 
   // Calculate statistics safely
   const connectedChannels = Array.isArray(channels) ? channels.filter((c) => c.status === 'connected').length : 0;
@@ -374,66 +324,37 @@ export function Dashboard() {
     [filteredUsageHistory],
   );
 
-  useEffect(() => {
-    if (!isGatewayRunning || !usagePanelReady || filteredUsageHistory.length === 0 || usageChartPrimedRef.current) {
-      return;
-    }
-
-    usageChartPrimedRef.current = true;
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setUsageChartReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: 260 });
-      } else {
-        timeoutId = window.setTimeout(markReady, 90);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
-    });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [filteredUsageHistory.length, isGatewayRunning, usagePanelReady]);
-
   // Update uptime periodically
   useEffect(() => {
     const updateUptime = () => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
       if (gatewayStatus.connectedAt) {
-        setUptime(Math.floor((Date.now() - gatewayStatus.connectedAt) / 1000));
+        const nextValue = Math.floor((Date.now() - gatewayStatus.connectedAt) / 1000);
+        setUptime((prev) => (prev === nextValue ? prev : nextValue));
       } else {
-        setUptime(0);
+        setUptime((prev) => (prev === 0 ? prev : 0));
       }
     };
 
     // Update immediately
     updateUptime();
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        updateUptime();
+      }
+    };
+
     // Update every second
     const interval = setInterval(updateUptime, 1000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [gatewayStatus.connectedAt]);
 
   const openDevConsole = async () => {

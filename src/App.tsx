@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Component, useCallback, useEffect, useRef } from 'react';
+import { Component, Suspense, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -15,11 +15,7 @@ import { Channels } from './pages/Channels';
 import { TeamsPage } from './pages/Teams';
 import { TeamChatPage } from './pages/Teams/TeamChat';
 import { ProvidersPage } from './pages/Providers';
-import { SecurityPage } from './pages/Security';
 import { SubAgents } from './pages/SubAgents';
-import { Setup } from './pages/Setup';
-import { Skills } from './pages/Skills';
-import { Settings } from './pages/Settings';
 import { TasksPage } from './pages/Tasks';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
@@ -27,6 +23,21 @@ import { useSkillsStore } from './stores/skills';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
+import {
+  SetupRoute,
+  SkillsRoute,
+  SecurityRoute,
+  SettingsRoute,
+  preloadCriticalLazyRoutes,
+} from './lib/route-preload';
+
+function RouteLoadingFallback() {
+  return (
+    <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-muted-foreground">
+      加载中...
+    </div>
+  );
+}
 
 
 /**
@@ -114,6 +125,7 @@ function App() {
   const gatewayState = useGatewayStore((state) => state.status.state);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const skillsPrefetchedRef = useRef(false);
+  const routeChunksPrefetchedRef = useRef(false);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -217,6 +229,43 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!settingsInitialized || !setupComplete) {
+      return;
+    }
+    if (routeChunksPrefetchedRef.current) {
+      return;
+    }
+    routeChunksPrefetchedRef.current = true;
+
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    let idleId: number | undefined;
+
+    const prewarm = () => {
+      if (cancelled) {
+        return;
+      }
+      preloadCriticalLazyRoutes();
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(() => prewarm(), { timeout: 1500 });
+    } else {
+      timeoutId = window.setTimeout(prewarm, 500);
+    }
+
+    return () => {
+      cancelled = true;
+      if (typeof timeoutId === 'number') {
+        window.clearTimeout(timeoutId);
+      }
+      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [settingsInitialized, setupComplete]);
+
+  useEffect(() => {
     if (!settingsInitialized || !setupComplete || gatewayState !== 'running') {
       return;
     }
@@ -259,7 +308,14 @@ function App() {
         <TeamsRuntimeDaemon />
         <Routes>
           {/* Setup wizard (shown on first launch) */}
-          <Route path="/setup/*" element={<Setup />} />
+          <Route
+            path="/setup/*"
+            element={(
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <SetupRoute />
+              </Suspense>
+            )}
+          />
 
           {/* Main application routes */}
           <Route element={<MainLayout />}>
@@ -282,13 +338,28 @@ function App() {
             <Route path="/providers" element={<ProvidersPage />} />
             <Route
               path="/skills"
-              element={<Skills />}
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <SkillsRoute />
+                </Suspense>
+              )}
             />
-            <Route path="/security" element={<SecurityPage />} />
+            <Route
+              path="/security"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <SecurityRoute />
+                </Suspense>
+              )}
+            />
             <Route path="/cron" element={<Navigate to="/tasks?tab=scheduled" replace />} />
             <Route
               path="/settings/*"
-              element={<Settings />}
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <SettingsRoute />
+                </Suspense>
+              )}
             />
           </Route>
         </Routes>

@@ -1,4 +1,5 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -20,10 +21,90 @@ import { SubagentManageDialog } from './components/SubagentManageDialog';
 import { SubagentTemplateLoadDialog } from './components/SubagentTemplateLoadDialog';
 
 type DialogMode = 'create' | 'edit';
+type TemplateListItem = SubagentTemplateCatalogResult['templates'][number];
 const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
-const INITIAL_TEMPLATE_CARD_BATCH = 9;
-const TEMPLATE_CARD_BATCH_SIZE = 18;
-const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
+const TEMPLATE_GRID_VIRTUAL_THRESHOLD = 24;
+const TEMPLATE_GRID_VIRTUAL_OVERSCAN = 4;
+const TEMPLATE_GRID_ESTIMATED_ROW_HEIGHT = 172;
+
+function resolveTemplateGridColumnCount(width: number): number {
+  if (width >= 1280) {
+    return 3;
+  }
+  if (width >= 768) {
+    return 2;
+  }
+  return 1;
+}
+
+const TemplateCatalogCard = memo(function TemplateCatalogCard({
+  template,
+  localizedTemplateName,
+  localizedSummary,
+  loading,
+  disabled,
+  badgeLabel,
+  loadLabel,
+  loadingLabel,
+  onPrefetch,
+  onLoad,
+}: {
+  template: TemplateListItem;
+  localizedTemplateName: string;
+  localizedSummary: string;
+  loading: boolean;
+  disabled: boolean;
+  badgeLabel: string;
+  loadLabel: string;
+  loadingLabel: string;
+  onPrefetch: (templateId: string) => void;
+  onLoad: (templateId: string) => void;
+}) {
+  return (
+    <article
+      className="rounded-md border bg-background p-3"
+      onMouseEnter={() => onPrefetch(template.id)}
+      onFocus={() => onPrefetch(template.id)}
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base">
+          {template.emoji || '\uD83E\uDD16'}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
+              {localizedTemplateName}
+            </h3>
+            <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium leading-none text-primary">
+              {badgeLabel}
+            </span>
+          </div>
+          <p className="truncate text-xs text-muted-foreground">{template.id}</p>
+          {localizedSummary && (
+            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              {localizedSummary}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="mt-3">
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full"
+          disabled={loading || disabled}
+          onClick={() => {
+            onLoad(template.id);
+          }}
+          onMouseEnter={() => onPrefetch(template.id)}
+          onFocus={() => onPrefetch(template.id)}
+        >
+          {loading ? loadingLabel : loadLabel}
+        </Button>
+      </div>
+    </article>
+  );
+});
 
 export function SubAgents() {
   const { t } = useTranslation('subagents');
@@ -75,11 +156,12 @@ export function SubAgents() {
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test',
   );
-  const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
+  const [templateGridViewportWidth, setTemplateGridViewportWidth] = useState(0);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const wasGatewayRunningRef = useRef(gatewayState === 'running');
   const templateLoadRequestIdRef = useRef(0);
   const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
+  const templateGridResetKeyRef = useRef('');
   const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
@@ -227,61 +309,66 @@ export function SubAgents() {
     return templateCatalog.templates.filter((template) => template.categoryId === selectedTemplateCategory);
   }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCatalog.templates]);
   const deferredFilteredTemplates = useDeferredValue(filteredTemplates);
-  const visibleTemplates = useMemo(
-    () => deferredFilteredTemplates.slice(0, visibleTemplateCount),
-    [deferredFilteredTemplates, visibleTemplateCount],
+  const templateGridColumnCount = useMemo(
+    () => resolveTemplateGridColumnCount(templateGridViewportWidth),
+    [templateGridViewportWidth],
   );
-  const displayedTemplateCount = Math.min(visibleTemplateCount, deferredFilteredTemplates.length);
-
-  useEffect(() => {
-    if (!templatesExpanded) {
-      return;
+  const templateRows = useMemo(() => {
+    if (deferredFilteredTemplates.length === 0) {
+      return [] as TemplateListItem[][];
     }
-    setVisibleTemplateCount(INITIAL_TEMPLATE_CARD_BATCH);
-  }, [selectedTemplateCategory, templatesExpanded]);
-
-  const appendVisibleTemplates = useCallback(() => {
-    setVisibleTemplateCount((prev) => {
-      if (prev >= deferredFilteredTemplates.length) {
-        return prev;
-      }
-      return Math.min(prev + TEMPLATE_CARD_BATCH_SIZE, deferredFilteredTemplates.length);
-    });
-  }, [deferredFilteredTemplates.length]);
-
-  const handleTemplateCardScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
-      return;
+    const rows: TemplateListItem[][] = [];
+    for (let index = 0; index < deferredFilteredTemplates.length; index += templateGridColumnCount) {
+      rows.push(deferredFilteredTemplates.slice(index, index + templateGridColumnCount));
     }
-    const target = event.currentTarget;
-    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
-    if (remain <= TEMPLATE_CARD_SCROLL_THRESHOLD_PX) {
-      appendVisibleTemplates();
-    }
-  }, [appendVisibleTemplates, deferredFilteredTemplates.length, displayedTemplateCount]);
+    return rows;
+  }, [deferredFilteredTemplates, templateGridColumnCount]);
+  const shouldUseVirtualTemplateGrid = deferredFilteredTemplates.length > TEMPLATE_GRID_VIRTUAL_THRESHOLD;
+  const templateRowVirtualizer = useVirtualizer({
+    count: templateRows.length,
+    getScrollElement: () => templateCardScrollRef.current,
+    estimateSize: () => TEMPLATE_GRID_ESTIMATED_ROW_HEIGHT,
+    overscan: TEMPLATE_GRID_VIRTUAL_OVERSCAN,
+  });
+  const virtualTemplateRows = templateRowVirtualizer.getVirtualItems();
 
   useEffect(() => {
     if (!templatesExpanded || !subagentsHeavyContentReady) {
-      return;
-    }
-    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
       return;
     }
     const container = templateCardScrollRef.current;
     if (!container) {
       return;
     }
-    if (container.scrollHeight <= container.clientHeight + 8) {
-      appendVisibleTemplates();
-    }
-  }, [
-    appendVisibleTemplates,
-    deferredFilteredTemplates.length,
-    displayedTemplateCount,
-    subagentsHeavyContentReady,
-    templatesExpanded,
-    visibleTemplates.length,
-  ]);
+
+    let rafId: number | null = null;
+    const updateWidth = (nextWidth: number) => {
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        setTemplateGridViewportWidth((prev) => (prev === nextWidth ? prev : nextWidth));
+      });
+    };
+
+    updateWidth(Math.round(container.clientWidth));
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) {
+        return;
+      }
+      updateWidth(Math.round(entry.contentRect.width));
+    });
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [subagentsHeavyContentReady, templatesExpanded]);
 
   useEffect(() => {
     if (!subagentsHeavyContentReady || selectedTemplateCategory === 'all') {
@@ -292,6 +379,35 @@ export function SubAgents() {
       setSelectedTemplateCategory('all');
     }
   }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCategories]);
+
+  useEffect(() => {
+    templateRowVirtualizer.measure();
+  }, [templateGridColumnCount, templateRowVirtualizer, templateRows.length]);
+
+  useEffect(() => {
+    if (!templatesExpanded || !subagentsHeavyContentReady) {
+      templateGridResetKeyRef.current = '';
+      return;
+    }
+    const resetKey = `${selectedTemplateCategory}:${deferredFilteredTemplates.length}:${templateGridColumnCount}`;
+    if (templateGridResetKeyRef.current === resetKey) {
+      return;
+    }
+    templateGridResetKeyRef.current = resetKey;
+
+    const container = templateCardScrollRef.current;
+    if (container) {
+      container.scrollTop = 0;
+    }
+    templateRowVirtualizer.scrollToOffset(0);
+  }, [
+    deferredFilteredTemplates.length,
+    selectedTemplateCategory,
+    subagentsHeavyContentReady,
+    templateGridColumnCount,
+    templateRowVirtualizer,
+    templatesExpanded,
+  ]);
 
   const prefetchTemplateDetail = useCallback((templateId: string) => {
     const normalizedId = templateId.trim();
@@ -351,6 +467,17 @@ export function SubAgents() {
     };
   }, [deferredFilteredTemplates, prefetchTemplateDetail, subagentsHeavyContentReady, templatesExpanded, templatesLoading]);
 
+  const localizedTemplateTextMap = useMemo(() => {
+    const localized = new Map<string, { name: string; summary: string }>();
+    for (const template of deferredFilteredTemplates) {
+      localized.set(template.id, {
+        name: tTemplate(`templates.${template.id}.name`, { defaultValue: template.name }),
+        summary: tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' }) || '',
+      });
+    }
+    return localized;
+  }, [deferredFilteredTemplates, tTemplate]);
+
   const editingAgent: SubagentSummary | undefined = editingAgentId
     ? agents.find((agent) => agent.id === editingAgentId)
     : undefined;
@@ -367,7 +494,7 @@ export function SubAgents() {
     setDialogOpen(true);
   };
 
-  const handleLoadTemplate = async (templateId: string) => {
+  const handleLoadTemplate = useCallback(async (templateId: string) => {
     const requestId = templateLoadRequestIdRef.current + 1;
     templateLoadRequestIdRef.current = requestId;
     setTemplateLoadingId(templateId);
@@ -393,7 +520,11 @@ export function SubAgents() {
         setTemplateLoadingId(null);
       }
     }
-  };
+  }, []);
+
+  const handleLoadTemplateCard = useCallback((templateId: string) => {
+    void handleLoadTemplate(templateId);
+  }, [handleLoadTemplate]);
 
   const closeManageDialog = async () => {
     const agentId = managedAgentId;
@@ -519,73 +650,72 @@ export function SubAgents() {
             {deferredFilteredTemplates.length === 0 ? (
               <p className="text-sm text-muted-foreground">{t('templates.empty')}</p>
             ) : (
-              <>
-                <div
-                  ref={templateCardScrollRef}
-                  className="max-h-[56vh] overflow-y-auto pr-1"
-                  onScroll={handleTemplateCardScroll}
-                >
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {visibleTemplates.map((template) => {
-                      const localizedTemplateName = tTemplate(`templates.${template.id}.name`, { defaultValue: template.name });
-                      const localizedSummary = tTemplate(`templates.${template.id}.summary`, { defaultValue: template.summary ?? '' }) || '';
+              <div
+                ref={templateCardScrollRef}
+                className="max-h-[56vh] overflow-y-auto pr-1"
+              >
+                {shouldUseVirtualTemplateGrid ? (
+                  <div
+                    className="relative"
+                    style={{ height: `${templateRowVirtualizer.getTotalSize()}px` }}
+                  >
+                    {virtualTemplateRows.map((virtualRow) => {
+                      const rowTemplates = templateRows[virtualRow.index] ?? [];
                       return (
-                        <article
-                          key={template.id}
-                          className="rounded-md border bg-background p-3"
-                          onMouseEnter={() => prefetchTemplateDetail(template.id)}
-                          onFocus={() => prefetchTemplateDetail(template.id)}
-                          onMouseDown={() => prefetchTemplateDetail(template.id)}
+                        <div
+                          key={virtualRow.key}
+                          data-index={virtualRow.index}
+                          ref={templateRowVirtualizer.measureElement}
+                          className="absolute left-0 top-0 w-full pb-3"
+                          style={{ transform: `translateY(${virtualRow.start}px)` }}
                         >
-                          <div className="flex items-start gap-3">
-                            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base">
-                              {template.emoji || '\uD83E\uDD16'}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
-                                  {localizedTemplateName}
-                                </h3>
-                                <span className="shrink-0 whitespace-nowrap rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium leading-none text-primary">
-                                  {t('templates.badge')}
-                                </span>
-                              </div>
-                              <p className="truncate text-xs text-muted-foreground">{template.id}</p>
-                              {localizedSummary && (
-                                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                                  {localizedSummary}
-                                </p>
-                              )}
-                            </div>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                            {rowTemplates.map((template) => {
+                              const localizedText = localizedTemplateTextMap.get(template.id);
+                              return (
+                                <TemplateCatalogCard
+                                  key={template.id}
+                                  template={template}
+                                  localizedTemplateName={localizedText?.name ?? template.name}
+                                  localizedSummary={localizedText?.summary ?? template.summary ?? ''}
+                                  loading={templateLoadingId === template.id}
+                                  disabled={modelsLoading || availableModels.length === 0}
+                                  badgeLabel={t('templates.badge')}
+                                  loadLabel={t('templates.load')}
+                                  loadingLabel={t('templates.loadingButton')}
+                                  onPrefetch={prefetchTemplateDetail}
+                                  onLoad={handleLoadTemplateCard}
+                                />
+                              );
+                            })}
                           </div>
-                          <div className="mt-3">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="w-full"
-                              disabled={templateLoadingId === template.id || modelsLoading || availableModels.length === 0}
-                              onClick={() => {
-                                void handleLoadTemplate(template.id);
-                              }}
-                              onMouseEnter={() => prefetchTemplateDetail(template.id)}
-                              onFocus={() => prefetchTemplateDetail(template.id)}
-                            >
-                              {templateLoadingId === template.id ? t('templates.loadingButton') : t('templates.load')}
-                            </Button>
-                          </div>
-                        </article>
+                        </div>
                       );
                     })}
                   </div>
-                </div>
-                {displayedTemplateCount < deferredFilteredTemplates.length && (
-                  <div className="rounded-md border border-dashed px-3 py-2 text-center">
-                    <p className="text-xs text-muted-foreground">
-                      {t('templates.pagination.showing', { shown: displayedTemplateCount, total: deferredFilteredTemplates.length })}
-                    </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {deferredFilteredTemplates.map((template) => {
+                      const localizedText = localizedTemplateTextMap.get(template.id);
+                      return (
+                        <TemplateCatalogCard
+                          key={template.id}
+                          template={template}
+                          localizedTemplateName={localizedText?.name ?? template.name}
+                          localizedSummary={localizedText?.summary ?? template.summary ?? ''}
+                          loading={templateLoadingId === template.id}
+                          disabled={modelsLoading || availableModels.length === 0}
+                          badgeLabel={t('templates.badge')}
+                          loadLabel={t('templates.load')}
+                          loadingLabel={t('templates.loadingButton')}
+                          onPrefetch={prefetchTemplateDetail}
+                          onLoad={handleLoadTemplateCard}
+                        />
+                      );
+                    })}
                   </div>
                 )}
-              </>
+              </div>
             )}
           </>
         )}

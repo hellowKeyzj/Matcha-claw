@@ -110,7 +110,11 @@ function resolveQrImageSource(payload: { qrDataUrl?: string; qr?: string; raw?: 
 
 export function Channels() {
   const { t } = useTranslation('channels');
-  const { channels, loading, error, fetchChannels, deleteChannel } = useChannelsStore();
+  const channels = useChannelsStore((state) => state.channels);
+  const loading = useChannelsStore((state) => state.loading);
+  const error = useChannelsStore((state) => state.error);
+  const fetchChannels = useChannelsStore((state) => state.fetchChannels);
+  const deleteChannel = useChannelsStore((state) => state.deleteChannel);
   const gatewayStatus = useGatewayStore((state) => state.status);
 
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -446,7 +450,7 @@ interface AddChannelDialogProps {
 
 function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded }: AddChannelDialogProps) {
   const { t } = useTranslation('channels');
-  const { addChannel } = useChannelsStore();
+  const addChannel = useChannelsStore((state) => state.addChannel);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
   const [connecting, setConnecting] = useState(false);

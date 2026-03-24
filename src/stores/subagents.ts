@@ -995,6 +995,7 @@ let latestLoadAgentsRequestId = 0;
 let agentsStateMutationVersion = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
 const pendingDeletedAgentIds = new Set<string>();
+let inflightLoadAgentsTask: Promise<void> | null = null;
 
 export function __resetSubagentsStoreInternalCachesForTest(): void {
   workspaceFallbackRootCache = undefined;
@@ -1010,6 +1011,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   latestLoadAgentsRequestId = 0;
   agentsStateMutationVersion = 0;
   agentMutationChain = Promise.resolve();
+  inflightLoadAgentsTask = null;
 }
 
 function bumpAgentsStateMutationVersion(): number {
@@ -1072,6 +1074,47 @@ async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<R
   return task;
 }
 
+function areStringArraysEqual(left?: string[], right?: string[]): boolean {
+  const normalizedLeft = Array.isArray(left) ? [...left].sort() : [];
+  const normalizedRight = Array.isArray(right) ? [...right].sort() : [];
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return false;
+  }
+  for (let index = 0; index < normalizedLeft.length; index += 1) {
+    if (normalizedLeft[index] !== normalizedRight[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function areSubagentSummariesEqual(left: SubagentSummary, right: SubagentSummary): boolean {
+  return (
+    left.id === right.id
+    && (left.name ?? '') === (right.name ?? '')
+    && (left.workspace ?? '') === (right.workspace ?? '')
+    && (left.model ?? '') === (right.model ?? '')
+    && areStringArraysEqual(left.skills, right.skills)
+    && (left.identityEmoji ?? '') === (right.identityEmoji ?? '')
+    && (left.identity?.emoji ?? '') === (right.identity?.emoji ?? '')
+    && (left.identity?.name ?? '') === (right.identity?.name ?? '')
+    && (left.identity?.theme ?? '') === (right.identity?.theme ?? '')
+    && Boolean(left.isDefault) === Boolean(right.isDefault)
+  );
+}
+
+function areAgentListsEquivalent(left: SubagentSummary[], right: SubagentSummary[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (!areSubagentSummariesEqual(left[index], right[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   agents: [],
   availableModels: [],
@@ -1092,85 +1135,115 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   selectedAgentId: null,
 
   loadAgents: async () => {
+    if (inflightLoadAgentsTask) {
+      await inflightLoadAgentsTask;
+      return;
+    }
+
     const requestId = ++latestLoadAgentsRequestId;
-    set({ loading: true, error: null });
-    try {
-      const [result, configSnapshot] = await Promise.all([
-        rpc<AgentsListResult>('agents.list', {}),
-        readConfigForDisplay(),
-      ]);
-      settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
-      const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, configSnapshot));
-      if (requestId !== latestLoadAgentsRequestId) {
-        return;
-      }
-      const selectedAgentId = get().selectedAgentId;
-      const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
-      const managedAgentId = get().managedAgentId;
-      const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
-      const hydrationSourceVersion = bumpAgentsStateMutationVersion();
+    const shouldShowLoading = get().agents.length === 0;
+    if (shouldShowLoading) {
+      set({ loading: true, error: null });
+    }
 
-      set({
-        agents: normalizedAgents,
-        selectedAgentId: hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null),
-        managedAgentId: hasManaged ? managedAgentId : null,
-        error: null,
-        loading: false,
-      });
+    const task = (async () => {
+      try {
+        const [result, configSnapshot] = await Promise.all([
+          rpc<AgentsListResult>('agents.list', {}),
+          readConfigForDisplay(),
+        ]);
+        settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
+        const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, configSnapshot));
+        if (requestId !== latestLoadAgentsRequestId) {
+          return;
+        }
+        const stateSnapshot = get();
+        const selectedAgentId = stateSnapshot.selectedAgentId;
+        const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
+        const managedAgentId = stateSnapshot.managedAgentId;
+        const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
+        const nextSelectedAgentId = hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null);
+        const nextManagedAgentId = hasManaged ? managedAgentId : null;
+        const shouldPatchAgents = (
+          !areAgentListsEquivalent(stateSnapshot.agents, normalizedAgents)
+          || stateSnapshot.selectedAgentId !== nextSelectedAgentId
+          || stateSnapshot.managedAgentId !== nextManagedAgentId
+          || stateSnapshot.error !== null
+          || stateSnapshot.loading
+        );
+        const hydrationSourceVersion = shouldPatchAgents
+          ? bumpAgentsStateMutationVersion()
+          : agentsStateMutationVersion;
 
-      void hydrateAgentIdentityEmoji(normalizedAgents)
-        .then((hydratedAgents) => {
-          if (requestId !== latestLoadAgentsRequestId) {
-            return;
-          }
-          const emojiByAgentId = new Map<string, string>();
-          for (const agent of hydratedAgents) {
-            const emoji = getOptionalString(agent.identityEmoji);
-            if (!emoji) {
-              continue;
-            }
-            emojiByAgentId.set(agent.id, emoji);
-          }
-          set((state) => {
+        if (shouldPatchAgents) {
+          set({
+            agents: normalizedAgents,
+            selectedAgentId: nextSelectedAgentId,
+            managedAgentId: nextManagedAgentId,
+            error: null,
+            loading: false,
+          });
+        }
+
+        void hydrateAgentIdentityEmoji(normalizedAgents)
+          .then((hydratedAgents) => {
             if (requestId !== latestLoadAgentsRequestId) {
-              return {};
+              return;
             }
-            if (agentsStateMutationVersion !== hydrationSourceVersion) {
-              return {};
-            }
-            let changed = false;
-            const nextAgents = state.agents.map((agent) => {
-              const nextEmoji = emojiByAgentId.get(agent.id);
-              if (!nextEmoji || nextEmoji === agent.identityEmoji || isAgentPendingDeletion(agent.id)) {
-                return agent;
+            const emojiByAgentId = new Map<string, string>();
+            for (const agent of hydratedAgents) {
+              const emoji = getOptionalString(agent.identityEmoji);
+              if (!emoji) {
+                continue;
               }
-              changed = true;
+              emojiByAgentId.set(agent.id, emoji);
+            }
+            set((state) => {
+              if (requestId !== latestLoadAgentsRequestId) {
+                return {};
+              }
+              if (agentsStateMutationVersion !== hydrationSourceVersion) {
+                return {};
+              }
+              let changed = false;
+              const nextAgents = state.agents.map((agent) => {
+                const nextEmoji = emojiByAgentId.get(agent.id);
+                if (!nextEmoji || nextEmoji === agent.identityEmoji || isAgentPendingDeletion(agent.id)) {
+                  return agent;
+                }
+                changed = true;
+                return {
+                  ...agent,
+                  identityEmoji: nextEmoji,
+                };
+              });
+              if (!changed) {
+                return {};
+              }
+              bumpAgentsStateMutationVersion();
               return {
-                ...agent,
-                identityEmoji: nextEmoji,
+                agents: nextAgents,
               };
             });
-            if (!changed) {
-              return {};
-            }
-            bumpAgentsStateMutationVersion();
-            return {
-              agents: nextAgents,
-            };
+          })
+          .catch(() => {
+            // identity hydration is best-effort; keep core list path deterministic.
           });
-        })
-        .catch(() => {
-          // identity hydration is best-effort; keep core list path deterministic.
+      } catch (error) {
+        if (requestId !== latestLoadAgentsRequestId) {
+          return;
+        }
+        set({
+          loading: false,
+          error: error instanceof Error ? error.message : 'Failed to load subagents',
         });
-    } catch (error) {
-      if (requestId !== latestLoadAgentsRequestId) {
-        return;
+      } finally {
+        inflightLoadAgentsTask = null;
       }
-      set({
-        loading: false,
-        error: error instanceof Error ? error.message : 'Failed to load subagents',
-      });
-    }
+    })();
+
+    inflightLoadAgentsTask = task;
+    await task;
   },
 
   loadAvailableModels: async () => {
