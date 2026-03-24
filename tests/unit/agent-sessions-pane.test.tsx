@@ -123,4 +123,52 @@ describe('agent sessions pane', () => {
       expect(deleteSession).toHaveBeenCalledWith('agent:main:session-1');
     });
   });
+
+  it('agent 列表和会话列表使用两个独立滚动区', () => {
+    const now = Date.now();
+    useSubagentsStore.setState({
+      agents: Array.from({ length: 12 }, (_, index) => ({
+        id: `agent-${index + 1}`,
+        name: `Agent ${index + 1}`,
+        isDefault: false,
+        identity: { emoji: '🤖' },
+      })),
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:agent-1:main',
+      sessions: Array.from({ length: 14 }, (_, index) => ({
+        key: index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`,
+        displayName: `agent:agent-1:session-${index}`,
+      })),
+      sessionLabels: Object.fromEntries(
+        Array.from({ length: 13 }, (_, index) => [
+          `agent:agent-1:session-${index + 1}`,
+          `会话 ${index + 1}`,
+        ]),
+      ),
+      sessionLastActivity: Object.fromEntries(
+        Array.from({ length: 13 }, (_, index) => [
+          `agent:agent-1:session-${index + 1}`,
+          now - (index + 1) * 60_000,
+        ]),
+      ),
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    const agentScrollArea = screen.getByTestId('agent-list-scroll-area');
+    const sessionScrollArea = screen.getByTestId('session-list-scroll-area');
+
+    expect(agentScrollArea).toBeInTheDocument();
+    expect(sessionScrollArea).toBeInTheDocument();
+    expect(agentScrollArea).not.toBe(sessionScrollArea);
+    expect(agentScrollArea.className).toContain('overflow-y-auto');
+    expect(sessionScrollArea.className).toContain('overflow-y-auto');
+  });
 });

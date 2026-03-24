@@ -652,84 +652,98 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               <Plus className="h-4 w-4" />
             </Button>
           </div>
-          <div className="flex-1 space-y-3 overflow-auto p-2">
-            <section className="space-y-1">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 p-2">
+            <section className="flex min-h-0 max-h-[42%] flex-col space-y-1">
               <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {t('sidebar.subagents')}
               </p>
-              {agentSessionNodes.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>
-              ) : (
-                agentSessionNodes.map((node) => (
-                  <AgentListItem
-                    key={node.agentId}
-                    node={node}
-                    preferredSessionKey={preferredSessionKeyByAgent.get(node.agentId) ?? `agent:${node.agentId}:main`}
-                    isAgentActive={activeAgentId === node.agentId}
-                    newSessionLabel={t('sidebar.newSession')}
-                    onSwitchSession={handleSwitchSession}
-                    onCreateSessionForAgent={handleCreateSessionForAgent}
-                  />
-                ))
-              )}
+              <div
+                data-testid="agent-list-scroll-area"
+                className="min-h-0 overflow-y-auto pr-1"
+              >
+                {agentSessionNodes.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>
+                ) : (
+                  <div className="space-y-1">
+                    {agentSessionNodes.map((node) => (
+                      <AgentListItem
+                        key={node.agentId}
+                        node={node}
+                        preferredSessionKey={preferredSessionKeyByAgent.get(node.agentId) ?? `agent:${node.agentId}:main`}
+                        isAgentActive={activeAgentId === node.agentId}
+                        newSessionLabel={t('sidebar.newSession')}
+                        onSwitchSession={handleSwitchSession}
+                        onCreateSessionForAgent={handleCreateSessionForAgent}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
             </section>
 
-            <section className="space-y-1 border-t border-border/70 pt-3">
+            <section className="flex min-h-0 flex-1 flex-col space-y-1 border-t border-border/70 pt-3">
               <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {t('sidebar.agentSessions')}
               </p>
-              {globalSessions.length === 0 ? (
-                <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noAgentSessions')}</p>
-              ) : (
-                globalSessionBuckets.map((bucket) => {
-                  const bucketStateKey = createSessionBucketStateKey(bucket.id);
-                  const bucketCollapsed = Object.prototype.hasOwnProperty.call(collapsedSessionBuckets, bucketStateKey)
-                    ? Boolean(collapsedSessionBuckets[bucketStateKey])
-                    : bucket.defaultCollapsed;
-                  return (
-                    <div key={bucket.id} className="space-y-1">
-                      <button
-                        type="button"
-                        onClick={() => toggleSessionBucket(bucket.id, bucket.defaultCollapsed)}
-                        className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground"
-                      >
-                        {bucketCollapsed ? (
-                          <ChevronRight className="h-3 w-3 shrink-0" />
-                        ) : (
-                          <ChevronDown className="h-3 w-3 shrink-0" />
-                        )}
-                        <span className="truncate">{bucket.label}</span>
-                        <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                          {bucket.sessions.length}
-                        </span>
-                      </button>
+              <div
+                data-testid="session-list-scroll-area"
+                className="min-h-0 flex-1 overflow-y-auto pr-1"
+              >
+                {globalSessions.length === 0 ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noAgentSessions')}</p>
+                ) : (
+                  <div className="space-y-1">
+                    {globalSessionBuckets.map((bucket) => {
+                      const bucketStateKey = createSessionBucketStateKey(bucket.id);
+                      const bucketCollapsed = Object.prototype.hasOwnProperty.call(collapsedSessionBuckets, bucketStateKey)
+                        ? Boolean(collapsedSessionBuckets[bucketStateKey])
+                        : bucket.defaultCollapsed;
+                      return (
+                        <div key={bucket.id} className="space-y-1">
+                          <button
+                            type="button"
+                            onClick={() => toggleSessionBucket(bucket.id, bucket.defaultCollapsed)}
+                            className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground"
+                          >
+                            {bucketCollapsed ? (
+                              <ChevronRight className="h-3 w-3 shrink-0" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3 shrink-0" />
+                            )}
+                            <span className="truncate">{bucket.label}</span>
+                            <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                              {bucket.sessions.length}
+                            </span>
+                          </button>
 
-                      {!bucketCollapsed && (
-                        <div className="space-y-1">
-                          {bucket.sessions.map((session) => {
-                            const viewModel = sessionViewModelByKey.get(session.key);
-                            const deleting = Boolean(deletingSessionKeys[session.key]);
-                            return (
-                              <SessionListItem
-                                key={session.key}
-                                session={session}
-                                sessionTitle={viewModel?.title ?? inferUntitledSessionLabel(session, t)}
-                                sessionMeta={viewModel?.meta ?? readSessionSuffix(session.key)}
-                                identityEmoji={viewModel?.emoji ?? '🤖'}
-                                isCurrent={currentSessionKey === session.key}
-                                deleting={deleting}
-                                deleteLabel={viewModel?.deleteLabel ?? t('sidebar.deleteSessionAria', { title: session.key })}
-                                onSwitchSession={handleSwitchSession}
-                                onRequestDelete={requestDeleteSession}
-                              />
-                            );
-                          })}
+                          {!bucketCollapsed && (
+                            <div className="space-y-1">
+                              {bucket.sessions.map((session) => {
+                                const viewModel = sessionViewModelByKey.get(session.key);
+                                const deleting = Boolean(deletingSessionKeys[session.key]);
+                                return (
+                                  <SessionListItem
+                                    key={session.key}
+                                    session={session}
+                                    sessionTitle={viewModel?.title ?? inferUntitledSessionLabel(session, t)}
+                                    sessionMeta={viewModel?.meta ?? readSessionSuffix(session.key)}
+                                    identityEmoji={viewModel?.emoji ?? '🤖'}
+                                    isCurrent={currentSessionKey === session.key}
+                                    deleting={deleting}
+                                    deleteLabel={viewModel?.deleteLabel ?? t('sidebar.deleteSessionAria', { title: session.key })}
+                                    onSwitchSession={handleSwitchSession}
+                                    onRequestDelete={requestDeleteSession}
+                                  />
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </section>
           </div>
         </>
