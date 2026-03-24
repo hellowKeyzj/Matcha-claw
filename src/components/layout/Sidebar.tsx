@@ -29,9 +29,10 @@ import { useChannelsStore } from '@/stores/channels';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
+import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useTransition } from 'react';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
 
 interface NavItemProps {
   to: string;
@@ -40,7 +41,6 @@ interface NavItemProps {
   collapsed?: boolean;
   onMouseEnter?: () => void;
   onFocus?: () => void;
-  onMouseDown?: () => void;
   onNavigate?: (to: string) => void;
 }
 
@@ -84,14 +84,19 @@ const TEAM_MAILBOX_SCAN_LIMIT = 80;
 const TEAM_MAILBOX_CARD_LIMIT = 3;
 const TASK_BLOCKER_SCAN_LIMIT = 24;
 const CHAT_APPROVAL_SCAN_LIMIT = 24;
+const SIDEBAR_PREFETCH_FALLBACK_DELAY_MS = 120;
+const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
 
-function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onMouseDown, onNavigate }: NavItemProps) {
+type PrefetchScheduleHandle =
+  | { type: 'idle'; id: number }
+  | { type: 'timeout'; id: number };
+
+function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   return (
     <NavLink
       to={to}
       onMouseEnter={onMouseEnter}
       onFocus={onFocus}
-      onMouseDown={onMouseDown}
       onClick={(event) => {
         if (!onNavigate) {
           return;
@@ -344,7 +349,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const fetchChannels = useChannelsStore((state) => state.fetchChannels);
-  const [, startTransition] = useTransition();
+  const prefetchHandlesRef = useRef<Map<string, PrefetchScheduleHandle>>(new Map());
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -380,6 +385,8 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
   ];
 
   const prefetchNavPath = useCallback((path: string) => {
+    void preloadLazyRouteForPath(path);
+
     if (path === '/subagents') {
       void prefetchSubagentTemplateCatalog();
       return;
@@ -414,6 +421,41 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     taskCenterInitialized,
   ]);
 
+  const clearPrefetchHandle = useCallback((path: string) => {
+    const current = prefetchHandlesRef.current.get(path);
+    if (!current) {
+      return;
+    }
+    if (current.type === 'idle') {
+      if ('cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(current.id);
+      }
+    } else {
+      window.clearTimeout(current.id);
+    }
+    prefetchHandlesRef.current.delete(path);
+  }, []);
+
+  const scheduleNavPrefetch = useCallback((path: string) => {
+    if (prefetchHandlesRef.current.has(path)) {
+      return;
+    }
+
+    const runPrefetch = () => {
+      prefetchHandlesRef.current.delete(path);
+      prefetchNavPath(path);
+    };
+
+    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(runPrefetch, { timeout: SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS });
+      prefetchHandlesRef.current.set(path, { type: 'idle', id: idleId });
+      return;
+    }
+
+    const timeoutId = window.setTimeout(runPrefetch, SIDEBAR_PREFETCH_FALLBACK_DELAY_MS);
+    prefetchHandlesRef.current.set(path, { type: 'timeout', id: timeoutId });
+  }, [prefetchNavPath]);
+
   useEffect(() => {
     if (gatewayState !== 'running' || taskCenterInitialized) {
       return;
@@ -421,14 +463,19 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
     void initTaskCenter();
   }, [gatewayState, initTaskCenter, taskCenterInitialized]);
 
-  const navigateWithTransition = useCallback((to: string) => {
+  useEffect(() => () => {
+    const paths = Array.from(prefetchHandlesRef.current.keys());
+    for (const path of paths) {
+      clearPrefetchHandle(path);
+    }
+  }, [clearPrefetchHandle]);
+
+  const navigateToPath = useCallback((to: string) => {
     if (location.pathname === to) {
       return;
     }
-    startTransition(() => {
-      navigate(to);
-    });
-  }, [location.pathname, navigate, startTransition]);
+    navigate(to);
+  }, [location.pathname, navigate]);
 
   return (
     <aside
@@ -460,10 +507,9 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
             key={item.to}
             {...item}
             collapsed={sidebarCollapsed}
-            onMouseEnter={() => prefetchNavPath(item.to)}
-            onFocus={() => prefetchNavPath(item.to)}
-            onMouseDown={() => prefetchNavPath(item.to)}
-            onNavigate={navigateWithTransition}
+            onMouseEnter={() => scheduleNavPrefetch(item.to)}
+            onFocus={() => scheduleNavPrefetch(item.to)}
+            onNavigate={navigateToPath}
           />
         ))}
 

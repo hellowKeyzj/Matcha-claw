@@ -3,7 +3,7 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, useMemo, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, memo, type ReactNode } from 'react';
 import { User, Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -233,7 +233,10 @@ export const ChatMessage = memo(function ChatMessage({
   const visibleThinking = showThinking ? thinking : null;
   const visibleTools = tools;
 
-  const attachedFiles = message._attachedFiles || [];
+  const attachedFiles = useMemo(
+    () => (Array.isArray(message._attachedFiles) ? message._attachedFiles : []),
+    [message._attachedFiles],
+  );
   const resolveFileHintPath = useMemo(
     () => createFileHintPathResolver(attachedFiles),
     [attachedFiles],
@@ -495,7 +498,7 @@ function ToolStatusBar({
 
 // ── Assistant hover bar (timestamp + copy, shown on group hover) ─
 
-function AssistantHoverBar({ text, timestamp }: { text: string; timestamp?: number }) {
+const AssistantHoverBar = memo(function AssistantHoverBar({ text, timestamp }: { text: string; timestamp?: number }) {
   const [copied, setCopied] = useState(false);
 
   const copyContent = useCallback(() => {
@@ -519,11 +522,11 @@ function AssistantHoverBar({ text, timestamp }: { text: string; timestamp?: numb
       </Button>
     </div>
   );
-}
+});
 
 // ── Message Bubble ──────────────────────────────────────────────
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   text,
   isUser,
   isStreaming,
@@ -544,6 +547,59 @@ function MessageBubble({
       // ignore open errors
     }
   }, []);
+
+  const markdownContent = useMemo(
+    () => linkifyFileHintsInMarkdown(
+      migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
+      resolveFileHintPath,
+    ),
+    [resolveFileHintPath, text],
+  );
+
+  const markdownComponents = useMemo(
+    () => ({
+      code({ className, children, ...props }: { className?: string; children?: ReactNode }) {
+        const match = /language-(\w+)/.exec(className || '');
+        const isInline = !match && !className;
+        if (isInline) {
+          return (
+            <code className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono break-words break-all" {...props}>
+              {children}
+            </code>
+          );
+        }
+        return (
+          <pre className="bg-background/50 rounded-lg p-4 overflow-x-auto">
+            <code className={cn('text-sm font-mono', className)} {...props}>
+              {children}
+            </code>
+          </pre>
+        );
+      },
+      a({ href, children }: { href?: string; children?: ReactNode }) {
+        const rawHref = typeof href === 'string' ? href : '';
+        if (rawHref.startsWith('filehint:')) {
+          const encodedHint = rawHref.slice('filehint:'.length);
+          const decodedHint = decodeMaybeEncodedPath(encodedHint);
+          return (
+            <button
+              type="button"
+              className="inline cursor-pointer rounded-sm text-primary underline underline-offset-2 hover:text-primary/80"
+              onClick={() => void handleOpenFileHint(decodedHint)}
+            >
+              {children}
+            </button>
+          );
+        }
+        return (
+          <a href={rawHref} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
+            {children}
+          </a>
+        );
+      },
+    }),
+    [handleOpenFileHint],
+  );
 
   return (
     <div
@@ -567,52 +623,9 @@ function MessageBubble({
               }
               return defaultUrlTransform(url);
             }}
-            components={{
-              code({ className, children, ...props }) {
-                const match = /language-(\w+)/.exec(className || '');
-                const isInline = !match && !className;
-                if (isInline) {
-                  return (
-                    <code className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono break-words break-all" {...props}>
-                      {children}
-                    </code>
-                  );
-                }
-                return (
-                  <pre className="bg-background/50 rounded-lg p-4 overflow-x-auto">
-                    <code className={cn('text-sm font-mono', className)} {...props}>
-                      {children}
-                    </code>
-                  </pre>
-                );
-              },
-              a({ href, children }) {
-                const rawHref = typeof href === 'string' ? href : '';
-                if (rawHref.startsWith('filehint:')) {
-                  const encodedHint = rawHref.slice('filehint:'.length);
-                  const decodedHint = decodeMaybeEncodedPath(encodedHint);
-                  return (
-                    <button
-                      type="button"
-                      className="inline cursor-pointer rounded-sm text-primary underline underline-offset-2 hover:text-primary/80"
-                      onClick={() => void handleOpenFileHint(decodedHint)}
-                    >
-                      {children}
-                    </button>
-                  );
-                }
-                return (
-                  <a href={rawHref} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
-                    {children}
-                  </a>
-                );
-              },
-            }}
+            components={markdownComponents}
           >
-            {linkifyFileHintsInMarkdown(
-              migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
-              resolveFileHintPath,
-            )}
+            {markdownContent}
           </ReactMarkdown>
           {isStreaming && (
             <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />
@@ -622,7 +635,7 @@ function MessageBubble({
 
     </div>
   );
-}
+});
 
 // ── Thinking Block ──────────────────────────────────────────────
 
@@ -849,7 +862,7 @@ function ImageLightbox({
 
 // ── Tool Card ───────────────────────────────────────────────────
 
-function ToolCard({ name, input }: { name: string; input: unknown }) {
+const ToolCard = memo(function ToolCard({ name, input }: { name: string; input: unknown }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -870,4 +883,4 @@ function ToolCard({ name, input }: { name: string; input: unknown }) {
       )}
     </div>
   );
-}
+});

@@ -23,6 +23,7 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
+import { scheduleIdleReady } from '@/lib/idle-ready';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import type { Task } from '@/services/openclaw/task-manager-client';
@@ -52,6 +53,9 @@ const TASK_POLLING_BACKGROUND_MS = 60_000;
 const INITIAL_TASK_LIST_BATCH = 40;
 const TASK_LIST_BATCH_SIZE = 40;
 const TASK_LIST_SCROLL_THRESHOLD_PX = 160;
+const TASK_LIST_VIRTUAL_THRESHOLD = 50;
+const TASK_LIST_ESTIMATED_ROW_HEIGHT = 96;
+const TASK_LIST_VIRTUAL_OVERSCAN = 6;
 const TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 function resolveTaskCenterTab(value: string | null): TaskCenterTab {
@@ -146,9 +150,14 @@ export function TasksPage() {
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
   const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
+  const [taskListScrollTop, setTaskListScrollTop] = useState(0);
+  const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
-  const tasksForView = taskHeavyContentReady ? tasks : [];
+  const tasksForView = useMemo(
+    () => (taskHeavyContentReady ? tasks : []),
+    [taskHeavyContentReady, tasks],
+  );
 
   useEffect(() => {
     if (!initialized) {
@@ -159,58 +168,44 @@ export function TasksPage() {
   }, [init, initialized, refreshTasks]);
 
   useEffect(() => {
+    const updateNow = () => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      const now = Date.now();
+      setStatsNowMs((prev) => (Math.abs(prev - now) < 500 ? prev : now));
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        updateNow();
+      }
+    };
+
+    updateNow();
     const timer = window.setInterval(() => {
-      setStatsNowMs(Date.now());
+      updateNow();
     }, 60_000);
-    return () => window.clearInterval(timer);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
     if (taskHeavyContentReady) {
       return;
     }
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setTaskHeavyContentReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
-      } else {
-        timeoutId = window.setTimeout(markReady, 120);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
-    });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [taskHeavyContentReady]);
-
-  useEffect(() => {
-    if (!taskHeavyContentReady && initialized && tasks.length > 0) {
+    const cancel = scheduleIdleReady(() => {
       setTaskHeavyContentReady(true);
-    }
-  }, [initialized, taskHeavyContentReady, tasks.length]);
+    }, {
+      idleTimeoutMs: TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
+      fallbackDelayMs: 120,
+      useAnimationFrame: true,
+    });
+    return cancel;
+  }, [taskHeavyContentReady]);
 
   const hasActiveTasks = useMemo(
     () =>
@@ -310,14 +305,52 @@ export function TasksPage() {
     () => statsTasks.filter((task) => matchesStatusFilter(task, statusFilter)),
     [statsTasks, statusFilter],
   );
+  const shouldUseVirtualTaskList = taskHeavyContentReady && filteredTasks.length > TASK_LIST_VIRTUAL_THRESHOLD;
+  useEffect(() => {
+    if (!shouldUseVirtualTaskList) {
+      const rafId = window.requestAnimationFrame(() => {
+        setTaskListViewportHeight((prev) => (prev === 0 ? prev : 0));
+      });
+      return () => {
+        window.cancelAnimationFrame(rafId);
+      };
+    }
+
+    const element = taskListScrollRef.current;
+    if (!element) {
+      return;
+    }
+
+    let rafId: number | null = null;
+    const updateHeight = (nextHeight: number) => {
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        setTaskListViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+      });
+    };
+
+    updateHeight(Math.round(element.clientHeight));
+    const observer = new ResizeObserver((entries) => {
+      const measuredHeight = Math.round(entries[0]?.contentRect.height ?? element.clientHeight);
+      updateHeight(measuredHeight);
+    });
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [shouldUseVirtualTaskList]);
+
   const visibleTasks = useMemo(
     () => filteredTasks.slice(0, visibleTaskCount),
     [filteredTasks, visibleTaskCount],
   );
-
-  useEffect(() => {
-    setVisibleTaskCount(INITIAL_TASK_LIST_BATCH);
-  }, [filteredTasks]);
 
   const appendVisibleTasks = useCallback(() => {
     setVisibleTaskCount((prev) => {
@@ -329,17 +362,24 @@ export function TasksPage() {
   }, [filteredTasks.length]);
 
   const handleTaskListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    setTaskListScrollTop((prev) => (prev === target.scrollTop ? prev : target.scrollTop));
+    if (shouldUseVirtualTaskList) {
+      return;
+    }
     if (visibleTaskCount >= filteredTasks.length) {
       return;
     }
-    const target = event.currentTarget;
     const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
     if (remain <= TASK_LIST_SCROLL_THRESHOLD_PX) {
       appendVisibleTasks();
     }
-  }, [appendVisibleTasks, filteredTasks.length, visibleTaskCount]);
+  }, [appendVisibleTasks, filteredTasks.length, shouldUseVirtualTaskList, visibleTaskCount]);
 
   useEffect(() => {
+    if (shouldUseVirtualTaskList) {
+      return;
+    }
     if (activeTab !== 'long' || !taskHeavyContentReady) {
       return;
     }
@@ -351,9 +391,44 @@ export function TasksPage() {
       return;
     }
     if (container.scrollHeight <= container.clientHeight + 8) {
-      appendVisibleTasks();
+      window.requestAnimationFrame(() => {
+        appendVisibleTasks();
+      });
     }
-  }, [activeTab, appendVisibleTasks, filteredTasks.length, taskHeavyContentReady, visibleTaskCount, visibleTasks.length]);
+  }, [
+    activeTab,
+    appendVisibleTasks,
+    filteredTasks.length,
+    shouldUseVirtualTaskList,
+    taskHeavyContentReady,
+    visibleTaskCount,
+    visibleTasks.length,
+  ]);
+
+  const virtualWindow = useMemo(() => {
+    if (!shouldUseVirtualTaskList) {
+      return {
+        tasks: visibleTasks,
+        topSpacerHeight: 0,
+        bottomSpacerHeight: 0,
+      };
+    }
+    const safeViewportHeight = Math.max(taskListViewportHeight, TASK_LIST_ESTIMATED_ROW_HEIGHT);
+    const visibleCount = Math.max(1, Math.ceil(safeViewportHeight / TASK_LIST_ESTIMATED_ROW_HEIGHT));
+    const startIndex = Math.max(
+      0,
+      Math.floor(taskListScrollTop / TASK_LIST_ESTIMATED_ROW_HEIGHT) - TASK_LIST_VIRTUAL_OVERSCAN,
+    );
+    const endIndex = Math.min(
+      filteredTasks.length,
+      startIndex + visibleCount + TASK_LIST_VIRTUAL_OVERSCAN * 2,
+    );
+    return {
+      tasks: filteredTasks.slice(startIndex, endIndex),
+      topSpacerHeight: startIndex * TASK_LIST_ESTIMATED_ROW_HEIGHT,
+      bottomSpacerHeight: Math.max(0, (filteredTasks.length - endIndex) * TASK_LIST_ESTIMATED_ROW_HEIGHT),
+    };
+  }, [filteredTasks, shouldUseVirtualTaskList, taskListScrollTop, taskListViewportHeight, visibleTasks]);
 
   const effectiveSelectedTaskId = useMemo(() => {
     if (filteredTasks.length === 0) {
@@ -667,7 +742,7 @@ export function TasksPage() {
                 <CardHeader className="shrink-0">
                   <CardTitle>{t('listTitle')}</CardTitle>
                 </CardHeader>
-                <CardContent ref={taskListScrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto pb-6" onScroll={handleTaskListScroll}>
+                <CardContent ref={taskListScrollRef} className="min-h-0 flex-1 overflow-y-auto pb-6" onScroll={handleTaskListScroll}>
                   {!taskHeavyContentReady ? (
                     <div className="space-y-3">
                       {Array.from({ length: 6 }).map((_, index) => (
@@ -681,8 +756,11 @@ export function TasksPage() {
                   ) : filteredTasks.length === 0 ? (
                     <p className="text-sm text-muted-foreground">{t('empty')}</p>
                   ) : (
-                    <>
-                      {visibleTasks.map((task) => (
+                    <div className="space-y-3">
+                      {shouldUseVirtualTaskList && virtualWindow.topSpacerHeight > 0 ? (
+                        <div aria-hidden style={{ height: virtualWindow.topSpacerHeight }} />
+                      ) : null}
+                      {virtualWindow.tasks.map((task) => (
                         <button
                           key={task.id}
                           type="button"
@@ -712,7 +790,10 @@ export function TasksPage() {
                           </div>
                         </button>
                       ))}
-                      {visibleTaskCount < filteredTasks.length && (
+                      {shouldUseVirtualTaskList && virtualWindow.bottomSpacerHeight > 0 ? (
+                        <div aria-hidden style={{ height: virtualWindow.bottomSpacerHeight }} />
+                      ) : null}
+                      {!shouldUseVirtualTaskList && visibleTaskCount < filteredTasks.length && (
                         <div className="space-y-2 rounded-md border border-dashed px-3 py-3 text-center">
                           <p className="text-xs text-muted-foreground">
                             {t('pagination.showing', { shown: visibleTaskCount, total: filteredTasks.length })}
@@ -722,7 +803,7 @@ export function TasksPage() {
                           </Button>
                         </div>
                       )}
-                    </>
+                    </div>
                   )}
                 </CardContent>
               </Card>

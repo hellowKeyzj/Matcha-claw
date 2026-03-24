@@ -1,5 +1,162 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-23 Chat 真虚拟化落地）
+
+### 目录树
+
+```text
+package.json（新增 @tanstack/react-virtual 依赖）
+src/pages/Chat/
+└── index.tsx（消息列表改为真实虚拟化：完整高度占位 + 会话锚点恢复）
+```
+
+### 文件职责（关键模块）
+
+- `src/pages/Chat/index.tsx`：聊天消息渲染与滚动控制；本次将长会话从全量挂载升级为虚拟化挂载，仅渲染可视区消息并保持完整滚动高度语义。
+- `package.json`：新增 `@tanstack/react-virtual`，作为消息列表虚拟化引擎。
+
+### 模块依赖与边界
+
+- 仅改 Renderer 聊天页渲染层，不改 `stores/chat` 协议与 Main 进程 IPC。
+- 保持现有消息模型、审批模型、流式消息模型不变。
+
+### 关键决策与原因
+
+1. 全量渲染长会话会在切会话时触发大量 `beginWork/createTask`，形成 100ms+ 主线程长任务。
+2. 之前 `slice(startIndex)` 截断方案破坏了滚动语义，本次改为“真实虚拟化 + 完整占位高度”从结构上修复。
+3. 增加“每会话滚动锚点快照”与“切回恢复”，避免切换会话时总是丢失用户阅读位置。
+
+### 本次变更
+
+- 接入 `useVirtualizer`：
+  - 消息列表改为虚拟项绝对定位渲染；
+  - 使用 `messageVirtualizer.getTotalSize()` 维持完整滚动高度。
+- 新增滚动快照机制：
+  - 记录 `atBottom + anchorKey + anchorOffsetWithin + fallbackScrollTop`；
+  - 切会话后按锚点或回退偏移恢复滚动位置。
+- 继续保留粘底自动滚动（`behavior: 'auto'`）以降低滚动动画虚影风险。
+
+### 验证
+
+- `pnpm exec eslint src/pages/Chat/index.tsx` 通过。
+- `pnpm run typecheck` 通过。
+
+## 本次变更日志（2026-03-23 Chat 滚动语义止血修复）
+
+### 目录树
+
+```text
+src/pages/Chat/
+└── index.tsx（移除 slice 截断窗口化，恢复完整消息滚动语义）
+```
+
+### 文件职责（关键模块）
+
+- `src/pages/Chat/index.tsx`：消息列表渲染与滚动控制；本次移除“截断渲染窗口”逻辑，恢复完整消息列表渲染，确保滚动条位置与真实历史一致。
+
+### 模块依赖与边界
+
+- 仅改 Renderer 聊天页渲染层，不改 `stores/chat` 协议与 Main 进程 IPC。
+- 不改变发送、流式、审批、会话切换数据链路。
+
+### 关键决策与原因
+
+1. 现有 `messages.slice(startIndex)` 属于“数据截断渲染”，未配套虚拟化占位高度，导致滚动条语义失真（切会话后滑块位置不稳定）。
+2. 先做止血：回退截断窗口化，优先恢复滚动行为可预测性。
+3. 后续若需继续压渲染成本，应采用完整虚拟化方案（top/bottom spacer + 锚点恢复），而非再次截断数据。
+
+### 本次变更
+
+- 移除 `INITIAL_VISIBLE_MESSAGES / MESSAGE_GROW_BATCH / MESSAGE_GROW_TOP_THRESHOLD_PX` 相关窗口化常量和状态。
+- 删除“向上增量展开 + 高度补偿”相关 effect 逻辑。
+- 消息列表恢复为全量渲染：`ChatMessageHistoryList` 直接接收 `messages`。
+- 保留粘底判断与自动滚动（`behavior: 'auto'`），避免滚动动画虚影。
+
+### 验证
+
+- `pnpm exec eslint src/pages/Chat/index.tsx` 通过。
+- `pnpm run typecheck` 通过。
+
+## 本次变更日志（2026-03-23 前端性能专项：会话切换与首屏交互卡顿治理）
+
+### 目录树
+
+```text
+Matcha-claw/src/
+├── lib/idle-ready.ts (新增：统一 idle/timeout 就绪调度)
+├── stores/chat.ts (改：历史加载增量探测 + 指纹短路 + 合并状态提交)
+├── components/layout/
+│   ├── MainLayout.tsx (改：resize 链路 rAF 节流 + 值未变短路)
+│   └── AgentSessionsPane.tsx (改：拆分 memo 子组件 + 分桶/展示缓存 + startTransition 切会话)
+└── pages/
+    ├── Chat/index.tsx (改：resize 链路 rAF 节流 + 值未变短路)
+    ├── Dashboard/index.tsx (改：统一 idle-ready 调度，减少短定时器并发提交)
+    ├── Skills/index.tsx (改：统一 idle-ready 调度，避免 ready 阶段同帧 setTimeout 堆叠)
+    └── Tasks/index.tsx (改：统一 idle-ready + 任务列表窗口化渲染)
+```
+
+### 文件职责
+
+- `lib/idle-ready.ts`：封装 `requestAnimationFrame + requestIdleCallback + shared timeout fallback`，用于重内容“延迟就绪”统一调度。
+- `stores/chat.ts`：负责会话历史拉取、历史应用、会话标签/活动时间维护；新增 quiet 探测窗口与历史指纹短路。
+- `components/layout/MainLayout.tsx` / `pages/Chat/index.tsx`：负责 pane resize 自适应；统一改为 rAF 节流并在值未变化时跳过 setState。
+- `components/layout/AgentSessionsPane.tsx`：负责子代理会话列表展示；拆分为 memo 行组件，缓存分桶/展示文案，切会话改为 transition 更新。
+- `pages/Tasks/index.tsx`：任务列表窗口化渲染，滚动时仅渲染可视区附近卡片，降低长列表渲染成本。
+
+### 模块依赖与边界
+
+- `Skills/Dashboard/Tasks` 的重内容 ready 调度统一依赖 `lib/idle-ready.ts`，避免各页重复实现。
+- `chat.ts` 仅通过 `useGatewayStore.rpc('chat.history')` 与 `loadCronFallbackMessages` 获取历史，不引入新的跨层调用。
+- 渲染层优化集中在 `src/` 内部，不改变主进程 IPC 协议边界。
+
+### 关键决策与原因
+
+1. quiet 轮询先小窗口探测再按需全量拉取：降低高频轮询成本，避免每次 200 条全量解析。
+2. 历史应用阶段合并多次 `set`：减少同一帧多次提交导致的 `performWorkUntilDeadline` 累积。
+3. resize 统一 rAF 节流：避免窗口拖拽/布局变化触发高频同步计算。
+4. 列表窗口化优先落地在任务长列表：该路径数据量大且渲染成本稳定可控，收益确定性高。
+
+### 本次变更
+
+- 聊天历史：
+  - `loadHistory` 增加 quiet probe（64）与指纹短路；
+  - 有变化时才走 full window（200）与完整应用；
+  - 历史应用阶段整合为单次 `set` 提交，减少重复状态写入。
+- 布局链路：
+  - `MainLayout`、`Chat` 的 resize 全改 rAF 调度；
+  - `setSidebarWidth`、`setAgentSessionsWidth`、`setTaskInboxWidth` 均加“值不变不更新”短路。
+- 会话面板：
+  - 拆分 `AgentListItem` / `SessionListItem` memo 子组件；
+  - 新增全局会话分桶和会话展示信息缓存；
+  - 会话切换与新建切换使用 `startTransition`。
+- 定时器就绪：
+  - 新增 `scheduleIdleReady`，并接入 `Skills/Dashboard/Tasks`。
+- 第二刀（安全子集）：
+  - `Dashboard` 将 usage 图表/明细的两路 idle 定时合并为一路触发，降低同阶段多次 `Timer fired` 提交；
+  - `Dashboard` 的 usage retry 在页面不可见时自动降频；
+  - `Dashboard/Tasks` 的分钟/秒级时间刷新加入 `visibility` 保护，仅在可见时推进 state。
+- Skills 首击链路补完：
+  - `INITIAL_SKILLS_BATCH` 从 `12` 下调到 `8`，降低首次 `createTask` 负载；
+  - all tab 计算链路按 `activeTab` 真短路（筛选/排序/分页仅在 `activeTab=all` 执行）；
+  - 技能卡片拆分为 `SkillGridCard (memo)`，并使用稳定回调，减少父级状态变更带来的整批卡片重算。
+- 第三刀（窗口化）：
+  - `Skills` 卡片列表接入固定行高窗口化（阈值启用，含 overscan + 上下 spacer），不引入动态测高复杂度；
+  - 窗口化开启时关闭旧的追加分页渲染路径，避免双路径重复计算。
+- 聊天渲染链路（click 长任务治理）：
+  - `Chat` 消息列表改为“最近 N 条先渲染 + 顶部滚动触发向上增量展开”，降低首击与切会话的初始渲染成本；
+  - `ChatMessage` 的 `MessageBubble / ToolCard / AssistantHoverBar` 提取为 `memo`，减少父级更新时的重复子树渲染；
+  - markdown 文本预处理（本地文件链接迁移 + filehint linkify）改为 `useMemo` 缓存，避免每次渲染重复字符串扫描；
+  - 会话切换后的 `loadHistory(true)` 延后一帧执行，优先释放点击反馈主线程预算。
+- 列表虚拟化：
+  - `Tasks` 长任务列表改为窗口化渲染（可视区 + overscan + spacer）。
+
+### 验证
+
+- `pnpm run typecheck` 通过。
+- `pnpm exec eslint ...`（本次改动相关文件）存在既有规则告警/错误：
+  - `react-hooks/set-state-in-effect` 在 `Dashboard/Tasks` 旧逻辑中仍有历史问题；
+  - 本次改动未新增新的 TypeScript 错误。
+
 ## 本次变更日志（2026-03-22 任务中心：共性层视觉统一（标题区/统计卡/基础卡片））
 
 ### 目录树
@@ -3124,3 +3281,185 @@ scripts/
   - 新增独立 `openclaw-security-plugin`，承接安全网关方法骨架。
   - 从 `secureclaw` 过滤拷贝核心检测能力到 `openclaw-security-plugin/src/vendor/secureclaw-lite.ts`，并接入 `before_tool_call` 的 P0 阻断链（kill switch / destructive / secret）。
   - 构建/打包脚本接入独立安全插件产物。
+
+---
+
+## 目录树（本次聊天滚动增量展开节流）
+
+```text
+src/pages/Chat/
+└── index.tsx（消息列表向上增量展开：滚动事件加 rAF 节流）
+```
+
+## 文件职责（关键模块）
+
+- `src/pages/Chat/index.tsx`：负责聊天消息滚动行为；本次将“顶部触发历史增量展开”从每次滚动直接 `setState` 改为每帧最多一次，降低滚动链路抖动。
+
+## 模块依赖与边界
+
+- 仅修改 Renderer 聊天页滚动监听逻辑。
+- 不改 `stores/chat` 的数据协议与加载语义。
+- 不改 `host-api/api-client` 边界与 Main 进程行为。
+
+## 关键决策与原因
+
+1. 顶部阈值命中时，滚动事件可能在一帧内触发多次，直接 `setState` 会产生连续调度与卡顿放大。
+2. 采用 `requestAnimationFrame` 作为门控，保证同一帧只展开一次，同时保持现有“高度差补偿”不变，风险最小。
+
+## 本次变更日志
+
+- 日期：2026-03-23
+- 变更主题：`perf(chat): 向上增量展开加帧节流，避免滚动时连续 setState`
+- 主要结果：
+  - 新增 `scheduleGrowOlderMessages`（rAF 节流）；
+  - 顶部阈值命中后由“直接 setState”改为“每帧最多一次 setState”；
+  - effect cleanup 增加未执行 rAF 取消，避免遗留调度。
+
+---
+
+## 目录树（本次切页热点治理：路由预热 + 导航调度简化）
+
+```text
+src/
+├── lib/
+│   └── route-preload.ts（新增：懒加载路由预热注册与路径映射）
+├── App.tsx（改：接入预热组件并在空闲时预热关键懒加载路由）
+└── components/layout/
+    └── Sidebar.tsx（改：侧栏预取联动路由预热，页面跳转改为同步 navigate）
+```
+
+## 文件职责（关键模块）
+
+- `src/lib/route-preload.ts`：统一定义 `Setup/Skills/Security/Settings` 的 `lazy + preload` 能力，提供按路径预热和关键路由批量预热入口。
+- `src/App.tsx`：在应用稳定后（`settingsInitialized + setupComplete`）于空闲时预热关键懒加载页面 chunk，降低首切页解析/提交成本。
+- `src/components/layout/Sidebar.tsx`：将导航预取从“仅数据预取”扩展为“数据 + 路由模块预热”，并移除页面跳转的 `startTransition`，避免切页链路落入 `Timer fired -> commitRootWhenReady` 延迟提交路径。
+
+## 模块依赖与边界
+
+- 仅改 Renderer 侧路由加载与侧栏导航调度。
+- 不改 `stores/*` 数据协议，不改 `host-api/api-client` 与 Main 进程边界。
+- 懒加载页面仍保持 `React.lazy + Suspense`，只是增加预热入口，不改变路由结构。
+
+## 关键决策与原因
+
+1. 现有热点主要表现为 React 并发调度链路（`Timer fired -> commitRootWhenReady`），优先去掉切页路径上的 `startTransition` 延迟因素。
+2. 对懒加载页面做空闲预热，避免首切页时把 chunk 加载/解析成本叠加到点击链路。
+3. 预热能力集中到 `route-preload.ts`，避免在各页面分散写 `import()`，保持边界清晰可维护。
+
+## 本次变更日志
+
+- 日期：2026-03-24
+- 变更主题：`perf(route): 预热懒加载页面并简化侧栏切页调度`
+- 主要结果：
+  - 新增 `route-preload` 模块，支持按路径和批量预热；
+  - `App` 增加空闲预热关键懒加载路由；
+  - `Sidebar` 预取联动路由模块预热；
+  - `Sidebar` 页面跳转移除 `startTransition`，改同步 `navigate`。
+
+---
+
+## 目录树（本次模板库卡顿治理：真虚拟化替换增量追加）
+
+```text
+src/pages/SubAgents/
+└── index.tsx（模板库列表从“visibleCount 增量追加”改为“按行虚拟化渲染”）
+```
+
+## 文件职责（关键模块）
+
+- `src/pages/SubAgents/index.tsx`：模板库筛选与卡片渲染主入口；本次新增网格行虚拟化与 `memo` 卡片，避免滚动时连续补批次触发的长任务与掉帧。
+
+## 模块依赖与边界
+
+- 使用既有 `@tanstack/react-virtual`（已在项目中引入）实现列表虚拟化。
+- 仅改 Renderer 的模板库 UI 渲染路径，不改模板获取协议、不改 stores、不改主进程 IPC。
+
+## 关键决策与原因
+
+1. 旧实现基于 `visibleTemplateCount` 的“边滚边追加”模型，会在滚动事件链路触发频繁 `setState`，形成明显卡顿与“补一批卡片再停顿”的体感。
+2. 新实现改为“完整高度占位 + 可视区渲染”，滚动时 DOM 数量稳定，主线程负载更平滑。
+3. 将模板卡片拆为 `TemplateCatalogCard (memo)`，降低父组件状态变化时的卡片重复渲染成本。
+
+## 本次变更日志
+
+- 日期：2026-03-24
+- 变更主题：`perf(subagents): 模板库切换为真虚拟化并减少滚动重渲染`
+- 主要结果：
+  - 删除模板库 `visibleCount` 增量追加逻辑与滚动阈值补批次链路；
+  - 新增按断点列数（1/2/3 列）分行的网格虚拟化渲染；
+  - 新增 `ResizeObserver` + rAF 宽度更新，保证列数变化时虚拟行测量正确；
+  - 新增模板本地化文案缓存 `Map`，并引入 `TemplateCatalogCard (memo)`；
+  - 保留 hover/focus 预取，移除点击按下阶段预取，减少交互帧竞争。
+
+---
+
+## 目录树（本次 Skills 首击优化：按需挂载 + 空闲补批）
+
+```text
+src/pages/Skills/
+└── index.tsx（改：Tabs 按需挂载、技能列表补批次改为空闲调度）
+```
+
+## 文件职责（关键模块）
+
+- `src/pages/Skills/index.tsx`：技能页渲染入口；本次聚焦“点击进入时的首帧主线程压力”，将非激活 tab 从“隐藏挂载”改为“按需挂载”，并将列表自动补批次改到 idle 阶段执行。
+
+## 模块依赖与边界
+
+- 仅改 Skills 页面渲染节奏，不改 `stores/skills.ts` 接口和主进程调用协议。
+- 复用已有 `scheduleIdleReady` 调度工具，不引入新依赖。
+
+## 关键决策与原因
+
+1. 首击热点显示 `beginWork -> Skills -> SkillGridCard`，说明主要成本来自首帧挂载量，而不是业务请求。
+2. 非激活 tab 继续挂载会放大 `createTask`，改为按需挂载可直接减少一次点击帧中的 React 工作量。
+3. 自动补批次若同步执行，会把“补卡片渲染”叠到点击帧；改为空闲调度可以把重活后移，优先保证点击反馈。
+
+## 本次变更日志
+
+- 日期：2026-03-24
+- 变更主题：`perf(skills): 降低首击渲染任务，延后补批次到空闲帧`
+- 主要结果：
+  - `TabsContent` 改为仅在激活 tab 时挂载，避免非激活面板参与首帧渲染；
+  - 技能列表自动补批次从同步触发改为 `scheduleIdleReady` 调度；
+  - 补批次步长从 `24` 下调为 `12`，降低单次批量渲染峰值；
+  - `skillsHeavyContentReady` 取消“有数据立即重内容”同步路径，避免切页瞬间回到重渲染链路。
+
+---
+
+## 目录树（本次首击进一步压缩：卡片 props 提纯 + store 去重短路）
+
+```text
+src/
+├── pages/Skills/
+│   └── index.tsx（改：SkillGridCard 纯 props，父层预计算文案，虚拟窗口阈值收紧）
+└── stores/
+    └── subagents.ts（改：loadAgents 增加 in-flight 去重与无变化短路）
+```
+
+## 文件职责（关键模块）
+
+- `src/pages/Skills/index.tsx`：将卡片渲染改为“视图模型下发”，减少卡片内部重复计算与引用抖动。
+- `src/stores/subagents.ts`：将 `loadAgents` 从“每次调用都发请求并 set”改为“同一时刻单请求 + 数据等价时不 set”。
+
+## 模块依赖与边界
+
+- 未改 `host-api/api-client` 边界，仍走既有 RPC 调用链。
+- 未引入新依赖；仅复用现有 `scheduleIdleReady`，并在 store 内做纯状态层去重。
+
+## 关键决策与原因
+
+1. `Skills` 热点在 `createTask / beginWork / SkillGridCard`，优先减少卡片层级的计算与挂载负担。
+2. `loadAgents` 在多个入口被调用，先做低风险基础版去重短路，避免重复请求与重复提交。
+3. 暂不引入 TTL 与强一致策略分支，先保证行为稳定与可回归。
+
+## 本次变更日志
+
+- 日期：2026-03-24
+- 变更主题：`perf(skills+subagents): 压缩首击渲染并降低重复 agents 刷新`
+- 主要结果：
+  - `SkillGridCard` 改为纯 props 输入，不再在卡片内做 `useTranslation` 与可用性文案拼装；
+  - 卡片可用性标签与缺失依赖文案上提到父层 `useMemo` 统一计算；
+  - 技能列表虚拟化阈值由 `60` 收紧为 `24`，`overscan` 由 `2` 收紧为 `1`；
+  - `loadAgents` 增加 `inflightLoadAgentsTask` 去重，避免并发重复拉取；
+  - `loadAgents` 增加 agents 等价比较，无变化时跳过主列表 `set`。

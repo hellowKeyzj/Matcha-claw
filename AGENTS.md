@@ -46,6 +46,10 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - Transport policy is Main-owned and fixed as `WS -> HTTP -> IPC fallback`; renderer should not implement protocol switching UI/business logic.
 - **Doc sync rule**: After any functional or architecture change, review `README.md`, `README.zh-CN.md`, and `README.ja-JP.md` for required updates; if behavior/flows/interfaces changed, update docs in the same PR/commit.
 
+## 全局开发策略
+
+- **重构兼容性策略**：当前项目尚未发布正式版本，任何重构默认不要求保持历史版本兼容性；优先保证结构清晰与长期可维护性。
+
 ## git提交规范（全局）
 
 以下规则用于**所有“要求我提交代码”**的场景，默认执行：

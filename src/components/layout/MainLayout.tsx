@@ -62,6 +62,7 @@ export function MainLayout() {
     }
   });
   const layoutRef = useRef<HTMLDivElement>(null);
+  const resizeRafRef = useRef<number | null>(null);
   const isChatRoute = location.pathname === '/';
 
   const getRenderedSidebarWidth = useCallback(
@@ -109,7 +110,7 @@ export function MainLayout() {
   }, [agentSessionsWidth]);
 
   useEffect(() => {
-    const handleResize = () => {
+    const applyResize = () => {
       const layoutWidth = layoutRef.current?.clientWidth ?? window.innerWidth;
       const maxSidebarWidth = getSidebarMaxWidth(layoutWidth);
       const nextSidebarWidth = sidebarCollapsed
@@ -117,22 +118,41 @@ export function MainLayout() {
         : clamp(sidebarWidth, SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, maxSidebarWidth));
 
       if (!sidebarCollapsed) {
-        setSidebarWidth(nextSidebarWidth);
+        setSidebarWidth((prev) => (prev === nextSidebarWidth ? prev : nextSidebarWidth));
       }
 
       if (isChatRoute && !agentSessionsCollapsed) {
         const maxAgentWidth = getAgentSessionsMaxWidth(layoutWidth, nextSidebarWidth);
-        setAgentSessionsWidth((prev) => clamp(
-          prev,
-          AGENT_SESSIONS_PANE_MIN_WIDTH,
-          Math.min(AGENT_SESSIONS_PANE_MAX_WIDTH, maxAgentWidth),
-        ));
+        setAgentSessionsWidth((prev) => {
+          const next = clamp(
+            prev,
+            AGENT_SESSIONS_PANE_MIN_WIDTH,
+            Math.min(AGENT_SESSIONS_PANE_MAX_WIDTH, maxAgentWidth),
+          );
+          return next === prev ? prev : next;
+        });
       }
     };
 
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    const scheduleResize = () => {
+      if (resizeRafRef.current != null) {
+        return;
+      }
+      resizeRafRef.current = window.requestAnimationFrame(() => {
+        resizeRafRef.current = null;
+        applyResize();
+      });
+    };
+
+    scheduleResize();
+    window.addEventListener('resize', scheduleResize);
+    return () => {
+      window.removeEventListener('resize', scheduleResize);
+      if (resizeRafRef.current != null) {
+        window.cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
+    };
   }, [
     agentSessionsCollapsed,
     getAgentSessionsMaxWidth,

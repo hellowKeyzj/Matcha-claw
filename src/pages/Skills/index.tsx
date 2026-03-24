@@ -2,7 +2,8 @@
  * Skills Page
  * Browse and manage AI skills
  */
-import { useDeferredValue, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { memo, useDeferredValue, useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Search,
   Puzzle,
@@ -39,16 +40,21 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
+import { scheduleIdleReady } from '@/lib/idle-ready';
 import { trackUiEvent } from '@/lib/telemetry';
 import { toast } from 'sonner';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/skill';
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
-const INITIAL_SKILLS_BATCH = 12;
-const SKILLS_BATCH_SIZE = 24;
+const INITIAL_SKILLS_BATCH = 8;
+const SKILLS_BATCH_SIZE = 12;
 const SKILLS_GRID_SCROLL_THRESHOLD_PX = 180;
+const SKILLS_GRID_VIRTUAL_THRESHOLD = 24;
+const SKILLS_GRID_ESTIMATED_ROW_HEIGHT = 248;
+const SKILLS_GRID_VIRTUAL_OVERSCAN = 1;
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
+const SKILLS_AUTO_APPEND_IDLE_TIMEOUT_MS = 420;
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   if (!skill.enabled) return 'disabled';
@@ -96,7 +102,7 @@ interface SkillDetailDialogProps {
 
 function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps) {
   const { t } = useTranslation('skills');
-  const { fetchSkills } = useSkillsStore();
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const [activeTab, setActiveTab] = useState('info');
   const [envVars, setEnvVars] = useState<Array<{ key: string; value: string }>>([]);
   const [apiKey, setApiKey] = useState('');
@@ -518,52 +524,190 @@ function MarketplaceSkillCard({
   );
 }
 
+interface SkillGridCardViewModel {
+  skillId: string;
+  skillName: string;
+  skillDescription: string;
+  skillIcon: string;
+  isCore: boolean;
+  isBundled: boolean;
+  slug?: string;
+  version?: string;
+  enabled: boolean;
+  configurable: boolean;
+  availabilityKind: SkillAvailabilityKind;
+  availabilityLabel: string;
+  blockedLabel?: string;
+  missingSummaryLabel?: string;
+  configurableLabel: string;
+}
+
+interface SkillGridCardProps extends SkillGridCardViewModel {
+  onOpenDetail: (skillId: string) => void;
+  onToggleSkill: (skillId: string, enabled: boolean) => void;
+  onUninstallSkill: (skillId: string) => void;
+}
+
+const SkillGridCard = memo(function SkillGridCard({
+  skillId,
+  skillName,
+  skillDescription,
+  skillIcon,
+  isCore,
+  isBundled,
+  slug,
+  version,
+  enabled,
+  configurable,
+  availabilityKind,
+  availabilityLabel,
+  blockedLabel,
+  missingSummaryLabel,
+  configurableLabel,
+  onOpenDetail,
+  onToggleSkill,
+  onUninstallSkill
+}: SkillGridCardProps) {
+  return (
+    <Card
+      className={cn(
+        'cursor-pointer hover:border-primary/50 transition-colors',
+        enabled && 'border-primary/50 bg-primary/5'
+      )}
+      onClick={() => onOpenDetail(skillId)}
+    >
+      <CardHeader className="pb-3">
+        <div className="flex items-start gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <span className="text-2xl">{skillIcon}</span>
+            <div className="min-w-0">
+              <CardTitle className="flex min-w-0 items-center gap-2 text-base">
+                <span className="min-w-0 truncate">{skillName}</span>
+                {isCore ? (
+                  <Lock className="h-3 w-3 text-muted-foreground" />
+                ) : isBundled ? (
+                  <Puzzle className="h-3 w-3 text-blue-500/70" />
+                ) : (
+                  <Globe className="h-3 w-3 text-purple-500/70" />
+                )}
+                {slug && slug !== skillName ? (
+                  <span className="shrink-0 rounded border border-black/10 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground dark:border-white/10">
+                    {slug}
+                  </span>
+                ) : null}
+              </CardTitle>
+            </div>
+          </div>
+          <div className="flex w-[88px] shrink-0 items-center justify-end gap-2">
+            {!isBundled && !isCore && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onUninstallSkill(skillId);
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
+            <Switch
+              checked={enabled}
+              onCheckedChange={(checked) => {
+                onToggleSkill(skillId, checked);
+              }}
+              disabled={isCore}
+              onClick={(event) => event.stopPropagation()}
+            />
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground line-clamp-2">
+          {skillDescription}
+        </p>
+        <div className="flex items-center gap-2 mt-2 flex-wrap">
+          {version && (
+            <Badge variant="outline" className="text-xs">
+              v{version}
+            </Badge>
+          )}
+          <Badge variant="outline" className={cn('text-xs', getAvailabilityBadgeClass(availabilityKind))}>
+            {availabilityLabel}
+          </Badge>
+          {configurable && (
+            <Badge variant="secondary" className="text-xs">
+              <Settings className="h-3 w-3 mr-1" />
+              {configurableLabel}
+            </Badge>
+          )}
+        </div>
+        {availabilityKind === 'blocked' && blockedLabel && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            {blockedLabel}
+          </p>
+        )}
+        {missingSummaryLabel && availabilityKind !== 'eligible' && (
+          <p className="mt-2 text-xs text-muted-foreground break-all">
+            {missingSummaryLabel}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+});
+
 export function Skills() {
-  const {
-    skills,
-    loading,
-    error,
-    fetchSkills,
-    enableSkill,
-    disableSkill,
-    searchResults,
-    searchSkills,
-    installSkill,
-    uninstallSkill,
-    searching,
-    searchError,
-    installing
-  } = useSkillsStore();
+  const navigate = useNavigate();
+  const skills = useSkillsStore((state) => state.skills);
+  const loading = useSkillsStore((state) => state.loading);
+  const error = useSkillsStore((state) => state.error);
+  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const enableSkill = useSkillsStore((state) => state.enableSkill);
+  const disableSkill = useSkillsStore((state) => state.disableSkill);
+  const searchResults = useSkillsStore((state) => state.searchResults);
+  const searchSkills = useSkillsStore((state) => state.searchSkills);
+  const installSkill = useSkillsStore((state) => state.installSkill);
+  const uninstallSkill = useSkillsStore((state) => state.uninstallSkill);
+  const searching = useSkillsStore((state) => state.searching);
+  const searchError = useSkillsStore((state) => state.searchError);
+  const installing = useSkillsStore((state) => state.installing);
   const { t } = useTranslation('skills');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [searchQuery, setSearchQuery] = useState('');
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
+  const isAllTabActive = activeTab === 'all';
   const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
   const [visibleSkillCount, setVisibleSkillCount] = useState(INITIAL_SKILLS_BATCH);
-  const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(() => skills.length > 0);
+  const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(false);
   const marketplaceDiscoveryAttemptedRef = useRef(false);
   const skillsGridScrollRef = useRef<HTMLDivElement | null>(null);
+  const [skillsGridScrollTop, setSkillsGridScrollTop] = useState(0);
+  const [skillsGridViewportHeight, setSkillsGridViewportHeight] = useState(0);
+  const [skillsGridViewportWidth, setSkillsGridViewportWidth] = useState(0);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
   const [showGatewayWarning, setShowGatewayWarning] = useState(false);
 
   // Debounce the gateway warning to avoid flickering during brief restarts (like skill toggles)
   useEffect(() => {
-    let timer: NodeJS.Timeout;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     if (!isGatewayRunning) {
       // Wait 1.5s before showing the warning
       timer = setTimeout(() => {
         setShowGatewayWarning(true);
       }, 1500);
     } else {
-      // Use setTimeout to avoid synchronous setState in effect
-      timer = setTimeout(() => {
-        setShowGatewayWarning(false);
-      }, 0);
+      setShowGatewayWarning((prev) => (prev ? false : prev));
     }
-    return () => clearTimeout(timer);
+    return () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    };
   }, [isGatewayRunning]);
 
   // Fetch skills on mount.
@@ -579,55 +723,28 @@ export function Skills() {
     if (skillsHeavyContentReady) {
       return;
     }
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setSkillsHeavyContentReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
-      } else {
-        timeoutId = window.setTimeout(markReady, 120);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
-    });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [skillsHeavyContentReady]);
-
-  useEffect(() => {
-    if (!skillsHeavyContentReady && skills.length > 0) {
+    const cancel = scheduleIdleReady(() => {
       setSkillsHeavyContentReady(true);
-    }
-  }, [skills.length, skillsHeavyContentReady]);
+    }, {
+      idleTimeoutMs: SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
+      fallbackDelayMs: 120,
+      useAnimationFrame: true,
+    });
+    return cancel;
+  }, [skillsHeavyContentReady]);
 
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
+  const skillById = useMemo(() => {
+    return new Map(safeSkills.map((skill) => [skill.id, skill] as const));
+  }, [safeSkills]);
   const deferredSkills = useDeferredValue(safeSkills);
-  const deferredSearchQuery = useDeferredValue(searchQuery);
-  const deferredSelectedSource = useDeferredValue(selectedSource);
-  const skillsForView = skillsHeavyContentReady ? deferredSkills : [];
+  const deferredSearchQuery = useDeferredValue(isAllTabActive ? searchQuery : '');
+  const deferredSelectedSource = useDeferredValue(isAllTabActive ? selectedSource : 'all');
+  const skillsForView = useMemo(
+    () => (isAllTabActive && skillsHeavyContentReady ? deferredSkills : []),
+    [deferredSkills, isAllTabActive, skillsHeavyContentReady],
+  );
 
   const filteredSkills = useMemo(() => {
     const q = deferredSearchQuery.toLowerCase().trim();
@@ -662,48 +779,146 @@ export function Skills() {
     });
   }, [deferredSearchQuery, deferredSelectedSource, skillsForView]);
 
-  const sourceStats = useMemo(() => ({
-    all: safeSkills.length,
-    eligible: safeSkills.filter((s) => s.eligible === true).length,
-    builtIn: safeSkills.filter((s) => s.isBundled).length,
-    marketplace: safeSkills.filter((s) => !s.isBundled).length,
-  }), [safeSkills]);
+  const filteredSkillCards = useMemo<SkillGridCardViewModel[]>(() => {
+    const configurableLabel = t('detail.configurable');
+    const blockedLabel = t('availability.blockedByAllowlist');
+    return filteredSkills.map((skill) => {
+      const availabilityKind = getSkillAvailabilityKind(skill);
+      const missingSummary = formatMissingSummary(skill.missing);
+      const availabilityLabel = availabilityKind === 'disabled'
+        ? t('detail.disabled')
+        : t(`availability.${availabilityKind}`);
+      return {
+        skillId: skill.id,
+        skillName: skill.name,
+        skillDescription: skill.description,
+        skillIcon: skill.icon || '🧩',
+        isCore: Boolean(skill.isCore),
+        isBundled: Boolean(skill.isBundled),
+        slug: skill.slug,
+        version: skill.version,
+        enabled: skill.enabled,
+        configurable: Boolean(skill.configurable),
+        availabilityKind,
+        availabilityLabel,
+        blockedLabel,
+        missingSummaryLabel: missingSummary && availabilityKind !== 'eligible'
+          ? t('availability.missingPrefix', { items: missingSummary })
+          : undefined,
+        configurableLabel,
+      };
+    });
+  }, [filteredSkills, t]);
+
+  const sourceStats = useMemo(() => {
+    if (!isAllTabActive) {
+      return { all: 0, eligible: 0, builtIn: 0, marketplace: 0 };
+    }
+    return {
+      all: safeSkills.length,
+      eligible: safeSkills.filter((s) => s.eligible === true).length,
+      builtIn: safeSkills.filter((s) => s.isBundled).length,
+      marketplace: safeSkills.filter((s) => !s.isBundled).length,
+    };
+  }, [isAllTabActive, safeSkills]);
+
+  const shouldUseVirtualSkillsGrid = isAllTabActive
+    && skillsHeavyContentReady
+    && filteredSkillCards.length > SKILLS_GRID_VIRTUAL_THRESHOLD;
 
   const visibleSkills = useMemo(
-    () => filteredSkills.slice(0, visibleSkillCount),
-    [filteredSkills, visibleSkillCount],
+    () => (isAllTabActive ? filteredSkillCards.slice(0, visibleSkillCount) : []),
+    [filteredSkillCards, isAllTabActive, visibleSkillCount],
   );
-  const displayedSkillCount = Math.min(visibleSkillCount, filteredSkills.length);
+  const displayedSkillCount = isAllTabActive
+    ? (shouldUseVirtualSkillsGrid ? filteredSkillCards.length : Math.min(visibleSkillCount, filteredSkillCards.length))
+    : 0;
 
   useEffect(() => {
-    setVisibleSkillCount(INITIAL_SKILLS_BATCH);
-  }, [filteredSkills]);
+    if (!isAllTabActive) {
+      return;
+    }
+    setVisibleSkillCount((prev) => (prev === INITIAL_SKILLS_BATCH ? prev : INITIAL_SKILLS_BATCH));
+  }, [filteredSkillCards, isAllTabActive]);
 
   const appendVisibleSkills = useCallback(() => {
     setVisibleSkillCount((prev) => {
-      if (prev >= filteredSkills.length) {
+      if (prev >= filteredSkillCards.length) {
         return prev;
       }
-      return Math.min(prev + SKILLS_BATCH_SIZE, filteredSkills.length);
+      return Math.min(prev + SKILLS_BATCH_SIZE, filteredSkillCards.length);
     });
-  }, [filteredSkills.length]);
+  }, [filteredSkillCards.length]);
+
+  useEffect(() => {
+    if (!shouldUseVirtualSkillsGrid) {
+      setSkillsGridScrollTop((prev) => (prev === 0 ? prev : 0));
+      setSkillsGridViewportHeight((prev) => (prev === 0 ? prev : 0));
+      setSkillsGridViewportWidth((prev) => (prev === 0 ? prev : 0));
+      return;
+    }
+
+    const element = skillsGridScrollRef.current;
+    if (!element) {
+      return;
+    }
+
+    let rafId: number | null = null;
+    const updateViewport = (nextHeight: number, nextWidth: number) => {
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        setSkillsGridViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+        setSkillsGridViewportWidth((prev) => (prev === nextWidth ? prev : nextWidth));
+      });
+    };
+
+    updateViewport(Math.round(element.clientHeight), Math.round(element.clientWidth));
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) {
+        return;
+      }
+      updateViewport(Math.round(entry.contentRect.height), Math.round(entry.contentRect.width));
+    });
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, [shouldUseVirtualSkillsGrid]);
 
   const handleSkillsGridScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    if (displayedSkillCount >= filteredSkills.length) {
+    if (!isAllTabActive) {
       return;
     }
     const target = event.currentTarget;
+    setSkillsGridScrollTop((prev) => (prev === target.scrollTop ? prev : target.scrollTop));
+    if (shouldUseVirtualSkillsGrid) {
+      return;
+    }
+    if (displayedSkillCount >= filteredSkillCards.length) {
+      return;
+    }
     const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
     if (remain <= SKILLS_GRID_SCROLL_THRESHOLD_PX) {
       appendVisibleSkills();
     }
-  }, [appendVisibleSkills, displayedSkillCount, filteredSkills.length]);
+  }, [appendVisibleSkills, displayedSkillCount, filteredSkillCards.length, isAllTabActive, shouldUseVirtualSkillsGrid]);
 
   useEffect(() => {
-    if (activeTab !== 'all' || !skillsHeavyContentReady) {
+    if (shouldUseVirtualSkillsGrid) {
       return;
     }
-    if (displayedSkillCount >= filteredSkills.length) {
+    if (!isAllTabActive || !skillsHeavyContentReady) {
+      return;
+    }
+    if (displayedSkillCount >= filteredSkillCards.length) {
       return;
     }
     const container = skillsGridScrollRef.current;
@@ -711,9 +926,16 @@ export function Skills() {
       return;
     }
     if (container.scrollHeight <= container.clientHeight + 8) {
-      appendVisibleSkills();
+      const cancel = scheduleIdleReady(() => {
+        appendVisibleSkills();
+      }, {
+        idleTimeoutMs: SKILLS_AUTO_APPEND_IDLE_TIMEOUT_MS,
+        fallbackDelayMs: 120,
+        useAnimationFrame: true,
+      });
+      return cancel;
     }
-  }, [activeTab, appendVisibleSkills, displayedSkillCount, filteredSkills.length, skillsHeavyContentReady, visibleSkills.length]);
+  }, [appendVisibleSkills, displayedSkillCount, filteredSkillCards.length, isAllTabActive, shouldUseVirtualSkillsGrid, skillsHeavyContentReady, visibleSkills.length]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -759,6 +981,18 @@ export function Skills() {
     }
   }, [enableSkill, disableSkill, t]);
 
+  const handleOpenSkillDetail = useCallback((skillId: string) => {
+    const nextSkill = skillById.get(skillId);
+    if (!nextSkill) {
+      return;
+    }
+    setSelectedSkill(nextSkill);
+  }, [skillById]);
+
+  const handleToggleSkillQuick = useCallback((skillId: string, enable: boolean) => {
+    void handleToggle(skillId, enable);
+  }, [handleToggle]);
+
   const hasInstalledSkills = useMemo(() => skills.some((s) => !s.isBundled), [skills]);
 
   const handleOpenSkillsFolder = useCallback(async () => {
@@ -792,20 +1026,21 @@ export function Skills() {
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedQuery = marketplaceQuery.trim();
+    if (!trimmedQuery) {
+      return;
+    }
     marketplaceDiscoveryAttemptedRef.current = true;
-    searchSkills(marketplaceQuery.trim());
+    searchSkills(trimmedQuery);
   }, [marketplaceQuery, searchSkills]);
 
-  // Marketplace query debounce + clear fallback
+  // Marketplace query debounce（仅对非空关键词生效）
   useEffect(() => {
     if (activeTab !== 'marketplace') {
       return;
     }
     const trimmedQuery = marketplaceQuery.trim();
     if (!trimmedQuery) {
-      if (marketplaceDiscoveryAttemptedRef.current) {
-        searchSkills('');
-      }
       return;
     }
 
@@ -865,6 +1100,63 @@ export function Skills() {
     }
   }, [uninstallSkill, t]);
 
+  const handleUninstallSkillQuick = useCallback((slug: string) => {
+    void handleUninstall(slug);
+  }, [handleUninstall]);
+
+  const handleOpenClawHubTokenSettings = useCallback(() => {
+    navigate('/settings?section=gateway');
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!shouldUseVirtualSkillsGrid || !isAllTabActive) {
+      return;
+    }
+    const container = skillsGridScrollRef.current;
+    if (container) {
+      container.scrollTop = 0;
+    }
+    setSkillsGridScrollTop((prev) => (prev === 0 ? prev : 0));
+  }, [deferredSearchQuery, deferredSelectedSource, isAllTabActive, shouldUseVirtualSkillsGrid]);
+
+  const virtualSkillsWindow = useMemo(() => {
+    if (!shouldUseVirtualSkillsGrid) {
+      return {
+        skills: visibleSkills,
+        topSpacerHeight: 0,
+        bottomSpacerHeight: 0,
+      };
+    }
+
+    const columnCount = skillsGridViewportWidth >= 1024 ? 3 : skillsGridViewportWidth >= 768 ? 2 : 1;
+    const safeViewportHeight = Math.max(skillsGridViewportHeight, SKILLS_GRID_ESTIMATED_ROW_HEIGHT);
+    const visibleRows = Math.max(1, Math.ceil(safeViewportHeight / SKILLS_GRID_ESTIMATED_ROW_HEIGHT));
+    const totalRows = Math.ceil(filteredSkillCards.length / columnCount);
+    const startRow = Math.max(
+      0,
+      Math.floor(skillsGridScrollTop / SKILLS_GRID_ESTIMATED_ROW_HEIGHT) - SKILLS_GRID_VIRTUAL_OVERSCAN,
+    );
+    const endRow = Math.min(
+      totalRows,
+      startRow + visibleRows + SKILLS_GRID_VIRTUAL_OVERSCAN * 2,
+    );
+    const startIndex = startRow * columnCount;
+    const endIndex = Math.min(filteredSkillCards.length, endRow * columnCount);
+
+    return {
+      skills: filteredSkillCards.slice(startIndex, endIndex),
+      topSpacerHeight: startRow * SKILLS_GRID_ESTIMATED_ROW_HEIGHT,
+      bottomSpacerHeight: Math.max(0, (totalRows - endRow) * SKILLS_GRID_ESTIMATED_ROW_HEIGHT),
+    };
+  }, [
+    filteredSkillCards,
+    skillsGridScrollTop,
+    skillsGridViewportHeight,
+    skillsGridViewportWidth,
+    shouldUseVirtualSkillsGrid,
+    visibleSkills,
+  ]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -918,7 +1210,8 @@ export function Skills() {
           </TabsTrigger> */}
         </TabsList>
 
-        <TabsContent value="all" className="space-y-6 mt-6">
+        {activeTab === 'all' ? (
+          <TabsContent value="all" className="space-y-6 mt-6">
           {/* Search and Filter */}
           <div className="flex gap-4 flex-wrap">
             <div className="relative flex-1 min-w-[200px]">
@@ -1020,7 +1313,7 @@ export function Skills() {
                 <LoadingSpinner size="lg" />
               </CardContent>
             </Card>
-          ) : filteredSkills.length === 0 ? (
+          ) : filteredSkillCards.length === 0 ? (
             <Card>
               <CardContent className="flex flex-col items-center justify-center py-12">
                 <Puzzle className="h-12 w-12 text-muted-foreground mb-4" />
@@ -1037,118 +1330,38 @@ export function Skills() {
                 className="max-h-[56vh] overflow-y-auto pr-1"
                 onScroll={handleSkillsGridScroll}
               >
+                {virtualSkillsWindow.topSpacerHeight > 0 ? (
+                  <div style={{ height: virtualSkillsWindow.topSpacerHeight }} />
+                ) : null}
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {visibleSkills.map((skill) => {
-                    const availabilityKind = getSkillAvailabilityKind(skill);
-                    const missingSummary = formatMissingSummary(skill.missing);
-                    const availabilityLabel = availabilityKind === 'disabled'
-                      ? t('detail.disabled')
-                      : t(`availability.${availabilityKind}`);
-
-                    return (
-                      <Card
-                        key={skill.id}
-                        className={cn(
-                          'cursor-pointer hover:border-primary/50 transition-colors',
-                          skill.enabled && 'border-primary/50 bg-primary/5'
-                        )}
-                        onClick={() => setSelectedSkill(skill)}
-                      >
-                        <CardHeader className="pb-3">
-                          <div className="flex items-start gap-3">
-                            <div className="flex min-w-0 flex-1 items-center gap-3">
-                              <span className="text-2xl">{skill.icon || '🧩'}</span>
-                              <div className="min-w-0">
-                                <CardTitle className="flex min-w-0 items-center gap-2 text-base">
-                                  <span className="min-w-0 truncate">{skill.name}</span>
-                                  {skill.isCore ? (
-                                    <Lock className="h-3 w-3 text-muted-foreground" />
-                                  ) : skill.isBundled ? (
-                                    <Puzzle className="h-3 w-3 text-blue-500/70" />
-                                  ) : (
-                                    <Globe className="h-3 w-3 text-purple-500/70" />
-                                  )}
-                                  {skill.slug && skill.slug !== skill.name ? (
-                                    <span className="shrink-0 rounded border border-black/10 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground dark:border-white/10">
-                                      {skill.slug}
-                                    </span>
-                                  ) : null}
-                                </CardTitle>
-                              </div>
-                            </div>
-                            <div className="flex w-[88px] shrink-0 items-center justify-end gap-2">
-                              {!skill.isBundled && !skill.isCore && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleUninstall(skill.id);
-                                  }}
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              )}
-                              <Switch
-                                checked={skill.enabled}
-                                onCheckedChange={(checked) => {
-                                  handleToggle(skill.id, checked);
-                                }}
-                                disabled={skill.isCore}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </div>
-                          </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="text-sm text-muted-foreground line-clamp-2">
-                            {skill.description}
-                          </p>
-                          <div className="flex items-center gap-2 mt-2 flex-wrap">
-                            {skill.version && (
-                              <Badge variant="outline" className="text-xs">
-                                v{skill.version}
-                              </Badge>
-                            )}
-                            <Badge variant="outline" className={cn('text-xs', getAvailabilityBadgeClass(availabilityKind))}>
-                              {availabilityLabel}
-                            </Badge>
-                            {skill.configurable && (
-                              <Badge variant="secondary" className="text-xs">
-                                <Settings className="h-3 w-3 mr-1" />
-                                {t('detail.configurable')}
-                              </Badge>
-                            )}
-                          </div>
-                          {availabilityKind === 'blocked' && (
-                            <p className="mt-2 text-xs text-muted-foreground">
-                              {t('availability.blockedByAllowlist')}
-                            </p>
-                          )}
-                          {missingSummary && availabilityKind !== 'eligible' && (
-                            <p className="mt-2 text-xs text-muted-foreground break-all">
-                              {t('availability.missingPrefix', { items: missingSummary })}
-                            </p>
-                          )}
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
+                  {virtualSkillsWindow.skills.map((skill) => (
+                    <SkillGridCard
+                      key={skill.skillId}
+                      {...skill}
+                      onOpenDetail={handleOpenSkillDetail}
+                      onToggleSkill={handleToggleSkillQuick}
+                      onUninstallSkill={handleUninstallSkillQuick}
+                    />
+                  ))}
                 </div>
+                {virtualSkillsWindow.bottomSpacerHeight > 0 ? (
+                  <div style={{ height: virtualSkillsWindow.bottomSpacerHeight }} />
+                ) : null}
               </div>
-              {activeTab === 'all' && visibleSkillCount < filteredSkills.length && (
+              {activeTab === 'all' && !shouldUseVirtualSkillsGrid && visibleSkillCount < filteredSkillCards.length && (
                 <div className="rounded-md border border-dashed px-3 py-3 text-center">
                   <p className="text-xs text-muted-foreground">
-                    {t('pagination.showing', { shown: displayedSkillCount, total: filteredSkills.length })}
+                    {t('pagination.showing', { shown: displayedSkillCount, total: filteredSkillCards.length })}
                   </p>
                 </div>
               )}
             </div>
           )}
-        </TabsContent>
+          </TabsContent>
+        ) : null}
 
-        <TabsContent value="marketplace" className="space-y-6 mt-6">
+        {activeTab === 'marketplace' ? (
+          <TabsContent value="marketplace" className="space-y-6 mt-6">
           <div className="flex flex-col gap-4">
             <Card className="border-muted/50 bg-muted/20">
               <CardContent className="py-4 flex items-start gap-3">
@@ -1159,9 +1372,15 @@ export function Skills() {
               </CardContent>
             </Card>
             <Card className="border-info/30 bg-info/5">
-              <CardContent className="py-3 text-sm flex items-start gap-2 text-muted-foreground">
-                <Download className="h-4 w-4 mt-0.5 shrink-0" />
-                <span>{t('marketplace.manualInstallHint', { path: skillsDirPath })}</span>
+              <CardContent className="py-3 text-sm flex items-start justify-between gap-3 text-muted-foreground">
+                <div className="flex items-start gap-2">
+                  <Download className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span className="whitespace-pre-line">{t('marketplace.manualAndTokenHint', { path: skillsDirPath })}</span>
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={handleOpenClawHubTokenSettings}>
+                  <Key className="mr-2 h-4 w-4" />
+                  {t('marketplace.openTokenSettings')}
+                </Button>
               </CardContent>
             </Card>
             <div className="flex gap-4">
@@ -1236,7 +1455,8 @@ export function Skills() {
               </Card>
             )}
           </div>
-        </TabsContent>
+          </TabsContent>
+        ) : null}
 
         {/* <TabsContent value="bundles" className="space-y-6 mt-6">
           <p className="text-muted-foreground">

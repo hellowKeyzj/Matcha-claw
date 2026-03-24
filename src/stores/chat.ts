@@ -160,6 +160,14 @@ function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
+function scheduleNextFrame(task: () => void): void {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => task());
+    return;
+  }
+  setTimeout(task, 16);
+}
+
 function safeStableStringify(value: unknown): string {
   try {
     return JSON.stringify(value) ?? '';
@@ -249,10 +257,74 @@ function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boole
   return true;
 }
 
+function buildHistoryFingerprint(messages: RawMessage[], thinkingLevel: string | null): string {
+  const count = messages.length;
+  const first = count > 0 ? messages[0] : null;
+  const last = count > 0 ? messages[count - 1] : null;
+  return [
+    count,
+    thinkingLevel ?? '',
+    first?.id ?? '',
+    first?.role ?? '',
+    first?.timestamp ?? '',
+    last?.id ?? '',
+    last?.role ?? '',
+    last?.timestamp ?? '',
+  ].join('|');
+}
+
+function hashStringDjb2(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function buildQuickRawHistoryFingerprint(messages: RawMessage[], thinkingLevel: string | null): string {
+  const count = messages.length;
+  if (count === 0) {
+    return hashStringDjb2(`0|${thinkingLevel ?? ''}`);
+  }
+
+  const sampleStride = Math.max(1, Math.floor(count / 6));
+  const parts: string[] = [String(count), String(sampleStride), thinkingLevel ?? ''];
+  for (let index = 0; index < count; index += sampleStride) {
+    const msg = messages[index];
+    parts.push([
+      msg?.id ?? '',
+      msg?.role ?? '',
+      msg?.timestamp ?? '',
+      msg?.toolCallId ?? '',
+      msg?.toolName ?? '',
+      msg?.isError ? '1' : '0',
+    ].join(':'));
+  }
+  if ((count - 1) % sampleStride !== 0) {
+    const tail = messages[count - 1];
+    parts.push([
+      tail?.id ?? '',
+      tail?.role ?? '',
+      tail?.timestamp ?? '',
+      tail?.toolCallId ?? '',
+      tail?.toolName ?? '',
+      tail?.isError ? '1' : '0',
+    ].join(':'));
+  }
+
+  return hashStringDjb2(parts.join('|'));
+}
+
 // Timer for fallback history polling during active sends.
 // If no streaming events arrive within a few seconds, we periodically
 // poll chat.history to surface intermediate tool-call turns.
 let _historyPollTimer: ReturnType<typeof setTimeout> | null = null;
+const CHAT_HISTORY_FULL_LIMIT = 200;
+const CHAT_HISTORY_QUIET_PROBE_LIMIT = 64;
+const CHAT_HISTORY_QUIET_FULL_LIMIT = 120;
+const _historyFingerprintBySession = new Map<string, string>();
+const _historyProbeFingerprintBySession = new Map<string, string>();
+const _historyQuickFingerprintBySession = new Map<string, string>();
 
 // Timer for delayed error finalization. When the Gateway reports a mid-stream
 // error (e.g. "terminated"), it may retry internally and recover. We wait
@@ -1047,6 +1119,23 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   }
 }
 
+function hasPendingPreviewLoads(messages: RawMessage[]): boolean {
+  return messages.some((msg) => {
+    if (!msg._attachedFiles || msg._attachedFiles.length === 0) {
+      return false;
+    }
+    return msg._attachedFiles.some((file) => {
+      if (!file.filePath) {
+        return false;
+      }
+      if (file.mimeType.startsWith('image/')) {
+        return !file.preview;
+      }
+      return file.fileSize === 0;
+    });
+  });
+}
+
 function getCanonicalPrefixFromSessions(
   sessions: ChatSession[],
   preferredSessionKey?: string,
@@ -1815,6 +1904,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     const { currentSessionKey, messages } = state;
     const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    if (leavingEmpty) {
+      _historyFingerprintBySession.delete(currentSessionKey);
+      _historyProbeFingerprintBySession.delete(currentSessionKey);
+      _historyQuickFingerprintBySession.delete(currentSessionKey);
+    }
     const nextSessionRuntimeByKey = { ...state.sessionRuntimeByKey };
 
     if (leavingEmpty) {
@@ -1868,7 +1962,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
       _historyPollTimer = setTimeout(pollHistory, 1_000);
     }
-    void get().loadHistory(true);
+    scheduleNextFrame(() => {
+      void get().loadHistory(true);
+    });
   },
 
   // ── Delete session ──
@@ -1901,6 +1997,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const { currentSessionKey, sessions } = get();
     const remaining = sessions.filter((s) => s.key !== key);
+    _historyFingerprintBySession.delete(key);
+    _historyProbeFingerprintBySession.delete(key);
+    _historyQuickFingerprintBySession.delete(key);
 
     if (currentSessionKey === key) {
       clearHistoryPoll();
@@ -1963,6 +2062,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // conversation history inaccessible when the user switches back to it.
     const { currentSessionKey, messages } = get();
     const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    if (leavingEmpty) {
+      _historyFingerprintBySession.delete(currentSessionKey);
+      _historyProbeFingerprintBySession.delete(currentSessionKey);
+      _historyQuickFingerprintBySession.delete(currentSessionKey);
+    }
     const prefix = resolveCanonicalPrefixForAgent(agentId)
       ?? getCanonicalPrefixFromSessions(get().sessions, currentSessionKey)
       ?? DEFAULT_CANONICAL_PREFIX;
@@ -2011,6 +2115,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // in the sidebar.
     const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
     if (!isEmptyNonMain) return;
+    _historyFingerprintBySession.delete(currentSessionKey);
+    _historyProbeFingerprintBySession.delete(currentSessionKey);
+    _historyQuickFingerprintBySession.delete(currentSessionKey);
     set((s) => ({
       sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
       sessionLabels: Object.fromEntries(
@@ -2035,6 +2142,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!quiet) set({ loading: true, error: null });
 
     const applyLoadedMessages = (rawMessages: RawMessage[], thinkingLevel: string | null) => {
+      const quickFingerprint = buildQuickRawHistoryFingerprint(rawMessages, thinkingLevel);
+      const previousQuickFingerprint = _historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
+      const currentStateForQuickPath = get();
+      const canSkipWithQuickFingerprint = (
+        previousQuickFingerprint === quickFingerprint
+        && currentStateForQuickPath.currentSessionKey === requestedSessionKey
+        && currentStateForQuickPath.messages.length > 0
+        && currentStateForQuickPath.thinkingLevel === thinkingLevel
+      );
+      if (canSkipWithQuickFingerprint) {
+        if (!quiet && currentStateForQuickPath.loading) {
+          set({ loading: false });
+        }
+        return;
+      }
+      _historyQuickFingerprintBySession.set(requestedSessionKey, quickFingerprint);
+
       // Before filtering: attach images/files from tool_result messages to the next assistant message
       const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
       const filteredMessages: RawMessage[] = [];
@@ -2074,64 +2198,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      const currentState = get();
-      const messageListChanged = !areMessagesEquivalent(currentState.messages, finalMessages);
-      const thinkingLevelChanged = currentState.thinkingLevel !== thinkingLevel;
-      const nextStatePatch: Partial<ChatState> = {};
-      if (messageListChanged) {
-        nextStatePatch.messages = finalMessages;
-      }
-      if (thinkingLevelChanged) {
-        nextStatePatch.thinkingLevel = thinkingLevel;
-      }
-      if (currentState.loading) {
-        nextStatePatch.loading = false;
-      }
-      if (Object.keys(nextStatePatch).length > 0) {
-        set(nextStatePatch);
-      }
-
-      // 统一会话标题提取：优先用户首条有效消息；无用户消息时回退 assistant 首条有效消息（过滤模板句）
       const isMainSession = requestedSessionKey.endsWith(':main');
-      if (!isMainSession) {
-        const resolvedLabel = resolveSessionLabelFromMessages(finalMessages);
-        if (resolvedLabel) {
-          const currentLabel = get().sessionLabels[requestedSessionKey];
-          if (currentLabel !== resolvedLabel) {
-            set((s) => ({
-              sessionLabels: { ...s.sessionLabels, [requestedSessionKey]: resolvedLabel },
-            }));
-          }
-        }
-      }
-
-      // Record last activity time from the last message in history
+      const resolvedLabel = !isMainSession
+        ? resolveSessionLabelFromMessages(finalMessages)
+        : '';
       const lastMsg = finalMessages[finalMessages.length - 1];
-      if (lastMsg?.timestamp) {
-        const lastAt = toMs(lastMsg.timestamp);
-        const currentLastAt = get().sessionLastActivity[requestedSessionKey];
-        if (currentLastAt !== lastAt) {
-          set((s) => ({
-            sessionLastActivity: { ...s.sessionLastActivity, [requestedSessionKey]: lastAt },
-          }));
-        }
-      }
+      const lastAt = lastMsg?.timestamp ? toMs(lastMsg.timestamp) : null;
 
-      // Async: load missing image previews from disk (updates in background)
-      loadMissingPreviews(finalMessages).then((updated) => {
-        if (updated) {
-          // Create new object references so React.memo detects changes.
-          // loadMissingPreviews mutates AttachedFileMeta in place, so we
-          // must produce fresh message + file references for each affected msg.
-          set({
-            messages: finalMessages.map(msg =>
-              msg._attachedFiles
-                ? { ...msg, _attachedFiles: msg._attachedFiles.map(f => ({ ...f })) }
-                : msg
-            ),
-          });
-        }
-      });
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
 
       // If we're sending but haven't received streaming events, check
@@ -2143,63 +2216,178 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return toMs(msg.timestamp) >= userMsTs;
       };
 
-      if (isSendingNow && !pendingFinal) {
-        const hasRecentAssistantActivity = [...filteredMessages].reverse().some((msg) => {
-          if (msg.role !== 'assistant') return false;
-          return isAfterUserMsg(msg);
-        });
-        if (hasRecentAssistantActivity) {
-          set({ pendingFinal: true });
-        }
-      }
+      const hasRecentAssistantActivity = isSendingNow && !pendingFinal
+        ? [...filteredMessages].reverse().some((msg) => msg.role === 'assistant' && isAfterUserMsg(msg))
+        : false;
 
       // If pendingFinal, check whether the AI produced a final text response.
-      if (pendingFinal || get().pendingFinal) {
-        const recentAssistant = [...filteredMessages].reverse().find((msg) => {
-          if (msg.role !== 'assistant') return false;
-          if (!hasNonToolAssistantContent(msg)) return false;
-          return isAfterUserMsg(msg);
-        });
-        if (recentAssistant) {
-          clearHistoryPoll();
-          set({ sending: false, activeRunId: null, pendingFinal: false });
+      const hasRecentFinalAssistantMessage = [...filteredMessages].reverse().some((msg) => {
+        if (msg.role !== 'assistant') return false;
+        if (!hasNonToolAssistantContent(msg)) return false;
+        return isAfterUserMsg(msg);
+      });
+
+      let didMessageListChange = false;
+      set((state) => {
+        if (state.currentSessionKey !== requestedSessionKey) {
+          return state;
         }
+        const nextStatePatch: Partial<ChatState> = {};
+        let changed = false;
+
+        if (!areMessagesEquivalent(state.messages, finalMessages)) {
+          nextStatePatch.messages = finalMessages;
+          didMessageListChange = true;
+          changed = true;
+        }
+        if (state.thinkingLevel !== thinkingLevel) {
+          nextStatePatch.thinkingLevel = thinkingLevel;
+          changed = true;
+        }
+        if (state.loading) {
+          nextStatePatch.loading = false;
+          changed = true;
+        }
+        if (resolvedLabel && state.sessionLabels[requestedSessionKey] !== resolvedLabel) {
+          nextStatePatch.sessionLabels = {
+            ...state.sessionLabels,
+            [requestedSessionKey]: resolvedLabel,
+          };
+          changed = true;
+        }
+        if (lastAt != null && state.sessionLastActivity[requestedSessionKey] !== lastAt) {
+          nextStatePatch.sessionLastActivity = {
+            ...state.sessionLastActivity,
+            [requestedSessionKey]: lastAt,
+          };
+          changed = true;
+        }
+        if (hasRecentAssistantActivity && state.sending && !state.pendingFinal) {
+          nextStatePatch.pendingFinal = true;
+          changed = true;
+        }
+        if (hasRecentFinalAssistantMessage && (state.sending || state.activeRunId != null || state.pendingFinal)) {
+          nextStatePatch.sending = false;
+          nextStatePatch.activeRunId = null;
+          nextStatePatch.pendingFinal = false;
+          changed = true;
+        }
+
+        return changed ? nextStatePatch : state;
+      });
+
+      if (hasRecentFinalAssistantMessage) {
+        clearHistoryPoll();
+      }
+
+      // Async: load missing image previews from disk (updates in background)
+      if (didMessageListChange && hasPendingPreviewLoads(finalMessages)) {
+        void loadMissingPreviews(finalMessages).then((updated) => {
+          if (!updated) {
+            return;
+          }
+          set((state) => {
+            if (state.currentSessionKey !== requestedSessionKey) {
+              return state;
+            }
+            if (state.messages !== finalMessages) {
+              return state;
+            }
+            return {
+              messages: finalMessages.map((msg) => (
+                msg._attachedFiles
+                  ? { ...msg, _attachedFiles: msg._attachedFiles.map((file) => ({ ...file })) }
+                  : msg
+              )),
+            };
+          });
+        });
       }
     };
 
-    try {
+    const fetchHistoryWindow = async (
+      limit: number,
+    ): Promise<{ rawMessages: RawMessage[]; thinkingLevel: string | null }> => {
       const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
         'chat.history',
-        { sessionKey: requestedSessionKey, limit: 200 },
+        { sessionKey: requestedSessionKey, limit },
       );
+      let rawMessages = Array.isArray(data?.messages) ? data.messages as RawMessage[] : [];
+      const thinkingLevel = data?.thinkingLevel ? String(data.thinkingLevel) : null;
+      if (rawMessages.length === 0) {
+        rawMessages = await loadCronFallbackMessages(requestedSessionKey, limit);
+      }
+      return { rawMessages, thinkingLevel };
+    };
+
+    try {
+      if (quiet) {
+        const probe = await fetchHistoryWindow(CHAT_HISTORY_QUIET_PROBE_LIMIT);
+        if (get().currentSessionKey !== requestedSessionKey) {
+          return;
+        }
+        const probeFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
+        const previousProbeFingerprint = _historyProbeFingerprintBySession.get(requestedSessionKey) ?? null;
+        _historyProbeFingerprintBySession.set(requestedSessionKey, probeFingerprint);
+
+        const hasKnownFullSnapshot = _historyFingerprintBySession.has(requestedSessionKey);
+        const hasRenderableMessages = get().messages.length > 0;
+        if (
+          previousProbeFingerprint === probeFingerprint
+          && hasKnownFullSnapshot
+          && hasRenderableMessages
+        ) {
+          return;
+        }
+
+        const shouldUseProbeAsFinal = probe.rawMessages.length < CHAT_HISTORY_QUIET_PROBE_LIMIT;
+        if (shouldUseProbeAsFinal) {
+          const fullFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
+          _historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
+          applyLoadedMessages(probe.rawMessages, probe.thinkingLevel);
+          return;
+        }
+
+        const full = await fetchHistoryWindow(CHAT_HISTORY_QUIET_FULL_LIMIT);
+        if (get().currentSessionKey !== requestedSessionKey) {
+          return;
+        }
+        const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
+        _historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
+        _historyProbeFingerprintBySession.set(requestedSessionKey, fullFingerprint);
+        applyLoadedMessages(full.rawMessages, full.thinkingLevel);
+        return;
+      }
+
+      const full = await fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT);
       // 防止异步竞态：请求返回时若用户已切到其它会话，直接丢弃本次结果。
+      if (get().currentSessionKey !== requestedSessionKey) {
+        set({ loading: false });
+        return;
+      }
+      const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
+      _historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
+      _historyProbeFingerprintBySession.set(requestedSessionKey, fullFingerprint);
+      applyLoadedMessages(full.rawMessages, full.thinkingLevel);
+    } catch (err) {
+      console.warn('Failed to load chat history:', err);
+      const fallbackMessages = await loadCronFallbackMessages(requestedSessionKey, CHAT_HISTORY_FULL_LIMIT);
       if (get().currentSessionKey !== requestedSessionKey) {
         if (!quiet) {
           set({ loading: false });
         }
         return;
       }
-      if (data) {
-        let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
-        const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
-        if (rawMessages.length === 0) {
-          rawMessages = await loadCronFallbackMessages(requestedSessionKey, 200);
-        }
-        applyLoadedMessages(rawMessages, thinkingLevel);
-      } else {
-        const fallbackMessages = await loadCronFallbackMessages(requestedSessionKey, 200);
-        if (fallbackMessages.length > 0) {
-          applyLoadedMessages(fallbackMessages, null);
-        } else if (!quiet) {
-          set({ messages: [], loading: false });
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to load chat history:', err);
-      const fallbackMessages = await loadCronFallbackMessages(requestedSessionKey, 200);
       if (fallbackMessages.length > 0) {
+        const fallbackFingerprint = buildHistoryFingerprint(fallbackMessages, null);
+        _historyFingerprintBySession.set(requestedSessionKey, fallbackFingerprint);
+        _historyProbeFingerprintBySession.set(requestedSessionKey, fallbackFingerprint);
         applyLoadedMessages(fallbackMessages, null);
       } else if (!quiet) {
+        const emptyFingerprint = buildHistoryFingerprint([], null);
+        _historyFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
+        _historyProbeFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
+        _historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
         set({ messages: [], loading: false });
       }
     }
