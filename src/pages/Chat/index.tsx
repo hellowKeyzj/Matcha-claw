@@ -48,6 +48,10 @@ interface SessionScrollSnapshot {
   fallbackScrollTop: number;
 }
 
+interface ChatBottomVirtualizer {
+  scrollToIndex: (index: number, options: { align: 'end' }) => void;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -100,6 +104,28 @@ function resolveMessageAnchorKey(message: RawMessage, index: number): string {
   const timestamp = typeof message.timestamp === 'number' ? message.timestamp : 'na';
   const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
   return `fallback:${role}:${timestamp}:${toolCallId}:${index}`;
+}
+
+export function scrollChatToBottom(
+  messagesCount: number,
+  virtualizer: ChatBottomVirtualizer,
+  endRef: { current: HTMLDivElement | null },
+): void {
+  if (messagesCount > 0) {
+    virtualizer.scrollToIndex(messagesCount - 1, { align: 'end' });
+  }
+  endRef.current?.scrollIntoView({ behavior: 'auto' });
+}
+
+export function shouldAutoScrollChat(
+  shouldStickToBottom: boolean,
+  pendingRestoreSessionKey: string | null,
+  currentSessionKey: string,
+): boolean {
+  if (!shouldStickToBottom) {
+    return false;
+  }
+  return pendingRestoreSessionKey == null || pendingRestoreSessionKey !== currentSessionKey;
 }
 
 export function Chat() {
@@ -337,7 +363,7 @@ export function Chat() {
       }
       if (!snapshot || snapshot.atBottom) {
         shouldStickToBottomRef.current = true;
-        viewport.scrollTop = viewport.scrollHeight;
+        scrollChatToBottom(messages.length, messageVirtualizer, messagesEndRef);
         pendingScrollRestoreSessionKeyRef.current = null;
         return;
       }
@@ -371,14 +397,26 @@ export function Chat() {
   // Auto-scroll on new messages, streaming, or activity changes.
   // Use auto behavior to avoid scroll animation blur/ghosting under heavy render load.
   useEffect(() => {
-    if (!shouldStickToBottomRef.current) {
+    if (!shouldAutoScrollChat(
+      shouldStickToBottomRef.current,
+      pendingScrollRestoreSessionKeyRef.current,
+      currentSessionKey,
+    )) {
       return;
     }
     if (autoScrollRafRef.current != null) {
       window.cancelAnimationFrame(autoScrollRafRef.current);
     }
     autoScrollRafRef.current = window.requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      if (!shouldAutoScrollChat(
+        shouldStickToBottomRef.current,
+        pendingScrollRestoreSessionKeyRef.current,
+        currentSessionKey,
+      )) {
+        autoScrollRafRef.current = null;
+        return;
+      }
+      scrollChatToBottom(messages.length, messageVirtualizer, messagesEndRef);
       autoScrollRafRef.current = null;
     });
     return () => {
@@ -387,7 +425,7 @@ export function Chat() {
         autoScrollRafRef.current = null;
       }
     };
-  }, [messages, streamingMessage, sending, pendingFinal, currentSessionKey]);
+  }, [currentSessionKey, messageVirtualizer, messages, sending, pendingFinal, streamingMessage]);
 
   // Update timestamp when sending starts
   useEffect(() => {
