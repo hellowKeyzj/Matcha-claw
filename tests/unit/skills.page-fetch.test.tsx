@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
@@ -49,7 +49,7 @@ const skillsState: {
 };
 
 vi.mock('@/stores/skills', () => ({
-  useSkillsStore: () => skillsState,
+  useSkillsStore: (selector: (state: typeof skillsState) => unknown) => selector(skillsState),
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -108,5 +108,30 @@ describe('skills page fetch behavior', () => {
     await waitFor(() => {
       expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('技能页会一次性渲染完整技能列表，不使用内部裁切滚动区', async () => {
+    skillsState.skills = Array.from({ length: 30 }, (_, index) => ({
+      id: `skill-${index + 1}`,
+      name: `Skill ${index + 1}`,
+      description: `Description ${index + 1}`,
+      enabled: index % 2 === 0,
+      isBundled: index % 3 === 0,
+      eligible: true,
+    }));
+
+    const { container } = render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Skill 1')).toBeInTheDocument();
+      expect(screen.getByText('Skill 30')).toBeInTheDocument();
+    });
+
+    const clippedViewport = container.querySelector('.max-h-\\[56vh\\].overflow-y-auto');
+    expect(clippedViewport).toBeNull();
   });
 });

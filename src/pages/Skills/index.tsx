@@ -47,14 +47,7 @@ import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
-const INITIAL_SKILLS_BATCH = 8;
-const SKILLS_BATCH_SIZE = 12;
-const SKILLS_GRID_SCROLL_THRESHOLD_PX = 180;
-const SKILLS_GRID_VIRTUAL_THRESHOLD = 24;
-const SKILLS_GRID_ESTIMATED_ROW_HEIGHT = 248;
-const SKILLS_GRID_VIRTUAL_OVERSCAN = 1;
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
-const SKILLS_AUTO_APPEND_IDLE_TIMEOUT_MS = 420;
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   if (!skill.enabled) return 'disabled';
@@ -681,13 +674,8 @@ export function Skills() {
   const [activeTab, setActiveTab] = useState('all');
   const isAllTabActive = activeTab === 'all';
   const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
-  const [visibleSkillCount, setVisibleSkillCount] = useState(INITIAL_SKILLS_BATCH);
   const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(false);
   const marketplaceDiscoveryAttemptedRef = useRef(false);
-  const skillsGridScrollRef = useRef<HTMLDivElement | null>(null);
-  const [skillsGridScrollTop, setSkillsGridScrollTop] = useState(0);
-  const [skillsGridViewportHeight, setSkillsGridViewportHeight] = useState(0);
-  const [skillsGridViewportWidth, setSkillsGridViewportWidth] = useState(0);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
   const [showGatewayWarning, setShowGatewayWarning] = useState(false);
@@ -821,121 +809,6 @@ export function Skills() {
       marketplace: safeSkills.filter((s) => !s.isBundled).length,
     };
   }, [isAllTabActive, safeSkills]);
-
-  const shouldUseVirtualSkillsGrid = isAllTabActive
-    && skillsHeavyContentReady
-    && filteredSkillCards.length > SKILLS_GRID_VIRTUAL_THRESHOLD;
-
-  const visibleSkills = useMemo(
-    () => (isAllTabActive ? filteredSkillCards.slice(0, visibleSkillCount) : []),
-    [filteredSkillCards, isAllTabActive, visibleSkillCount],
-  );
-  const displayedSkillCount = isAllTabActive
-    ? (shouldUseVirtualSkillsGrid ? filteredSkillCards.length : Math.min(visibleSkillCount, filteredSkillCards.length))
-    : 0;
-
-  useEffect(() => {
-    if (!isAllTabActive) {
-      return;
-    }
-    setVisibleSkillCount((prev) => (prev === INITIAL_SKILLS_BATCH ? prev : INITIAL_SKILLS_BATCH));
-  }, [filteredSkillCards, isAllTabActive]);
-
-  const appendVisibleSkills = useCallback(() => {
-    setVisibleSkillCount((prev) => {
-      if (prev >= filteredSkillCards.length) {
-        return prev;
-      }
-      return Math.min(prev + SKILLS_BATCH_SIZE, filteredSkillCards.length);
-    });
-  }, [filteredSkillCards.length]);
-
-  useEffect(() => {
-    if (!shouldUseVirtualSkillsGrid) {
-      setSkillsGridScrollTop((prev) => (prev === 0 ? prev : 0));
-      setSkillsGridViewportHeight((prev) => (prev === 0 ? prev : 0));
-      setSkillsGridViewportWidth((prev) => (prev === 0 ? prev : 0));
-      return;
-    }
-
-    const element = skillsGridScrollRef.current;
-    if (!element) {
-      return;
-    }
-
-    let rafId: number | null = null;
-    const updateViewport = (nextHeight: number, nextWidth: number) => {
-      if (rafId != null) {
-        window.cancelAnimationFrame(rafId);
-      }
-      rafId = window.requestAnimationFrame(() => {
-        rafId = null;
-        setSkillsGridViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
-        setSkillsGridViewportWidth((prev) => (prev === nextWidth ? prev : nextWidth));
-      });
-    };
-
-    updateViewport(Math.round(element.clientHeight), Math.round(element.clientWidth));
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) {
-        return;
-      }
-      updateViewport(Math.round(entry.contentRect.height), Math.round(entry.contentRect.width));
-    });
-    observer.observe(element);
-
-    return () => {
-      observer.disconnect();
-      if (rafId != null) {
-        window.cancelAnimationFrame(rafId);
-      }
-    };
-  }, [shouldUseVirtualSkillsGrid]);
-
-  const handleSkillsGridScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
-    if (!isAllTabActive) {
-      return;
-    }
-    const target = event.currentTarget;
-    setSkillsGridScrollTop((prev) => (prev === target.scrollTop ? prev : target.scrollTop));
-    if (shouldUseVirtualSkillsGrid) {
-      return;
-    }
-    if (displayedSkillCount >= filteredSkillCards.length) {
-      return;
-    }
-    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
-    if (remain <= SKILLS_GRID_SCROLL_THRESHOLD_PX) {
-      appendVisibleSkills();
-    }
-  }, [appendVisibleSkills, displayedSkillCount, filteredSkillCards.length, isAllTabActive, shouldUseVirtualSkillsGrid]);
-
-  useEffect(() => {
-    if (shouldUseVirtualSkillsGrid) {
-      return;
-    }
-    if (!isAllTabActive || !skillsHeavyContentReady) {
-      return;
-    }
-    if (displayedSkillCount >= filteredSkillCards.length) {
-      return;
-    }
-    const container = skillsGridScrollRef.current;
-    if (!container) {
-      return;
-    }
-    if (container.scrollHeight <= container.clientHeight + 8) {
-      const cancel = scheduleIdleReady(() => {
-        appendVisibleSkills();
-      }, {
-        idleTimeoutMs: SKILLS_AUTO_APPEND_IDLE_TIMEOUT_MS,
-        fallbackDelayMs: 120,
-        useAnimationFrame: true,
-      });
-      return cancel;
-    }
-  }, [appendVisibleSkills, displayedSkillCount, filteredSkillCards.length, isAllTabActive, shouldUseVirtualSkillsGrid, skillsHeavyContentReady, visibleSkills.length]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -1108,55 +981,6 @@ export function Skills() {
     navigate('/settings?section=gateway');
   }, [navigate]);
 
-  useEffect(() => {
-    if (!shouldUseVirtualSkillsGrid || !isAllTabActive) {
-      return;
-    }
-    const container = skillsGridScrollRef.current;
-    if (container) {
-      container.scrollTop = 0;
-    }
-    setSkillsGridScrollTop((prev) => (prev === 0 ? prev : 0));
-  }, [deferredSearchQuery, deferredSelectedSource, isAllTabActive, shouldUseVirtualSkillsGrid]);
-
-  const virtualSkillsWindow = useMemo(() => {
-    if (!shouldUseVirtualSkillsGrid) {
-      return {
-        skills: visibleSkills,
-        topSpacerHeight: 0,
-        bottomSpacerHeight: 0,
-      };
-    }
-
-    const columnCount = skillsGridViewportWidth >= 1024 ? 3 : skillsGridViewportWidth >= 768 ? 2 : 1;
-    const safeViewportHeight = Math.max(skillsGridViewportHeight, SKILLS_GRID_ESTIMATED_ROW_HEIGHT);
-    const visibleRows = Math.max(1, Math.ceil(safeViewportHeight / SKILLS_GRID_ESTIMATED_ROW_HEIGHT));
-    const totalRows = Math.ceil(filteredSkillCards.length / columnCount);
-    const startRow = Math.max(
-      0,
-      Math.floor(skillsGridScrollTop / SKILLS_GRID_ESTIMATED_ROW_HEIGHT) - SKILLS_GRID_VIRTUAL_OVERSCAN,
-    );
-    const endRow = Math.min(
-      totalRows,
-      startRow + visibleRows + SKILLS_GRID_VIRTUAL_OVERSCAN * 2,
-    );
-    const startIndex = startRow * columnCount;
-    const endIndex = Math.min(filteredSkillCards.length, endRow * columnCount);
-
-    return {
-      skills: filteredSkillCards.slice(startIndex, endIndex),
-      topSpacerHeight: startRow * SKILLS_GRID_ESTIMATED_ROW_HEIGHT,
-      bottomSpacerHeight: Math.max(0, (totalRows - endRow) * SKILLS_GRID_ESTIMATED_ROW_HEIGHT),
-    };
-  }, [
-    filteredSkillCards,
-    skillsGridScrollTop,
-    skillsGridViewportHeight,
-    skillsGridViewportWidth,
-    shouldUseVirtualSkillsGrid,
-    visibleSkills,
-  ]);
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -1324,37 +1148,16 @@ export function Skills() {
               </CardContent>
             </Card>
           ) : (
-            <div className="space-y-4">
-              <div
-                ref={skillsGridScrollRef}
-                className="max-h-[56vh] overflow-y-auto pr-1"
-                onScroll={handleSkillsGridScroll}
-              >
-                {virtualSkillsWindow.topSpacerHeight > 0 ? (
-                  <div style={{ height: virtualSkillsWindow.topSpacerHeight }} />
-                ) : null}
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {virtualSkillsWindow.skills.map((skill) => (
-                    <SkillGridCard
-                      key={skill.skillId}
-                      {...skill}
-                      onOpenDetail={handleOpenSkillDetail}
-                      onToggleSkill={handleToggleSkillQuick}
-                      onUninstallSkill={handleUninstallSkillQuick}
-                    />
-                  ))}
-                </div>
-                {virtualSkillsWindow.bottomSpacerHeight > 0 ? (
-                  <div style={{ height: virtualSkillsWindow.bottomSpacerHeight }} />
-                ) : null}
-              </div>
-              {activeTab === 'all' && !shouldUseVirtualSkillsGrid && visibleSkillCount < filteredSkillCards.length && (
-                <div className="rounded-md border border-dashed px-3 py-3 text-center">
-                  <p className="text-xs text-muted-foreground">
-                    {t('pagination.showing', { shown: displayedSkillCount, total: filteredSkillCards.length })}
-                  </p>
-                </div>
-              )}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {filteredSkillCards.map((skill) => (
+                <SkillGridCard
+                  key={skill.skillId}
+                  {...skill}
+                  onOpenDetail={handleOpenSkillDetail}
+                  onToggleSkill={handleToggleSkillQuick}
+                  onUninstallSkill={handleUninstallSkillQuick}
+                />
+              ))}
             </div>
           )}
           </TabsContent>
