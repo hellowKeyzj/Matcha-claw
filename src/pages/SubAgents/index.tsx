@@ -1,5 +1,4 @@
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -23,19 +22,9 @@ import { SubagentTemplateLoadDialog } from './components/SubagentTemplateLoadDia
 type DialogMode = 'create' | 'edit';
 type TemplateListItem = SubagentTemplateCatalogResult['templates'][number];
 const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
-const TEMPLATE_GRID_VIRTUAL_THRESHOLD = 24;
-const TEMPLATE_GRID_VIRTUAL_OVERSCAN = 4;
-const TEMPLATE_GRID_ESTIMATED_ROW_HEIGHT = 172;
-
-function resolveTemplateGridColumnCount(width: number): number {
-  if (width >= 1280) {
-    return 3;
-  }
-  if (width >= 768) {
-    return 2;
-  }
-  return 1;
-}
+const INITIAL_TEMPLATE_CARD_BATCH = 9;
+const TEMPLATE_CARD_BATCH_SIZE = 18;
+const TEMPLATE_CARD_SCROLL_THRESHOLD_PX = 180;
 
 const TemplateCatalogCard = memo(function TemplateCatalogCard({
   template,
@@ -156,12 +145,11 @@ export function SubAgents() {
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test',
   );
-  const [templateGridViewportWidth, setTemplateGridViewportWidth] = useState(0);
+  const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const wasGatewayRunningRef = useRef(gatewayState === 'running');
   const templateLoadRequestIdRef = useRef(0);
   const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
-  const templateGridResetKeyRef = useRef('');
   const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
@@ -309,66 +297,38 @@ export function SubAgents() {
     return templateCatalog.templates.filter((template) => template.categoryId === selectedTemplateCategory);
   }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCatalog.templates]);
   const deferredFilteredTemplates = useDeferredValue(filteredTemplates);
-  const templateGridColumnCount = useMemo(
-    () => resolveTemplateGridColumnCount(templateGridViewportWidth),
-    [templateGridViewportWidth],
+  const visibleTemplates = useMemo(
+    () => deferredFilteredTemplates.slice(0, visibleTemplateCount),
+    [deferredFilteredTemplates, visibleTemplateCount],
   );
-  const templateRows = useMemo(() => {
-    if (deferredFilteredTemplates.length === 0) {
-      return [] as TemplateListItem[][];
-    }
-    const rows: TemplateListItem[][] = [];
-    for (let index = 0; index < deferredFilteredTemplates.length; index += templateGridColumnCount) {
-      rows.push(deferredFilteredTemplates.slice(index, index + templateGridColumnCount));
-    }
-    return rows;
-  }, [deferredFilteredTemplates, templateGridColumnCount]);
-  const shouldUseVirtualTemplateGrid = deferredFilteredTemplates.length > TEMPLATE_GRID_VIRTUAL_THRESHOLD;
-  const templateRowVirtualizer = useVirtualizer({
-    count: templateRows.length,
-    getScrollElement: () => templateCardScrollRef.current,
-    estimateSize: () => TEMPLATE_GRID_ESTIMATED_ROW_HEIGHT,
-    overscan: TEMPLATE_GRID_VIRTUAL_OVERSCAN,
-  });
-  const virtualTemplateRows = templateRowVirtualizer.getVirtualItems();
+  const displayedTemplateCount = Math.min(visibleTemplateCount, deferredFilteredTemplates.length);
 
   useEffect(() => {
-    if (!templatesExpanded || !subagentsHeavyContentReady) {
+    if (!templatesExpanded) {
       return;
     }
-    const container = templateCardScrollRef.current;
-    if (!container) {
-      return;
-    }
+    setVisibleTemplateCount(INITIAL_TEMPLATE_CARD_BATCH);
+  }, [selectedTemplateCategory, templatesExpanded]);
 
-    let rafId: number | null = null;
-    const updateWidth = (nextWidth: number) => {
-      if (rafId != null) {
-        window.cancelAnimationFrame(rafId);
+  const appendVisibleTemplates = useCallback(() => {
+    setVisibleTemplateCount((prev) => {
+      if (prev >= deferredFilteredTemplates.length) {
+        return prev;
       }
-      rafId = window.requestAnimationFrame(() => {
-        rafId = null;
-        setTemplateGridViewportWidth((prev) => (prev === nextWidth ? prev : nextWidth));
-      });
-    };
-
-    updateWidth(Math.round(container.clientWidth));
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) {
-        return;
-      }
-      updateWidth(Math.round(entry.contentRect.width));
+      return Math.min(prev + TEMPLATE_CARD_BATCH_SIZE, deferredFilteredTemplates.length);
     });
-    observer.observe(container);
+  }, [deferredFilteredTemplates.length]);
 
-    return () => {
-      observer.disconnect();
-      if (rafId != null) {
-        window.cancelAnimationFrame(rafId);
-      }
-    };
-  }, [subagentsHeavyContentReady, templatesExpanded]);
+  const handleTemplateCardScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
+      return;
+    }
+    const target = event.currentTarget;
+    const remain = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (remain <= TEMPLATE_CARD_SCROLL_THRESHOLD_PX) {
+      appendVisibleTemplates();
+    }
+  }, [appendVisibleTemplates, deferredFilteredTemplates.length, displayedTemplateCount]);
 
   useEffect(() => {
     if (!subagentsHeavyContentReady || selectedTemplateCategory === 'all') {
@@ -381,32 +341,26 @@ export function SubAgents() {
   }, [selectedTemplateCategory, subagentsHeavyContentReady, templateCategories]);
 
   useEffect(() => {
-    templateRowVirtualizer.measure();
-  }, [templateGridColumnCount, templateRowVirtualizer, templateRows.length]);
-
-  useEffect(() => {
     if (!templatesExpanded || !subagentsHeavyContentReady) {
-      templateGridResetKeyRef.current = '';
       return;
     }
-    const resetKey = `${selectedTemplateCategory}:${deferredFilteredTemplates.length}:${templateGridColumnCount}`;
-    if (templateGridResetKeyRef.current === resetKey) {
+    if (displayedTemplateCount >= deferredFilteredTemplates.length) {
       return;
     }
-    templateGridResetKeyRef.current = resetKey;
-
     const container = templateCardScrollRef.current;
-    if (container) {
-      container.scrollTop = 0;
+    if (!container) {
+      return;
     }
-    templateRowVirtualizer.scrollToOffset(0);
+    if (container.scrollHeight <= container.clientHeight + 8) {
+      appendVisibleTemplates();
+    }
   }, [
+    appendVisibleTemplates,
     deferredFilteredTemplates.length,
-    selectedTemplateCategory,
+    displayedTemplateCount,
     subagentsHeavyContentReady,
-    templateGridColumnCount,
-    templateRowVirtualizer,
     templatesExpanded,
+    visibleTemplates.length,
   ]);
 
   const prefetchTemplateDetail = useCallback((templateId: string) => {
@@ -653,68 +607,35 @@ export function SubAgents() {
               <div
                 ref={templateCardScrollRef}
                 className="max-h-[56vh] overflow-y-auto pr-1"
+                onScroll={handleTemplateCardScroll}
               >
-                {shouldUseVirtualTemplateGrid ? (
-                  <div
-                    className="relative"
-                    style={{ height: `${templateRowVirtualizer.getTotalSize()}px` }}
-                  >
-                    {virtualTemplateRows.map((virtualRow) => {
-                      const rowTemplates = templateRows[virtualRow.index] ?? [];
-                      return (
-                        <div
-                          key={virtualRow.key}
-                          data-index={virtualRow.index}
-                          ref={templateRowVirtualizer.measureElement}
-                          className="absolute left-0 top-0 w-full pb-3"
-                          style={{ transform: `translateY(${virtualRow.start}px)` }}
-                        >
-                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                            {rowTemplates.map((template) => {
-                              const localizedText = localizedTemplateTextMap.get(template.id);
-                              return (
-                                <TemplateCatalogCard
-                                  key={template.id}
-                                  template={template}
-                                  localizedTemplateName={localizedText?.name ?? template.name}
-                                  localizedSummary={localizedText?.summary ?? template.summary ?? ''}
-                                  loading={templateLoadingId === template.id}
-                                  disabled={modelsLoading || availableModels.length === 0}
-                                  badgeLabel={t('templates.badge')}
-                                  loadLabel={t('templates.load')}
-                                  loadingLabel={t('templates.loadingButton')}
-                                  onPrefetch={prefetchTemplateDetail}
-                                  onLoad={handleLoadTemplateCard}
-                                />
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {deferredFilteredTemplates.map((template) => {
-                      const localizedText = localizedTemplateTextMap.get(template.id);
-                      return (
-                        <TemplateCatalogCard
-                          key={template.id}
-                          template={template}
-                          localizedTemplateName={localizedText?.name ?? template.name}
-                          localizedSummary={localizedText?.summary ?? template.summary ?? ''}
-                          loading={templateLoadingId === template.id}
-                          disabled={modelsLoading || availableModels.length === 0}
-                          badgeLabel={t('templates.badge')}
-                          loadLabel={t('templates.load')}
-                          loadingLabel={t('templates.loadingButton')}
-                          onPrefetch={prefetchTemplateDetail}
-                          onLoad={handleLoadTemplateCard}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {visibleTemplates.map((template) => {
+                    const localizedText = localizedTemplateTextMap.get(template.id);
+                    return (
+                      <TemplateCatalogCard
+                        key={template.id}
+                        template={template}
+                        localizedTemplateName={localizedText?.name ?? template.name}
+                        localizedSummary={localizedText?.summary ?? template.summary ?? ''}
+                        loading={templateLoadingId === template.id}
+                        disabled={modelsLoading || availableModels.length === 0}
+                        badgeLabel={t('templates.badge')}
+                        loadLabel={t('templates.load')}
+                        loadingLabel={t('templates.loadingButton')}
+                        onPrefetch={prefetchTemplateDetail}
+                        onLoad={handleLoadTemplateCard}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {displayedTemplateCount < deferredFilteredTemplates.length && (
+              <div className="rounded-md border border-dashed px-3 py-2 text-center">
+                <p className="text-xs text-muted-foreground">
+                  {t('templates.pagination.showing', { shown: displayedTemplateCount, total: deferredFilteredTemplates.length })}
+                </p>
               </div>
             )}
           </>

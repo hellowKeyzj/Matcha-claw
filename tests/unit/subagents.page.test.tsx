@@ -565,4 +565,37 @@ describe('subagents page', () => {
       );
     });
   });
+
+  it('大模板列表展开后仍保持直接响应式 grid 容器，避免虚拟行破坏自适应布局', async () => {
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel) => {
+      if (channel === 'openclaw:getSubagentTemplateCatalog') {
+        return {
+          sourceDir: '/repo/integrations/openclaw',
+          templates: Array.from({ length: 30 }, (_, index) => ({
+            id: `template-${index + 1}`,
+            name: `Template ${index + 1}`,
+            emoji: '🤖',
+            summary: `Template summary ${index + 1}`,
+            files: ['AGENTS.md'],
+          })),
+        };
+      }
+      return undefined;
+    });
+
+    renderSubagentsPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Template Library' }));
+
+    const firstTemplateTitle = await screen.findByText('Template 1');
+    const templateGrid = firstTemplateTitle.closest('.grid');
+
+    expect(templateGrid).not.toBeNull();
+    expect(templateGrid?.className).toContain('grid-cols-1');
+    expect(templateGrid?.className).toContain('md:grid-cols-2');
+    expect(templateGrid?.className).toContain('xl:grid-cols-3');
+    expect(templateGrid?.parentElement?.className).toContain('max-h-[56vh]');
+    expect(templateGrid?.parentElement?.className).toContain('overflow-y-auto');
+  });
 });
