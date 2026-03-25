@@ -584,6 +584,21 @@ function stripAssistantTextForToolFiller(message: RawMessage): RawMessage {
   return changed ? nextRow as unknown as RawMessage : message;
 }
 
+function createIntermediateToolTurnSnapshot(
+  message: RawMessage,
+  id: string,
+): RawMessage {
+  const normalizedMessage: RawMessage = {
+    ...message,
+    role: 'assistant',
+    id,
+  };
+  if (!hasAssistantToolCall(normalizedMessage)) {
+    return normalizedMessage;
+  }
+  return stripAssistantTextForToolFiller(normalizedMessage);
+}
+
 function shouldTreatAsIntermediateToolTurn(
   message: RawMessage | undefined,
   nextMessage?: RawMessage,
@@ -2897,11 +2912,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     const snapId = currentStream.id
                       || `${runId || 'run'}-turn-${s.messages.length}`;
                     if (!s.messages.some(m => m.id === snapId)) {
-                      const snapshot = sanitizeIntermediateToolFillerMessage({
-                        ...(currentStream as RawMessage),
-                        role: 'assistant',
-                        id: snapId,
-                      }, { trackPhrase: true });
+                      const snapshot = sanitizeIntermediateToolFillerMessage(
+                        createIntermediateToolTurnSnapshot(currentStream as RawMessage, snapId),
+                        { trackPhrase: true },
+                      );
                       snapshotMsgs.push(snapshot);
                     }
                   }
@@ -3003,16 +3017,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (currentStream && (currentStream.role === 'assistant' || currentStream.role === undefined)) {
           const snapId = (currentStream as RawMessage).id
             || `error-snap-${Date.now()}`;
-          const alreadyExists = get().messages.some(m => m.id === snapId);
-          if (!alreadyExists) {
-            const snapshot = sanitizeIntermediateToolFillerMessage({
-              ...currentStream,
-              role: 'assistant' as const,
-              id: snapId,
-            }, { trackPhrase: true });
-            set((s) => ({
-              messages: [...s.messages, snapshot],
-            }));
+            const alreadyExists = get().messages.some(m => m.id === snapId);
+            if (!alreadyExists) {
+              const snapshot = sanitizeIntermediateToolFillerMessage(
+                createIntermediateToolTurnSnapshot(currentStream, snapId),
+                { trackPhrase: true },
+              );
+              set((s) => ({
+                messages: [...s.messages, snapshot],
+              }));
           }
         }
 

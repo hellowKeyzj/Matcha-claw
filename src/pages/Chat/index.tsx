@@ -10,7 +10,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
+import { useChatStore, type ApprovalDecision, type ApprovalItem } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -21,9 +21,10 @@ import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { TaskInboxPanel } from './components/TaskInboxPanel';
 import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
-import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
+import { buildChatRows, type ChatRow } from './chat-row-model';
+import { useChatScrollOrchestrator } from './useChatScrollOrchestrator';
 
 const TASK_INBOX_MIN_WIDTH = 260;
 const TASK_INBOX_MAX_WIDTH = 560;
@@ -39,17 +40,6 @@ interface AgentSkillOption {
   id: string;
   name: string;
   icon?: string;
-}
-
-interface SessionScrollSnapshot {
-  atBottom: boolean;
-  anchorKey?: string;
-  anchorOffsetWithin?: number;
-  fallbackScrollTop: number;
-}
-
-interface ChatBottomVirtualizer {
-  scrollToIndex: (index: number, options: { align: 'end' }) => void;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -96,38 +86,6 @@ function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean
   return isDefault ? '⚙️' : '🤖';
 }
 
-function resolveMessageAnchorKey(message: RawMessage, index: number): string {
-  if (typeof message.id === 'string' && message.id.trim()) {
-    return `id:${message.id}`;
-  }
-  const role = typeof message.role === 'string' ? message.role : 'unknown';
-  const timestamp = typeof message.timestamp === 'number' ? message.timestamp : 'na';
-  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
-  return `fallback:${role}:${timestamp}:${toolCallId}:${index}`;
-}
-
-export function scrollChatToBottom(
-  messagesCount: number,
-  virtualizer: ChatBottomVirtualizer,
-  endRef: { current: HTMLDivElement | null },
-): void {
-  if (messagesCount > 0) {
-    virtualizer.scrollToIndex(messagesCount - 1, { align: 'end' });
-  }
-  endRef.current?.scrollIntoView({ behavior: 'auto' });
-}
-
-export function shouldAutoScrollChat(
-  shouldStickToBottom: boolean,
-  pendingRestoreSessionKey: string | null,
-  currentSessionKey: string,
-): boolean {
-  if (!shouldStickToBottom) {
-    return false;
-  }
-  return pendingRestoreSessionKey == null || pendingRestoreSessionKey !== currentSessionKey;
-}
-
 export function Chat() {
   const { t } = useTranslation('chat');
   const location = useLocation();
@@ -163,14 +121,10 @@ export function Chat() {
 
   const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const messageContentRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
-  const shouldStickToBottomRef = useRef(true);
-  const autoScrollRafRef = useRef<number | null>(null);
-  const sessionScrollSnapshotRef = useRef<Map<string, SessionScrollSnapshot>>(new Map());
-  const pendingScrollRestoreSessionKeyRef = useRef<string | null>(currentSessionKey);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
   const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
     try {
@@ -183,25 +137,6 @@ export function Chat() {
   const [skillConfigOpen, setSkillConfigOpen] = useState(false);
   const [skillConfigSaving, setSkillConfigSaving] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-  const messageAnchorKeys = useMemo(
-    () => messages.map((message, index) => resolveMessageAnchorKey(message, index)),
-    [messages],
-  );
-  const messageAnchorIndexByKey = useMemo(() => {
-    const map = new Map<string, number>();
-    messageAnchorKeys.forEach((key, index) => {
-      map.set(key, index);
-    });
-    return map;
-  }, [messageAnchorKeys]);
-  const messageVirtualizer = useVirtualizer({
-    count: messages.length,
-    getScrollElement: () => messagesViewportRef.current,
-    estimateSize: () => CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX,
-    overscan: CHAT_VIRTUAL_OVERSCAN,
-    getItemKey: (index) => messageAnchorKeys[index] ?? `idx:${index}`,
-  });
-  const virtualMessageItems = messageVirtualizer.getVirtualItems();
 
   useEffect(() => {
     try {
@@ -310,123 +245,6 @@ export function Chat() {
     };
   }, [cleanupEmptySession, isGatewayRunning, loadAgents, loadHistory, loadSessions, location.search, navigate, switchSession]);
 
-  useEffect(() => {
-    const viewport = messagesViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-
-    const evaluateStickiness = () => {
-      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      const atBottom = distanceToBottom <= CHAT_STICKY_BOTTOM_THRESHOLD_PX;
-      shouldStickToBottomRef.current = atBottom;
-
-      const nextSnapshot: SessionScrollSnapshot = {
-        atBottom,
-        fallbackScrollTop: viewport.scrollTop,
-      };
-      if (!atBottom && messages.length > 0) {
-        const virtualItems = messageVirtualizer.getVirtualItems();
-        const anchorItem = virtualItems.find((item) => (item.start + item.size) > viewport.scrollTop) ?? virtualItems[0];
-        if (anchorItem) {
-          nextSnapshot.anchorKey = messageAnchorKeys[anchorItem.index];
-          nextSnapshot.anchorOffsetWithin = Math.max(0, viewport.scrollTop - anchorItem.start);
-        }
-      }
-      sessionScrollSnapshotRef.current.set(currentSessionKey, nextSnapshot);
-    };
-
-    evaluateStickiness();
-    viewport.addEventListener('scroll', evaluateStickiness, { passive: true });
-    return () => {
-      viewport.removeEventListener('scroll', evaluateStickiness);
-    };
-  }, [currentSessionKey, messageAnchorKeys, messageVirtualizer, messages.length]);
-
-  useEffect(() => {
-    shouldStickToBottomRef.current = true;
-    pendingScrollRestoreSessionKeyRef.current = currentSessionKey;
-  }, [currentSessionKey]);
-
-  useEffect(() => {
-    if (pendingScrollRestoreSessionKeyRef.current !== currentSessionKey) {
-      return;
-    }
-    const viewport = messagesViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-    const snapshot = sessionScrollSnapshotRef.current.get(currentSessionKey);
-    const restoreRaf = window.requestAnimationFrame(() => {
-      if (pendingScrollRestoreSessionKeyRef.current !== currentSessionKey) {
-        return;
-      }
-      if (!snapshot || snapshot.atBottom) {
-        shouldStickToBottomRef.current = true;
-        scrollChatToBottom(messages.length, messageVirtualizer, messagesEndRef);
-        pendingScrollRestoreSessionKeyRef.current = null;
-        return;
-      }
-
-      shouldStickToBottomRef.current = false;
-      const anchorIndex = snapshot.anchorKey ? messageAnchorIndexByKey.get(snapshot.anchorKey) : undefined;
-      if (typeof anchorIndex === 'number') {
-        messageVirtualizer.scrollToIndex(anchorIndex, { align: 'start' });
-        window.requestAnimationFrame(() => {
-          const latestViewport = messagesViewportRef.current;
-          if (!latestViewport) {
-            return;
-          }
-          const maxTop = Math.max(0, latestViewport.scrollHeight - latestViewport.clientHeight);
-          const offsetWithin = snapshot.anchorOffsetWithin ?? 0;
-          latestViewport.scrollTop = Math.min(maxTop, Math.max(0, latestViewport.scrollTop + offsetWithin));
-          pendingScrollRestoreSessionKeyRef.current = null;
-        });
-        return;
-      }
-
-      const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-      viewport.scrollTop = Math.min(maxTop, Math.max(0, snapshot.fallbackScrollTop));
-      pendingScrollRestoreSessionKeyRef.current = null;
-    });
-    return () => {
-      window.cancelAnimationFrame(restoreRaf);
-    };
-  }, [currentSessionKey, messageAnchorIndexByKey, messageVirtualizer, messages.length]);
-
-  // Auto-scroll on new messages, streaming, or activity changes.
-  // Use auto behavior to avoid scroll animation blur/ghosting under heavy render load.
-  useEffect(() => {
-    if (!shouldAutoScrollChat(
-      shouldStickToBottomRef.current,
-      pendingScrollRestoreSessionKeyRef.current,
-      currentSessionKey,
-    )) {
-      return;
-    }
-    if (autoScrollRafRef.current != null) {
-      window.cancelAnimationFrame(autoScrollRafRef.current);
-    }
-    autoScrollRafRef.current = window.requestAnimationFrame(() => {
-      if (!shouldAutoScrollChat(
-        shouldStickToBottomRef.current,
-        pendingScrollRestoreSessionKeyRef.current,
-        currentSessionKey,
-      )) {
-        autoScrollRafRef.current = null;
-        return;
-      }
-      scrollChatToBottom(messages.length, messageVirtualizer, messagesEndRef);
-      autoScrollRafRef.current = null;
-    });
-    return () => {
-      if (autoScrollRafRef.current != null) {
-        window.cancelAnimationFrame(autoScrollRafRef.current);
-        autoScrollRafRef.current = null;
-      }
-    };
-  }, [currentSessionKey, messageVirtualizer, messages, sending, pendingFinal, streamingMessage]);
-
   // Update timestamp when sending starts
   useEffect(() => {
     if (sending && streamingTimestamp === 0) {
@@ -436,21 +254,59 @@ export function Chat() {
     }
   }, [sending, streamingTimestamp]);
 
-  const streamMsg = streamingMessage && typeof streamingMessage === 'object'
-    ? streamingMessage as unknown as { role?: string; content?: unknown; timestamp?: number }
-    : null;
-  const streamText = streamMsg ? extractText(streamMsg) : (typeof streamingMessage === 'string' ? streamingMessage : '');
-  const hasStreamText = streamText.trim().length > 0;
-  const streamThinking = streamMsg ? extractThinking(streamMsg) : null;
-  const hasStreamThinking = showThinking && !!streamThinking && streamThinking.trim().length > 0;
-  const streamTools = streamMsg ? extractToolUse(streamMsg) : [];
-  const hasStreamTools = streamTools.length > 0;
-  const streamImages = streamMsg ? extractImages(streamMsg) : [];
-  const hasStreamImages = streamImages.length > 0;
-  const hasStreamToolStatus = streamingTools.length > 0;
-  const shouldRenderStreaming = sending && (hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus);
-  const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
   const waitingApproval = approvalStatus === 'awaiting_approval';
+  const chatRows = useMemo(
+    () => buildChatRows({
+      sessionKey: currentSessionKey,
+      messages,
+      sending,
+      pendingFinal,
+      waitingApproval,
+      showThinking,
+      streamingMessage,
+      streamingTools,
+      streamingTimestamp,
+    }),
+    [
+      currentSessionKey,
+      messages,
+      pendingFinal,
+      sending,
+      showThinking,
+      streamingMessage,
+      streamingTimestamp,
+      streamingTools,
+      waitingApproval,
+    ],
+  );
+  const {
+    handleViewportPointerDown,
+    handleViewportScroll,
+    handleViewportTouchMove,
+    handleViewportWheel,
+    handleVirtualizerChange,
+  } = useChatScrollOrchestrator({
+    currentSessionKey,
+    rows: chatRows,
+    viewportRef: messagesViewportRef,
+    contentRef: messageContentRef,
+    stickyBottomThresholdPx: CHAT_STICKY_BOTTOM_THRESHOLD_PX,
+  });
+  const chatRowKeys = useMemo(
+    () => chatRows.map((row) => row.key),
+    [chatRows],
+  );
+  const messageVirtualizer = useVirtualizer({
+    count: chatRows.length,
+    getScrollElement: () => messagesViewportRef.current,
+    estimateSize: () => CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX,
+    overscan: CHAT_VIRTUAL_OVERSCAN,
+    getItemKey: (index) => chatRowKeys[index] ?? `idx:${index}`,
+    onChange: (instance) => {
+      handleVirtualizerChange(instance);
+    },
+  });
+  const virtualMessageItems = messageVirtualizer.getVirtualItems();
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
   const availableSkillOptions = useMemo<AgentSkillOption[]>(
@@ -556,79 +412,51 @@ export function Chat() {
           <ChatToolbar />
         </div>
 
-        <div ref={messagesViewportRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div
+          ref={messagesViewportRef}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+          onPointerDownCapture={handleViewportPointerDown}
+          onScroll={handleViewportScroll}
+          onTouchMoveCapture={handleViewportTouchMove}
+          onWheelCapture={handleViewportWheel}
+        >
           <div className="mx-auto max-w-4xl">
             {loading && !sending ? (
               <div className="flex h-full items-center justify-center py-20">
                 <LoadingSpinner size="lg" />
               </div>
-            ) : messages.length === 0 && !sending ? (
+            ) : chatRows.length === 0 ? (
               <WelcomeScreen />
             ) : (
-              <>
-                <div
-                  className="relative w-full"
-                  style={{ height: messageVirtualizer.getTotalSize() }}
-                >
-                  {virtualMessageItems.map((virtualItem) => {
-                    const message = messages[virtualItem.index];
-                    if (!message) {
-                      return null;
-                    }
-                    return (
-                      <div
-                        key={virtualItem.key}
-                        data-index={virtualItem.index}
-                        ref={messageVirtualizer.measureElement}
-                        className="absolute left-0 top-0 w-full pb-4"
-                        style={{ transform: `translateY(${virtualItem.start}px)` }}
-                      >
-                        <ChatMessage
-                          message={message}
-                          showThinking={showThinking}
-                          assistantAvatarEmoji={assistantAvatarEmoji}
-                          userAvatarImageUrl={userAvatarDataUrl}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="space-y-4">
-                  {shouldRenderStreaming && (
-                    <ChatMessage
-                      message={(streamMsg
-                        ? {
-                            ...(streamMsg as Record<string, unknown>),
-                            role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-                            content: streamMsg.content ?? streamText,
-                            timestamp: streamMsg.timestamp ?? streamingTimestamp,
-                          }
-                        : {
-                            role: 'assistant',
-                            content: streamText,
-                            timestamp: streamingTimestamp,
-                          }) as RawMessage}
-                      showThinking={showThinking}
-                      isStreaming
-                      streamingTools={streamingTools}
-                      assistantAvatarEmoji={assistantAvatarEmoji}
-                      userAvatarImageUrl={userAvatarDataUrl}
-                    />
-                  )}
-
-                  {sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && (
-                    <ActivityIndicator />
-                  )}
-
-                  {sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && (
-                    <TypingIndicator />
-                  )}
-                </div>
-              </>
+              <div
+                ref={messageContentRef}
+                className="relative w-full"
+                style={{ height: messageVirtualizer.getTotalSize() }}
+              >
+                {virtualMessageItems.map((virtualItem) => {
+                  const row = chatRows[virtualItem.index];
+                  if (!row) {
+                    return null;
+                  }
+                  return (
+                    <div
+                      key={virtualItem.key}
+                      data-index={virtualItem.index}
+                      ref={messageVirtualizer.measureElement}
+                      className="absolute left-0 top-0 w-full pb-4"
+                      style={{ transform: `translateY(${virtualItem.start}px)` }}
+                    >
+                      <ChatRowItem
+                        row={row}
+                        showThinking={showThinking}
+                        assistantAvatarEmoji={assistantAvatarEmoji}
+                        userAvatarImageUrl={userAvatarDataUrl}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
             )}
-
-            <div ref={messagesEndRef} />
           </div>
         </div>
 
@@ -715,6 +543,48 @@ export function Chat() {
       />
     </div>
   );
+}
+
+function ChatRowItem({
+  row,
+  showThinking,
+  assistantAvatarEmoji,
+  userAvatarImageUrl,
+}: {
+  row: ChatRow;
+  showThinking: boolean;
+  assistantAvatarEmoji?: string;
+  userAvatarImageUrl?: string | null;
+}) {
+  if (row.kind === 'message') {
+    return (
+      <ChatMessage
+        message={row.message}
+        showThinking={showThinking}
+        assistantAvatarEmoji={assistantAvatarEmoji}
+        userAvatarImageUrl={userAvatarImageUrl}
+      />
+    );
+  }
+
+  if (row.kind === 'streaming') {
+    return (
+      <ChatMessage
+        message={row.message}
+        showThinking={showThinking}
+        isStreaming
+        streamingTools={row.streamingTools}
+        assistantAvatarEmoji={assistantAvatarEmoji}
+        userAvatarImageUrl={userAvatarImageUrl}
+      />
+    );
+  }
+
+  if (row.kind === 'activity') {
+    return <ActivityIndicator />;
+  }
+
+  return <TypingIndicator />;
 }
 
 function AgentSkillConfigDialog({

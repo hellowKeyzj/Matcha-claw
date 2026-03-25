@@ -99,4 +99,72 @@ describe('gateway store event wiring', () => {
     expect(chatState.approvalStatus).toBe('idle');
     expect(chatState.pendingApprovalsBySession?.['agent:main:main'] ?? []).toEqual([]);
   });
+
+  it('agent 聊天事件同时出现在 notification 和 chat-message 时，不应重复转发到 chat store', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleChatEventMock = vi.fn();
+    useChatStore.setState({
+      handleChatEvent: handleChatEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sending: false,
+      activeRunId: null,
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    const agentPayload = {
+      method: 'agent',
+      params: {
+        runId: 'run-1',
+        sessionKey: 'agent:main:main',
+        data: {
+          state: 'final',
+          message: {
+            role: 'assistant',
+            id: 'assistant-final-1',
+            content: 'hello',
+          },
+        },
+      },
+    };
+
+    handlers.get('gateway:notification')?.(agentPayload);
+    handlers.get('gateway:chat-message')?.({
+      message: {
+        runId: 'run-1',
+        sessionKey: 'agent:main:main',
+        state: 'final',
+        message: {
+          role: 'assistant',
+          id: 'assistant-final-1',
+          content: 'hello',
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
+    expect(handleChatEventMock).toHaveBeenCalledWith({
+      runId: 'run-1',
+      sessionKey: 'agent:main:main',
+      state: 'final',
+      message: {
+        role: 'assistant',
+        id: 'assistant-final-1',
+        content: 'hello',
+      },
+    });
+  });
 });

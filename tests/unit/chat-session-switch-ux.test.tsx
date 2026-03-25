@@ -9,11 +9,42 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 
+const scrollToIndexMock = vi.fn();
+
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({
+    count,
+    onChange,
+  }: {
+    count: number;
+    onChange?: (instance: { scrollToIndex: typeof scrollToIndexMock }, sync: boolean) => void;
+  }) => {
+    const instance = {
+      getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
+        index,
+        key: `virtual-item-${index}`,
+        start: index * 120,
+        size: 120,
+      })),
+      getTotalSize: () => count * 120,
+      measureElement: vi.fn(),
+      scrollToIndex: scrollToIndexMock,
+    };
+    queueMicrotask(() => {
+      act(() => {
+        onChange?.(instance, false);
+      });
+    });
+    return instance;
+  },
+}));
+
 describe('chat 会话切换 UI 回归', () => {
   let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     i18n.changeLanguage('en');
+    scrollToIndexMock.mockReset();
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
@@ -78,7 +109,27 @@ describe('chat 会话切换 UI 回归', () => {
       currentSessionKey: 'agent:test:main',
       sessionLabels: {},
       sessionLastActivity: {},
-      sessionRuntimeByKey: {},
+      sessionRuntimeByKey: {
+        'agent:another:main': {
+          messages: [
+            {
+              role: 'assistant',
+              content: 'another session latest message',
+              timestamp: Date.now() / 1000,
+              id: 'another-msg-1',
+            },
+          ],
+          sending: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          approvalStatus: 'idle',
+        },
+      },
       showThinking: true,
       thinkingLevel: null,
       loadHistory,
@@ -100,7 +151,7 @@ describe('chat 会话切换 UI 回归', () => {
     act(() => {
       useChatStore.getState().switchSession('agent:another:main');
     });
-    expect(screen.getByText('MatchaClaw Chat')).toBeInTheDocument();
+    expect(screen.getByText('another session latest message')).toBeInTheDocument();
 
     act(() => {
       useChatStore.getState().switchSession('agent:test:main');
@@ -131,7 +182,7 @@ describe('chat 会话切换 UI 回归', () => {
     Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
     Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
 
-    scrollIntoViewMock.mockClear();
+    scrollToIndexMock.mockClear();
     fireEvent.scroll(viewport);
 
     act(() => {
@@ -139,7 +190,90 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     await waitFor(() => {
-      expect(scrollIntoViewMock).toHaveBeenCalled();
+      expect(scrollToIndexMock).toHaveBeenCalled();
+      expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([0, { align: 'end' }]);
+    });
+  });
+
+  it('离开会话前已上翻历史，再次点开时也应落在最新消息底部', async () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 1200 });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    fireEvent.wheel(viewport, { deltaY: -240 });
+    fireEvent.scroll(viewport);
+
+    scrollToIndexMock.mockClear();
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:another:main');
+    });
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:test:main');
+    });
+
+    await waitFor(() => {
+      expect(scrollToIndexMock).toHaveBeenCalled();
+      expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([1, { align: 'end' }]);
+    });
+  });
+
+  it('原本在底部附近时，新消息追加后应继续自动吸底', async () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    fireEvent.scroll(viewport);
+    scrollToIndexMock.mockClear();
+
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 640 });
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        messages: [
+          ...state.messages,
+          {
+            role: 'assistant',
+            content: 'new assistant message',
+            timestamp: Date.now() / 1000,
+            id: 'assistant-msg-2',
+          },
+        ],
+      }));
+    });
+
+    await waitFor(() => {
+      expect(scrollToIndexMock).toHaveBeenCalled();
+      expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([2, { align: 'end' }]);
     });
   });
 });
