@@ -1,5 +1,75 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-25 Chat 虚拟列表语义重构）
+
+### 目录树
+
+```text
+src/pages/Chat/
+├── chat-row-model.ts（新增：统一聊天行建模，历史消息与底部临时内容合流）
+├── chat-scroll-machine.ts（新增：显式滚动模式与命令状态机）
+├── useChatScrollOrchestrator.ts（新增：虚拟列表执行器与视口/内容观察协调层）
+└── index.tsx（改：聊天页改为只消费 ChatRow[] + 滚动状态机/执行器）
+
+tests/unit/
+├── chat-scroll-bottom.test.ts（改：覆盖聊天行模型与底部命令语义）
+├── chat-scroll-machine.test.ts（新增：覆盖状态机纯函数流转）
+├── chat-agent-click-scroll.test.tsx（新增：覆盖点击左侧 AGENT 的真实链路）
+└── chat-session-switch-ux.test.tsx（改：覆盖切会话到底部与底部附近追加吸底）
+
+spec/001-chat-virtual-list-refactor/
+├── requirements.md
+├── design.md
+├── tasks.md
+└── docs/README.md
+```
+
+### 文件职责（关键模块）
+
+- `src/pages/Chat/chat-row-model.ts`：把历史消息、流式消息、处理中提示、打字提示统一建模成 `ChatRow[]`，让“最后一条聊天行”只有一个来源。
+- `src/pages/Chat/chat-scroll-machine.ts`：维护 `opening / sticky / detached` 三种滚动模式，以及 `open-to-latest / follow-append` 两种待消费命令。
+- `src/pages/Chat/useChatScrollOrchestrator.ts`：协调 virtualizer、视口和内容容器；把程序化滚动和用户主动滚动分开，并在高度继续变化时重试命令。
+- `src/pages/Chat/index.tsx`：聊天页组合层；只负责把 store 运行时状态转成 `ChatRow[]`，交给虚拟列表渲染，并转发真实用户输入事件。
+- `tests/unit/chat-scroll-bottom.test.ts`：验证统一聊天行模型、底部阈值判断和打开/追加命令语义。
+- `tests/unit/chat-scroll-machine.test.ts`：验证纯状态机在切会话、追加消息、用户脱离底部时的流转规则。
+- `tests/unit/chat-agent-click-scroll.test.tsx`：验证点击左侧 `AGENT` 后，即使行数不变也必须滚到当前会话最新消息底部。
+- `tests/unit/chat-session-switch-ux.test.tsx`：验证“切会话默认到底部”“底部附近追加消息继续吸底”“用户上翻后不被强拉”的页面语义。
+
+### 模块依赖与边界
+
+- 仅改 Renderer 聊天页渲染层，不改 `src/stores/chat.ts` 的会话协议、Gateway RPC 和 Main 进程 IPC。
+- 滚动定位统一依赖 `@tanstack/react-virtual` 的 `scrollToIndex(...)`、virtualizer 更新回调和内容容器 `ResizeObserver`，不再由额外 DOM 底部锚点承担主职责。
+- 审批 dock 继续保留在输入框上方独立区域，没有被强行并入聊天行模型，避免本次重构扩大到审批 UI。
+
+### 关键决策与原因
+
+1. 旧实现同时维护“虚拟历史消息 + 列表外 streaming/activity/typing + DOM 底部锚点”，导致“最后一条”没有单一事实源，滚动语义只能靠 effect 时序拼出来。
+2. 先把历史消息和底部临时内容统一成 `ChatRow[]`，才能让“切会话到底部”和“当前会话继续吸底”都只依赖同一个坐标系。
+3. 吸底命令不会再被程序化滚动产生的中间 `scroll` 误判为“用户上翻”，只有真实用户输入才会打断 sticky 语义。
+4. 内容高度继续变化时，由 `ResizeObserver` 和 virtualizer 更新共同驱动重试，不再靠多段 `requestAnimationFrame` 猜测测量完成时机。
+5. 滚动语义收敛成显式状态后，测试可以直接围绕“为什么这次要吸底 / 不吸底”断言，而不是跟着实现细节波动。
+
+### 本次变更
+
+- 新增 `ChatRow` 建模层：
+  - 历史消息、流式消息、处理中提示、打字提示全部统一成 `ChatRow[]`。
+  - 去掉聊天页里“列表内消息”和“列表外临时行”并存的结构。
+- 新增虚拟滚动控制层：
+  - 用 `ChatScrollMachine` 显式表达 `opening / sticky / detached` 三种模式。
+  - 用 `open-to-latest / follow-append` 命令表达“切会话到底部”和“底部附近追加后继续吸底”两种待执行语义。
+  - 只有真实用户输入触发的滚动才会把状态切到 `detached`。
+- 清理旧滚动补丁：
+  - 删除 `messagesEndRef`、会话滚动快照恢复、`scrollIntoView(...)` 主路径、旧 `useChatVirtualScrollController.ts` 和双重定位 helper。
+  - 聊天页只保留一套基于 `ChatRow[]` 末尾索引的底部定位逻辑，并在内容高度变化时通过观察器重试。
+- 回归测试重写：
+  - 纯函数测试覆盖聊天行合成、滚动状态流转和程序化滚动不中断命令的语义。
+  - 页面级测试覆盖点击左侧 AGENT、切会话与当前会话追加消息三条主路径。
+
+### 验证
+
+- `pnpm test -- tests/unit/chat-scroll-machine.test.ts tests/unit/chat-agent-click-scroll.test.tsx tests/unit/chat-scroll-bottom.test.ts tests/unit/chat-session-switch-ux.test.tsx` 通过。
+- `pnpm run typecheck` 通过。
+
 ## 本次变更日志（2026-03-23 Chat 真虚拟化落地）
 
 ### 目录树

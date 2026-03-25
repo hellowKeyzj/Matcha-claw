@@ -196,24 +196,6 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   const p = payload.params;
   const data = (p.data && typeof p.data === 'object') ? (p.data as Record<string, unknown>) : {};
   const phase = data.phase ?? p.phase;
-  const hasChatData = (p.state ?? data.state) || (p.message ?? data.message);
-
-  if (hasChatData) {
-    const normalizedEvent: Record<string, unknown> = {
-      ...data,
-      runId: p.runId ?? data.runId,
-      sessionKey: p.sessionKey ?? data.sessionKey,
-      stream: p.stream ?? data.stream,
-      seq: p.seq ?? data.seq,
-      state: p.state ?? data.state,
-      message: p.message ?? data.message,
-    };
-    getChatStoreModule()
-      .then(({ useChatStore }) => {
-        useChatStore.getState().handleChatEvent(normalizedEvent);
-      })
-      .catch(() => {});
-  }
 
   const runId = p.runId ?? data.runId;
   const sessionKey = p.sessionKey ?? data.sessionKey;

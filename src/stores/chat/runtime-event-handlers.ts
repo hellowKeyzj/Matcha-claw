@@ -18,6 +18,51 @@ import {
 import type { AttachedFileMeta, RawMessage } from './types';
 import type { ChatGet, ChatSet } from './store-api';
 
+function hasAssistantToolCall(message: RawMessage | undefined): boolean {
+  if (!message || typeof message !== 'object') return false;
+  const content = message.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === 'tool_use' || block.type === 'toolCall') return true;
+    }
+  }
+  const row = message as unknown as Record<string, unknown>;
+  const toolCalls = row.tool_calls ?? row.toolCalls;
+  return Array.isArray(toolCalls) && toolCalls.length > 0;
+}
+
+function stripAssistantTextForToolTurnSnapshot(message: RawMessage): RawMessage {
+  const row = message as unknown as Record<string, unknown>;
+  const nextRow: Record<string, unknown> = { ...row };
+
+  if (typeof nextRow.content === 'string') {
+    nextRow.content = '';
+  } else if (Array.isArray(nextRow.content)) {
+    nextRow.content = nextRow.content.filter((block) => block.type !== 'text');
+  }
+
+  if (typeof nextRow.text === 'string') {
+    nextRow.text = '';
+  }
+
+  return nextRow as unknown as RawMessage;
+}
+
+function createIntermediateToolTurnSnapshot(
+  message: RawMessage,
+  id: string,
+): RawMessage {
+  const normalizedMessage: RawMessage = {
+    ...message,
+    role: 'assistant',
+    id,
+  };
+  if (!hasAssistantToolCall(normalizedMessage)) {
+    return normalizedMessage;
+  }
+  return stripAssistantTextForToolTurnSnapshot(normalizedMessage);
+}
+
 export function handleRuntimeEventState(
   set: ChatSet,
   get: ChatGet,
@@ -106,9 +151,7 @@ export function handleRuntimeEventState(
                       || `${runId || 'run'}-turn-${s.messages.length}`;
                     if (!s.messages.some(m => m.id === snapId)) {
                       snapshotMsgs.push({
-                        ...(currentStream as RawMessage),
-                        role: 'assistant',
-                        id: snapId,
+                        ...createIntermediateToolTurnSnapshot(currentStream as RawMessage, snapId),
                       });
                     }
                   }
@@ -209,7 +252,7 @@ export function handleRuntimeEventState(
             const alreadyExists = get().messages.some(m => m.id === snapId);
             if (!alreadyExists) {
               set((s) => ({
-                messages: [...s.messages, { ...currentStream, role: 'assistant' as const, id: snapId }],
+                messages: [...s.messages, createIntermediateToolTurnSnapshot(currentStream, snapId)],
               }));
             }
           }
