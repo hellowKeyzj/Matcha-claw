@@ -60,11 +60,11 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
 
 ### 用户确认后怎么做
 
-- 用户确认进入 Spec 开发流程后，必须按 `ClawX/spec/000-Spec规范/` 里的规范和模板创建或更新对应 Spec。
-- 入口文档是 `ClawX/Spec/000-Spec规范/Codex-Spec规范文档.md`。
-- 模板目录是 `ClawX/Spec/000-Spec规范/Spec模板/`。
+- 用户确认进入 Spec 开发流程后，必须按 `spec/000-Spec规范/` 里的规范和模板创建或更新对应 Spec。
+- 入口文档是 `Spec/000-Spec规范/Codex-Spec规范文档.md`。
+- 模板目录是 `Spec/000-Spec规范/Spec模板/`。
 - 新 Spec 至少要包含 `requirements.md`、`design.md`、`tasks.md`；需要补充资料时再增加 `docs/`。
-- `AGENTS.md` 只定义入口规则和执行纪律。Spec 的字段、模板结构、状态规则、自检清单，以 `ClawX/spec/000-Spec规范/Codex-Spec规范文档.md` 为准。
+- `AGENTS.md` 只定义入口规则和执行纪律。Spec 的字段、模板结构、状态规则、自检清单，以 `spec/000-Spec规范/Codex-Spec规范文档.md` 为准。
 
 ### Spec 文档必须怎么写
 
