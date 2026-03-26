@@ -1,5 +1,44 @@
 # CHANGE.md
 
+## 本次变更日志（2026-03-26 扩展宿主与双插件体系重构 Spec）
+
+### 目录树
+
+```text
+spec/
+└── 002-matchaclaw-extension-host/
+    ├── requirements.md
+    ├── design.md
+    └── tasks.md
+```
+
+### 文件职责（关键模块）
+
+- `spec/002-matchaclaw-extension-host/requirements.md`：定义双插件体系、独立 Extension Host、OpenClaw Bridge、Workbench 贡献模型和 Main Shell 收敛边界的需求基线。
+- `spec/002-matchaclaw-extension-host/design.md`：给出目标进程结构、目录结构、模块职责、宿主调用/事件/前端模块三份合同、状态模型、错误语义和迁移方向。
+- `spec/002-matchaclaw-extension-host/tasks.md`：把实现拆成“合同先行 -> 宿主骨架 -> Bridge -> 贡献模型 -> builtin extension 迁移 -> 清理验收”的阶段任务。
+
+### 模块依赖与边界
+
+- 明确区分两套插件系统：
+  - `OpenClaw Plugin`：只运行在 OpenClaw Gateway
+  - `MatchaClaw Extension`：只运行在 MatchaClaw Extension Host
+- Renderer 仍然只能通过 `src/lib/host-api.ts` 和 `src/lib/api-client.ts` 访问后端能力。
+- Renderer 到运行时的调用链固定为 `host-api/api-client -> Main Shell / Host API -> Extension Host / Gateway`，Host API 暴露的是宿主契约，不是 Extension Host 内部 API 透传。
+- 新增三份必须先落地的合同：
+  - 宿主调用合同：先定义可调用能力，再决定由 Main、Extension Host 还是 Gateway 实现
+  - 宿主事件合同：把状态型/瞬时型事件的命名、重放和恢复语义写成硬规则
+  - 前端模块合同：把 builtin/local 前端贡献的构建和加载元数据写成可验证资产
+- Main 进程语义收敛为 `Main Shell`，职责只包括 OS 壳层、进程编排与最薄边界转发；`electron/main -> electron/shell` 的物理目录迁移后置到 cleanup 阶段，不再与引入 Extension Host 绑成同一批实现。
+
+### 关键决策与原因
+
+1. 现有仓库已经有 `electron/core` / `electron/adapters` / `platform-composition-root` 基础，不应推倒重来，而应先抽成 Extension Host 和 Host API 共用的服务基座。
+2. 当前真正缺的不只是独立 `Extension Host`，还缺宿主调用合同、宿主事件合同和前端模块合同；这三份合同必须先于大规模页面迁移落地。
+3. 现有 `src/pages` / `src/stores` 迁移时，必须先拆“共享领域逻辑”和“扩展 UI 壳层”，避免把旧耦合原样搬进扩展体系。
+4. 本次 Spec 明确本期只支持 builtin extension 与本地开发扩展；远程前端扩展市场和任意第三方 UI bundle 只保留挂载点，不进入实际加载范围。
+5. 第一批 builtin extension 迁移名单仍是 `chat / tasks / channels / settings`，但落地顺序改为 `settings -> channels -> tasks -> chat`，把 `chat` 放到事件总线和前端模块加载稳定之后再迁。
+
 ## 本次变更日志（2026-03-25 Chat 虚拟列表语义重构）
 
 ### 目录树
