@@ -14,8 +14,7 @@ const isMac = window.electron?.platform === 'darwin';
 
 export function TitleBar() {
   if (isMac) {
-    // macOS: just a drag region, traffic lights are native
-    return <div className="drag-region h-10 shrink-0 border-b border-border/80 bg-card/80 backdrop-blur-[6px]" />;
+    return <div className="drag-region h-12 shrink-0 border-b border-border/70 bg-card/96 backdrop-blur-xl" />;
   }
 
   return <WindowsTitleBar />;
@@ -54,41 +53,39 @@ function WindowsTitleBar() {
   };
 
   return (
-    <div className="drag-region flex h-10 shrink-0 items-center justify-between border-b border-border/80 bg-card/80 backdrop-blur-[6px]">
-      {/* Left: Icon + App Name */}
-      <div className="no-drag flex items-center gap-2 pl-3">
+    <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/96 px-3 backdrop-blur-xl">
+      <div className="no-drag flex items-center gap-2">
         <img src={logoSvg} alt="MatchaClaw" className="h-5 w-auto" />
-        <span className="text-xs font-medium text-muted-foreground select-none">
+        <span className="select-none text-xs font-semibold tracking-[0.08em] text-muted-foreground">
           MatchaClaw
         </span>
       </div>
 
-      {/* Right: Window Controls */}
       <div className="no-drag flex h-full">
         <button
           onClick={handleOpenSettings}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-accent transition-colors"
+          className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
           title={t('sidebar.settings')}
         >
           <Settings className="h-4 w-4" />
         </button>
         <button
           onClick={handleMinimize}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-accent transition-colors"
+          className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
           title="Minimize"
         >
           <Minus className="h-4 w-4" />
         </button>
         <button
           onClick={handleMaximize}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-accent transition-colors"
+          className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
           title={maximized ? 'Restore' : 'Maximize'}
         >
           {maximized ? <Copy className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
         </button>
         <button
           onClick={handleClose}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-red-500 hover:text-white transition-colors"
+          className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
           title="Close"
         >
           <X className="h-4 w-4" />

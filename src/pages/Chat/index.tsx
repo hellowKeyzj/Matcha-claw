@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { AlertCircle, Bot, Loader2, MessageSquare, Settings2, Sparkles, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useChatStore, type ApprovalDecision, type ApprovalItem } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
@@ -279,6 +278,7 @@ export function Chat() {
       waitingApproval,
     ],
   );
+  const isEmptyState = !loading && !sending && chatRows.length === 0;
   const {
     handleViewportPointerDown,
     handleViewportScroll,
@@ -396,8 +396,8 @@ export function Chat() {
         ['--task-inbox-resizer-width' as string]: `${TASK_INBOX_RESIZER_WIDTH}px`,
       }}
     >
-      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <div className="flex shrink-0 items-center justify-end px-4 py-2">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-card">
+        <div className="flex shrink-0 items-center justify-end px-2 py-2 md:px-4">
           <Button
             type="button"
             size="sm"
@@ -414,18 +414,21 @@ export function Chat() {
 
         <div
           ref={messagesViewportRef}
-          className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+          className={cn(
+            'min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6',
+            isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
+          )}
           onPointerDownCapture={handleViewportPointerDown}
           onScroll={handleViewportScroll}
           onTouchMoveCapture={handleViewportTouchMove}
           onWheelCapture={handleViewportWheel}
         >
-          <div className="mx-auto max-w-4xl">
+          <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-center justify-center')}>
             {loading && !sending ? (
               <div className="flex h-full items-center justify-center py-20">
                 <LoadingSpinner size="lg" />
               </div>
-            ) : chatRows.length === 0 ? (
+            ) : isEmptyState ? (
               <WelcomeScreen />
             ) : (
               <div
@@ -495,6 +498,7 @@ export function Chat() {
         )}
 
         <ChatInput
+          layout={isEmptyState ? 'hero' : 'dock'}
           onSend={sendMessage}
           onStop={abortRun}
           disabled={!isGatewayRunning}
@@ -682,29 +686,32 @@ function AgentSkillConfigDialog({
 function WelcomeScreen() {
   const { t } = useTranslation('chat');
   return (
-    <div className="flex flex-col items-center justify-center text-center py-20">
-      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center mb-6">
-        <Bot className="h-8 w-8 text-white" />
+    <div className="flex w-full flex-col items-center justify-center text-center">
+      <div className="mb-8 flex h-16 w-16 items-center justify-center rounded-[1.5rem] border border-border bg-secondary text-foreground">
+        <Bot className="h-7 w-7" />
       </div>
-      <h2 className="text-2xl font-bold mb-2">{t('welcome.title')}</h2>
-      <p className="text-muted-foreground mb-8 max-w-md">
+      <h2 className="mb-2 text-[2rem] font-semibold tracking-[-0.04em]">{t('welcome.title')}</h2>
+      <p className="mb-8 max-w-xl text-[15px] leading-7 text-muted-foreground">
         {t('welcome.subtitle')}
       </p>
 
-      <div className="grid grid-cols-2 gap-4 max-w-lg w-full">
+      <div className="mt-2 grid w-full max-w-3xl gap-4 md:grid-cols-2">
         {[
           { icon: MessageSquare, title: t('welcome.askQuestions'), desc: t('welcome.askQuestionsDesc') },
           { icon: Sparkles, title: t('welcome.creativeTasks'), desc: t('welcome.creativeTasksDesc') },
         ].map((item, i) => (
-          <Card key={i} className="text-left">
-            <CardContent className="p-4">
-              <item.icon className="h-6 w-6 text-primary mb-2" />
-              <h3 className="font-medium">{item.title}</h3>
-              <p className="text-sm text-muted-foreground">{item.desc}</p>
-            </CardContent>
-          </Card>
+          <button
+            key={i}
+            type="button"
+            className="rounded-[1.5rem] border border-border bg-card px-5 py-5 text-left transition-colors hover:bg-secondary"
+          >
+            <item.icon className="mb-3 h-5 w-5 text-foreground" />
+            <h3 className="font-medium text-foreground">{item.title}</h3>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">{item.desc}</p>
+          </button>
         ))}
       </div>
+
     </div>
   );
 }

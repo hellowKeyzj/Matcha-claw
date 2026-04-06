@@ -48,6 +48,7 @@ interface NavItemProps {
 interface SidebarProps {
   expandedWidth?: number;
   collapsedWidth?: number;
+  showRightDivider?: boolean;
 }
 
 interface PendingBlockerCard {
@@ -117,9 +118,11 @@ function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate
       }}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-          'hover:bg-accent hover:text-accent-foreground',
-          isActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground',
+          'flex items-center gap-3 rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] transition-[background-color,color,box-shadow]',
+          'hover:bg-secondary hover:text-foreground',
+          isActive
+            ? 'bg-secondary text-foreground'
+            : 'text-muted-foreground',
           collapsed && 'justify-center px-2',
         )
       }
@@ -279,13 +282,13 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   ]);
 
   return (
-    <section className="mt-3 rounded-lg border border-border/70 bg-muted/30 p-2">
+    <section className="mt-4 rounded-[1rem] border border-border/80 bg-secondary/55 p-2.5">
       <header className="mb-2 flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-foreground">{t('sidebar.pendingBlockers')}</h3>
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground">{t('sidebar.pendingBlockers')}</h3>
         <span className="text-[11px] text-muted-foreground">{pendingBlockers.length}</span>
       </header>
       {pendingBlockers.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border/70 px-2 py-3 text-center text-xs text-muted-foreground">
+        <div className="rounded-[calc(var(--radius-interactive)+2px)] border border-dashed border-border px-3 py-3 text-center text-xs text-muted-foreground">
           {t('sidebar.pendingBlockersEmpty')}
         </div>
       ) : (
@@ -294,7 +297,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
             <button
               key={card.id}
               type="button"
-              className="w-full rounded-md border border-border/70 bg-background px-2 py-2 text-left transition-colors hover:bg-accent/50"
+              className="w-full rounded-[calc(var(--radius-interactive)+2px)] border border-border bg-card px-3 py-2.5 text-left transition-[background-color,border-color,box-shadow] hover:border-input hover:bg-secondary hover:shadow-whisper"
               onClick={() => {
                 if (card.source === 'team_mailbox') {
                   setActiveTeam(card.teamId);
@@ -339,7 +342,11 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   );
 });
 
-export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarProps) {
+export function Sidebar({
+  expandedWidth = 256,
+  collapsedWidth = 64,
+  showRightDivider = true,
+}: SidebarProps) {
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
@@ -481,10 +488,13 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r border-border/80 bg-card transition-all duration-300"
+      className={cn(
+        'relative flex shrink-0 flex-col overflow-hidden bg-card transition-[width] duration-300',
+        showRightDivider && 'border-r [border-right-color:var(--divider-line)]',
+      )}
       style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
     >
-      <nav className="flex flex-1 flex-col gap-1 overflow-hidden p-2">
+      <nav className="flex flex-1 flex-col gap-1.5 overflow-hidden p-3">
         <button
           type="button"
           onClick={() => {
@@ -495,8 +505,8 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
             navigate('/');
           }}
           className={cn(
-            'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors',
-            'hover:bg-accent hover:text-accent-foreground',
+            'flex items-center gap-3 rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] text-muted-foreground transition-[background-color,color,box-shadow]',
+            'hover:bg-secondary hover:text-foreground',
             sidebarCollapsed && 'justify-center px-2',
           )}
         >
@@ -518,7 +528,7 @@ export function Sidebar({ expandedWidth = 256, collapsedWidth = 64 }: SidebarPro
         {!sidebarCollapsed && <SidebarPendingBlockers />}
       </nav>
 
-      <div className="space-y-2 p-2">
+      <div className="space-y-2 p-3 pt-0">
         {devModeUnlocked && !sidebarCollapsed && (
           <Button
             variant="ghost"

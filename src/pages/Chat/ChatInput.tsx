@@ -50,6 +50,7 @@ interface ChatInputProps {
   sending?: boolean;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
+  layout?: 'dock' | 'hero';
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -153,6 +154,7 @@ export const ChatInput = memo(function ChatInput({
   sending = false,
   approvalWaiting = false,
   mentionCandidates = [],
+  layout = 'dock',
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
@@ -644,12 +646,16 @@ export const ChatInput = memo(function ChatInput({
 
   return (
     <div
-      className="p-4"
+      className={cn(
+        layout === 'hero'
+          ? 'w-full px-2 pb-3 pt-3 md:px-4'
+          : 'border-t border-border/70 px-2 pb-3 pt-3 md:px-4',
+      )}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="max-w-4xl mx-auto">
+      <div className="mx-auto max-w-4xl">
         {/* Attachment Previews */}
         {attachments.length > 0 && (
           <div className="flex gap-2 mb-2 flex-wrap">
@@ -664,35 +670,27 @@ export const ChatInput = memo(function ChatInput({
         )}
 
         {/* Input Row */}
-        <div className={`flex items-end gap-2 ${dragOver ? 'ring-2 ring-primary rounded-lg' : ''}`}>
-
-          {/* Attach Button */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="shrink-0 h-[44px] w-[44px]"
-            onClick={pickFiles}
-            disabled={disabled || sending || approvalWaiting}
-            title="Attach files"
-          >
-            <Paperclip className="h-4 w-4" />
-          </Button>
-
-          {/* Textarea */}
-          <div className="flex-1 relative">
-            <div className="rounded-md border border-input/90 bg-card/70 px-3 py-2 backdrop-blur-[2px]">
+        <div
+          className={cn(
+            'rounded-[1.75rem] border border-input bg-card px-3 py-3 transition-[border-color,box-shadow,background-color]',
+            dragOver && 'border-ring shadow-[var(--shadow-focus)]',
+            layout === 'hero' ? 'min-h-[96px]' : 'min-h-[72px]',
+          )}
+        >
+          <div className="relative min-w-0">
+            <div className="px-2 pt-1">
               {selectedSkills.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {selectedSkills.map((skill) => (
                     <span
                       key={skill.id}
-                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-primary/40 bg-primary/20 px-2.5 py-1 text-xs font-medium text-primary shadow-sm"
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-medium text-foreground"
                     >
                       <span>{skill.icon}</span>
                       <span className="truncate">{skill.name}</span>
                       <button
                         type="button"
-                        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-primary/80 hover:bg-primary/20 hover:text-primary"
+                        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground"
                         onMouseDown={(event) => {
                           event.preventDefault();
                           setSelectedSkills((prev) => prev.filter((item) => item.id !== skill.id));
@@ -729,7 +727,10 @@ export const ChatInput = memo(function ChatInput({
                     ? t('input.approvalWaitingPlaceholder')
                     : t('input.messagePlaceholder')}
                 disabled={disabled}
-                className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent p-0 pr-1 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+                className={cn(
+                  'min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent pl-1 pr-2 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0',
+                  layout === 'hero' && 'min-h-[72px]',
+                )}
                 rows={1}
               />
             </div>
@@ -801,21 +802,33 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
-          {/* Send Button */}
-          <Button
-            onClick={sending ? handleStop : handleSend}
-            disabled={sending ? !canStop : !canSend}
-            size="icon"
-            className="shrink-0 h-[44px] w-[44px]"
-            variant={sending ? 'destructive' : 'default'}
-            title={sending ? 'Stop' : 'Send'}
-          >
-            {sending ? (
-              <Square className="h-4 w-4" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </Button>
+          <div className="mt-2 flex items-center justify-between gap-3 px-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 shrink-0"
+              onClick={pickFiles}
+              disabled={disabled || sending || approvalWaiting}
+              title="Attach files"
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
+
+            <Button
+              onClick={sending ? handleStop : handleSend}
+              disabled={sending ? !canStop : !canSend}
+              size="icon"
+              className="h-11 w-11 shrink-0"
+              variant={sending ? 'destructive' : 'default'}
+              title={sending ? 'Stop' : 'Send'}
+            >
+              {sending ? (
+                <Square className="h-4 w-4" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
         </div>
         {hasFailedAttachments && (
           <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
