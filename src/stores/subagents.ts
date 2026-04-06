@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { buildLineDiff } from '@/lib/line-diff';
-import { invokeIpc } from '@/lib/api-client';
+import { hostGatewayRpc, hostOpenClawGetConfigDir } from '@/lib/host-api';
 import {
   waitAgentRunWithProgress,
 } from '@/services/openclaw/agent-runtime';
@@ -32,17 +32,6 @@ import type {
   SubagentTargetFile,
 } from '@/types/subagent';
 
-interface RpcSuccess<T> {
-  success: true;
-  result: T;
-}
-
-interface RpcFailure {
-  success: false;
-  error?: string;
-}
-
-type RpcResult<T> = RpcSuccess<T> | RpcFailure;
 const MAIN_AGENT_ID = 'main';
 const DRAFT_HISTORY_POLL_INTERVAL_MS = 500;
 const DRAFT_HISTORY_READ_TIMEOUT_MS = 180000;
@@ -62,6 +51,7 @@ let configDisplayCache:
 let configDisplayReadTask: Promise<ConfigDisplaySnapshot> | null = null;
 let configDisplayReadTaskSeq = 0;
 let configDisplayReadSeq = 0;
+let queuedLoadAgentsTask: Promise<void> | null = null;
 
 function buildDraftSessionKey(agentId: string): string {
   return `agent:${agentId}:subagent-draft`;
@@ -163,15 +153,7 @@ interface SubagentsState {
 }
 
 async function rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  const response = await (timeoutMs == null
-    ? invokeIpc<RpcResult<T>>('gateway:rpc', method, params)
-    : invokeIpc<RpcResult<T>>('gateway:rpc', method, params, timeoutMs));
-
-  if (!response.success) {
-    throw new Error(response.error || `RPC call failed: ${method}`);
-  }
-
-  return response.result;
+  return await hostGatewayRpc<T>(method, params, timeoutMs);
 }
 
 function getOptionalString(value: unknown): string | undefined {
@@ -455,8 +437,7 @@ async function resolveWorkspaceFallbackRoot(): Promise<string | undefined> {
   }
   workspaceFallbackRootTask = (async () => {
     try {
-      const rawConfigDir = await invokeIpc<unknown>('openclaw:getConfigDir');
-      const configDir = getOptionalString(rawConfigDir);
+      const configDir = getOptionalString(await hostOpenClawGetConfigDir());
       if (!configDir) {
         return undefined;
       }
@@ -1136,7 +1117,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   loadAgents: async () => {
     if (inflightLoadAgentsTask) {
-      await inflightLoadAgentsTask;
+      if (!queuedLoadAgentsTask) {
+        queuedLoadAgentsTask = inflightLoadAgentsTask.finally(async () => {
+          queuedLoadAgentsTask = null;
+          await get().loadAgents();
+        });
+      }
+      await queuedLoadAgentsTask;
       return;
     }
 

@@ -1,0 +1,35 @@
+{
+  "allowedRouteFiles": [
+    "app.ts",
+    "diagnostics.ts",
+    "files.ts",
+    "gateway.ts",
+    "logs.ts",
+    "runtime-host-internal.ts",
+    "runtime-host-proxy.ts"
+  ],
+  "mainOwnedExactRoutes": [
+    "/api/events",
+    "/api/app/gateway-info",
+    "/api/gateway/status",
+    "/api/gateway/health",
+    "/api/gateway/start",
+    "/api/gateway/stop",
+    "/api/gateway/restart",
+    "/api/gateway/control-ui",
+    "/api/gateway/rpc",
+    "/api/files/stage-paths",
+    "/api/files/stage-buffer",
+    "/api/files/thumbnails",
+    "/api/files/save-image",
+    "/api/diagnostics/collect",
+    "/api/logs",
+    "/api/logs/dir",
+    "/api/logs/files",
+    "/internal/runtime-host/execution-sync",
+    "/internal/runtime-host/shell-actions"
+  ],
+  "mainOwnedPrefixRoutes": [
+    "/internal/runtime-host/"
+  ]
+}

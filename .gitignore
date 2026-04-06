@@ -67,3 +67,7 @@ build/
 _bmad/
 .codex/
 docs/
+worktrees/
+_bmad-output/
+runtime-host/build/
+.vscode/

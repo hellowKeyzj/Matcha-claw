@@ -1,0 +1,53 @@
+{
+  "title": "Plugin Center",
+  "description": "Manage plugin execution and plugin states in one place; Runtime Host is always-on.",
+  "runtime": {
+    "title": "Runtime Status",
+    "description": "Inspect Runtime Host lifecycle and health.",
+    "refresh": "Refresh",
+    "restart": "Restart Host",
+    "busy": "Processing...",
+    "recoveredNotice": "Runtime Host auto-recovered {{count}} times",
+    "recoveredAt": "Last recovered at: {{time}}"
+  },
+  "execution": {
+    "title": "Plugin Execution Layer",
+    "description": "This only controls plugin execution. OpenClaw Bridge and core interaction stay available.",
+    "switchLabel": "Enable plugin execution layer"
+  },
+  "catalog": {
+    "title": "Plugin Catalog",
+    "description": "Manage plugin enablement here; Settings does not include plugin management.",
+    "empty": "No plugins available.",
+    "columns": {
+      "plugin": "Plugin",
+      "platform": "Platform",
+      "kind": "Kind",
+      "category": "Category",
+      "version": "Version",
+      "enabled": "Enabled"
+    },
+    "platform": {
+      "openclaw": "OpenClaw",
+      "matchaclaw": "MatchaClaw"
+    },
+    "kind": {
+      "builtin": "Builtin",
+      "third-party": "Third-party"
+    }
+  },
+  "state": {
+    "executionOn": "Execution enabled",
+    "executionOff": "Execution disabled",
+    "hostRunning": "Host running",
+    "hostStopped": "Host not running",
+    "hostStarting": "Host starting",
+    "hostDegraded": "Host degraded"
+  },
+  "errors": {
+    "loadFailed": "Failed to load plugin center data",
+    "toggleExecutionFailed": "Failed to switch execution layer",
+    "togglePluginFailed": "Failed to switch plugin enablement",
+    "restartFailed": "Failed to restart Runtime Host"
+  }
+}

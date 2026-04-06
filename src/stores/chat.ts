@@ -1191,10 +1191,18 @@ function parseSessionUpdatedAtMs(value: unknown): number | undefined {
 async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promise<RawMessage[]> {
   if (!isCronSessionKey(sessionKey)) return [];
   try {
-    const response = await hostApiFetch<{ messages?: RawMessage[] }>(
-      buildCronSessionHistoryPath(sessionKey, limit),
-    );
-    return Array.isArray(response.messages) ? response.messages : [];
+    const payload = await hostApiFetch<unknown>(buildCronSessionHistoryPath(sessionKey, limit));
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('Invalid cron session history payload: expected object');
+    }
+    const record = payload as Record<string, unknown>;
+    if (!Array.isArray(record.messages)) {
+      throw new Error('Invalid cron session history payload: expected messages[]');
+    }
+    const response: { messages: RawMessage[] } = {
+      messages: record.messages as RawMessage[],
+    };
+    return response.messages;
   } catch (error) {
     console.warn('Failed to load cron fallback history:', error);
     return [];
@@ -2004,10 +2012,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body: JSON.stringify({ sessionKey: key }),
       });
       if (!result.success) {
-        console.warn(`[deleteSession] IPC reported failure for ${key}:`, result.error);
+        console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
       }
     } catch (err) {
-      console.warn(`[deleteSession] IPC call failed for ${key}:`, err);
+      console.warn(`[deleteSession] Host API call failed for ${key}:`, err);
     }
 
     const { currentSessionKey, sessions } = get();

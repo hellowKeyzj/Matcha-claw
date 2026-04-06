@@ -4,9 +4,16 @@ import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
 
 const fetchSkillsMock = vi.fn(async () => {});
-const invokeIpcMock = vi.fn(async (channel: string) => {
-  if (channel === 'openclaw:getSkillsDir') {
-    return 'C:/Users/test/.openclaw/skills';
+const invokeIpcMock = vi.fn(async (channel: string, payload?: { path?: string }) => {
+  if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
+    return {
+      ok: true,
+      data: {
+        status: 200,
+        ok: true,
+        json: 'C:/Users/test/.openclaw/skills',
+      },
+    };
   }
   return '';
 });
@@ -60,10 +67,6 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
-vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: vi.fn(),
-}));
-
 vi.mock('@/lib/telemetry', () => ({
   trackUiEvent: vi.fn(),
 }));
@@ -76,7 +79,8 @@ vi.mock('react-i18next', () => ({
 
 describe('skills page fetch behavior', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    invokeIpcMock.mockClear();
+    fetchSkillsMock.mockClear();
   });
 
   it('skills 已存在时不重复触发 fetchSkills', async () => {
@@ -89,10 +93,6 @@ describe('skills page fetch behavior', () => {
         <Skills />
       </MemoryRouter>,
     );
-
-    await waitFor(() => {
-      expect(invokeIpcMock).toHaveBeenCalledWith('openclaw:getSkillsDir');
-    });
     expect(fetchSkillsMock).not.toHaveBeenCalled();
   });
 

@@ -16,6 +16,9 @@ export const PORTS = {
   /** Local host API server port */
   MATCHACLAW_HOST_API: 3210,
 
+  /** Runtime host process port */
+  MATCHACLAW_RUNTIME_HOST: 3211,
+
   /** OpenClaw Gateway port */
   OPENCLAW_GATEWAY: 18789,
 
@@ -25,7 +28,12 @@ export const PORTS = {
 } as const;
 
 type PortKey = keyof typeof PORTS;
-type CanonicalPortKey = 'CLAWX_DEV' | 'CLAWX_GUI' | 'MATCHACLAW_HOST_API' | 'OPENCLAW_GATEWAY';
+type CanonicalPortKey =
+  | 'CLAWX_DEV'
+  | 'CLAWX_GUI'
+  | 'MATCHACLAW_HOST_API'
+  | 'MATCHACLAW_RUNTIME_HOST'
+  | 'OPENCLAW_GATEWAY';
 
 function toCanonicalPortKey(key: PortKey): CanonicalPortKey {
   if (key === 'MatchaClaw_DEV') return 'CLAWX_DEV';
@@ -56,6 +64,10 @@ export function getPort(key: PortKey): number {
   if (canonical === 'MATCHACLAW_HOST_API') {
     envKeys.clear();
     envKeys.add('MATCHACLAW_PORT_MATCHACLAW_HOST_API');
+  }
+  if (canonical === 'MATCHACLAW_RUNTIME_HOST') {
+    envKeys.clear();
+    envKeys.add('MATCHACLAW_RUNTIME_HOST_PORT');
   }
 
   for (const envKey of envKeys) {

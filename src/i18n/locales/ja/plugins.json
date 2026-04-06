@@ -1,0 +1,53 @@
+{
+  "title": "プラグインセンター",
+  "description": "プラグイン実行層と状態を一元管理します。Runtime Host は常駐です。",
+  "runtime": {
+    "title": "ランタイム状態",
+    "description": "Runtime Host のライフサイクルとヘルスを確認します。",
+    "refresh": "更新",
+    "restart": "ホストを再起動",
+    "busy": "処理中...",
+    "recoveredNotice": "Runtime Host は {{count}} 回自動復旧しました",
+    "recoveredAt": "最終復旧時刻: {{time}}"
+  },
+  "execution": {
+    "title": "プラグイン実行層",
+    "description": "制御対象はプラグイン実行のみです。OpenClaw Bridge と基本導線には影響しません。",
+    "switchLabel": "プラグイン実行層を有効化"
+  },
+  "catalog": {
+    "title": "プラグイン一覧",
+    "description": "プラグインの有効化はここで管理します。設定ページには配置しません。",
+    "empty": "管理可能なプラグインがありません。",
+    "columns": {
+      "plugin": "プラグイン",
+      "platform": "プラットフォーム",
+      "kind": "種別",
+      "category": "カテゴリ",
+      "version": "バージョン",
+      "enabled": "有効"
+    },
+    "platform": {
+      "openclaw": "OpenClaw",
+      "matchaclaw": "MatchaClaw"
+    },
+    "kind": {
+      "builtin": "内蔵",
+      "third-party": "サードパーティ"
+    }
+  },
+  "state": {
+    "executionOn": "実行層は有効",
+    "executionOff": "実行層は無効",
+    "hostRunning": "ホスト稼働中",
+    "hostStopped": "ホスト停止中",
+    "hostStarting": "ホスト起動中",
+    "hostDegraded": "ホスト劣化状態"
+  },
+  "errors": {
+    "loadFailed": "プラグインセンターの読み込みに失敗しました",
+    "toggleExecutionFailed": "実行層の切り替えに失敗しました",
+    "togglePluginFailed": "プラグイン有効化の切り替えに失敗しました",
+    "restartFailed": "Runtime Host の再起動に失敗しました"
+  }
+}

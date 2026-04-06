@@ -2,7 +2,7 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { invokeIpc } from '@/lib/api-client';
+import { hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
   getSubagentTemplateById,
@@ -786,8 +786,7 @@ export function SubAgents() {
             : values.workspace;
           if (isDefaultAgent && !resolvedWorkspace.trim()) {
             try {
-              const rawWorkspaceDir = await invokeIpc<unknown>('openclaw:getWorkspaceDir');
-              const workspaceDir = typeof rawWorkspaceDir === 'string' ? rawWorkspaceDir.trim() : '';
+              const workspaceDir = (await hostOpenClawGetWorkspaceDir()).trim();
               if (workspaceDir) {
                 resolvedWorkspace = workspaceDir;
               }

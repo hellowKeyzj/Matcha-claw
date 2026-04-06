@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildLineDiff } from '@/lib/line-diff';
+import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+
 import { useSubagentsStore } from '@/stores/subagents';
 
 describe('subagents diff and apply', () => {
   beforeEach(() => {
+    resetGatewayClientMocks();
     useSubagentsStore.setState({
       agents: [{ id: 'writer', name: 'Writer', isDefault: false }],
       loading: false,
@@ -49,50 +52,38 @@ describe('subagents diff and apply', () => {
   });
 
   it('does not call agents.files.set until applyDraft is confirmed', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel: string, ..._args: unknown[]) => {
-      if (channel === 'gateway:rpc') {
-        return { success: true, result: {} };
-      }
-      return undefined;
-    });
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValue({ success: true, result: {} });
 
     useSubagentsStore.getState().generatePreviewDiffByFile({
       'AGENTS.md': 'line-1\nline-2',
     });
 
-    expect(invoke).not.toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).not.toHaveBeenCalledWith(
       'agents.files.set',
       expect.anything()
     );
 
     await useSubagentsStore.getState().applyDraft('writer');
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.files.set',
       {
         agentId: 'writer',
         name: 'AGENTS.md',
         content: 'line-1\nline-3',
-      }
+      },
+      undefined,
     );
-    expect(invoke).not.toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).not.toHaveBeenCalledWith(
       'sessions.delete',
       expect.anything()
     );
   });
 
   it('clears draft/preview and marks apply success after applyDraft', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel: string, ..._args: unknown[]) => {
-      if (channel === 'gateway:rpc') {
-        return { success: true, result: {} };
-      }
-      return undefined;
-    });
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValue({ success: true, result: {} });
 
     useSubagentsStore.getState().generatePreviewDiffByFile({
       'AGENTS.md': 'line-1\nline-2',
@@ -108,18 +99,18 @@ describe('subagents diff and apply', () => {
   });
 
   it('deletes session and clears draft when cancelDraft is called', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValue({ success: true, result: {} });
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValue({ success: true, result: {} });
 
     await useSubagentsStore.getState().cancelDraft('writer');
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'sessions.delete',
       {
         key: 'agent:writer:subagent-draft-123',
         deleteTranscript: true,
-      }
+      },
+      undefined,
     );
     const state = useSubagentsStore.getState();
     expect(state.draftByFile).toEqual({});
@@ -128,3 +119,4 @@ describe('subagents diff and apply', () => {
     expect(state.draftPromptByAgent.writer).toBeUndefined();
   });
 });
+

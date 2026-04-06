@@ -11,6 +11,8 @@ directories:
 files:
   - dist
   - dist-electron
+  - runtime-host/build/**
+  - runtime-host/host-process.cjs
   - package.json
 
 extraResources:

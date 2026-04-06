@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostGatewayRpc } from '@/lib/host-api';
 import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
 import { findLatestAssistantText, type ChatMessage } from '@/services/openclaw/session-runtime';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
@@ -24,12 +24,6 @@ const RESULT_WAIT_TIMEOUT_MS = 180_000;
 const AGENT_WAIT_SLICE_MS = 30_000;
 const AGENT_WAIT_RPC_TIMEOUT_BUFFER_MS = 10_000;
 const BLOCKED_AUTO_ARBITRATION_DELAY_MS = 15_000;
-
-interface GatewayRpcResponse<T> {
-  success: boolean;
-  result?: T;
-  error?: string;
-}
 
 interface AssistantProgress {
   assistantCount: number;
@@ -77,16 +71,7 @@ async function callGatewayRpc<T>(
   params: unknown,
   timeoutMs: number,
 ): Promise<T> {
-  const response = await invokeIpc<GatewayRpcResponse<T>>(
-    'gateway:rpc',
-    method,
-    params,
-    timeoutMs,
-  );
-  if (!response?.success) {
-    throw new Error(response?.error || `Gateway RPC failed: ${method}`);
-  }
-  return response.result as T;
+  return await hostGatewayRpc<T>(method, params, timeoutMs);
 }
 
 async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {

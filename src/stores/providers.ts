@@ -8,10 +8,17 @@ import type {
   ProviderVendorInfo,
   ProviderWithKeyInfo,
 } from '@/lib/providers';
-import { hostApiFetch } from '@/lib/host-api';
 import {
   fetchProviderSnapshot,
 } from '@/lib/provider-accounts';
+import {
+  hostProviderCreateAccount,
+  hostProviderDeleteAccount,
+  hostProviderReadApiKey,
+  hostProviderSetDefaultAccount,
+  hostProviderUpdateAccount,
+  hostProviderValidate,
+} from '@/lib/provider-runtime';
 
 // Re-export types for consumers that imported from here
 export type {
@@ -71,10 +78,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   createAccount: async (account, apiKey) => {
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/provider-accounts', {
-        method: 'POST',
-        body: JSON.stringify({ account, apiKey }),
-      });
+      const result = await hostProviderCreateAccount(account, apiKey);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to create provider account');
@@ -89,10 +93,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   updateAccount: async (accountId, updates, apiKey) => {
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/provider-accounts/${encodeURIComponent(accountId)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ updates, apiKey }),
-      });
+      const result = await hostProviderUpdateAccount(accountId, updates, apiKey);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to update provider account');
@@ -107,9 +108,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   
   removeAccount: async (accountId) => {
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/provider-accounts/${encodeURIComponent(accountId)}`, {
-        method: 'DELETE',
-      });
+      const result = await hostProviderDeleteAccount(accountId);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to delete provider account');
@@ -124,10 +123,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   setDefaultAccount: async (accountId) => {
     try {
-      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/provider-accounts/default', {
-        method: 'PUT',
-        body: JSON.stringify({ accountId }),
-      });
+      const result = await hostProviderSetDefaultAccount(accountId);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to set default provider account');
@@ -146,10 +142,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       const payload = account
         ? { accountId: account.id, vendorId: account.vendorId, apiKey, options }
         : { vendorId: accountOrVendorId, apiKey, options };
-      const result = await hostApiFetch<{ valid: boolean; error?: string }>('/api/provider-accounts/validate', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      const result = await hostProviderValidate(payload);
       return result;
     } catch (error) {
       return { valid: false, error: String(error) };
@@ -158,7 +151,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   getAccountApiKey: async (accountId) => {
     try {
-      const result = await hostApiFetch<{ apiKey: string | null }>(`/api/provider-accounts/${encodeURIComponent(accountId)}/api-key`);
+      const result = await hostProviderReadApiKey(accountId);
       return result.apiKey;
     } catch {
       return null;

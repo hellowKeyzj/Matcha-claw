@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  gatewayClientRequestMock,
+  hostApiFetchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
-const invokeIpcMock = vi.fn();
-const hostApiFetchMock = vi.fn();
 const clearHistoryPoll = vi.fn();
 const enrichWithCachedImages = vi.fn((messages) => messages);
 const enrichWithToolResultFiles = vi.fn((messages) => messages);
@@ -13,14 +16,6 @@ const hasNonToolAssistantContent = vi.fn((message: { content?: unknown } | undef
 const isToolResultRole = vi.fn((role: unknown) => role === 'toolresult' || role === 'tool_result');
 const loadMissingPreviews = vi.fn(async () => false);
 const toMs = vi.fn((ts: number) => ts < 1e12 ? ts * 1000 : ts);
-
-vi.mock('@/lib/api-client', () => ({
-  invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
-}));
-
-vi.mock('@/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
 
 vi.mock('@/stores/chat/helpers', () => ({
   clearHistoryPoll: (...args: unknown[]) => clearHistoryPoll(...args),
@@ -73,9 +68,17 @@ function makeHarness(initial?: Partial<ChatLikeState>) {
 
 describe('chat history actions', () => {
   beforeEach(() => {
-    vi.resetAllMocks();
-    invokeIpcMock.mockResolvedValue({ success: true, result: { messages: [] } });
+    resetGatewayClientMocks();
+    clearHistoryPoll.mockReset();
+    enrichWithCachedImages.mockClear();
+    enrichWithToolResultFiles.mockClear();
+    getMessageText.mockClear();
+    hasNonToolAssistantContent.mockClear();
+    isToolResultRole.mockClear();
+    loadMissingPreviews.mockClear();
+    toMs.mockClear();
     hostApiFetchMock.mockResolvedValue({ messages: [] });
+    gatewayClientRequestMock.mockResolvedValue({ success: true, result: { messages: [] } });
   });
 
   it('uses cron session fallback when gateway history is empty', async () => {
@@ -106,6 +109,7 @@ describe('chat history actions', () => {
 
     expect(hostApiFetchMock).toHaveBeenCalledWith(
       '/api/cron/session-history?sessionKey=agent%3Amain%3Acron%3Ajob-1&limit=200',
+      undefined,
     );
     expect(h.read().messages.map((message) => message.content)).toEqual([
       'Scheduled task: Drink water',

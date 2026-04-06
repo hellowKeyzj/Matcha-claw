@@ -34,9 +34,15 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
-import { hostApiFetch } from '@/lib/host-api';
+import {
+  hostChannelsCancelSession,
+  hostChannelsFetchConfiguredTypes,
+  hostChannelsReadConfig,
+  hostChannelsSaveConfig,
+  hostChannelsStartSession,
+  hostChannelsValidateCredentials,
+} from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { invokeIpc } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import {
   CHANNEL_ICONS,
@@ -133,10 +139,7 @@ export function Channels() {
   // Fetch configured channel types from config file
   const fetchConfiguredTypes = useCallback(async () => {
     try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        channels?: string[];
-      }>('/api/channels/configured');
+      const result = await hostChannelsFetchConfiguredTypes();
       if (result.success && result.channels) {
         setConfiguredTypes(result.channels);
       }
@@ -450,7 +453,6 @@ interface AddChannelDialogProps {
 
 function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded }: AddChannelDialogProps) {
   const { t } = useTranslation('channels');
-  const addChannel = useChannelsStore((state) => state.addChannel);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
   const [connecting, setConnecting] = useState(false);
@@ -490,8 +492,8 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       setQrImageFailed(false);
       setShowAdvancedSettings(false);
       // 清理可能存在的二维码会话
-      void hostApiFetch('/api/channels/whatsapp/cancel', { method: 'POST' }).catch(() => { });
-      void hostApiFetch('/api/channels/openclaw-weixin/cancel', { method: 'POST' }).catch(() => { });
+      void hostChannelsCancelSession('whatsapp').catch(() => { });
+      void hostChannelsCancelSession('openclaw-weixin').catch(() => { });
       return;
     }
     setShowAdvancedSettings(false);
@@ -501,10 +503,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
     (async () => {
       try {
-        const result = await invokeIpc(
-          'channel:getFormValues',
-          selectedType
-        ) as { success: boolean; values?: Record<string, string> };
+        const result = await hostChannelsReadConfig(selectedType);
 
         if (cancelled) return;
 
@@ -561,31 +560,8 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       } else {
         toast.success(t('toast.channelSaved', { name: CHANNEL_NAMES[selectedType] }));
       }
-      const accountId = data?.accountId || channelName.trim() || 'default';
-      if (selectedType === 'whatsapp') {
-        try {
-          const saveResult = await hostApiFetch<{ success?: boolean; error?: string }>('/api/channels/config', {
-            method: 'POST',
-            body: JSON.stringify({ channelType: 'whatsapp', config: { enabled: true } }),
-          });
-          if (!saveResult?.success) {
-            console.error('Failed to save WhatsApp config:', saveResult?.error);
-          } else {
-            console.info('Saved WhatsApp config for account:', accountId);
-          }
-        } catch (error) {
-          console.error('Failed to save WhatsApp config:', error);
-        }
-      }
-      // Register the channel locally so it shows up immediately
-      addChannel({
-        type: selectedType,
-        name: channelName || CHANNEL_NAMES[selectedType],
-      }).then(() => {
-        // Restart gateway to pick up the new session
-        useGatewayStore.getState().restart().catch(console.error);
-        onChannelAdded();
-      });
+      void data;
+      onChannelAdded();
       setConnecting(false);
     };
 
@@ -613,9 +589,10 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       if (typeof removeErrorListener === 'function') removeErrorListener();
       clearQrGenerateTimeout();
       // Cancel when unmounting or switching types
-      void hostApiFetch(`${qrApiBase}/cancel`, { method: 'POST' }).catch(() => { });
+      const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
+      void hostChannelsCancelSession(qrChannelType).catch(() => { });
     };
-  }, [selectedType, addChannel, channelName, onChannelAdded, t, clearQrGenerateTimeout]);
+  }, [selectedType, channelName, onChannelAdded, t, clearQrGenerateTimeout]);
 
   const handleValidate = async () => {
     if (!selectedType) return;
@@ -624,16 +601,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     setValidationResult(null);
 
     try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        valid?: boolean;
-        errors?: string[];
-        warnings?: string[];
-        details?: Record<string, string>;
-      }>('/api/channels/credentials/validate', {
-        method: 'POST',
-        body: JSON.stringify({ channelType: selectedType, config: configValues }),
-      });
+      const result = await hostChannelsValidateCredentials(selectedType, configValues);
 
       const warnings = result.warnings || [];
       if (result.valid && result.details) {
@@ -669,8 +637,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     try {
       // For QR-based channels, request QR code
       if (meta.connectionType === 'qr') {
-        const qrApiBase = QR_API_BASE_BY_TYPE[selectedType];
-        if (!qrApiBase) {
+        if (!QR_API_BASE_BY_TYPE[selectedType]) {
           throw new Error(`Unsupported QR channel type: ${selectedType}`);
         }
         clearQrGenerateTimeout();
@@ -679,29 +646,15 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
           toast.error(t('toast.qrGenerateTimeout'));
         }, QR_GENERATE_TIMEOUT_MS);
         const accountId = channelName.trim() || 'default';
-        await hostApiFetch(`${qrApiBase}/start`, {
-          method: 'POST',
-          body: JSON.stringify({
-            accountId,
-            config: configValues,
-          }),
-        });
+        const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
+        await hostChannelsStartSession(qrChannelType, { accountId, config: configValues });
         // The QR code will be set via event listener
         return;
       }
 
       // Step 1: Validate credentials against the actual service API
       if (meta.connectionType === 'token') {
-        const validationResponse = await hostApiFetch<{
-          success: boolean;
-          valid?: boolean;
-          errors?: string[];
-          warnings?: string[];
-          details?: Record<string, string>;
-        }>('/api/channels/credentials/validate', {
-          method: 'POST',
-          body: JSON.stringify({ channelType: selectedType, config: configValues }),
-        });
+        const validationResponse = await hostChannelsValidateCredentials(selectedType, configValues);
 
         if (!validationResponse.valid) {
           setValidationResult({
@@ -738,15 +691,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
 
       // Step 2: Save channel configuration via IPC
       const config: Record<string, unknown> = { ...configValues };
-      const saveResult = await hostApiFetch<{
-        success?: boolean;
-        error?: string;
-        warning?: string;
-        pluginInstalled?: boolean;
-      }>('/api/channels/config', {
-        method: 'POST',
-        body: JSON.stringify({ channelType: selectedType, config }),
-      });
+      const saveResult = await hostChannelsSaveConfig({ channelType: selectedType, config });
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
       }
@@ -754,21 +699,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         toast.warning(saveResult.warning);
       }
 
-      // Step 3: Add a local channel entry for the UI
-      await addChannel({
-        type: selectedType,
-        name: channelName || CHANNEL_NAMES[selectedType],
-        token: configValues[meta.configFields[0]?.key] || undefined,
-      });
-
       toast.success(t('toast.channelSaved', { name: meta.name }));
-
-      // Gateway restart is now handled server-side via debouncedRestart()
-      // inside the channel:saveConfig IPC handler, so we don't need to
-      // trigger it explicitly here.  This avoids cascading restarts when
-      // multiple config changes happen in quick succession (e.g. during
-      // the setup wizard).
-      toast.success(t('toast.channelConnecting', { name: meta.name }));
 
       // Brief delay so user can see the success state before dialog closes
       await new Promise((resolve) => setTimeout(resolve, 800));

@@ -20,6 +20,7 @@ describe('host events unsubscribe', () => {
     dispose();
 
     expect(on).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledWith('host:event', expect.any(Function));
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     expect(off).not.toHaveBeenCalled();
   });
@@ -37,7 +38,8 @@ describe('host events unsubscribe', () => {
     dispose();
 
     expect(on).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledWith('host:event', expect.any(Function));
     expect(off).toHaveBeenCalledTimes(1);
-    expect(off).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
+    expect(off).toHaveBeenCalledWith('host:event', expect.any(Function));
   });
 });

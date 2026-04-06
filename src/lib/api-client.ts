@@ -2,13 +2,11 @@ import { trackUiEvent } from './telemetry';
 import {
   AppError,
   type AppErrorCode,
-  mapBackendErrorCode,
   normalizeAppError,
 } from './error-model';
 export { AppError } from './error-model';
 
 export type TransportKind = 'ipc' | 'ws' | 'http';
-export type GatewayTransportPreference = 'ws-first';
 type TransportInvoker = <T>(channel: string, args: unknown[]) => Promise<T>;
 type TransportRequest = { channel: string; args: unknown[] };
 
@@ -16,24 +14,6 @@ type NormalizedTransportResponse = {
   ok: boolean;
   data?: unknown;
   error?: unknown;
-};
-
-type UnifiedRequest = {
-  id: string;
-  module: string;
-  action: string;
-  payload?: unknown;
-};
-
-type UnifiedResponse = {
-  id?: string;
-  ok: boolean;
-  data?: unknown;
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
 };
 
 type TransportRule = {
@@ -45,40 +25,6 @@ export type ApiClientTransportConfig = {
   enabled: Record<Exclude<TransportKind, 'ipc'>, boolean>;
   rules: TransportRule[];
 };
-
-const UNIFIED_CHANNELS = new Set<string>([
-  'app:version',
-  'app:name',
-  'app:platform',
-  'settings:getAll',
-  'settings:get',
-  'settings:set',
-  'settings:setMany',
-  'settings:reset',
-  'provider:listVendors',
-  'provider:listAccounts',
-  'provider:listAccountStatuses',
-  'provider:getAccount',
-  'provider:getDefaultAccountId',
-  'provider:hasAccountApiKey',
-  'provider:getAccountApiKey',
-  'provider:setDefaultAccount',
-  'update:status',
-  'update:version',
-  'update:check',
-  'update:download',
-  'update:install',
-  'update:setChannel',
-  'update:setAutoDownload',
-  'update:cancelAutoInstall',
-  'cron:list',
-  'cron:create',
-  'cron:update',
-  'cron:delete',
-  'cron:toggle',
-  'cron:trigger',
-  'usage:recentTokenHistory',
-]);
 
 const customInvokers = new Map<Exclude<TransportKind, 'ipc'>, TransportInvoker>();
 const GATEWAY_WS_DIAG_FLAG = 'clawx:gateway-ws-diagnostic';
@@ -173,10 +119,6 @@ class TransportUnsupportedError extends Error {
     super(message);
     this.transport = transport;
   }
-}
-
-function mapUnifiedErrorCode(code?: string): AppErrorCode {
-  return mapBackendErrorCode(code);
 }
 
 function shouldLogApiRequests(): boolean {
@@ -298,44 +240,11 @@ export function setGatewayWsDiagnosticEnabled(enabled: boolean): void {
   applyGatewayTransportPreference();
 }
 
-function toUnifiedRequest(channel: string, args: unknown[]): UnifiedRequest {
-  const splitIndex = channel.indexOf(':');
-  return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    module: channel.slice(0, splitIndex),
-    action: channel.slice(splitIndex + 1),
-    payload: args.length <= 1 ? args[0] : args,
-  };
-}
-
 async function invokeViaIpc<T>(channel: string, args: unknown[]): Promise<T> {
-  if (channel !== 'app:request' && UNIFIED_CHANNELS.has(channel)) {
-    const request = toUnifiedRequest(channel, args);
-
-    try {
-      const response = await window.electron.ipcRenderer.invoke('app:request', request) as UnifiedResponse;
-      if (!response?.ok) {
-        const message = response?.error?.message || 'Unified IPC request failed';
-        if (message.includes('APP_REQUEST_UNSUPPORTED:')) {
-          throw new Error(message);
-        }
-        throw new AppError(mapUnifiedErrorCode(response?.error?.code), message, response?.error);
-      }
-      return response.data as T;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('APP_REQUEST_UNSUPPORTED:') || message.includes('Invalid IPC channel: app:request')) {
-        // Fallback to legacy channel handlers.
-      } else {
-        throw normalizeAppError(err, { transport: 'ipc', channel, source: 'app:request' });
-      }
-    }
-  }
-
   try {
     return await window.electron.ipcRenderer.invoke(channel, ...args) as T;
   } catch (err) {
-    throw normalizeAppError(err, { transport: 'ipc', channel, source: 'legacy-ipc' });
+    throw normalizeAppError(err, { transport: 'ipc', channel, source: 'ipc' });
   }
 }
 
@@ -554,13 +463,9 @@ export function createGatewayHttpTransportInvoker(
         : 15000;
 
     const response = await invokeViaIpc<{
-      ok?: boolean;
+      ok: boolean;
       data?: unknown;
       error?: unknown;
-      success?: boolean;
-      status?: number;
-      json?: unknown;
-      text?: string;
     }>('gateway:httpProxy', [{
       path: '/rpc',
       method: 'POST',
@@ -572,36 +477,7 @@ export function createGatewayHttpTransportInvoker(
       },
     }]);
 
-    if (response && 'data' in response && typeof response.ok === 'boolean') {
-      if (!response.ok) {
-        const errObj = response.error as { message?: string } | string | undefined;
-        throw new Error(
-          typeof errObj === 'string'
-            ? errObj
-            : (errObj?.message || 'Gateway HTTP proxy failed'),
-        );
-      }
-      const proxyData = response.data as { status?: number; ok?: boolean; json?: unknown; text?: string } | undefined;
-      const payload = proxyData?.json as Record<string, unknown> | undefined;
-      if (!payload || typeof payload !== 'object') {
-        throw new Error(proxyData?.text || `Gateway HTTP returned non-JSON (status=${proxyData?.status ?? 'unknown'})`);
-      }
-      if (payload.type === 'res') {
-        if (payload.ok === false || payload.error) {
-          throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
-        }
-        return normalizeGatewayRpcEnvelope(payload.payload ?? payload) as T;
-      }
-      if ('ok' in payload) {
-        if (!payload.ok) {
-          throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
-        }
-        return normalizeGatewayRpcEnvelope(payload.data ?? payload) as T;
-      }
-      return normalizeGatewayRpcEnvelope(payload) as T;
-    }
-
-    if (!response?.success) {
+    if (!response.ok) {
       const errObj = response?.error as { message?: string } | string | undefined;
       throw new Error(
         typeof errObj === 'string'
@@ -610,11 +486,11 @@ export function createGatewayHttpTransportInvoker(
       );
     }
 
-    const payload = response?.json as Record<string, unknown> | undefined;
+    const proxyData = response.data as { status?: number; ok?: boolean; json?: unknown; text?: string } | undefined;
+    const payload = proxyData?.json as Record<string, unknown> | undefined;
     if (!payload || typeof payload !== 'object') {
-      throw new Error(response?.text || `Gateway HTTP returned non-JSON (status=${response?.status ?? 'unknown'})`);
+      throw new Error(proxyData?.text || `Gateway HTTP returned non-JSON (status=${proxyData?.status ?? 'unknown'})`);
     }
-
     if (payload.type === 'res') {
       if (payload.ok === false || payload.error) {
         throw new Error(String(payload.error ?? 'Gateway HTTP request failed'));
@@ -632,6 +508,30 @@ export function createGatewayHttpTransportInvoker(
   };
 }
 
+async function getGatewayTokenFromHostSettings(): Promise<string | null> {
+  const response = await invokeViaIpc<{
+    ok: boolean;
+    data?: unknown;
+    error?: unknown;
+  }>('hostapi:fetch', [{
+    path: '/api/settings/gatewayToken',
+    method: 'GET',
+  }]);
+
+  if (!response.ok) {
+    const errObj = response?.error as { message?: string } | string | undefined;
+    throw new Error(
+      typeof errObj === 'string'
+        ? errObj
+        : (errObj?.message || 'Host settings request failed'),
+    );
+  }
+
+  const proxyData = response.data as { json?: unknown } | undefined;
+  const payload = proxyData?.json as { value?: unknown } | undefined;
+  return typeof payload?.value === 'string' ? payload.value : null;
+}
+
 export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptions = {}): TransportInvoker {
   const timeoutMs = options.timeoutMs ?? 15000;
   const websocketFactory = options.websocketFactory ?? ((url: string) => new WebSocket(url));
@@ -641,7 +541,7 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
     if (controlUi?.success && typeof controlUi.token === 'string' && controlUi.token.trim()) {
       return controlUi.token;
     }
-    return await invokeViaIpc<string | null>('settings:get', [{ key: 'gatewayToken' }]);
+    return await getGatewayTokenFromHostSettings();
   });
 
   let socket: WebSocket | null = null;

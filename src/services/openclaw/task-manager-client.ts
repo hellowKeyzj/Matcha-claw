@@ -1,4 +1,9 @@
-import { invokeIpc } from '@/lib/api-client';
+import {
+  hostApiFetch,
+  hostOpenClawGetTaskWorkspaceDirs,
+  hostOpenClawGetWorkspaceDir,
+  hostGatewayRpc,
+} from '@/lib/host-api';
 
 export type TaskStatus =
   | 'pending'
@@ -105,8 +110,6 @@ export type TaskNotification =
       };
     };
 
-type RpcResult<T> = { success: boolean; result?: T; error?: string };
-
 const TASK_RPC_TIMEOUT_MS = 60_000;
 
 function resolveRandomId(): string {
@@ -117,15 +120,11 @@ function resolveRandomId(): string {
 }
 
 async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs = TASK_RPC_TIMEOUT_MS): Promise<T> {
-  const response = await invokeIpc<RpcResult<T>>('gateway:rpc', method, params, timeoutMs);
-  if (!response.success) {
-    throw new Error(response.error || `RPC failed: ${method}`);
-  }
-  return response.result as T;
+  return await hostGatewayRpc<T>(method, params, timeoutMs);
 }
 
 export async function getWorkspaceDir(): Promise<string | null> {
-  const value = await invokeIpc<unknown>('openclaw:getWorkspaceDir');
+  const value = await hostOpenClawGetWorkspaceDir();
   if (typeof value !== 'string') {
     return null;
   }
@@ -134,7 +133,7 @@ export async function getWorkspaceDir(): Promise<string | null> {
 }
 
 export async function getTaskWorkspaceDirs(): Promise<string[]> {
-  const value = await invokeIpc<unknown>('openclaw:getTaskWorkspaceDirs');
+  const value = await hostOpenClawGetTaskWorkspaceDirs();
   if (!Array.isArray(value)) {
     return [];
   }
@@ -265,7 +264,9 @@ export async function getTaskPluginStatus(): Promise<{
   version?: string;
   pluginDir: string;
 }> {
-  return invokeIpc('task:pluginStatus');
+  return hostApiFetch('/api/task-plugin/status', {
+    method: 'POST',
+  });
 }
 
 export async function installTaskPlugin(): Promise<{
@@ -277,7 +278,9 @@ export async function installTaskPlugin(): Promise<{
   version?: string;
   error?: string;
 }> {
-  return invokeIpc('task:pluginInstall');
+  return hostApiFetch('/api/task-plugin/install', {
+    method: 'POST',
+  });
 }
 
 export async function uninstallTaskPlugin(): Promise<{
@@ -288,5 +291,7 @@ export async function uninstallTaskPlugin(): Promise<{
   removedPath?: string;
   error?: string;
 }> {
-  return invokeIpc('task:pluginUninstall');
+  return hostApiFetch('/api/task-plugin/uninstall', {
+    method: 'POST',
+  });
 }

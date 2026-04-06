@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import { invokeIpc } from '@/lib/api-client';
+import { hostOpenClawGetConfigDir, hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import {
@@ -125,8 +125,7 @@ export function SubagentFormDialog({
     let cancelled = false;
     const loadFallbackWorkspaceRoot = async () => {
       try {
-        const rawConfigDir = await invokeIpc<unknown>('openclaw:getConfigDir');
-        const configDir = typeof rawConfigDir === 'string' ? rawConfigDir.trim() : '';
+        const configDir = (await hostOpenClawGetConfigDir()).trim();
         if (cancelled) {
           return;
         }
@@ -173,8 +172,7 @@ export function SubagentFormDialog({
     let cancelled = false;
     const loadMainWorkspace = async () => {
       try {
-        const rawWorkspaceDir = await invokeIpc<unknown>('openclaw:getWorkspaceDir');
-        const workspaceDir = typeof rawWorkspaceDir === 'string' ? rawWorkspaceDir.trim() : '';
+        const workspaceDir = (await hostOpenClawGetWorkspaceDir()).trim();
         if (!workspaceDir || cancelled) {
           return;
         }

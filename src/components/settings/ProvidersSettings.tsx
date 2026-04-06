@@ -45,12 +45,16 @@ import {
   buildProviderListItems,
   type ProviderListItem,
 } from '@/lib/provider-accounts';
+import {
+  hostProviderCancelOAuth,
+  hostProviderStartOAuth,
+  hostProviderSubmitOAuthCode,
+} from '@/lib/provider-runtime';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 import { invokeIpc } from '@/lib/api-client';
 import { useSettingsStore } from '@/stores/settings';
-import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
@@ -810,7 +814,7 @@ function AddProviderDialog({
       const payload = (data as { accountId?: string } | undefined) || undefined;
       const accountId = payload?.accountId || pendingOAuthRef.current?.accountId;
 
-      // device-oauth.ts already saved the provider config to the backend,
+      // device-oauth-manager already saved the provider config to the backend,
       // including the dynamically resolved baseUrl for the region (e.g. CN vs Global).
       // If we call add() here with undefined baseUrl, it will overwrite and erase it!
       // So we just fetch the latest list from the backend to update the UI.
@@ -872,10 +876,7 @@ function AddProviderDialog({
       const accountId = supportsMultipleAccounts ? `${selectedType}-${crypto.randomUUID()}` : selectedType;
       const label = name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType;
       pendingOAuthRef.current = { accountId, label };
-      await hostApiFetch('/api/provider-accounts/oauth/start', {
-        method: 'POST',
-        body: JSON.stringify({ provider: selectedType, accountId, label }),
-      });
+      await hostProviderStartOAuth({ provider: selectedType, accountId, label });
     } catch (e) {
       setOauthError(String(e));
       setOauthFlowing(false);
@@ -889,19 +890,14 @@ function AddProviderDialog({
     setManualCodeInput('');
     setOauthError(null);
     pendingOAuthRef.current = null;
-    await hostApiFetch('/api/provider-accounts/oauth/cancel', {
-      method: 'POST',
-    });
+    await hostProviderCancelOAuth();
   };
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
     if (!value) return;
     try {
-      await hostApiFetch('/api/provider-accounts/oauth/submit', {
-        method: 'POST',
-        body: JSON.stringify({ code: value }),
-      });
+      await hostProviderSubmitOAuthCode(value);
       setOauthError(null);
     } catch (error) {
       setOauthError(String(error));

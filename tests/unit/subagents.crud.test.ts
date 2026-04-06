@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+
 import { useSubagentsStore } from '@/stores/subagents';
 
 describe('subagents crud', () => {
   beforeEach(() => {
+    resetGatewayClientMocks();
     vi.mocked(window.electron.ipcRenderer.invoke).mockReset();
     useSubagentsStore.setState({
       agents: [{ id: 'main', workspace: '/home/dev/.openclaw/workspace', isDefault: true }],
@@ -18,12 +21,12 @@ describe('subagents crud', () => {
   });
 
   it('calls agents.create and agents.update with model', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel, method) => {
-      if (channel === 'gateway:rpc' && method === 'agents.create') {
+    const rpc = gatewayClientRpcMock;
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer-v2' } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.list') {
+      if (method === 'agents.list') {
         return {
           success: true,
           result: {
@@ -31,10 +34,10 @@ describe('subagents crud', () => {
           },
         };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.update') {
+      if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     const createdAgentId = await useSubagentsStore.getState().createAgent({
@@ -44,31 +47,42 @@ describe('subagents crud', () => {
     });
     expect(createdAgentId).toBe('writer-v2');
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.create',
       { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
+      undefined,
     );
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.update',
       { agentId: 'writer-v2', model: 'gpt-4.1-mini' },
+      undefined,
     );
   });
 
   it('create 在缺少主工作区时，优先用 openclaw:getConfigDir 生成 fallback 工作区', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     useSubagentsStore.setState({
       agents: [{ id: 'main', isDefault: true }],
     });
-    invoke.mockImplementation(async (channel, method) => {
-      if (channel === 'openclaw:getConfigDir') {
-        return 'C:\\Users\\Dev\\.openclaw';
+    invoke.mockImplementation(async (channel, payload) => {
+      if (channel === 'hostapi:fetch' && (payload as { path?: string } | undefined)?.path === '/api/openclaw/config-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: 'C:\\Users\\Dev\\.openclaw',
+          },
+        };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.create') {
+      throw new Error(`Unexpected invoke call: ${String(channel)}`);
+    });
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.list') {
+      if (method === 'agents.list') {
         return {
           success: true,
           result: {
@@ -76,10 +90,10 @@ describe('subagents crud', () => {
           },
         };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.update') {
+      if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await useSubagentsStore.getState().createAgent({
@@ -89,22 +103,23 @@ describe('subagents crud', () => {
     });
 
     expect(invoke).toHaveBeenCalledWith(
-      'openclaw:getConfigDir',
+      'hostapi:fetch',
+      expect.objectContaining({ path: '/api/openclaw/config-dir', method: 'GET' }),
     );
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.create',
       { name: 'writer', workspace: 'C:\\Users\\Dev\\.openclaw\\workspace-subagents\\writer' },
+      undefined,
     );
   });
 
   it('passes emoji to agents.create when provided', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel, method) => {
-      if (channel === 'gateway:rpc' && method === 'agents.create') {
+    const rpc = gatewayClientRpcMock;
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.list') {
+      if (method === 'agents.list') {
         return {
           success: true,
           result: {
@@ -112,10 +127,10 @@ describe('subagents crud', () => {
           },
         };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.update') {
+      if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await useSubagentsStore.getState().createAgent({
@@ -125,24 +140,24 @@ describe('subagents crud', () => {
       emoji: '🤖',
     });
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.create',
       { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer', emoji: '🤖' },
+      undefined,
     );
   });
 
   it('create 成功后若首次 agents.update 返回 not found，会自动重试并成功', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({ loadAgents });
     let updateCallCount = 0;
     let listCallCount = 0;
-    invoke.mockImplementation(async (channel, method) => {
-      if (channel === 'gateway:rpc' && method === 'agents.create') {
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
         return { success: true, result: { agentId: 'test4' } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.list') {
+      if (method === 'agents.list') {
         listCallCount += 1;
         return {
           success: true,
@@ -151,14 +166,14 @@ describe('subagents crud', () => {
           },
         };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.update') {
+      if (method === 'agents.update') {
         updateCallCount += 1;
         if (updateCallCount === 1) {
           return { success: false, error: 'Error: agent "test4" not found' };
         }
         return { success: true, result: { ok: true } };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await expect(useSubagentsStore.getState().createAgent({
@@ -169,22 +184,22 @@ describe('subagents crud', () => {
 
     expect(updateCallCount).toBe(2);
     expect(listCallCount).toBeGreaterThanOrEqual(2);
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'secrets.reload', {});
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'config.patch', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('secrets.reload', {});
+    expect(rpc).not.toHaveBeenCalledWith('config.patch', expect.anything());
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(useSubagentsStore.getState().error).toBeNull();
   });
 
   it('create 在 agents.create 未返回 agentId 时抛协议错误且不调用 agents.update', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel, method) => {
-      if (channel === 'gateway:rpc' && method === 'agents.create') {
+    const rpc = gatewayClientRpcMock;
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
         return { success: true, result: { ok: true } };
       }
-      if (channel === 'gateway:rpc' && method === 'agents.update') {
+      if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await expect(useSubagentsStore.getState().createAgent({
@@ -193,12 +208,12 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
     })).rejects.toThrow('agents.create returned missing agentId');
 
-    expect(invoke).not.toHaveBeenCalledWith('gateway:rpc', 'agents.update', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything());
   });
 
   it('calls agents.update with model payload', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({ success: true, result: {} });
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({ success: true, result: {} });
 
     await useSubagentsStore.getState().updateAgent({
       agentId: 'writer',
@@ -207,20 +222,20 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
     });
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.update',
       {
         agentId: 'writer',
         name: 'writer-v2',
         workspace: '/tmp/writer-v2',
         model: 'gpt-4.1-mini',
-      }
+      },
+      undefined,
     );
   });
 
   it('updateAgent 传入 skills allowlist 时应写入 agents.list[].skills', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({
       agents: [
@@ -236,10 +251,7 @@ describe('subagents crud', () => {
       loadAgents,
     });
 
-    invoke.mockImplementation(async (channel, method, params) => {
-      if (channel !== 'gateway:rpc') {
-        throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
-      }
+    rpc.mockImplementation(async (method, params) => {
       if (method === 'config.get') {
         return {
           success: true,
@@ -274,7 +286,7 @@ describe('subagents crud', () => {
       if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      throw new Error(`Unexpected invoke call: ${String(channel)} ${String(method)}`);
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await useSubagentsStore.getState().updateAgent({
@@ -285,19 +297,19 @@ describe('subagents crud', () => {
       skills: ['web-search', 'feishu-doc'],
     });
 
-    expect(invoke).toHaveBeenCalledWith('gateway:rpc', 'config.get', {});
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
+    expect(rpc).toHaveBeenCalledWith(
       'config.set',
       expect.objectContaining({
         baseHash: 'cfg-hash-1',
       }),
+      undefined,
     );
     expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
   it('skips update when payload has no effective changes', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     useSubagentsStore.setState({
       agents: [
@@ -320,21 +332,23 @@ describe('subagents crud', () => {
       model: 'gpt-4.1-mini',
     });
 
-    expect(invoke).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
     expect(loadAgents).not.toHaveBeenCalled();
   });
 
   it('calls agents.delete with hard-delete payload', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({ success: true, result: {} });
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({ success: true, result: {} });
 
     await useSubagentsStore.getState().deleteAgent('writer');
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agents.delete',
       { agentId: 'writer', deleteFiles: true }
+      ,
+      undefined
     );
-    expect(invoke).not.toHaveBeenCalledWith('subagent:deleteWorkspace', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('subagent:deleteWorkspace', expect.anything());
   });
 });
+

@@ -6,7 +6,7 @@ import { Dashboard } from '@/pages/Dashboard';
 const fetchChannelsMock = vi.fn(async () => {});
 const fetchSkillsMock = vi.fn(async () => {});
 const hostApiFetchMock = vi.fn(async (path: string) => {
-  if (path === '/api/usage/recent-token-history') {
+  if (path === '/api/runtime-host/usage/recent') {
     return [
       {
         timestamp: '2026-03-15T00:00:00.000Z',
@@ -52,11 +52,13 @@ vi.mock('@/stores/gateway', () => ({
 }));
 
 vi.mock('@/stores/channels', () => ({
-  useChannelsStore: () => channelsState,
+  useChannelsStore: (selector?: (state: typeof channelsState) => unknown) =>
+    typeof selector === 'function' ? selector(channelsState) : channelsState,
 }));
 
 vi.mock('@/stores/skills', () => ({
-  useSkillsStore: () => skillsState,
+  useSkillsStore: (selector?: (state: typeof skillsState) => unknown) =>
+    typeof selector === 'function' ? selector(skillsState) : skillsState,
 }));
 
 vi.mock('@/stores/settings', () => ({

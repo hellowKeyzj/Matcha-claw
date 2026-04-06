@@ -10,13 +10,6 @@ import i18n from './i18n';
 import { MainLayout } from './components/layout/MainLayout';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Chat } from './pages/Chat';
-import { Dashboard } from './pages/Dashboard';
-import { Channels } from './pages/Channels';
-import { TeamsPage } from './pages/Teams';
-import { TeamChatPage } from './pages/Teams/TeamChat';
-import { ProvidersPage } from './pages/Providers';
-import { SubAgents } from './pages/SubAgents';
-import { TasksPage } from './pages/Tasks';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useSkillsStore } from './stores/skills';
@@ -28,6 +21,14 @@ import {
   SkillsRoute,
   SecurityRoute,
   SettingsRoute,
+  DashboardRoute,
+  ChannelsRoute,
+  TeamsRoute,
+  TeamChatRoute,
+  ProvidersRoute,
+  SubAgentsRoute,
+  TasksRoute,
+  PluginsRoute,
   preloadCriticalLazyRoutes,
 } from './lib/route-preload';
 
@@ -322,20 +323,68 @@ function App() {
             <Route path="/" element={<Chat />} />
             <Route
               path="/dashboard"
-              element={<Dashboard />}
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <DashboardRoute />
+                </Suspense>
+              )}
             />
-            <Route path="/channels" element={<Channels />} />
+            <Route
+              path="/channels"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <ChannelsRoute />
+                </Suspense>
+              )}
+            />
             <Route
               path="/subagents"
-              element={<SubAgents />}
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <SubAgentsRoute />
+                </Suspense>
+              )}
             />
-            <Route path="/teams" element={<TeamsPage />} />
-            <Route path="/teams/:teamId" element={<TeamChatPage />} />
+            <Route
+              path="/teams"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <TeamsRoute />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="/teams/:teamId"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <TeamChatRoute />
+                </Suspense>
+              )}
+            />
             <Route
               path="/tasks"
-              element={<TasksPage />}
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <TasksRoute />
+                </Suspense>
+              )}
             />
-            <Route path="/providers" element={<ProvidersPage />} />
+            <Route
+              path="/providers"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <ProvidersRoute />
+                </Suspense>
+              )}
+            />
+            <Route
+              path="/plugins"
+              element={(
+                <Suspense fallback={<RouteLoadingFallback />}>
+                  <PluginsRoute />
+                </Suspense>
+              )}
+            />
             <Route
               path="/skills"
               element={(

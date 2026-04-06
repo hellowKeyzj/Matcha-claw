@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildPlatformCompositionRoot } from '@electron/main/platform-composition-root';
+import { createRuntimeHostPlatformRoot } from '../../../runtime-host/api/platform/runtime-root';
 
-describe('platform composition root', () => {
-  it('wires runtime manager and run service', async () => {
-    const root = buildPlatformCompositionRoot({
-      gatewayManager: {
-        rpc: vi.fn().mockResolvedValue({ runId: 'run-1' }),
-        getStatus: vi.fn().mockReturnValue({ state: 'running' }),
-      } as never,
+describe('runtime-host platform root', () => {
+  it('在子进程内装配 runtime manager 和 run service', async () => {
+    const root = createRuntimeHostPlatformRoot({
+      isGatewayRunning: vi.fn().mockResolvedValue(true),
+      platformInstallTool: vi.fn(),
+      platformUninstallTool: vi.fn(),
+      platformEnableTool: vi.fn(),
+      platformDisableTool: vi.fn(),
+      platformListToolsCatalog: vi.fn().mockResolvedValue([]),
+      platformStartRun: vi.fn().mockResolvedValue({ runId: 'run-1' }),
+      platformAbortRun: vi.fn(),
     });
 
     expect(root.runtimeManager).toBeDefined();

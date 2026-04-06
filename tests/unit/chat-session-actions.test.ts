@@ -1,10 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-const invokeIpcMock = vi.fn();
-
-vi.mock('@/lib/api-client', () => ({
-  invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
-}));
+import {
+  gatewayClientRequestMock,
+  hostApiFetchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
 type ChatLikeState = {
   currentSessionKey: string;
@@ -51,8 +50,9 @@ function makeHarness(initial?: Partial<ChatLikeState>) {
 
 describe('chat session actions', () => {
   beforeEach(() => {
-    vi.resetAllMocks();
-    invokeIpcMock.mockResolvedValue({ success: true });
+    resetGatewayClientMocks();
+    hostApiFetchMock.mockResolvedValue({ success: true });
+    gatewayClientRequestMock.mockResolvedValue({ success: true });
   });
 
   it('switchSession removes empty non-main leaving session and loads history', async () => {
@@ -88,7 +88,10 @@ describe('chat session actions', () => {
 
     await actions.deleteSession('agent:foo:session-a');
     const next = h.read();
-    expect(invokeIpcMock).toHaveBeenCalledWith('session:delete', 'agent:foo:session-a');
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/delete', {
+      method: 'POST',
+      body: JSON.stringify({ sessionKey: 'agent:foo:session-a' }),
+    });
     expect(next.currentSessionKey).toBe('agent:foo:main');
     expect(next.sessions.map((s) => s.key)).toEqual(['agent:foo:main']);
     expect(next.sessionLabels['agent:foo:session-a']).toBeUndefined();
@@ -144,7 +147,7 @@ describe('chat session actions', () => {
     });
     const actions = createSessionActions(h.set as never, h.get as never);
 
-    invokeIpcMock.mockResolvedValueOnce({
+    gatewayClientRequestMock.mockResolvedValueOnce({
       success: true,
       result: {
         sessions: [

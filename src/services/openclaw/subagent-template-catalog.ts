@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostOpenClawGetSubagentTemplate, hostOpenClawGetSubagentTemplateCatalog } from '@/lib/host-api';
 import type {
   SubagentTargetFile,
   SubagentTemplateCategory,
@@ -103,7 +103,7 @@ function normalizeTemplateFileContents(value: unknown): Partial<Record<SubagentT
 }
 
 async function fetchTemplateCatalogFromIpc(): Promise<SubagentTemplateCatalogResult> {
-  const value = await invokeIpc<unknown>('openclaw:getSubagentTemplateCatalog');
+  const value = await hostOpenClawGetSubagentTemplateCatalog<unknown>();
   if (!value || typeof value !== 'object') {
     return {
       categories: [],
@@ -138,7 +138,7 @@ async function fetchTemplateDetailFromIpc(templateId: string): Promise<SubagentT
   if (!id) {
     throw new Error('Template id is required');
   }
-  const value = await invokeIpc<unknown>('openclaw:getSubagentTemplate', id);
+  const value = await hostOpenClawGetSubagentTemplate<unknown>(id);
   if (!value || typeof value !== 'object') {
     throw new Error(`Template "${id}" not found`);
   }

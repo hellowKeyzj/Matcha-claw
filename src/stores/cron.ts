@@ -21,6 +21,13 @@ interface CronState {
   setJobs: (jobs: CronJob[]) => void;
 }
 
+function decodeCronJobs(payload: unknown): CronJob[] {
+  if (!Array.isArray(payload)) {
+    throw new Error('Invalid /api/cron/jobs response: expected array');
+  }
+  return payload as CronJob[];
+}
+
 export const useCronStore = create<CronState>((set) => ({
   jobs: [],
   loading: false,
@@ -33,11 +40,11 @@ export const useCronStore = create<CronState>((set) => ({
     }
     
     try {
-      const result = await hostApiFetch<CronJob[]>('/api/cron/jobs');
+      const jobs = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
       if (silent) {
-        set({ jobs: result });
+        set({ jobs });
       } else {
-        set({ jobs: result, loading: false });
+        set({ jobs, loading: false });
       }
     } catch (error) {
       if (!silent) {
@@ -117,8 +124,8 @@ export const useCronStore = create<CronState>((set) => ({
       console.log('Cron trigger result:', result);
       // Refresh jobs after trigger to update lastRun/nextRun state
       try {
-        const jobs = await hostApiFetch<CronJob[]>('/api/cron/jobs');
-        set({ jobs });
+        const refreshed = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
+        set({ jobs: refreshed });
       } catch {
         // Ignore refresh error
       }

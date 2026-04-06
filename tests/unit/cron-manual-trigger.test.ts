@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildManualRunPatches, shouldUseManualRunProfileSwitch, type GatewayCronJobForTrigger } from '@electron/utils/cron-manual-trigger';
+import {
+  buildManualRunPatches,
+  shouldUseManualRunProfileSwitch,
+  type GatewayCronJobForTrigger,
+} from '../../runtime-host/application/cron/manual-trigger';
 
 function buildJob(overrides?: Partial<GatewayCronJobForTrigger>): GatewayCronJobForTrigger {
   return {
@@ -55,4 +59,3 @@ describe('cron 手动触发配置切换', () => {
     });
   });
 });
-

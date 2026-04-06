@@ -1,40 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PlatformIpcFacade } from '@electron/main/platform-ipc-facade';
-import { LocalPluginStateLedger } from '@electron/adapters/platform';
-import { ToolRegistryStore } from '@electron/adapters/platform/tool-registry-store';
+import { createRuntimeHostPlatformRoot } from '../../../runtime-host/api/platform/runtime-root';
 
-describe('platform ipc facade', () => {
-  it('writes platform tools to registry and local ledger', async () => {
-    const runtimeManager = {
-      runtimeHealth: vi.fn().mockResolvedValue({ status: 'running' }),
-      installNativeTool: vi.fn(),
-      reconcileNativeTools: vi.fn(),
-    };
-    const runSessionService = {
-      start: vi.fn(),
-      abort: vi.fn(),
-    };
-    const toolCatalog = {
-      listEffective: vi.fn().mockResolvedValue([]),
-      upsertPlatformTools: vi.fn().mockResolvedValue(undefined),
-      setToolEnabled: vi.fn().mockResolvedValue(undefined),
-    };
-    const executor = { executeTool: vi.fn() };
-    const localLedger = new LocalPluginStateLedger();
-    const registry = new ToolRegistryStore();
-    await registry.upsertPlatform([{ id: 'p1', source: 'platform', enabled: true }]);
+describe('runtime-host platform facade', () => {
+  it('写入 platform tools 后会更新子进程注册表快照', async () => {
+    const root = createRuntimeHostPlatformRoot({
+      isGatewayRunning: vi.fn().mockResolvedValue(true),
+      platformInstallTool: vi.fn(),
+      platformUninstallTool: vi.fn(),
+      platformEnableTool: vi.fn(),
+      platformDisableTool: vi.fn(),
+      platformListToolsCatalog: vi.fn().mockResolvedValue([]),
+      platformStartRun: vi.fn(),
+      platformAbortRun: vi.fn(),
+    });
 
-    const facade = new PlatformIpcFacade(
-      runtimeManager as never,
-      runSessionService as never,
-      toolCatalog as never,
-      executor as never,
-      localLedger,
-      registry,
-    );
-
-    await facade.upsertPlatformTools([{ id: 'p1', source: 'platform', enabled: true }]);
-    expect(toolCatalog.upsertPlatformTools).toHaveBeenCalledTimes(1);
-    expect(localLedger.list().map((tool) => tool.id)).toEqual(['p1']);
+    await root.facade.upsertPlatformTools([{ id: 'p1', source: 'platform', enabled: true }]);
+    expect(root.toolRegistry.snapshotPlatform().map((tool) => tool.id)).toEqual(['p1']);
   });
 });

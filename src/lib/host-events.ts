@@ -2,22 +2,9 @@ import { createHostEventSource } from './host-api';
 
 let eventSource: EventSource | null = null;
 
-const HOST_EVENT_TO_IPC_CHANNEL: Record<string, string> = {
-  'gateway:status': 'gateway:status-changed',
-  'gateway:error': 'gateway:error',
-  'gateway:notification': 'gateway:notification',
-  'gateway:chat-message': 'gateway:chat-message',
-  'gateway:channel-status': 'gateway:channel-status',
-  'gateway:exit': 'gateway:exit',
-  'oauth:code': 'oauth:code',
-  'oauth:success': 'oauth:success',
-  'oauth:error': 'oauth:error',
-  'channel:whatsapp-qr': 'channel:whatsapp-qr',
-  'channel:whatsapp-success': 'channel:whatsapp-success',
-  'channel:whatsapp-error': 'channel:whatsapp-error',
-  'channel:weixin-qr': 'channel:weixin-qr',
-  'channel:weixin-success': 'channel:weixin-success',
-  'channel:weixin-error': 'channel:weixin-error',
+type HostEventEnvelope<T = unknown> = {
+  eventName: string;
+  payload: T;
 };
 
 function getEventSource(): EventSource {
@@ -40,24 +27,27 @@ export function subscribeHostEvent<T = unknown>(
   handler: (payload: T) => void,
 ): () => void {
   const ipc = window.electron?.ipcRenderer;
-  const ipcChannel = HOST_EVENT_TO_IPC_CHANNEL[eventName];
-  if (ipcChannel && ipc?.on && ipc?.off) {
-    const listener = (payload: unknown) => {
-      handler(payload as T);
+  if (ipc?.on && ipc?.off) {
+    const envelopeListener = (raw: unknown) => {
+      const envelope = raw as HostEventEnvelope<T> | null;
+      if (!envelope || envelope.eventName !== eventName) {
+        return;
+      }
+      handler(envelope.payload);
     };
-    const unsubscribe = ipc.on(ipcChannel, listener);
+    const unsubscribe = ipc.on('host:event', envelopeListener);
     if (typeof unsubscribe === 'function') {
       return () => {
         unsubscribe();
       };
     }
     return () => {
-      ipc.off(ipcChannel, listener);
+      ipc.off('host:event', envelopeListener);
     };
   }
 
   if (!allowSseFallback()) {
-    console.warn(`[host-events] no IPC mapping for event "${eventName}", SSE fallback disabled`);
+    console.warn(`[host-events] host:event unavailable, SSE fallback disabled for "${eventName}"`);
     return () => {};
   }
 

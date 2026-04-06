@@ -1,13 +1,26 @@
 import type { BrowserWindow } from 'electron';
 import type { GatewayManager } from '../gateway/manager';
-import type { ClawHubService } from '../gateway/clawhub';
 import type { HostEventBus } from './event-bus';
-import type { PlatformRuntimeFacade } from '../main/platform-ipc-facade';
+import type { RuntimeHostManager } from '../main/runtime-host-manager';
 
 export interface HostApiContext {
   gatewayManager: GatewayManager;
-  clawHubService: ClawHubService;
   eventBus: HostEventBus;
   mainWindow: BrowserWindow | null;
-  platformFacade?: PlatformRuntimeFacade;
+  runtimeHost: RuntimeHostManager;
 }
+
+export type RuntimeHostApiContext = Pick<HostApiContext, 'runtimeHost'>;
+
+export type GatewayApiContext = Pick<HostApiContext, 'gatewayManager' | 'runtimeHost'>;
+
+export type GatewayControlApiContext = Pick<HostApiContext, 'gatewayManager'>;
+
+export type DiagnosticsApiContext = Pick<HostApiContext, 'gatewayManager' | 'runtimeHost'>;
+
+export type AppApiContext = Pick<HostApiContext, 'eventBus' | 'gatewayManager'>;
+
+export type LogApiContext = {};
+
+export type FileApiContext = {};
+

@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch, hostGatewayRequest } from '@/lib/host-api';
 import { getCanonicalPrefixFromSessions, getMessageText, toMs } from './helpers';
 import { DEFAULT_CANONICAL_PREFIX, DEFAULT_SESSION_KEY, type ChatSession, type RawMessage } from './types';
 import type { ChatGet, ChatSet, SessionHistoryActions } from './store-api';
@@ -26,6 +26,7 @@ function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
   }
   return `agent:${normalized}`;
 }
+
 export function createSessionActions(
   set: ChatSet,
   get: ChatGet,
@@ -33,11 +34,10 @@ export function createSessionActions(
   return {
     loadSessions: async () => {
       try {
-        const result = await invokeIpc(
-          'gateway:rpc',
+        const result = await hostGatewayRequest<Record<string, unknown>>(
           'sessions.list',
-          {}
-        ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+          {},
+        );
 
         if (result.success && result.result) {
           const data = result.result;
@@ -120,11 +120,10 @@ export function createSessionActions(
             void Promise.all(
               sessionsToLabel.map(async (session) => {
                 try {
-                  const r = await invokeIpc(
-                    'gateway:rpc',
+                  const r = await hostGatewayRequest<Record<string, unknown>>(
                     'chat.history',
                     { sessionKey: session.key, limit: 1000 },
-                  ) as { success: boolean; result?: Record<string, unknown> };
+                  );
                   if (!r.success || !r.result) return;
                   const msgs = Array.isArray(r.result.messages) ? r.result.messages as RawMessage[] : [];
                   const firstUser = msgs.find((m) => m.role === 'user');
@@ -193,18 +192,21 @@ export function createSessionActions(
 
     deleteSession: async (key: string) => {
       // Soft-delete the session's JSONL transcript on disk.
-      // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
+      // Host API renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
       // sessions.list and token-usage queries both skip it automatically.
       try {
-        const result = await invokeIpc('session:delete', key) as {
+        const result = await hostApiFetch<{
           success: boolean;
           error?: string;
-        };
+        }>('/api/sessions/delete', {
+          method: 'POST',
+          body: JSON.stringify({ sessionKey: key }),
+        });
         if (!result.success) {
-          console.warn(`[deleteSession] IPC reported failure for ${key}:`, result.error);
+          console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
         }
       } catch (err) {
-        console.warn(`[deleteSession] IPC call failed for ${key}:`, err);
+        console.warn(`[deleteSession] Host API call failed for ${key}:`, err);
       }
 
       const { currentSessionKey, sessions } = get();

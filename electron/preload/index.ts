@@ -3,6 +3,11 @@
  * Exposes safe APIs to the renderer process via contextBridge
  */
 import { contextBridge, ipcRenderer } from 'electron';
+import {
+  isRetainedEventChannel,
+  isRetainedInvokeChannel,
+  isRetainedOnceChannel,
+} from './ipc-contract';
 
 /**
  * IPC renderer methods exposed to the renderer process
@@ -13,138 +18,7 @@ const electronAPI = {
    */
   ipcRenderer: {
     invoke: (channel: string, ...args: unknown[]) => {
-      const validChannels = [
-        // Gateway
-        'gateway:status',
-        'gateway:isConnected',
-        'gateway:start',
-        'gateway:stop',
-        'gateway:restart',
-        'gateway:rpc',
-        'gateway:httpProxy',
-        'hostapi:fetch',
-        'gateway:health',
-        'gateway:getControlUiUrl',
-        // OpenClaw
-        'openclaw:status',
-        'openclaw:isReady',
-        // Shell
-        'shell:openExternal',
-        'shell:showItemInFolder',
-        'shell:openPath',
-        // Dialog
-        'dialog:open',
-        'dialog:save',
-        'dialog:message',
-        // App
-        'app:version',
-        'app:name',
-        'app:getPath',
-        'app:platform',
-        'app:quit',
-        'app:relaunch',
-        'app:request',
-        // Window controls
-        'window:minimize',
-        'window:maximize',
-        'window:close',
-        'window:isMaximized',
-        // Settings
-        'settings:get',
-        'settings:set',
-        'settings:setMany',
-        'settings:getAll',
-        'settings:reset',
-        'usage:recentTokenHistory',
-        // Update
-        'update:status',
-        'update:version',
-        'update:check',
-        'update:download',
-        'update:install',
-        'update:setChannel',
-        'update:setAutoDownload',
-        'update:cancelAutoInstall',
-        // Env
-        'env:getConfig',
-        'env:setApiKey',
-        'env:deleteApiKey',
-        // Cron
-        'cron:list',
-        'cron:create',
-        'cron:update',
-        'cron:delete',
-        'cron:toggle',
-        'cron:trigger',
-        // Channel Config
-        'channel:saveConfig',
-        'channel:getConfig',
-        'channel:getFormValues',
-        'channel:deleteConfig',
-        'channel:listConfigured',
-        'channel:setEnabled',
-        'channel:validate',
-        'channel:validate',
-        'channel:validateCredentials',
-        // WhatsApp
-        'channel:requestWhatsAppQr',
-        'channel:cancelWhatsAppQr',
-        // ClawHub
-        'clawhub:search',
-        'clawhub:install',
-        'clawhub:uninstall',
-        'clawhub:list',
-        'clawhub:openSkillReadme',
-        // UV
-        'uv:check',
-        'uv:install-all',
-        // Skill config (direct file access)
-        'skill:updateConfig',
-        'skill:getConfig',
-        'skill:getAllConfigs',
-        // Logs
-        'log:getRecent',
-        'log:readFile',
-        'log:getFilePath',
-        'log:getDir',
-        'log:listFiles',
-        // File staging & media
-        'file:stage',
-        'file:stageBuffer',
-        'media:getThumbnails',
-        'media:saveImage',
-        // Chat send with media (reads staged files in main process)
-        'chat:sendWithMedia',
-        // Session management
-        'session:delete',
-        // Team runtime
-        'team:init',
-        'team:snapshot',
-        'team:planUpsert',
-        'team:claimNext',
-        'team:heartbeat',
-        'team:taskUpdate',
-        'team:mailboxPost',
-        'team:mailboxPull',
-        'team:releaseClaim',
-        'team:reset',
-        'team:listTasks',
-        // OpenClaw extras
-        'openclaw:getDir',
-        'openclaw:getConfigDir',
-        'openclaw:getSubagentTemplateCatalog',
-        'openclaw:getSubagentTemplate',
-        'openclaw:getWorkspaceDir',
-        'openclaw:getTaskWorkspaceDirs',
-        'openclaw:getSkillsDir',
-        'openclaw:getCliCommand',
-        // Task manager plugin
-        'task:pluginStatus',
-        'task:pluginInstall',
-        'task:pluginUninstall',
-      ];
-
-      if (validChannels.includes(channel)) {
+      if (isRetainedInvokeChannel(channel)) {
         return ipcRenderer.invoke(channel, ...args);
       }
 
@@ -155,37 +29,7 @@ const electronAPI = {
      * Listen for events from main process
      */
     on: (channel: string, callback: (...args: unknown[]) => void) => {
-      const validChannels = [
-        'gateway:status-changed',
-        'gateway:message',
-        'gateway:notification',
-        'gateway:channel-status',
-        'gateway:chat-message',
-        'channel:whatsapp-qr',
-        'channel:whatsapp-success',
-        'channel:whatsapp-error',
-        'channel:weixin-qr',
-        'channel:weixin-success',
-        'channel:weixin-error',
-        'gateway:exit',
-        'gateway:error',
-        'navigate',
-        'update:status-changed',
-        'update:checking',
-        'update:available',
-        'update:not-available',
-        'update:progress',
-        'update:downloaded',
-        'update:error',
-        'update:auto-install-countdown',
-        'cron:updated',
-        'oauth:code',
-        'oauth:success',
-        'oauth:error',
-        'openclaw:cli-installed',
-      ];
-
-      if (validChannels.includes(channel)) {
+      if (isRetainedEventChannel(channel)) {
         // Wrap the callback to strip the event
         const subscription = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => {
           callback(...args);
@@ -205,29 +49,7 @@ const electronAPI = {
      * Listen for a single event from main process
      */
     once: (channel: string, callback: (...args: unknown[]) => void) => {
-      const validChannels = [
-        'gateway:status-changed',
-        'gateway:message',
-        'gateway:notification',
-        'gateway:channel-status',
-        'gateway:chat-message',
-        'gateway:exit',
-        'gateway:error',
-        'navigate',
-        'update:status-changed',
-        'update:checking',
-        'update:available',
-        'update:not-available',
-        'update:progress',
-        'update:downloaded',
-        'update:error',
-        'update:auto-install-countdown',
-        'oauth:code',
-        'oauth:success',
-        'oauth:error',
-      ];
-
-      if (validChannels.includes(channel)) {
+      if (isRetainedOnceChannel(channel)) {
         ipcRenderer.once(channel, (_event, ...args) => callback(...args));
         return;
       }

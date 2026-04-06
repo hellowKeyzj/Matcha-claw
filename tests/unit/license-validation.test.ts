@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildLicenseKey, validateLicenseKey, validateLicenseKeyLocally } from '@electron/utils/license';
+import { buildLicenseKey, validateLicenseKey, validateLicenseKeyLocally } from '@electron/services/license/license-gate-service';
 
 const originalAllowlistEnv = process.env.MATCHACLAW_LICENSE_KEYS;
 const originalEndpoint = process.env.MATCHACLAW_LICENSE_ENDPOINT;

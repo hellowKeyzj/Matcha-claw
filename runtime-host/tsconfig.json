@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "*.ts",
+    "api/**/*.ts",
+    "application/**/*.ts",
+    "bootstrap/**/*.ts",
+    "plugin-engine/**/*.ts",
+    "shared/**/*.ts"
+  ]
+}

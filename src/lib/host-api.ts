@@ -1,36 +1,50 @@
 import { invokeIpc } from '@/lib/api-client';
 import { trackUiEvent } from './telemetry';
 import { normalizeAppError } from './error-model';
+import {
+  decodeHostApiProxyEnvelope,
+  type HostApiProxyEnvelope,
+  unwrapHostApiProxyEnvelope,
+} from './host-api-transport-contract';
 
 const HOST_API_PORT = 3210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
-
-type HostApiProxyResponse = {
-  ok?: boolean;
-  data?: {
-    status?: number;
-    ok?: boolean;
-    json?: unknown;
-    text?: string;
-  };
-  error?: { message?: string } | string;
-  // backward compatibility fields
-  success: boolean;
-  status?: number;
-  json?: unknown;
-  text?: string;
-};
 
 type HostApiRequestInit = RequestInit & {
   timeoutMs?: number;
 };
 
-type HostApiProxyData = {
-  status?: number;
-  ok?: boolean;
-  json?: unknown;
-  text?: string;
+export type HostGatewayRpcResult<TResult = unknown> = {
+  success: boolean;
+  result?: TResult;
+  error?: string;
 };
+
+export interface GatewayClient {
+  request<TResult = unknown>(
+    method: string,
+    payload?: unknown,
+    timeoutMs?: number,
+  ): Promise<HostGatewayRpcResult<TResult>>;
+  rpc<TResult = unknown>(
+    method: string,
+    payload?: unknown,
+    timeoutMs?: number,
+  ): Promise<TResult>;
+}
+
+export interface OpenClawStatusPayload {
+  packageExists: boolean;
+  isBuilt: boolean;
+  dir: string;
+  version?: string;
+}
+
+export interface OpenClawCliCommandPayload {
+  success: boolean;
+  command?: string;
+  error?: string;
+}
 
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -39,155 +53,101 @@ function headersToRecord(headers?: HeadersInit): Record<string, string> {
   return { ...headers };
 }
 
-async function parseResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
-    try {
-      const payload = await response.json() as { error?: string };
-      if (payload?.error) {
-        message = payload.error;
-      }
-    } catch {
-      // ignore body parse failure
-    }
-    throw normalizeAppError(new Error(message), {
-      source: 'browser-fallback',
-      status: response.status,
-    });
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return await response.json() as T;
-}
-
-function resolveProxyErrorMessage(error: HostApiProxyResponse['error']): string {
-  return typeof error === 'string'
-    ? error
-    : (error?.message || 'Host API proxy request failed');
-}
-
 function parseUnifiedProxyResponse<T>(
-  response: HostApiProxyResponse,
+  envelope: HostApiProxyEnvelope,
   path: string,
   method: string,
   startedAt: number,
 ): T {
-  if (!response.ok) {
-    throw new Error(resolveProxyErrorMessage(response.error));
-  }
-
-  const data: HostApiProxyData = response.data ?? {};
+  const status = envelope.ok ? envelope.data.status : 502;
   trackUiEvent('hostapi.fetch', {
     path,
     method,
     source: 'ipc-proxy',
     durationMs: Date.now() - startedAt,
-    status: data.status ?? 200,
+    status,
   });
-
-  if (data.status === 204) return undefined as T;
-  if (data.json !== undefined) return data.json as T;
-  return data.text as T;
-}
-
-function parseLegacyProxyResponse<T>(
-  response: HostApiProxyResponse,
-  path: string,
-  method: string,
-  startedAt: number,
-): T {
-  if (!response.success) {
-    throw new Error(resolveProxyErrorMessage(response.error));
-  }
-
-  if (!response.ok) {
-    const message = response.text
-      || (typeof response.json === 'object' && response.json != null && 'error' in (response.json as Record<string, unknown>)
-        ? String((response.json as Record<string, unknown>).error)
-        : `HTTP ${response.status ?? 'unknown'}`);
-    throw new Error(message);
-  }
-
-  trackUiEvent('hostapi.fetch', {
-    path,
-    method,
-    source: 'ipc-proxy-legacy',
-    durationMs: Date.now() - startedAt,
-    status: response.status ?? 200,
-  });
-
-  if (response.status === 204) return undefined as T;
-  if (response.json !== undefined) return response.json as T;
-  return response.text as T;
-}
-
-function shouldFallbackToBrowser(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return normalized.includes('invalid ipc channel: hostapi:fetch')
-    || normalized.includes("no handler registered for 'hostapi:fetch'")
-    || normalized.includes('no handler registered for "hostapi:fetch"')
-    || normalized.includes('no handler registered for hostapi:fetch')
-    || normalized.includes('window is not defined');
+  return unwrapHostApiProxyEnvelope<T>(envelope, { method, path }).data;
 }
 
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
-  // In Electron renderer, always proxy through main process to avoid CORS.
   try {
-    const response = await invokeIpc<HostApiProxyResponse>('hostapi:fetch', {
+    const response = await invokeIpc<unknown>('hostapi:fetch', {
       path,
       method,
       headers: headersToRecord(init?.headers),
       body: init?.body ?? null,
       timeoutMs: init?.timeoutMs,
     });
-
-    if (typeof response?.ok === 'boolean' && 'data' in response) {
-      return parseUnifiedProxyResponse<T>(response, path, method, startedAt);
-    }
-
-    return parseLegacyProxyResponse<T>(response, path, method, startedAt);
+    const envelope = decodeHostApiProxyEnvelope(response);
+    return parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
   } catch (error) {
     const normalized = normalizeAppError(error, { source: 'ipc-proxy', path, method });
-    const message = normalized.message;
     trackUiEvent('hostapi.fetch_error', {
       path,
       method,
       source: 'ipc-proxy',
       durationMs: Date.now() - startedAt,
-      message,
+      message: normalized.message,
       code: normalized.code,
     });
-    if (!shouldFallbackToBrowser(message)) {
-      throw normalized;
-    }
-  }
-
-  // Browser-only fallback (non-Electron environments).
-  const response = await fetch(`${HOST_API_BASE}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
-  trackUiEvent('hostapi.fetch', {
-    path,
-    method,
-    source: 'browser-fallback',
-    durationMs: Date.now() - startedAt,
-    status: response.status,
-  });
-  try {
-    return await parseResponse<T>(response);
-  } catch (error) {
-    throw normalizeAppError(error, { source: 'browser-fallback', path, method });
+    throw normalized;
   }
 }
+
+export type HostApiResponseDecoder<T> = (payload: unknown) => T;
+
+export async function hostApiFetchDecoded<T>(
+  path: string,
+  decode: HostApiResponseDecoder<T>,
+  init?: HostApiRequestInit,
+): Promise<T> {
+  const payload = await hostApiFetch<unknown>(path, init);
+  return decode(payload);
+}
+
+export async function hostGatewayRequest<TResult = unknown>(
+  method: string,
+  payload?: unknown,
+  timeoutMs?: number,
+): Promise<HostGatewayRpcResult<TResult>> {
+  return await hostApiFetch<HostGatewayRpcResult<TResult>>('/api/gateway/rpc', {
+    method: 'POST',
+    body: JSON.stringify({
+      method,
+      ...(payload !== undefined ? { params: payload } : {}),
+      ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
+    }),
+    timeoutMs,
+  });
+}
+
+export async function hostGatewayRpc<TResult = unknown>(
+  method: string,
+  payload?: unknown,
+  timeoutMs?: number,
+): Promise<TResult> {
+  const response = await hostGatewayRequest<TResult>(method, payload, timeoutMs);
+  if (!response.success) {
+    throw new Error(response.error || `Gateway RPC failed: ${method}`);
+  }
+  return response.result as TResult;
+}
+
+/**
+ * @deprecated 正式业务请改用 hostGatewayRequest / hostGatewayRpc。
+ * 这里只保留给旧测试和高级调试别名，避免业务层再次依赖 gatewayClient 语义。
+ */
+export const gatewayClient: GatewayClient = {
+  request: hostGatewayRequest,
+  rpc: async <TResult = unknown>(
+    method: string,
+    payload?: unknown,
+    timeoutMs?: number,
+  ): Promise<TResult> => await hostGatewayRpc<TResult>(method, payload, timeoutMs),
+};
 
 export function createHostEventSource(path = '/api/events'): EventSource {
   return new EventSource(`${HOST_API_BASE}${path}`);
@@ -195,4 +155,54 @@ export function createHostEventSource(path = '/api/events'): EventSource {
 
 export function getHostApiBase(): string {
   return HOST_API_BASE;
+}
+
+export async function hostOpenClawGetStatus(): Promise<OpenClawStatusPayload> {
+  return hostApiFetch('/api/openclaw/status');
+}
+
+export async function hostOpenClawIsReady(): Promise<boolean> {
+  return hostApiFetch('/api/openclaw/ready');
+}
+
+export async function hostOpenClawGetDir(): Promise<string> {
+  return hostApiFetch('/api/openclaw/dir');
+}
+
+export async function hostOpenClawGetConfigDir(): Promise<string> {
+  return hostApiFetch('/api/openclaw/config-dir');
+}
+
+export async function hostOpenClawGetSubagentTemplateCatalog<T = unknown>(): Promise<T> {
+  return hostApiFetch('/api/openclaw/subagent-templates');
+}
+
+export async function hostOpenClawGetSubagentTemplate<T = unknown>(templateId: string): Promise<T> {
+  return hostApiFetch(`/api/openclaw/subagent-templates/${encodeURIComponent(templateId)}`);
+}
+
+export async function hostOpenClawGetWorkspaceDir(): Promise<string> {
+  return hostApiFetch('/api/openclaw/workspace-dir');
+}
+
+export async function hostOpenClawGetTaskWorkspaceDirs(): Promise<string[]> {
+  return hostApiFetch('/api/openclaw/task-workspace-dirs');
+}
+
+export async function hostOpenClawGetSkillsDir(): Promise<string> {
+  return hostApiFetch('/api/openclaw/skills-dir');
+}
+
+export async function hostOpenClawGetCliCommand(): Promise<OpenClawCliCommandPayload> {
+  return hostApiFetch('/api/openclaw/cli-command');
+}
+
+export async function hostUvCheck(): Promise<boolean> {
+  return hostApiFetch('/api/toolchain/uv/check');
+}
+
+export async function hostUvInstallAll(): Promise<{ success: boolean; error?: string }> {
+  return hostApiFetch('/api/toolchain/uv/install', {
+    method: 'POST',
+  });
 }

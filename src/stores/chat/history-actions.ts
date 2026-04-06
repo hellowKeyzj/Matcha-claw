@@ -1,5 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostGatewayRequest } from '@/lib/host-api';
 import {
   clearHistoryPoll,
   enrichWithCachedImages,
@@ -17,10 +16,18 @@ import type { ChatGet, ChatSet, SessionHistoryActions } from './store-api';
 async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promise<RawMessage[]> {
   if (!isCronSessionKey(sessionKey)) return [];
   try {
-    const response = await hostApiFetch<{ messages?: RawMessage[] }>(
-      buildCronSessionHistoryPath(sessionKey, limit),
-    );
-    return Array.isArray(response.messages) ? response.messages : [];
+    const payload = await hostApiFetch<unknown>(buildCronSessionHistoryPath(sessionKey, limit));
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('Invalid cron session history payload: expected object');
+    }
+    const record = payload as Record<string, unknown>;
+    if (!Array.isArray(record.messages)) {
+      throw new Error('Invalid cron session history payload: expected messages[]');
+    }
+    const response: { messages: RawMessage[] } = {
+      messages: record.messages as RawMessage[],
+    };
+    return response.messages;
   } catch (error) {
     console.warn('Failed to load cron fallback history:', error);
     return [];
@@ -143,11 +150,10 @@ export function createHistoryActions(
       };
 
       try {
-        const result = await invokeIpc(
-          'gateway:rpc',
+        const result = await hostGatewayRequest<Record<string, unknown>>(
           'chat.history',
-          { sessionKey: currentSessionKey, limit: 200 }
-        ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+          { sessionKey: currentSessionKey, limit: 200 },
+        );
 
         if (result.success && result.result) {
           const data = result.result;

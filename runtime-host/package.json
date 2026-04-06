@@ -1,0 +1,9 @@
+{
+  "name": "@matchaclaw/runtime-host",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@matchaclaw/plugins-sdk": "workspace:*"
+  }
+}

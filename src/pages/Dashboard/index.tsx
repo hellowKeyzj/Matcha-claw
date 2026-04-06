@@ -121,7 +121,7 @@ export function Dashboard() {
       });
 
       try {
-        const entries = await hostApiFetch<UsageHistoryEntry[]>('/api/usage/recent-token-history');
+        const entries = await hostApiFetch<UsageHistoryEntry[]>('/api/runtime-host/usage/recent');
         if (usageFetchGenerationRef.current !== generation) {
           return;
         }
