@@ -14,6 +14,7 @@ interface AgentSessionsPaneProps {
   collapsed?: boolean;
   collapsedWidth?: number;
   onToggleCollapse?: () => void;
+  showRightDivider?: boolean;
 }
 
 interface AgentSessionNode {
@@ -267,10 +268,10 @@ const AgentListItem = memo(function AgentListItem({
     <div
       key={node.agentId}
       className={cn(
-        'group flex items-center gap-1 rounded-lg pr-1 transition-colors',
+        'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] pr-1 transition-[background-color,color,box-shadow]',
         isAgentActive
-          ? 'bg-accent text-accent-foreground'
-          : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
+          ? 'bg-secondary text-foreground'
+          : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
       )}
     >
       <button
@@ -281,7 +282,7 @@ const AgentListItem = memo(function AgentListItem({
       >
         <span
           aria-hidden
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs leading-none"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-card/20 text-xs leading-none"
         >
           {node.identityEmoji}
         </span>
@@ -290,7 +291,7 @@ const AgentListItem = memo(function AgentListItem({
       <button
         type="button"
         data-testid={`agent-new-session-${node.agentId}`}
-        className="shrink-0 rounded p-1 text-muted-foreground/80 opacity-0 transition group-hover:opacity-100 hover:bg-accent"
+        className="shrink-0 rounded-full p-1 text-current/80 opacity-0 transition group-hover:opacity-100 hover:bg-card/15"
         aria-label={`${newSessionLabel} ${node.agentName}`}
         title={`${newSessionLabel} ${node.agentName}`}
         onClick={(event) => {
@@ -332,10 +333,10 @@ const SessionListItem = memo(function SessionListItem({
     <div
       key={session.key}
       className={cn(
-        'group flex items-center gap-1 rounded-lg transition-colors',
+        'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] transition-[background-color,color,box-shadow]',
         isCurrent
-          ? 'bg-accent text-accent-foreground'
-          : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground',
+          ? 'bg-secondary text-foreground'
+          : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
       )}
     >
       <button
@@ -345,7 +346,7 @@ const SessionListItem = memo(function SessionListItem({
       >
         <span
           aria-hidden
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted/80 text-[10px] leading-none"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-card/20 text-[10px] leading-none"
         >
           {identityEmoji}
         </span>
@@ -356,11 +357,11 @@ const SessionListItem = memo(function SessionListItem({
       </button>
       {!session.key.endsWith(':main') && (
         <button
-          type="button"
-          className="mr-1 shrink-0 rounded p-1 text-muted-foreground/70 opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
-          aria-label={deleteLabel}
-          title={deleteLabel}
-          disabled={deleting}
+        type="button"
+        className="mr-1 shrink-0 rounded-full p-1 text-current/70 opacity-0 transition hover:bg-destructive/15 hover:text-destructive-foreground group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
+        aria-label={deleteLabel}
+        title={deleteLabel}
+        disabled={deleting}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -379,6 +380,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   collapsed = false,
   collapsedWidth = 52,
   onToggleCollapse,
+  showRightDivider = true,
 }: AgentSessionsPaneProps) {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
@@ -626,25 +628,28 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   return (
     <aside
       data-testid="agent-sessions-pane"
-      className="relative flex shrink-0 flex-col border-r border-border/80 bg-card"
+      className={cn(
+        'relative flex shrink-0 flex-col overflow-hidden bg-card',
+        showRightDivider && 'border-r [border-right-color:var(--divider-line)]',
+      )}
       style={{ width: collapsed ? collapsedWidth : expandedWidth }}
     >
       {collapsed ? (
-        <div className="flex flex-1 flex-col items-center gap-2 px-1 py-3">
-          <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
+        <div className="flex flex-1 flex-col items-center gap-2 px-1 py-4">
+          <span className="px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground [writing-mode:vertical-rl]">
             {t('sidebar.agentSessions')}
           </span>
         </div>
       ) : (
         <>
-          <div className="flex items-center justify-between gap-2 px-3 py-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="flex items-center justify-between gap-2 border-b border-border/70 px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
               {t('sidebar.agentSessions')}
             </p>
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7 shrink-0"
+              className="h-8 w-8 shrink-0"
               onClick={() => handleCreateSessionForAgent(activeAgentId)}
               aria-label={t('sidebar.newSession')}
               title={t('sidebar.newSession')}
@@ -652,9 +657,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               <Plus className="h-4 w-4" />
             </Button>
           </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 p-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 p-3">
             <section className="flex min-h-0 max-h-[42%] flex-col space-y-1">
-              <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <p className="px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                 {t('sidebar.subagents')}
               </p>
               <div
@@ -681,8 +686,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
               </div>
             </section>
 
-            <section className="flex min-h-0 flex-1 flex-col space-y-1 border-t border-border/70 pt-3">
-              <p className="px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <section className="flex min-h-0 flex-1 flex-col space-y-1 border-t border-border/70 pt-4">
+              <p className="px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                 {t('sidebar.agentSessions')}
               </p>
               <div
@@ -703,7 +708,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                           <button
                             type="button"
                             onClick={() => toggleSessionBucket(bucket.id, bucket.defaultCollapsed)}
-                            className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground"
+                            className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2.5 py-1.5 text-left text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                           >
                             {bucketCollapsed ? (
                               <ChevronRight className="h-3 w-3 shrink-0" />
@@ -711,7 +716,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                               <ChevronDown className="h-3 w-3 shrink-0" />
                             )}
                             <span className="truncate">{bucket.label}</span>
-                            <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                            <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
                               {bucket.sessions.length}
                             </span>
                           </button>
@@ -761,7 +766,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
           <section
             role="dialog"
             aria-label={t('sidebar.deleteSessionDialogTitle', { title: pendingDeleteSession.title })}
-            className="w-full max-w-md rounded-lg border bg-background p-4 shadow-lg"
+            className="w-full max-w-md rounded-[1.25rem] border border-border bg-card p-5 shadow-elevated"
           >
             <header className="flex items-center justify-between">
               <h2 className="text-lg font-semibold">

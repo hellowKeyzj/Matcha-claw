@@ -29,15 +29,9 @@ export function VerticalPaneResizer({
       aria-label={ariaLabel}
     >
       {variant === 'line' ? (
-        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary/60" />
+        <div className="absolute inset-y-4 left-1/2 w-[0.5px] -translate-x-1/2 rounded-full bg-[var(--divider-line)] transition-colors group-hover:bg-[var(--divider-line-hover)]" />
       ) : (
-        <>
-          <div className="absolute inset-y-0 left-1/2 w-[3px] -translate-x-1/2 bg-border/12 transition-colors duration-150 group-hover:bg-border/22" />
-          <div className="absolute inset-y-0 left-1/2 flex w-[3px] -translate-x-1/2 justify-between">
-            <div className="w-px bg-border/55 transition-colors duration-150 group-hover:bg-border/80" />
-            <div className="w-px bg-border/35 transition-colors duration-150 group-hover:bg-border/65" />
-          </div>
-        </>
+        <div className="absolute inset-y-0 left-1/2 w-[0.5px] -translate-x-1/2 bg-[var(--divider-line)] transition-colors duration-150 group-hover:bg-[var(--divider-line-hover)]" />
       )}
     </div>
   );

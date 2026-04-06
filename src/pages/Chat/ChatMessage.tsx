@@ -604,11 +604,11 @@ const MessageBubble = memo(function MessageBubble({
   return (
     <div
       className={cn(
-        'relative rounded-2xl px-4 py-3',
-        !isUser && 'w-full',
+        'relative',
+        isUser ? 'rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground' : 'w-full bg-transparent px-0 py-0',
         isUser
-          ? 'bg-primary text-primary-foreground'
-          : 'bg-muted',
+          ? 'dark:border-border/70 dark:bg-secondary/85'
+          : '',
       )}
     >
       {isUser ? (

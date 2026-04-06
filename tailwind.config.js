@@ -14,6 +14,10 @@ module.exports = {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ['var(--font-sans)'],
+        mono: ['var(--font-mono)'],
+      },
       colors: {
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
@@ -53,6 +57,14 @@ module.exports = {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
+      },
+      boxShadow: {
+        whisper: 'var(--shadow-whisper)',
+        elevated: 'var(--shadow-elevated)',
+      },
+      letterSpacing: {
+        display: '-0.06em',
+        section: '-0.04em',
       },
       keyframes: {
         'accordion-down': {

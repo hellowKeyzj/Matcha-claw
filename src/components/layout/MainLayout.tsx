@@ -237,14 +237,19 @@ export function MainLayout() {
 
       <div
         ref={layoutRef}
-        className="flex flex-1 overflow-hidden"
+        className="flex flex-1 overflow-hidden bg-card"
       >
-        <Sidebar expandedWidth={sidebarWidth} collapsedWidth={SIDEBAR_COLLAPSED_WIDTH} />
+        <Sidebar
+          expandedWidth={sidebarWidth}
+          collapsedWidth={SIDEBAR_COLLAPSED_WIDTH}
+          showRightDivider={sidebarCollapsed}
+        />
         {!sidebarCollapsed && (
           <VerticalPaneResizer
             testId="layout-left-resizer"
             onMouseDown={startSidebarResize}
             ariaLabel="Resize sidebar"
+            variant="subtle-border"
           />
         )}
         {isChatRoute && (
@@ -253,6 +258,7 @@ export function MainLayout() {
             collapsed={agentSessionsCollapsed}
             collapsedWidth={AGENT_SESSIONS_COLLAPSED_WIDTH}
             onToggleCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
+            showRightDivider={agentSessionsCollapsed}
           />
         )}
         {isChatRoute && !agentSessionsCollapsed && (
@@ -263,8 +269,10 @@ export function MainLayout() {
             variant="subtle-border"
           />
         )}
-        <main className="min-w-0 flex-1 overflow-auto bg-card p-6">
-          <Outlet />
+        <main className="min-w-0 flex-1 overflow-hidden bg-card">
+          <div className="h-full overflow-auto px-5 py-4 md:px-8 md:py-6">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

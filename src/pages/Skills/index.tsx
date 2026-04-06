@@ -564,15 +564,18 @@ const SkillGridCard = memo(function SkillGridCard({
   return (
     <Card
       className={cn(
-        'cursor-pointer hover:border-primary/50 transition-colors',
-        enabled && 'border-primary/50 bg-primary/5'
+        'group cursor-pointer rounded-[1.35rem] border border-border/65 bg-card/95 transition-[border-color,background-color,box-shadow]',
+        'hover:border-border/85 hover:bg-card',
+        enabled && 'bg-card'
       )}
       onClick={() => onOpenDetail(skillId)}
     >
       <CardHeader className="pb-3">
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            <span className="text-2xl">{skillIcon}</span>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-secondary/45 text-xl">
+              <span>{skillIcon}</span>
+            </div>
             <div className="min-w-0">
               <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                 <span className="min-w-0 truncate">{skillName}</span>
@@ -596,7 +599,7 @@ const SkillGridCard = memo(function SkillGridCard({
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                className="h-8 w-8 shrink-0 text-destructive/80 hover:bg-destructive/10 hover:text-destructive"
                 onClick={(event) => {
                   event.stopPropagation();
                   onUninstallSkill(skillId);
@@ -617,10 +620,10 @@ const SkillGridCard = memo(function SkillGridCard({
         </div>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-muted-foreground line-clamp-2">
+        <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
           {skillDescription}
         </p>
-        <div className="flex items-center gap-2 mt-2 flex-wrap">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           {version && (
             <Badge variant="outline" className="text-xs">
               v{version}

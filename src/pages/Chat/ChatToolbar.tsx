@@ -20,7 +20,6 @@ export const ChatToolbar = memo(function ChatToolbar() {
 
   return (
     <div className="flex items-center gap-2">
-      {/* Refresh */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -38,7 +37,6 @@ export const ChatToolbar = memo(function ChatToolbar() {
         </TooltipContent>
       </Tooltip>
 
-      {/* Thinking Toggle */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -46,7 +44,7 @@ export const ChatToolbar = memo(function ChatToolbar() {
             size="icon"
             className={cn(
               'h-8 w-8',
-              showThinking && 'bg-primary/10 text-primary',
+              showThinking && 'bg-secondary text-foreground',
             )}
             onClick={toggleThinking}
           >
