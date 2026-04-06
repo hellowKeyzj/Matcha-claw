@@ -36,6 +36,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
+import { hostOpenClawGetSkillsDir } from '@/lib/host-api';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
@@ -181,15 +182,14 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
         return acc;
       }, {} as Record<string, string>);
 
-      // Use direct file access instead of Gateway RPC for reliability
-      const result = await invokeIpc<{ success: boolean; error?: string }>(
-        'skill:updateConfig',
-        {
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/skills/config', {
+        method: 'PUT',
+        body: JSON.stringify({
           skillKey: skill.id,
-          apiKey: apiKey || '', // Empty string will delete the key
-          env: envObj // Empty object will clear all env vars
-        }
-      ) as { success: boolean; error?: string };
+          apiKey: apiKey || '',
+          env: envObj,
+        }),
+      });
 
       if (!result.success) {
         throw new Error(result.error || 'Unknown error');
@@ -870,7 +870,7 @@ export function Skills() {
 
   const handleOpenSkillsFolder = useCallback(async () => {
     try {
-      const skillsDir = await invokeIpc<string>('openclaw:getSkillsDir');
+      const skillsDir = await hostOpenClawGetSkillsDir();
       if (!skillsDir) {
         throw new Error('Skills directory not available');
       }
@@ -891,7 +891,7 @@ export function Skills() {
   const [skillsDirPath, setSkillsDirPath] = useState('~/.openclaw/skills');
 
   useEffect(() => {
-    invokeIpc<string>('openclaw:getSkillsDir')
+    hostOpenClawGetSkillsDir()
       .then((dir) => setSkillsDirPath(dir as string))
       .catch(console.error);
   }, []);

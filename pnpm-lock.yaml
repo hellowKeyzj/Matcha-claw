@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      '@matchaclaw/plugins-sdk':
+        specifier: workspace:*
+        version: link:worktrees/plugins/sdk
       clawhub:
         specifier: ^0.5.0
         version: 0.5.0
@@ -216,6 +219,14 @@ importers:
       zx:
         specifier: ^8.8.5
         version: 8.8.5
+
+  extension-host:
+    dependencies:
+      '@matchaclaw/plugins-sdk':
+        specifier: workspace:*
+        version: link:../worktrees/plugins/sdk
+
+  worktrees/plugins/sdk: {}
 
 packages:
 

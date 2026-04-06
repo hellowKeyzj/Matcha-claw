@@ -3,7 +3,7 @@ import { dialog, nativeImage } from 'electron';
 import crypto from 'node:crypto';
 import { extname, join } from 'node:path';
 import { homedir } from 'node:os';
-import type { HostApiContext } from '../context';
+import type { FileApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const EXT_MIME_MAP: Record<string, string> = {
@@ -79,7 +79,7 @@ export async function handleFileRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: HostApiContext,
+  _ctx: FileApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/files/stage-paths' && req.method === 'POST') {
     try {

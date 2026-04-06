@@ -31,12 +31,89 @@ describe('gateway store event wiring', () => {
 
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:error', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:connection', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:notification', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:chat-message', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:status', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:error', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:restart', expect.any(Function));
 
     handlers.get('gateway:status')?.({ state: 'stopped', port: 18789 });
     expect(useGatewayStore.getState().status.state).toBe('stopped');
+  });
+
+  it('gateway:connection 事件会更新 runtimeHost 连接态并驱动 degraded/running 切换', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('runtime-host:status')?.({
+      status: 'running',
+      updatedAt: 2001,
+    });
+    handlers.get('gateway:connection')?.({
+      state: 'disconnected',
+      reason: 'socket closed',
+      updatedAt: 2002,
+    });
+
+    let state = useGatewayStore.getState().runtimeHost;
+    expect(state.lifecycle).toBe('degraded');
+    expect(state.gatewayConnectionState).toBe('disconnected');
+    expect(state.gatewayConnectionReason).toBe('socket closed');
+
+    handlers.get('gateway:connection')?.({
+      state: 'connected',
+      updatedAt: 2003,
+    });
+
+    state = useGatewayStore.getState().runtimeHost;
+    expect(state.lifecycle).toBe('running');
+    expect(state.gatewayConnectionState).toBe('connected');
+  });
+
+  it('runtime-host 事件会更新 renderer 侧运行时状态', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('runtime-host:status')?.({
+      status: 'degraded',
+      pid: 4321,
+      error: 'health check failed',
+      updatedAt: 1001,
+    });
+    handlers.get('runtime-host:restart')?.({
+      previousPid: 4321,
+      pid: 6789,
+      recoveredAt: 1002,
+    });
+    handlers.get('runtime-host:error')?.({
+      status: 'error',
+      message: 'runtime-host crashed',
+      updatedAt: 1003,
+    });
+
+    const state = useGatewayStore.getState().runtimeHost;
+    expect(state.lifecycle).toBe('error');
+    expect(state.pid).toBe(6789);
+    expect(state.error).toBe('runtime-host crashed');
+    expect(state.restartCount).toBe(1);
+    expect(state.lastRestartAt).toBe(1002);
+    expect(state.updatedAt).toBe(1003);
   });
 
   it('forwards exec.approval.requested/resolved notifications into chat approval state', async () => {

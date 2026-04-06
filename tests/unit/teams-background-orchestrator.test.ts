@@ -11,7 +11,7 @@ describe('teams background orchestrator', () => {
     } as never);
 
     useTeamsRunnerStore.setState({
-      daemonRunning: false,
+      daemonRunning: true,
       enabledByTeamId: { 'team-1': true },
       activeAgentIdsByTeamId: {},
       activeTaskByAgentByTeamId: {},

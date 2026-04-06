@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "outDir": "runtime-host/build",
+    "rootDir": "runtime-host",
+    "noEmit": false,
+    "noCheck": true,
+    "strict": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "declaration": false
+  },
+  "include": ["runtime-host/main.ts"],
+  "exclude": ["runtime-host/build/**"]
+}

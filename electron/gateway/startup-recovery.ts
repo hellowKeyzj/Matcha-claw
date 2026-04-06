@@ -13,11 +13,9 @@ const INVALID_CONFIG_PATTERNS: RegExp[] = [
 ];
 
 const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
-  /WebSocket closed before handshake/i,
   /ECONNREFUSED/i,
   /Gateway process exited before becoming ready/i,
-  /Timed out waiting for connect\.challenge/i,
-  /Connect handshake timeout/i,
+  /Gateway failed to start after \d+ retries/i,
 ];
 
 function normalizeLogLine(value: string): string {
@@ -96,4 +94,3 @@ export function getGatewayStartupRecoveryAction(options: {
 
   return 'fail';
 }
-

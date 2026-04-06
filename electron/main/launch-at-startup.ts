@@ -2,7 +2,7 @@ import { app } from 'electron';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logger } from '../utils/logger';
-import { getSetting } from '../utils/store';
+import { getSetting } from '../services/settings/settings-store';
 
 const LINUX_AUTOSTART_FILE = join('.config', 'autostart', 'clawx.desktop');
 

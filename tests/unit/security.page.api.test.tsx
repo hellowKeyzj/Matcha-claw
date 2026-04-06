@@ -32,6 +32,7 @@ vi.mock('@/lib/host-api', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
+    i18n: { language: 'zh' },
   }),
 }));
 
@@ -44,6 +45,11 @@ describe('SecurityPage API 接入', () => {
           securityPreset: 'balanced',
           securityPolicyVersion: 1,
           securityPolicyByAgent: {},
+        };
+      }
+      if (path === '/api/security/audit?page=1&pageSize=8') {
+        return {
+          items: [],
         };
       }
       if (path === '/api/platform/tools?includeDisabled=true') {
@@ -73,5 +79,7 @@ describe('SecurityPage API 接入', () => {
     await waitFor(() => {
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/security');
     });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/security/audit?page=1&pageSize=8');
+    expect(gatewayRpcMock).not.toHaveBeenCalled();
   });
 });

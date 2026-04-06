@@ -8,6 +8,7 @@
         "subagents": "Subagents",
         "tasks": "Task Center",
         "teams": "Teams",
+        "plugins": "Plugin Center",
         "security": "Security",
         "agentSessions": "Agent Sessions",
         "collapseAgentSessions": "Collapse agent sessions",

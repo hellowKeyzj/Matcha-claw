@@ -32,7 +32,7 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { toast } from 'sonner';
 import { invokeIpc } from '@/lib/api-client';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 interface SetupStep {
   id: string;
@@ -133,6 +133,18 @@ import {
   hasConfiguredCredentials,
   pickPreferredAccount,
 } from '@/lib/provider-accounts';
+import {
+  buildProviderAccountPayload,
+  hostProviderCancelOAuth,
+  hostProviderCreateAccount,
+  hostProviderReadAccount,
+  hostProviderReadApiKey,
+  hostProviderSetDefaultAccount,
+  hostProviderStartOAuth,
+  hostProviderSubmitOAuthCode,
+  hostProviderUpdateAccount,
+  hostProviderValidate,
+} from '@/lib/provider-runtime';
 import matchaClawIcon from '@/assets/logo.svg';
 
 // Use the shared provider registry for setup providers
@@ -580,12 +592,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
 
     // Check OpenClaw package status
     try {
-      const openclawStatus = await invokeIpc('openclaw:status') as {
-        packageExists: boolean;
-        isBuilt: boolean;
-        dir: string;
-        version?: string;
-      };
+      const openclawStatus = await hostOpenClawGetStatus();
 
       setOpenclawDir(openclawStatus.dir);
 
@@ -950,10 +957,7 @@ function ProviderContent({
 
       if (accountId) {
         try {
-          await hostApiFetch('/api/provider-accounts/default', {
-            method: 'PUT',
-            body: JSON.stringify({ accountId }),
-          });
+          await hostProviderSetDefaultAccount(accountId);
           setSelectedAccountId(accountId);
         } catch (error) {
           console.error('Failed to set default provider account:', error);
@@ -1014,10 +1018,7 @@ function ProviderContent({
       );
       const label = selectedProviderData?.name || selectedProvider;
       pendingOAuthRef.current = { accountId, label };
-      await hostApiFetch('/api/provider-accounts/oauth/start', {
-        method: 'POST',
-        body: JSON.stringify({ provider: selectedProvider, accountId, label }),
-      });
+      await hostProviderStartOAuth({ provider: selectedProvider, accountId, label });
     } catch (e) {
       setOauthError(String(e));
       setOauthFlowing(false);
@@ -1031,17 +1032,14 @@ function ProviderContent({
     setManualCodeInput('');
     setOauthError(null);
     pendingOAuthRef.current = null;
-    await hostApiFetch('/api/provider-accounts/oauth/cancel', { method: 'POST' });
+    await hostProviderCancelOAuth();
   };
 
   const handleSubmitManualOAuthCode = async () => {
     const value = manualCodeInput.trim();
     if (!value) return;
     try {
-      await hostApiFetch('/api/provider-accounts/oauth/submit', {
-        method: 'POST',
-        body: JSON.stringify({ code: value }),
-      });
+      await hostProviderSubmitOAuthCode(value);
       setOauthError(null);
     } catch (error) {
       setOauthError(String(error));
@@ -1068,9 +1066,7 @@ function ProviderContent({
           const typeInfo = providers.find((p) => p.id === preferred.vendorId);
           const requiresKey = typeInfo?.requiresApiKey ?? false;
           onConfiguredChange(!requiresKey || hasConfiguredCredentials(preferred, statusMap.get(preferred.id)));
-          const storedKey = (await hostApiFetch<{ apiKey: string | null }>(
-            `/api/provider-accounts/${encodeURIComponent(preferred.id)}/api-key`,
-          )).apiKey;
+          const storedKey = (await hostProviderReadApiKey(preferred.id)).apiKey;
           onApiKeyChange(storedKey || '');
         } else if (!cancelled) {
           onConfiguredChange(false);
@@ -1102,12 +1098,8 @@ function ProviderContent({
         const accountIdForLoad = preferredAccount?.id || selectedProvider;
         setSelectedAccountId(preferredAccount?.id || null);
 
-        const savedProvider = await hostApiFetch<{ baseUrl?: string; model?: string } | null>(
-          `/api/provider-accounts/${encodeURIComponent(accountIdForLoad)}`,
-        );
-        const storedKey = (await hostApiFetch<{ apiKey: string | null }>(
-          `/api/provider-accounts/${encodeURIComponent(accountIdForLoad)}/api-key`,
-        )).apiKey;
+        const savedProvider = await hostProviderReadAccount(accountIdForLoad);
+        const storedKey = (await hostProviderReadApiKey(accountIdForLoad)).apiKey;
         if (!cancelled) {
           onApiKeyChange(storedKey || '');
 
@@ -1183,14 +1175,11 @@ function ProviderContent({
       // Validate key if the provider requires one and a key was entered
       const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
       if (isApiKeyRequired && apiKey) {
-        const result = await hostApiFetch<{ valid: boolean; error?: string }>('/api/provider-accounts/validate', {
-          method: 'POST',
-          body: JSON.stringify({
-            accountId: selectedAccountId || undefined,
-            vendorId: selectedProvider,
-            apiKey,
-            options: { baseUrl: baseUrl.trim() || undefined },
-          }),
+        const result = await hostProviderValidate({
+          accountId: selectedAccountId || undefined,
+          vendorId: selectedProvider,
+          apiKey,
+          options: { baseUrl: baseUrl.trim() || undefined },
         });
 
         setKeyValid(result.valid);
@@ -1217,9 +1206,9 @@ function ProviderContent({
       );
 
       const effectiveApiKey = resolveProviderApiKeyForSave(selectedProvider, apiKey);
-      const accountPayload: ProviderAccount = {
-        id: accountIdForSave,
-        vendorId: selectedProvider as ProviderType,
+      const accountPayload: ProviderAccount = buildProviderAccountPayload({
+        accountId: accountIdForSave,
+        providerType: selectedProvider as ProviderType,
         label: selectedProvider === 'custom'
           ? t('settings:aiProviders.custom')
           : (selectedProviderData?.name || selectedProvider),
@@ -1228,45 +1217,27 @@ function ProviderContent({
           : 'api_key',
         baseUrl: baseUrl.trim() || undefined,
         model: effectiveModelId,
-        enabled: true,
-        isDefault: false,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
+      });
 
       const saveResult = selectedAccountId
-        ? await hostApiFetch<{ success: boolean; error?: string }>(
-          `/api/provider-accounts/${encodeURIComponent(accountIdForSave)}`,
+        ? await hostProviderUpdateAccount(
+          accountIdForSave,
           {
-            method: 'PUT',
-            body: JSON.stringify({
-              updates: {
-                label: accountPayload.label,
-                authMode: accountPayload.authMode,
-                baseUrl: accountPayload.baseUrl,
-                model: accountPayload.model,
-                enabled: accountPayload.enabled,
-              },
-              apiKey: effectiveApiKey,
-            }),
+            label: accountPayload.label,
+            authMode: accountPayload.authMode,
+            baseUrl: accountPayload.baseUrl,
+            model: accountPayload.model,
+            enabled: accountPayload.enabled,
           },
+          effectiveApiKey,
         )
-        : await hostApiFetch<{ success: boolean; error?: string }>('/api/provider-accounts', {
-          method: 'POST',
-          body: JSON.stringify({ account: accountPayload, apiKey: effectiveApiKey }),
-        });
+        : await hostProviderCreateAccount(accountPayload, effectiveApiKey);
 
       if (!saveResult.success) {
         throw new Error(saveResult.error || 'Failed to save provider config');
       }
 
-      const defaultResult = await hostApiFetch<{ success: boolean; error?: string }>(
-        '/api/provider-accounts/default',
-        {
-          method: 'PUT',
-          body: JSON.stringify({ accountId: accountIdForSave }),
-        },
-      );
+      const defaultResult = await hostProviderSetDefaultAccount(accountIdForSave);
 
       if (!defaultResult.success) {
         throw new Error(defaultResult.error || 'Failed to set default provider');
@@ -1682,7 +1653,7 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
         setOverallProgress(10);
 
         // Step 2: Call the backend to install uv and setup Python
-        const result = await invokeIpc('uv:install-all') as {
+        const result = await hostUvInstallAll() as {
           success: boolean;
           error?: string
         };

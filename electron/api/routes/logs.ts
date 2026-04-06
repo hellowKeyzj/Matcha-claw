@@ -1,13 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { logger } from '../../utils/logger';
-import type { HostApiContext } from '../context';
+import type { LogApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
 export async function handleLogRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: HostApiContext,
+  _ctx: LogApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/logs' && req.method === 'GET') {
     const tailLines = Number(url.searchParams.get('tailLines') || '100');

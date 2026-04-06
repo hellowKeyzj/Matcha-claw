@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 
 export type TeamTaskStatus = 'todo' | 'claimed' | 'running' | 'blocked' | 'done' | 'failed';
 
@@ -43,7 +43,10 @@ export async function teamInit(payload: {
   teamId: string;
   leadAgentId: string;
 }): Promise<{ runtimeRoot: string; run: TeamRunMeta }> {
-  return invokeIpc('team:init', payload);
+  return hostApiFetch('/api/team-runtime/init', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamSnapshot(payload: {
@@ -59,14 +62,20 @@ export async function teamSnapshot(payload: {
   };
   events: Array<Record<string, unknown>>;
 }> {
-  return invokeIpc('team:snapshot', payload);
+  return hostApiFetch('/api/team-runtime/snapshot', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamPlanUpsert(payload: {
   teamId: string;
   tasks: Array<{ taskId: string; title?: string; instruction: string; dependsOn?: string[] }>;
 }): Promise<{ tasks: TeamTask[] }> {
-  return invokeIpc('team:planUpsert', payload);
+  return hostApiFetch('/api/team-runtime/plan-upsert', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamClaimNext(payload: {
@@ -75,7 +84,10 @@ export async function teamClaimNext(payload: {
   sessionKey: string;
   leaseMs?: number;
 }): Promise<{ task: TeamTask | null }> {
-  return invokeIpc('team:claimNext', payload);
+  return hostApiFetch('/api/team-runtime/claim-next', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamHeartbeat(payload: {
@@ -85,7 +97,10 @@ export async function teamHeartbeat(payload: {
   sessionKey: string;
   leaseMs?: number;
 }): Promise<{ ok: boolean; task?: TeamTask }> {
-  return invokeIpc('team:heartbeat', payload);
+  return hostApiFetch('/api/team-runtime/heartbeat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamTaskUpdate(payload: {
@@ -95,7 +110,10 @@ export async function teamTaskUpdate(payload: {
   resultSummary?: string;
   error?: string;
 }): Promise<{ task: TeamTask }> {
-  return invokeIpc('team:taskUpdate', payload);
+  return hostApiFetch('/api/team-runtime/task-update', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamMailboxPost(payload: {
@@ -111,7 +129,10 @@ export async function teamMailboxPost(payload: {
     createdAt?: number;
   };
 }): Promise<{ created: boolean; message: TeamMailboxMessage }> {
-  return invokeIpc('team:mailboxPost', payload);
+  return hostApiFetch('/api/team-runtime/mailbox-post', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamMailboxPull(payload: {
@@ -119,7 +140,10 @@ export async function teamMailboxPull(payload: {
   cursor?: string;
   limit?: number;
 }): Promise<{ messages: TeamMailboxMessage[]; nextCursor?: string }> {
-  return invokeIpc('team:mailboxPull', payload);
+  return hostApiFetch('/api/team-runtime/mailbox-pull', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function teamReleaseClaim(payload: {
@@ -128,5 +152,8 @@ export async function teamReleaseClaim(payload: {
   agentId: string;
   sessionKey: string;
 }): Promise<{ ok: boolean; task?: TeamTask }> {
-  return invokeIpc('team:releaseClaim', payload);
+  return hostApiFetch('/api/team-runtime/release-claim', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }

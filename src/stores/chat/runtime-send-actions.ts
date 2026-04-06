@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch, hostGatewayRequest, hostGatewayRpc } from '@/lib/host-api';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -126,9 +126,11 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
         const CHAT_SEND_TIMEOUT_MS = 120_000;
 
         if (hasMedia) {
-          result = await invokeIpc(
-            'chat:sendWithMedia',
+          result = await hostApiFetch(
+            '/api/chat/send-with-media',
             {
+              method: 'POST',
+              body: JSON.stringify({
               sessionKey: currentSessionKey,
               message: trimmed || 'Process the attached file(s).',
               deliver: false,
@@ -138,11 +140,11 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
                 mimeType: a.mimeType,
                 fileName: a.fileName,
               })),
+              }),
             },
           ) as { success: boolean; result?: { runId?: string }; error?: string };
         } else {
-          result = await invokeIpc(
-            'gateway:rpc',
+          result = await hostGatewayRequest(
             'chat.send',
             {
               sessionKey: currentSessionKey,
@@ -178,8 +180,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
       set({ streamingTools: [] });
 
       try {
-        await invokeIpc(
-          'gateway:rpc',
+        await hostGatewayRpc(
           'chat.abort',
           { sessionKey: currentSessionKey },
         );

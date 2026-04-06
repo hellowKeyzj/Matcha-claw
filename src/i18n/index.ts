@@ -15,6 +15,7 @@ import enSubagentTemplates from './locales/en/subagent-templates.json';
 import enTeams from './locales/en/teams.json';
 import enTasks from './locales/en/tasks.json';
 import enSecurity from './locales/en/security.json';
+import enPlugins from './locales/en/plugins.json';
 
 // ZH
 import zhCommon from './locales/zh/common.json';
@@ -30,6 +31,7 @@ import zhSubagentTemplates from './locales/zh/subagent-templates.json';
 import zhTeams from './locales/zh/teams.json';
 import zhTasks from './locales/zh/tasks.json';
 import zhSecurity from './locales/zh/security.json';
+import zhPlugins from './locales/zh/plugins.json';
 
 // JA
 import jaCommon from './locales/ja/common.json';
@@ -45,6 +47,7 @@ import jaSubagentTemplates from './locales/ja/subagent-templates.json';
 import jaTeams from './locales/ja/teams.json';
 import jaTasks from './locales/ja/tasks.json';
 import jaSecurity from './locales/ja/security.json';
+import jaPlugins from './locales/ja/plugins.json';
 
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
@@ -69,6 +72,7 @@ const resources = {
         teams: enTeams,
         tasks: enTasks,
         security: enSecurity,
+        plugins: enPlugins,
     },
     zh: {
         common: zhCommon,
@@ -84,6 +88,7 @@ const resources = {
         teams: zhTeams,
         tasks: zhTasks,
         security: zhSecurity,
+        plugins: zhPlugins,
     },
     ja: {
         common: jaCommon,
@@ -99,6 +104,7 @@ const resources = {
         teams: jaTeams,
         tasks: jaTasks,
         security: jaSecurity,
+        plugins: jaPlugins,
     },
 };
 
@@ -109,7 +115,7 @@ i18n
         lng: 'en', // will be overridden by settings store
         fallbackLng: 'en',
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security'],
+        ns: ['common', 'settings', 'dashboard', 'chat', 'channels', 'skills', 'cron', 'setup', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

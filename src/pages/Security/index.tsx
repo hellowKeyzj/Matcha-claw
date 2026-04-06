@@ -9,6 +9,21 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
+import {
+  hostSecurityApplyRemediation,
+  hostSecurityCheckAdvisories,
+  hostSecurityCheckIntegrity,
+  hostSecurityFetchRuleCatalog,
+  hostSecurityPreviewRemediation,
+  hostSecurityReadAudit,
+  hostSecurityReadPolicy,
+  hostSecurityRebaselineIntegrity,
+  hostSecurityRollbackRemediation,
+  hostSecurityRunEmergencyResponse,
+  hostSecurityRunQuickAudit,
+  hostSecurityScanSkills,
+  hostSecurityWritePolicy,
+} from '@/lib/security-runtime';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTranslation } from 'react-i18next';
 
@@ -422,7 +437,6 @@ function normalizePolicy(raw: unknown): SecurityPolicy {
 export function SecurityPage() {
   const { t, i18n } = useTranslation('security');
   const gatewayState = useGatewayStore((state) => state.status.state);
-  const gatewayRpc = useGatewayStore((state) => state.rpc);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -468,7 +482,7 @@ export function SecurityPage() {
   const loadPolicy = useCallback(async () => {
     setLoading(true);
     try {
-      const payload = await hostApiFetch<unknown>('/api/security');
+      const payload = await hostSecurityReadPolicy<unknown>();
       const normalized = normalizePolicy(payload);
       setPolicy(normalized);
       setSavedPolicySnapshot(normalized);
@@ -488,7 +502,7 @@ export function SecurityPage() {
     setSaving(true);
     try {
       const payload: SecurityPolicy = policy;
-      await hostApiFetch('/api/security', { method: 'PUT', body: JSON.stringify(payload) });
+      await hostSecurityWritePolicy(payload);
       setPolicy(payload);
       setSavedPolicySnapshot(payload);
       toast.success(t('messages.saved'));
@@ -539,7 +553,7 @@ export function SecurityPage() {
   const loadRuleCatalog = useCallback(async () => {
     setLoadingRuleCatalog(true);
     try {
-      const payload = await hostApiFetch<{ success?: boolean; items?: RuleCatalogItem[] }>('/api/security/destructive-rule-catalog');
+      const payload = await hostSecurityFetchRuleCatalog<{ success?: boolean; items?: RuleCatalogItem[] }>();
       const items = Array.isArray(payload?.items) ? payload.items : [];
       const allowedPlatforms = new Set<Exclude<RuleCatalogPlatform, 'all'>>(['universal', 'linux', 'windows', 'macos', 'powershell']);
       const normalized = items.filter((item): item is RuleCatalogItem => {
@@ -567,14 +581,14 @@ export function SecurityPage() {
     }
     setLoadingAudit(true);
     try {
-      const result = await gatewayRpc<{ items?: AuditItem[] }>('security.audit.query', { page: 1, pageSize: 8 }, 8000);
+      const result = await hostSecurityReadAudit<{ items?: AuditItem[] }>({ page: 1, pageSize: 8 });
       setAuditItems(Array.isArray(result.items) ? result.items : []);
     } catch {
       setAuditItems([]);
     } finally {
       setLoadingAudit(false);
     }
-  }, [gatewayRpc, gatewayState]);
+  }, [gatewayState]);
 
   useEffect(() => {
     void loadRecentAudits();
@@ -1189,7 +1203,7 @@ export function SecurityPage() {
               title={t('actionCenter.quickAuditTitle')}
               variant="outline"
               disabled={securityOpBusy !== null}
-              onClick={() => void runSecurityOp(t('actionCenter.quickAudit'), async () => hostApiFetch('/api/security/quick-audit', { method: 'POST' }))}
+              onClick={() => void runSecurityOp(t('actionCenter.quickAudit'), async () => await hostSecurityRunQuickAudit())}
             >
               {t('actionCenter.quickAudit')}
             </Button>
@@ -1197,30 +1211,30 @@ export function SecurityPage() {
               title={t('actionCenter.emergencyTitle')}
               variant="destructive"
               disabled={securityOpBusy !== null}
-              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async () => hostApiFetch('/api/security/emergency-response', { method: 'POST' }))}
+              onClick={() => void runSecurityOp(t('actionCenter.emergency'), async () => await hostSecurityRunEmergencyResponse())}
             >
               {t('actionCenter.emergency')}
             </Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.integrity'), async () => hostApiFetch('/api/security/integrity'))}>{t('actionCenter.integrity')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.rebaseline'), async () => hostApiFetch('/api/security/integrity/rebaseline', { method: 'POST' }))}>{t('actionCenter.rebaseline')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.skillScan'), async () => hostApiFetch('/api/security/skills/scan', { method: 'POST', body: '{}' }))}>{t('actionCenter.skillScan')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.advisories'), async () => hostApiFetch('/api/security/advisories'))}>{t('actionCenter.advisories')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.integrity'), async () => await hostSecurityCheckIntegrity())}>{t('actionCenter.integrity')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.rebaseline'), async () => await hostSecurityRebaselineIntegrity())}>{t('actionCenter.rebaseline')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.skillScan'), async () => await hostSecurityScanSkills())}>{t('actionCenter.skillScan')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.advisories'), async () => await hostSecurityCheckAdvisories())}>{t('actionCenter.advisories')}</Button>
           </div>
 
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationPreview'), async () => {
-              const payload = await hostApiFetch<{ actions?: RemediationActionItem[] }>('/api/security/remediation/preview');
+              const payload = await hostSecurityPreviewRemediation<{ actions?: RemediationActionItem[] }>();
               const actions = Array.isArray(payload.actions) ? payload.actions : [];
               setRemediationActions(actions);
               setSelectedRemediationActions(actions.map((item) => item.id));
               return payload;
             })}>{t('actionCenter.remediationPreview')}</Button>
             <Button disabled={securityOpBusy !== null || selectedRemediationActions.length === 0} onClick={() => void runSecurityOp(t('actionCenter.remediationApply'), async () => {
-              const payload = await hostApiFetch<{ snapshotId?: string }>('/api/security/remediation/apply', { method: 'POST', body: JSON.stringify({ actions: selectedRemediationActions }) });
+              const payload = await hostSecurityApplyRemediation<{ snapshotId?: string }>(selectedRemediationActions);
               if (payload.snapshotId) setLastRemediationSnapshotId(payload.snapshotId);
               return payload;
             })}>{t('actionCenter.remediationApply')}</Button>
-            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationRollback'), async () => hostApiFetch('/api/security/remediation/rollback', { method: 'POST', body: JSON.stringify(lastRemediationSnapshotId ? { snapshotId: lastRemediationSnapshotId } : {}) }))}>{t('actionCenter.remediationRollback')}</Button>
+            <Button variant="outline" disabled={securityOpBusy !== null} onClick={() => void runSecurityOp(t('actionCenter.remediationRollback'), async () => await hostSecurityRollbackRemediation(lastRemediationSnapshotId))}>{t('actionCenter.remediationRollback')}</Button>
           </div>
 
           {remediationActions.length > 0 && (

@@ -1,7 +1,6 @@
 import { app, utilityProcess } from 'electron';
 import path from 'path';
 import { existsSync } from 'fs';
-import WebSocket from 'ws';
 import { getOpenClawDir, getOpenClawEntryPath } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
@@ -251,35 +250,20 @@ export async function findExistingGatewayProcess(options: {
   const { port, ownedPid } = options;
 
   try {
-    try {
-      const pids = await getListeningProcessIds(port);
-      if (pids.length > 0 && (!ownedPid || !pids.includes(String(ownedPid)))) {
-        await terminateOrphanedProcessIds(port, pids);
-        return null;
-      }
-    } catch (err) {
-      logger.warn('Error checking for existing process on port:', err);
+    const pids = await getListeningProcessIds(port);
+    if (pids.length === 0) {
+      return null;
     }
 
-    return await new Promise<{ port: number; externalToken?: string } | null>((resolve) => {
-      const testWs = new WebSocket(`ws://localhost:${port}/ws`);
-      const timeout = setTimeout(() => {
-        testWs.close();
-        resolve(null);
-      }, 2000);
+    const ownedPidValue = typeof ownedPid === 'number' ? String(ownedPid) : '';
+    if (ownedPidValue && pids.includes(ownedPidValue)) {
+      return { port };
+    }
 
-      testWs.on('open', () => {
-        clearTimeout(timeout);
-        testWs.close();
-        resolve({ port });
-      });
-
-      testWs.on('error', () => {
-        clearTimeout(timeout);
-        resolve(null);
-      });
-    });
-  } catch {
+    await terminateOrphanedProcessIds(port, pids);
+    return null;
+  } catch (err) {
+    logger.warn('Error checking for existing process on port:', err);
     return null;
   }
 }

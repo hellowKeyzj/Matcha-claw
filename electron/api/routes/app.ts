@@ -1,12 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import type { HostApiContext } from '../context';
+import type { AppApiContext } from '../context';
 import { setCorsHeaders, sendNoContent } from '../route-utils';
 
 export async function handleAppRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: HostApiContext,
+  ctx: AppApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/events' && req.method === 'GET') {
     setCorsHeaders(res);

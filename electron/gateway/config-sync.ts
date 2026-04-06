@@ -1,17 +1,19 @@
 import { app } from 'electron';
 import path from 'path';
 import { existsSync } from 'fs';
-import { getAllSettings } from '../utils/store';
-import { getApiKey, getDefaultProvider, getProvider } from '../utils/secure-storage';
-import { getProviderEnvVar, getKeyableProviderTypes } from '../utils/provider-registry';
+import { getAllSettings } from '../services/settings/settings-store';
 import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
-import { listConfiguredChannels } from '../utils/channel-config';
-import { syncGatewayTokenToConfig, syncBrowserConfigToOpenClaw, sanitizeOpenClawConfig } from '../utils/openclaw-auth';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
-import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
+import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
+
+function createGatewayConfigRuntimeHostClient() {
+  return createDefaultRuntimeHostHttpClient({
+    timeoutMs: 8_000,
+  });
+}
 
 export interface GatewayLaunchContext {
   appSettings: Awaited<ReturnType<typeof getAllSettings>>;
@@ -30,40 +32,96 @@ export interface GatewayLaunchContext {
 export async function syncGatewayConfigBeforeLaunch(
   appSettings: Awaited<ReturnType<typeof getAllSettings>>,
 ): Promise<void> {
-  await syncProxyConfigToOpenClaw(appSettings);
-
+  const runtimeHostClient = createGatewayConfigRuntimeHostClient();
   try {
-    await sanitizeOpenClawConfig();
+    await runtimeHostClient.request('POST', '/api/runtime-host/sync-gateway-config', {
+      gatewayToken: appSettings.gatewayToken,
+      proxyEnabled: appSettings.proxyEnabled,
+      proxyServer: appSettings.proxyServer,
+      proxyBypassRules: appSettings.proxyBypassRules,
+    });
   } catch (err) {
-    logger.warn('Failed to sanitize openclaw.json:', err);
-  }
-
-  try {
-    await syncGatewayTokenToConfig(appSettings.gatewayToken);
-  } catch (err) {
-    logger.warn('Failed to sync gateway token to openclaw.json:', err);
-  }
-
-  try {
-    await syncBrowserConfigToOpenClaw();
-  } catch (err) {
-    logger.warn('Failed to sync browser config to openclaw.json:', err);
+    logger.warn('Failed to sync gateway bootstrap config through runtime-host:', err);
   }
 }
 
 async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>; loadedProviderKeyCount: number }> {
+  const runtimeHostClient = createGatewayConfigRuntimeHostClient();
   const providerEnv: Record<string, string> = {};
-  const providerTypes = getKeyableProviderTypes();
+  let providerTypes: string[] = [];
+  let envVarByProviderType: Record<string, string> = {};
+  try {
+    const result = await runtimeHostClient.request<{
+      success?: boolean;
+      keyableProviderTypes?: unknown;
+      envVarByProviderType?: unknown;
+    }>('GET', '/api/runtime-host/provider-env-map');
+    const data = result.data;
+    providerTypes = Array.isArray(data?.keyableProviderTypes)
+      ? data.keyableProviderTypes.filter((item): item is string => typeof item === 'string')
+      : [];
+    envVarByProviderType = (
+      data?.envVarByProviderType
+      && typeof data.envVarByProviderType === 'object'
+      && !Array.isArray(data.envVarByProviderType)
+    )
+      ? Object.fromEntries(
+        Object.entries(data.envVarByProviderType)
+          .filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'),
+      )
+      : {};
+  } catch (error) {
+    logger.warn('Failed to fetch provider env map through runtime-host:', error);
+    providerTypes = [];
+    envVarByProviderType = {};
+  }
   let loadedProviderKeyCount = 0;
 
+  const accountTypeById = new Map<string, string>();
+  let defaultAccountId: string | null = null;
   try {
-    const defaultProviderId = await getDefaultProvider();
-    if (defaultProviderId) {
-      const defaultProvider = await getProvider(defaultProviderId);
-      const defaultProviderType = defaultProvider?.type;
-      const defaultProviderKey = await getApiKey(defaultProviderId);
+    const result = await runtimeHostClient.request<{
+      defaultAccountId?: unknown;
+      accounts?: unknown;
+    }>('GET', '/api/provider-accounts');
+    if (typeof result.data?.defaultAccountId === 'string' && result.data.defaultAccountId.trim()) {
+      defaultAccountId = result.data.defaultAccountId.trim();
+    }
+    if (Array.isArray(result.data?.accounts)) {
+      for (const item of result.data.accounts) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          continue;
+        }
+        const record = item as Record<string, unknown>;
+        const accountId = typeof record.id === 'string' ? record.id.trim() : '';
+        const accountType = typeof record.vendorId === 'string'
+          ? record.vendorId.trim()
+          : (typeof record.type === 'string' ? record.type.trim() : '');
+        if (accountId && accountType) {
+          accountTypeById.set(accountId, accountType);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('Failed to load provider account snapshot through runtime-host:', err);
+  }
+
+  const fetchAccountApiKey = async (accountId: string): Promise<string | null> => {
+    const response = await runtimeHostClient.request<{ apiKey?: unknown }>(
+      'GET',
+      `/api/provider-accounts/${encodeURIComponent(accountId)}/api-key`,
+    );
+    return typeof response.data?.apiKey === 'string' && response.data.apiKey.trim()
+      ? response.data.apiKey
+      : null;
+  };
+
+  try {
+    if (defaultAccountId) {
+      const defaultProviderType = accountTypeById.get(defaultAccountId) ?? null;
+      const defaultProviderKey = await fetchAccountApiKey(defaultAccountId);
       if (defaultProviderType && defaultProviderKey) {
-        const envVar = getProviderEnvVar(defaultProviderType);
+        const envVar = envVarByProviderType[defaultProviderType];
         if (envVar) {
           providerEnv[envVar] = defaultProviderKey;
           loadedProviderKeyCount++;
@@ -76,9 +134,9 @@ async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>;
 
   for (const providerType of providerTypes) {
     try {
-      const key = await getApiKey(providerType);
+      const key = await fetchAccountApiKey(providerType);
       if (key) {
-        const envVar = getProviderEnvVar(providerType);
+        const envVar = envVarByProviderType[providerType];
         if (envVar) {
           providerEnv[envVar] = key;
           loadedProviderKeyCount++;
@@ -96,8 +154,12 @@ async function resolveChannelStartupPolicy(): Promise<{
   skipChannels: boolean;
   channelStartupSummary: string;
 }> {
+  const runtimeHostClient = createGatewayConfigRuntimeHostClient();
   try {
-    const configuredChannels = await listConfiguredChannels();
+    const response = await runtimeHostClient.request<{ channels?: unknown }>('GET', '/api/channels/configured');
+    const configuredChannels = Array.isArray(response.data?.channels)
+      ? response.data.channels.filter((channel): channel is string => typeof channel === 'string')
+      : [];
     if (configuredChannels.length === 0) {
       return {
         skipChannels: true,

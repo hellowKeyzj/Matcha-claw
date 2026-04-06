@@ -1,5 +1,5 @@
-import type { ProviderSecret } from '../../shared/providers/types';
-import { getClawXProviderStore } from '../providers/store-instance';
+import type { ProviderSecret } from '../providers/provider-types';
+import { getClawXProviderStore } from '../providers/provider-store-instance';
 
 export interface SecretStore {
   get(accountId: string): Promise<ProviderSecret | null>;

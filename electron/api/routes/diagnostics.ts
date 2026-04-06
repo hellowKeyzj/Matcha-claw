@@ -1,20 +1,22 @@
 import { app } from 'electron';
 import type { IncomingMessage, ServerResponse } from 'http';
-import { collectDiagnosticsBundle } from '../../utils/diagnostics-bundle';
-import { getLicenseGateSnapshot } from '../../utils/license';
+import { getLicenseGateSnapshot } from '../../services/license/license-gate-service';
 import { getOpenClawConfigDir } from '../../utils/paths';
-import type { HostApiContext } from '../context';
+import type { DiagnosticsApiContext } from '../context';
 import { sendJson } from '../route-utils';
 
 export async function handleDiagnosticsRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: HostApiContext,
+  ctx: DiagnosticsApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/diagnostics/collect' && req.method === 'POST') {
     try {
-      const result = await collectDiagnosticsBundle({
+      const result = await ctx.runtimeHost.request(
+        'POST',
+        '/api/diagnostics/collect',
+        {
         userDataDir: app.getPath('userData'),
         openclawConfigDir: getOpenClawConfigDir(),
         appInfo: {
@@ -26,14 +28,11 @@ export async function handleDiagnosticsRoutes(
           electron: process.versions.electron,
           node: process.versions.node,
         },
-        gateway: {
-          status: ctx.gatewayManager.getStatus(),
-        },
-        license: {
-          gateSnapshot: getLicenseGateSnapshot(),
-        },
-      });
-      sendJson(res, 200, result);
+        gatewayStatus: ctx.gatewayManager.getStatus(),
+        licenseGateSnapshot: getLicenseGateSnapshot(),
+      },
+      );
+      sendJson(res, result.status, result.data);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

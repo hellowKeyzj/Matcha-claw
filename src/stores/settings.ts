@@ -5,7 +5,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import i18n from '@/i18n';
-import { hostApiFetch } from '@/lib/host-api';
+import {
+  hostSettingsFetchAll,
+  hostSettingsPutValue,
+  hostSettingsReset,
+} from '@/lib/settings-runtime';
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
@@ -59,7 +63,7 @@ interface SettingsState {
   setSidebarCollapsed: (value: boolean) => void;
   setDevModeUnlocked: (value: boolean) => void;
   markSetupComplete: () => void;
-  resetSettings: () => void;
+  resetSettings: () => Promise<void>;
 }
 
 const defaultSettings = {
@@ -88,6 +92,8 @@ const defaultSettings = {
   initialized: false,
 };
 
+type SettingsSnapshot = typeof defaultSettings;
+
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
@@ -95,7 +101,7 @@ export const useSettingsStore = create<SettingsState>()(
 
       init: async () => {
         try {
-          const settings = await hostApiFetch<Partial<typeof defaultSettings>>('/api/settings');
+          const settings = await hostSettingsFetchAll<Partial<SettingsSnapshot>>();
           let shouldSyncSetupComplete = false;
           set((state) => {
             const mergedSetupComplete = Boolean(state.setupComplete || settings.setupComplete);
@@ -108,10 +114,7 @@ export const useSettingsStore = create<SettingsState>()(
             };
           });
           if (shouldSyncSetupComplete) {
-            void hostApiFetch('/api/settings/setupComplete', {
-              method: 'PUT',
-              body: JSON.stringify({ value: true }),
-            }).catch(() => {});
+            void hostSettingsPutValue('setupComplete', true).catch(() => {});
           }
           if (settings.language) {
             i18n.changeLanguage(settings.language);
@@ -123,74 +126,85 @@ export const useSettingsStore = create<SettingsState>()(
         }
       },
 
-      setTheme: (theme) => set({ theme }),
+      setTheme: (theme) => {
+        set({ theme });
+        void hostSettingsPutValue('theme', theme).catch(() => {});
+      },
       setLanguage: (language) => {
         i18n.changeLanguage(language);
         set({ language });
-        void hostApiFetch('/api/settings/language', {
-          method: 'PUT',
-          body: JSON.stringify({ value: language }),
-        }).catch(() => {});
+        void hostSettingsPutValue('language', language).catch(() => {});
       },
       setUserAvatarDataUrl: (userAvatarDataUrl) => {
         set({ userAvatarDataUrl });
-        void hostApiFetch('/api/settings/userAvatarDataUrl', {
-          method: 'PUT',
-          body: JSON.stringify({ value: userAvatarDataUrl }),
-        }).catch(() => {});
+        void hostSettingsPutValue('userAvatarDataUrl', userAvatarDataUrl).catch(() => {});
       },
       clearUserAvatar: () => {
         set({ userAvatarDataUrl: null });
-        void hostApiFetch('/api/settings/userAvatarDataUrl', {
-          method: 'PUT',
-          body: JSON.stringify({ value: null }),
-        }).catch(() => {});
+        void hostSettingsPutValue('userAvatarDataUrl', null).catch(() => {});
       },
-      setStartMinimized: (startMinimized) => set({ startMinimized }),
+      setStartMinimized: (startMinimized) => {
+        set({ startMinimized });
+        void hostSettingsPutValue('startMinimized', startMinimized).catch(() => {});
+      },
       setLaunchAtStartup: (launchAtStartup) => {
         set({ launchAtStartup });
-        void hostApiFetch('/api/settings/launchAtStartup', {
-          method: 'PUT',
-          body: JSON.stringify({ value: launchAtStartup }),
-        }).catch(() => { });
+        void hostSettingsPutValue('launchAtStartup', launchAtStartup).catch(() => {});
       },
       setTelemetryEnabled: (telemetryEnabled) => {
         set({ telemetryEnabled });
-        void hostApiFetch('/api/settings/telemetryEnabled', {
-          method: 'PUT',
-          body: JSON.stringify({ value: telemetryEnabled }),
-        }).catch(() => { });
+        void hostSettingsPutValue('telemetryEnabled', telemetryEnabled).catch(() => {});
       },
       setGatewayAutoStart: (gatewayAutoStart) => {
         set({ gatewayAutoStart });
-        void hostApiFetch('/api/settings/gatewayAutoStart', {
-          method: 'PUT',
-          body: JSON.stringify({ value: gatewayAutoStart }),
-        }).catch(() => {});
+        void hostSettingsPutValue('gatewayAutoStart', gatewayAutoStart).catch(() => {});
       },
       setGatewayPort: (gatewayPort) => {
         set({ gatewayPort });
-        void hostApiFetch('/api/settings/gatewayPort', {
-          method: 'PUT',
-          body: JSON.stringify({ value: gatewayPort }),
-        }).catch(() => {});
+        void hostSettingsPutValue('gatewayPort', gatewayPort).catch(() => {});
       },
       setProxyEnabled: (proxyEnabled) => set({ proxyEnabled }),
       setProxyServer: (proxyServer) => set({ proxyServer }),
       setProxyBypassRules: (proxyBypassRules) => set({ proxyBypassRules }),
-      setUpdateChannel: (updateChannel) => set({ updateChannel }),
-      setAutoCheckUpdate: (autoCheckUpdate) => set({ autoCheckUpdate }),
-      setAutoDownloadUpdate: (autoDownloadUpdate) => set({ autoDownloadUpdate }),
-      setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
-      setDevModeUnlocked: (devModeUnlocked) => set({ devModeUnlocked }),
+      setUpdateChannel: (updateChannel) => {
+        set({ updateChannel });
+        void hostSettingsPutValue('updateChannel', updateChannel).catch(() => {});
+      },
+      setAutoCheckUpdate: (autoCheckUpdate) => {
+        set({ autoCheckUpdate });
+        void hostSettingsPutValue('autoCheckUpdate', autoCheckUpdate).catch(() => {});
+      },
+      setAutoDownloadUpdate: (autoDownloadUpdate) => {
+        set({ autoDownloadUpdate });
+        void hostSettingsPutValue('autoDownloadUpdate', autoDownloadUpdate).catch(() => {});
+      },
+      setSidebarCollapsed: (sidebarCollapsed) => {
+        set({ sidebarCollapsed });
+        void hostSettingsPutValue('sidebarCollapsed', sidebarCollapsed).catch(() => {});
+      },
+      setDevModeUnlocked: (devModeUnlocked) => {
+        set({ devModeUnlocked });
+        void hostSettingsPutValue('devModeUnlocked', devModeUnlocked).catch(() => {});
+      },
       markSetupComplete: () => {
         set({ setupComplete: true });
-        void hostApiFetch('/api/settings/setupComplete', {
-          method: 'PUT',
-          body: JSON.stringify({ value: true }),
-        }).catch(() => {});
+        void hostSettingsPutValue('setupComplete', true).catch(() => {});
       },
-      resetSettings: () => set({ ...defaultSettings, initialized: true }),
+      resetSettings: async () => {
+        try {
+          const settings = await hostSettingsReset<Partial<SettingsSnapshot>>();
+          if (settings.language) {
+            i18n.changeLanguage(settings.language);
+          }
+          set({
+            ...defaultSettings,
+            ...settings,
+            initialized: true,
+          });
+        } catch {
+          set({ ...defaultSettings, initialized: true });
+        }
+      },
     }),
     {
       name: 'clawx-settings',

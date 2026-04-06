@@ -1,5 +1,5 @@
 import { session } from 'electron';
-import { getAllSettings, type AppSettings } from '../utils/store';
+import { getAllSettings, type AppSettings } from '../services/settings/settings-store';
 import { buildElectronProxyConfig } from '../utils/proxy';
 import { logger } from '../utils/logger';
 

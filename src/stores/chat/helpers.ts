@@ -1,4 +1,4 @@
-import { invokeIpc } from '@/lib/api-client';
+import { hostApiFetch } from '@/lib/host-api';
 import type { AttachedFileMeta, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
 
 // Module-level timestamp tracking the last chat event received.
@@ -490,10 +490,13 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   if (needPreview.length === 0) return false;
 
   try {
-    const thumbnails = await invokeIpc(
-      'media:getThumbnails',
-      needPreview,
-    ) as Record<string, { preview: string | null; fileSize: number }>;
+    const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
+      '/api/files/thumbnails',
+      {
+        method: 'POST',
+        body: JSON.stringify({ paths: needPreview }),
+      },
+    );
 
     let updated = false;
     for (const msg of messages) {

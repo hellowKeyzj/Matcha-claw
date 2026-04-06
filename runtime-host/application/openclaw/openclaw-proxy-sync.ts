@@ -1,0 +1,71 @@
+import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+
+export interface ProxySettings {
+  proxyEnabled: boolean;
+  proxyServer: string;
+  proxyBypassRules: string;
+}
+
+function trimValue(value: string | undefined | null): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeProxyServer(proxyServer: string): string {
+  const value = trimValue(proxyServer);
+  if (!value) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return value;
+  return `http://${value}`;
+}
+
+function resolveProxySettings(settings: ProxySettings): { allProxy: string } {
+  return {
+    allProxy: normalizeProxyServer(settings.proxyServer),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export async function syncProxyConfigToOpenClaw(settings: ProxySettings): Promise<void> {
+  const config = readOpenClawConfigJson() as Record<string, unknown>;
+  const telegramSection = config.channels?.telegram;
+
+  if (!isRecord(telegramSection)) {
+    return;
+  }
+
+  if (!isRecord(telegramSection.accounts)) {
+    telegramSection.accounts = {};
+  }
+  const defaultAccountId = typeof telegramSection.defaultAccount === 'string' && telegramSection.defaultAccount.trim()
+    ? telegramSection.defaultAccount
+    : 'default';
+  telegramSection.defaultAccount = defaultAccountId;
+  const accounts = telegramSection.accounts as Record<string, Record<string, unknown>>;
+  const currentDefault = isRecord(accounts[defaultAccountId]) ? accounts[defaultAccountId] : {};
+
+  const resolved = resolveProxySettings(settings);
+  const nextProxy = settings.proxyEnabled
+    ? resolved.allProxy
+    : '';
+  const currentProxy = typeof currentDefault.proxy === 'string' ? currentDefault.proxy : '';
+
+  if (!nextProxy && !currentProxy) {
+    return;
+  }
+
+  accounts[defaultAccountId] = { ...currentDefault };
+
+  if (nextProxy) {
+    accounts[defaultAccountId].proxy = nextProxy;
+  } else {
+    delete accounts[defaultAccountId].proxy;
+  }
+  if ('proxy' in telegramSection) {
+    delete telegramSection.proxy;
+  }
+
+  await writeOpenClawConfigJson(config);
+  console.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
+}

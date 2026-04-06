@@ -5,6 +5,7 @@ import { SubAgents } from '@/pages/SubAgents';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
+import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
 
 function LocationProbe() {
   const location = useLocation();
@@ -32,6 +33,46 @@ describe('subagents page', () => {
   const loadPersistedFilesForAgent = vi.fn().mockResolvedValue({});
 
   beforeEach(() => {
+    __resetSubagentTemplateCatalogCacheForTest();
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockReset();
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: [],
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/workspace-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: '/home/dev/.openclaw/workspace',
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/config-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: '/home/dev/.openclaw',
+          },
+        };
+      }
+      return undefined;
+    });
     createAgent.mockClear();
     createAgentFromTemplate.mockClear();
     updateAgent.mockClear();
@@ -497,36 +538,51 @@ describe('subagents page', () => {
 
   it('loads a template and creates subagent with template defaults', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel, ...args) => {
-      if (channel === 'openclaw:getSubagentTemplateCatalog') {
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
         return {
-          sourceDir: '/repo/integrations/openclaw',
-          templates: [
-            {
-              id: 'brand-guardian',
-              name: 'Brand Guardian',
-              emoji: '🎨',
-              summary: 'Brand guard template',
-              files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: [
+                {
+                  id: 'brand-guardian',
+                  name: 'Brand Guardian',
+                  emoji: '🎨',
+                  summary: 'Brand guard template',
+                  files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+                },
+              ],
             },
-          ],
+          },
         };
       }
-      if (channel === 'openclaw:getSubagentTemplate' && args[0] === 'brand-guardian') {
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates/brand-guardian') {
         return {
-          sourceDir: '/repo/integrations/openclaw',
-          template: {
-            id: 'brand-guardian',
-            name: 'Brand Guardian',
-            emoji: '🎨',
-            summary: 'Brand guard template',
-            files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
-            fileContents: {
-              'AGENTS.md': 'agents',
-              'SOUL.md': 'soul',
-              'TOOLS.md': 'tools',
-              'IDENTITY.md': 'identity',
-              'USER.md': 'user',
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              template: {
+                id: 'brand-guardian',
+                name: 'Brand Guardian',
+                emoji: '🎨',
+                summary: 'Brand guard template',
+                files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
+                fileContents: {
+                  'AGENTS.md': 'agents',
+                  'SOUL.md': 'soul',
+                  'TOOLS.md': 'tools',
+                  'IDENTITY.md': 'identity',
+                  'USER.md': 'user',
+                },
+              },
             },
           },
         };
@@ -568,17 +624,25 @@ describe('subagents page', () => {
 
   it('大模板列表展开后仍保持直接响应式 grid 容器，避免虚拟行破坏自适应布局', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (channel) => {
-      if (channel === 'openclaw:getSubagentTemplateCatalog') {
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
         return {
-          sourceDir: '/repo/integrations/openclaw',
-          templates: Array.from({ length: 30 }, (_, index) => ({
-            id: `template-${index + 1}`,
-            name: `Template ${index + 1}`,
-            emoji: '🤖',
-            summary: `Template summary ${index + 1}`,
-            files: ['AGENTS.md'],
-          })),
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: Array.from({ length: 30 }, (_, index) => ({
+                id: `template-${index + 1}`,
+                name: `Template ${index + 1}`,
+                emoji: '🤖',
+                summary: `Template summary ${index + 1}`,
+                files: ['AGENTS.md'],
+              })),
+            },
+          },
         };
       }
       return undefined;

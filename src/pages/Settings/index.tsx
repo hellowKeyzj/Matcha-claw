@@ -51,7 +51,12 @@ import {
 } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostOpenClawGetCliCommand } from '@/lib/host-api';
+import {
+  hostSettingsGetValue,
+  hostSettingsPutPatch,
+  hostSettingsPutValue,
+} from '@/lib/settings-runtime';
 import { getTaskPluginStatus, installTaskPlugin, uninstallTaskPlugin } from '@/services/openclaw/task-manager-client';
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -562,11 +567,7 @@ export function Settings() {
 
     (async () => {
       try {
-        const result = await invokeIpc<{
-          success: boolean;
-          command?: string;
-          error?: string;
-        }>('openclaw:getCliCommand');
+        const result = await hostOpenClawGetCliCommand();
         if (cancelled) return;
         if (result.success && result.command) {
           setOpenclawCliCommand(result.command);
@@ -638,9 +639,9 @@ export function Settings() {
   }, [proxyBypassRules]);
 
   useEffect(() => {
-    void hostApiFetch<{ value: string }>('/api/settings/clawHubToken')
-      .then((payload) => {
-        setClawHubTokenInput(typeof payload.value === 'string' ? payload.value : '');
+    void hostSettingsGetValue<string>('clawHubToken')
+      .then((value) => {
+        setClawHubTokenInput(typeof value === 'string' ? value : '');
       })
       .catch(() => {});
   }, []);
@@ -677,7 +678,7 @@ export function Settings() {
     try {
       const normalizedProxyServer = proxyServerDraft.trim();
       const normalizedBypassRules = proxyBypassRulesDraft.trim();
-      await invokeIpc('settings:setMany', {
+      await hostSettingsPutPatch({
         proxyEnabled: proxyEnabledDraft,
         proxyServer: normalizedProxyServer,
         proxyBypassRules: normalizedBypassRules,
@@ -700,10 +701,7 @@ export function Settings() {
     setSavingClawHubToken(true);
     try {
       const normalizedToken = clawHubTokenInput.trim().replace(/^Bearer\s+/i, '').trim();
-      await hostApiFetch('/api/settings/clawHubToken', {
-        method: 'PUT',
-        body: JSON.stringify({ value: normalizedToken }),
-      });
+      await hostSettingsPutValue('clawHubToken', normalizedToken);
       setClawHubTokenInput(normalizedToken);
       toast.success(t('gateway.clawHubTokenSaved'));
       trackUiEvent('settings.clawhub_token_saved', { hasToken: normalizedToken.length > 0 });
@@ -717,10 +715,7 @@ export function Settings() {
   const handleClearClawHubToken = useCallback(async () => {
     setSavingClawHubToken(true);
     try {
-      await hostApiFetch('/api/settings/clawHubToken', {
-        method: 'PUT',
-        body: JSON.stringify({ value: '' }),
-      });
+      await hostSettingsPutValue('clawHubToken', '');
       setClawHubTokenInput('');
       setShowClawHubTokenPlain(false);
       toast.success(t('gateway.clawHubTokenCleared'));
@@ -744,8 +739,7 @@ export function Settings() {
         method: 'POST',
         timeoutMs: 180000,
       });
-      const payload = await hostApiFetch<{ value: string }>('/api/settings/clawHubToken');
-      const normalizedToken = typeof payload.value === 'string' ? payload.value : '';
+      const normalizedToken = await hostSettingsGetValue<string>('clawHubToken');
       setClawHubTokenInput(normalizedToken);
       setShowClawHubTokenPlain(false);
       toast.success(t('gateway.clawHubTokenAutoSynced'));

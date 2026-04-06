@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+
 import { useSubagentsStore } from '@/stores/subagents';
 
 function buildDraftOutput(
@@ -11,6 +13,7 @@ function buildDraftOutput(
 
 describe('subagents prompt pipeline', () => {
   beforeEach(() => {
+    resetGatewayClientMocks();
     useSubagentsStore.setState({
       agents: [{ id: 'writer', name: 'Writer', isDefault: false }],
       loading: false,
@@ -31,8 +34,8 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('builds structured prompt, calls chat.send once, and parses draftByFile', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: buildDraftOutput([
@@ -54,9 +57,8 @@ describe('subagents prompt pipeline', () => {
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '帮我生成子agent规则');
 
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith(
       'chat.send',
       expect.objectContaining({
         sessionKey: expect.stringContaining('subagent-draft'),
@@ -65,8 +67,8 @@ describe('subagents prompt pipeline', () => {
       }),
       expect.any(Number)
     );
-    expect(invoke.mock.calls[0]?.[2]).not.toHaveProperty('system');
-    const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
+    expect(rpc.mock.calls[0]?.[1]).not.toHaveProperty('system');
+    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
     expect(sentMessage).toContain('"files":[{"name","content","reason","confidence"}]');
     expect(sentMessage).toContain('JSON');
@@ -79,8 +81,8 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('returns explicit error when model output is invalid JSON', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: 'not-json',
@@ -95,13 +97,13 @@ describe('subagents prompt pipeline', () => {
     await expect(
       useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案')
     ).rejects.toThrow('Invalid JSON output from model');
-    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(rpc).toHaveBeenCalledTimes(2);
     expect(useSubagentsStore.getState().draftRawOutputByAgent.writer).toBe('not-json');
   });
 
   it('parses draft JSON wrapped in markdown code fence', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: [
@@ -126,8 +128,8 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('returns explicit error when output contains non-target file', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: buildDraftOutput([
@@ -147,8 +149,8 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('falls back to chat.history polling when chat.send returns run status only', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockImplementation(async (_channel, method) => {
+    const rpc = gatewayClientRpcMock;
+    rpc.mockImplementation(async (method) => {
       if (method === 'chat.send') {
         return {
           success: true,
@@ -197,29 +199,28 @@ describe('subagents prompt pipeline', () => {
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', 'generate config');
 
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'agent.wait',
       expect.objectContaining({
         runId: 'run-123',
       }),
       expect.any(Number),
     );
-    expect(invoke).toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).toHaveBeenCalledWith(
       'chat.history',
       expect.objectContaining({
         sessionKey: expect.stringContaining('subagent-draft'),
         limit: 20,
       }),
+      undefined,
     );
     expect(useSubagentsStore.getState().draftByFile['AGENTS.md']?.content).toBe('rules from history');
   });
 
   it('rejects duplicate draft generation while same agent run is in-flight', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     let resolveFirst: ((value: unknown) => void) | undefined;
-    invoke
+    rpc
       .mockImplementationOnce(() => new Promise((resolve) => {
         resolveFirst = resolve;
       }))
@@ -243,7 +244,7 @@ describe('subagents prompt pipeline', () => {
     await expect(
       useSubagentsStore.getState().generateDraftFromPrompt('writer', 'second prompt')
     ).rejects.toThrow('Draft generation already in progress for this agent');
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledTimes(1);
 
     resolveFirst?.({
       success: true,
@@ -262,9 +263,9 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('reuses the same draft session for sequential generations', async () => {
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     let sendCount = 0;
-    invoke.mockImplementation(async (_, method) => {
+    rpc.mockImplementation(async (method) => {
       if (method === 'chat.send') {
         sendCount += 1;
         return {
@@ -317,8 +318,7 @@ describe('subagents prompt pipeline', () => {
 
     expect(firstSessionKey).toBe('agent:writer:subagent-draft');
     expect(secondSessionKey).toBe(firstSessionKey);
-    expect(invoke).not.toHaveBeenCalledWith(
-      'gateway:rpc',
+    expect(rpc).not.toHaveBeenCalledWith(
       'sessions.delete',
       expect.anything()
     );
@@ -333,8 +333,8 @@ describe('subagents prompt pipeline', () => {
         },
       },
     });
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: buildDraftOutput([
@@ -350,7 +350,7 @@ describe('subagents prompt pipeline', () => {
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续优化');
 
-    const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
+    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('### SOUL.md');
     expect(sentMessage).toContain('### AGENTS.md');
     expect(sentMessage).toContain('saved agents baseline');
@@ -368,8 +368,8 @@ describe('subagents prompt pipeline', () => {
         writer: 'agent:writer:subagent-draft',
       },
     });
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
-    invoke.mockResolvedValueOnce({
+    const rpc = gatewayClientRpcMock;
+    rpc.mockResolvedValueOnce({
       success: true,
       result: {
         output: buildDraftOutput([
@@ -385,7 +385,7 @@ describe('subagents prompt pipeline', () => {
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续润色');
 
-    const sentMessage = String((invoke.mock.calls[0]?.[2] as { message?: unknown } | undefined)?.message ?? '');
+    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).not.toContain('### SOUL.md');
     expect(sentMessage).not.toContain('saved agents baseline');
   });
@@ -395,9 +395,9 @@ describe('subagents prompt pipeline', () => {
       persistedFilesByAgent: {},
     });
 
-    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    const rpc = gatewayClientRpcMock;
     const methods: string[] = [];
-    invoke.mockImplementation(async (_, method, params) => {
+    rpc.mockImplementation(async (method, params) => {
       methods.push(String(method));
       if (method === 'agents.files.get') {
         return {
@@ -437,3 +437,7 @@ describe('subagents prompt pipeline', () => {
     expect(useSubagentsStore.getState().persistedFilesByAgent.writer).toBeTruthy();
   });
 });
+
+
+
+

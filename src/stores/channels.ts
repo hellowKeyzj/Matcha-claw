@@ -3,15 +3,14 @@
  * Manages messaging channel state
  */
 import { create } from 'zustand';
-import { hostApiFetch } from '@/lib/host-api';
-import { useGatewayStore } from './gateway';
+import {
+  hostChannelsConnect,
+  hostChannelsDeleteConfig,
+  hostChannelsDisconnect,
+  hostChannelsFetchSnapshot,
+  hostChannelsRequestQrCode,
+} from '@/lib/channel-runtime';
 import type { Channel, ChannelType } from '../types/channel';
-
-interface AddChannelParams {
-  type: ChannelType;
-  name: string;
-  token?: string;
-}
 
 interface FetchChannelsOptions {
   silent?: boolean;
@@ -24,7 +23,6 @@ interface ChannelsState {
 
   // Actions
   fetchChannels: (options?: FetchChannelsOptions) => Promise<void>;
-  addChannel: (params: AddChannelParams) => Promise<Channel>;
   deleteChannel: (channelId: string) => Promise<void>;
   connectChannel: (channelId: string) => Promise<void>;
   disconnectChannel: (channelId: string) => Promise<void>;
@@ -83,7 +81,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
     const runFetch = async () => {
       try {
-        const data = await useGatewayStore.getState().rpc<{
+        const result = await hostChannelsFetchSnapshot();
+        const data = result.snapshot as {
             channelOrder?: string[];
             channels?: Record<string, unknown>;
             channelAccounts?: Record<string, Array<{
@@ -99,8 +98,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
               lastOutboundAt?: number | null;
             }>>;
             channelDefaultAccountId?: Record<string, string>;
-        }>('channels.status', { probe: true });
-        if (data) {
+        } | undefined;
+        if (result.success && data) {
           const channels: Channel[] = [];
 
           // Parse the complex channels.status response into simple Channel objects
@@ -203,43 +202,6 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     await runFetch();
   },
 
-  addChannel: async (params) => {
-    try {
-      const result = await useGatewayStore.getState().rpc<Channel>('channels.add', params);
-
-      if (result) {
-        set((state) => ({
-          channels: [...state.channels, result],
-        }));
-        return result;
-      } else {
-        // If gateway is not available, create a local channel for now
-        const newChannel: Channel = {
-          id: `local-${Date.now()}`,
-          type: params.type,
-          name: params.name,
-          status: 'disconnected',
-        };
-        set((state) => ({
-          channels: [...state.channels, newChannel],
-        }));
-        return newChannel;
-      }
-    } catch {
-      // Create local channel if gateway unavailable
-      const newChannel: Channel = {
-        id: `local-${Date.now()}`,
-        type: params.type,
-        name: params.name,
-        status: 'disconnected',
-      };
-      set((state) => ({
-        channels: [...state.channels, newChannel],
-      }));
-      return newChannel;
-    }
-  },
-
   deleteChannel: async (channelId) => {
     const channelTypeFromState = get().channels.find((channel) => channel.id === channelId)?.type;
     const placeholderMatch = channelId.match(/^(.*)-default$/);
@@ -252,19 +214,9 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      // Delete the channel configuration from openclaw.json
-      await hostApiFetch(`/api/channels/config/${encodeURIComponent(channelType)}`, {
-        method: 'DELETE',
-      });
+      await hostChannelsDeleteConfig(channelType);
     } catch (error) {
       console.error('Failed to delete channel config:', error);
-    }
-
-    try {
-      await useGatewayStore.getState().rpc('channels.delete', { channelId: channelType });
-    } catch (error) {
-      // Continue with local deletion even if gateway fails
-      console.error('Failed to delete channel from gateway:', error);
     }
 
     // Remove from local state
@@ -278,7 +230,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     updateChannel(channelId, { status: 'connecting', error: undefined });
 
     try {
-      await useGatewayStore.getState().rpc('channels.connect', { channelId });
+      await hostChannelsConnect(channelId);
       updateChannel(channelId, { status: 'connected' });
     } catch (error) {
       updateChannel(channelId, { status: 'error', error: String(error) });
@@ -289,7 +241,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     const { updateChannel } = get();
 
     try {
-      await useGatewayStore.getState().rpc('channels.disconnect', { channelId });
+      await hostChannelsDisconnect(channelId);
     } catch (error) {
       console.error('Failed to disconnect channel:', error);
     }
@@ -298,10 +250,11 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   requestQrCode: async (channelType) => {
-    return await useGatewayStore.getState().rpc<{ qrCode: string; sessionId: string }>(
-      'channels.requestQr',
-      { type: channelType },
-    );
+    const result = await hostChannelsRequestQrCode(channelType);
+    return {
+      qrCode: result.qrCode || '',
+      sessionId: result.sessionId || '',
+    };
   },
 
   setChannels: (channels) => set({ channels }),

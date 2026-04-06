@@ -10,6 +10,11 @@ export interface IpcRenderer {
   off(channel: string, callback?: (...args: unknown[]) => void): void;
 }
 
+export interface HostEventEnvelope<T = unknown> {
+  eventName: string;
+  payload: T;
+}
+
 export interface ElectronAPI {
   ipcRenderer: IpcRenderer;
   openExternal: (url: string) => Promise<void>;
