@@ -2,6 +2,9 @@ import { constants, type Dirent } from 'fs';
 import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { createRuntimeLogger } from '../../shared/logger';
+
+const logger = createRuntimeLogger('openclaw-auth-store');
 
 export const AUTH_STORE_VERSION = 1;
 export const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -74,7 +77,7 @@ export async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesSt
       return data;
     }
   } catch (error) {
-    console.warn('Failed to read auth-profiles.json, creating fresh store:', error);
+    logger.warn('Failed to read auth-profiles.json, creating fresh store:', error);
   }
   return { version: AUTH_STORE_VERSION, profiles: {} };
 }

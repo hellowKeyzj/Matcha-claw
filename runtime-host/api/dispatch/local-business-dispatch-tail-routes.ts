@@ -5,7 +5,6 @@ import { handlePlatformRoute } from '../routes/platform-routes';
 import { handlePluginRuntimeRoute } from '../routes/plugin-runtime-routes';
 import { handleSecurityRoute } from '../routes/security-routes';
 import { handleSessionRoute } from '../routes/session-routes';
-import { handleTaskPluginRoute } from '../routes/task-plugin-routes';
 import { handleTeamRuntimeRoute } from '../routes/team-runtime-routes';
 import { checkUvInstalledLocal, installUvLocal } from '../routes/toolchain-uv-routes';
 import { getOpenClawConfigDir } from '../storage/paths';
@@ -56,17 +55,6 @@ export function createTailLocalBusinessHandlers(
   context: LocalBusinessDispatchContext,
 ): LocalBusinessHandlerEntry[] {
   return [
-    {
-      key: 'task_plugin',
-      handle: createPrefixedRouteHandler(
-        '/api/task-plugin/',
-        async (request) => await handleTaskPluginRoute(
-          request.method,
-          request.routePath,
-          { refreshPluginCatalog: context.refreshPluginCatalog },
-        ),
-      ),
-    },
     {
       key: 'team_runtime',
       handle: createPrefixedRouteHandler('/api/team-runtime/', async (request) => await handleTeamRuntimeRoute(request.method, request.routePath, request.payload)),

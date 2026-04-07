@@ -1,7 +1,5 @@
 import {
-  DEFAULT_ENABLED_PLUGIN_IDS,
   DEFAULT_PLUGIN_EXECUTION_ENABLED,
-  normalizePluginIds,
   type RuntimeHostCatalogPlugin,
   type RuntimeHostExecutionState,
   type RuntimeHostRouteResult,
@@ -79,6 +77,7 @@ export interface RuntimeHostManager {
   readonly checkHealth: () => Promise<RuntimeHostManagerHealth>;
   readonly getState: () => RuntimeHostManagerState;
   readonly getExecutionState: () => RuntimeHostExecutionState;
+  readonly refreshExecutionState: () => Promise<RuntimeHostExecutionState>;
   readonly setExecutionEnabled: (enabled: boolean) => Promise<RuntimeHostExecutionState>;
   readonly setEnabledPluginIds: (pluginIds: readonly string[]) => Promise<RuntimeHostExecutionState>;
   readonly listAvailablePlugins: () => Promise<readonly RuntimeHostCatalogPlugin[]>;
@@ -171,12 +170,11 @@ export function createRuntimeHostManager(
     };
   }
 
-  const initialEnabledPluginIds = deps.enabledPluginIds?.length
-    ? Array.from(new Set(deps.enabledPluginIds))
-    : [...DEFAULT_ENABLED_PLUGIN_IDS];
   let executionState: RuntimeHostExecutionState = {
     pluginExecutionEnabled: DEFAULT_PLUGIN_EXECUTION_ENABLED,
-    enabledPluginIds: initialEnabledPluginIds,
+    enabledPluginIds: deps.enabledPluginIds?.length
+      ? Array.from(new Set(deps.enabledPluginIds))
+      : [],
   };
 
   let lifecycle: RuntimeHostLifecycle = 'idle';
@@ -245,21 +243,19 @@ export function createRuntimeHostManager(
     },
   } as const;
 
-  async function hydrateExecutionStateFromStore(): Promise<void> {
-    const [pluginExecutionEnabled, pluginEnabledIds, gatewayToken] = await Promise.all([
+  async function hydrateExecutionStateFromSources(): Promise<void> {
+    const [pluginExecutionEnabled, runtimeHostEnabledPluginIds, gatewayToken] = await Promise.all([
       infrastructure.settingsStore.get('pluginExecutionEnabled').catch(() => DEFAULT_PLUGIN_EXECUTION_ENABLED),
-      infrastructure.settingsStore.get('pluginEnabledIds').catch(() => [...initialEnabledPluginIds]),
+      infrastructure.settingsStore.get('runtimeHostEnabledPluginIds').catch(() => [] as string[]),
       infrastructure.settingsStore.get('gatewayToken').catch(() => ''),
     ]);
     executionState = {
       pluginExecutionEnabled: typeof pluginExecutionEnabled === 'boolean'
         ? pluginExecutionEnabled
         : DEFAULT_PLUGIN_EXECUTION_ENABLED,
-      enabledPluginIds: normalizePluginIds(
-        Array.isArray(pluginEnabledIds)
-          ? pluginEnabledIds.filter((id): id is string => typeof id === 'string')
-          : [...initialEnabledPluginIds],
-      ),
+      enabledPluginIds: Array.isArray(runtimeHostEnabledPluginIds)
+        ? Array.from(new Set(runtimeHostEnabledPluginIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)))
+        : [],
     };
     const gatewayStatusPort = infrastructure.gatewayManager.getStatus().port;
     if (!Number.isFinite(gatewayStatusPort) || gatewayStatusPort <= 0) {
@@ -287,7 +283,12 @@ export function createRuntimeHostManager(
   }
 
   async function setEnabledPluginIdsInternal(pluginIds: readonly string[]): Promise<RuntimeHostExecutionState> {
-    const normalizedPluginIds = normalizePluginIds(pluginIds);
+    const normalizedPluginIds = Array.from(new Set(
+      pluginIds
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0),
+    ));
     const hasSameLength = normalizedPluginIds.length === executionState.enabledPluginIds.length;
     const isSame = hasSameLength
       && normalizedPluginIds.every((pluginId, index) => pluginId === executionState.enabledPluginIds[index]);
@@ -298,7 +299,7 @@ export function createRuntimeHostManager(
       ...executionState,
       enabledPluginIds: normalizedPluginIds,
     };
-    await infrastructure.settingsStore.set('pluginEnabledIds', normalizedPluginIds);
+    await infrastructure.settingsStore.set('runtimeHostEnabledPluginIds', normalizedPluginIds);
     if (lifecycle === 'running' || lifecycle === 'starting') {
       await infrastructure.processManager.restart();
     }
@@ -535,7 +536,7 @@ export function createRuntimeHostManager(
       lifecycle = 'starting';
       lastError = undefined;
       try {
-        await hydrateExecutionStateFromStore();
+        await hydrateExecutionStateFromSources();
         await infrastructure.processManager.start();
         lifecycle = 'running';
         logger.info(
@@ -559,7 +560,7 @@ export function createRuntimeHostManager(
     },
 
     async restart() {
-      await hydrateExecutionStateFromStore();
+      await hydrateExecutionStateFromSources();
       await infrastructure.processManager.restart();
       lifecycle = 'running';
     },
@@ -622,6 +623,11 @@ export function createRuntimeHostManager(
     },
 
     getExecutionState() {
+      return executionState;
+    },
+
+    async refreshExecutionState() {
+      await hydrateExecutionStateFromSources();
       return executionState;
     },
 

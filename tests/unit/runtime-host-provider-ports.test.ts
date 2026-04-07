@@ -26,7 +26,7 @@ const hoisted = vi.hoisted(() => ({
   })),
   getSettingMock: vi.fn(async (key: string) => {
     if (key === 'pluginExecutionEnabled') return true;
-    if (key === 'pluginEnabledIds') return ['security-core'];
+    if (key === 'runtimeHostEnabledPluginIds') return ['security-core'];
     return undefined;
   }),
 }));

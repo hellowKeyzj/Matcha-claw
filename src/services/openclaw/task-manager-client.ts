@@ -1,5 +1,4 @@
 import {
-  hostApiFetch,
   hostOpenClawGetTaskWorkspaceDirs,
   hostOpenClawGetWorkspaceDir,
   hostGatewayRpc,
@@ -254,44 +253,5 @@ export async function wakeTaskSession(
     sessionKey: target.sessionKey,
     message: buildWakeTaskMessage(taskId, options),
     idempotencyKey: `task-resume:${target.agentId}:${taskId}:${resolveRandomId()}`,
-  });
-}
-
-export async function getTaskPluginStatus(): Promise<{
-  installed: boolean;
-  enabled: boolean;
-  skillEnabled: boolean;
-  version?: string;
-  pluginDir: string;
-}> {
-  return hostApiFetch('/api/task-plugin/status', {
-    method: 'POST',
-  });
-}
-
-export async function installTaskPlugin(): Promise<{
-  success: boolean;
-  installed?: boolean;
-  enabled?: boolean;
-  skillEnabled?: boolean;
-  installedPath?: string;
-  version?: string;
-  error?: string;
-}> {
-  return hostApiFetch('/api/task-plugin/install', {
-    method: 'POST',
-  });
-}
-
-export async function uninstallTaskPlugin(): Promise<{
-  success: boolean;
-  installed?: boolean;
-  enabled?: boolean;
-  skillEnabled?: boolean;
-  removedPath?: string;
-  error?: string;
-}> {
-  return hostApiFetch('/api/task-plugin/uninstall', {
-    method: 'POST',
   });
 }

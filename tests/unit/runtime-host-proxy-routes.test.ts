@@ -106,4 +106,20 @@ describe('runtime-host proxy routes', () => {
     expect(runtimeHostRequest).not.toHaveBeenCalled();
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
+
+  it('插件运行态路由改由主进程直管，不再走 runtime-host-proxy', async () => {
+    const runtimeHostRequest = vi.fn();
+
+    const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
+    const handled = await handleRuntimeHostProxyRoutes(
+      { method: 'PUT' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/plugins/runtime/enabled-plugins'),
+      { runtimeHost: { request: runtimeHostRequest } } as never,
+    );
+
+    expect(handled).toBe(false);
+    expect(runtimeHostRequest).not.toHaveBeenCalled();
+    expect(sendJsonMock).not.toHaveBeenCalled();
+  });
 });

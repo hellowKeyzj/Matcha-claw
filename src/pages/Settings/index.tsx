@@ -19,7 +19,6 @@ import {
   Download,
   Copy,
   FileText,
-  Wrench,
   Upload,
   Trash2,
   User,
@@ -57,7 +56,6 @@ import {
   hostSettingsPutPatch,
   hostSettingsPutValue,
 } from '@/lib/settings-runtime';
-import { getTaskPluginStatus, installTaskPlugin, uninstallTaskPlugin } from '@/services/openclaw/task-manager-client';
 import {
   DEFAULT_SETTINGS_SECTION,
   parseSettingsSectionFromSearch,
@@ -67,14 +65,6 @@ type ControlUiInfo = {
   url: string;
   token: string;
   port: number;
-};
-
-type TaskPluginInfo = {
-  installed: boolean;
-  enabled: boolean;
-  skillEnabled: boolean;
-  version?: string;
-  pluginDir: string;
 };
 
 type LicenseValidationCode =
@@ -244,8 +234,6 @@ export function Settings() {
     () => parseSettingsSectionFromSearch(location.search) ?? DEFAULT_SETTINGS_SECTION
   );
   const userAvatarInputRef = useRef<HTMLInputElement | null>(null);
-  const [taskPluginInfo, setTaskPluginInfo] = useState<TaskPluginInfo | null>(null);
-  const [taskPluginBusy, setTaskPluginBusy] = useState(false);
   const [licenseKeyInput, setLicenseKeyInput] = useState('');
   const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCodeWithUnknown | null>(null);
   const [licenseValidationMessage, setLicenseValidationMessage] = useState('');
@@ -439,51 +427,6 @@ export function Settings() {
     }
   }, [lastDiagnosticsZipPath, t]);
 
-  const loadTaskPluginStatus = useCallback(async (silent = true) => {
-    try {
-      const status = await getTaskPluginStatus();
-      setTaskPluginInfo(status);
-    } catch (error) {
-      if (!silent) {
-        toast.error(t('taskPlugin.toastStatusFailed', { error: String(error) }));
-      }
-    }
-  }, [t]);
-
-  const handleInstallTaskPlugin = useCallback(async () => {
-    setTaskPluginBusy(true);
-    try {
-      const result = await installTaskPlugin();
-      if (!result.success) {
-        toast.error(t('taskPlugin.toastInstallFailed', { error: result.error || 'unknown error' }));
-        return;
-      }
-      toast.success(t('taskPlugin.toastInstallSuccess'));
-      await loadTaskPluginStatus(true);
-    } catch (error) {
-      toast.error(t('taskPlugin.toastInstallFailed', { error: String(error) }));
-    } finally {
-      setTaskPluginBusy(false);
-    }
-  }, [loadTaskPluginStatus, t]);
-
-  const handleUninstallTaskPlugin = useCallback(async () => {
-    setTaskPluginBusy(true);
-    try {
-      const result = await uninstallTaskPlugin();
-      if (!result.success) {
-        toast.error(t('taskPlugin.toastUninstallFailed', { error: result.error || 'unknown error' }));
-        return;
-      }
-      toast.success(t('taskPlugin.toastUninstallSuccess'));
-      await loadTaskPluginStatus(true);
-    } catch (error) {
-      toast.error(t('taskPlugin.toastUninstallFailed', { error: String(error) }));
-    } finally {
-      setTaskPluginBusy(false);
-    }
-  }, [loadTaskPluginStatus, t]);
-
   const handleAvatarFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
     event.target.value = '';
@@ -645,10 +588,6 @@ export function Settings() {
       })
       .catch(() => {});
   }, []);
-
-  useEffect(() => {
-    void loadTaskPluginStatus(true);
-  }, [loadTaskPluginStatus]);
 
   useEffect(() => {
     void refreshLicenseGateSnapshot();
@@ -842,24 +781,9 @@ export function Settings() {
     );
   };
 
-  const taskPluginReady = Boolean(taskPluginInfo?.installed && taskPluginInfo?.enabled && taskPluginInfo?.skillEnabled);
-
-  const taskPluginBadgeVariant = !taskPluginInfo?.installed
-    ? 'secondary'
-    : taskPluginReady
-      ? 'success'
-      : 'destructive';
-
-  const taskPluginStatusLabel = !taskPluginInfo?.installed
-    ? t('taskPlugin.notInstalled')
-    : taskPluginReady
-      ? t('taskPlugin.installedEnabled')
-      : t('taskPlugin.installedDisabled');
-
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.title') },
     { key: 'appearance', label: t('appearance.title') },
-    { key: 'taskPlugin', label: t('taskPlugin.title') },
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
     { key: 'license', label: t('license.title') },
@@ -1379,67 +1303,6 @@ export function Settings() {
         </CardContent>
       </Card>
       )}
-
-      {/* Task Plugin */}
-      {activeSection === 'taskPlugin' && (
-      <Card className="order-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Wrench className="h-5 w-5" />
-            {t('taskPlugin.title')}
-          </CardTitle>
-          <CardDescription>{t('taskPlugin.description')}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="min-w-0 flex-1 space-y-1">
-              <Label>{t('taskPlugin.status')}</Label>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={taskPluginBadgeVariant}>{taskPluginStatusLabel}</Badge>
-                {taskPluginInfo?.version ? (
-                  <span className="text-xs text-muted-foreground">
-                    {t('taskPlugin.version')}: {taskPluginInfo.version}
-                  </span>
-                ) : null}
-              </div>
-              {taskPluginInfo?.installed ? (
-                <p className="text-xs text-muted-foreground">
-                  Skill `task-manager`: {taskPluginInfo.skillEnabled ? 'enabled' : 'disabled'}
-                </p>
-              ) : null}
-            </div>
-            <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => void loadTaskPluginStatus(false)}
-                disabled={taskPluginBusy}
-              >
-                <RefreshCw className="mr-2 h-4 w-4" />
-                {t('taskPlugin.refresh')}
-              </Button>
-              <Button onClick={() => void handleInstallTaskPlugin()} disabled={taskPluginBusy}>
-                <Wrench className="mr-2 h-4 w-4" />
-                {taskPluginInfo?.installed ? t('taskPlugin.reinstall') : t('taskPlugin.install')}
-              </Button>
-              {taskPluginInfo?.installed ? (
-                <Button variant="destructive" onClick={() => void handleUninstallTaskPlugin()} disabled={taskPluginBusy}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  {t('taskPlugin.uninstall')}
-                </Button>
-              ) : null}
-            </div>
-          </div>
-
-          {taskPluginInfo?.pluginDir ? (
-            <div className="space-y-1">
-              <Label>{t('taskPlugin.path')}</Label>
-              <Input readOnly value={taskPluginInfo.pluginDir} className="font-mono" />
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-      )}
-
       {/* Updates */}
       {activeSection === 'updates' && (
       <Card className="order-2">

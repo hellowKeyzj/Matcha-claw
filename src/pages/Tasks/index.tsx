@@ -10,7 +10,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -122,6 +122,7 @@ function formatDateTime(value: number | undefined): string {
 
 export function TasksPage() {
   const { t } = useTranslation('tasks');
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const {
@@ -134,7 +135,6 @@ export function TasksPage() {
     blockedQueue,
     init,
     refreshTasks,
-    installPlugin,
     resumeBlockedTask,
     deleteTaskById,
     closeBlockedDialog,
@@ -484,16 +484,6 @@ export function TasksPage() {
   const completedCount = taskStatusSummary.completed;
   const incompleteCount = taskStatusSummary.incomplete;
 
-  const handleInstall = async () => {
-    await installPlugin();
-    const next = useTaskCenterStore.getState();
-    if (next.error) {
-      toast.error(next.error);
-      return;
-    }
-    toast.success(t('toast.pluginInstalled'));
-  };
-
   const handleResumeConfirm = async (payload: { taskId: string; confirmId: string; decision?: 'approve' | 'reject'; userInput?: string }) => {
     await resumeBlockedTask(payload);
     const next = useTaskCenterStore.getState();
@@ -602,9 +592,9 @@ export function TasksPage() {
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               {!pluginInstalled || !pluginEnabled ? (
-                <Button type="button" size="sm" onClick={handleInstall} disabled={loading}>
+                <Button type="button" size="sm" onClick={() => navigate('/plugins')} disabled={loading}>
                   <Wrench className="mr-2 h-4 w-4" />
-                  {t('installPlugin')}
+                  {t('openPluginCenter')}
                 </Button>
               ) : null}
               <label htmlFor="tasks-date-from" className="relative h-9 w-40 cursor-pointer">
@@ -679,9 +669,9 @@ export function TasksPage() {
                 <CardDescription>{t('plugin.description')}</CardDescription>
               </CardHeader>
               <CardContent>
-                <Button onClick={handleInstall} disabled={loading}>
+                <Button onClick={() => navigate('/plugins')} disabled={loading}>
                   <Wrench className="mr-2 h-4 w-4" />
-                  {t('installPlugin')}
+                  {t('openPluginCenter')}
                 </Button>
               </CardContent>
             </Card>

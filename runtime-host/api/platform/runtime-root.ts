@@ -136,8 +136,19 @@ export function createRuntimeHostPlatformRoot(
     },
 
     async setToolEnabled(toolId, enabled) {
-      await toolCatalogService.setToolEnabled(toolId, enabled);
-      localLedger.setAll(toolRegistry.snapshotPlatform());
+      if (enabled) {
+        await runtimeDriver.enableTool(toolId);
+      } else {
+        await runtimeDriver.disableTool(toolId);
+      }
+      const upstream = await runtimeDriver.listInstalledTools();
+      gatewayLedger.setAll(upstream);
+      await toolRegistry.upsertNative(upstream);
+      await auditSink.append({
+        type: 'runtime.set_tool_enabled',
+        ts: Date.now(),
+        payload: { toolId, enabled },
+      });
     },
 
     async executePlatformTool(req) {

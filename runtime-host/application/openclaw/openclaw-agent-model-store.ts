@@ -1,6 +1,9 @@
 import { join } from 'path';
 import { homedir } from 'os';
 import { discoverAgentIds, readJsonFile, writeJsonFile } from './openclaw-auth-store';
+import { createRuntimeLogger } from '../../shared/logger';
+
+const logger = createRuntimeLogger('openclaw-agent-model-store');
 
 export async function updateAgentModelProvider(
   providerType: string,
@@ -51,9 +54,9 @@ export async function updateAgentModelProvider(
 
     try {
       await writeJsonFile(modelsPath, data);
-      console.log(`Updated models.json for agent "${agentId}" provider "${providerType}"`);
+      logger.info(`Updated models.json for agent "${agentId}" provider "${providerType}"`);
     } catch (error) {
-      console.warn(`Failed to update models.json for agent "${agentId}":`, error);
+      logger.warn(`Failed to update models.json for agent "${agentId}":`, error);
     }
   }
 }

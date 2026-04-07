@@ -1,7 +1,6 @@
 export const SETTINGS_SECTIONS = [
   'gateway',
   'appearance',
-  'taskPlugin',
   'updates',
   'advanced',
   'license',

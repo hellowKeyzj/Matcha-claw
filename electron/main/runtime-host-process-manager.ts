@@ -55,6 +55,8 @@ const DEFAULT_AUTO_RESTART_BASE_DELAY_MS = 300;
 const DEFAULT_AUTO_RESTART_MAX_DELAY_MS = 5000;
 const DEFAULT_AUTO_RESTART_WINDOW_MS = 60000;
 const DEFAULT_AUTO_RESTART_MAX_ATTEMPTS = 6;
+const REBUILD_OUTPUT_MAX_BUFFER = 10 * 1024 * 1024;
+const ANSI_ESCAPE_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function getDefaultScriptPathCandidates(): string[] {
   const resourcesPath = typeof process.resourcesPath === 'string' ? process.resourcesPath : '';
@@ -181,6 +183,38 @@ function shouldAutoRebuildRuntimeHost(scriptPath: string | null, explicitScriptP
   return true;
 }
 
+function normalizeProcessOutputChunk(output: string | Buffer | null | undefined): string[] {
+  const raw = typeof output === 'string'
+    ? output
+    : Buffer.isBuffer(output)
+      ? output.toString('utf8')
+      : '';
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .replace(/\r\n?/g, '\n')
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+}
+
+function logRebuildOutput(
+  logger: RuntimeHostProcessLogger | undefined,
+  stream: 'stdout' | 'stderr',
+  output: string | Buffer | null | undefined,
+): void {
+  const lines = normalizeProcessOutputChunk(output);
+  for (const line of lines) {
+    if (stream === 'stderr') {
+      logger?.warn?.(`[runtime-host-child:build:stderr] ${line}`);
+      continue;
+    }
+    logger?.info?.(`[runtime-host-child:build] ${line}`);
+  }
+}
+
 function rebuildRuntimeHostProcess(logger?: RuntimeHostProcessLogger): void {
   logger?.info?.('[runtime-host-child] runtime-host build is stale, rebuilding...');
   const projectRoot = resolveProjectRootForRuntimeHostBuild();
@@ -189,9 +223,19 @@ function rebuildRuntimeHostProcess(logger?: RuntimeHostProcessLogger): void {
   }
   const result = spawnSync('pnpm', ['run', 'build:runtime-host-process'], {
     cwd: projectRoot,
-    stdio: 'inherit',
+    stdio: 'pipe',
+    encoding: 'utf8',
+    maxBuffer: REBUILD_OUTPUT_MAX_BUFFER,
+    env: {
+      ...process.env,
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
+      npm_config_color: 'false',
+    },
     shell: process.platform === 'win32',
   });
+  logRebuildOutput(logger, 'stdout', result.stdout);
+  logRebuildOutput(logger, 'stderr', result.stderr);
   if (result.error) {
     throw result.error;
   }

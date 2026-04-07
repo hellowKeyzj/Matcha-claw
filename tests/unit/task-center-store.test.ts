@@ -3,8 +3,8 @@ import type { Task } from '@/services/openclaw/task-manager-client';
 
 const getWorkspaceDirMock = vi.fn<() => Promise<string | null>>();
 const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
-const getTaskPluginStatusMock = vi.fn();
-const installTaskPluginMock = vi.fn();
+const getPluginCatalogMock = vi.fn();
+const getPluginRuntimeMock = vi.fn();
 const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
 const resumeTaskMock = vi.fn();
 const wakeTaskSessionMock = vi.fn();
@@ -12,11 +12,15 @@ const wakeTaskSessionMock = vi.fn();
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   getWorkspaceDir: (...args: unknown[]) => getWorkspaceDirMock(...args),
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
-  getTaskPluginStatus: (...args: unknown[]) => getTaskPluginStatusMock(...args),
-  installTaskPlugin: (...args: unknown[]) => installTaskPluginMock(...args),
   listTasks: (...args: unknown[]) => listTasksMock(...args),
   resumeTask: (...args: unknown[]) => resumeTaskMock(...args),
   wakeTaskSession: (...args: unknown[]) => wakeTaskSessionMock(...args),
+}));
+
+vi.mock('@/services/openclaw/plugin-manager-client', () => ({
+  getPluginCatalog: (...args: unknown[]) => getPluginCatalogMock(...args),
+  getPluginRuntime: (...args: unknown[]) => getPluginRuntimeMock(...args),
+  ensurePluginEnabled: vi.fn(),
 }));
 
 function task(overrides: Partial<Task>): Task {
@@ -37,8 +41,8 @@ describe('task center store', () => {
     vi.resetModules();
     getWorkspaceDirMock.mockReset();
     getTaskWorkspaceDirsMock.mockReset();
-    getTaskPluginStatusMock.mockReset();
-    installTaskPluginMock.mockReset();
+    getPluginCatalogMock.mockReset();
+    getPluginRuntimeMock.mockReset();
     listTasksMock.mockReset();
     resumeTaskMock.mockReset();
     wakeTaskSessionMock.mockReset();
@@ -47,12 +51,14 @@ describe('task center store', () => {
   it('init 在插件可用时加载任务并生成 blockedQueue', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getTaskPluginStatusMock.mockResolvedValue({
-      installed: true,
-      enabled: true,
-      skillEnabled: true,
-      version: '1.0.0',
-      pluginDir: 'x',
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
     });
     listTasksMock.mockResolvedValue([
       task({ id: 'waiting-1', status: 'waiting_for_input', blocked_info: { reason: 'need_user_confirm', confirm_id: 'c1', question: '请输入审批意见' } }),
@@ -73,12 +79,14 @@ describe('task center store', () => {
   it('resumeBlockedTask 提交后会更新任务并移除阻塞队列', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getTaskPluginStatusMock.mockResolvedValue({
-      installed: true,
-      enabled: true,
-      skillEnabled: true,
-      version: '1.0.0',
-      pluginDir: 'x',
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
     });
     listTasksMock.mockResolvedValue([
       task({ id: 'waiting-2', status: 'waiting_for_input', blocked_info: { reason: 'need_user_confirm', confirm_id: 'c2', question: '是否继续' } }),
