@@ -18,6 +18,9 @@ import {
   writeAuthProfiles,
   writeOpenClawJson,
 } from './openclaw-auth-store';
+import { createRuntimeLogger } from '../../shared/logger';
+
+const logger = createRuntimeLogger('openclaw-provider-config-service');
 
 function getOAuthPluginId(provider: string): string {
   return `${provider}-auth`;
@@ -161,11 +164,11 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
         if (providers && providers[provider]) {
           delete providers[provider];
           await writeFile(modelsPath, JSON.stringify(data, null, 2), 'utf-8');
-          console.log(`Removed models.json entry for provider "${provider}" (agent "${id}")`);
+          logger.info(`Removed models.json entry for provider "${provider}" (agent "${id}")`);
         }
       }
     } catch (error) {
-      console.warn(`Failed to remove provider ${provider} from models.json (agent "${id}"):`, error);
+      logger.warn(`Failed to remove provider ${provider} from models.json (agent "${id}"):`, error);
     }
   }
 
@@ -179,7 +182,7 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
     if (entries[pluginName]) {
       entries[pluginName].enabled = false;
       modified = true;
-      console.log(`Disabled OpenClaw plugin: ${pluginName}`);
+      logger.info(`Disabled OpenClaw plugin: ${pluginName}`);
     }
 
     const models = config.models as Record<string, unknown> | undefined;
@@ -187,19 +190,19 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
     if (providers[provider]) {
       delete providers[provider];
       modified = true;
-      console.log(`Removed OpenClaw provider config: ${provider}`);
+      logger.info(`Removed OpenClaw provider config: ${provider}`);
     }
 
     if (pruneProviderModelRefsInAgentsConfig(config, provider)) {
       modified = true;
-      console.log(`Pruned stale agent model references for provider "${provider}"`);
+      logger.info(`Pruned stale agent model references for provider "${provider}"`);
     }
 
     if (modified) {
       await writeOpenClawJson(config);
     }
   } catch (error) {
-    console.warn(`Failed to remove provider ${provider} from openclaw.json:`, error);
+    logger.warn(`Failed to remove provider ${provider} from openclaw.json:`, error);
   }
 }
 
@@ -322,7 +325,7 @@ function upsertOpenClawProviderEntry(
   config.models = models;
 
   if (removedLegacyMoonshot) {
-    console.log('Removed legacy models.providers.moonshot alias entry');
+    logger.info('Removed legacy models.providers.moonshot alias entry');
   }
 }
 
@@ -356,7 +359,7 @@ export async function setOpenClawDefaultModel(
 
   const model = normalizeModelRef(provider, modelOverride);
   if (!model) {
-    console.warn(`No default model mapping for provider "${provider}"`);
+    logger.warn(`No default model mapping for provider "${provider}"`);
     return;
   }
 
@@ -383,13 +386,13 @@ export async function setOpenClawDefaultModel(
       includeRegistryModels: true,
       mergeExistingModels: true,
     });
-    console.log(`Configured models.providers.${provider} with baseUrl=${providerCfg.baseUrl}, model=${modelId}`);
+    logger.info(`Configured models.providers.${provider} with baseUrl=${providerCfg.baseUrl}, model=${modelId}`);
   } else {
     const models = (config.models || {}) as Record<string, unknown>;
     const providers = (models.providers || {}) as Record<string, unknown>;
     if (providers[provider]) {
       delete providers[provider];
-      console.log(`Removed stale models.providers.${provider} (built-in provider)`);
+      logger.info(`Removed stale models.providers.${provider} (built-in provider)`);
       models.providers = providers;
       config.models = models;
     }
@@ -400,7 +403,7 @@ export async function setOpenClawDefaultModel(
   config.gateway = gateway;
 
   await writeOpenClawJson(config);
-  console.log(`Set OpenClaw default model to "${model}" for provider "${provider}"`);
+  logger.info(`Set OpenClaw default model to "${model}" for provider "${provider}"`);
 }
 
 export async function syncProviderConfigToOpenClaw(
@@ -449,7 +452,7 @@ export async function setOpenClawDefaultModelWithOverride(
 
   const model = normalizeModelRef(provider, modelOverride);
   if (!model) {
-    console.warn(`No default model mapping for provider "${provider}"`);
+    logger.warn(`No default model mapping for provider "${provider}"`);
     return;
   }
 
@@ -495,7 +498,7 @@ export async function setOpenClawDefaultModelWithOverride(
   }
 
   await writeOpenClawJson(config);
-  console.log(`Set OpenClaw default model to "${model}" for provider "${provider}" (runtime override)`);
+  logger.info(`Set OpenClaw default model to "${model}" for provider "${provider}" (runtime override)`);
 }
 
 export async function getActiveOpenClawProviders(): Promise<Set<string>> {
@@ -519,7 +522,7 @@ export async function getActiveOpenClawProviders(): Promise<Set<string>> {
       }
     }
   } catch (error) {
-    console.warn('Failed to read openclaw.json for active providers:', error);
+    logger.warn('Failed to read openclaw.json for active providers:', error);
   }
 
   return activeProviders;
@@ -561,7 +564,7 @@ export async function syncGatewayTokenToConfig(token: string): Promise<void> {
   config.gateway = gateway;
 
   await writeOpenClawJson(config);
-  console.log('Synced gateway token to openclaw.json');
+  logger.info('Synced gateway token to openclaw.json');
 }
 
 export async function syncBrowserConfigToOpenClaw(): Promise<void> {
@@ -591,7 +594,7 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
 
   config.browser = browser;
   await writeOpenClawJson(config);
-  console.log('Synced browser config to openclaw.json');
+  logger.info('Synced browser config to openclaw.json');
 }
 
 export async function sanitizeOpenClawConfig(): Promise<void> {
@@ -603,7 +606,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     const skillsObj = skills as Record<string, unknown>;
     for (const key of ['enabled', 'disabled']) {
       if (key in skillsObj) {
-        console.log(`[sanitize] Removing misplaced key "skills.${key}" from openclaw.json`);
+        logger.info(`[sanitize] Removing misplaced key "skills.${key}" from openclaw.json`);
         delete skillsObj[key];
         modified = true;
       }
@@ -619,7 +622,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     commands.restart = true;
     config.commands = commands;
     modified = true;
-    console.log('[sanitize] Enabling commands.restart for graceful reload support');
+    logger.info('[sanitize] Enabling commands.restart for graceful reload support');
   }
 
   const providers = ((config.models as Record<string, unknown> | undefined)?.providers as Record<string, unknown> | undefined) || {};
@@ -629,7 +632,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     const search = (web.search as Record<string, unknown> | undefined) || {};
     const kimi = (search.kimi as Record<string, unknown> | undefined) || {};
     if ('apiKey' in kimi) {
-      console.log('[sanitize] Removing stale key "tools.web.search.kimi.apiKey" from openclaw.json');
+      logger.info('[sanitize] Removing stale key "tools.web.search.kimi.apiKey" from openclaw.json');
       delete kimi.apiKey;
       search.kimi = kimi;
       web.search = search;
@@ -657,7 +660,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
   if (toolsModified) {
     config.tools = toolsConfig;
     modified = true;
-    console.log('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
+    logger.info('[sanitize] Enforced tools.profile="full" and tools.sessions.visibility="all" for OpenClaw 3.8+');
   }
 
   const plugins = config.plugins;
@@ -667,7 +670,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (entries && typeof entries === 'object') {
       let cleaned = false;
       if (entries.feishu) {
-        console.log('[sanitize] Removing stale plugins.entries.feishu that blocks the official feishu plugin channel');
+        logger.info('[sanitize] Removing stale plugins.entries.feishu that blocks the official feishu plugin channel');
         delete entries.feishu;
         cleaned = true;
       }
@@ -682,7 +685,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 
   if (modified) {
     await writeOpenClawJson(config);
-    console.log('[sanitize] openclaw.json sanitized successfully');
+    logger.info('[sanitize] openclaw.json sanitized successfully');
   }
 }
 

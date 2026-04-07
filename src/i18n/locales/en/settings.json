@@ -119,25 +119,6 @@
       "requestingCode": "Requesting secure login code..."
     }
   },
-  "taskPlugin": {
-    "title": "Task Plugin",
-    "description": "Manage the built-in task-manager plugin runtime status",
-    "status": "Status",
-    "version": "Version",
-    "path": "Plugin Path",
-    "install": "Install",
-    "reinstall": "Reinstall",
-    "uninstall": "Uninstall",
-    "refresh": "Refresh",
-    "notInstalled": "Not Installed",
-    "installedEnabled": "Installed & Enabled",
-    "installedDisabled": "Installed but Disabled",
-    "toastInstallSuccess": "Task plugin installed",
-    "toastInstallFailed": "Failed to install task plugin: {{error}}",
-    "toastUninstallSuccess": "Task plugin uninstalled",
-    "toastUninstallFailed": "Failed to uninstall task plugin: {{error}}",
-    "toastStatusFailed": "Failed to load task plugin status: {{error}}"
-  },
   "license": {
     "title": "License",
     "description": "Activate and manage your local license authorization",

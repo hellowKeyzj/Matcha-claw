@@ -92,7 +92,6 @@ function setupSidebarState() {
     blockedQueue: [],
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    installPlugin: vi.fn().mockResolvedValue(undefined),
     resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
     closeBlockedDialog: vi.fn(),
     handleGatewayNotification: vi.fn(),

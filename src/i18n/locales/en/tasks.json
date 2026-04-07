@@ -2,7 +2,7 @@
     "title": "Task Center",
     "subtitle": "Task execution and scheduling",
     "workspace": "Workspace",
-    "installPlugin": "Install Task Plugin",
+    "openPluginCenter": "Open Plugin Center",
     "refresh": "Refresh",
     "tabs": {
         "long": "Long Tasks",
@@ -11,7 +11,7 @@
     "gatewayNotRunning": "Gateway is not running",
     "plugin": {
         "title": "Task Manager Plugin Required",
-        "description": "Install and enable task-manager plugin before using task center"
+        "description": "Enable task-manager in Plugin Center before using Task Center"
     },
     "stats": {
         "running": "Running",
@@ -70,7 +70,6 @@
         "deleteConfirm": "Delete this task? This action cannot be undone."
     },
     "toast": {
-        "pluginInstalled": "Task plugin installed",
         "resumed": "Task resumed",
         "deleted": "Task deleted"
     }

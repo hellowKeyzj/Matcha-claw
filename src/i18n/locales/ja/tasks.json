@@ -2,7 +2,7 @@
     "title": "タスクセンター",
     "subtitle": "タスク実行とスケジューリング",
     "workspace": "ワークスペース",
-    "installPlugin": "タスクプラグインをインストール",
+    "openPluginCenter": "プラグインセンターを開く",
     "refresh": "更新",
     "tabs": {
         "long": "長期タスク",
@@ -11,7 +11,7 @@
     "gatewayNotRunning": "ゲートウェイが停止中です",
     "plugin": {
         "title": "Task Manager プラグインが必要です",
-        "description": "タスクセンターを使う前に task-manager プラグインをインストールして有効化してください"
+        "description": "タスクセンターを使う前に、プラグインセンターで task-manager を有効化してください"
     },
     "stats": {
         "running": "実行中",
@@ -70,7 +70,6 @@
         "deleteConfirm": "このタスクを削除しますか？この操作は元に戻せません。"
     },
     "toast": {
-        "pluginInstalled": "タスクプラグインをインストールしました",
         "resumed": "タスクを再開しました",
         "deleted": "タスクを削除しました"
     }

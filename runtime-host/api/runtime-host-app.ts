@@ -21,6 +21,9 @@ import {
   discoverPluginCatalogLocal,
   mergePluginCatalogSnapshots,
 } from '../application/plugins/catalog';
+import { createRuntimeLogger } from '../shared/logger';
+
+const logger = createRuntimeLogger('runtime-host-app');
 
 const port = Number.parseInt(process.env.MATCHACLAW_RUNTIME_HOST_PORT || '', 10) || DEFAULT_PORT;
 function readRequiredEnv(name: string): string {
@@ -130,7 +133,7 @@ async function refreshPluginCatalog() {
     pluginCatalog = mergePluginCatalogSnapshots(discoveredCatalog, injectedPluginCatalog);
   } catch (error) {
     pluginCatalog = [...injectedPluginCatalog];
-    console.warn('[runtime-host-process] failed to refresh plugin catalog:', error);
+    logger.warn('failed to refresh plugin catalog', error);
   }
 }
 
@@ -247,7 +250,7 @@ export function startRuntimeHostProcess() {
   void refreshPluginCatalog()
     .finally(() => {
       server.listen(port, '127.0.0.1', () => {
-        console.info(`[runtime-host-process] listening on http://127.0.0.1:${port}`);
+        logger.info(`listening on http://127.0.0.1:${port}`);
       });
     });
 

@@ -1,4 +1,7 @@
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+import { createRuntimeLogger } from '../../shared/logger';
+
+const logger = createRuntimeLogger('openclaw-proxy-sync');
 
 export interface ProxySettings {
   proxyEnabled: boolean;
@@ -67,5 +70,5 @@ export async function syncProxyConfigToOpenClaw(settings: ProxySettings): Promis
   }
 
   await writeOpenClawConfigJson(config);
-  console.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
+  logger.info(`Synced Telegram proxy to OpenClaw config (${nextProxy || 'disabled'})`);
 }

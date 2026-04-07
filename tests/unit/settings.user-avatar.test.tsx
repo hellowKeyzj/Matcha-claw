@@ -15,17 +15,6 @@ vi.mock('@/components/settings/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
-vi.mock('@/services/openclaw/task-manager-client', () => ({
-  getTaskPluginStatus: vi.fn().mockResolvedValue({
-    installed: false,
-    enabled: false,
-    skillEnabled: false,
-    pluginDir: '/tmp/task-plugin',
-  }),
-  installTaskPlugin: vi.fn().mockResolvedValue({ success: true }),
-  uninstallTaskPlugin: vi.fn().mockResolvedValue({ success: true }),
-}));
-
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn(async (path: string) => {
     if (path === '/api/license/gate') {

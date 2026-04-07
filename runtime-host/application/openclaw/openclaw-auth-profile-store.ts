@@ -5,6 +5,9 @@ import {
   type OAuthProfileEntry,
   writeAuthProfiles,
 } from './openclaw-auth-store';
+import { createRuntimeLogger } from '../../shared/logger';
+
+const logger = createRuntimeLogger('openclaw-auth-profile-store');
 
 export async function saveOAuthTokenToOpenClaw(
   provider: string,
@@ -41,7 +44,7 @@ export async function saveOAuthTokenToOpenClaw(
 
     await writeAuthProfiles(store, id);
   }
-  console.log(`Saved OAuth token for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  logger.info(`Saved OAuth token for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
 }
 
 export async function getOAuthTokenFromOpenClaw(
@@ -57,7 +60,7 @@ export async function getOAuthTokenFromOpenClaw(
       return (profile as OAuthProfileEntry).access;
     }
   } catch (error) {
-    console.warn(`[getOAuthToken] Failed to read token for ${provider}:`, error);
+    logger.warn(`[getOAuthToken] Failed to read token for ${provider}:`, error);
   }
   return null;
 }
@@ -68,7 +71,7 @@ export async function saveProviderKeyToOpenClaw(
   agentId?: string,
 ): Promise<void> {
   if (isOAuthProviderType(provider) && !apiKey) {
-    console.log(`Skipping auth-profiles write for OAuth provider "${provider}" (no API key provided, using OAuth)`);
+    logger.info(`Skipping auth-profiles write for OAuth provider "${provider}" (no API key provided, using OAuth)`);
     return;
   }
 
@@ -94,7 +97,7 @@ export async function saveProviderKeyToOpenClaw(
 
     await writeAuthProfiles(store, id);
   }
-  console.log(`Saved API key for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  logger.info(`Saved API key for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
 }
 
 export async function removeProviderKeyFromOpenClaw(
@@ -102,7 +105,7 @@ export async function removeProviderKeyFromOpenClaw(
   agentId?: string,
 ): Promise<void> {
   if (isOAuthProviderType(provider)) {
-    console.log(`Skipping auth-profiles removal for OAuth provider "${provider}" (managed by OpenClaw plugin)`);
+    logger.info(`Skipping auth-profiles removal for OAuth provider "${provider}" (managed by OpenClaw plugin)`);
     return;
   }
 
@@ -129,5 +132,5 @@ export async function removeProviderKeyFromOpenClaw(
 
     await writeAuthProfiles(store, id);
   }
-  console.log(`Removed API key for provider "${provider}" from OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  logger.info(`Removed API key for provider "${provider}" from OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
 }

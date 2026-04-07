@@ -3,13 +3,15 @@ import {
   deleteTask,
   getWorkspaceDir,
   getTaskWorkspaceDirs,
-  getTaskPluginStatus,
-  installTaskPlugin,
   listTasks,
   resumeTask,
   type Task,
   wakeTaskSession,
 } from '@/services/openclaw/task-manager-client';
+import {
+  getPluginCatalog,
+  getPluginRuntime,
+} from '@/services/openclaw/plugin-manager-client';
 import { inferInputModeFromPrompt } from '@/lib/task-inbox';
 
 interface BlockedTaskItem {
@@ -33,7 +35,6 @@ interface TaskCenterState {
   blockedQueue: BlockedTaskItem[];
   init: () => Promise<void>;
   refreshTasks: () => Promise<void>;
-  installPlugin: () => Promise<void>;
   resumeBlockedTask: (payload: {
     taskId: string;
     confirmId: string;
@@ -233,26 +234,30 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
     set({ loading: true, error: null });
     try {
-      const [workspace, workspaceDirs, pluginStatus] = await Promise.all([
+      const [workspace, workspaceDirs, pluginCatalog, pluginRuntime] = await Promise.all([
         getWorkspaceDir(),
         getTaskWorkspaceDirs(),
-        getTaskPluginStatus(),
+        getPluginCatalog(),
+        getPluginRuntime(),
       ]);
+      const taskManagerPlugin = pluginCatalog.plugins.find((plugin) => plugin.id === 'task-manager');
       const scope = workspaceDirs.length > 0
         ? workspaceDirs
         : (workspace ? [workspace] : []);
       const workspaceLabel = scope.length <= 1
         ? (scope[0] || workspace)
         : `${scope[0]} (+${scope.length - 1})`;
+      const pluginInstalled = Boolean(taskManagerPlugin);
+      const pluginEnabled = Boolean(taskManagerPlugin?.enabled) && pluginRuntime.execution.pluginExecutionEnabled;
       set({
         workspaceDir: workspaceLabel || null,
         workspaceDirs: scope,
-        pluginInstalled: pluginStatus.installed,
-        pluginEnabled: pluginStatus.enabled && pluginStatus.skillEnabled,
-        pluginVersion: pluginStatus.version,
+        pluginInstalled,
+        pluginEnabled,
+        pluginVersion: taskManagerPlugin?.version,
       });
 
-      if (pluginStatus.installed && pluginStatus.enabled) {
+      if (pluginInstalled && pluginEnabled) {
         const tasks = await listTasksFromWorkspaceScope(scope);
         set({
           tasks,
@@ -306,34 +311,6 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       await taskCenterRefreshPromise;
     } finally {
       taskCenterRefreshPromise = null;
-    }
-  },
-
-  installPlugin: async () => {
-    set({ loading: true, error: null });
-    try {
-      const result = await installTaskPlugin();
-      if (!result.success) {
-        throw new Error(result.error || 'install failed');
-      }
-      const status = await getTaskPluginStatus();
-      set({
-        pluginInstalled: status.installed,
-        pluginEnabled: status.enabled && status.skillEnabled,
-        pluginVersion: status.version,
-      });
-
-      if (status.installed && status.enabled) {
-        const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);
-        set({
-          tasks,
-          blockedQueue: collectBlockedQueueFromTasks(tasks),
-        });
-      }
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      set({ loading: false });
     }
   },
 

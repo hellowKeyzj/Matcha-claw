@@ -2,7 +2,7 @@
     "title": "任务中心",
     "subtitle": "任务执行与调度",
     "workspace": "工作区",
-    "installPlugin": "安装任务插件",
+    "openPluginCenter": "前往插件中心",
     "refresh": "刷新",
     "tabs": {
         "long": "长任务",
@@ -10,8 +10,8 @@
     },
     "gatewayNotRunning": "网关未运行",
     "plugin": {
-        "title": "需要安装 Task Manager 插件",
-        "description": "使用任务中心前请先安装并启用 task-manager 插件"
+        "title": "需要启用 Task Manager 插件",
+        "description": "使用任务中心前，请先在插件中心启用 task-manager 插件"
     },
     "stats": {
         "running": "执行中",
@@ -70,7 +70,6 @@
         "deleteConfirm": "确认删除这个任务吗？删除后不可恢复。"
     },
     "toast": {
-        "pluginInstalled": "任务插件安装成功",
         "resumed": "任务已恢复执行",
         "deleted": "任务已删除"
     }

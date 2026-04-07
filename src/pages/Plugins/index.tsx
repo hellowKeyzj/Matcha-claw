@@ -124,6 +124,10 @@ export function PluginsPage() {
     () => runtime?.execution.enabledPluginIds ?? [],
     [runtime],
   );
+  const enabledPluginIdSet = useMemo(
+    () => new Set(enabledPluginIds),
+    [enabledPluginIds],
+  );
   const executionEnabled = runtime?.execution.pluginExecutionEnabled ?? true;
 
   const lifecycleTags = useMemo(() => {
@@ -351,7 +355,7 @@ export function PluginsPage() {
                   <span className="truncate text-sm">{plugin.version}</span>
                   <div className="justify-self-end">
                     <Switch
-                      checked={plugin.enabled}
+                      checked={enabledPluginIdSet.has(plugin.id)}
                       disabled={busyAction !== null}
                       onCheckedChange={(checked) => {
                         void togglePluginEnabled(plugin.id, checked);
