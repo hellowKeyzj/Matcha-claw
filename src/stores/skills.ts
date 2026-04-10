@@ -31,6 +31,9 @@ type GatewaySkillStatus = {
   eligible?: boolean;
   blockedByAllowlist?: boolean;
   missing?: GatewaySkillMissing;
+  source?: string;
+  baseDir?: string;
+  filePath?: string;
 };
 
 type GatewaySkillsStatusResult = {
@@ -41,6 +44,13 @@ type MarketplaceSearchResult = {
   success: boolean;
   results?: MarketplaceSkill[];
   error?: string;
+};
+
+type ClawHubListResult = {
+  slug: string;
+  version?: string;
+  source?: string;
+  baseDir?: string;
 };
 
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 2500;
@@ -140,10 +150,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       try {
         const gatewayPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
         const configPromise = hostApiFetch<Record<string, { apiKey?: string; env?: Record<string, string> }>>('/api/skills/configs');
+        const clawhubListPromise = hostApiFetch<{ success: boolean; results?: ClawHubListResult[] }>('/api/clawhub/list')
+          .catch(() => ({ success: false, results: [] }));
 
-        const [gatewayData, configResult] = await Promise.all([
+        const [gatewayData, configResult, clawhubResult] = await Promise.all([
           gatewayPromise,
           configPromise,
+          clawhubListPromise,
         ]);
 
         let combinedSkills: Skill[] = [];
@@ -173,11 +186,45 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
               },
               isCore: s.bundled && s.always,
               isBundled: s.bundled,
+              source: s.source,
+              baseDir: s.baseDir,
+              filePath: s.filePath,
             };
           });
         } else if (currentSkills.length > 0) {
           // ... if gateway down ...
           combinedSkills = [...currentSkills];
+        }
+
+        if (clawhubResult.success && Array.isArray(clawhubResult.results)) {
+          clawhubResult.results.forEach((installed) => {
+            const existing = combinedSkills.find((skill) => skill.id === installed.slug);
+            if (existing) {
+              if (!existing.baseDir && installed.baseDir) {
+                existing.baseDir = installed.baseDir;
+              }
+              if (!existing.source && installed.source) {
+                existing.source = installed.source;
+              }
+              return;
+            }
+            const directConfig = configResult[installed.slug] || {};
+            combinedSkills.push({
+              id: installed.slug,
+              slug: installed.slug,
+              name: installed.slug,
+              description: 'Recently installed, initializing...',
+              enabled: false,
+              icon: '⌛',
+              version: installed.version || 'unknown',
+              author: undefined,
+              config: directConfig,
+              isCore: false,
+              isBundled: false,
+              source: installed.source || 'openclaw-managed',
+              baseDir: installed.baseDir,
+            });
+          });
         }
 
         lastSkillsFetchAt = Date.now();

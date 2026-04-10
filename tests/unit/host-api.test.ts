@@ -10,6 +10,7 @@ describe('host-api', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.resetModules();
+    vi.unstubAllGlobals();
   });
 
   it('uses IPC proxy and returns unified envelope json', async () => {
@@ -87,5 +88,26 @@ describe('host-api', () => {
 
     const { hostApiFetch } = await import('@/lib/host-api');
     await expect(hostApiFetch('/api/test')).rejects.toThrow('Invalid IPC channel: hostapi:fetch');
+  });
+
+  it('createHostEventSource 会附带 token 且复用缓存 token', async () => {
+    const eventSourceCtor = vi.fn(function EventSourceCtor(this: unknown) {});
+    vi.stubGlobal('EventSource', eventSourceCtor as unknown as typeof EventSource);
+    invokeIpcMock.mockResolvedValueOnce('token-123');
+
+    const { createHostEventSource } = await import('@/lib/host-api');
+    await createHostEventSource('/api/events');
+    await createHostEventSource('/api/events?foo=1');
+
+    expect(invokeIpcMock).toHaveBeenCalledTimes(1);
+    expect(invokeIpcMock).toHaveBeenCalledWith('hostapi:token');
+    expect(eventSourceCtor).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:13210/api/events?token=token-123',
+    );
+    expect(eventSourceCtor).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:13210/api/events?foo=1&token=token-123',
+    );
   });
 });

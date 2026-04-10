@@ -9,13 +9,12 @@ export interface ExistingGatewayInfo {
 
 type StartupHooks = {
   port: number;
-  ownedPid?: number;
   shouldWaitForPortFree: boolean;
   maxStartAttempts?: number;
   resetStartupStderrLines: () => void;
   getStartupStderrLines: () => string[];
   assertLifecycle: (phase: string) => void;
-  findExistingGateway: (port: number, ownedPid?: number) => Promise<ExistingGatewayInfo | null>;
+  findExistingGateway: (port: number) => Promise<ExistingGatewayInfo | null>;
   connect: (port: number, externalToken?: string) => Promise<void>;
   onConnectedToExistingGateway: () => void;
   waitForPortFree: (port: number) => Promise<void>;
@@ -51,7 +50,7 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       logger.debug(`Gateway startup attempt ${startAttempts}/${maxStartAttempts} begin`);
       logger.debug('Checking for existing Gateway...');
       const existing = await measureStage('find-existing', async () => {
-        return await hooks.findExistingGateway(hooks.port, hooks.ownedPid);
+        return await hooks.findExistingGateway(hooks.port);
       });
       hooks.assertLifecycle('start/find-existing');
       if (existing) {

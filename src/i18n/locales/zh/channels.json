@@ -8,6 +8,16 @@
         "connected": "已连接",
         "disconnected": "未连接"
     },
+    "status": {
+        "connected": "已连接",
+        "disconnected": "未连接",
+        "connecting": "连接中",
+        "error": "异常",
+        "running": "运行中",
+        "stopped": "已停止",
+        "starting": "启动中",
+        "reconnecting": "重连中"
+    },
     "gatewayWarning": "网关服务未运行，频道无法连接。",
     "available": "可用频道",
     "availableDesc": "连接一个新的频道",
@@ -198,7 +208,7 @@
         },
         "feishu": {
             "description": "通过飞书官方推出的 OpenClaw 插件连接飞书/Lark 机器人",
-            "docsUrl": "https://www.feishu.cn/content/article/7613711414611463386",
+            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GKn8wOvHnibpPNkNkPzcAvGlnzK#Py88dTltfoJc1jxAhIBcW3Pkn7b",
             "fields": {
                 "appId": {
                     "label": "应用 ID (App ID)",
@@ -220,7 +230,7 @@
         },
         "wecom": {
             "description": "通过插件连接企业微信机器人",
-            "docsUrl": "https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657",
+            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/JTGnwoV0RixKPtkr4w7c7gpAnDc",
             "fields": {
                 "botId": {
                     "label": "机器人 Bot ID",
@@ -350,8 +360,8 @@
             ]
         },
         "qqbot": {
-            "description": "通过 @sliverp/qqbot 插件连接 QQ 机器人",
-            "docsUrl": "https://github.com/sliverp/qqbot/blob/main/README.zh.md",
+            "description": "通过 @tencent-connect/openclaw-qqbot 插件连接 QQ 机器人",
+            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/KPIJwlyiGiupMrkiS9ice39Zn2c",
             "fields": {
                 "appId": {
                     "label": "App ID",

@@ -2,7 +2,7 @@
  * ConfirmDialog - In-DOM confirmation dialog (replaces window.confirm)
  * Keeps focus within the renderer to avoid Windows focus loss after native dialogs.
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 
@@ -13,8 +13,9 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'default' | 'destructive';
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onCancel: () => void;
+  onError?: (error: unknown) => void;
 }
 
 export function ConfirmDialog({
@@ -26,8 +27,10 @@ export function ConfirmDialog({
   variant = 'default',
   onConfirm,
   onCancel,
+  onError,
 }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     if (open && cancelRef.current) {
@@ -35,12 +38,36 @@ export function ConfirmDialog({
     }
   }, [open]);
 
+  useEffect(() => {
+    if (!open) {
+      setConfirming(false);
+    }
+  }, [open]);
+
   if (!open) return null;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && !confirming) {
       e.preventDefault();
       onCancel();
+    }
+  };
+
+  const handleConfirm = () => {
+    if (confirming) {
+      return;
+    }
+
+    const maybePromise = onConfirm();
+    if (maybePromise instanceof Promise) {
+      setConfirming(true);
+      maybePromise
+        .catch((error) => {
+          onError?.(error);
+        })
+        .finally(() => {
+          setConfirming(false);
+        });
     }
   };
 
@@ -68,12 +95,14 @@ export function ConfirmDialog({
             ref={cancelRef}
             variant="outline"
             onClick={onCancel}
+            disabled={confirming}
           >
             {cancelLabel}
           </Button>
           <Button
             variant={variant === 'destructive' ? 'destructive' : 'default'}
-            onClick={onConfirm}
+            onClick={handleConfirm}
+            disabled={confirming}
           >
             {confirmLabel}
           </Button>

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import WebSocket from 'ws';
 import { DEFAULT_GATEWAY_RPC_TIMEOUT_MS } from '../api/common/constants';
+import { getRuntimeHostDataDir } from '../api/storage/paths';
 import { dispatchGatewayProtocolEvent } from './events';
 import {
   isGatewayEventFrame,
@@ -8,6 +10,13 @@ import {
   type GatewayNotification,
   type GatewayResponseFrame,
 } from './protocol';
+import {
+  buildDeviceAuthPayloadV3,
+  loadOrCreateDeviceIdentity,
+  publicKeyRawBase64UrlFromPem,
+  signDevicePayload,
+  type DeviceIdentity,
+} from '../shared/device-identity';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -31,6 +40,19 @@ export interface GatewayClientOptions {
   readonly onGatewayError?: (error: Error) => void;
   readonly onGatewayConnectionState?: (payload: GatewayConnectionStatePayload) => void;
 }
+
+export const DEFAULT_GATEWAY_OPERATOR_SCOPES = [
+  'operator.read',
+  'operator.write',
+  'operator.admin',
+  'operator.approvals',
+] as const;
+const GATEWAY_CLIENT_ID = 'gateway-client';
+const GATEWAY_CLIENT_VERSION = '0.1.0';
+const GATEWAY_CLIENT_MODE = 'backend';
+const GATEWAY_CLIENT_DEVICE_FAMILY = 'desktop';
+const GATEWAY_DEVICE_IDENTITY_PATH = join(getRuntimeHostDataDir(), 'identity', 'device.json');
+let gatewayDeviceIdentityCache: DeviceIdentity | null = null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -81,10 +103,35 @@ function getGatewayPort(): number {
 
 function getGatewayToken(): string {
   const token = process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN;
-  return typeof token === 'string' ? token : '';
+  return typeof token === 'string' ? token.trim() : '';
 }
 
-function buildGatewayConnectRequest(connectId: string) {
+function loadGatewayDeviceIdentity(): DeviceIdentity {
+  if (gatewayDeviceIdentityCache) {
+    return gatewayDeviceIdentityCache;
+  }
+  gatewayDeviceIdentityCache = loadOrCreateDeviceIdentity(GATEWAY_DEVICE_IDENTITY_PATH);
+  return gatewayDeviceIdentityCache;
+}
+
+function buildGatewayConnectRequest(connectId: string, challengeNonce: string) {
+  const gatewayToken = getGatewayToken();
+  const signedAtMs = Date.now();
+  const deviceIdentity = loadGatewayDeviceIdentity();
+  const devicePayload = buildDeviceAuthPayloadV3({
+    deviceId: deviceIdentity.deviceId,
+    clientId: GATEWAY_CLIENT_ID,
+    clientMode: GATEWAY_CLIENT_MODE,
+    role: 'operator',
+    scopes: [...DEFAULT_GATEWAY_OPERATOR_SCOPES],
+    signedAtMs,
+    token: gatewayToken || null,
+    nonce: challengeNonce,
+    platform: process.platform,
+    deviceFamily: GATEWAY_CLIENT_DEVICE_FAMILY,
+  });
+  const deviceSignature = signDevicePayload(deviceIdentity.privateKeyPem, devicePayload);
+
   return {
     type: 'req',
     id: connectId,
@@ -93,19 +140,24 @@ function buildGatewayConnectRequest(connectId: string) {
       minProtocol: 3,
       maxProtocol: 3,
       client: {
-        id: 'gateway-client',
+        id: GATEWAY_CLIENT_ID,
         displayName: 'MatchaClaw',
-        version: '0.1.0',
+        version: GATEWAY_CLIENT_VERSION,
         platform: process.platform,
-        mode: 'ui',
+        mode: GATEWAY_CLIENT_MODE,
+        deviceFamily: GATEWAY_CLIENT_DEVICE_FAMILY,
       },
-      auth: {
-        token: getGatewayToken(),
-      },
+      ...(gatewayToken ? { auth: { token: gatewayToken } } : {}),
       caps: [],
       role: 'operator',
-      scopes: ['operator.admin', 'operator.approvals'],
-      device: undefined,
+      scopes: [...DEFAULT_GATEWAY_OPERATOR_SCOPES],
+      device: {
+        id: deviceIdentity.deviceId,
+        publicKey: publicKeyRawBase64UrlFromPem(deviceIdentity.publicKeyPem),
+        signature: deviceSignature,
+        signedAt: signedAtMs,
+        nonce: challengeNonce,
+      },
     },
   };
 }
@@ -224,7 +276,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           }
           connectRequestId = `connect-${randomUUID()}`;
           try {
-            ws.send(JSON.stringify(buildGatewayConnectRequest(connectRequestId)));
+            ws.send(JSON.stringify(buildGatewayConnectRequest(connectRequestId, challengeNonce)));
           } catch (error) {
             settleConnectFailure(error);
           }

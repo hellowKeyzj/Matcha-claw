@@ -19,8 +19,21 @@ export interface ProviderListItem {
   status?: ProviderWithKeyInfo;
 }
 
+function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
+  const snapshot = value && typeof value === 'object'
+    ? (value as Partial<ProviderSnapshot>)
+    : {};
+  return {
+    accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+    statuses: Array.isArray(snapshot.statuses) ? snapshot.statuses : [],
+    vendors: Array.isArray(snapshot.vendors) ? snapshot.vendors : [],
+    defaultAccountId: typeof snapshot.defaultAccountId === 'string' ? snapshot.defaultAccountId : null,
+  };
+}
+
 export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
-  return await hostApiFetch<ProviderSnapshot>('/api/provider-accounts');
+  const snapshot = await hostApiFetch<ProviderSnapshot | undefined>('/api/provider-accounts');
+  return normalizeProviderSnapshot(snapshot);
 }
 
 export function hasConfiguredCredentials(
@@ -68,10 +81,13 @@ export function buildProviderListItems(
   vendors: ProviderVendorInfo[],
   defaultAccountId: string | null,
 ): ProviderListItem[] {
-  const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
-  const statusMap = new Map(statuses.map((status) => [status.id, status]));
+  const safeAccounts = Array.isArray(accounts) ? accounts : [];
+  const safeStatuses = Array.isArray(statuses) ? statuses : [];
+  const safeVendors = Array.isArray(vendors) ? vendors : [];
+  const vendorMap = new Map(safeVendors.map((vendor) => [vendor.id, vendor]));
+  const statusMap = new Map(safeStatuses.map((status) => [status.id, status]));
 
-  return accounts
+  return safeAccounts
     .map((account) => ({
       account,
       vendor: vendorMap.get(account.vendorId),

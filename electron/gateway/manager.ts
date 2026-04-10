@@ -26,7 +26,11 @@ import {
 import { GatewayLifecycleController, LifecycleSupersededError } from './lifecycle-controller';
 import { launchGatewayProcess } from './process-launcher';
 import { GatewayRestartController } from './restart-controller';
-import { classifyGatewayStderrMessage, recordGatewayStartupStderrLine } from './startup-stderr';
+import {
+  classifyGatewayStderrMessage,
+  recordGatewayStartupStderrLine,
+  shouldSuppressGatewayStderrRepeat,
+} from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
 
 export interface GatewayStatus {
@@ -138,7 +142,6 @@ export class GatewayManager extends EventEmitter {
     try {
       await runGatewayStartupSequence({
         port: this.status.port,
-        ownedPid: this.process?.pid,
         shouldWaitForPortFree: process.platform === 'win32',
         resetStartupStderrLines: () => {
           this.recentStartupStderrLines = [];
@@ -147,8 +150,13 @@ export class GatewayManager extends EventEmitter {
         assertLifecycle: (phase) => {
           this.lifecycleController.assert(startEpoch, phase);
         },
-        findExistingGateway: async (port, ownedPid) => {
-          return await findExistingGatewayProcess({ port, ownedPid });
+        findExistingGateway: async (port) => {
+          return await findExistingGatewayProcess({
+            port,
+            // Read current pid dynamically so retries do not keep using
+            // a stale pre-start snapshot.
+            ownedPid: this.process?.pid,
+          });
         },
         connect: async (port) => {
           this.setStatus({
@@ -159,8 +167,14 @@ export class GatewayManager extends EventEmitter {
           });
         },
         onConnectedToExistingGateway: () => {
-          this.ownsProcess = false;
-          this.setStatus({ pid: undefined });
+          // If the existing gateway is actually our own spawned process
+          // (for example after self-restart), keep ownership so stop()/restart()
+          // can still terminate it deterministically.
+          const isOwnProcess = this.process?.pid != null && this.ownsProcess;
+          if (!isOwnProcess) {
+            this.ownsProcess = false;
+            this.setStatus({ pid: undefined });
+          }
         },
         waitForPortFree: async (port) => {
           await waitForPortFree(port);
@@ -233,6 +247,24 @@ export class GatewayManager extends EventEmitter {
     this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined });
   }
 
+  /**
+   * Best-effort emergency cleanup used by app-quit timeout path.
+   * Only terminates a process that is still owned by current manager.
+   */
+  async forceTerminateOwnedProcessForQuit(): Promise<boolean> {
+    if (!this.process || !this.ownsProcess) {
+      return false;
+    }
+    const child = this.process;
+    await terminateOwnedGatewayProcess(child);
+    if (this.process === child) {
+      this.process = null;
+    }
+    this.ownsProcess = false;
+    this.setStatus({ pid: undefined });
+    return true;
+  }
+
   async restart(): Promise<void> {
     if (this.restartController.isRestartDeferred({
       state: this.status.state,
@@ -248,6 +280,7 @@ export class GatewayManager extends EventEmitter {
     if (this.restartInFlight) {
       logger.debug('Gateway restart already in progress, joining existing request');
       await this.restartInFlight;
+      this.restartController.recordRestartCompleted();
       return;
     }
 
@@ -259,6 +292,7 @@ export class GatewayManager extends EventEmitter {
 
     try {
       await this.restartInFlight;
+      this.restartController.recordRestartCompleted();
     } finally {
       this.restartInFlight = null;
       this.restartController.flushDeferredRestart(
@@ -385,6 +419,7 @@ export class GatewayManager extends EventEmitter {
     const launchContext = await prepareGatewayLaunchContext(this.status.port);
     await unloadLaunchctlGatewayService();
     this.processExitCode = null;
+    const stderrDedupCounter = new Map<string, number>();
 
     const { child, lastSpawnSummary } = await launchGatewayProcess({
       port: this.status.port,
@@ -396,6 +431,13 @@ export class GatewayManager extends EventEmitter {
         recordGatewayStartupStderrLine(this.recentStartupStderrLines, line);
         const classified = classifyGatewayStderrMessage(line);
         if (classified.level === 'drop') return;
+        const dedup = shouldSuppressGatewayStderrRepeat(stderrDedupCounter, classified.normalized);
+        if (dedup.suppress) {
+          if (dedup.emitSummary) {
+            logger.debug(`[Gateway stderr] (suppressed ${dedup.repeatCount} repeats) ${classified.normalized}`);
+          }
+          return;
+        }
         if (classified.level === 'debug') {
           logger.debug(`[Gateway stderr] ${classified.normalized}`);
           return;

@@ -27,6 +27,7 @@ import {
   Key,
   ChevronDown,
   FolderOpen,
+  Copy,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -84,6 +85,23 @@ function formatMissingSummary(missing?: SkillMissingRequirements): string {
   return parts.join(', ');
 }
 
+function resolveSkillSourceLabel(skill: Skill, t: (key: string, options?: Record<string, unknown>) => string): string {
+  const source = (skill.source || '').trim().toLowerCase();
+  if (!source) {
+    if (skill.isBundled) {
+      return t('source.badge.bundled');
+    }
+    return t('source.badge.unknown');
+  }
+  if (source === 'openclaw-bundled') return t('source.badge.bundled');
+  if (source === 'openclaw-managed') return t('source.badge.managed');
+  if (source === 'openclaw-workspace') return t('source.badge.workspace');
+  if (source === 'openclaw-extra') return t('source.badge.extra');
+  if (source === 'agents-skills-personal') return t('source.badge.agentsPersonal');
+  if (source === 'agents-skills-project') return t('source.badge.agentsProject');
+  return source;
+}
+
 
 
 
@@ -92,9 +110,10 @@ interface SkillDetailDialogProps {
   skill: Skill;
   onClose: () => void;
   onToggle: (enabled: boolean) => void;
+  onOpenFolder?: (skill: Skill) => Promise<void> | void;
 }
 
-function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps) {
+function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDetailDialogProps) {
   const { t } = useTranslation('skills');
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const [activeTab, setActiveTab] = useState('info');
@@ -140,7 +159,7 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
     try {
       const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/open-readme', {
         method: 'POST',
-        body: JSON.stringify({ skillKey: skill.id, slug: skill.slug }),
+        body: JSON.stringify({ skillKey: skill.id, slug: skill.slug, baseDir: skill.baseDir }),
       });
       if (result.success) {
         toast.success(t('toast.openedEditor'));
@@ -149,6 +168,18 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
       }
     } catch (err) {
       toast.error(t('toast.failedEditor') + ': ' + String(err));
+    }
+  };
+
+  const handleCopyPath = async () => {
+    if (!skill.baseDir) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(skill.baseDir);
+      toast.success(t('toast.copiedPath'));
+    } catch (err) {
+      toast.error(t('toast.failedCopyPath') + ': ' + String(err));
     }
   };
 
@@ -270,9 +301,40 @@ function SkillDetailDialog({ skill, onClose, onToggle }: SkillDetailDialogProps)
 
                   <div>
                     <h3 className="text-sm font-medium text-muted-foreground">{t('detail.source')}</h3>
-                    <Badge variant="secondary" className="mt-1 font-normal">
-                      {skill.isCore ? t('detail.coreSystem') : skill.isBundled ? t('detail.bundled') : t('detail.userInstalled')}
-                    </Badge>
+                    <div className="mt-1 space-y-2">
+                      <Badge variant="secondary" className="font-normal">
+                        {resolveSkillSourceLabel(skill, t)}
+                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={skill.baseDir || t('detail.pathUnavailable')}
+                          readOnly
+                          className="font-mono text-xs"
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-9 w-9"
+                          disabled={!skill.baseDir}
+                          title={t('detail.copyPath')}
+                          onClick={handleCopyPath}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="h-9 w-9"
+                          disabled={!skill.baseDir}
+                          title={t('detail.openActualFolder')}
+                          onClick={() => onOpenFolder?.(skill)}
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                   <div>
                     <h3 className="text-sm font-medium text-muted-foreground">{t('detail.availability')}</h3>
@@ -533,6 +595,8 @@ interface SkillGridCardViewModel {
   blockedLabel?: string;
   missingSummaryLabel?: string;
   configurableLabel: string;
+  sourceLabel: string;
+  baseDirText: string;
 }
 
 interface SkillGridCardProps extends SkillGridCardViewModel {
@@ -557,6 +621,8 @@ const SkillGridCard = memo(function SkillGridCard({
   blockedLabel,
   missingSummaryLabel,
   configurableLabel,
+  sourceLabel,
+  baseDirText,
   onOpenDetail,
   onToggleSkill,
   onUninstallSkill
@@ -623,6 +689,12 @@ const SkillGridCard = memo(function SkillGridCard({
         <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
           {skillDescription}
         </p>
+        <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+          <Badge variant="secondary" className="px-1.5 py-0 h-5 text-[10px] font-medium bg-black/5 dark:bg-white/10 border-0 shadow-none">
+            {sourceLabel}
+          </Badge>
+          <span className="truncate font-mono">{baseDirText}</span>
+        </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {version && (
             <Badge variant="outline" className="text-xs">
@@ -797,6 +869,8 @@ export function Skills() {
           ? t('availability.missingPrefix', { items: missingSummary })
           : undefined,
         configurableLabel,
+        sourceLabel: resolveSkillSourceLabel(skill, t),
+        baseDirText: skill.baseDir || t('detail.pathUnavailable'),
       };
     });
   }, [filteredSkills, t]);
@@ -864,6 +938,28 @@ export function Skills() {
     }
     setSelectedSkill(nextSkill);
   }, [skillById]);
+
+  const handleOpenSkillFolder = useCallback(async (skill: Skill) => {
+    try {
+      const targetDir = typeof skill.baseDir === 'string' ? skill.baseDir.trim() : '';
+      if (!targetDir) {
+        throw new Error('Skill path not available');
+      }
+      const openResult = await invokeIpc<string>('shell:openPath', targetDir);
+      if (openResult) {
+        if (
+          openResult.toLowerCase().includes('no such file')
+          || openResult.toLowerCase().includes('not found')
+          || openResult.toLowerCase().includes('failed to open')
+        ) {
+          throw new Error(t('toast.failedFolderNotFound'));
+        }
+        throw new Error(openResult);
+      }
+    } catch (err) {
+      toast.error(t('toast.failedOpenActualFolder') + ': ' + String(err));
+    }
+  }, [t]);
 
   const handleToggleSkillQuick = useCallback((skillId: string, enable: boolean) => {
     void handleToggle(skillId, enable);
@@ -1294,6 +1390,7 @@ export function Skills() {
             handleToggle(selectedSkill.id, enabled);
             setSelectedSkill({ ...selectedSkill, enabled });
           }}
+          onOpenFolder={handleOpenSkillFolder}
         />
       )}
     </div>

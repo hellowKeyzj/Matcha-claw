@@ -30,25 +30,17 @@ import { hostApiFetch } from '@/lib/host-api';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
-
-type UsageHistoryEntry = {
-  timestamp: string;
-  sessionId: string;
-  agentId: string;
-  model?: string;
-  provider?: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
-  costUsd?: number;
-};
-
-type UsageWindow = '7d' | '30d' | 'all';
-type UsageGroupBy = 'model' | 'day';
-const USAGE_FETCH_MAX_ATTEMPTS = 6;
+import {
+  filterUsageHistoryByWindow,
+  groupUsageHistory,
+  type UsageGroupBy,
+  type UsageHistoryEntry,
+  type UsageWindow,
+} from './usage-history';
+const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
+const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
 const USAGE_FETCH_RETRY_DELAY_MS = 1500;
+const USAGE_FETCH_SAFETY_TIMEOUT_MS = 30_000;
 const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 export function Dashboard() {
@@ -61,6 +53,9 @@ export function Dashboard() {
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
+  const usageFetchMaxAttempts = window.electron?.platform === 'win32'
+    ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
+    : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
   const [uptime, setUptime] = useState(0);
   const [usageHistory, setUsageHistory] = useState<UsageHistoryEntry[]>([]);
   const [usageGroupBy, setUsageGroupBy] = useState<UsageGroupBy>('model');
@@ -72,7 +67,9 @@ export function Dashboard() {
   const [usagePanelReady, setUsagePanelReady] = useState(false);
   const [usageChartReady, setUsageChartReady] = useState(false);
   const [usageDetailListReady, setUsageDetailListReady] = useState(false);
+  const [usageFetchPending, setUsageFetchPending] = useState(false);
   const usageFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usageFetchSafetyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const usageFetchGenerationRef = useRef(0);
   const usageVisualizationPrimedRef = useRef(false);
 
@@ -100,18 +97,47 @@ export function Dashboard() {
       clearTimeout(usageFetchTimerRef.current);
       usageFetchTimerRef.current = null;
     }
+    if (usageFetchSafetyTimeoutRef.current) {
+      clearTimeout(usageFetchSafetyTimeoutRef.current);
+      usageFetchSafetyTimeoutRef.current = null;
+    }
 
     if (!isGatewayRunning) {
+      setUsageFetchPending(false);
       return;
     }
 
     const generation = usageFetchGenerationRef.current + 1;
     usageFetchGenerationRef.current = generation;
+    setUsageFetchPending(true);
     const restartMarker = `${gatewayStatus.pid ?? 'na'}:${gatewayStatus.connectedAt ?? 'na'}`;
     trackUiEvent('dashboard.token_usage_fetch_started', {
       generation,
       restartMarker,
     });
+
+    const settleUsageFetchPending = () => {
+      if (usageFetchGenerationRef.current !== generation) {
+        return;
+      }
+      setUsageFetchPending(false);
+      if (usageFetchSafetyTimeoutRef.current) {
+        clearTimeout(usageFetchSafetyTimeoutRef.current);
+        usageFetchSafetyTimeoutRef.current = null;
+      }
+    };
+
+    usageFetchSafetyTimeoutRef.current = setTimeout(() => {
+      if (usageFetchGenerationRef.current !== generation) {
+        return;
+      }
+      setUsageFetchPending(false);
+      usageFetchSafetyTimeoutRef.current = null;
+      trackUiEvent('dashboard.token_usage_fetch_safety_timeout', {
+        generation,
+        restartMarker,
+      });
+    }, USAGE_FETCH_SAFETY_TIMEOUT_MS);
 
     const fetchUsageHistoryWithRetry = async (attempt: number) => {
       trackUiEvent('dashboard.token_usage_fetch_attempt', {
@@ -136,7 +162,7 @@ export function Dashboard() {
           restartMarker,
         });
 
-        if (normalized.length === 0 && attempt < USAGE_FETCH_MAX_ATTEMPTS) {
+        if (normalized.length === 0 && attempt < usageFetchMaxAttempts) {
           trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
             generation,
             attempt,
@@ -156,6 +182,9 @@ export function Dashboard() {
             reason: 'empty',
             restartMarker,
           });
+          settleUsageFetchPending();
+        } else {
+          settleUsageFetchPending();
         }
       } catch (error) {
         if (usageFetchGenerationRef.current !== generation) {
@@ -167,7 +196,7 @@ export function Dashboard() {
           restartMarker,
           message: error instanceof Error ? error.message : String(error),
         });
-        if (attempt < USAGE_FETCH_MAX_ATTEMPTS) {
+        if (attempt < usageFetchMaxAttempts) {
           trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
             generation,
             attempt,
@@ -189,18 +218,23 @@ export function Dashboard() {
           reason: 'error',
           restartMarker,
         });
+        settleUsageFetchPending();
       }
     };
 
     void fetchUsageHistoryWithRetry(1);
 
     return () => {
+      if (usageFetchSafetyTimeoutRef.current) {
+        clearTimeout(usageFetchSafetyTimeoutRef.current);
+        usageFetchSafetyTimeoutRef.current = null;
+      }
       if (usageFetchTimerRef.current) {
         clearTimeout(usageFetchTimerRef.current);
         usageFetchTimerRef.current = null;
       }
     };
-  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning]);
+  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning, usageFetchMaxAttempts]);
 
   useEffect(() => {
     if (dashboardHeavyContentReady) {
@@ -310,7 +344,7 @@ export function Dashboard() {
     () => filteredUsageHistory.slice((safeUsagePage - 1) * usagePageSize, safeUsagePage * usagePageSize),
     [filteredUsageHistory, safeUsagePage],
   );
-  const usageLoading = isGatewayRunning && visibleUsageHistory.length === 0;
+  const usageLoading = isGatewayRunning && usageFetchPending;
   const usageSummary = useMemo(
     () => filteredUsageHistory.reduce(
       (acc, entry) => ({
@@ -374,6 +408,8 @@ export function Dashboard() {
       console.error('Error opening Dev Console:', err);
     }
   };
+
+  const quickActionClassName = 'h-full min-h-[64px] w-full rounded-[calc(var(--radius-card)-8px)] px-2.5 py-2.5 whitespace-normal text-center leading-snug shadow-none hover:shadow-whisper';
 
   return (
     <div className="space-y-6">
@@ -443,56 +479,55 @@ export function Dashboard() {
       </div>
 
       {/* Quick Actions */}
-          <Card>
+      <Card className="w-full max-w-4xl">
         <CardHeader>
           <CardTitle>{t('quickActions.title')}</CardTitle>
-          <CardDescription>{t('quickActions.description')}</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+        <CardContent className="pt-0">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(145px,1fr))] gap-2.5">
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/settings" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'add_provider' })}>
-                <Wrench className="h-5 w-5" />
+                <Wrench className="h-4 w-4" />
                 <span>{t('quickActions.addProvider')}</span>
               </Link>
             </Button>
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/channels" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'add_channel' })}>
-                <Plus className="h-5 w-5" />
+                <Plus className="h-4 w-4" />
                 <span>{t('quickActions.addChannel')}</span>
               </Link>
             </Button>
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/tasks?tab=scheduled" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'create_cron' })}>
-                <Clock className="h-5 w-5" />
+                <Clock className="h-4 w-4" />
                 <span>{t('quickActions.createCron')}</span>
               </Link>
             </Button>
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/skills" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'install_skill' })}>
-                <Puzzle className="h-5 w-5" />
+                <Puzzle className="h-4 w-4" />
                 <span>{t('quickActions.installSkill')}</span>
               </Link>
             </Button>
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'open_chat' })}>
-                <MessageSquare className="h-5 w-5" />
+                <MessageSquare className="h-4 w-4" />
                 <span>{t('quickActions.openChat')}</span>
               </Link>
             </Button>
-            <Button variant="outline" className="h-auto flex-col gap-2 py-4" asChild>
+            <Button variant="outline" className={quickActionClassName} asChild>
               <Link to="/settings" onClick={() => trackUiEvent('dashboard.quick_action', { action: 'open_settings' })}>
-                <Settings className="h-5 w-5" />
+                <Settings className="h-4 w-4" />
                 <span>{t('quickActions.settings')}</span>
               </Link>
             </Button>
             {devModeUnlocked && (
               <Button
                 variant="outline"
-                className="h-auto flex-col gap-2 py-4"
+                className={quickActionClassName}
                 onClick={openDevConsole}
               >
-                <Terminal className="h-5 w-5" />
+                <Terminal className="h-4 w-4" />
                 <span>{t('quickActions.devConsole')}</span>
               </Button>
             )}
@@ -859,84 +894,6 @@ function formatUsageTimestamp(timestamp: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
-}
-
-function groupUsageHistory(
-  entries: UsageHistoryEntry[],
-  groupBy: UsageGroupBy,
-): Array<{
-  label: string;
-  totalTokens: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheTokens: number;
-  sortKey: number | string;
-}> {
-  const grouped = new Map<string, {
-    label: string;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheTokens: number;
-    sortKey: number | string;
-  }>();
-
-  for (const entry of entries) {
-    const label = groupBy === 'model'
-      ? (entry.model || 'Unknown')
-      : formatUsageDay(entry.timestamp);
-    const current = grouped.get(label) ?? {
-      label,
-      totalTokens: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheTokens: 0,
-      sortKey: groupBy === 'day' ? getUsageDaySortKey(entry.timestamp) : label.toLowerCase(),
-    };
-    current.totalTokens += entry.totalTokens;
-    current.inputTokens += entry.inputTokens;
-    current.outputTokens += entry.outputTokens;
-    current.cacheTokens += entry.cacheReadTokens + entry.cacheWriteTokens;
-    grouped.set(label, current);
-  }
-
-  return Array.from(grouped.values())
-    .sort((a, b) => {
-      if (groupBy === 'day') {
-        return Number(a.sortKey) - Number(b.sortKey);
-      }
-      return b.totalTokens - a.totalTokens;
-    })
-    .slice(0, 8);
-}
-
-function formatUsageDay(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return timestamp;
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(date);
-}
-
-function getUsageDaySortKey(timestamp: string): number {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return 0;
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
-}
-
-function filterUsageHistoryByWindow(entries: UsageHistoryEntry[], window: UsageWindow): UsageHistoryEntry[] {
-  if (window === 'all') return entries;
-
-  const now = Date.now();
-  const days = window === '7d' ? 7 : 30;
-  const cutoff = now - days * 24 * 60 * 60 * 1000;
-
-  return entries.filter((entry) => {
-    const timestamp = Date.parse(entry.timestamp);
-    return Number.isFinite(timestamp) && timestamp >= cutoff;
-  });
 }
 
 function UsageBarChart({

@@ -31,6 +31,9 @@ export interface Skill {
   eligible?: boolean;
   blockedByAllowlist?: boolean;
   missing?: SkillMissingRequirements;
+  source?: string;
+  baseDir?: string;
+  filePath?: string;
 }
 
 /**

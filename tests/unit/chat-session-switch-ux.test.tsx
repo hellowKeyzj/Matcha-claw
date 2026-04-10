@@ -163,6 +163,36 @@ describe('chat 会话切换 UI 回归', () => {
     expect(useChatStore.getState().pendingFinal).toBe(true);
   });
 
+  it('重复切换当前会话时，不应触发额外刷新链路', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    const loadHistoryMock = useChatStore.getState().loadHistory as ReturnType<typeof vi.fn>;
+    await waitFor(() => {
+      expect(loadHistoryMock).toHaveBeenCalled();
+    });
+    loadHistoryMock.mockClear();
+
+    const before = useChatStore.getState();
+    const beforeMessagesRef = before.messages;
+    const beforeSessionRuntimeRef = before.sessionRuntimeByKey;
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:test:main');
+    });
+
+    const after = useChatStore.getState();
+    expect(loadHistoryMock).not.toHaveBeenCalled();
+    expect(after.currentSessionKey).toBe('agent:test:main');
+    expect(after.messages).toBe(beforeMessagesRef);
+    expect(after.sessionRuntimeByKey).toBe(beforeSessionRuntimeRef);
+  });
+
   it('切换会话时即使当前未吸底也应滚到最新消息', async () => {
     const { container } = render(
       <MemoryRouter initialEntries={['/']}>

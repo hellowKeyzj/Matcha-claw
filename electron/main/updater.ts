@@ -49,6 +49,10 @@ export class AppUpdater extends EventEmitter {
 
   constructor() {
     super();
+
+    this.on('error', (error: Error) => {
+      logger.error('[Updater] AppUpdater emitted error:', error);
+    });
     
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = true;

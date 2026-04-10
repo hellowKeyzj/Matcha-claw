@@ -117,6 +117,42 @@ describe('chat runtime event handlers', () => {
     expect(next.streamingTools).toEqual([{ name: 'tool-a', status: 'running', updatedAt: 1 }]);
   });
 
+  it('delta with empty object does not overwrite existing streamingMessage', async () => {
+    const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
+    const existing = { role: 'assistant', content: [{ type: 'text', text: 'hello' }] };
+    const h = makeHarness({ streamingMessage: existing });
+
+    handleRuntimeEventState(h.set as never, h.get as never, { message: {} }, 'delta', 'run-x');
+    expect(h.read().streamingMessage).toEqual(existing);
+  });
+
+  it('delta with role-only object does not overwrite existing streamingMessage', async () => {
+    const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
+    const existing = { role: 'assistant', content: [{ type: 'text', text: 'partial' }] };
+    const h = makeHarness({ streamingMessage: existing });
+
+    handleRuntimeEventState(h.set as never, h.get as never, { message: { role: 'assistant' } }, 'delta', 'run-x');
+    expect(h.read().streamingMessage).toEqual(existing);
+  });
+
+  it('delta with role-only object is accepted when streamingMessage is null', async () => {
+    const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
+    const h = makeHarness({ streamingMessage: null });
+
+    handleRuntimeEventState(h.set as never, h.get as never, { message: { role: 'assistant' } }, 'delta', 'run-x');
+    expect(h.read().streamingMessage).toEqual({ role: 'assistant' });
+  });
+
+  it('delta with actual content replaces streamingMessage', async () => {
+    const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
+    const existing = { role: 'assistant', content: [{ type: 'text', text: 'old' }] };
+    const incoming = { role: 'assistant', content: [{ type: 'text', text: 'new' }] };
+    const h = makeHarness({ streamingMessage: existing });
+
+    handleRuntimeEventState(h.set as never, h.get as never, { message: incoming }, 'delta', 'run-x');
+    expect(h.read().streamingMessage).toEqual(incoming);
+  });
+
   it('loads history when final event has no message', async () => {
     const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
     const h = makeHarness();
@@ -163,4 +199,3 @@ describe('chat runtime event handlers', () => {
     expect(next.pendingToolImages).toEqual([]);
   });
 });
-

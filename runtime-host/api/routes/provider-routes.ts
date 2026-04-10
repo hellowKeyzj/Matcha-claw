@@ -19,7 +19,7 @@ interface ProviderRouteDeps {
   accountToStatusLocal: (account: any, apiKey: string | undefined) => any;
   normalizeProviderAccountLocal: (input: any, current?: any) => any;
   normalizeProviderFallbackAccountLocal: (accounts: any[], deletedId: string) => string | null;
-  validateProviderApiKeyLocal: (input: unknown) => unknown;
+  validateProviderApiKeyLocal: (input: unknown) => Promise<unknown>;
   requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
   mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
   providerVendorDefinitions: unknown;
@@ -113,7 +113,7 @@ export async function handleProviderRoute(
   if (method === 'POST' && routePath === '/api/provider-accounts/validate') {
     return {
       status: 200,
-      data: service.validate(payload),
+      data: await service.validate(payload),
     };
   }
 

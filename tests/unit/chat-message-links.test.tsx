@@ -245,7 +245,7 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalled();
   });
 
-  it('attached file card should open file in folder when filePath exists', () => {
+  it('attached file card should open file directly when filePath exists', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '文件已生成',
@@ -270,7 +270,7 @@ describe('chat message links', () => {
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
-      'shell:showItemInFolder',
+      'shell:openPath',
       'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md',
     );
   });

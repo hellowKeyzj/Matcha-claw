@@ -1,5 +1,6 @@
-import { cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { copyDirectorySafe } from '../utils/copy-safe';
 
 type LoggerLike = {
   info?: (message: string) => void;
@@ -113,11 +114,7 @@ export async function ensureBundledPluginsMirrorDir(
 
   try {
     await mkdir(path.dirname(mirrorDir), { recursive: true });
-    await cp(sourceMeta.sourceRealDir, tmpDir, {
-      recursive: true,
-      force: true,
-      dereference: true,
-    });
+    await copyDirectorySafe(sourceMeta.sourceRealDir, tmpDir);
     await writeFile(path.join(tmpDir, META_FILE), JSON.stringify(sourceMeta, null, 2), 'utf8');
 
     await rm(mirrorDir, { recursive: true, force: true });

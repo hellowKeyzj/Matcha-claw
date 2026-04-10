@@ -54,6 +54,57 @@ describe('channels store', () => {
     ]);
   });
 
+  it('多账号场景下，存在健康账号时整体状态应保持 connected', async () => {
+    hostChannelsFetchSnapshotMock.mockResolvedValue({
+      success: true,
+      snapshot: {
+        channelOrder: ['telegram'],
+        channels: { telegram: { configured: true } },
+        channelAccounts: {
+          telegram: [
+            { accountId: 'default', running: true, connected: false, linked: false, name: 'default' },
+            { accountId: 'backup', running: false, connected: false, linked: false, lastError: 'secondary failed', name: 'backup' },
+          ],
+        },
+        channelDefaultAccountId: { telegram: 'default' },
+      },
+    });
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels();
+
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({
+        type: 'telegram',
+        status: 'connected',
+      }),
+    ]);
+  });
+
+  it('账号 probe 成功时应识别为 connected', async () => {
+    hostChannelsFetchSnapshotMock.mockResolvedValue({
+      success: true,
+      snapshot: {
+        channelOrder: ['feishu'],
+        channels: { feishu: { configured: true } },
+        channelAccounts: {
+          feishu: [{ accountId: 'default', running: false, connected: false, probe: { ok: true }, name: 'default' }],
+        },
+        channelDefaultAccountId: { feishu: 'default' },
+      },
+    });
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels();
+
+    expect(useChannelsStore.getState().channels).toEqual([
+      expect.objectContaining({
+        type: 'feishu',
+        status: 'connected',
+      }),
+    ]);
+  });
+
   it('connect/disconnect/requestQrCode 通过 channel runtime helper 执行', async () => {
     const { useChannelsStore } = await import('../../src/stores/channels');
     useChannelsStore.getState().setChannels([

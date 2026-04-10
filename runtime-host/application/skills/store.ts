@@ -1,5 +1,6 @@
 import { listInstalledClawHubSkills } from './clawhub';
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -25,57 +26,58 @@ export async function updateSkillConfigLocal(skillKey: string, updates: Record<s
   if (!isRecord(updates)) {
     return { success: false, error: 'updates is required' };
   }
-
-  const config = readOpenClawConfigJson();
   try {
-    if (!isRecord(config.skills)) {
-      config.skills = {};
-    }
-    if (!isRecord(config.skills.entries)) {
-      config.skills.entries = {};
-    }
+    await withOpenClawConfigLock(async () => {
+      const config = readOpenClawConfigJson();
+      if (!isRecord(config.skills)) {
+        config.skills = {};
+      }
+      if (!isRecord(config.skills.entries)) {
+        config.skills.entries = {};
+      }
 
-    const entries = config.skills.entries;
-    const current = isRecord(entries[trimmedSkillKey]) ? entries[trimmedSkillKey] : {};
-    const entry = { ...current };
+      const entries = config.skills.entries;
+      const current = isRecord(entries[trimmedSkillKey]) ? entries[trimmedSkillKey] : {};
+      const entry = { ...current };
 
-    if (Object.prototype.hasOwnProperty.call(updates, 'apiKey')) {
-      if (typeof updates.apiKey !== 'string') {
-        delete entry.apiKey;
-      } else {
-        const trimmed = updates.apiKey.trim();
-        if (trimmed) {
-          entry.apiKey = trimmed;
-        } else {
+      if (Object.prototype.hasOwnProperty.call(updates, 'apiKey')) {
+        if (typeof updates.apiKey !== 'string') {
           delete entry.apiKey;
-        }
-      }
-    }
-
-    if (Object.prototype.hasOwnProperty.call(updates, 'env')) {
-      if (!isRecord(updates.env)) {
-        delete entry.env;
-      } else {
-        const newEnv: Record<string, string> = {};
-        for (const [key, value] of Object.entries(updates.env)) {
-          const trimmedKey = key.trim();
-          if (!trimmedKey) {
-            continue;
-          }
-          const trimmedValue = typeof value === 'string' ? value.trim() : '';
-          if (trimmedValue) {
-            newEnv[trimmedKey] = trimmedValue;
-          }
-        }
-        if (Object.keys(newEnv).length > 0) {
-          entry.env = newEnv;
         } else {
-          delete entry.env;
+          const trimmed = updates.apiKey.trim();
+          if (trimmed) {
+            entry.apiKey = trimmed;
+          } else {
+            delete entry.apiKey;
+          }
         }
       }
-    }
-    entries[trimmedSkillKey] = entry;
-    await writeOpenClawConfigJson(config);
+
+      if (Object.prototype.hasOwnProperty.call(updates, 'env')) {
+        if (!isRecord(updates.env)) {
+          delete entry.env;
+        } else {
+          const newEnv: Record<string, string> = {};
+          for (const [key, value] of Object.entries(updates.env)) {
+            const trimmedKey = key.trim();
+            if (!trimmedKey) {
+              continue;
+            }
+            const trimmedValue = typeof value === 'string' ? value.trim() : '';
+            if (trimmedValue) {
+              newEnv[trimmedKey] = trimmedValue;
+            }
+          }
+          if (Object.keys(newEnv).length > 0) {
+            entry.env = newEnv;
+          } else {
+            delete entry.env;
+          }
+        }
+      }
+      entries[trimmedSkillKey] = entry;
+      await writeOpenClawConfigJson(config);
+    });
     return { success: true };
   } catch (error) {
     return { success: false, error: String(error) };

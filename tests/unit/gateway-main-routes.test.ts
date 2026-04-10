@@ -89,5 +89,28 @@ describe('main gateway routes', () => {
       { success: false, error: 'method is required' },
     );
   });
-});
 
+  it('/api/gateway/control-ui 返回使用 hash token 的 URL', async () => {
+    const ctx = createContext();
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'GET' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/control-ui'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      200,
+      expect.objectContaining({
+        success: true,
+        url: 'http://127.0.0.1:18789/#token=token-test',
+        token: 'token-test',
+        port: 18789,
+      }),
+    );
+  });
+});

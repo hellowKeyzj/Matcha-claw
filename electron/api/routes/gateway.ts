@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PORTS } from '../../utils/config';
+import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../services/settings/settings-store';
 import type { GatewayApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -106,7 +107,7 @@ export async function handleGatewayRoutes(
       const status = ctx.gatewayManager.getStatus();
       const token = await getSetting('gatewayToken');
       const port = status.port || PORTS.OPENCLAW_GATEWAY;
-      const urlValue = `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+      const urlValue = buildOpenClawControlUiUrl(port, token);
       sendJson(res, 200, { success: true, url: urlValue, token, port });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

@@ -1,4 +1,12 @@
 import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
+import { BUILTIN_PROVIDER_TYPES } from './provider-types';
+import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
+import { removeProviderKeyFromOpenClaw } from '../openclaw/openclaw-auth-profile-store';
+import {
+  getActiveOpenClawProviders,
+  getOpenClawProvidersConfig,
+  removeProviderFromOpenClaw,
+} from '../openclaw/openclaw-provider-config-service';
 
 type LocalDispatchResponse = {
   status: number;
@@ -18,7 +26,7 @@ export interface ProviderAccountsServiceDeps {
   readonly accountToStatus: (account: any, apiKey: string | undefined) => any;
   readonly normalizeAccount: (input: any, current?: any) => any;
   readonly normalizeFallbackAccount: (accounts: any[], deletedId: string) => string | null;
-  readonly validateApiKey: (input: unknown) => unknown;
+  readonly validateApiKey: (input: unknown) => Promise<unknown>;
   readonly requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
   readonly mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
   readonly providerVendorDefinitions: unknown;
@@ -54,13 +62,165 @@ function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function normalizeIsoTimestamp(value: unknown): string {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value
+    : new Date(0).toISOString();
+}
+
+function normalizeHeaders(input: unknown): Record<string, string> | undefined {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+  const headers = Object.fromEntries(
+    Object.entries(input)
+      .filter(
+        ([key, value]): value is string =>
+          typeof key === 'string'
+          && key.trim().length > 0
+          && typeof value === 'string'
+          && value.trim().length > 0,
+      )
+      .map(([key, value]) => [key, value.trim()]),
+  );
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+function resolveProviderCleanupKeys(accountId: string, account: Record<string, any> | null): string[] {
+  const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
+  const runtimeProviderKey = providerType
+    ? getOpenClawProviderKeyForType(providerType, accountId)
+    : accountId;
+  return Array.from(new Set([runtimeProviderKey, accountId].filter((item) => item.trim().length > 0)));
+}
+
 export class ProviderAccountsService {
   constructor(private readonly deps: ProviderAccountsServiceDeps) {}
 
   async list() {
     const store = await this.deps.readProviderStore();
-    const accounts = Object.values(store.accounts).filter((entry) => isRecord(entry));
-    const sortedAccounts = this.deps.sortAccounts(accounts, store.defaultAccountId);
+    const builtinProviderTypes = new Set<string>(BUILTIN_PROVIDER_TYPES);
+    const { providers, defaultModel } = await getOpenClawProvidersConfig();
+    const activeProviders = await getActiveOpenClawProviders();
+
+    if (activeProviders.size === 0) {
+      return {
+        accounts: [],
+        statuses: [],
+        vendors: this.deps.providerVendorDefinitions,
+        defaultAccountId: null,
+      };
+    }
+
+    const allStoreAccounts = Object.values(store.accounts).filter((entry) => isRecord(entry));
+    const groupedByOpenClawKey = new Map<string, Record<string, any>[]>();
+    for (const account of allStoreAccounts) {
+      const accountId = typeof account.id === 'string' ? account.id : '';
+      const vendorId = typeof account.vendorId === 'string' ? account.vendorId : '';
+      if (!accountId || !vendorId) {
+        continue;
+      }
+      const openClawKey = getOpenClawProviderKeyForType(vendorId, accountId);
+      const group = groupedByOpenClawKey.get(openClawKey) ?? [];
+      group.push(account);
+      groupedByOpenClawKey.set(openClawKey, group);
+    }
+
+    const defaultModelProvider = typeof defaultModel === 'string' && defaultModel.includes('/')
+      ? defaultModel.split('/')[0]
+      : undefined;
+
+    const resultAccounts: Record<string, any>[] = [];
+    let storeModified = false;
+    const nowIso = new Date().toISOString();
+
+    for (const providerKey of activeProviders) {
+      const group = groupedByOpenClawKey.get(providerKey) ?? [];
+      if (group.length > 0) {
+        const sortedGroup = [...group].sort((left, right) => {
+          const leftAlias = typeof left.vendorId === 'string' && left.vendorId !== providerKey ? 1 : 0;
+          const rightAlias = typeof right.vendorId === 'string' && right.vendorId !== providerKey ? 1 : 0;
+          if (leftAlias !== rightAlias) {
+            return rightAlias - leftAlias;
+          }
+          const byUpdatedAt = normalizeIsoTimestamp(right.updatedAt).localeCompare(normalizeIsoTimestamp(left.updatedAt));
+          if (byUpdatedAt !== 0) {
+            return byUpdatedAt;
+          }
+          return String(left.id).localeCompare(String(right.id));
+        });
+
+        const keep = sortedGroup[0];
+        resultAccounts.push(keep);
+
+        for (const duplicated of sortedGroup.slice(1)) {
+          const duplicatedId = typeof duplicated.id === 'string' ? duplicated.id : '';
+          if (!duplicatedId) {
+            continue;
+          }
+          delete store.accounts[duplicatedId];
+          delete store.apiKeys[duplicatedId];
+          storeModified = true;
+        }
+        continue;
+      }
+
+      const providerEntry = providers[providerKey];
+      if (!isRecord(providerEntry)) {
+        continue;
+      }
+
+      const vendorId = builtinProviderTypes.has(providerKey) ? providerKey : 'custom';
+      const seededAccount = {
+        id: providerKey,
+        vendorId,
+        label: providerKey,
+        authMode: vendorId === 'ollama' ? 'local' : 'api_key',
+        baseUrl: typeof providerEntry.baseUrl === 'string' ? providerEntry.baseUrl : undefined,
+        headers: normalizeHeaders(providerEntry.headers),
+        model: defaultModelProvider === providerKey ? defaultModel : undefined,
+        enabled: true,
+        isDefault: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      store.accounts[providerKey] = seededAccount;
+      resultAccounts.push(seededAccount);
+      storeModified = true;
+    }
+
+    const resultIds = new Set(resultAccounts.map((account) => account.id));
+    const nextDefaultAccountId = (
+      store.defaultAccountId
+      && resultIds.has(store.defaultAccountId)
+    )
+      ? store.defaultAccountId
+      : (() => {
+          const sorted = this.deps.sortAccounts(resultAccounts, null);
+          return typeof sorted[0]?.id === 'string' ? sorted[0].id : null;
+        })();
+
+    if (store.defaultAccountId !== nextDefaultAccountId) {
+      store.defaultAccountId = nextDefaultAccountId;
+      storeModified = true;
+    }
+
+    for (const account of Object.values(store.accounts)) {
+      if (!isRecord(account) || typeof account.id !== 'string') {
+        continue;
+      }
+      const shouldBeDefault = Boolean(store.defaultAccountId) && account.id === store.defaultAccountId;
+      if (account.isDefault !== shouldBeDefault) {
+        account.isDefault = shouldBeDefault;
+        storeModified = true;
+      }
+    }
+
+    if (storeModified) {
+      await this.deps.writeProviderStore(store);
+    }
+
+    const sortedAccounts = this.deps.sortAccounts(resultAccounts, store.defaultAccountId);
     const statuses = sortedAccounts.map((account) => this.deps.accountToStatus(account, store.apiKeys[account.id]));
     return {
       accounts: sortedAccounts,
@@ -126,8 +286,8 @@ export class ProviderAccountsService {
     };
   }
 
-  validate(payload: unknown) {
-    return this.deps.validateApiKey(payload);
+  async validate(payload: unknown) {
+    return await this.deps.validateApiKey(payload);
   }
 
   async startOAuth(payload: unknown) {
@@ -305,8 +465,14 @@ export class ProviderAccountsService {
 
   async delete(accountId: string, apiKeyOnly: boolean): Promise<LocalDispatchResponse> {
     const store = await this.deps.readProviderStore();
+    const existingAccount = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
+    const cleanupProviderKeys = resolveProviderCleanupKeys(accountId, existingAccount);
+
     if (apiKeyOnly) {
       delete store.apiKeys[accountId];
+      for (const providerKey of cleanupProviderKeys) {
+        await removeProviderKeyFromOpenClaw(providerKey);
+      }
       await this.deps.writeProviderStore(store);
       return {
         status: 200,
@@ -320,6 +486,9 @@ export class ProviderAccountsService {
       for (const account of Object.values(store.accounts)) {
         account.isDefault = Boolean(store.defaultAccountId) && account.id === store.defaultAccountId;
       }
+    }
+    for (const providerKey of cleanupProviderKeys) {
+      await removeProviderFromOpenClaw(providerKey);
     }
     await this.deps.writeProviderStore(store);
     return {

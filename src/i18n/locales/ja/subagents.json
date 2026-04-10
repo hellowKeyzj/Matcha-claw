@@ -84,6 +84,7 @@
     "nameDuplicate": "Agent名が重複しています。",
     "modelsLoading": "モデルを読み込み中...",
     "selectModel": "設定済みモデルを選択",
+    "useDefaultModel": "グローバル既定モデルを継承",
     "modelUnavailable": "利用可能な設定済みモデルがありません。",
     "initialPrompt": "システムプロンプト",
     "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力",

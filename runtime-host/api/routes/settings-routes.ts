@@ -5,11 +5,46 @@ interface SettingsRouteDeps {
   setSettingsPatchLocal: (patch: Record<string, unknown>) => Promise<unknown>;
   resetSettingsLocal: () => Promise<Record<string, unknown>>;
   setSettingValueLocal: (key: string, value: unknown) => Promise<unknown>;
+  syncProxyConfigToOpenClaw?: (
+    settings: {
+      proxyEnabled: boolean;
+      proxyServer: string;
+      proxyBypassRules: string;
+    },
+    options?: {
+      preserveExistingWhenDisabled?: boolean;
+    },
+  ) => Promise<void>;
 }
 
 interface LocalDispatchResponse {
   status: number;
   data: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExplicitProxyPatch(payload: unknown): boolean {
+  if (!isRecord(payload)) {
+    return false;
+  }
+  return Object.prototype.hasOwnProperty.call(payload, 'proxyEnabled')
+    || Object.prototype.hasOwnProperty.call(payload, 'proxyServer')
+    || Object.prototype.hasOwnProperty.call(payload, 'proxyBypassRules');
+}
+
+function toProxySettings(settings: Record<string, unknown>): {
+  proxyEnabled: boolean;
+  proxyServer: string;
+  proxyBypassRules: string;
+} {
+  return {
+    proxyEnabled: settings.proxyEnabled === true,
+    proxyServer: typeof settings.proxyServer === 'string' ? settings.proxyServer : '',
+    proxyBypassRules: typeof settings.proxyBypassRules === 'string' ? settings.proxyBypassRules : '',
+  };
 }
 
 export async function handleSettingsRoute(
@@ -34,9 +69,18 @@ export async function handleSettingsRoute(
 
   if (routePath === '/api/settings' && method === 'PUT') {
     try {
+      const shouldSyncProxy = hasExplicitProxyPatch(payload);
+      const patchResult = await service.patch(payload);
+      if (shouldSyncProxy && deps.syncProxyConfigToOpenClaw) {
+        const latestSettings = await service.getAll();
+        await deps.syncProxyConfigToOpenClaw(
+          toProxySettings(latestSettings),
+          { preserveExistingWhenDisabled: false },
+        );
+      }
       return {
         status: 200,
-        data: await service.patch(payload),
+        data: patchResult,
       };
     } catch (error) {
       return {

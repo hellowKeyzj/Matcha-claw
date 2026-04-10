@@ -1,15 +1,127 @@
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { triggerCronJobWithSplitProfiles } from './manual-trigger';
 import type { OpenClawBridge } from '../../openclaw-bridge';
+import { getRecentTokenUsageHistory } from '../usage/token-usage-history';
 
 type CronRouteBridge = Pick<
   OpenClawBridge,
   'listCronJobs' | 'addCronJob' | 'updateCronJob' | 'removeCronJob' | 'runCronJob'
 >;
 
+type CronDeliveryMode = 'none' | 'announce';
+type GatewayCronDelivery = {
+  mode: CronDeliveryMode;
+  channel?: string;
+  to?: string;
+  accountId?: string;
+};
+
+const WECHAT_CHANNEL_ALIAS = new Set(['wechat', 'openclaw-weixin']);
+
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeDeliveryChannel(channel: unknown): string | undefined {
+  if (typeof channel !== 'string') {
+    return undefined;
+  }
+  const normalized = channel.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return WECHAT_CHANNEL_ALIAS.has(normalized) ? 'openclaw-weixin' : normalized;
+}
+
+function isWeChatDeliveryChannel(channel?: string): boolean {
+  if (!channel) {
+    return false;
+  }
+  return WECHAT_CHANNEL_ALIAS.has(channel.trim());
+}
+
+function getCronDeliveryValidationError(delivery: GatewayCronDelivery): string | undefined {
+  if (delivery.mode !== 'announce' || !delivery.channel) {
+    return undefined;
+  }
+  if (!isWeChatDeliveryChannel(delivery.channel)) {
+    return undefined;
+  }
+  if (!delivery.to) {
+    return 'WeChat scheduled delivery requires delivery.to (recipient target).';
+  }
+  if (!delivery.accountId) {
+    return 'WeChat scheduled delivery requires delivery.accountId (sending account).';
+  }
+  return undefined;
+}
+
+function mergeCronDelivery(base: GatewayCronDelivery, patch: Record<string, unknown>): GatewayCronDelivery {
+  const mode = typeof patch.mode === 'string'
+    ? (patch.mode.trim() === 'announce' ? 'announce' : 'none')
+    : base.mode;
+  const channel = 'channel' in patch
+    ? normalizeDeliveryChannel(patch.channel)
+    : normalizeDeliveryChannel(base.channel);
+  if (mode !== 'announce' || !channel) {
+    return { mode: 'none' };
+  }
+  const to = 'to' in patch
+    ? (typeof patch.to === 'string' ? patch.to.trim() : '')
+    : (typeof base.to === 'string' ? base.to.trim() : '');
+  const accountId = 'accountId' in patch
+    ? (typeof patch.accountId === 'string' ? patch.accountId.trim() : '')
+    : (typeof base.accountId === 'string' ? base.accountId.trim() : '');
+  return {
+    mode: 'announce',
+    channel,
+    ...(to ? { to } : {}),
+    ...(accountId ? { accountId } : {}),
+  };
+}
+
+function normalizeCronDelivery(rawDelivery: unknown): GatewayCronDelivery {
+  if (!isRecord(rawDelivery)) {
+    return { mode: 'none' };
+  }
+  const mode = typeof rawDelivery.mode === 'string' && rawDelivery.mode.trim() === 'announce'
+    ? 'announce'
+    : 'none';
+  const channel = normalizeDeliveryChannel(rawDelivery.channel);
+  if (mode !== 'announce' || !channel) {
+    return { mode: 'none' };
+  }
+  const to = typeof rawDelivery.to === 'string' ? rawDelivery.to.trim() : '';
+  const accountId = typeof rawDelivery.accountId === 'string' ? rawDelivery.accountId.trim() : '';
+  return {
+    mode,
+    channel,
+    ...(to ? { to } : {}),
+    ...(accountId ? { accountId } : {}),
+  };
+}
+
+function normalizeCronDeliveryPatch(rawPatch: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(rawPatch)) {
+    return undefined;
+  }
+  const patch: Record<string, unknown> = {};
+  if ('mode' in rawPatch) {
+    patch.mode = (typeof rawPatch.mode === 'string' && rawPatch.mode.trim() === 'announce')
+      ? 'announce'
+      : 'none';
+  }
+  if ('channel' in rawPatch) {
+    patch.channel = normalizeDeliveryChannel(rawPatch.channel);
+  }
+  if ('to' in rawPatch) {
+    patch.to = typeof rawPatch.to === 'string' ? rawPatch.to.trim() : '';
+  }
+  if ('accountId' in rawPatch) {
+    patch.accountId = typeof rawPatch.accountId === 'string' ? rawPatch.accountId.trim() : '';
+  }
+  return patch;
 }
 
 function asCronCreateInput(value: unknown) {
@@ -21,19 +133,25 @@ function asCronCreateInput(value: unknown) {
     name: value.name,
     message: value.message,
     schedule: value.schedule,
+    delivery: normalizeCronDelivery(value.delivery),
     ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
   };
 }
 
 function normalizeCronJob(job: Record<string, any>) {
   const payload = isRecord(job.payload) ? job.payload : {};
-  const delivery = isRecord(job.delivery) ? job.delivery : {};
+  const delivery = normalizeCronDelivery(job.delivery);
   const state = isRecord(job.state) ? job.state : {};
   const schedule = isRecord(job.schedule) ? job.schedule : {};
   const message = payload.message || payload.text || '';
   const channelType = delivery.channel;
   const target = channelType
-    ? { channelType, channelId: channelType, channelName: channelType }
+    ? {
+      channelType,
+      channelId: delivery.accountId || channelType,
+      channelName: channelType,
+      ...(delivery.to ? { recipient: delivery.to } : {}),
+    }
     : undefined;
   const lastRun = state.lastRunAtMs
     ? {
@@ -50,6 +168,7 @@ function normalizeCronJob(job: Record<string, any>) {
     name: job.name,
     message,
     schedule,
+    delivery,
     target,
     enabled: job.enabled,
     createdAt: new Date(job.createdAtMs).toISOString(),
@@ -140,64 +259,6 @@ function buildCronRunMessage(entry: Record<string, any>, index: number) {
   };
 }
 
-function toFiniteNumberOr(value: unknown, fallback = 0) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return fallback;
-  }
-  return numeric;
-}
-
-function parseUsageEntriesFromJsonl(content: string, context: Record<string, string>, limit?: number) {
-  const entries: Array<Record<string, any>> = [];
-  const lines = String(content || '').split(/\r?\n/).filter(Boolean);
-  const maxEntries = typeof limit === 'number' && Number.isFinite(limit)
-    ? Math.max(Math.floor(limit), 0)
-    : Number.POSITIVE_INFINITY;
-  for (let index = lines.length - 1; index >= 0 && entries.length < maxEntries; index -= 1) {
-    let parsed;
-    try {
-      parsed = JSON.parse(lines[index]);
-    } catch {
-      continue;
-    }
-    const message = isRecord(parsed?.message) ? parsed.message : null;
-    const usage = isRecord(message?.usage) ? message.usage : null;
-    const timestamp = typeof parsed?.timestamp === 'string' ? parsed.timestamp : '';
-    if (!message || !usage || message.role !== 'assistant' || !timestamp) {
-      continue;
-    }
-    const inputTokens = toFiniteNumberOr(usage.input ?? usage.promptTokens, 0);
-    const outputTokens = toFiniteNumberOr(usage.output ?? usage.completionTokens, 0);
-    const cacheReadTokens = toFiniteNumberOr(usage.cacheRead, 0);
-    const cacheWriteTokens = toFiniteNumberOr(usage.cacheWrite, 0);
-    const totalTokens = toFiniteNumberOr(
-      usage.total ?? usage.totalTokens,
-      inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    );
-    const costRecord = isRecord(usage.cost) ? usage.cost : null;
-    const costTotal = costRecord ? toFiniteNumberOr(costRecord.total, NaN) : NaN;
-    if (totalTokens <= 0 && !Number.isFinite(costTotal)) {
-      continue;
-    }
-    entries.push({
-      timestamp,
-      sessionId: context.sessionId,
-      agentId: context.agentId,
-      ...(typeof message.model === 'string' ? { model: message.model } : {}),
-      ...(typeof message.modelRef === 'string' && !message.model ? { model: message.modelRef } : {}),
-      ...(typeof message.provider === 'string' ? { provider: message.provider } : {}),
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheWriteTokens,
-      totalTokens,
-      ...(Number.isFinite(costTotal) ? { costUsd: costTotal } : {}),
-    });
-  }
-  return entries;
-}
-
 export interface CronServiceDeps {
   readonly openclawBridge: CronRouteBridge;
   readonly getOpenClawConfigDir: () => string;
@@ -221,7 +282,10 @@ export class CronService {
         limit = Math.max(Math.floor(payloadLimit), 0);
       }
     }
-    return await this.getRecentTokenUsageHistory(limit);
+    return await getRecentTokenUsageHistory({
+      limit,
+      openclawConfigDir: this.deps.getOpenClawConfigDir(),
+    });
   }
 
   async listJobs() {
@@ -285,6 +349,13 @@ export class CronService {
         data: { success: false, error: 'Invalid cron create payload' },
       };
     }
+    const deliveryValidationError = getCronDeliveryValidationError(input.delivery);
+    if (deliveryValidationError) {
+      return {
+        status: 400,
+        data: { success: false, error: deliveryValidationError },
+      };
+    }
     const created = await this.deps.openclawBridge.addCronJob({
       name: input.name,
       schedule: { kind: 'cron', expr: input.schedule },
@@ -292,7 +363,7 @@ export class CronService {
       enabled: input.enabled ?? true,
       wakeMode: 'next-heartbeat',
       sessionTarget: 'isolated',
-      delivery: { mode: 'none' },
+      delivery: input.delivery,
     });
     return {
       status: 200,
@@ -315,6 +386,19 @@ export class CronService {
     if (typeof patch.message === 'string') {
       patch.payload = { kind: 'agentTurn', message: patch.message };
       delete patch.message;
+    }
+    if ('delivery' in patch) {
+      patch.delivery = normalizeCronDeliveryPatch(patch.delivery);
+      const deliveryPatch = isRecord(patch.delivery) ? patch.delivery : {};
+      const currentDelivery = await this.getJobDelivery(jobId);
+      const mergedDelivery = mergeCronDelivery(currentDelivery, deliveryPatch);
+      const deliveryValidationError = getCronDeliveryValidationError(mergedDelivery);
+      if (deliveryValidationError) {
+        return {
+          status: 400,
+          data: { success: false, error: deliveryValidationError },
+        };
+      }
     }
     return {
       status: 200,
@@ -430,75 +514,14 @@ export class CronService {
     return messages.slice(-limit);
   }
 
-  private async listRecentSessionFiles() {
-    const agentsDir = join(this.deps.getOpenClawConfigDir(), 'agents');
-    let agentEntries;
-    try {
-      agentEntries = await readdir(agentsDir, { withFileTypes: true });
-    } catch {
-      return [];
+  private async getJobDelivery(jobId: string): Promise<GatewayCronDelivery> {
+    const listResult = await this.deps.openclawBridge.listCronJobs(true);
+    const jobs = parseGatewayCronJobs(listResult);
+    const matchedJob = jobs.find((job) => job.id === jobId);
+    if (!matchedJob || !isRecord(matchedJob.delivery)) {
+      return { mode: 'none' };
     }
-    const files: Array<Record<string, any>> = [];
-    for (const agentEntry of agentEntries) {
-      if (!agentEntry.isDirectory()) {
-        continue;
-      }
-      const agentId = agentEntry.name;
-      const sessionsDir = join(agentsDir, agentId, 'sessions');
-      let sessionEntries;
-      try {
-        sessionEntries = await readdir(sessionsDir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const sessionEntry of sessionEntries) {
-        if (!sessionEntry.isFile()) {
-          continue;
-        }
-        const fileName = sessionEntry.name;
-        if (!fileName.endsWith('.jsonl') || fileName.includes('.deleted.')) {
-          continue;
-        }
-        const filePath = join(sessionsDir, fileName);
-        try {
-          const fileStats = await stat(filePath);
-          files.push({
-            filePath,
-            sessionId: fileName.replace(/\.jsonl$/, ''),
-            agentId,
-            mtimeMs: fileStats.mtimeMs,
-          });
-        } catch {
-          // ignore file stat failure
-        }
-      }
-    }
-    files.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    return files;
+    return normalizeCronDelivery(matchedJob.delivery);
   }
 
-  private async getRecentTokenUsageHistory(limit?: number) {
-    const maxEntries = typeof limit === 'number' && Number.isFinite(limit)
-      ? Math.max(Math.floor(limit), 0)
-      : Number.POSITIVE_INFINITY;
-    if (maxEntries === 0) {
-      return [];
-    }
-    const sessionFiles = await this.listRecentSessionFiles();
-    const results: Array<Record<string, any>> = [];
-    for (const file of sessionFiles) {
-      try {
-        const content = await readFile(file.filePath, 'utf8');
-        const entries = parseUsageEntriesFromJsonl(content, {
-          sessionId: file.sessionId,
-          agentId: file.agentId,
-        });
-        results.push(...entries);
-      } catch {
-        // ignore malformed transcript file
-      }
-    }
-    results.sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp));
-    return Number.isFinite(maxEntries) ? results.slice(0, maxEntries) : results;
-  }
 }

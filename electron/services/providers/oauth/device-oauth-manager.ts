@@ -1,17 +1,14 @@
 import { EventEmitter } from 'events';
 import { shell } from 'electron';
 import { logger } from '../../../utils/logger';
-import { isOpenClawPresent } from '../../../utils/paths';
 import { createDefaultRuntimeHostHttpClient } from '../../../main/runtime-host-client';
 import {
   loginMiniMaxPortalOAuth,
   type MiniMaxOAuthToken,
   type MiniMaxRegion,
-} from '../../../../node_modules/openclaw/extensions/minimax-portal-auth/oauth';
-import {
   loginQwenPortalOAuth,
   type QwenOAuthToken,
-} from '../../../../node_modules/openclaw/extensions/qwen-portal-auth/oauth';
+} from './device-oauth-providers';
 
 export type OAuthProviderType = 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
 export type { MiniMaxRegion };
@@ -73,9 +70,6 @@ class DeviceOAuthManager extends EventEmitter {
   }
 
   private async runMiniMaxFlow(region?: MiniMaxRegion, providerType: OAuthProviderType = 'minimax-portal'): Promise<void> {
-    if (!isOpenClawPresent()) {
-      throw new Error('OpenClaw package not found');
-    }
     const provider = this.activeProvider!;
 
     const token: MiniMaxOAuthToken = await loginMiniMaxPortalOAuth({
@@ -114,9 +108,6 @@ class DeviceOAuthManager extends EventEmitter {
   }
 
   private async runQwenFlow(): Promise<void> {
-    if (!isOpenClawPresent()) {
-      throw new Error('OpenClaw package not found');
-    }
     const provider = this.activeProvider!;
 
     const token: QwenOAuthToken = await loginQwenPortalOAuth({

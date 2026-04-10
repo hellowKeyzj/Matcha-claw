@@ -47,6 +47,8 @@ vi.mock('../../electron/api/routes/runtime-host-proxy', () => ({
 
 vi.mock('../../electron/api/route-utils', () => ({
   sendJson: (...args: unknown[]) => hoisted.sendJsonMock(...args),
+  setCorsHeaders: vi.fn(),
+  requireJsonContentType: vi.fn(() => true),
 }));
 
 vi.mock('../../electron/utils/logger', () => ({
@@ -59,6 +61,26 @@ vi.mock('../../electron/utils/logger', () => ({
 }));
 
 describe('host api server boundary guard', () => {
+  async function issueHostApiToken(): Promise<string> {
+    const { startHostApiServer, getHostApiToken } = await import('../../electron/api/server');
+    const port = 46000 + Math.floor(Math.random() * 1000);
+    const server = startHostApiServer({} as never, port);
+    await new Promise<void>((resolve, reject) => {
+      server.once('listening', () => resolve());
+      server.once('error', reject);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    return getHostApiToken();
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -113,5 +135,52 @@ describe('host api server boundary guard', () => {
 
     expect(hoisted.handleAppRoutesMock).toHaveBeenCalledTimes(1);
     expect(hoisted.sendJsonMock).not.toHaveBeenCalled();
+  });
+
+  it('仅 internal runtime-host 路由跳过 Bearer 鉴权', async () => {
+    const { shouldBypassHostApiBearerAuth } = await import('../../electron/api/server');
+    expect(shouldBypassHostApiBearerAuth('/internal/runtime-host/shell-actions', 'POST')).toBe(true);
+    expect(shouldBypassHostApiBearerAuth('/api/events', 'GET')).toBe(false);
+    expect(shouldBypassHostApiBearerAuth('/api/events', 'POST')).toBe(false);
+    expect(shouldBypassHostApiBearerAuth('/api/gateway/status', 'GET')).toBe(false);
+  });
+
+  it('/api/events 支持 query token 鉴权通过', async () => {
+    const token = await issueHostApiToken();
+    hoisted.handleAppRoutesMock.mockResolvedValueOnce(true);
+
+    const { createHostApiRequestHandler } = await import('../../electron/api/server');
+    const handler = createHostApiRequestHandler({} as never, 3210);
+
+    await handler(
+      { method: 'GET', url: `/api/events?token=${token}`, headers: {} } as IncomingMessage,
+      {} as ServerResponse,
+    );
+
+    expect(hoisted.sendJsonMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      401,
+      expect.objectContaining({ success: false, error: 'Unauthorized' }),
+    );
+    expect(hoisted.handleAppRoutesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('/api/events 缺少 token 时返回 401', async () => {
+    await issueHostApiToken();
+
+    const { createHostApiRequestHandler } = await import('../../electron/api/server');
+    const handler = createHostApiRequestHandler({} as never, 3210);
+
+    await handler(
+      { method: 'GET', url: '/api/events', headers: {} } as IncomingMessage,
+      {} as ServerResponse,
+    );
+
+    expect(hoisted.sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      401,
+      expect.objectContaining({ success: false, error: 'Unauthorized' }),
+    );
+    expect(hoisted.handleAppRoutesMock).not.toHaveBeenCalled();
   });
 });

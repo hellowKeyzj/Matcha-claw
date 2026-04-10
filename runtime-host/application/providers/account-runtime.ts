@@ -1,7 +1,28 @@
 import { PROVIDER_VENDOR_DEFINITIONS } from '../../api/provider-definitions';
+import { validateApiKeyWithProvider } from './provider-validation';
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeHeadersRecord(input: unknown): Record<string, string> | undefined {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+
+  const normalized = Object.fromEntries(
+    Object.entries(input)
+      .filter(
+        ([key, value]): value is string =>
+          typeof key === 'string'
+          && key.trim().length > 0
+          && typeof value === 'string'
+          && value.trim().length > 0,
+      )
+      .map(([key, value]) => [key, value.trim()]),
+  );
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 export function normalizeProviderAccountLocal(input: unknown, current?: Record<string, any> | null) {
@@ -18,6 +39,9 @@ export function normalizeProviderAccountLocal(input: unknown, current?: Record<s
     return null;
   }
   const nowIso = new Date().toISOString();
+  const headers = Object.prototype.hasOwnProperty.call(input, 'headers')
+    ? normalizeHeadersRecord(input.headers)
+    : normalizeHeadersRecord(current?.headers);
   return {
     ...current,
     ...input,
@@ -35,6 +59,7 @@ export function normalizeProviderAccountLocal(input: unknown, current?: Record<s
     isDefault: typeof input.isDefault === 'boolean'
       ? input.isDefault
       : (typeof current?.isDefault === 'boolean' ? current.isDefault : false),
+    headers,
     createdAt: typeof current?.createdAt === 'string' ? current.createdAt : nowIso,
     updatedAt: nowIso,
   };
@@ -92,12 +117,29 @@ function getVendorDefinitionLocal(vendorId: string) {
   return PROVIDER_VENDOR_DEFINITIONS.find((item) => item.id === vendorId);
 }
 
-export function validateProviderApiKeyLocal(input: unknown) {
+function isProviderProtocol(value: unknown): value is 'openai-completions' | 'openai-responses' | 'anthropic-messages' {
+  return value === 'openai-completions' || value === 'openai-responses' || value === 'anthropic-messages';
+}
+
+function getVendorDefaultBaseUrl(vendorId: string): string | undefined {
+  const vendor = getVendorDefinitionLocal(vendorId);
+  return typeof vendor?.defaultBaseUrl === 'string' ? vendor.defaultBaseUrl : undefined;
+}
+
+export async function validateProviderApiKeyLocal(input: unknown) {
   if (!isRecord(input)) {
     return { valid: false, error: 'Invalid provider validate payload' };
   }
   const vendorId = typeof input.vendorId === 'string' ? input.vendorId : '';
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  const options = isRecord(input.options) ? input.options : {};
+  const baseUrl = typeof options.baseUrl === 'string' && options.baseUrl.trim().length > 0
+    ? options.baseUrl.trim()
+    : getVendorDefaultBaseUrl(vendorId);
+  const apiProtocol = isProviderProtocol(options.apiProtocol)
+    ? options.apiProtocol
+    : undefined;
+  const headers = normalizeHeadersRecord(options.headers);
   const vendor = getVendorDefinitionLocal(vendorId);
   if (!vendor) {
     return { valid: false, error: `Unsupported provider vendor: ${vendorId}` };
@@ -105,5 +147,13 @@ export function validateProviderApiKeyLocal(input: unknown) {
   if (vendor.requiresApiKey && !apiKey) {
     return { valid: false, error: 'API key is required' };
   }
-  return { valid: true };
+  if (!apiKey) {
+    return { valid: true };
+  }
+
+  return await validateApiKeyWithProvider(vendorId, apiKey, {
+    baseUrl,
+    apiProtocol,
+    ...(headers ? { headers } : {}),
+  });
 }

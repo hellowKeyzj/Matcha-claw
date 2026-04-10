@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
 import { normalizePluginIds } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
+import { withOpenClawConfigLock } from './openclaw-config-mutex';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -120,29 +121,31 @@ function cloneSkillEntries(config: Record<string, unknown>): Record<string, Reco
 
 export async function syncPluginSkillsToOpenClawConfig(enabledPluginIds: readonly string[]): Promise<void> {
   const enabledSet = new Set(normalizePluginIds(enabledPluginIds));
-  const config = readOpenClawConfigJson();
   const skillIdsByPluginId = await discoverPluginSkillIdsByPluginId();
-  const nextSkillEntries = cloneSkillEntries(config);
+  await withOpenClawConfigLock(async () => {
+    const config = readOpenClawConfigJson();
+    const nextSkillEntries = cloneSkillEntries(config);
 
-  for (const [pluginId, skillIds] of skillIdsByPluginId.entries()) {
-    const pluginEnabled = enabledSet.has(pluginId);
-    for (const skillId of skillIds) {
-      const currentEntry = nextSkillEntries[skillId] ?? {};
-      nextSkillEntries[skillId] = {
-        ...currentEntry,
-        enabled: pluginEnabled,
-      };
+    for (const [pluginId, skillIds] of skillIdsByPluginId.entries()) {
+      const pluginEnabled = enabledSet.has(pluginId);
+      for (const skillId of skillIds) {
+        const currentEntry = nextSkillEntries[skillId] ?? {};
+        nextSkillEntries[skillId] = {
+          ...currentEntry,
+          enabled: pluginEnabled,
+        };
+      }
     }
-  }
 
-  const skills = isRecord(config.skills) ? { ...config.skills } : {};
-  if (Object.keys(nextSkillEntries).length > 0) {
-    skills.entries = nextSkillEntries;
-  }
+    const skills = isRecord(config.skills) ? { ...config.skills } : {};
+    if (Object.keys(nextSkillEntries).length > 0) {
+      skills.entries = nextSkillEntries;
+    }
 
-  await writeOpenClawConfigJson({
-    ...config,
-    ...(Object.keys(skills).length > 0 ? { skills } : {}),
+    await writeOpenClawConfigJson({
+      ...config,
+      ...(Object.keys(skills).length > 0 ? { skills } : {}),
+    });
   });
 }
 
@@ -215,7 +218,9 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
 
 export async function syncEnabledPluginIdsToOpenClawConfig(pluginIds: readonly string[]): Promise<string[]> {
   const normalizedPluginIds = normalizePluginIds(pluginIds);
-  const nextConfig = await applyEnabledPluginIdsToOpenClawConfig(readOpenClawConfigJson(), normalizedPluginIds);
-  await writeOpenClawConfigJson(nextConfig);
+  await withOpenClawConfigLock(async () => {
+    const nextConfig = await applyEnabledPluginIdsToOpenClawConfig(readOpenClawConfigJson(), normalizedPluginIds);
+    await writeOpenClawConfigJson(nextConfig);
+  });
   return normalizedPluginIds;
 }

@@ -133,6 +133,10 @@ queue.push({ nodeModulesDir: openclawVirtualNM, skipPkg: 'openclaw' });
 const SKIP_PACKAGES = new Set([
   'typescript',
   '@playwright/test',
+  // @discordjs/opus 是系统 Node ABI 的 native addon。
+  // Gateway 在 Electron utilityProcess 中运行，ABI 不一致会在运行时报错。
+  // 该依赖为可选项，跳过不会影响常规文本收发能力。
+  '@discordjs/opus',
 ]);
 const SKIP_SCOPES = ['@cloudflare/', '@types/'];
 let skippedDevCount = 0;

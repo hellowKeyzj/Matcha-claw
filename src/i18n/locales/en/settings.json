@@ -60,7 +60,15 @@
       "replaceApiKey": "Replace API Key",
       "replaceApiKeyHelp": "Leave this field empty if you want to keep the currently stored API key.",
       "baseUrl": "Base URL",
+      "protocol": "Protocol",
+      "userAgent": "User-Agent",
+      "userAgentPlaceholder": "MatchaClaw/1.0",
       "modelId": "Model ID",
+      "codePlanPreset": "Code Plan Preset",
+      "codePlanMode": "Code Plan",
+      "useCodePlanPreset": "Use Ark Code Plan Preset",
+      "codePlanPresetDesc": "Code Plan uses https://ark.cn-beijing.volces.com/api/coding/v3 and model ark-code-latest. Do not use /api/v3 for Code Plan traffic.",
+      "codePlanDoc": "Code Plan docs",
       "fallbackModels": "Fallback Models",
       "fallbackProviders": "Fallback Providers",
       "fallbackModelIds": "Fallback Model IDs",
@@ -73,6 +81,12 @@
       "save": "Save",
       "customDoc": "Documentation",
       "validate": "Validate"
+    },
+    "protocols": {
+      "openai": "OpenAI Compatible",
+      "openaiCompletions": "OpenAI Completions",
+      "openaiResponses": "OpenAI Responses",
+      "anthropic": "Anthropic Compatible"
     },
     "card": {
       "default": "Default",

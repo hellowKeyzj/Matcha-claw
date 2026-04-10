@@ -2,12 +2,13 @@
  * Skill Config Utilities
  * Handles built-in and preinstalled skill deployment.
  */
-import { readFile, writeFile, cp, mkdir } from 'fs/promises';
+import { readFile, writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { getOpenClawDir, getResourcesDir } from '../../utils/paths';
 import { logger } from '../../utils/logger';
+import { copyDirectorySafe } from '../../utils/copy-safe';
 import { createDefaultRuntimeHostHttpClient } from '../../main/runtime-host-client';
 
 function createSkillsRuntimeHostClient() {
@@ -86,7 +87,7 @@ export async function ensureBuiltinSkillsInstalled(): Promise<void> {
 
         try {
             await mkdir(targetDir, { recursive: true });
-            await cp(sourceDir, targetDir, { recursive: true });
+            await copyDirectorySafe(sourceDir, targetDir);
             logger.info(`Installed built-in skill: ${slug} -> ${targetDir}`);
         } catch (error) {
             logger.warn(`Failed to install built-in skill ${slug}:`, error);
@@ -228,7 +229,7 @@ export async function ensurePreinstalledSkillsInstalled(): Promise<void> {
 
         try {
             await mkdir(targetDir, { recursive: true });
-            await cp(sourceDir, targetDir, { recursive: true, force: true });
+            await copyDirectorySafe(sourceDir, targetDir);
             const markerPayload: PreinstalledMarker = {
                 source: 'clawx-preinstalled',
                 slug: spec.slug,

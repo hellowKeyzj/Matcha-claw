@@ -130,6 +130,7 @@ export function Channels() {
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
   const statusRefreshLastAtRef = useRef(0);
+  const lastGatewayStateRef = useRef(gatewayStatus.state);
 
   // Fetch channels on mount
   useEffect(() => {
@@ -186,6 +187,14 @@ export function Channels() {
       }
     };
   }, [scheduleStatusRefresh]);
+
+  useEffect(() => {
+    const previousGatewayState = lastGatewayStateRef.current;
+    lastGatewayStateRef.current = gatewayStatus.state;
+    if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
+      scheduleStatusRefresh();
+    }
+  }, [gatewayStatus.state, scheduleStatusRefresh]);
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
@@ -405,29 +414,37 @@ interface ChannelCardProps {
 }
 
 function ChannelCard({ channel, onDelete }: ChannelCardProps) {
+  const { t } = useTranslation('channels');
+  const status = channel.status as Status;
+  const statusLabel = t(`status.${status}`, { defaultValue: status });
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
+    <Card className="h-full">
+      <CardContent className="flex h-full min-h-[136px] flex-col justify-between p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <span className="text-2xl">
               {CHANNEL_ICONS[channel.type]}
             </span>
-            <div>
-              <CardTitle className="text-base">{channel.name}</CardTitle>
-              <CardDescription className="text-xs">
+            <div className="min-w-0">
+              <CardTitle className="truncate text-base">{channel.name}</CardTitle>
+              <CardDescription className="truncate text-xs">
                 {CHANNEL_NAMES[channel.type]}
               </CardDescription>
             </div>
           </div>
-          <StatusBadge status={channel.status as Status} />
+          <StatusBadge status={status} label={statusLabel} className="shrink-0 max-w-none" />
         </div>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {channel.error && (
-          <p className="text-xs text-destructive mb-3">{channel.error}</p>
-        )}
-        <div className="flex gap-2">
+
+        <div className="min-h-5">
+          {channel.error ? (
+            <p className="line-clamp-2 text-xs text-destructive">{channel.error}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">{CHANNEL_NAMES[channel.type]}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end">
           <Button
             variant="ghost"
             size="sm"
@@ -754,8 +771,18 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     : [];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto">
+    <div
+      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <Card
+        className="w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <CardHeader className="flex flex-row items-start justify-between">
           <div>
             <CardTitle>

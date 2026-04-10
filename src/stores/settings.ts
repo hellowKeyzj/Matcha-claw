@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import i18n from '@/i18n';
+import { resolveSupportedLanguage } from '@/i18n/language';
 import {
   hostSettingsFetchAll,
   hostSettingsPutValue,
@@ -68,12 +69,7 @@ interface SettingsState {
 
 const defaultSettings = {
   theme: 'system' as Theme,
-  language: (() => {
-    const lang = navigator.language.toLowerCase();
-    if (lang.startsWith('zh')) return 'zh';
-    if (lang.startsWith('ja')) return 'ja';
-    return 'en';
-  })(),
+  language: resolveSupportedLanguage(typeof navigator !== 'undefined' ? navigator.language : undefined),
   userAvatarDataUrl: null,
   startMinimized: false,
   launchAtStartup: false,
@@ -102,6 +98,9 @@ export const useSettingsStore = create<SettingsState>()(
       init: async () => {
         try {
           const settings = await hostSettingsFetchAll<Partial<SettingsSnapshot>>();
+          const resolvedLanguage = settings.language
+            ? resolveSupportedLanguage(settings.language)
+            : undefined;
           let shouldSyncSetupComplete = false;
           set((state) => {
             const mergedSetupComplete = Boolean(state.setupComplete || settings.setupComplete);
@@ -109,6 +108,7 @@ export const useSettingsStore = create<SettingsState>()(
             return {
               ...state,
               ...settings,
+              ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
               setupComplete: mergedSetupComplete,
               initialized: true,
             };
@@ -116,8 +116,8 @@ export const useSettingsStore = create<SettingsState>()(
           if (shouldSyncSetupComplete) {
             void hostSettingsPutValue('setupComplete', true).catch(() => {});
           }
-          if (settings.language) {
-            i18n.changeLanguage(settings.language);
+          if (resolvedLanguage) {
+            i18n.changeLanguage(resolvedLanguage);
           }
         } catch {
           // Keep renderer-persisted settings as a fallback when the main
@@ -131,9 +131,10 @@ export const useSettingsStore = create<SettingsState>()(
         void hostSettingsPutValue('theme', theme).catch(() => {});
       },
       setLanguage: (language) => {
-        i18n.changeLanguage(language);
-        set({ language });
-        void hostSettingsPutValue('language', language).catch(() => {});
+        const resolvedLanguage = resolveSupportedLanguage(language);
+        i18n.changeLanguage(resolvedLanguage);
+        set({ language: resolvedLanguage });
+        void hostSettingsPutValue('language', resolvedLanguage).catch(() => {});
       },
       setUserAvatarDataUrl: (userAvatarDataUrl) => {
         set({ userAvatarDataUrl });
@@ -193,12 +194,16 @@ export const useSettingsStore = create<SettingsState>()(
       resetSettings: async () => {
         try {
           const settings = await hostSettingsReset<Partial<SettingsSnapshot>>();
-          if (settings.language) {
-            i18n.changeLanguage(settings.language);
+          const resolvedLanguage = settings.language
+            ? resolveSupportedLanguage(settings.language)
+            : undefined;
+          if (resolvedLanguage) {
+            i18n.changeLanguage(resolvedLanguage);
           }
           set({
             ...defaultSettings,
             ...settings,
+            ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
             initialized: true,
           });
         } catch {

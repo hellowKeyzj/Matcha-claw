@@ -87,6 +87,7 @@
     "nameDuplicate": "Agent 名称重复。",
     "modelsLoading": "模型加载中...",
     "selectModel": "请选择已配置模型",
+    "useDefaultModel": "继承全局默认模型",
     "modelUnavailable": "未找到可用的已配置模型。",
     "initialPrompt": "系统提示词",
     "initialPromptPlaceholder": "可选：先写一段该 Agent 的系统提示词",

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
 import {
   expandHomePath,
   getOpenClawConfigDir,
@@ -10,6 +11,16 @@ import {
 
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+type LocalDispatchResponse = {
+  status: number;
+  data: unknown;
+};
+
+interface ClawHubServiceDeps {
+  requestParentShellAction: (action: ParentShellAction, payload?: unknown) => Promise<ParentTransportUpstreamPayload>;
+  mapParentTransportResponse: (upstream: ParentTransportUpstreamPayload) => LocalDispatchResponse;
 }
 
 function getOpenClawSkillsDir() {
@@ -235,15 +246,18 @@ function resolveSkillDirByManifestName(candidates: string[]) {
 function openPathWithDefaultApp(targetPath: string) {
   const normalized = resolve(targetPath);
   if (process.platform === 'win32') {
-    const result = spawnSync('explorer.exe', [normalized], { windowsHide: true, shell: false });
-    return !result.error;
+    const result = spawnSync('cmd.exe', ['/d', '/s', '/c', 'start', '""', normalized], {
+      windowsHide: true,
+      shell: false,
+    });
+    return !result.error && (result.status === 0 || result.status === null);
   }
   if (process.platform === 'darwin') {
     const result = spawnSync('open', [normalized], { shell: false });
-    return !result.error;
+    return !result.error && (result.status === 0 || result.status === null);
   }
   const result = spawnSync('xdg-open', [normalized], { shell: false });
-  return !result.error;
+  return !result.error && (result.status === 0 || result.status === null);
 }
 
 export async function listInstalledClawHubSkills() {
@@ -271,12 +285,19 @@ export async function listInstalledClawHubSkills() {
         // ignore
       }
     }
-    skills.push({ slug, version });
+    skills.push({
+      slug,
+      version,
+      source: 'openclaw-managed',
+      baseDir: skillDir,
+    });
   }
   return skills.sort((left, right) => left.slug.localeCompare(right.slug));
 }
 
 export class ClawHubService {
+  constructor(private readonly deps?: ClawHubServiceDeps) {}
+
   async search(params: Record<string, unknown>) {
     const query = typeof params.query === 'string' ? params.query.trim() : '';
     const limit = normalizeLimit(params.limit, query ? 50 : 25);
@@ -343,19 +364,42 @@ export class ClawHubService {
     return await listInstalledClawHubSkills();
   }
 
-  async openReadme(skillKeyOrSlug: string, fallbackSlug?: string) {
+  private resolveSkillDir(skillKeyOrSlug: string, fallbackSlug?: string, preferredBaseDir?: string) {
+    const preferred = typeof preferredBaseDir === 'string' ? preferredBaseDir.trim() : '';
+    if (preferred && existsSync(preferred)) {
+      return resolve(preferred);
+    }
+
     const candidates = [skillKeyOrSlug, fallbackSlug]
       .filter((item) => typeof item === 'string' && item.trim().length > 0)
       .map((item) => item.trim());
     if (candidates.length === 0) {
-      throw new Error('skillKey or slug is required');
+      return null;
     }
 
     const skillsRoot = getOpenClawSkillsDir();
     const directSkillDir = candidates
       .map((item) => join(skillsRoot, item))
       .find((dir) => existsSync(dir));
-    const skillDir = directSkillDir || resolveSkillDirByManifestName(candidates);
+    return directSkillDir || resolveSkillDirByManifestName(candidates);
+  }
+
+  private async openPathViaMainProcess(targetPath: string): Promise<boolean> {
+    if (!this.deps) {
+      return false;
+    }
+    const upstream = await this.deps.requestParentShellAction('shell_open_path', { path: targetPath });
+    const mapped = this.deps.mapParentTransportResponse(upstream);
+    if (mapped.status < 200 || mapped.status >= 300) {
+      const data = isRecord(mapped.data) ? mapped.data : {};
+      const message = typeof data.error === 'string' ? data.error : `Failed to open path: ${targetPath}`;
+      throw new Error(message);
+    }
+    return true;
+  }
+
+  async openReadme(skillKeyOrSlug: string, fallbackSlug?: string, preferredBaseDir?: string) {
+    const skillDir = this.resolveSkillDir(skillKeyOrSlug, fallbackSlug, preferredBaseDir);
     if (!skillDir) {
       throw new Error('Skill directory not found');
     }
@@ -373,9 +417,21 @@ export class ClawHubService {
       targetPath = skillDir;
     }
 
-    const opened = openPathWithDefaultApp(targetPath);
+    const opened = await this.openPathViaMainProcess(targetPath) || openPathWithDefaultApp(targetPath);
     if (!opened) {
       throw new Error(`Failed to open path: ${targetPath}`);
+    }
+    return { success: true };
+  }
+
+  async openPath(skillKeyOrSlug: string, fallbackSlug?: string, preferredBaseDir?: string) {
+    const skillDir = this.resolveSkillDir(skillKeyOrSlug, fallbackSlug, preferredBaseDir);
+    if (!skillDir) {
+      throw new Error('Skill directory not found');
+    }
+    const opened = await this.openPathViaMainProcess(skillDir) || openPathWithDefaultApp(skillDir);
+    if (!opened) {
+      throw new Error(`Failed to open path: ${skillDir}`);
     }
     return { success: true };
   }

@@ -7,8 +7,9 @@ import {
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
 
-const HOST_API_PORT = 3210;
+const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
+let cachedHostApiToken: string | null = null;
 
 type HostApiRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -68,6 +69,20 @@ function parseUnifiedProxyResponse<T>(
     status,
   });
   return unwrapHostApiProxyEnvelope<T>(envelope, { method, path }).data;
+}
+
+async function getHostApiToken(): Promise<string> {
+  if (cachedHostApiToken && cachedHostApiToken.trim()) {
+    return cachedHostApiToken;
+  }
+
+  const token = await invokeIpc<unknown>('hostapi:token');
+  if (typeof token !== 'string' || !token.trim()) {
+    throw new Error('Host API token unavailable');
+  }
+
+  cachedHostApiToken = token;
+  return token;
 }
 
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
@@ -149,8 +164,11 @@ export const gatewayClient: GatewayClient = {
   ): Promise<TResult> => await hostGatewayRpc<TResult>(method, payload, timeoutMs),
 };
 
-export function createHostEventSource(path = '/api/events'): EventSource {
-  return new EventSource(`${HOST_API_BASE}${path}`);
+export async function createHostEventSource(path = '/api/events'): Promise<EventSource> {
+  const token = await getHostApiToken();
+  const url = new URL(path, HOST_API_BASE);
+  url.searchParams.set('token', token);
+  return new EventSource(url.toString());
 }
 
 export function getHostApiBase(): string {

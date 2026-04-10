@@ -60,7 +60,15 @@
       "replaceApiKey": "API キーを置き換える",
       "replaceApiKeyHelp": "現在保存されている API キーをそのまま使う場合は、この欄を空のままにしてください。",
       "baseUrl": "ベース URL",
+      "protocol": "プロトコル",
+      "userAgent": "User-Agent",
+      "userAgentPlaceholder": "MatchaClaw/1.0",
       "modelId": "モデル ID",
+      "codePlanPreset": "Code Plan プリセット",
+      "codePlanMode": "Code Plan",
+      "useCodePlanPreset": "Ark Code Plan プリセットを使用",
+      "codePlanPresetDesc": "Code Plan は https://ark.cn-beijing.volces.com/api/coding/v3 と model ark-code-latest を使います。Code Plan 通信に /api/v3 を使わないでください。",
+      "codePlanDoc": "Code Plan ドキュメント",
       "fallbackModels": "フォールバックモデル",
       "fallbackProviders": "別プロバイダーへのフォールバック",
       "fallbackModelIds": "同一プロバイダーのフォールバックモデル ID",
@@ -73,6 +81,12 @@
       "save": "保存",
       "customDoc": "ドキュメント",
       "validate": "検証"
+    },
+    "protocols": {
+      "openai": "OpenAI 互換",
+      "openaiCompletions": "OpenAI Completions",
+      "openaiResponses": "OpenAI Responses",
+      "anthropic": "Anthropic 互換"
     },
     "card": {
       "default": "デフォルト",

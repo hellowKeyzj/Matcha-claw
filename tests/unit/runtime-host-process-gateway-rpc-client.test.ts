@@ -45,6 +45,7 @@ describe('runtime-host process gateway rpc client', () => {
 
     let connectionCount = 0;
     const methods: string[] = [];
+    let connectParamsSnapshot: Record<string, unknown> | null = null;
     const wss = new WebSocketServer({ host: '127.0.0.1', port });
     wss.on('connection', (socket) => {
       connectionCount += 1;
@@ -63,6 +64,7 @@ describe('runtime-host process gateway rpc client', () => {
           const params = (message.params && typeof message.params === 'object')
             ? message.params as Record<string, unknown>
             : {};
+          connectParamsSnapshot = params;
           const auth = (params.auth && typeof params.auth === 'object')
             ? params.auth as Record<string, unknown>
             : {};
@@ -108,6 +110,17 @@ describe('runtime-host process gateway rpc client', () => {
 
       expect(methods).toEqual(['channels.status', 'cron.list']);
       expect(connectionCount).toBe(1);
+      expect(connectParamsSnapshot).toBeTruthy();
+      expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.read');
+      expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.write');
+      expect((connectParamsSnapshot as { client?: { mode?: string } }).client?.mode).toBe('backend');
+      const device = (connectParamsSnapshot as { device?: Record<string, unknown> }).device;
+      expect(device).toBeTruthy();
+      expect(typeof device?.id).toBe('string');
+      expect(typeof device?.publicKey).toBe('string');
+      expect(typeof device?.signature).toBe('string');
+      expect(typeof device?.signedAt).toBe('number');
+      expect(typeof device?.nonce).toBe('string');
     } finally {
       await new Promise<void>((resolve, reject) => {
         wss.close((error) => {

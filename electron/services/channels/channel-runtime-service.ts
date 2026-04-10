@@ -1,8 +1,10 @@
 import { app } from 'electron';
-import { existsSync, cpSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createDefaultRuntimeHostHttpClient } from '../../main/runtime-host-client';
+import { fsPath } from '../../utils/fs-path';
+import { copyDirectorySyncSafe } from '../../utils/copy-safe';
 import { whatsAppLoginManager } from './whatsapp-login-manager';
 import { weixinLoginManager } from './weixin-login-manager';
 
@@ -39,11 +41,11 @@ function normalizeSessionKey(value: unknown): string | undefined {
 
 function getInstalledPluginVersion(pluginId: string): string | undefined {
   const pkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
-  if (!existsSync(pkgPath)) {
+  if (!existsSync(fsPath(pkgPath))) {
     return undefined;
   }
   try {
-    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+    const parsed = JSON.parse(readFileSync(fsPath(pkgPath), 'utf8')) as { version?: unknown };
     return typeof parsed.version === 'string' ? parsed.version : undefined;
   } catch {
     return undefined;
@@ -72,7 +74,7 @@ async function ensureBundledPluginInstalled(
   const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
 
-  if (existsSync(targetManifest)) {
+  if (existsSync(fsPath(targetManifest))) {
     return {
       installed: true,
       installedPath: targetDir,
@@ -81,7 +83,7 @@ async function ensureBundledPluginInstalled(
   }
 
   const candidateSources = resolveBundledPluginSources(pluginId);
-  const sourceDir = candidateSources.find((dir) => existsSync(join(dir, 'openclaw.plugin.json')));
+  const sourceDir = candidateSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
   if (!sourceDir) {
     return {
       installed: false,
@@ -90,10 +92,10 @@ async function ensureBundledPluginInstalled(
   }
 
   try {
-    mkdirSync(join(homedir(), '.openclaw', 'extensions'), { recursive: true });
-    rmSync(targetDir, { recursive: true, force: true });
-    cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
-    if (!existsSync(targetManifest)) {
+    mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
+    rmSync(fsPath(targetDir), { recursive: true, force: true });
+    copyDirectorySyncSafe(sourceDir, targetDir);
+    if (!existsSync(fsPath(targetManifest))) {
       return { installed: false, warning: `Failed to install ${displayName} plugin mirror (manifest missing).` };
     }
     return {

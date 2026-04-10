@@ -9,7 +9,7 @@ import { AlertCircle, Bot, Loader2, MessageSquare, Settings2, Sparkles, X } from
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Button } from '@/components/ui/button';
-import { useChatStore, type ApprovalDecision, type ApprovalItem } from '@/stores/chat';
+import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -18,12 +18,15 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
+import { ExecutionGraphCard } from './ExecutionGraphCard';
 import { TaskInboxPanel } from './components/TaskInboxPanel';
 import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import { buildChatRows, type ChatRow } from './chat-row-model';
+import { buildChatRows, resolveMessageRowKey, type ChatRow, type ExecutionGraphData } from './chat-row-model';
+import { deriveTaskSteps, parseSubagentCompletionInfo } from './task-visualization';
 import { useChatScrollOrchestrator } from './useChatScrollOrchestrator';
+import { useMinLoading } from './useMinLoading';
 
 const TASK_INBOX_MIN_WIDTH = 260;
 const TASK_INBOX_MAX_WIDTH = 560;
@@ -33,7 +36,19 @@ const CHAT_MAIN_MIN_WIDTH = 520;
 const CHAT_STICKY_BOTTOM_THRESHOLD_PX = 120;
 const CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX = 168;
 const CHAT_VIRTUAL_OVERSCAN = 8;
+const SUBAGENT_HISTORY_LIMIT = 200;
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
+const EMPTY_MESSAGES: RawMessage[] = [];
+const EMPTY_STRING_SET = new Set<string>();
+
+interface CompletionEventAnchor {
+  eventIndex: number;
+  triggerIndex: number;
+  replyIndex: number | null;
+  sessionKey: string;
+  sessionId?: string;
+  agentId?: string;
+}
 
 interface AgentSkillOption {
   id: string;
@@ -85,11 +100,52 @@ function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean
   return isDefault ? '⚙️' : '🤖';
 }
 
+function findCompletionEventAnchors(messages: RawMessage[]): CompletionEventAnchor[] {
+  const anchors: CompletionEventAnchor[] = [];
+  for (const [eventIndex, message] of messages.entries()) {
+    const completionInfo = parseSubagentCompletionInfo(message);
+    if (!completionInfo) continue;
+
+    let triggerIndex = eventIndex;
+    for (let index = eventIndex - 1; index >= 0; index -= 1) {
+      const previous = messages[index];
+      if (previous.role !== 'user') continue;
+      if (parseSubagentCompletionInfo(previous)) continue;
+      triggerIndex = index;
+      break;
+    }
+
+    let replyIndex: number | null = null;
+    for (let index = eventIndex + 1; index < messages.length; index += 1) {
+      if (messages[index]?.role === 'assistant') {
+        replyIndex = index;
+        break;
+      }
+    }
+
+    anchors.push({
+      eventIndex,
+      triggerIndex,
+      replyIndex,
+      sessionKey: completionInfo.sessionKey,
+      ...(completionInfo.sessionId ? { sessionId: completionInfo.sessionId } : {}),
+      ...(completionInfo.agentId ? { agentId: completionInfo.agentId } : {}),
+    });
+  }
+  return anchors;
+}
+
+function isRenderableChatMessage(message: RawMessage): boolean {
+  const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
+  return role !== 'toolresult' && role !== 'tool_result';
+}
+
 export function Chat() {
   const { t } = useTranslation('chat');
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((s) => s.status);
+  const gatewayRpc = useGatewayStore((s) => s.rpc);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
   const messages = useChatStore((s) => s.messages);
@@ -136,6 +192,8 @@ export function Chat() {
   const [skillConfigOpen, setSkillConfigOpen] = useState(false);
   const [skillConfigSaving, setSkillConfigSaving] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [subagentHistoryBySession, setSubagentHistoryBySession] = useState<Record<string, RawMessage[]>>({});
+  const subagentHistoryLoadingRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     try {
@@ -254,6 +312,188 @@ export function Chat() {
   }, [sending, streamingTimestamp]);
 
   const waitingApproval = approvalStatus === 'awaiting_approval';
+  const completionAnchors = useMemo(
+    () => findCompletionEventAnchors(messages),
+    [messages],
+  );
+
+  useEffect(() => {
+    if (!isGatewayRunning) {
+      return;
+    }
+    let cancelled = false;
+    const existing = subagentHistoryBySession;
+    const pendingSessionKeys = Array.from(new Set(
+      completionAnchors
+        .map((anchor) => anchor.sessionKey)
+        .filter((sessionKey) => !!sessionKey && !(sessionKey in existing) && !subagentHistoryLoadingRef.current.has(sessionKey)),
+    ));
+    if (pendingSessionKeys.length === 0) {
+      return;
+    }
+
+    for (const sessionKey of pendingSessionKeys) {
+      subagentHistoryLoadingRef.current.add(sessionKey);
+      void gatewayRpc<Record<string, unknown>>('chat.history', {
+        sessionKey,
+        limit: SUBAGENT_HISTORY_LIMIT,
+      }).then((result) => {
+        if (cancelled) {
+          return;
+        }
+        const loaded = Array.isArray(result.messages) ? result.messages as RawMessage[] : EMPTY_MESSAGES;
+        setSubagentHistoryBySession((previous) => {
+          if (sessionKey in previous) {
+            return previous;
+          }
+          return {
+            ...previous,
+            [sessionKey]: loaded,
+          };
+        });
+      }).catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setSubagentHistoryBySession((previous) => {
+          if (sessionKey in previous) {
+            return previous;
+          }
+          return {
+            ...previous,
+            [sessionKey]: EMPTY_MESSAGES,
+          };
+        });
+      }).finally(() => {
+        subagentHistoryLoadingRef.current.delete(sessionKey);
+      });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [completionAnchors, gatewayRpc, isGatewayRunning, subagentHistoryBySession]);
+
+  const executionGraphs = useMemo<ExecutionGraphData[]>(() => {
+    if (completionAnchors.length === 0) {
+      return [];
+    }
+
+    const messageKeyByIndex = new Map<number, string>();
+    let renderableIndex = 0;
+    for (const [index, message] of messages.entries()) {
+      if (!isRenderableChatMessage(message)) {
+        continue;
+      }
+      messageKeyByIndex.set(index, resolveMessageRowKey(message, renderableIndex));
+      renderableIndex += 1;
+    }
+
+    const graphs: ExecutionGraphData[] = [];
+    for (const [anchorIndex, anchor] of completionAnchors.entries()) {
+      const triggerMessageKey = messageKeyByIndex.get(anchor.triggerIndex) ?? messageKeyByIndex.get(anchor.eventIndex);
+      if (!triggerMessageKey) {
+        continue;
+      }
+      const replyMessageKey = anchor.replyIndex != null ? messageKeyByIndex.get(anchor.replyIndex) : undefined;
+      const includeStreaming = sending && anchorIndex === completionAnchors.length - 1;
+      const mainStart = anchor.triggerIndex;
+      const mainEnd = anchor.replyIndex != null ? anchor.replyIndex + 1 : messages.length;
+      const mainMessages = messages.slice(mainStart, mainEnd);
+      const childMessages = subagentHistoryBySession[anchor.sessionKey] ?? EMPTY_MESSAGES;
+
+      const mainSteps = deriveTaskSteps({
+        messages: mainMessages,
+        streamingMessage: includeStreaming ? streamingMessage : null,
+        streamingTools: includeStreaming ? streamingTools : [],
+        sending: includeStreaming ? sending : false,
+        pendingFinal: includeStreaming ? pendingFinal : false,
+        showThinking,
+      });
+      const childSteps = childMessages.length > 0
+        ? deriveTaskSteps({
+            messages: childMessages,
+            streamingMessage: null,
+            streamingTools: [],
+            sending: false,
+            pendingFinal: false,
+            showThinking,
+          })
+        : [];
+
+      const resolvedAgentName = anchor.agentId
+        ? (agents.find((agent) => agent.id === anchor.agentId)?.name || anchor.agentId)
+        : 'subagent';
+
+      const steps = [...mainSteps];
+      if (childSteps.length > 0) {
+        const childRootId = `child-root:${anchor.sessionKey}`;
+        steps.push({
+          id: childRootId,
+          label: `${resolvedAgentName} subagent`,
+          status: 'completed',
+          kind: 'system',
+          detail: anchor.sessionKey,
+          depth: 1,
+          parentId: 'agent-run',
+        });
+        for (const [stepIndex, step] of childSteps.entries()) {
+          steps.push({
+            ...step,
+            id: `child:${anchor.sessionKey}:${step.id || stepIndex}`,
+            depth: Math.max(step.depth + 1, 2),
+            parentId: childRootId,
+          });
+        }
+      }
+
+      const suppressToolCardMessageKeys: string[] = [];
+      for (let index = mainStart; index < mainEnd; index += 1) {
+        const message = messages[index];
+        if (message?.role !== 'assistant') continue;
+        const key = messageKeyByIndex.get(index);
+        if (key) {
+          suppressToolCardMessageKeys.push(key);
+        }
+      }
+
+      graphs.push({
+        id: `${currentSessionKey}:${anchor.sessionKey}:${anchor.eventIndex}`,
+        anchorMessageKey: triggerMessageKey,
+        triggerMessageKey,
+        ...(replyMessageKey ? { replyMessageKey } : {}),
+        agentLabel: resolvedAgentName,
+        sessionLabel: anchor.sessionId || anchor.sessionKey,
+        steps: steps.slice(0, 32),
+        active: includeStreaming,
+        suppressToolCardMessageKeys,
+      });
+    }
+
+    return graphs;
+  }, [
+    agents,
+    completionAnchors,
+    currentSessionKey,
+    messages,
+    pendingFinal,
+    sending,
+    showThinking,
+    streamingMessage,
+    streamingTools,
+    subagentHistoryBySession,
+  ]);
+
+  const suppressedToolCardRowKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const graph of executionGraphs) {
+      for (const key of graph.suppressToolCardMessageKeys || []) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }, [executionGraphs]);
+
   const chatRows = useMemo(
     () => buildChatRows({
       sessionKey: currentSessionKey,
@@ -265,9 +505,11 @@ export function Chat() {
       streamingMessage,
       streamingTools,
       streamingTimestamp,
+      executionGraphs,
     }),
     [
       currentSessionKey,
+      executionGraphs,
       messages,
       pendingFinal,
       sending,
@@ -278,7 +520,11 @@ export function Chat() {
       waitingApproval,
     ],
   );
-  const isEmptyState = !loading && !sending && chatRows.length === 0;
+  const loadingVisible = useMinLoading(loading && !sending);
+  const hasRenderableRows = chatRows.length > 0;
+  const showBlockingLoading = loadingVisible && !sending && !hasRenderableRows;
+  const showOverlayLoading = loadingVisible && !sending && hasRenderableRows;
+  const isEmptyState = !showBlockingLoading && !sending && chatRows.length === 0;
   const {
     handleViewportPointerDown,
     handleViewportScroll,
@@ -307,6 +553,16 @@ export function Chat() {
     },
   });
   const virtualMessageItems = messageVirtualizer.getVirtualItems();
+  const scrollToRowKey = useCallback((rowKey?: string) => {
+    if (!rowKey) {
+      return;
+    }
+    const targetIndex = chatRows.findIndex((row) => row.key === rowKey);
+    if (targetIndex < 0) {
+      return;
+    }
+    messageVirtualizer.scrollToIndex(targetIndex, { align: 'start' });
+  }, [chatRows, messageVirtualizer]);
   const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
   const availableSkillOptions = useMemo<AgentSkillOption[]>(
@@ -412,55 +668,66 @@ export function Chat() {
           <ChatToolbar />
         </div>
 
-        <div
-          ref={messagesViewportRef}
-          className={cn(
-            'min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6',
-            isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
-          )}
-          onPointerDownCapture={handleViewportPointerDown}
-          onScroll={handleViewportScroll}
-          onTouchMoveCapture={handleViewportTouchMove}
-          onWheelCapture={handleViewportWheel}
-        >
-          <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-center justify-center')}>
-            {loading && !sending ? (
-              <div className="flex h-full items-center justify-center py-20">
-                <LoadingSpinner size="lg" />
-              </div>
-            ) : isEmptyState ? (
-              <WelcomeScreen />
-            ) : (
-              <div
-                ref={messageContentRef}
-                className="relative w-full"
-                style={{ height: messageVirtualizer.getTotalSize() }}
-              >
-                {virtualMessageItems.map((virtualItem) => {
-                  const row = chatRows[virtualItem.index];
-                  if (!row) {
-                    return null;
-                  }
-                  return (
-                    <div
-                      key={virtualItem.key}
-                      data-index={virtualItem.index}
-                      ref={messageVirtualizer.measureElement}
-                      className="absolute left-0 top-0 w-full pb-4"
-                      style={{ transform: `translateY(${virtualItem.start}px)` }}
-                    >
-                      <ChatRowItem
-                        row={row}
-                        showThinking={showThinking}
-                        assistantAvatarEmoji={assistantAvatarEmoji}
-                        userAvatarImageUrl={userAvatarDataUrl}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={messagesViewportRef}
+            className={cn(
+              'h-full overflow-y-auto px-4 py-4 md:px-6',
+              isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
             )}
+            onPointerDownCapture={handleViewportPointerDown}
+            onScroll={handleViewportScroll}
+            onTouchMoveCapture={handleViewportTouchMove}
+            onWheelCapture={handleViewportWheel}
+          >
+            <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-center justify-center')}>
+              {showBlockingLoading ? (
+                <div className="flex h-full items-center justify-center py-20">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : isEmptyState ? (
+                <WelcomeScreen />
+              ) : (
+                <div
+                  ref={messageContentRef}
+                  className="relative w-full"
+                  style={{ height: messageVirtualizer.getTotalSize() }}
+                >
+                  {virtualMessageItems.map((virtualItem) => {
+                    const row = chatRows[virtualItem.index];
+                    if (!row) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={virtualItem.key}
+                        data-index={virtualItem.index}
+                        ref={messageVirtualizer.measureElement}
+                        className="absolute left-0 top-0 w-full pb-4"
+                        style={{ transform: `translateY(${virtualItem.start}px)` }}
+                      >
+                        <ChatRowItem
+                          row={row}
+                          showThinking={showThinking}
+                          assistantAvatarEmoji={assistantAvatarEmoji}
+                          userAvatarImageUrl={userAvatarDataUrl}
+                          suppressedToolCardRowKeys={suppressedToolCardRowKeys}
+                          onJumpToRowKey={scrollToRowKey}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
+          {showOverlayLoading && (
+            <div className="pointer-events-auto absolute inset-0 z-10 flex items-center justify-center bg-background/20 backdrop-blur-[1px]">
+              <div className="rounded-full border border-border bg-background p-2.5 shadow-md">
+                <LoadingSpinner size="md" />
+              </div>
+            </div>
+          )}
         </div>
 
         {error && (
@@ -554,19 +821,37 @@ function ChatRowItem({
   showThinking,
   assistantAvatarEmoji,
   userAvatarImageUrl,
+  suppressedToolCardRowKeys = EMPTY_STRING_SET,
+  onJumpToRowKey,
 }: {
   row: ChatRow;
   showThinking: boolean;
   assistantAvatarEmoji?: string;
   userAvatarImageUrl?: string | null;
+  suppressedToolCardRowKeys?: Set<string>;
+  onJumpToRowKey?: (rowKey?: string) => void;
 }) {
   if (row.kind === 'message') {
     return (
       <ChatMessage
         message={row.message}
         showThinking={showThinking}
+        suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
         assistantAvatarEmoji={assistantAvatarEmoji}
         userAvatarImageUrl={userAvatarImageUrl}
+      />
+    );
+  }
+
+  if (row.kind === 'execution_graph') {
+    return (
+      <ExecutionGraphCard
+        agentLabel={row.graph.agentLabel}
+        sessionLabel={row.graph.sessionLabel}
+        steps={row.graph.steps}
+        active={row.graph.active}
+        onJumpToTrigger={() => onJumpToRowKey?.(row.graph.triggerMessageKey)}
+        onJumpToReply={() => onJumpToRowKey?.(row.graph.replyMessageKey)}
       />
     );
   }

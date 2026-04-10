@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
+import { getHostApiToken } from '../../api/server';
 
 type HostApiFetchRequest = {
   path?: string;
@@ -11,6 +12,8 @@ type HostApiFetchRequest = {
 };
 
 export function registerHostApiProxyHandlers(): void {
+  ipcMain.handle('hostapi:token', () => getHostApiToken());
+
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
     try {
       const port = getPort('MATCHACLAW_HOST_API');
@@ -24,6 +27,7 @@ export function registerHostApiProxyHandlers(): void {
           : 15000;
 
       const headers: Record<string, string> = { ...(request?.headers ?? {}) };
+      headers.Authorization = `Bearer ${getHostApiToken()}`;
       let body: string | undefined;
       if (request?.body !== undefined && request.body !== null && method !== 'GET' && method !== 'HEAD') {
         body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);

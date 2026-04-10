@@ -26,6 +26,11 @@ type ProviderAccountLike = {
 
 type BrowserOAuthProviderType = 'google' | 'openai';
 type DeviceOAuthProviderType = 'minimax-portal' | 'minimax-portal-cn' | 'qwen-portal';
+const LEGACY_DEVICE_OAUTH_DEFAULT_MODELS: Record<DeviceOAuthProviderType, string[]> = {
+  'minimax-portal': ['MiniMax-M2.5'],
+  'minimax-portal-cn': ['MiniMax-M2.5'],
+  'qwen-portal': [],
+};
 
 function extractModelId(modelRef: string | undefined): string | undefined {
   if (!modelRef) return undefined;
@@ -37,6 +42,33 @@ function getBrowserOAuthDefaultModelId(providerType: BrowserOAuthProviderType): 
     ? GOOGLE_BROWSER_OAUTH_DEFAULT_MODEL_REF
     : OPENAI_BROWSER_OAUTH_DEFAULT_MODEL_REF;
   return extractModelId(ref) || ref;
+}
+
+function normalizeModelString(model: string | undefined): string | undefined {
+  const value = model?.trim();
+  return value || undefined;
+}
+
+function resolveDeviceOAuthModel(
+  providerType: DeviceOAuthProviderType,
+  existingModel: string | undefined,
+  defaultModel: string | undefined,
+): string | undefined {
+  const normalizedExisting = normalizeModelString(existingModel);
+  const normalizedDefault = normalizeModelString(defaultModel);
+  if (!normalizedExisting) {
+    return normalizedDefault;
+  }
+  if (!normalizedDefault) {
+    return normalizedExisting;
+  }
+
+  const legacyDefaults = LEGACY_DEVICE_OAUTH_DEFAULT_MODELS[providerType];
+  if (normalizedExisting === normalizedDefault || legacyDefaults.includes(normalizedExisting)) {
+    return normalizedDefault;
+  }
+
+  return normalizedExisting;
 }
 
 export function normalizeBrowserOAuthExistingModel(
@@ -109,7 +141,7 @@ export function buildDeviceOAuthAccount(input: {
     authMode: 'oauth_device',
     baseUrl: input.baseUrl,
     apiProtocol: input.existingAccount?.apiProtocol,
-    model: input.existingAccount?.model || input.defaultModel,
+    model: resolveDeviceOAuthModel(input.providerType, input.existingAccount?.model, input.defaultModel),
     fallbackModels: input.existingAccount?.fallbackModels,
     fallbackAccountIds: input.existingAccount?.fallbackAccountIds,
     enabled: input.existingAccount?.enabled ?? true,

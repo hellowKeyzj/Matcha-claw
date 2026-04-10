@@ -61,7 +61,15 @@ export function createTailLocalBusinessHandlers(
     },
     {
       key: 'clawhub',
-      handle: createPrefixedRouteHandler('/api/clawhub/', async (request) => await handleClawHubRoute(request.method, request.routePath, request.payload)),
+      handle: createPrefixedRouteHandler('/api/clawhub/', async (request) => await handleClawHubRoute(
+        request.method,
+        request.routePath,
+        request.payload,
+        {
+          requestParentShellAction: context.requestParentShellAction,
+          mapParentTransportResponse: context.mapParentTransportResponse,
+        },
+      )),
     },
     {
       key: 'toolchain_uv',

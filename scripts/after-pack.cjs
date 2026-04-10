@@ -120,18 +120,54 @@ function cleanupKoffi(nodeModulesDir, platform, arch) {
 // ── Platform-specific: scoped native packages ────────────────────────────────
 // Packages like @napi-rs/canvas-darwin-arm64, @img/sharp-linux-x64, etc.
 // Only the variant matching the target platform should survive.
+//
+// 某些包使用了非标准平台名：
+//   - @node-llama-cpp: "mac" 代替 "darwin"，"win" 代替 "win32"
+//   - sqlite-vec: "windows" 代替 "win32"（非 scoped，单独处理）
+// 在比较前统一归一化。
 
+const PLATFORM_ALIASES = {
+  darwin: 'darwin', mac: 'darwin',
+  linux: 'linux', linuxmusl: 'linux',
+  win32: 'win32', win: 'win32', windows: 'win32',
+};
+
+// 每个正则都必须满足：
+// - 捕获组 1 = platform
+// - 捕获组 2 = arch
+// 允许复合 arch 后缀（如 x64-msvc / arm64-gnu / arm64-metal），
+// 后续会截取首个 "-" 前作为基础架构。
 const PLATFORM_NATIVE_SCOPES = {
   '@napi-rs': /^canvas-(darwin|linux|win32)-(x64|arm64)/,
-  '@img': /^sharp(?:-libvips)?-(darwin|linux|win32)-(x64|arm64)/,
+  '@img': /^sharp(?:-libvips)?-(darwin|linux(?:musl)?|win32)-(x64|arm64|arm|ppc64|riscv64|s390x)/,
   '@mariozechner': /^clipboard-(darwin|linux|win32)-(x64|arm64|universal)/,
-  // @lydell/node-pty-win32-x64, @lydell/node-pty-linux-x64-musl, ...
+  '@snazzah': /^davey-(darwin|linux|android|freebsd|win32|wasm32)-(x64|arm64|arm|ia32|arm64-gnu|arm64-musl|x64-gnu|x64-musl|x64-msvc|arm64-msvc|ia32-msvc|arm-eabi|arm-gnueabihf|wasi)/,
   '@lydell': /^node-pty-(darwin|linux|win32)-(x64|arm64|ia32|armv7l)(?:-.+)?/,
+  '@reflink': /^reflink-(darwin|linux|win32)-(x64|arm64|x64-gnu|x64-musl|arm64-gnu|arm64-musl|x64-msvc|arm64-msvc)/,
+  '@node-llama-cpp': /^(mac|linux|win)-(arm64|x64|armv7l)(-metal|-cuda|-cuda-ext|-vulkan)?$/,
+  '@esbuild': /^(darwin|linux|win32|android|freebsd|netbsd|openbsd|sunos|aix|openharmony)-(x64|arm64|arm|ia32|loong64|mips64el|ppc64|riscv64|s390x)/,
 };
+
+// 非 scoped 的原生包，命名规则为 <name>-<platform>-<arch>。
+// 每个条目：{ pattern }，其中 pattern 需捕获 (platform, arch)。
+const UNSCOPED_NATIVE_PACKAGES = [
+  // sqlite-vec 使用 "windows" 而不是 "win32"
+  { pattern: /^sqlite-vec-(darwin|linux|windows)-(x64|arm64)$/ },
+];
+
+/**
+ * 从复合架构值中提取基础 arch。
+ * 例如："x64-msvc" → "x64"，"arm64-gnu" → "arm64"，"arm64-metal" → "arm64"
+ */
+function baseArch(rawArch) {
+  const dash = rawArch.indexOf('-');
+  return dash > 0 ? rawArch.slice(0, dash) : rawArch;
+}
 
 function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
   let removed = 0;
 
+  // 1. 清理 scoped 原生包（如 @snazzah/davey-darwin-arm64）
   for (const [scope, pattern] of Object.entries(PLATFORM_NATIVE_SCOPES)) {
     const scopeDir = join(nodeModulesDir, scope);
     if (!existsSync(scopeDir)) continue;
@@ -140,8 +176,8 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
       const match = entry.match(pattern);
       if (!match) continue; // not a platform-specific package, leave it
 
-      const pkgPlatform = match[1];
-      const pkgArch = match[2];
+      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
+      const pkgArch = baseArch(match[2]);
 
       const isMatch =
         pkgPlatform === platform &&
@@ -150,6 +186,31 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
       if (!isMatch) {
         try {
           rmSync(join(scopeDir, entry), { recursive: true, force: true });
+          removed++;
+        } catch { /* */ }
+      }
+    }
+  }
+
+  // 2. 清理非 scoped 原生包（如 sqlite-vec-darwin-arm64）
+  for (const { pattern } of UNSCOPED_NATIVE_PACKAGES) {
+    let entries;
+    try { entries = readdirSync(nodeModulesDir); } catch { continue; }
+
+    for (const entry of entries) {
+      const match = entry.match(pattern);
+      if (!match) continue;
+
+      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
+      const pkgArch = baseArch(match[2]);
+
+      const isMatch =
+        pkgPlatform === platform &&
+        (pkgArch === arch || pkgArch === 'universal');
+
+      if (!isMatch) {
+        try {
+          rmSync(join(nodeModulesDir, entry), { recursive: true, force: true });
           removed++;
         } catch { /* */ }
       }
@@ -183,7 +244,7 @@ const MODULE_PATCHES = {
 };
 
 function patchBrokenModules(nodeModulesDir) {
-  const { writeFileSync } = require('fs');
+  const { readFileSync, writeFileSync } = require('fs');
   let count = 0;
   for (const [rel, content] of Object.entries(MODULE_PATCHES)) {
     const target = join(nodeModulesDir, rel);
@@ -192,8 +253,85 @@ function patchBrokenModules(nodeModulesDir) {
       count++;
     }
   }
+
+  // https-proxy-agent@8.x 仅声明了 ESM 导出，OpenClaw 网关在部分路径下通过
+  // require() 加载会触发 ERR_PACKAGE_PATH_NOT_EXPORTED。这里补上 require 分支，
+  // 保证打包后运行时兼容 CJS 调用链。
+  const hpaPkgPath = join(nodeModulesDir, 'https-proxy-agent', 'package.json');
+  if (existsSync(hpaPkgPath)) {
+    try {
+      const raw = readFileSync(hpaPkgPath, 'utf8');
+      const pkg = JSON.parse(raw);
+      const exp = pkg.exports;
+      if (exp && exp.import && !exp.require && !exp['.']) {
+        pkg.exports = {
+          '.': {
+            import: exp.import,
+            require: exp.import,
+            default: typeof exp.import === 'string' ? exp.import : exp.import.default,
+          },
+        };
+        writeFileSync(hpaPkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+        count++;
+        console.log('[after-pack] 🩹 Patched https-proxy-agent exports for CJS compatibility');
+      }
+    } catch (error) {
+      console.warn(`[after-pack] ⚠️  Failed to patch https-proxy-agent: ${error.message}`);
+    }
+  }
+
   if (count > 0) {
     console.log(`[after-pack] 🩹 Patched ${count} broken module(s) in ${nodeModulesDir}`);
+  }
+}
+
+// ── Plugin ID mismatch patcher ───────────────────────────────────────────────
+// 某些插件（已知 wecom/qqbot）在编译产物里硬编码了旧 id，导致和
+// openclaw.plugin.json 声明不一致，网关会拒绝加载。
+const PLUGIN_ID_FIXES = {
+  'wecom-openclaw-plugin': 'wecom',
+  qqbot: 'openclaw-qqbot',
+};
+
+function patchPluginIds(pluginDir, expectedId) {
+  const { readFileSync, writeFileSync } = require('fs');
+  const pkgJsonPath = join(pluginDir, 'package.json');
+  if (!existsSync(pkgJsonPath)) return;
+
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+  } catch {
+    return;
+  }
+
+  const entryFiles = [pkg.main, pkg.module].filter(Boolean);
+  for (const entry of entryFiles) {
+    const entryPath = join(pluginDir, entry);
+    if (!existsSync(entryPath)) continue;
+
+    let content;
+    try {
+      content = readFileSync(entryPath, 'utf8');
+    } catch {
+      continue;
+    }
+    let patched = false;
+
+    for (const [wrongId, correctId] of Object.entries(PLUGIN_ID_FIXES)) {
+      if (correctId !== expectedId) continue;
+      const pattern = new RegExp(`(\\bid\\s*:\\s*)(["'])${wrongId.replace(/-/g, '\\-')}\\2`, 'g');
+      const replaced = content.replace(pattern, `$1$2${correctId}$2`);
+      if (replaced !== content) {
+        content = replaced;
+        patched = true;
+        console.log(`[after-pack] 🩹 Patching plugin ID in ${entry}: "${wrongId}" → "${correctId}"`);
+      }
+    }
+
+    if (patched) {
+      writeFileSync(entryPath, content, 'utf8');
+    }
   }
 }
 
@@ -375,7 +513,7 @@ exports.default = async function afterPack(context) {
     { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
     { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-    { npmName: '@sliverp/qqbot', pluginId: 'qqbot' },
+    { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
     {
       pluginId: 'task-manager',
       localSourceCandidates: [
@@ -411,6 +549,7 @@ exports.default = async function afterPack(context) {
         cleanupKoffi(pluginNM, platform, arch);
         cleanupNativePlatformPackages(pluginNM, platform, arch);
       }
+      patchPluginIds(pluginDestDir, pluginId);
     }
   }
 
@@ -430,4 +569,12 @@ exports.default = async function afterPack(context) {
   if (nativeRemoved > 0) {
     console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
   }
+};
+
+exports.__test__ = {
+  PLATFORM_ALIASES,
+  PLATFORM_NATIVE_SCOPES,
+  UNSCOPED_NATIVE_PACKAGES,
+  baseArch,
+  cleanupNativePlatformPackages,
 };

@@ -49,6 +49,36 @@ vi.spyOn(hostApiModule.gatewayClient, 'rpc').mockImplementation(async <TResult =
   return response as TResult;
 });
 
+vi.spyOn(hostApiModule, 'hostGatewayRequest').mockImplementation(async <TResult = unknown>(
+  method: string,
+  params?: unknown,
+  timeoutMs?: number,
+) => {
+  const response = await gatewayClientRequestMock(method, params, timeoutMs);
+  if (isGatewayRpcEnvelope(response)) {
+    return response as GatewayRpcEnvelope<TResult>;
+  }
+  return {
+    success: true,
+    result: response as TResult,
+  };
+});
+
+vi.spyOn(hostApiModule, 'hostGatewayRpc').mockImplementation(async <TResult = unknown>(
+  method: string,
+  params?: unknown,
+  timeoutMs?: number,
+) => {
+  const response = await gatewayClientRpcMock(method, params, timeoutMs);
+  if (isGatewayRpcEnvelope(response)) {
+    if (!response.success) {
+      throw new Error(response.error || `Gateway RPC failed: ${method}`);
+    }
+    return response.result as TResult;
+  }
+  return response as TResult;
+});
+
 vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unknown>(
   path: string,
   init?: RequestInit & { timeoutMs?: number },
