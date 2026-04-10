@@ -24,4 +24,16 @@ describe('provider accounts helper', () => {
     });
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts');
   });
+
+  it('fetchProviderSnapshot 会归一化异常返回结构，避免空值崩溃', async () => {
+    hostApiFetchMock.mockResolvedValue(undefined);
+
+    const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
+    await expect(fetchProviderSnapshot()).resolves.toEqual({
+      accounts: [],
+      statuses: [],
+      vendors: [],
+      defaultAccountId: null,
+    });
+  });
 });

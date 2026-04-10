@@ -322,6 +322,7 @@ let _historyPollTimer: ReturnType<typeof setTimeout> | null = null;
 const CHAT_HISTORY_FULL_LIMIT = 200;
 const CHAT_HISTORY_QUIET_PROBE_LIMIT = 64;
 const CHAT_HISTORY_QUIET_FULL_LIMIT = 120;
+const CHAT_HISTORY_LOADING_TIMEOUT_MS = 15_000;
 const _historyFingerprintBySession = new Map<string, string>();
 const _historyProbeFingerprintBySession = new Map<string, string>();
 const _historyQuickFingerprintBySession = new Map<string, string>();
@@ -1188,6 +1189,16 @@ function parseSessionUpdatedAtMs(value: unknown): number | undefined {
   return undefined;
 }
 
+function isTrulyEmptyNonMainSession(
+  currentSessionKey: string,
+  state: Pick<ChatState, 'messages' | 'sessionLastActivity' | 'sessionLabels'>,
+): boolean {
+  return !currentSessionKey.endsWith(':main')
+    && state.messages.length === 0
+    && !state.sessionLastActivity[currentSessionKey]
+    && !state.sessionLabels[currentSessionKey];
+}
+
 async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promise<RawMessage[]> {
   if (!isCronSessionKey(sessionKey)) return [];
   try {
@@ -1259,6 +1270,22 @@ function isToolResultRole(role: unknown): boolean {
   if (!role) return false;
   const normalized = String(role).toLowerCase();
   return normalized === 'toolresult' || normalized === 'tool_result';
+}
+
+function isInternalMessage(msg: Pick<RawMessage, 'role' | 'content'>): boolean {
+  if (!msg) {
+    return false;
+  }
+  if (msg.role === 'system') {
+    return true;
+  }
+  if (msg.role === 'assistant') {
+    const text = getMessageText(msg.content).trim();
+    if (/^(HEARTBEAT_OK|NO_REPLY)$/.test(text)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -1552,6 +1579,14 @@ function hasTimeoutSignal(error: unknown): boolean {
   const msg = String(err.message || error);
   const code = typeof err.code === 'string' ? err.code.toUpperCase() : '';
   return code.includes('TIMEOUT') || msg.toLowerCase().includes('timeout');
+}
+
+function isRecoverableChatSendTimeout(errorMessage: string): boolean {
+  const normalized = errorMessage.trim();
+  return (
+    normalized.includes('RPC timeout: chat.send')
+    || normalized.includes('Gateway RPC timeout: chat.send')
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1922,11 +1957,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
+    if (key === get().currentSessionKey) {
+      return;
+    }
     clearHistoryPoll();
     clearErrorRecoveryTimer();
     const state = get();
-    const { currentSessionKey, messages } = state;
-    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const { currentSessionKey } = state;
+    const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
     if (leavingEmpty) {
       _historyFingerprintBySession.delete(currentSessionKey);
       _historyProbeFingerprintBySession.delete(currentSessionKey);
@@ -2083,8 +2121,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // NOTE: We intentionally do NOT call sessions.reset on the old session.
     // sessions.reset archives (renames) the session JSONL file, making old
     // conversation history inaccessible when the user switches back to it.
-    const { currentSessionKey, messages } = get();
-    const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const state = get();
+    const { currentSessionKey } = state;
+    const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
     if (leavingEmpty) {
       _historyFingerprintBySession.delete(currentSessionKey);
       _historyProbeFingerprintBySession.delete(currentSessionKey);
@@ -2131,12 +2170,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Cleanup empty session on navigate away ──
 
   cleanupEmptySession: () => {
-    const { currentSessionKey, messages } = get();
+    const state = get();
+    const { currentSessionKey } = state;
     // Only remove non-main sessions that were never used (no messages sent).
     // This mirrors the "leavingEmpty" logic in switchSession so that creating
     // a new session and immediately navigating away doesn't leave a ghost entry
     // in the sidebar.
-    const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
+    const isEmptyNonMain = isTrulyEmptyNonMainSession(currentSessionKey, state);
     if (!isEmptyNonMain) return;
     _historyFingerprintBySession.delete(currentSessionKey);
     _historyProbeFingerprintBySession.delete(currentSessionKey);
@@ -2162,7 +2202,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadHistory: async (quiet = false) => {
     const requestedSessionKey = get().currentSessionKey;
-    if (!quiet) set({ loading: true, error: null });
+    let loadingSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+    if (!quiet) {
+      set({ loading: true, error: null });
+      loadingSafetyTimer = setTimeout(() => {
+        set((state) => {
+          if (state.currentSessionKey !== requestedSessionKey || !state.loading) {
+            return state;
+          }
+          return { loading: false };
+        });
+      }, CHAT_HISTORY_LOADING_TIMEOUT_MS);
+    }
 
     const applyLoadedMessages = (rawMessages: RawMessage[], thinkingLevel: string | null) => {
       const quickFingerprint = buildQuickRawHistoryFingerprint(rawMessages, thinkingLevel);
@@ -2187,7 +2238,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const filteredMessages: RawMessage[] = [];
       for (let i = 0; i < messagesWithToolImages.length; i += 1) {
         const current = messagesWithToolImages[i];
-        if (isToolResultRole(current.role)) continue;
+        if (isToolResultRole(current.role) || isInternalMessage(current)) continue;
         const next = i + 1 < messagesWithToolImages.length ? messagesWithToolImages[i + 1] : undefined;
         filteredMessages.push(
           sanitizeIntermediateToolFillerMessage(current, {
@@ -2413,6 +2464,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         _historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
         set({ messages: [], loading: false });
       }
+    } finally {
+      if (loadingSafetyTimer) {
+        clearTimeout(loadingSafetyTimer);
+      }
     }
   },
 
@@ -2608,6 +2663,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
 
       if (!result.success) {
+        const errorMsg = result.error || 'Failed to send message';
+        if (isRecoverableChatSendTimeout(errorMsg)) {
+          set({ error: errorMsg });
+          return;
+        }
         await get().syncPendingApprovals(currentSessionKey);
         const state = get();
         const pendingApprovals = state.pendingApprovalsBySession[currentSessionKey] ?? [];
@@ -2621,11 +2681,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return;
         }
         clearHistoryPoll();
-        set({ error: result.error || 'Failed to send message', sending: false });
+        set({ error: errorMsg, sending: false });
       } else if (result.result?.runId) {
         set({ activeRunId: result.result.runId });
       }
     } catch (err) {
+      const errMsg = String(err);
+      if (isRecoverableChatSendTimeout(errMsg)) {
+        set({ error: errMsg });
+        return;
+      }
       if (hasTimeoutSignal(err)) {
         await get().syncPendingApprovals(currentSessionKey);
       }
@@ -2644,7 +2709,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
       clearHistoryPoll();
-      set({ error: String(err), sending: false, approvalStatus: 'idle' });
+      set({ error: errMsg, sending: false, approvalStatus: 'idle' });
     }
   },
 
@@ -2850,11 +2915,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
       case 'delta': {
-        // If we're receiving new deltas, the Gateway has recovered from any
-        // prior error — cancel the error finalization timer and clear the
-        // stale error banner so the user sees the live stream again.
+        // Clear stale error state (including chat.send timeout) once new data arrives.
         if (_errorRecoveryTimer) {
           clearErrorRecoveryTimer();
+        }
+        if (get().error) {
           set({ error: null });
         }
         const updates = collectToolUpdates(event.message, resolvedState);
@@ -2863,6 +2928,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (event.message && typeof event.message === 'object') {
               const msgRole = (event.message as RawMessage).role;
               if (isToolResultRole(msgRole)) return s.streamingMessage;
+              const msgObj = event.message as RawMessage;
+              if (s.streamingMessage && msgObj.content === undefined) {
+                return s.streamingMessage;
+              }
             }
             return event.message ?? s.streamingMessage;
           })(),

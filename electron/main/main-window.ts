@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron';
 import { join } from 'path';
+import { logger } from '../utils/logger';
 
 function getIconsDir(): string {
   if (app.isPackaged) {
@@ -22,6 +23,8 @@ function getAppIcon(): Electron.NativeImage | undefined {
 
 export function createMainWindow(): BrowserWindow {
   const isMac = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
+  const useCustomTitleBar = isWindows;
 
   const win = new BrowserWindow({
     width: 1280,
@@ -36,9 +39,9 @@ export function createMainWindow(): BrowserWindow {
       sandbox: false,
       webviewTag: true,
     },
-    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    titleBarStyle: isMac ? 'hiddenInset' : useCustomTitleBar ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 16 } : undefined,
-    frame: isMac,
+    frame: isMac || !useCustomTitleBar,
     show: false,
   });
 
@@ -47,7 +50,16 @@ export function createMainWindow(): BrowserWindow {
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        void shell.openExternal(url);
+      } else {
+        logger.warn(`Blocked openExternal for disallowed protocol: ${parsed.protocol}`);
+      }
+    } catch {
+      logger.warn(`Blocked openExternal for malformed URL: ${url}`);
+    }
     return { action: 'deny' };
   });
 

@@ -196,11 +196,11 @@ export function SubagentFormDialog({
   }, [basicInfoLocked, mode, open, values.workspace]);
 
   useEffect(() => {
-    if (!open || values.model || modelOptions.length !== 1) {
+    if (!open || mode !== 'create' || values.model || modelOptions.length !== 1) {
       return;
     }
     setValues((prev) => ({ ...prev, model: modelOptions[0].id }));
-  }, [modelOptions, open, values.model]);
+  }, [mode, modelOptions, open, values.model]);
 
   useEffect(() => {
     if (!open) {
@@ -224,14 +224,14 @@ export function SubagentFormDialog({
   const duplicateName = mode === 'create'
     ? hasSubagentNameConflict(values.name, existingAgents)
     : false;
-  const missingModel = !values.model.trim();
+  const missingModel = mode === 'create' && !values.model.trim();
   const hasModelOptions = resolvedModelOptions.length > 0;
   const canSubmit = !submitting
     && !!values.name.trim()
     && (basicInfoLocked || !!values.workspace.trim())
     && !duplicateName
     && !missingModel
-    && hasModelOptions
+    && (mode === 'edit' || hasModelOptions)
     && !modelsLoading;
 
   return (
@@ -371,14 +371,18 @@ export function SubagentFormDialog({
                 <Select
                   id="subagent-model"
                   value={values.model}
-                  disabled={modelsLoading || !hasModelOptions}
+                  disabled={modelsLoading || (mode === 'create' && !hasModelOptions)}
                   onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))}
                 >
-                  <option value="">
-                    {modelsLoading
-                      ? t('form.modelsLoading')
-                      : t('form.selectModel')}
-                  </option>
+                  {mode === 'edit' ? (
+                    <option value="">{t('form.useDefaultModel')}</option>
+                  ) : (
+                    <option value="">
+                      {modelsLoading
+                        ? t('form.modelsLoading')
+                        : t('form.selectModel')}
+                    </option>
+                  )}
                   {resolvedModelOptions.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.provider ? `${model.id} (${model.provider})` : model.id}

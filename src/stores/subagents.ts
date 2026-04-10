@@ -657,6 +657,56 @@ function upsertAgentSkillsInConfig(params: {
   return nextConfig;
 }
 
+function upsertAgentModelInConfig(params: {
+  config: ConfigGetResult['config'];
+  agentId: string;
+  model: string | undefined;
+}): ConfigGetResult['config'] {
+  const nextConfig = cloneConfigForWrite(params.config);
+  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
+    ? { ...nextConfig.agents }
+    : {};
+  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
+  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
+  if (!normalizedTargetId) {
+    return nextConfig;
+  }
+
+  const targetIndex = list.findIndex((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return false;
+    }
+    const id = getOptionalString((entry as { id?: unknown }).id);
+    if (!id) {
+      return false;
+    }
+    return normalizeAgentIdForComparison(id) === normalizedTargetId;
+  });
+
+  const current = targetIndex >= 0
+    ? list[targetIndex]
+    : { id: normalizedTargetId };
+  const nextEntry = (current && typeof current === 'object')
+    ? { ...current } as Record<string, unknown>
+    : ({ id: normalizedTargetId } as Record<string, unknown>);
+
+  if (params.model === undefined) {
+    delete nextEntry.model;
+  } else {
+    nextEntry.model = params.model;
+  }
+
+  if (targetIndex >= 0) {
+    list[targetIndex] = nextEntry as typeof list[number];
+  } else {
+    list.push(nextEntry as typeof list[number]);
+  }
+
+  nextAgents.list = list;
+  nextConfig.agents = nextAgents;
+  return nextConfig;
+}
+
 async function updateAgentSkillsConfig(agentId: string, skills: string[] | undefined): Promise<void> {
   const configGetResult = await rpc<ConfigGetResult>('config.get', {});
   const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
@@ -667,6 +717,23 @@ async function updateAgentSkillsConfig(agentId: string, skills: string[] | undef
     config: configGetResult.config,
     agentId,
     skills,
+  });
+  await rpc('config.set', {
+    raw: JSON.stringify(nextConfig),
+    baseHash: hash,
+  });
+}
+
+async function updateAgentModelConfig(agentId: string, model: string | undefined): Promise<void> {
+  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
+  if (!hash) {
+    throw new Error('Missing config hash for model update');
+  }
+  const nextConfig = upsertAgentModelInConfig({
+    config: configGetResult.config,
+    agentId,
+    model,
   });
   await rpc('config.set', {
     raw: JSON.stringify(nextConfig),
@@ -1482,15 +1549,19 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       : normalizeSkillAllowlist(skills);
     const currentSkills = normalizeSkillAllowlist(current?.skills);
     const skillsChanged = skillChangeRequested && !equalSkillAllowlist(currentSkills, nextSkills);
-    const basicChanged = !(
+    const identityChanged = !(
       current
       && equalOptionalTrimmedString(current.name, name)
       && equalOptionalTrimmedString(current.workspace, workspace)
+    );
+    const modelChanged = !(
+      current
       && equalOptionalTrimmedString(current.model, model)
     );
 
     if (
-      !basicChanged
+      !identityChanged
+      && !modelChanged
       && !skillsChanged
     ) {
       return;
@@ -1502,13 +1573,21 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     set({ loading: true, error: null });
     try {
-      if (basicChanged) {
-        await rpc('agents.update', {
+      if (identityChanged || (modelChanged && nextModel !== undefined)) {
+        const updatePayload: Record<string, unknown> = {
           agentId,
-          name: nextName,
-          workspace: nextWorkspace,
-          model: nextModel,
-        });
+        };
+        if (identityChanged) {
+          updatePayload.name = nextName;
+          updatePayload.workspace = nextWorkspace;
+        }
+        if (modelChanged && nextModel !== undefined) {
+          updatePayload.model = nextModel;
+        }
+        await rpc('agents.update', updatePayload);
+      }
+      if (modelChanged && nextModel === undefined) {
+        await updateAgentModelConfig(agentId, undefined);
       }
       if (skillsChanged) {
         await updateAgentSkillsConfig(agentId, nextSkills);

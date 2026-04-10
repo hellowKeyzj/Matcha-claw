@@ -1,7 +1,8 @@
 /**
  * TitleBar Component
  * macOS: empty drag region (native traffic lights handled by hiddenInset).
- * Windows/Linux: icon + "MatchaClaw" on left, minimize/maximize/close on right.
+ * Windows: custom title bar with window controls.
+ * Linux: use native title bar for better IME compatibility.
  */
 import { useState, useEffect } from 'react';
 import { Minus, Square, X, Copy, Settings } from 'lucide-react';
@@ -10,11 +11,14 @@ import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
 import { invokeIpc } from '@/lib/api-client';
 
-const isMac = window.electron?.platform === 'darwin';
-
 export function TitleBar() {
-  if (isMac) {
+  const platform = window.electron?.platform;
+  if (platform === 'darwin') {
     return <div className="drag-region h-12 shrink-0 border-b border-border/70 bg-card/96 backdrop-blur-xl" />;
+  }
+
+  if (platform !== 'win32') {
+    return null;
   }
 
   return <WindowsTitleBar />;

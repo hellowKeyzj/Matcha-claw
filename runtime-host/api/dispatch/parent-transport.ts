@@ -11,6 +11,7 @@ export type ParentExecutionSyncAction =
   | 'restart_runtime_host';
 
 export type ParentShellAction =
+  | 'shell_open_path'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'

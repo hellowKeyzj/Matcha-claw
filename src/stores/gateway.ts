@@ -257,6 +257,7 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
           activeRunId: null,
           pendingFinal: false,
           lastUserMessageAt: null,
+          error: null,
         });
       }
     } catch {

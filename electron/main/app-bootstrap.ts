@@ -20,6 +20,8 @@ import { emitHostEvent, registerHostEventBridge } from './host-event-bridge';
 import { createMainWindow } from './main-window';
 import { isQuitting } from './app-state';
 
+const isE2EMode = process.env.CLAWX_E2E === '1';
+
 function registerGatewayControlUiSecurityHeaders(): void {
   session.defaultSession.webRequest.onHeadersReceived(
     { urls: ['http://127.0.0.1:18789/*', 'http://localhost:18789/*'] },
@@ -112,16 +114,24 @@ export async function bootstrapMainApplication(deps: {
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}`,
   );
 
-  void warmupNetworkOptimization();
+  if (!isE2EMode) {
+    void warmupNetworkOptimization();
+  } else {
+    logger.info('E2E mode enabled: startup side effects are minimized');
+  }
 
   await applyProxySettings();
-  await syncLaunchAtStartupSettingFromStore();
+  if (!isE2EMode) {
+    await syncLaunchAtStartupSettingFromStore();
+  }
 
   createMenu();
 
   const mainWindow = createMainWindow();
   deps.setMainWindow(mainWindow);
-  createTray(mainWindow);
+  if (!isE2EMode) {
+    createTray(mainWindow);
+  }
 
   try {
     await deps.runtimeHostManager.start();
@@ -145,7 +155,9 @@ export async function bootstrapMainApplication(deps: {
     runtimeHost: deps.runtimeHostManager,
   });
 
-  registerUpdateHandlers(appUpdater, mainWindow);
+  if (!isE2EMode) {
+    registerUpdateHandlers(appUpdater, mainWindow);
+  }
   registerMainWindowLifecycle({
     mainWindow,
     clearMainWindowRef: () => deps.setMainWindow(null),
@@ -158,14 +170,20 @@ export async function bootstrapMainApplication(deps: {
     getMainWindow: () => mainWindow,
   });
 
-  startNonBlockingBootstrapTasks(mainWindow);
+  if (!isE2EMode) {
+    startNonBlockingBootstrapTasks(mainWindow);
+  }
 
-  await autoStartGatewayIfEnabled({
-    mainWindow,
-    gatewayManager: deps.gatewayManager,
-    runtimeHostManager: deps.runtimeHostManager,
-    hostEventBus: deps.hostEventBus,
-  });
+  if (!isE2EMode) {
+    await autoStartGatewayIfEnabled({
+      mainWindow,
+      gatewayManager: deps.gatewayManager,
+      runtimeHostManager: deps.runtimeHostManager,
+      hostEventBus: deps.hostEventBus,
+    });
+  } else {
+    logger.info('E2E mode: skip gateway auto-start');
+  }
 
   return { mainWindow, hostApiServer };
 }

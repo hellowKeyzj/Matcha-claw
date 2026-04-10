@@ -11,6 +11,7 @@ interface StatusBadgeProps {
   status: Status;
   label?: string;
   showDot?: boolean;
+  className?: string;
 }
 
 const statusConfig: Record<Status, { label: string; variant: 'success' | 'secondary' | 'warning' | 'destructive' }> = {
@@ -24,12 +25,12 @@ const statusConfig: Record<Status, { label: string; variant: 'success' | 'second
   error: { label: 'Error', variant: 'destructive' },
 };
 
-export function StatusBadge({ status, label, showDot = true }: StatusBadgeProps) {
+export function StatusBadge({ status, label, showDot = true, className }: StatusBadgeProps) {
   const config = statusConfig[status];
   const displayLabel = label || config.label;
   
   return (
-    <Badge variant={config.variant} className="gap-1.5">
+    <Badge variant={config.variant} className={cn('gap-1.5', className)}>
       {showDot && (
         <span
           className={cn(

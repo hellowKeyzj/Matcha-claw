@@ -48,6 +48,9 @@ describe('skills store availability and search cache', () => {
             config: ['baseUrl'],
             os: ['linux'],
           },
+          source: 'openclaw-workspace',
+          baseDir: '/tmp/openclaw/workspace/skills/foo-skill',
+          filePath: '/tmp/openclaw/workspace/skills/foo-skill/SKILL.md',
         },
       ],
     });
@@ -55,6 +58,9 @@ describe('skills store availability and search cache', () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/skills/configs') {
         return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
       }
       throw new Error(`Unexpected hostApiFetch path: ${path}`);
     });
@@ -74,6 +80,49 @@ describe('skills store availability and search cache', () => {
         config: ['baseUrl'],
         os: ['linux'],
       },
+      source: 'openclaw-workspace',
+      baseDir: '/tmp/openclaw/workspace/skills/foo-skill',
+      filePath: '/tmp/openclaw/workspace/skills/foo-skill/SKILL.md',
+    });
+  });
+
+  it('fills source/baseDir from clawhub list when gateway status entry is incomplete', async () => {
+    rpcMock.mockResolvedValueOnce({
+      skills: [
+        {
+          skillKey: 'git-helper',
+          name: 'Git Helper',
+          description: 'helper',
+          disabled: false,
+        },
+      ],
+    });
+
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/configs') {
+        return {};
+      }
+      if (path === '/api/clawhub/list') {
+        return {
+          success: true,
+          results: [{
+            slug: 'git-helper',
+            version: '1.2.3',
+            source: 'openclaw-managed',
+            baseDir: '/tmp/.openclaw/skills/git-helper',
+          }],
+        };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    await useSkillsStore.getState().fetchSkills();
+
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({
+      id: 'git-helper',
+      source: 'openclaw-managed',
+      baseDir: '/tmp/.openclaw/skills/git-helper',
     });
   });
 

@@ -21,6 +21,25 @@
         "showThinking": "显示思考过程",
         "hideThinking": "隐藏思考过程"
     },
+    "taskPanel": {
+        "stepStatus": {
+            "running": "进行中",
+            "completed": "完成",
+            "error": "错误"
+        }
+    },
+    "executionGraph": {
+        "eyebrow": "对话执行",
+        "title": "执行关系图",
+        "status": {
+            "active": "执行中",
+            "previous": "历史"
+        },
+        "branchLabel": "分支",
+        "userTriggerHint": "对应上方这条用户消息",
+        "agentRun": "{{agent}} 执行",
+        "agentReplyHint": "跳到下方助手回复"
+    },
     "skillConfigDialog": {
         "titleWithAgent": "技能配置 · {{agent}}",
         "loading": "技能加载中...",

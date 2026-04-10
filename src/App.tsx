@@ -13,6 +13,7 @@ import { Chat } from './pages/Chat';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useSkillsStore } from './stores/skills';
+import { useProviderStore } from './stores/providers';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
@@ -123,6 +124,7 @@ function App() {
   const setupComplete = useSettingsStore((state) => state.setupComplete);
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
+  const initProviders = useProviderStore((state) => state.init);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const skillsPrefetchedRef = useRef(false);
@@ -155,6 +157,12 @@ function App() {
   useEffect(() => {
     initGateway();
   }, [initGateway]);
+
+  // Initialize provider snapshot on mount so provider display state
+  // survives app restarts without requiring settings page entry.
+  useEffect(() => {
+    void initProviders();
+  }, [initProviders]);
 
   useEffect(() => {
     if (!settingsInitialized) {

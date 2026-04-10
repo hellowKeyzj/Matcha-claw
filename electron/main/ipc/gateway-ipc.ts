@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { GatewayManager } from '../../gateway/manager';
 import { getSetting } from '../../services/settings/settings-store';
+import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import type { RuntimeHostManager } from '../runtime-host-manager';
 
@@ -138,7 +139,7 @@ export function registerGatewayHandlers(
       const status = gatewayManager.getStatus();
       const token = await getSetting('gatewayToken');
       const port = status.port || 18789;
-      const url = `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+      const url = buildOpenClawControlUiUrl(port, token);
       return { success: true, url, port, token };
     } catch (error) {
       return { success: false, error: String(error) };

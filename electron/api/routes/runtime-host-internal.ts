@@ -15,6 +15,7 @@ type RuntimeHostExecutionSyncAction =
   | 'restart_runtime_host';
 
 type RuntimeHostShellAction =
+  | 'shell_open_path'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
@@ -105,7 +106,8 @@ function isExecutionSyncAction(value: unknown): value is RuntimeHostExecutionSyn
 }
 
 function isShellAction(value: unknown): value is RuntimeHostShellAction {
-  return value === 'provider_oauth_start'
+  return value === 'shell_open_path'
+    || value === 'provider_oauth_start'
     || value === 'provider_oauth_cancel'
     || value === 'provider_oauth_submit'
     || value === 'channel_whatsapp_start'

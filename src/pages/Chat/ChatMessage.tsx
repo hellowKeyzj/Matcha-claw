@@ -17,6 +17,7 @@ import { extractText, extractThinking, extractImages, extractToolUse, formatTime
 interface ChatMessageProps {
   message: RawMessage;
   showThinking: boolean;
+  suppressToolCards?: boolean;
   assistantAvatarEmoji?: string;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
@@ -217,6 +218,7 @@ function linkifyFileHintsInMarkdown(text: string, resolveFileHintPath?: FileHint
 export const ChatMessage = memo(function ChatMessage({
   message,
   showThinking,
+  suppressToolCards = false,
   assistantAvatarEmoji,
   userAvatarImageUrl,
   isStreaming = false,
@@ -231,7 +233,7 @@ export const ChatMessage = memo(function ChatMessage({
   const images = extractImages(message);
   const tools = extractToolUse(message);
   const visibleThinking = showThinking ? thinking : null;
-  const visibleTools = tools;
+  const visibleTools = suppressToolCards ? [] : tools;
 
   const attachedFiles = useMemo(
     () => (Array.isArray(message._attachedFiles) ? message._attachedFiles : []),
@@ -686,7 +688,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
     if (!canOpen) {
       return;
     }
-    void invokeIpc('shell:showItemInFolder', file.filePath!);
+    void invokeIpc('shell:openPath', file.filePath!);
   }, [canOpen, file.filePath]);
 
   if (canOpen) {
@@ -694,6 +696,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
       <button
         type="button"
         onClick={handleOpen}
+        title="Open file"
         className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 bg-muted/30 max-w-[220px] text-left cursor-pointer hover:bg-muted/50 transition-colors"
       >
         <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />

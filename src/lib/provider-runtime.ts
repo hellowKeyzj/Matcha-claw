@@ -32,8 +32,20 @@ export async function hostProviderSubmitOAuthCode(code: string): Promise<{ succe
   });
 }
 
-export async function hostProviderReadAccount(accountId: string): Promise<{ baseUrl?: string; model?: string } | null> {
-  return await hostApiFetch<{ baseUrl?: string; model?: string } | null>(
+export async function hostProviderReadAccount(
+  accountId: string,
+): Promise<{
+  baseUrl?: string;
+  model?: string;
+  apiProtocol?: ProviderAccount['apiProtocol'];
+  headers?: Record<string, string>;
+} | null> {
+  return await hostApiFetch<{
+    baseUrl?: string;
+    model?: string;
+    apiProtocol?: ProviderAccount['apiProtocol'];
+    headers?: Record<string, string>;
+  } | null>(
     `/api/provider-accounts/${encodeURIComponent(accountId)}`,
   );
 }
@@ -49,7 +61,11 @@ export async function hostProviderValidate(
     accountId?: string;
     vendorId: string;
     apiKey: string;
-    options?: { baseUrl?: string };
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+    };
   },
 ): Promise<{ valid: boolean; error?: string }> {
   return await hostApiFetch<{ valid: boolean; error?: string }>('/api/provider-accounts/validate', {
@@ -97,6 +113,8 @@ export function buildProviderAccountPayload(input: {
   label: string;
   authMode: ProviderAccount['authMode'];
   baseUrl?: string;
+  apiProtocol?: ProviderAccount['apiProtocol'];
+  headers?: Record<string, string>;
   model?: string;
 }): ProviderAccount {
   return {
@@ -105,6 +123,8 @@ export function buildProviderAccountPayload(input: {
     label: input.label,
     authMode: input.authMode,
     baseUrl: input.baseUrl,
+    apiProtocol: input.apiProtocol,
+    headers: input.headers,
     model: input.model,
     enabled: true,
     isDefault: false,

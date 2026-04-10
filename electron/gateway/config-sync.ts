@@ -1,18 +1,39 @@
 import { app } from 'electron';
 import path from 'path';
-import { existsSync } from 'fs';
+import { existsSync, rmSync } from 'fs';
+import { homedir } from 'os';
 import { getAllSettings } from '../services/settings/settings-store';
 import { getOpenClawDir, getOpenClawEntryPath, isOpenClawPresent } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { logger } from '../utils/logger';
+import { prependPathEntry } from '../utils/env-path';
+import { fsPath } from '../utils/fs-path';
 import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
+import { stripSystemdSupervisorEnv } from './config-sync-env';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
     timeoutMs: 8_000,
   });
+}
+
+const BUILTIN_CHANNEL_EXTENSIONS = ['discord', 'telegram'];
+
+function cleanupStaleBuiltInExtensions(): void {
+  for (const extensionId of BUILTIN_CHANNEL_EXTENSIONS) {
+    const extensionDir = path.join(homedir(), '.openclaw', 'extensions', extensionId);
+    if (!existsSync(fsPath(extensionDir))) {
+      continue;
+    }
+    try {
+      rmSync(fsPath(extensionDir), { recursive: true, force: true });
+      logger.info(`[plugin] Removed stale built-in extension copy: ${extensionId}`);
+    } catch (error) {
+      logger.warn(`[plugin] Failed to remove stale built-in extension ${extensionId}:`, error);
+    }
+  }
 }
 
 export interface GatewayLaunchContext {
@@ -32,6 +53,12 @@ export interface GatewayLaunchContext {
 export async function syncGatewayConfigBeforeLaunch(
   appSettings: Awaited<ReturnType<typeof getAllSettings>>,
 ): Promise<void> {
+  try {
+    cleanupStaleBuiltInExtensions();
+  } catch (error) {
+    logger.warn('Failed to clean stale built-in extensions before gateway launch:', error);
+  }
+
   const runtimeHostClient = createGatewayConfigRuntimeHostClient();
   try {
     await runtimeHostClient.request('POST', '/api/runtime-host/sync-gateway-config', {
@@ -212,9 +239,6 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     ? path.join(process.resourcesPath, 'bin')
     : path.join(process.cwd(), 'resources', 'bin', target);
   const binPathExists = existsSync(binPath);
-  const finalPath = binPathExists
-    ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
-    : process.env.PATH || '';
 
   const { providerEnv, loadedProviderKeyCount } = await loadProviderEnv();
   const { skipChannels, channelStartupSummary } = await resolveChannelStartupPolicy();
@@ -226,9 +250,12 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     : 'disabled';
 
   const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
+  const baseEnvRecord = baseEnv as Record<string, string | undefined>;
+  const baseEnvPatched = binPathExists
+    ? prependPathEntry(baseEnvRecord, binPath).env
+    : baseEnvRecord;
   const forkEnv: Record<string, string | undefined> = {
-    ...baseEnv,
-    PATH: finalPath,
+    ...stripSystemdSupervisorEnv(baseEnvPatched),
     ...providerEnv,
     ...uvEnv,
     ...proxyEnv,

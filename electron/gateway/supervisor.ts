@@ -5,6 +5,7 @@ import { getOpenClawDir, getOpenClawEntryPath } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
 import { logger } from '../utils/logger';
+import { prependPathEntry } from '../utils/env-path';
 
 const ANSI_ESCAPE_RE = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 
@@ -53,6 +54,16 @@ export async function terminateOwnedGatewayProcess(child: Electron.UtilityProces
   let exited = false;
 
   await new Promise<void>((resolve) => {
+    const terminateWindowsProcessTree = (pid: number) => {
+      import('child_process').then((cp) => {
+        cp.exec(`taskkill /F /PID ${pid} /T`, { timeout: 5000, windowsHide: true }, () => {
+          // 忽略 taskkill 错误，统一交给超时兜底
+        });
+      }).catch(() => {
+        // ignore
+      });
+    };
+
     child.once('exit', () => {
       exited = true;
       resolve();
@@ -60,20 +71,28 @@ export async function terminateOwnedGatewayProcess(child: Electron.UtilityProces
 
     const pid = child.pid;
     logger.info(`Sending kill to Gateway process (pid=${pid ?? 'unknown'})`);
-    try {
-      child.kill();
-    } catch {
-      // ignore if already exited
+    if (process.platform === 'win32' && typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
+      terminateWindowsProcessTree(pid);
+    } else {
+      try {
+        child.kill();
+      } catch {
+        // ignore if already exited
+      }
     }
 
     const timeout = setTimeout(() => {
       if (!exited) {
         logger.warn(`Gateway did not exit in time, force-killing (pid=${pid ?? 'unknown'})`);
-        if (pid) {
-          try {
-            process.kill(pid, 'SIGKILL');
-          } catch {
-            // ignore
+        if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
+          if (process.platform === 'win32') {
+            terminateWindowsProcessTree(pid);
+          } else {
+            try {
+              process.kill(pid, 'SIGKILL');
+            } catch {
+              // ignore
+            }
           }
         }
       }
@@ -165,7 +184,8 @@ export async function waitForPortFree(port: number, timeoutMs = 30000): Promise<
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
   }
 
-  logger.warn(`Port ${port} still occupied after ${timeoutMs}ms, proceeding anyway`);
+  logger.error(`Port ${port} still occupied after ${timeoutMs}ms; aborting startup to avoid port conflict`);
+  throw new Error(`Port ${port} still occupied after ${timeoutMs}ms`);
 }
 
 async function getListeningProcessIds(port: number): Promise<string[]> {
@@ -261,6 +281,7 @@ export async function findExistingGatewayProcess(options: {
     }
 
     await terminateOrphanedProcessIds(port, pids);
+    await waitForPortFree(port, 10000);
     return null;
   } catch (err) {
     logger.warn('Error checking for existing process on port:', err);
@@ -283,9 +304,10 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
     ? path.join(process.resourcesPath, 'bin')
     : path.join(process.cwd(), 'resources', 'bin', target);
   const binPathExists = existsSync(binPath);
-  const finalPath = binPathExists
-    ? `${binPath}${path.delimiter}${process.env.PATH || ''}`
-    : process.env.PATH || '';
+  const baseProcessEnv = process.env as Record<string, string | undefined>;
+  const baseEnvPatched = binPathExists
+    ? prependPathEntry(baseProcessEnv, binPath).env
+    : baseProcessEnv;
 
   const uvEnv = await getUvMirrorEnv();
   const doctorArgs = ['--no-color', 'doctor', '--fix', '--yes', '--non-interactive'];
@@ -295,8 +317,7 @@ export async function runOpenClawDoctorRepair(): Promise<boolean> {
 
   return await new Promise<boolean>((resolve) => {
     const forkEnv: Record<string, string | undefined> = {
-      ...process.env,
-      PATH: finalPath,
+      ...baseEnvPatched,
       ...uvEnv,
       OPENCLAW_NO_RESPAWN: '1',
       NO_COLOR: '1',

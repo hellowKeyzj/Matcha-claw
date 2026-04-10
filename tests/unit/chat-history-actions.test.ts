@@ -14,6 +14,13 @@ const hasNonToolAssistantContent = vi.fn((message: { content?: unknown } | undef
   return typeof message.content === 'string' ? message.content.trim().length > 0 : true;
 });
 const isToolResultRole = vi.fn((role: unknown) => role === 'toolresult' || role === 'tool_result');
+const isInternalMessage = vi.fn((msg: { role?: string; content?: unknown }) => {
+  if (msg.role === 'system') return true;
+  if (msg.role === 'assistant' && typeof msg.content === 'string') {
+    if (/^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(msg.content.trim())) return true;
+  }
+  return false;
+});
 const loadMissingPreviews = vi.fn(async () => false);
 const toMs = vi.fn((ts: number) => ts < 1e12 ? ts * 1000 : ts);
 
@@ -24,6 +31,7 @@ vi.mock('@/stores/chat/helpers', () => ({
   getMessageText: (...args: unknown[]) => getMessageText(...args),
   hasNonToolAssistantContent: (...args: unknown[]) => hasNonToolAssistantContent(...args),
   isToolResultRole: (...args: unknown[]) => isToolResultRole(...args),
+  isInternalMessage: (...args: unknown[]) => isInternalMessage(...args),
   loadMissingPreviews: (...args: unknown[]) => loadMissingPreviews(...args),
   toMs: (...args: unknown[]) => toMs(...args as Parameters<typeof toMs>),
 }));
@@ -75,6 +83,7 @@ describe('chat history actions', () => {
     getMessageText.mockClear();
     hasNonToolAssistantContent.mockClear();
     isToolResultRole.mockClear();
+    isInternalMessage.mockClear();
     loadMissingPreviews.mockClear();
     toMs.mockClear();
     hostApiFetchMock.mockResolvedValue({ messages: [] });
@@ -111,10 +120,7 @@ describe('chat history actions', () => {
       '/api/cron/session-history?sessionKey=agent%3Amain%3Acron%3Ajob-1&limit=200',
       undefined,
     );
-    expect(h.read().messages.map((message) => message.content)).toEqual([
-      'Scheduled task: Drink water',
-      'Drink water 💧',
-    ]);
+    expect(h.read().messages.map((message) => message.content)).toEqual(['Drink water 💧']);
     expect(h.read().sessionLastActivity['agent:main:cron:job-1']).toBe(1773281732751);
     expect(h.read().loading).toBe(false);
   });
@@ -131,5 +137,234 @@ describe('chat history actions', () => {
     expect(hostApiFetchMock).not.toHaveBeenCalled();
     expect(h.read().messages).toEqual([]);
     expect(h.read().loading).toBe(false);
+  });
+
+  it('filters out system messages from loaded history', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    gatewayClientRequestMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'system', content: 'Gateway restarted', timestamp: 1001 },
+          { role: 'assistant', content: '正常回复', timestamp: 1002 },
+        ],
+      },
+    });
+
+    await actions.loadHistory();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual(['正常回复']);
+  });
+
+  it('filters out HEARTBEAT_OK assistant messages', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    gatewayClientRequestMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'assistant', content: 'HEARTBEAT_OK', timestamp: 1001 },
+          { role: 'assistant', content: '真实内容', timestamp: 1002 },
+        ],
+      },
+    });
+
+    await actions.loadHistory();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual(['真实内容']);
+  });
+
+  it('filters out NO_REPLY assistant messages', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    gatewayClientRequestMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'assistant', content: 'NO_REPLY', timestamp: 1001 },
+          { role: 'assistant', content: '真实内容', timestamp: 1002 },
+        ],
+      },
+    });
+
+    await actions.loadHistory();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual(['真实内容']);
+  });
+
+  it('keeps normal assistant messages that contain HEARTBEAT_OK as substring', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    gatewayClientRequestMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          { role: 'user', content: 'What is HEARTBEAT_OK?', timestamp: 1000 },
+          { role: 'assistant', content: 'HEARTBEAT_OK is a status code', timestamp: 1001 },
+        ],
+      },
+    });
+
+    await actions.loadHistory();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'What is HEARTBEAT_OK?',
+      'HEARTBEAT_OK is a status code',
+    ]);
+  });
+
+  it('preserves existing messages when history refresh fails for current session', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'still here',
+          timestamp: 1773281732,
+        },
+      ],
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    gatewayClientRequestMock.mockRejectedValueOnce(new Error('Gateway unavailable'));
+
+    await actions.loadHistory();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual(['still here']);
+    expect(h.read().error).toBe('Error: Gateway unavailable');
+    expect(h.read().loading).toBe(false);
+  });
+
+  it('drops stale history result after user switches to another session', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    let resolveHistory: ((value: unknown) => void) | null = null;
+    gatewayClientRequestMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveHistory = resolve;
+    }));
+
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:session-a',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'session b content',
+          timestamp: 1773281733,
+        },
+      ],
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    const loadPromise = actions.loadHistory();
+    h.set({
+      currentSessionKey: 'agent:main:session-b',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'session b content',
+          timestamp: 1773281733,
+        },
+      ],
+    });
+
+    resolveHistory?.({
+      success: true,
+      result: {
+        messages: [
+          {
+            role: 'assistant',
+            content: 'stale session a content',
+            timestamp: 1773281734,
+          },
+        ],
+      },
+    });
+
+    await loadPromise;
+
+    expect(h.read().currentSessionKey).toBe('agent:main:session-b');
+    expect(h.read().messages.map((message) => message.content)).toEqual(['session b content']);
+  });
+
+  it('preserves newer same-session messages when preview hydration resolves later', async () => {
+    const { createHistoryActions } = await import('@/stores/chat/history-actions');
+    let releasePreviewHydration: (() => void) | null = null;
+    loadMissingPreviews.mockImplementationOnce(async (messages) => {
+      await new Promise<void>((resolve) => {
+        releasePreviewHydration = () => {
+          messages[0]!._attachedFiles = [
+            {
+              fileName: 'image.png',
+              mimeType: 'image/png',
+              fileSize: 42,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/image.png',
+            },
+          ];
+          resolve();
+        };
+      });
+      return true;
+    });
+
+    gatewayClientRequestMock.mockResolvedValueOnce({
+      success: true,
+      result: {
+        messages: [
+          {
+            id: 'history-1',
+            role: 'assistant',
+            content: 'older message',
+            timestamp: 1000,
+          },
+        ],
+      },
+    });
+
+    const h = makeHarness({
+      currentSessionKey: 'agent:main:main',
+    });
+    const actions = createHistoryActions(h.set as never, h.get as never);
+
+    await actions.loadHistory();
+    h.set((state) => ({
+      messages: [
+        ...state.messages,
+        {
+          id: 'newer-1',
+          role: 'assistant',
+          content: 'newer message',
+          timestamp: 1001,
+        },
+      ],
+    }));
+
+    releasePreviewHydration?.();
+    await Promise.resolve();
+
+    expect(h.read().messages.map((message) => message.content)).toEqual([
+      'older message',
+      'newer message',
+    ]);
+    expect(h.read().messages[0]?._attachedFiles?.[0]).toMatchObject({
+      preview: 'data:image/png;base64,abc',
+    });
   });
 });

@@ -1,33 +1,103 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { getOpenClawConfigDir } from '../../api/storage/paths';
 import { parseUsageEntriesFromJsonl, type TokenUsageHistoryEntry } from './token-usage-parser';
 
-function getOpenClawConfigDir(): string {
-  return join(homedir(), '.openclaw');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function listRecentSessionFiles(): Promise<Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }>> {
-  const openclawDir = getOpenClawConfigDir();
-  const agentsDir = join(openclawDir, 'agents');
+async function listConfiguredAgentIds(openclawConfigDir: string): Promise<string[]> {
+  const configPath = join(openclawConfigDir, 'openclaw.json');
+  const normalizedIds = new Set<string>();
+  try {
+    const raw = await readFile(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) {
+      return [];
+    }
+    const agents = isRecord(parsed.agents) ? parsed.agents : {};
+    const list = Array.isArray(agents.list) ? agents.list : [];
+    for (const item of list) {
+      if (!isRecord(item)) {
+        continue;
+      }
+      const id = typeof item.id === 'string' ? item.id.trim() : '';
+      if (id) {
+        normalizedIds.add(id);
+      }
+    }
+    return [...normalizedIds];
+  } catch {
+    return [];
+  }
+}
+
+export function extractSessionIdFromTranscriptFileName(fileName: string): string | undefined {
+  if (!fileName.endsWith('.jsonl') && !fileName.includes('.jsonl.reset.')) {
+    return undefined;
+  }
+  return fileName
+    .replace(/\.reset\..+$/, '')
+    .replace(/\.deleted\.jsonl$/, '')
+    .replace(/\.jsonl$/, '');
+}
+
+async function listAgentIdsWithSessionDirs(openclawConfigDir: string): Promise<string[]> {
+  const agentIds = new Set<string>();
+  const agentsDir = join(openclawConfigDir, 'agents');
+  for (const agentId of await listConfiguredAgentIds(openclawConfigDir)) {
+    const normalized = agentId.trim();
+    if (normalized) {
+      agentIds.add(normalized);
+    }
+  }
 
   try {
-    const agentEntries = await readdir(agentsDir);
+    const agentEntries = await readdir(agentsDir, { withFileTypes: true });
+    for (const entry of agentEntries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const normalized = entry.name.trim();
+      if (normalized) {
+        agentIds.add(normalized);
+      }
+    }
+  } catch {
+    // Ignore disk discovery failures and return configured IDs only.
+  }
+
+  return [...agentIds];
+}
+
+async function listRecentSessionFiles(openclawConfigDir: string): Promise<Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }>> {
+  const openclawDir = openclawConfigDir;
+  const agentsDir = join(openclawDir, 'agents');
+  try {
+    const agentEntries = await listAgentIdsWithSessionDirs(openclawDir);
     const files: Array<{ filePath: string; sessionId: string; agentId: string; mtimeMs: number }> = [];
 
     for (const agentId of agentEntries) {
       const sessionsDir = join(agentsDir, agentId, 'sessions');
       try {
-        const sessionEntries = await readdir(sessionsDir);
+        const sessionEntries = await readdir(sessionsDir, { withFileTypes: true });
 
-        for (const fileName of sessionEntries) {
-          if (!fileName.endsWith('.jsonl') || fileName.includes('.deleted.')) continue;
+        for (const sessionEntry of sessionEntries) {
+          if (!sessionEntry.isFile()) {
+            continue;
+          }
+          const fileName = sessionEntry.name;
+          const sessionId = extractSessionIdFromTranscriptFileName(fileName);
+          if (!sessionId) {
+            continue;
+          }
           const filePath = join(sessionsDir, fileName);
           try {
             const fileStat = await stat(filePath);
             files.push({
               filePath,
-              sessionId: fileName.replace(/\.jsonl$/, ''),
+              sessionId,
               agentId,
               mtimeMs: fileStat.mtimeMs,
             });
@@ -47,12 +117,22 @@ async function listRecentSessionFiles(): Promise<Array<{ filePath: string; sessi
   }
 }
 
-export async function getRecentTokenUsageHistory(limit?: number): Promise<TokenUsageHistoryEntry[]> {
-  const files = await listRecentSessionFiles();
-  const results: TokenUsageHistoryEntry[] = [];
-  const maxEntries = typeof limit === 'number' && Number.isFinite(limit)
-    ? Math.max(Math.floor(limit), 0)
+export interface TokenUsageHistoryQueryOptions {
+  limit?: number;
+  openclawConfigDir?: string;
+}
+
+export async function getRecentTokenUsageHistory(options: TokenUsageHistoryQueryOptions = {}): Promise<TokenUsageHistoryEntry[]> {
+  const maxEntries = typeof options.limit === 'number' && Number.isFinite(options.limit)
+    ? Math.max(Math.floor(options.limit), 0)
     : Number.POSITIVE_INFINITY;
+  if (maxEntries === 0) {
+    return [];
+  }
+
+  const openclawConfigDir = options.openclawConfigDir || getOpenClawConfigDir();
+  const files = await listRecentSessionFiles(openclawConfigDir);
+  const results: TokenUsageHistoryEntry[] = [];
 
   for (const file of files) {
     if (results.length >= maxEntries) break;

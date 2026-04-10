@@ -1,5 +1,6 @@
 export const INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS = [
   'hostapi:fetch',
+  'hostapi:token',
   'gateway:status',
   'gateway:rpc',
   'gateway:httpProxy',

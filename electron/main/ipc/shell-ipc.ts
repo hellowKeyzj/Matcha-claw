@@ -4,8 +4,20 @@ import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { expandPath } from '../../utils/paths';
 import { logger } from '../../utils/logger';
 
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export function registerShellHandlers(): void {
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
+    if (!isAllowedExternalUrl(url)) {
+      throw new Error(`Blocked openExternal for disallowed URL: ${url}`);
+    }
     await shell.openExternal(url);
   });
 

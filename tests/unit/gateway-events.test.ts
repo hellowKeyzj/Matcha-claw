@@ -177,6 +177,51 @@ describe('gateway store event wiring', () => {
     expect(chatState.pendingApprovalsBySession?.['agent:main:main'] ?? []).toEqual([]);
   });
 
+  it('agent completed 通知应清理 chat.send 超时残留错误', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-cleanup',
+      pendingFinal: true,
+      error: 'RPC timeout: chat.send',
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:notification')?.({
+      method: 'agent',
+      params: {
+        runId: 'run-cleanup',
+        sessionKey: 'agent:main:main',
+        phase: 'completed',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const state = useChatStore.getState() as unknown as {
+      sending: boolean;
+      pendingFinal: boolean;
+      activeRunId: string | null;
+      error: string | null;
+    };
+    expect(state.sending).toBe(false);
+    expect(state.pendingFinal).toBe(false);
+    expect(state.activeRunId).toBeNull();
+    expect(state.error).toBeNull();
+  });
+
   it('agent 聊天事件同时出现在 notification 和 chat-message 时，不应重复转发到 chat store', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();

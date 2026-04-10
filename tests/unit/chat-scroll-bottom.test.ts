@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { buildChatRows } from '@/pages/Chat/chat-row-model';
+import { buildChatRows, type ExecutionGraphData } from '@/pages/Chat/chat-row-model';
 import {
   createInitialChatScrollState,
   reduceChatScrollState,
@@ -69,6 +69,56 @@ describe('chat 行模型', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'typing', key: 'typing:agent:main:main' });
+  });
+
+  it('有执行图时，应在锚点消息后插入 execution_graph 行', () => {
+    const graph: ExecutionGraphData = {
+      id: 'graph-1',
+      anchorMessageKey: 'id:user-1',
+      triggerMessageKey: 'id:user-1',
+      replyMessageKey: 'id:assistant-1',
+      agentLabel: 'coder',
+      sessionLabel: 'agent:coder:subagent:child-1',
+      steps: [
+        {
+          id: 'step-1',
+          label: 'sessions_spawn',
+          status: 'completed',
+          kind: 'tool',
+          depth: 1,
+        },
+      ],
+      active: false,
+    };
+
+    const rows = buildChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: '开始任务',
+          timestamp: 1,
+        } satisfies RawMessage,
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: '完成了',
+          timestamp: 2,
+        } satisfies RawMessage,
+      ],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+      executionGraphs: [graph],
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual(['message', 'execution_graph', 'message']);
+    expect(rows[1]).toMatchObject({ kind: 'execution_graph', key: 'execution_graph:graph-1' });
   });
 });
 

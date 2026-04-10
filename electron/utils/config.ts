@@ -14,7 +14,7 @@ export const PORTS = {
   CLAWX_GUI: 23333,
 
   /** Local host API server port */
-  MATCHACLAW_HOST_API: 3210,
+  MATCHACLAW_HOST_API: 13210,
 
   /** Runtime host process port */
   MATCHACLAW_RUNTIME_HOST: 3211,

@@ -5,12 +5,13 @@ import {
   enrichWithToolResultFiles,
   getMessageText,
   hasNonToolAssistantContent,
+  isInternalMessage,
   isToolResultRole,
   loadMissingPreviews,
   toMs,
 } from './helpers';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './cron-session-utils';
-import type { RawMessage } from './types';
+import type { AttachedFileMeta, RawMessage } from './types';
 import type { ChatGet, ChatSet, SessionHistoryActions } from './store-api';
 
 async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promise<RawMessage[]> {
@@ -41,12 +42,19 @@ export function createHistoryActions(
   return {
     loadHistory: async (quiet = false) => {
       const { currentSessionKey } = get();
+      const requestedSessionKey = currentSessionKey;
+      const isStaleRequest = () => get().currentSessionKey !== requestedSessionKey;
       if (!quiet) set({ loading: true, error: null });
 
       const applyLoadedMessages = (rawMessages: RawMessage[], thinkingLevel: string | null) => {
+        if (isStaleRequest()) {
+          return;
+        }
         // Before filtering: attach images/files from tool_result messages to the next assistant message
         const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
-        const filteredMessages = messagesWithToolImages.filter((msg) => !isToolResultRole(msg.role));
+        const filteredMessages = messagesWithToolImages.filter((msg) => (
+          !isToolResultRole(msg.role) && !isInternalMessage(msg)
+        ));
         // Restore file attachments for user/assistant messages (from cache + text patterns)
         const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
@@ -71,7 +79,7 @@ export function createHistoryActions(
           }
         }
 
-        set({ messages: finalMessages, thinkingLevel, loading: false });
+        set({ messages: finalMessages, thinkingLevel, loading: false, error: null });
 
         // Extract first user message text as a session label for display in the toolbar.
         // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
@@ -101,18 +109,54 @@ export function createHistoryActions(
 
         // Async: load missing image previews from disk (updates in background)
         loadMissingPreviews(finalMessages).then((updated) => {
-          if (updated) {
-            // Create new object references so React.memo detects changes.
-            // loadMissingPreviews mutates AttachedFileMeta in place, so we
-            // must produce fresh message + file references for each affected msg.
-            set({
-              messages: finalMessages.map(msg =>
-                msg._attachedFiles
-                  ? { ...msg, _attachedFiles: msg._attachedFiles.map(f => ({ ...f })) }
-                  : msg
-              ),
-            });
+          if (!updated || isStaleRequest()) {
+            return;
           }
+          const cloneAttachedFiles = (files: AttachedFileMeta[]): AttachedFileMeta[] => {
+            return files.map((file) => ({ ...file }));
+          };
+          const buildMessageIdentity = (message: RawMessage): string => {
+            const record = message as unknown as Record<string, unknown>;
+            const id = typeof record.id === 'string' ? record.id.trim() : '';
+            if (id) {
+              return `id:${id}`;
+            }
+            const role = typeof message.role === 'string' ? message.role : '';
+            const timestamp = message.timestamp !== undefined ? String(message.timestamp) : '';
+            const content = typeof message.content === 'string'
+              ? message.content
+              : JSON.stringify(message.content ?? null);
+            return `sig:${role}|${timestamp}|${content}`;
+          };
+          const previewsByIdentity = new Map<string, AttachedFileMeta[]>();
+          for (const message of finalMessages) {
+            if (!message._attachedFiles || message._attachedFiles.length === 0) {
+              continue;
+            }
+            previewsByIdentity.set(
+              buildMessageIdentity(message),
+              cloneAttachedFiles(message._attachedFiles),
+            );
+          }
+          if (previewsByIdentity.size === 0) {
+            return;
+          }
+          set((state) => {
+            if (state.currentSessionKey !== requestedSessionKey) {
+              return {};
+            }
+            const nextMessages = state.messages.map((message) => {
+              const previewFiles = previewsByIdentity.get(buildMessageIdentity(message as RawMessage));
+              if (!previewFiles) {
+                return message;
+              }
+              return {
+                ...message,
+                _attachedFiles: cloneAttachedFiles(previewFiles),
+              };
+            });
+            return { messages: nextMessages };
+          });
         });
         const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
 
@@ -154,6 +198,9 @@ export function createHistoryActions(
           'chat.history',
           { sessionKey: currentSessionKey, limit: 200 },
         );
+        if (isStaleRequest()) {
+          return;
+        }
 
         if (result.success && result.result) {
           const data = result.result;
@@ -165,19 +212,25 @@ export function createHistoryActions(
           applyLoadedMessages(rawMessages, thinkingLevel);
         } else {
           const fallbackMessages = await loadCronFallbackMessages(currentSessionKey, 200);
+          if (isStaleRequest()) {
+            return;
+          }
           if (fallbackMessages.length > 0) {
             applyLoadedMessages(fallbackMessages, null);
           } else {
-            set({ messages: [], loading: false });
+            set({ loading: false, error: result.error ? String(result.error) : null });
           }
         }
       } catch (err) {
         console.warn('Failed to load chat history:', err);
         const fallbackMessages = await loadCronFallbackMessages(currentSessionKey, 200);
+        if (isStaleRequest()) {
+          return;
+        }
         if (fallbackMessages.length > 0) {
           applyLoadedMessages(fallbackMessages, null);
         } else {
-          set({ messages: [], loading: false });
+          set({ loading: false, error: String(err) });
         }
       }
     },

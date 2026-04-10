@@ -39,6 +39,6 @@ export function registerIpcHandlers(
   // Usage handlers
   registerUsageHandlers(runtimeHost);
 
-  // Window control handlers (for custom title bar on Windows/Linux)
+  // Window control handlers (for custom title bar on Windows)
   registerWindowHandlers(mainWindow);
 }

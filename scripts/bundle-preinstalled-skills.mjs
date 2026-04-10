@@ -133,6 +133,12 @@ async function fetchRepoSnapshot(repo, ref, paths, checkoutDir) {
 }
 
 echo`Bundling preinstalled skills...`;
+
+if (process.env.SKIP_PREINSTALLED_SKILLS === '1') {
+  echo`⏭  SKIP_PREINSTALLED_SKILLS=1 set, skipping skills fetch.`;
+  process.exit(0);
+}
+
 const manifestSkills = loadManifest();
 
 rmSync(OUTPUT_ROOT, { recursive: true, force: true });

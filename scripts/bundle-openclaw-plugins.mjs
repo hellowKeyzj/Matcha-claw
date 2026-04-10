@@ -51,7 +51,7 @@ const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-  { npmName: '@sliverp/qqbot', pluginId: 'qqbot' },
+  { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
   { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
   { localPath: path.join(ROOT, 'packages', 'openclaw-security-plugin'), pluginId: 'security-core' },
   { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
@@ -187,7 +187,53 @@ function bundleOnePlugin({ npmName, pluginId }) {
     throw new Error(`Missing openclaw.plugin.json in bundled plugin output: ${pluginId}`);
   }
 
+  patchPluginId(outputDir, pluginId);
+
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
+}
+
+function patchPluginId(pluginDir, expectedId) {
+  const manifestPath = path.join(pluginDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(manifestPath)) return;
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  if (manifest.id !== expectedId) {
+    echo`   ⚠️  Manifest ID "${manifest.id}" 与期望 "${expectedId}" 不一致，跳过 entry 修补`;
+    return;
+  }
+
+  const pkgJsonPath = path.join(pluginDir, 'package.json');
+  if (!fs.existsSync(pkgJsonPath)) return;
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  const entryFiles = [pkg.main, pkg.module].filter(Boolean);
+
+  const ID_FIXES = {
+    'wecom-openclaw-plugin': 'wecom',
+    qqbot: 'openclaw-qqbot',
+  };
+
+  for (const entry of entryFiles) {
+    const entryPath = path.join(pluginDir, entry);
+    if (!fs.existsSync(entryPath)) continue;
+
+    let content = fs.readFileSync(entryPath, 'utf8');
+    let patched = false;
+
+    for (const [wrongId, correctId] of Object.entries(ID_FIXES)) {
+      if (correctId !== expectedId) continue;
+      const pattern = new RegExp(`(\\bid\\s*:\\s*)(["'])${wrongId.replace(/-/g, '\\-')}\\2`, 'g');
+      const replaced = content.replace(pattern, `$1$2${correctId}$2`);
+      if (replaced !== content) {
+        content = replaced;
+        patched = true;
+        echo`   🩹 Patching plugin ID in ${entry}: "${wrongId}" → "${correctId}"`;
+      }
+    }
+
+    if (patched) {
+      fs.writeFileSync(entryPath, content, 'utf8');
+    }
+  }
 }
 
 function bundleLocalPlugin({ localPath, pluginId }) {

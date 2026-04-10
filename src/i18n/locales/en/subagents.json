@@ -93,6 +93,7 @@
     "nameDuplicate": "Agent name is duplicated.",
     "modelsLoading": "Loading models...",
     "selectModel": "Select a configured model",
+    "useDefaultModel": "Inherit global default model",
     "modelUnavailable": "No configured models found."
   },
   "card": {

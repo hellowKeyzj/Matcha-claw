@@ -1,7 +1,7 @@
 export const GOOGLE_BROWSER_OAUTH_RUNTIME_PROVIDER = 'google-gemini-cli';
 export const GOOGLE_BROWSER_OAUTH_DEFAULT_MODEL_REF = `${GOOGLE_BROWSER_OAUTH_RUNTIME_PROVIDER}/gemini-3-pro-preview`;
 export const OPENAI_BROWSER_OAUTH_RUNTIME_PROVIDER = 'openai-codex';
-export const OPENAI_BROWSER_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_BROWSER_OAUTH_RUNTIME_PROVIDER}/gpt-5.3-codex`;
+export const OPENAI_BROWSER_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_BROWSER_OAUTH_RUNTIME_PROVIDER}/gpt-5.4`;
 export const OPENCLAW_PROVIDER_KEY_MINIMAX = 'minimax-portal';
 export const OPENCLAW_PROVIDER_KEY_QWEN = 'qwen-portal';
 export const OPENCLAW_PROVIDER_KEY_MOONSHOT = 'moonshot';
@@ -33,6 +33,13 @@ export function getBrowserOAuthRuntimeProviderKey(
 
 export function getOpenClawProviderKey(providerType: string, providerId: string): string {
   if (MULTI_INSTANCE_PROVIDER_TYPES.has(providerType)) {
+    const runtimeKeyPrefix = `${providerType}-`;
+    if (providerId.startsWith(runtimeKeyPrefix)) {
+      const suffix = providerId.slice(runtimeKeyPrefix.length);
+      if (/^[A-Za-z0-9]{8}$/.test(suffix)) {
+        return providerId;
+      }
+    }
     const suffix = providerId.replace(/-/g, '').slice(0, 8);
     return `${providerType}-${suffix}`;
   }

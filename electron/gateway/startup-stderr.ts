@@ -23,6 +23,7 @@ export function classifyGatewayStderrMessage(message: string): GatewayStderrClas
   if (msg.includes('ExperimentalWarning')) return { level: 'debug', normalized: msg };
   if (msg.includes('DeprecationWarning')) return { level: 'debug', normalized: msg };
   if (msg.includes('Debugger attached')) return { level: 'debug', normalized: msg };
+  if (msg.includes('Config warnings:')) return { level: 'debug', normalized: msg };
 
   // Electron restricts NODE_OPTIONS in packaged apps; this is expected and harmless.
   if (msg.includes('node: --require is not allowed in NODE_OPTIONS')) {
@@ -35,6 +36,24 @@ export function classifyGatewayStderrMessage(message: string): GatewayStderrClas
   }
 
   return { level: 'warn', normalized: msg };
+}
+
+export function shouldSuppressGatewayStderrRepeat(
+  dedupCounter: Map<string, number>,
+  normalizedMessage: string,
+  summaryEvery = 50,
+): {
+  suppress: boolean;
+  repeatCount: number;
+  emitSummary: boolean;
+} {
+  const repeatCount = (dedupCounter.get(normalizedMessage) ?? 0) + 1;
+  dedupCounter.set(normalizedMessage, repeatCount);
+  return {
+    suppress: repeatCount > 1,
+    repeatCount,
+    emitSummary: repeatCount > 1 && repeatCount % Math.max(1, summaryEvery) === 0,
+  };
 }
 
 export function recordGatewayStartupStderrLine(lines: string[], line: string): void {

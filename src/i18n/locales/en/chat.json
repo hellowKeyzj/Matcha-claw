@@ -21,6 +21,25 @@
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
     },
+    "taskPanel": {
+        "stepStatus": {
+            "running": "Running",
+            "completed": "Done",
+            "error": "Error"
+        }
+    },
+    "executionGraph": {
+        "eyebrow": "Conversation Run",
+        "title": "Execution Graph",
+        "status": {
+            "active": "Active",
+            "previous": "Previous"
+        },
+        "branchLabel": "branch",
+        "userTriggerHint": "Triggered by the user message above",
+        "agentRun": "{{agent}} execution",
+        "agentReplyHint": "Jump to the assistant reply below"
+    },
     "skillConfigDialog": {
         "titleWithAgent": "Skill Configuration · {{agent}}",
         "loading": "Loading skills...",

@@ -37,6 +37,7 @@ interface ProviderState {
   error: string | null;
   
   // Actions
+  init: () => Promise<void>;
   refreshProviderSnapshot: () => Promise<void>;
   createAccount: (account: ProviderAccount, apiKey?: string) => Promise<void>;
   updateAccount: (accountId: string, updates: Partial<ProviderAccount>, apiKey?: string) => Promise<void>;
@@ -45,7 +46,11 @@ interface ProviderState {
   validateAccountApiKey: (
     accountOrVendorId: string,
     apiKey: string,
-    options?: { baseUrl?: string }
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+    }
   ) => Promise<{ valid: boolean; error?: string }>;
   getAccountApiKey: (accountId: string) => Promise<string | null>;
 }
@@ -57,6 +62,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   defaultAccountId: null,
   loading: false,
   error: null,
+
+  init: async () => {
+    await get().refreshProviderSnapshot();
+  },
   
   refreshProviderSnapshot: async () => {
     set({ loading: true, error: null });
@@ -65,10 +74,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
       const snapshot = await fetchProviderSnapshot();
       
       set({ 
-        statuses: snapshot.statuses,
-        accounts: snapshot.accounts,
-        vendors: snapshot.vendors,
-        defaultAccountId: snapshot.defaultAccountId,
+        statuses: snapshot.statuses ?? [],
+        accounts: snapshot.accounts ?? [],
+        vendors: snapshot.vendors ?? [],
+        defaultAccountId: snapshot.defaultAccountId ?? null,
         loading: false 
       });
     } catch (error) {

@@ -26,11 +26,13 @@ import {
 import { getPort } from '../utils/config';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { shell } from 'electron';
 
 type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 type RuntimeHealthLifecycle = 'idle' | 'booting' | 'running' | 'stopped' | 'error';
 export type RuntimeHostShellAction =
+  | 'shell_open_path'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
@@ -402,6 +404,19 @@ export function createRuntimeHostManager(
 
       if (action === 'channel_openclaw_weixin_cancel') {
         await mainProcessCapabilities.channel.cancelOpenClawWeixin();
+        return { status: 200, data: { success: true } };
+      }
+
+      if (action === 'shell_open_path') {
+        const body = asRecord(payload);
+        const targetPath = typeof body?.path === 'string' ? body.path.trim() : '';
+        if (!targetPath) {
+          return { status: 400, data: { success: false, error: 'path is required' } };
+        }
+        const openError = await shell.openPath(targetPath);
+        if (openError) {
+          return { status: 500, data: { success: false, error: openError } };
+        }
         return { status: 200, data: { success: true } };
       }
 

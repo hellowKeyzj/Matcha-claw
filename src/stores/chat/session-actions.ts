@@ -27,6 +27,16 @@ function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
   return `agent:${normalized}`;
 }
 
+function isTrulyEmptyNonMainSession(
+  currentSessionKey: string,
+  state: Pick<ReturnType<ChatGet>, 'messages' | 'sessionLastActivity' | 'sessionLabels'>,
+): boolean {
+  return !currentSessionKey.endsWith(':main')
+    && state.messages.length === 0
+    && !state.sessionLastActivity[currentSessionKey]
+    && !state.sessionLabels[currentSessionKey];
+}
+
 export function createSessionActions(
   set: ChatSet,
   get: ChatGet,
@@ -155,8 +165,9 @@ export function createSessionActions(
     // ── Switch session ──
 
     switchSession: (key: string) => {
-      const { currentSessionKey, messages } = get();
-      const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+      const state = get();
+      const { currentSessionKey } = state;
+      const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
       set((s) => ({
         currentSessionKey: key,
         messages: [],
@@ -249,8 +260,9 @@ export function createSessionActions(
       // NOTE: We intentionally do NOT call sessions.reset on the old session.
       // sessions.reset archives (renames) the session JSONL file, making old
       // conversation history inaccessible when the user switches back to it.
-      const { currentSessionKey, messages } = get();
-      const leavingEmpty = !currentSessionKey.endsWith(':main') && messages.length === 0;
+      const state = get();
+      const { currentSessionKey } = state;
+      const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
       const prefix = resolveCanonicalPrefixForAgent(agentId)
         ?? getCanonicalPrefixFromSessions(get().sessions, currentSessionKey)
         ?? DEFAULT_CANONICAL_PREFIX;
@@ -283,12 +295,13 @@ export function createSessionActions(
     // ── Cleanup empty session on navigate away ──
 
     cleanupEmptySession: () => {
-      const { currentSessionKey, messages } = get();
+      const state = get();
+      const { currentSessionKey } = state;
       // Only remove non-main sessions that were never used (no messages sent).
       // This mirrors the "leavingEmpty" logic in switchSession so that creating
       // a new session and immediately navigating away doesn't leave a ghost entry
       // in the sidebar.
-      const isEmptyNonMain = !currentSessionKey.endsWith(':main') && messages.length === 0;
+      const isEmptyNonMain = isTrulyEmptyNonMainSession(currentSessionKey, state);
       if (!isEmptyNonMain) return;
       set((s) => ({
         sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),

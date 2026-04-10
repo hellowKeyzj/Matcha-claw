@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe('config ports', () => {
   it('Host API 端口键仅保留 MATCHACLAW_HOST_API', () => {
-    expect(PORTS.MATCHACLAW_HOST_API).toBe(3210);
+    expect(PORTS.MATCHACLAW_HOST_API).toBe(13210);
   });
 
   it('读取 MATCHACLAW_HOST_API 环境变量', () => {

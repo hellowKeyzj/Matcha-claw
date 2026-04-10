@@ -91,6 +91,10 @@ mac:
     NSCameraUsageDescription: MatchaClaw requires camera access for video features
 
 dmg:
+  # Explicit volume size avoids dmg-builder auto-size underestimation
+  # that can fail with "No space left on device" on larger app bundles.
+  # This only affects temporary build volume size, not final compressed dmg size.
+  size: 2g
   background: resources/dmg-background.png
   icon: resources/icons/icon.icns
   iconSize: 100

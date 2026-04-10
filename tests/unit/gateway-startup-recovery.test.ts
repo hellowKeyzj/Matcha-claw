@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getGatewayStartupRecoveryAction,
   hasInvalidConfigFailureSignal,
   isInvalidConfigSignal,
   shouldAttemptConfigAutoRepair,
@@ -48,5 +49,15 @@ describe('gateway startup recovery heuristics', () => {
     expect(isInvalidConfigSignal('Run: openclaw doctor --fix')).toBe(true);
     expect(isInvalidConfigSignal('Gateway ready after 3 attempts')).toBe(false);
   });
-});
 
+  it('端口仍被占用属于可重试的瞬态启动错误', () => {
+    const action = getGatewayStartupRecoveryAction({
+      startupError: new Error('Port 18789 still occupied after 30000ms'),
+      startupStderrLines: [],
+      configRepairAttempted: false,
+      attempt: 1,
+      maxAttempts: 3,
+    });
+    expect(action).toBe('retry');
+  });
+});

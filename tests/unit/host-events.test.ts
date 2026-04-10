@@ -7,10 +7,10 @@ const eventSourceMock = {
   removeEventListener: removeEventListenerMock,
 } as unknown as EventSource;
 
-const createHostEventSourceMock = vi.fn(() => eventSourceMock);
+const createHostEventSourceMock = vi.fn(async () => eventSourceMock);
 
 vi.mock('@/lib/host-api', () => ({
-  createHostEventSource: () => createHostEventSourceMock(),
+  createHostEventSource: (...args: unknown[]) => createHostEventSourceMock(...args),
 }));
 
 describe('host-events', () => {
@@ -64,14 +64,20 @@ describe('host-events', () => {
   });
 
   it('uses SSE fallback only when IPC is unavailable and explicitly enabled', async () => {
-    (window as unknown as { electron?: unknown }).electron = undefined;
+    (window as unknown as { electron?: unknown }).electron = {
+      ipcRenderer: {
+        invoke: vi.fn(),
+      },
+    };
     window.localStorage.setItem('clawx:allow-sse-fallback', '1');
     const { subscribeHostEvent } = await import('@/lib/host-events');
     const handler = vi.fn();
     const unsubscribe = subscribeHostEvent('unknown:event', handler);
 
+    await vi.waitFor(() => {
+      expect(addEventListenerMock).toHaveBeenCalledWith('unknown:event', expect.any(Function));
+    });
     expect(createHostEventSourceMock).toHaveBeenCalledTimes(1);
-    expect(addEventListenerMock).toHaveBeenCalledWith('unknown:event', expect.any(Function));
 
     const listener = addEventListenerMock.mock.calls[0][1] as (event: Event) => void;
     listener({ data: JSON.stringify({ x: 1 }) } as unknown as Event);
@@ -79,5 +85,23 @@ describe('host-events', () => {
 
     unsubscribe();
     expect(removeEventListenerMock).toHaveBeenCalledWith('unknown:event', expect.any(Function));
+  });
+
+  it('SSE fallback 缺少 token 获取能力时直接禁用', async () => {
+    const warnMock = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    (window as unknown as { electron?: unknown }).electron = undefined;
+    window.localStorage.setItem('clawx:allow-sse-fallback', '1');
+
+    const { subscribeHostEvent } = await import('@/lib/host-events');
+    const unsubscribe = subscribeHostEvent('unknown:event', vi.fn());
+
+    await Promise.resolve();
+    expect(createHostEventSourceMock).not.toHaveBeenCalled();
+    expect(warnMock).toHaveBeenCalledWith(
+      '[host-events] SSE fallback requires hostapi:token IPC for "unknown:event"',
+    );
+
+    unsubscribe();
+    warnMock.mockRestore();
   });
 });

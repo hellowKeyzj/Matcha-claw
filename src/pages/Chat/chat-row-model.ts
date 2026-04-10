@@ -1,11 +1,29 @@
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
+import type { TaskStep } from './task-visualization';
+
+export interface ExecutionGraphData {
+  id: string;
+  anchorMessageKey: string;
+  triggerMessageKey: string;
+  replyMessageKey?: string;
+  agentLabel: string;
+  sessionLabel: string;
+  steps: TaskStep[];
+  active: boolean;
+  suppressToolCardMessageKeys?: string[];
+}
 
 export type ChatRow =
   | {
     key: string;
     kind: 'message';
     message: RawMessage;
+  }
+  | {
+    key: string;
+    kind: 'execution_graph';
+    graph: ExecutionGraphData;
   }
   | {
     key: string;
@@ -32,6 +50,7 @@ interface BuildChatRowsInput {
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   streamingTimestamp: number;
+  executionGraphs?: ExecutionGraphData[];
 }
 
 function isRenderableMessage(message: RawMessage): boolean {
@@ -59,14 +78,54 @@ export function buildChatRows({
   streamingMessage,
   streamingTools,
   streamingTimestamp,
+  executionGraphs = [],
 }: BuildChatRowsInput): ChatRow[] {
-  const rows: ChatRow[] = messages
-    .filter(isRenderableMessage)
-    .map((message, index) => ({
-      key: resolveMessageRowKey(message, index),
-      kind: 'message' as const,
+  const graphByAnchorMessageKey = new Map<string, ExecutionGraphData[]>();
+  for (const graph of executionGraphs) {
+    const anchorKey = graph.anchorMessageKey;
+    if (!anchorKey) continue;
+    const existing = graphByAnchorMessageKey.get(anchorKey);
+    if (!existing) {
+      graphByAnchorMessageKey.set(anchorKey, [graph]);
+    } else {
+      existing.push(graph);
+    }
+  }
+
+  const insertedGraphIds = new Set<string>();
+  const rows: ChatRow[] = [];
+  const renderableMessages = messages.filter(isRenderableMessage);
+  for (const [index, message] of renderableMessages.entries()) {
+    const messageKey = resolveMessageRowKey(message, index);
+    rows.push({
+      key: messageKey,
+      kind: 'message',
       message,
-    }));
+    });
+    const graphs = graphByAnchorMessageKey.get(messageKey);
+    if (!graphs || graphs.length === 0) {
+      continue;
+    }
+    for (const graph of graphs) {
+      if (insertedGraphIds.has(graph.id)) continue;
+      insertedGraphIds.add(graph.id);
+      rows.push({
+        key: `execution_graph:${graph.id}`,
+        kind: 'execution_graph',
+        graph,
+      });
+    }
+  }
+
+  for (const graph of executionGraphs) {
+    if (insertedGraphIds.has(graph.id)) continue;
+    insertedGraphIds.add(graph.id);
+    rows.push({
+      key: `execution_graph:${graph.id}`,
+      kind: 'execution_graph',
+      graph,
+    });
+  }
 
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as { role?: string; content?: unknown; timestamp?: number }

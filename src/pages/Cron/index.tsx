@@ -27,6 +27,7 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
@@ -34,10 +35,11 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
+import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
-import { CHANNEL_ICONS, type ChannelType } from '@/types/channel';
+import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
@@ -52,6 +54,85 @@ const schedulePresets: { key: string; value: string; type: ScheduleType }[] = [
   { key: 'weeklyMon', value: '0 9 * * 1', type: 'weekly' },
   { key: 'monthly1st', value: '0 9 1 * *', type: 'monthly' },
 ];
+
+type DeliveryChannelAccount = {
+  accountId: string;
+  name: string;
+};
+
+type DeliveryChannelGroup = {
+  channelType: string;
+  accounts: DeliveryChannelAccount[];
+  defaultAccountId?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeCronDeliveryChannel(channelType: string): string {
+  const normalized = channelType.trim();
+  if (normalized === 'wechat') {
+    return 'openclaw-weixin';
+  }
+  return normalized;
+}
+
+function isWeChatDeliveryChannel(channelType: string): boolean {
+  return normalizeCronDeliveryChannel(channelType) === 'openclaw-weixin';
+}
+
+function isSupportedCronDeliveryChannel(channelType: string): boolean {
+  return normalizeCronDeliveryChannel(channelType).length > 0;
+}
+
+function parseDeliveryChannelGroups(snapshot: unknown): DeliveryChannelGroup[] {
+  if (!isRecord(snapshot)) {
+    return [];
+  }
+  const channelOrder = Array.isArray(snapshot.channelOrder)
+    ? snapshot.channelOrder.filter((item): item is string => typeof item === 'string')
+    : [];
+  const channelMap = isRecord(snapshot.channels) ? snapshot.channels : {};
+  const channelAccounts = isRecord(snapshot.channelAccounts) ? snapshot.channelAccounts : {};
+  const defaultAccountMap = isRecord(snapshot.channelDefaultAccountId) ? snapshot.channelDefaultAccountId : {};
+  const orderedChannelTypes = channelOrder.length > 0 ? channelOrder : Object.keys(channelMap);
+  const groups: DeliveryChannelGroup[] = [];
+  for (const channelType of orderedChannelTypes) {
+    const summary = channelMap[channelType];
+    if (!isRecord(summary)) {
+      continue;
+    }
+    const configured = summary.configured === true || summary.running === true;
+    if (!configured) {
+      continue;
+    }
+    const accountsRaw = Array.isArray(channelAccounts[channelType]) ? channelAccounts[channelType] : [];
+    const accounts: DeliveryChannelAccount[] = [];
+    for (const account of accountsRaw) {
+      if (!isRecord(account)) {
+        continue;
+      }
+      const accountId = typeof account.accountId === 'string' ? account.accountId.trim() : '';
+      if (!accountId) {
+        continue;
+      }
+      const accountName = typeof account.name === 'string' && account.name.trim()
+        ? account.name.trim()
+        : accountId;
+      accounts.push({ accountId, name: accountName });
+    }
+    const defaultAccountId = typeof defaultAccountMap[channelType] === 'string'
+      ? defaultAccountMap[channelType].trim()
+      : undefined;
+    groups.push({
+      channelType,
+      accounts,
+      ...(defaultAccountId ? { defaultAccountId } : {}),
+    });
+  }
+  return groups;
+}
 
 // Parse cron schedule to human-readable format
 // Handles both plain cron strings and Gateway CronSchedule objects:
@@ -201,7 +282,87 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
   const [customSchedule, setCustomSchedule] = useState('');
   const [useCustom, setUseCustom] = useState(false);
   const [enabled, setEnabled] = useState(job?.enabled ?? true);
+  const [deliveryMode, setDeliveryMode] = useState<'none' | 'announce'>(
+    job?.delivery?.mode === 'announce' ? 'announce' : 'none',
+  );
+  const [deliveryChannel, setDeliveryChannel] = useState(job?.delivery?.channel?.trim() || '');
+  const [deliveryTarget, setDeliveryTarget] = useState(job?.delivery?.to || '');
+  const [selectedDeliveryAccountId, setSelectedDeliveryAccountId] = useState(job?.delivery?.accountId || '');
+  const [deliveryChannels, setDeliveryChannels] = useState<DeliveryChannelGroup[]>([]);
+  const [deliveryChannelsLoading, setDeliveryChannelsLoading] = useState(false);
   const schedulePreview = estimateNextRun(useCustom ? customSchedule : schedule);
+  const deliveryChannelOptions = (() => {
+    const options = [...deliveryChannels];
+    if (deliveryChannel && !options.some((entry) => entry.channelType === deliveryChannel)) {
+      options.push({
+        channelType: deliveryChannel,
+        accounts: [],
+      });
+    }
+    return options;
+  })();
+  const selectedDeliveryChannelGroup = deliveryChannelOptions.find((entry) => entry.channelType === deliveryChannel);
+  const deliveryAccountOptions = selectedDeliveryChannelGroup?.accounts ?? [];
+  const requiresExplicitDeliveryAccount = deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDeliveryChannelsLoading(true);
+    void hostChannelsFetchSnapshot()
+      .then((result) => {
+        if (cancelled || !result.success) {
+          return;
+        }
+        const groups = parseDeliveryChannelGroups((result as { snapshot?: unknown }).snapshot);
+        setDeliveryChannels(groups);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('Failed to load delivery channels:', error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDeliveryChannelsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (deliveryMode !== 'announce' || deliveryChannel.trim()) {
+      return;
+    }
+    const firstSupported = deliveryChannels.find((entry) => isSupportedCronDeliveryChannel(entry.channelType));
+    if (firstSupported?.channelType) {
+      setDeliveryChannel(firstSupported.channelType);
+    }
+  }, [deliveryChannels, deliveryChannel, deliveryMode]);
+
+  useEffect(() => {
+    if (deliveryMode !== 'announce') {
+      if (selectedDeliveryAccountId) {
+        setSelectedDeliveryAccountId('');
+      }
+      return;
+    }
+    const currentChannel = deliveryChannelOptions.find((entry) => entry.channelType === deliveryChannel);
+    const accounts = currentChannel?.accounts ?? [];
+    if (accounts.length === 0) {
+      if (selectedDeliveryAccountId) {
+        setSelectedDeliveryAccountId('');
+      }
+      return;
+    }
+    const existed = accounts.some((entry) => entry.accountId === selectedDeliveryAccountId);
+    if (existed) {
+      return;
+    }
+    const nextDefault = currentChannel?.defaultAccountId || accounts[0]?.accountId || '';
+    setSelectedDeliveryAccountId(nextDefault);
+  }, [deliveryChannel, deliveryChannelOptions, deliveryMode, selectedDeliveryAccountId]);
 
   const handleSubmit = async () => {
     if (!name.trim()) {
@@ -219,12 +380,38 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
       return;
     }
 
+    const finalDelivery = deliveryMode === 'announce'
+      ? {
+        mode: 'announce' as const,
+        channel: deliveryChannel.trim(),
+        to: deliveryTarget.trim(),
+        ...(selectedDeliveryAccountId.trim() ? { accountId: selectedDeliveryAccountId.trim() } : {}),
+      }
+      : { mode: 'none' as const };
+    if (finalDelivery.mode === 'announce' && !finalDelivery.channel) {
+      toast.error(t('toast.deliveryChannelRequired'));
+      return;
+    }
+    if (finalDelivery.mode === 'announce' && !isSupportedCronDeliveryChannel(finalDelivery.channel)) {
+      toast.error(t('toast.deliveryChannelUnsupported'));
+      return;
+    }
+    if (finalDelivery.mode === 'announce' && !finalDelivery.to) {
+      toast.error(t('toast.deliveryTargetRequired'));
+      return;
+    }
+    if (finalDelivery.mode === 'announce' && isWeChatDeliveryChannel(finalDelivery.channel) && !selectedDeliveryAccountId.trim()) {
+      toast.error(t('toast.deliveryAccountRequiredWeChat'));
+      return;
+    }
+
     setSaving(true);
     try {
       await onSave({
         name: name.trim(),
         message: message.trim(),
         schedule: finalSchedule,
+        delivery: finalDelivery,
         enabled,
       });
       onClose();
@@ -310,6 +497,93 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
             <p className="text-xs text-muted-foreground">
               {schedulePreview ? `${t('card.next')}: ${schedulePreview}` : t('dialog.cronPlaceholder')}
             </p>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3">
+            <div className="space-y-1">
+              <Label>{t('dialog.deliveryTitle')}</Label>
+              <p className="text-xs text-muted-foreground">{t('dialog.deliveryDescription')}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                variant={deliveryMode === 'none' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setDeliveryMode('none')}
+                className="h-auto min-h-9 whitespace-normal break-words text-center leading-5 overflow-visible text-clip"
+              >
+                {t('dialog.deliveryModeNone')}
+              </Button>
+              <Button
+                type="button"
+                variant={deliveryMode === 'announce' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setDeliveryMode('announce')}
+                className="h-auto min-h-9 whitespace-normal break-words text-center leading-5 overflow-visible text-clip"
+              >
+                {t('dialog.deliveryModeAnnounce')}
+              </Button>
+            </div>
+
+            {deliveryMode === 'announce' && (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <Label htmlFor="delivery-channel">{t('dialog.deliveryChannel')}</Label>
+                  <Select
+                    id="delivery-channel"
+                    value={deliveryChannel}
+                    disabled={deliveryChannelsLoading}
+                    onChange={(event) => {
+                      setDeliveryChannel(event.target.value);
+                      setSelectedDeliveryAccountId('');
+                    }}
+                  >
+                    <option value="">{t('dialog.selectDeliveryChannel')}</option>
+                    {deliveryChannelOptions.map((group) => (
+                      <option key={group.channelType} value={group.channelType}>
+                        {CHANNEL_NAMES[group.channelType as ChannelType] || group.channelType}
+                      </option>
+                    ))}
+                  </Select>
+                  {deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel) && (
+                    <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatRequirements')}</p>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <Label htmlFor="delivery-account">{t('dialog.deliveryAccount')}</Label>
+                  <Select
+                    id="delivery-account"
+                    value={selectedDeliveryAccountId}
+                    disabled={deliveryAccountOptions.length === 0}
+                    onChange={(event) => setSelectedDeliveryAccountId(event.target.value)}
+                  >
+                    {!requiresExplicitDeliveryAccount && (
+                      <option value="">{t('dialog.deliveryAccountAuto')}</option>
+                    )}
+                    {deliveryAccountOptions.map((account) => (
+                      <option key={account.accountId} value={account.accountId}>
+                        {account.name}
+                      </option>
+                    ))}
+                  </Select>
+                  {requiresExplicitDeliveryAccount && (
+                    <p className="text-xs text-muted-foreground">{t('dialog.deliveryWeChatAccountRequired')}</p>
+                  )}
+                </div>
+
+                <div className="space-y-1">
+                  <Label htmlFor="delivery-target">{t('dialog.deliveryTarget')}</Label>
+                  <Input
+                    id="delivery-target"
+                    placeholder={t('dialog.deliveryTargetPlaceholder')}
+                    value={deliveryTarget}
+                    onChange={(event) => setDeliveryTarget(event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('dialog.deliveryTargetDesc')}</p>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Enabled */}
@@ -438,7 +712,16 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
 
         {/* Metadata */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
-          {job.target && (
+          {job.delivery?.mode === 'announce' && job.delivery.channel && (
+            <span className="flex items-center gap-1">
+              {CHANNEL_ICONS[job.delivery.channel as ChannelType]}
+              {CHANNEL_NAMES[job.delivery.channel as ChannelType] || job.delivery.channel}
+              {job.delivery.accountId ? `(${job.delivery.accountId})` : ''}
+              {job.delivery.to ? ` → ${job.delivery.to}` : ''}
+            </span>
+          )}
+
+          {(!job.delivery || job.delivery.mode !== 'announce') && job.target && (
             <span className="flex items-center gap-1">
               {CHANNEL_ICONS[job.target.channelType as ChannelType]}
               {job.target.channelName}

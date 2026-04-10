@@ -32,6 +32,7 @@ import {
 } from '@/stores/providers';
 import {
   PROVIDER_TYPE_INFO,
+  getProviderDocsUrl,
   type ProviderConfig,
   type ProviderType,
   getProviderIconUrl,
@@ -57,8 +58,19 @@ import { invokeIpc } from '@/lib/api-client';
 import { useSettingsStore } from '@/stores/settings';
 import { subscribeHostEvent } from '@/lib/host-events';
 
+type ArkMode = 'apikey' | 'codeplan';
+
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
+}
+
+function getProtocolBaseUrlPlaceholder(
+  apiProtocol: ProviderAccount['apiProtocol'],
+): string {
+  if (apiProtocol === 'anthropic-messages') {
+    return 'https://api.example.com/anthropic';
+  }
+  return 'https://api.example.com/v1';
 }
 
 function fallbackProviderIdsEqual(a?: string[], b?: string[]): boolean {
@@ -75,6 +87,53 @@ function fallbackModelsEqual(a?: string[], b?: string[]): boolean {
   const left = normalizeFallbackModels(a);
   const right = normalizeFallbackModels(b);
   return left.length === right.length && left.every((model, index) => model === right[index]);
+}
+
+function getUserAgentHeader(headers?: Record<string, string>): string {
+  if (!headers) return '';
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === 'user-agent') {
+      return value;
+    }
+  }
+  return '';
+}
+
+function mergeHeadersWithUserAgent(
+  headers: Record<string, string> | undefined,
+  userAgent: string,
+): Record<string, string> | undefined {
+  const next = Object.fromEntries(
+    Object.entries(headers ?? {})
+      .filter(([key]) => key.toLowerCase() !== 'user-agent'),
+  );
+  const normalizedUserAgent = userAgent.trim();
+  if (normalizedUserAgent) {
+    next['User-Agent'] = normalizedUserAgent;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function isArkCodePlanMode(
+  vendorId: string,
+  baseUrl: string | undefined,
+  modelId: string | undefined,
+  codePlanPresetBaseUrl?: string,
+  codePlanPresetModelId?: string,
+): boolean {
+  if (vendorId !== 'ark' || !codePlanPresetBaseUrl || !codePlanPresetModelId) {
+    return false;
+  }
+  return (baseUrl || '').trim() === codePlanPresetBaseUrl
+    && (modelId || '').trim() === codePlanPresetModelId;
+}
+
+function shouldShowUserAgentField(account: ProviderAccount): boolean {
+  return account.vendorId === 'custom';
+}
+
+function shouldShowUserAgentFieldForNewProvider(providerType: ProviderType | null): boolean {
+  return providerType === 'custom';
 }
 
 function getAuthModeLabel(
@@ -130,7 +189,13 @@ export function ProvidersSettings() {
     type: ProviderType,
     name: string,
     apiKey: string,
-    options?: { baseUrl?: string; model?: string; authMode?: ProviderAccount['authMode'] }
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+      model?: string;
+      authMode?: ProviderAccount['authMode'];
+    }
   ) => {
     const vendor = vendorMap.get(type);
     const id = buildProviderAccountId(type, null, vendors);
@@ -142,7 +207,10 @@ export function ProvidersSettings() {
         label: name,
         authMode: options?.authMode || vendor?.defaultAuthMode || (type === 'ollama' ? 'local' : 'api_key'),
         baseUrl: options?.baseUrl,
-        apiProtocol: type === 'custom' || type === 'ollama' ? 'openai-completions' : undefined,
+        apiProtocol: type === 'custom' || type === 'ollama'
+          ? (options?.apiProtocol || 'openai-completions')
+          : undefined,
+        headers: options?.headers,
         model: options?.model,
         enabled: true,
         isDefault: false,
@@ -224,6 +292,8 @@ export function ProvidersSettings() {
                 const updates: Partial<ProviderAccount> = {};
                 if (payload.updates) {
                   if (payload.updates.baseUrl !== undefined) updates.baseUrl = payload.updates.baseUrl;
+                  if (payload.updates.apiProtocol !== undefined) updates.apiProtocol = payload.updates.apiProtocol;
+                  if (payload.updates.headers !== undefined) updates.headers = payload.updates.headers;
                   if (payload.updates.model !== undefined) updates.model = payload.updates.model;
                   if (payload.updates.fallbackModels !== undefined) updates.fallbackModels = payload.updates.fallbackModels;
                   if (payload.updates.fallbackProviderIds !== undefined) {
@@ -271,7 +341,11 @@ interface ProviderCardProps {
   onSaveEdits: (payload: { newApiKey?: string; updates?: Partial<ProviderConfig> }) => Promise<void>;
   onValidateKey: (
     key: string,
-    options?: { baseUrl?: string }
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+    }
   ) => Promise<{ valid: boolean; error?: string }>;
   devModeUnlocked: boolean;
 }
@@ -295,6 +369,10 @@ function ProviderCard({
   const { account, vendor, status } = item;
   const [newKey, setNewKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(account.baseUrl || '');
+  const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>(
+    account.apiProtocol || 'openai-completions',
+  );
+  const [userAgent, setUserAgent] = useState(getUserAgentHeader(account.headers));
   const [modelId, setModelId] = useState(account.model || '');
   const [fallbackModelsText, setFallbackModelsText] = useState(
     normalizeFallbackModels(account.fallbackModels).join('\n')
@@ -305,10 +383,22 @@ function ProviderCard({
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [arkMode, setArkMode] = useState<ArkMode>('apikey');
 
   const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === account.vendorId);
+  const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
+  const codePlanPreset = typeInfo?.codePlanPresetBaseUrl && typeInfo?.codePlanPresetModelId
+    ? {
+      baseUrl: typeInfo.codePlanPresetBaseUrl,
+      modelId: typeInfo.codePlanPresetModelId,
+    }
+    : null;
+  const effectiveDocsUrl = account.vendorId === 'ark' && arkMode === 'codeplan'
+    ? (typeInfo?.codePlanDocsUrl || providerDocsUrl)
+    : providerDocsUrl;
   const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
+  const showUserAgentField = shouldShowUserAgentField(account);
 
   const resolveAccountLabel = (candidate: ProviderAccount): string => {
     const rawLabel = (candidate.label ?? '').trim();
@@ -331,11 +421,33 @@ function ProviderCard({
       setNewKey('');
       setShowKey(false);
       setBaseUrl(account.baseUrl || '');
+      setApiProtocol(account.apiProtocol || 'openai-completions');
+      setUserAgent(getUserAgentHeader(account.headers));
       setModelId(account.model || '');
       setFallbackModelsText(normalizeFallbackModels(account.fallbackModels).join('\n'));
       setFallbackProviderIds(normalizeFallbackProviderIds(account.fallbackAccountIds));
+      setArkMode(
+        isArkCodePlanMode(
+          account.vendorId,
+          account.baseUrl,
+          account.model,
+          typeInfo?.codePlanPresetBaseUrl,
+          typeInfo?.codePlanPresetModelId,
+        ) ? 'codeplan' : 'apikey'
+      );
     }
-  }, [isEditing, account.baseUrl, account.fallbackModels, account.fallbackAccountIds, account.model]);
+  }, [
+    isEditing,
+    account.apiProtocol,
+    account.baseUrl,
+    account.headers,
+    account.fallbackModels,
+    account.fallbackAccountIds,
+    account.model,
+    account.vendorId,
+    typeInfo?.codePlanPresetBaseUrl,
+    typeInfo?.codePlanPresetModelId,
+  ]);
 
   useEffect(() => {
     if (!isEditing) {
@@ -374,6 +486,12 @@ function ProviderCard({
         setValidating(true);
         const result = await onValidateKey(newKey, {
           baseUrl: baseUrl.trim() || undefined,
+          apiProtocol: (account.vendorId === 'custom' || account.vendorId === 'ollama')
+            ? apiProtocol
+            : undefined,
+          headers: showUserAgentField
+            ? mergeHeadersWithUserAgent(account.headers, userAgent)
+            : undefined,
         });
         setValidating(false);
         if (!result.valid) {
@@ -395,8 +513,21 @@ function ProviderCard({
         if (typeInfo?.showBaseUrl && (baseUrl.trim() || undefined) !== (account.baseUrl || undefined)) {
           updates.baseUrl = baseUrl.trim() || undefined;
         }
+        if (
+          (account.vendorId === 'custom' || account.vendorId === 'ollama')
+          && (apiProtocol || 'openai-completions') !== (account.apiProtocol || 'openai-completions')
+        ) {
+          updates.apiProtocol = apiProtocol || 'openai-completions';
+        }
         if (showModelIdField && (modelId.trim() || undefined) !== (account.model || undefined)) {
           updates.model = modelId.trim() || undefined;
+        }
+        if (showUserAgentField) {
+          const existingUserAgent = getUserAgentHeader(account.headers).trim();
+          const nextUserAgent = userAgent.trim();
+          if (nextUserAgent !== existingUserAgent) {
+            updates.headers = mergeHeadersWithUserAgent(account.headers, nextUserAgent);
+          }
         }
         if (!fallbackModelsEqual(normalizedFallbackModels, account.fallbackModels)) {
           updates.fallbackModels = normalizedFallbackModels;
@@ -469,11 +600,9 @@ function ProviderCard({
               >
                 <X className="h-3.5 w-3.5" />
               </Button>
-              {account.vendorId === 'custom' && (
+              {effectiveDocsUrl && (
                 <a
-                  href={i18n.language.startsWith('zh')
-                    ? 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh'
-                    : 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#Ee1ldfvKJoVGvfxc32mcILwenth'}
+                  href={effectiveDocsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-primary hover:underline inline-flex items-center gap-1"
@@ -498,7 +627,120 @@ function ProviderCard({
                     <Input
                       value={baseUrl}
                       onChange={(e) => setBaseUrl(e.target.value)}
-                      placeholder="https://api.example.com/v1"
+                      placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
+                      className="h-9 text-sm"
+                    />
+                  </div>
+                )}
+                {account.vendorId === 'ark' && codePlanPreset && (
+                  <div className="space-y-1.5 pt-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-xs">{t('aiProviders.dialog.codePlanPreset')}</Label>
+                      {typeInfo?.codePlanDocsUrl && (
+                        <a
+                          href={typeInfo.codePlanDocsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                        >
+                          {t('aiProviders.dialog.codePlanDoc')}
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                    <div className="flex gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setArkMode('apikey');
+                          setBaseUrl(typeInfo?.defaultBaseUrl || '');
+                          if (modelId.trim() === codePlanPreset.modelId) {
+                            setModelId(typeInfo?.defaultModelId || '');
+                          }
+                        }}
+                        className={cn(
+                          'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                          arkMode === 'apikey'
+                            ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                            : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                        )}
+                      >
+                        {t('aiProviders.authModes.apiKey')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setArkMode('codeplan');
+                          setBaseUrl(codePlanPreset.baseUrl);
+                          setModelId(codePlanPreset.modelId);
+                        }}
+                        className={cn(
+                          'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                          arkMode === 'codeplan'
+                            ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                            : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                        )}
+                      >
+                        {t('aiProviders.dialog.codePlanMode')}
+                      </button>
+                    </div>
+                    {arkMode === 'codeplan' && (
+                      <p className="text-xs text-muted-foreground">
+                        {t('aiProviders.dialog.codePlanPresetDesc')}
+                      </p>
+                    )}
+                  </div>
+                )}
+                {account.vendorId === 'custom' && (
+                  <div className="space-y-1">
+                    <Label className="text-xs">{t('aiProviders.dialog.protocol', 'Protocol')}</Label>
+                    <div className="flex gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setApiProtocol('openai-completions')}
+                        className={cn(
+                          'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                          apiProtocol === 'openai-completions'
+                            ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                            : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                        )}
+                      >
+                        {t('aiProviders.protocols.openaiCompletions', 'OpenAI Completions')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setApiProtocol('openai-responses')}
+                        className={cn(
+                          'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                          apiProtocol === 'openai-responses'
+                            ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                            : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                        )}
+                      >
+                        {t('aiProviders.protocols.openaiResponses', 'OpenAI Responses')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setApiProtocol('anthropic-messages')}
+                        className={cn(
+                          'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                          apiProtocol === 'anthropic-messages'
+                            ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                            : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                        )}
+                      >
+                        {t('aiProviders.protocols.anthropic', 'Anthropic')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {showUserAgentField && (
+                  <div className="space-y-1">
+                    <Label className="text-xs">{t('aiProviders.dialog.userAgent')}</Label>
+                    <Input
+                      value={userAgent}
+                      onChange={(e) => setUserAgent(e.target.value)}
+                      placeholder={t('aiProviders.dialog.userAgentPlaceholder')}
                       className="h-9 text-sm"
                     />
                   </div>
@@ -609,6 +851,8 @@ function ProviderCard({
                       || (
                         !newKey.trim()
                         && (baseUrl.trim() || undefined) === (account.baseUrl || undefined)
+                        && (apiProtocol || 'openai-completions') === (account.apiProtocol || 'openai-completions')
+                        && userAgent.trim() === getUserAgentHeader(account.headers).trim()
                         && (modelId.trim() || undefined) === (account.model || undefined)
                         && fallbackModelsEqual(normalizeFallbackModels(fallbackModelsText.split('\n')), account.fallbackModels)
                         && fallbackProviderIdsEqual(fallbackProviderIds, account.fallbackAccountIds)
@@ -709,12 +953,22 @@ interface AddProviderDialogProps {
     type: ProviderType,
     name: string,
     apiKey: string,
-    options?: { baseUrl?: string; model?: string; authMode?: ProviderAccount['authMode'] }
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+      model?: string;
+      authMode?: ProviderAccount['authMode'];
+    }
   ) => Promise<void>;
   onValidateKey: (
     type: string,
     apiKey: string,
-    options?: { baseUrl?: string }
+    options?: {
+      baseUrl?: string;
+      apiProtocol?: ProviderAccount['apiProtocol'];
+      headers?: Record<string, string>;
+    }
   ) => Promise<{ valid: boolean; error?: string }>;
   devModeUnlocked: boolean;
 }
@@ -732,7 +986,10 @@ function AddProviderDialog({
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
+  const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>('openai-completions');
+  const [userAgent, setUserAgent] = useState('');
   const [modelId, setModelId] = useState('');
+  const [arkMode, setArkMode] = useState<ArkMode>('apikey');
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -756,11 +1013,22 @@ function AddProviderDialog({
   const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('apikey');
 
   const typeInfo = PROVIDER_TYPE_INFO.find((t) => t.id === selectedType);
+  const providerDocsUrl = getProviderDocsUrl(typeInfo, i18n.language);
   const showModelIdField = shouldShowProviderModelId(typeInfo, devModeUnlocked);
+  const codePlanPreset = typeInfo?.codePlanPresetBaseUrl && typeInfo?.codePlanPresetModelId
+    ? {
+      baseUrl: typeInfo.codePlanPresetBaseUrl,
+      modelId: typeInfo.codePlanPresetModelId,
+    }
+    : null;
+  const effectiveDocsUrl = selectedType === 'ark' && arkMode === 'codeplan'
+    ? (typeInfo?.codePlanDocsUrl || providerDocsUrl)
+    : providerDocsUrl;
   const isOAuth = typeInfo?.isOAuth ?? false;
   const supportsApiKey = typeInfo?.supportsApiKey ?? false;
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
+  const showUserAgentInAddDialog = shouldShowUserAgentFieldForNewProvider(selectedType);
   const preferredOAuthMode = selectedVendor?.supportedAuthModes.includes('oauth_browser')
     ? 'oauth_browser'
     : (selectedVendor?.supportedAuthModes.includes('oauth_device')
@@ -775,6 +1043,23 @@ function AddProviderDialog({
     }
     setAuthMode(selectedVendor.defaultAuthMode === 'api_key' ? 'apikey' : 'oauth');
   }, [selectedVendor, isOAuth, supportsApiKey]);
+
+  useEffect(() => {
+    if (selectedType !== 'ark') {
+      setArkMode('apikey');
+      return;
+    }
+    setArkMode(
+      isArkCodePlanMode(
+        'ark',
+        baseUrl,
+        modelId,
+        typeInfo?.codePlanPresetBaseUrl,
+        typeInfo?.codePlanPresetModelId,
+      ) ? 'codeplan' : 'apikey'
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedType]);
 
   // Keep refs to the latest values so event handlers see the current dialog state.
   const latestRef = React.useRef({ selectedType, typeInfo, onAdd, onClose, t });
@@ -856,11 +1141,8 @@ function AddProviderDialog({
   const handleStartOAuth = async () => {
     if (!selectedType) return;
 
-    if (selectedType === 'minimax-portal' && existingVendorIds.has('minimax-portal-cn')) {
-      toast.error(t('aiProviders.toast.minimaxConflict'));
-      return;
-    }
-    if (selectedType === 'minimax-portal-cn' && existingVendorIds.has('minimax-portal')) {
+    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
+    if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
@@ -905,6 +1187,10 @@ function AddProviderDialog({
   };
 
   const availableTypes = PROVIDER_TYPE_INFO.filter((type) => {
+    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
+    if ((type.id === 'minimax-portal' || type.id === 'minimax-portal-cn') && hasMinimax) {
+      return false;
+    }
     const vendor = vendorMap.get(type.id);
     if (!vendor) {
       return !existingVendorIds.has(type.id) || type.id === 'custom';
@@ -915,11 +1201,8 @@ function AddProviderDialog({
   const handleAdd = async () => {
     if (!selectedType) return;
 
-    if (selectedType === 'minimax-portal' && existingVendorIds.has('minimax-portal-cn')) {
-      toast.error(t('aiProviders.toast.minimaxConflict'));
-      return;
-    }
-    if (selectedType === 'minimax-portal-cn' && existingVendorIds.has('minimax-portal')) {
+    const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
+    if ((selectedType === 'minimax-portal' || selectedType === 'minimax-portal-cn') && hasMinimax) {
       toast.error(t('aiProviders.toast.minimaxConflict'));
       return;
     }
@@ -938,6 +1221,12 @@ function AddProviderDialog({
       if (requiresKey && apiKey) {
         const result = await onValidateKey(selectedType, apiKey, {
           baseUrl: baseUrl.trim() || undefined,
+          apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')
+            ? apiProtocol
+            : undefined,
+          headers: showUserAgentInAddDialog
+            ? mergeHeadersWithUserAgent(undefined, userAgent)
+            : undefined,
         });
         if (!result.valid) {
           setValidationError(result.error || t('aiProviders.toast.invalidKey'));
@@ -959,6 +1248,12 @@ function AddProviderDialog({
         apiKey.trim(),
         {
           baseUrl: baseUrl.trim() || undefined,
+          apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')
+            ? apiProtocol
+            : undefined,
+          headers: showUserAgentInAddDialog
+            ? mergeHeadersWithUserAgent(undefined, userAgent)
+            : undefined,
           model: resolveProviderModelForSave(typeInfo, modelId, devModeUnlocked),
           authMode: useOAuthFlow ? (preferredOAuthMode || 'oauth_device') : selectedType === 'ollama'
             ? 'local'
@@ -1005,7 +1300,10 @@ function AddProviderDialog({
                     setSelectedType(type.id);
                     setName(type.id === 'custom' ? t('aiProviders.custom') : type.name);
                     setBaseUrl(type.defaultBaseUrl || '');
+                    setApiProtocol('openai-completions');
+                    setUserAgent('');
                     setModelId(type.defaultModelId || '');
+                    setArkMode('apikey');
                   }}
                   className="p-4 rounded-lg border hover:bg-accent transition-colors text-center"
                 >
@@ -1033,19 +1331,20 @@ function AddProviderDialog({
                       setSelectedType(null);
                       setValidationError(null);
                       setBaseUrl('');
+                      setApiProtocol('openai-completions');
+                      setUserAgent('');
                       setModelId('');
+                      setArkMode('apikey');
                     }}
                     className="text-sm text-muted-foreground hover:text-foreground"
                   >
                     {t('aiProviders.dialog.change')}
                   </button>
-                  {selectedType === 'custom' && (
+                  {effectiveDocsUrl && (
                     <>
                       <span className="mx-2 text-foreground/20">|</span>
                       <a
-                        href={i18n.language.startsWith('zh')
-                          ? 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#IWQCdfe5fobGU3xf3UGcgbLynGh'
-                          : 'https://icnnp7d0dymg.feishu.cn/wiki/BmiLwGBcEiloZDkdYnGc8RWnn6d#Ee1ldfvKJoVGvfxc32mcILwenth'}
+                        href={effectiveDocsUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
@@ -1143,10 +1442,129 @@ function AddProviderDialog({
                   <Label htmlFor="baseUrl">{t('aiProviders.dialog.baseUrl')}</Label>
                   <Input
                     id="baseUrl"
-                    placeholder="https://api.example.com/v1"
+                    placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                   />
+                </div>
+              )}
+
+              {showUserAgentInAddDialog && (
+                <div className="space-y-2">
+                  <Label htmlFor="userAgent">{t('aiProviders.dialog.userAgent')}</Label>
+                  <Input
+                    id="userAgent"
+                    placeholder={t('aiProviders.dialog.userAgentPlaceholder')}
+                    value={userAgent}
+                    onChange={(e) => setUserAgent(e.target.value)}
+                  />
+                </div>
+              )}
+
+              {selectedType === 'ark' && codePlanPreset && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label>{t('aiProviders.dialog.codePlanPreset')}</Label>
+                    {typeInfo?.codePlanDocsUrl && (
+                      <a
+                        href={typeInfo.codePlanDocsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                        tabIndex={-1}
+                      >
+                        {t('aiProviders.dialog.codePlanDoc')}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                  <div className="flex gap-2 text-[13px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setArkMode('apikey');
+                        setBaseUrl(typeInfo?.defaultBaseUrl || '');
+                        if (modelId.trim() === codePlanPreset.modelId) {
+                          setModelId(typeInfo?.defaultModelId || '');
+                        }
+                        setValidationError(null);
+                      }}
+                      className={cn(
+                        'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                        arkMode === 'apikey'
+                          ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                          : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                      )}
+                    >
+                      {t('aiProviders.authModes.apiKey')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setArkMode('codeplan');
+                        setBaseUrl(codePlanPreset.baseUrl);
+                        setModelId(codePlanPreset.modelId);
+                        setValidationError(null);
+                      }}
+                      className={cn(
+                        'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                        arkMode === 'codeplan'
+                          ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                          : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                      )}
+                    >
+                      {t('aiProviders.dialog.codePlanMode')}
+                    </button>
+                  </div>
+                  {arkMode === 'codeplan' && (
+                    <p className="text-xs text-muted-foreground">
+                      {t('aiProviders.dialog.codePlanPresetDesc')}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {selectedType === 'custom' && (
+                <div className="space-y-2">
+                  <Label>{t('aiProviders.dialog.protocol', 'Protocol')}</Label>
+                  <div className="flex gap-2 text-[13px]">
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('openai-completions')}
+                      className={cn(
+                        'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                        apiProtocol === 'openai-completions'
+                          ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                          : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                      )}
+                    >
+                      {t('aiProviders.protocols.openaiCompletions', 'OpenAI Completions')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('openai-responses')}
+                      className={cn(
+                        'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                        apiProtocol === 'openai-responses'
+                          ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                          : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                      )}
+                    >
+                      {t('aiProviders.protocols.openaiResponses', 'OpenAI Responses')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiProtocol('anthropic-messages')}
+                      className={cn(
+                        'flex-1 py-1.5 px-3 rounded-lg border transition-colors',
+                        apiProtocol === 'anthropic-messages'
+                          ? 'bg-white dark:bg-card border-black/20 dark:border-white/20 shadow-sm font-medium'
+                          : 'border-transparent bg-black/5 dark:bg-white/5 text-muted-foreground hover:bg-black/10 dark:hover:bg-white/10',
+                      )}
+                    >
+                      {t('aiProviders.protocols.anthropic', 'Anthropic')}
+                    </button>
+                  </div>
                 </div>
               )}
 

@@ -111,6 +111,8 @@ Configure and monitor multiple AI channels simultaneously. Each channel operates
 
 ### ⏰ Cron-Based Automation
 Schedule AI tasks to run automatically. Define triggers, set intervals, and let your AI agents work around the clock without manual intervention (accessible from the **Scheduled Tasks** tab in `/tasks`).
+The Scheduled Tasks form supports external delivery configuration with separate sender account and recipient target fields, so you can keep results in-app or push them to configured channels without editing `jobs.json` manually.
+WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints: you must explicitly set both recipient target (`delivery.to`) and sender account (`delivery.accountId`).
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, and manage skills through the integrated skill panel—no package managers required.
@@ -124,6 +126,7 @@ Environment variables for bundled search skills:
 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
+For OpenAI-compatible gateways configured via **Custom** provider, you can set a custom `User-Agent` in **Settings → Models → Edit Provider**.
 
 ### 🔑 License Gate & Diagnostics
 The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.
@@ -173,6 +176,8 @@ When you launch MatchaClaw for the first time, the **Setup Wizard** will guide y
 4. **Skill Bundles** – Select pre-configured skills for common use cases
 5. **Verification** – Test your configuration before entering the main interface
 
+If your system language is supported, the wizard will preselect it by default; otherwise it falls back to English.
+
 > Note for Moonshot (Kimi): MatchaClaw keeps Kimi web search enabled by default.  
 > When Moonshot is configured, MatchaClaw also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
 
@@ -195,6 +200,7 @@ Notes:
 - A bare `host:port` value is treated as HTTP.
 - Saving proxy settings reapplies Electron networking immediately and restarts the Gateway automatically.
 - MatchaClaw also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
+- On packaged Windows builds, the bundled `openclaw` CLI/TUI prefers the shipped `resources/bin/node.exe` entrypoint (falls back to `ELECTRON_RUN_AS_NODE` when unavailable).
 
 ---
 

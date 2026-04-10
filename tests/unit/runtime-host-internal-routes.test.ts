@@ -142,6 +142,49 @@ describe('runtime-host internal routes', () => {
     });
   });
 
+  it('shell-actions 支持 shell_open_path 动作透传', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({
+      version: 1,
+      action: 'shell_open_path',
+      payload: {
+        path: 'C:\\Users\\Mr.Key\\.openclaw\\skills\\docx',
+      },
+    });
+    const executeShellAction = vi.fn(async () => ({
+      status: 200,
+      data: { success: true },
+    }));
+
+    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
+    const handled = await handleRuntimeHostInternalRoutes(
+      {
+        method: 'POST',
+        headers: {
+          'x-runtime-host-dispatch-token': 'test-token',
+        },
+      } as unknown as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/internal/runtime-host/shell-actions'),
+      {
+        runtimeHost: {
+          getInternalDispatchToken: () => 'test-token',
+          executeShellAction,
+        },
+      } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(executeShellAction).toHaveBeenCalledWith('shell_open_path', {
+      path: 'C:\\Users\\Mr.Key\\.openclaw\\skills\\docx',
+    });
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {
+      version: 1,
+      success: true,
+      status: 200,
+      data: { success: true },
+    });
+  });
+
   it('gateway-events 路由会调用 runtimeHost.emitGatewayEvent', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       version: 1,

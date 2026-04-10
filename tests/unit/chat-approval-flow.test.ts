@@ -119,6 +119,64 @@ describe('chat 审批等待态流程', () => {
     expect(rpcMock).toHaveBeenCalledWith('exec.approvals.get', {});
   });
 
+  it('chat.send 显式 RPC 超时且无审批证据时，仍保持发送态等待后续事件恢复', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'chat.send') {
+        throw new Error('RPC timeout: chat.send');
+      }
+      if (method === 'exec.approvals.get') {
+        return { approvals: [] };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().sendMessage('hello');
+
+    const state = useChatStore.getState() as unknown as {
+      approvalStatus?: string;
+      error: string | null;
+      sending: boolean;
+      pendingFinal: boolean;
+    };
+    expect(state.sending).toBe(true);
+    expect(state.pendingFinal).toBe(false);
+    expect(state.approvalStatus).toBe('idle');
+    expect(state.error).toContain('RPC timeout: chat.send');
+  });
+
+  it('发生 chat.send 超时提示后，只要收到 delta 事件就应清理陈旧错误', () => {
+    useChatStore.setState({
+      sending: true,
+      error: 'RPC timeout: chat.send',
+      streamingMessage: null,
+      streamingTools: [],
+    } as never);
+
+    useChatStore.getState().handleChatEvent({
+      state: 'delta',
+      runId: 'run-delta-recover',
+      message: {
+        role: 'assistant',
+        content: 'working...',
+      },
+    });
+
+    const state = useChatStore.getState() as unknown as {
+      error: string | null;
+      streamingMessage: unknown;
+    };
+    expect(state.error).toBeNull();
+    expect(state.streamingMessage).toEqual({
+      role: 'assistant',
+      content: 'working...',
+    });
+  });
+
   it('停止时应先 deny 当前会话 pending 审批，再 chat.abort', async () => {
     const rpcMock = vi.fn(async () => ({}));
     useGatewayStore.setState({

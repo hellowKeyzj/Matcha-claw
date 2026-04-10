@@ -4,6 +4,7 @@ import {
   setOpenClawDefaultModelWithOverride,
   syncBrowserConfigToOpenClaw,
   syncGatewayTokenToConfig,
+  syncSessionIdleMinutesToOpenClaw,
 } from '../openclaw/openclaw-provider-config-service';
 import { syncProxyConfigToOpenClaw } from '../openclaw/openclaw-proxy-sync';
 import { listConfiguredChannelsLocal } from '../channels/channel-runtime';
@@ -27,6 +28,8 @@ type ProviderStoreAccount = {
   vendorId?: unknown;
   model?: unknown;
   baseUrl?: unknown;
+  apiProtocol?: unknown;
+  headers?: unknown;
   fallbackModels?: unknown;
 };
 
@@ -49,6 +52,61 @@ function normalizeFallbackModelRefs(providerKey: string, fallbackModels: unknown
   return normalized;
 }
 
+function normalizeProviderProtocol(
+  protocol: unknown,
+): 'openai-completions' | 'openai-responses' | 'anthropic-messages' {
+  if (protocol === 'openai-responses') {
+    return 'openai-responses';
+  }
+  if (protocol === 'anthropic-messages') {
+    return 'anthropic-messages';
+  }
+  return 'openai-completions';
+}
+
+function normalizeProviderHeaders(headers: unknown): Record<string, string> | undefined {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+    return undefined;
+  }
+
+  const normalized = Object.fromEntries(
+    Object.entries(headers as Record<string, unknown>)
+      .filter(
+        ([key, value]): value is string =>
+          typeof key === 'string'
+          && key.trim().length > 0
+          && typeof value === 'string'
+          && value.trim().length > 0,
+      )
+      .map(([key, value]) => [key, value.trim()]),
+  );
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeProviderBaseUrl(
+  vendorId: string,
+  baseUrl: unknown,
+  apiProtocol: 'openai-completions' | 'openai-responses' | 'anthropic-messages',
+): string | undefined {
+  if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) {
+    return undefined;
+  }
+
+  const normalized = baseUrl.trim().replace(/\/+$/, '');
+  if (vendorId !== 'custom' && vendorId !== 'ollama') {
+    return normalized;
+  }
+
+  if (apiProtocol === 'openai-responses') {
+    return normalized.replace(/\/responses?$/i, '');
+  }
+  if (apiProtocol === 'anthropic-messages') {
+    return normalized.replace(/\/v1\/messages$/i, '').replace(/\/messages$/i, '');
+  }
+  return normalized.replace(/\/chat\/completions$/i, '');
+}
+
 export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
   configuredChannels: string[];
 }> {
@@ -56,6 +114,8 @@ export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
     proxyEnabled: input.proxyEnabled === true,
     proxyServer: typeof input.proxyServer === 'string' ? input.proxyServer : '',
     proxyBypassRules: typeof input.proxyBypassRules === 'string' ? input.proxyBypassRules : '',
+  }, {
+    preserveExistingWhenDisabled: true,
   });
 
   if (typeof input.gatewayToken === 'string') {
@@ -64,6 +124,7 @@ export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
 
   await sanitizeOpenClawConfig();
   await syncBrowserConfigToOpenClaw();
+  await syncSessionIdleMinutesToOpenClaw();
 
   return {
     configuredChannels: await listConfiguredChannelsLocal(),
@@ -122,9 +183,11 @@ export async function syncProviderAuthBootstrapLocal(): Promise<{
       const model = typeof account.model === 'string' ? account.model : undefined;
       const fallbackModels = normalizeFallbackModelRefs(providerKey, account.fallbackModels);
       if (vendorId === 'custom' || vendorId === 'ollama') {
+        const protocol = normalizeProviderProtocol(account.apiProtocol);
         await setOpenClawDefaultModelWithOverride(providerKey, model, {
-          baseUrl: typeof account.baseUrl === 'string' ? account.baseUrl : undefined,
-          api: 'openai-completions',
+          baseUrl: normalizeProviderBaseUrl(vendorId, account.baseUrl, protocol),
+          api: protocol,
+          headers: normalizeProviderHeaders(account.headers),
         }, fallbackModels);
       } else {
         await setOpenClawDefaultModel(providerKey, model, fallbackModels);

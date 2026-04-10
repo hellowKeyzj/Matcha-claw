@@ -1,10 +1,11 @@
 import { dirname, join } from 'path';
-import { homedir } from 'os';
 import { createRequire } from 'module';
 import { EventEmitter } from 'events';
-import { existsSync, mkdirSync, rmSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { deflateSync } from 'zlib';
 import { getOpenClawDir, getOpenClawResolvedDir } from '../../utils/paths';
+import { fsPath } from '../../utils/fs-path';
+import { cleanupWhatsAppAuthDir, resolveWhatsAppAuthDir } from './whatsapp-auth-cleanup';
 
 const require = createRequire(import.meta.url);
 
@@ -174,6 +175,9 @@ export class WhatsAppLoginManager extends EventEmitter {
   private qr: string | null = null;
   private accountId: string | null = null;
   private active = false;
+  private loginSucceeded = false;
+  private createdAuthDirForCurrentAttempt = false;
+  private currentAuthDir: string | null = null;
   private retryCount = 0;
   private maxRetries = 5;
 
@@ -183,6 +187,7 @@ export class WhatsAppLoginManager extends EventEmitter {
 
   private async finishLogin(accountId: string): Promise<void> {
     if (!this.active) return;
+    this.loginSucceeded = true;
     await this.stop();
     await new Promise((resolve) => setTimeout(resolve, 5000));
     this.emit('success', { accountId });
@@ -203,6 +208,9 @@ export class WhatsAppLoginManager extends EventEmitter {
 
     this.accountId = accountId;
     this.active = true;
+    this.loginSucceeded = false;
+    this.createdAuthDirForCurrentAttempt = false;
+    this.currentAuthDir = null;
     this.qr = null;
     this.retryCount = 0;
 
@@ -213,10 +221,12 @@ export class WhatsAppLoginManager extends EventEmitter {
     if (!this.active) return;
 
     try {
-      const authDir = join(homedir(), '.openclaw', 'credentials', 'whatsapp', accountId);
+      const authDir = resolveWhatsAppAuthDir(accountId);
+      this.currentAuthDir = authDir;
 
-      if (!existsSync(authDir)) {
-        mkdirSync(authDir, { recursive: true });
+      if (!existsSync(fsPath(authDir))) {
+        mkdirSync(fsPath(authDir), { recursive: true });
+        this.createdAuthDirForCurrentAttempt = true;
       }
 
       let pino: (...args: unknown[]) => Record<string, unknown>;
@@ -294,7 +304,7 @@ export class WhatsAppLoginManager extends EventEmitter {
               this.active = false;
               if (error?.output?.statusCode === DisconnectReason.loggedOut) {
                 try {
-                  rmSync(authDir, { recursive: true, force: true });
+                  cleanupWhatsAppAuthDir(authDir);
                 } catch (err) {
                   console.error('[WhatsAppLogin] Failed to clear auth dir:', err);
                 }
@@ -334,6 +344,9 @@ export class WhatsAppLoginManager extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    const shouldCleanupAuthDir = !this.loginSucceeded && this.createdAuthDirForCurrentAttempt;
+    const authDirToCleanup = shouldCleanupAuthDir ? this.currentAuthDir : null;
+
     this.active = false;
     this.qr = null;
     if (this.socket) {
@@ -350,6 +363,25 @@ export class WhatsAppLoginManager extends EventEmitter {
       }
       this.socket = null;
     }
+
+    if (authDirToCleanup) {
+      try {
+        const cleanupResult = cleanupWhatsAppAuthDir(authDirToCleanup);
+        if (cleanupResult.removedAuthDir) {
+          console.log(`[WhatsAppLogin] Cleaned up auth dir for cancelled login: ${authDirToCleanup}`);
+          if (cleanupResult.removedParentDir) {
+            console.log('[WhatsAppLogin] Removed empty whatsapp credentials directory');
+          }
+        }
+      } catch (error) {
+        console.error('[WhatsAppLogin] Failed to clean up auth dir after cancel:', error);
+      }
+    }
+
+    this.accountId = null;
+    this.currentAuthDir = null;
+    this.createdAuthDirForCurrentAttempt = false;
+    this.loginSucceeded = false;
   }
 }
 

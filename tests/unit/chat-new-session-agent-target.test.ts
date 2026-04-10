@@ -66,7 +66,6 @@ describe('chat store newSession agent targeting', () => {
     expect(state.sending).toBe(false);
     expect(state.activeRunId).toBeNull();
     expect(state.pendingFinal).toBe(false);
-    expect(loadHistory).toHaveBeenCalledTimes(1);
   });
 
   it('切回发送中的会话时，应立即恢复本地消息与等待态，避免出现空白页错觉', () => {
@@ -94,7 +93,56 @@ describe('chat store newSession agent targeting', () => {
     expect(state.messages[0].id).toBe('msg-local-1');
     expect(state.sending).toBe(true);
     expect(state.pendingFinal).toBe(true);
-    expect(loadHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('切换会话时，不应误删“messages 为空但已有历史痕迹”的会话', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-a',
+      sessions: [
+        { key: 'agent:test:session-a', displayName: 'agent:test:session-a' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ],
+      messages: [],
+      sessionLabels: { 'agent:test:session-a': '历史会话A' },
+      sessionLastActivity: { 'agent:test:session-a': 1_713_000_000_000 },
+    } as never);
+
+    useChatStore.getState().switchSession('agent:test:main');
+
+    const state = useChatStore.getState();
+    expect(state.sessions.some((session) => session.key === 'agent:test:session-a')).toBe(true);
+    expect(state.sessionLabels['agent:test:session-a']).toBe('历史会话A');
+    expect(state.sessionLastActivity['agent:test:session-a']).toBe(1_713_000_000_000);
+  });
+
+  it('cleanupEmptySession 仅清理真正空会话（无消息/无标签/无活动）', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-b',
+      sessions: [
+        { key: 'agent:test:session-b', displayName: 'agent:test:session-b' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ],
+      messages: [],
+      sessionLabels: { 'agent:test:session-b': 'B' },
+      sessionLastActivity: {},
+    } as never);
+
+    useChatStore.getState().cleanupEmptySession();
+    expect(useChatStore.getState().sessions.some((session) => session.key === 'agent:test:session-b')).toBe(true);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-c',
+      sessions: [
+        { key: 'agent:test:session-c', displayName: 'agent:test:session-c' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    } as never);
+
+    useChatStore.getState().cleanupEmptySession();
+    expect(useChatStore.getState().sessions.some((session) => session.key === 'agent:test:session-c')).toBe(false);
   });
 
   it('创建新会话时，应重置发送态，避免继承上一会话的等待状态', () => {

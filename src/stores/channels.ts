@@ -10,7 +10,13 @@ import {
   hostChannelsFetchSnapshot,
   hostChannelsRequestQrCode,
 } from '@/lib/channel-runtime';
-import type { Channel, ChannelType } from '../types/channel';
+import {
+  isChannelRuntimeConnected,
+  pickChannelRuntimeStatus,
+  type ChannelRuntimeAccountSnapshot,
+  type ChannelRuntimeSummarySnapshot,
+} from '@/lib/channel-status';
+import { CHANNEL_NAMES, type Channel, type ChannelType } from '../types/channel';
 
 interface FetchChannelsOptions {
   silent?: boolean;
@@ -96,6 +102,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
               lastConnectedAt?: number | null;
               lastInboundAt?: number | null;
               lastOutboundAt?: number | null;
+              lastProbeAt?: number | null;
+              probe?: {
+                ok?: boolean;
+              } | null;
             }>>;
             channelDefaultAccountId?: Record<string, string>;
         } | undefined;
@@ -116,44 +126,24 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
 
             const accounts = data.channelAccounts?.[channelId] || [];
             const defaultAccountId = data.channelDefaultAccountId?.[channelId];
+            const summarySignal = summary as ChannelRuntimeSummarySnapshot | undefined;
             const primaryAccount =
               (defaultAccountId ? accounts.find((a) => a.accountId === defaultAccountId) : undefined) ||
-              accounts.find((a) => a.connected === true || a.linked === true) ||
+              accounts.find((a) => isChannelRuntimeConnected(a as ChannelRuntimeAccountSnapshot)) ||
               accounts[0];
 
-            // Map gateway status to our status format
-            let status: Channel['status'] = 'disconnected';
-            const nowAtStatusEval = Date.now();
-            const RECENT_MS = 10 * 60 * 1000;
-            const hasRecentActivity = (a: { lastInboundAt?: number | null; lastOutboundAt?: number | null; lastConnectedAt?: number | null }) =>
-              (typeof a.lastInboundAt === 'number' && nowAtStatusEval - a.lastInboundAt < RECENT_MS) ||
-              (typeof a.lastOutboundAt === 'number' && nowAtStatusEval - a.lastOutboundAt < RECENT_MS) ||
-              (typeof a.lastConnectedAt === 'number' && nowAtStatusEval - a.lastConnectedAt < RECENT_MS);
-            const anyConnected = accounts.some((a) => a.connected === true || a.linked === true || hasRecentActivity(a));
-            const anyRunning = accounts.some((a) => a.running === true);
+            const status: Channel['status'] = pickChannelRuntimeStatus(accounts, summarySignal);
             const summaryError =
-              typeof (summary as { error?: string })?.error === 'string'
-                ? (summary as { error?: string }).error
-                : typeof (summary as { lastError?: string })?.lastError === 'string'
-                  ? (summary as { lastError?: string }).lastError
+              typeof summarySignal?.error === 'string'
+                ? summarySignal.error
+                : typeof summarySignal?.lastError === 'string'
+                  ? summarySignal.lastError
                   : undefined;
-            const anyError =
-              accounts.some((a) => typeof a.lastError === 'string' && a.lastError) || Boolean(summaryError);
-
-            if (anyConnected) {
-              status = 'connected';
-            } else if (anyRunning && !anyError) {
-              status = 'connected';
-            } else if (anyError) {
-              status = 'error';
-            } else if (anyRunning) {
-              status = 'connecting';
-            }
 
             channels.push({
               id: `${channelId}-${primaryAccount?.accountId || 'default'}`,
               type: channelId as ChannelType,
-              name: primaryAccount?.name || channelId,
+              name: primaryAccount?.name || CHANNEL_NAMES[channelId as ChannelType] || channelId,
               status,
               accountId: primaryAccount?.accountId,
               error:

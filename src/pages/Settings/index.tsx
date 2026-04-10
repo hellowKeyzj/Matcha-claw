@@ -581,6 +581,19 @@ export function Settings() {
     setProxyBypassRulesDraft(proxyBypassRules);
   }, [proxyBypassRules]);
 
+  const proxySettingsDirty = useMemo(() => (
+    proxyEnabledDraft !== proxyEnabled
+    || proxyServerDraft.trim() !== proxyServer
+    || proxyBypassRulesDraft.trim() !== proxyBypassRules
+  ), [
+    proxyBypassRules,
+    proxyBypassRulesDraft,
+    proxyEnabled,
+    proxyEnabledDraft,
+    proxyServer,
+    proxyServerDraft,
+  ]);
+
   useEffect(() => {
     void hostSettingsGetValue<string>('clawHubToken')
       .then((value) => {
@@ -805,7 +818,7 @@ export function Settings() {
   }, [location.pathname, location.search, navigate]);
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-6" data-testid="settings-page">
       <div>
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         <p className="text-muted-foreground">
@@ -1232,6 +1245,7 @@ export function Settings() {
               variant="ghost"
               className="h-auto w-full justify-start p-0 hover:bg-transparent"
               onClick={() => setProxySettingsExpanded((prev) => !prev)}
+              data-testid="settings-proxy-expand"
             >
               <div className="flex items-center gap-2">
                 {proxySettingsExpanded ? (
@@ -1249,12 +1263,13 @@ export function Settings() {
             </Button>
 
             {proxySettingsExpanded && (
-              <div className="mt-4 space-y-4">
+              <div className="mt-4 space-y-4" data-testid="settings-proxy-section">
                 <div className="flex items-center justify-between">
                   <Label>{t('gateway.proxyTitle')}</Label>
                   <Switch
                     checked={proxyEnabledDraft}
                     onCheckedChange={setProxyEnabledDraft}
+                    data-testid="settings-proxy-toggle"
                   />
                 </div>
 
@@ -1291,7 +1306,8 @@ export function Settings() {
                   <Button
                     variant="outline"
                     onClick={handleSaveProxySettings}
-                    disabled={savingProxy}
+                    disabled={savingProxy || !proxySettingsDirty}
+                    data-testid="settings-proxy-save-button"
                   >
                     <RefreshCw className={`h-4 w-4 mr-2${savingProxy ? ' animate-spin' : ''}`} />
                     {savingProxy ? t('common:status.saving') : t('common:actions.save')}

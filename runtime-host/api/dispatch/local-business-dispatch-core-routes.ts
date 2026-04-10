@@ -38,6 +38,7 @@ import {
   syncGatewayConfigLocal,
   syncProviderAuthBootstrapLocal,
 } from '../../application/runtime-host/bootstrap';
+import { syncProxyConfigToOpenClaw } from '../../application/openclaw/openclaw-proxy-sync';
 import { collectDiagnosticsBundleLocal } from '../../application/support/diagnostics';
 import { completeBrowserOAuthLocal, completeDeviceOAuthLocal } from '../../application/providers/oauth-runtime';
 import { readProviderStoreLocal, writeProviderStoreLocal } from '../storage/provider-store';
@@ -110,6 +111,7 @@ export function createCoreLocalBusinessHandlers(
         setSettingsPatchLocal,
         resetSettingsLocal,
         setSettingValueLocal,
+        syncProxyConfigToOpenClaw,
       }),
     },
     {

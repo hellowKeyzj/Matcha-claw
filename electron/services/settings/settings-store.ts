@@ -4,6 +4,7 @@
  */
 
 import { randomBytes } from 'crypto';
+import { app } from 'electron';
 
 // Lazy-load electron-store (ESM module)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,6 +123,33 @@ const defaults: AppSettings = {
   securityPolicyByAgent: {},
 };
 
+function resolveSupportedLanguage(locale: string | null | undefined): 'en' | 'zh' | 'ja' {
+  const normalizedLocale = locale?.trim().toLowerCase().replaceAll('_', '-') ?? '';
+  if (normalizedLocale.startsWith('zh')) return 'zh';
+  if (normalizedLocale.startsWith('ja')) return 'ja';
+  return 'en';
+}
+
+function detectSystemLocale(): string {
+  const preferredLanguages = typeof app.getPreferredSystemLanguages === 'function'
+    ? app.getPreferredSystemLanguages()
+    : [];
+  if (preferredLanguages.length > 0 && typeof preferredLanguages[0] === 'string') {
+    return preferredLanguages[0];
+  }
+  if (typeof app.getLocale === 'function') {
+    return app.getLocale();
+  }
+  return Intl.DateTimeFormat().resolvedOptions().locale || 'en';
+}
+
+function createDefaultSettings(): AppSettings {
+  return {
+    ...defaults,
+    language: resolveSupportedLanguage(detectSystemLocale()),
+  };
+}
+
 /**
  * Get the settings store instance (lazy initialization)
  */
@@ -130,7 +158,7 @@ async function getSettingsStore() {
     const Store = (await import('electron-store')).default;
     settingsStoreInstance = new Store<AppSettings>({
       name: 'settings',
-      defaults,
+      defaults: createDefaultSettings(),
     });
   }
   return settingsStoreInstance;

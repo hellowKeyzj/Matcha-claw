@@ -29,6 +29,7 @@ const hoisted = vi.hoisted(() => {
     })),
   }));
   const setSettingMock = vi.fn(async () => {});
+  const shellOpenPathMock = vi.fn(async () => '');
   const getSettingMock = vi.fn(async (key: string) => {
     if (key === 'pluginExecutionEnabled') return true;
     if (key === 'runtimeHostEnabledPluginIds') return ['security-core'];
@@ -40,6 +41,7 @@ const hoisted = vi.hoisted(() => {
     createRuntimeHostHttpClientMock,
     createRuntimeHostProcessManagerMock,
     setSettingMock,
+    shellOpenPathMock,
     getSettingMock,
     processStateRef,
   };
@@ -72,6 +74,12 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
 vi.mock('../../electron/services/settings/settings-store', () => ({
   getSetting: hoisted.getSettingMock,
   setSetting: hoisted.setSettingMock,
+}));
+
+vi.mock('electron', () => ({
+  shell: {
+    openPath: (...args: unknown[]) => hoisted.shellOpenPathMock(...args),
+  },
 }));
 
 vi.mock('../../electron/services/channels/channel-runtime-service', () => ({
@@ -130,6 +138,8 @@ describe('runtime-host manager request transport policy', () => {
       request: hoisted.childRequestMock,
       checkHealth: hoisted.childHealthMock,
     }));
+    hoisted.shellOpenPathMock.mockReset();
+    hoisted.shellOpenPathMock.mockResolvedValue('');
     hoisted.processStateRef.lifecycle = 'idle';
     delete hoisted.processStateRef.lastError;
   });
@@ -272,5 +282,40 @@ describe('runtime-host manager request transport policy', () => {
     const manager = createRuntimeHostManager({ gatewayManager });
 
     await expect(manager.start()).rejects.toThrow('Invalid gateway port from gateway manager: 0');
+  });
+
+  it('executeShellAction(shell_open_path) 通过主进程 shell.openPath 打开目录', async () => {
+    hoisted.shellOpenPathMock.mockResolvedValueOnce('');
+    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
+    const manager = createRuntimeHostManager({
+      gatewayManager: {} as never,
+    });
+
+    const result = await manager.executeShellAction('shell_open_path', {
+      path: 'C:\\Users\\Mr.Key\\.openclaw\\skills\\docx',
+    });
+
+    expect(hoisted.shellOpenPathMock).toHaveBeenCalledWith('C:\\Users\\Mr.Key\\.openclaw\\skills\\docx');
+    expect(result).toEqual({
+      status: 200,
+      data: { success: true },
+    });
+  });
+
+  it('executeShellAction(shell_open_path) 在 shell 返回错误时返回失败', async () => {
+    hoisted.shellOpenPathMock.mockResolvedValueOnce('Access is denied');
+    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
+    const manager = createRuntimeHostManager({
+      gatewayManager: {} as never,
+    });
+
+    const result = await manager.executeShellAction('shell_open_path', {
+      path: 'C:\\Users\\Mr.Key\\.openclaw\\skills\\docx',
+    });
+
+    expect(result).toEqual({
+      status: 500,
+      data: { success: false, error: 'Access is denied' },
+    });
   });
 });

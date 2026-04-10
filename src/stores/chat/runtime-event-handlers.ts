@@ -93,6 +93,10 @@ export function handleRuntimeEventState(
               if (event.message && typeof event.message === 'object') {
                 const msgRole = (event.message as RawMessage).role;
                 if (isToolResultRole(msgRole)) return s.streamingMessage;
+                const msgObj = event.message as RawMessage;
+                if (s.streamingMessage && msgObj.content === undefined) {
+                  return s.streamingMessage;
+                }
               }
               return event.message ?? s.streamingMessage;
             })(),

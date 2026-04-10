@@ -8,6 +8,16 @@
         "connected": "接続済み",
         "disconnected": "未接続"
     },
+    "status": {
+        "connected": "接続済み",
+        "disconnected": "未接続",
+        "connecting": "接続中",
+        "error": "エラー",
+        "running": "稼働中",
+        "stopped": "停止中",
+        "starting": "起動中",
+        "reconnecting": "再接続中"
+    },
     "gatewayWarning": "ゲートウェイサービスが実行されていないため、チャンネルに接続できません。",
     "available": "利用可能なチャンネル",
     "availableDesc": "新しいチャンネルを接続",
@@ -219,7 +229,7 @@
         },
         "wecom": {
             "description": "プラグイン経由で WeCom Bot (企業微信) に接続します",
-            "docsUrl": "https://open.work.weixin.qq.com/help2/pc/cat?doc_id=21657",
+            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/JTGnwoV0RixKPtkr4w7c7gpAnDc",
             "fields": {
                 "botId": {
                     "label": "ボット ID",
@@ -349,7 +359,7 @@
             "docsUrl": "https://docs.openclaw.ai/channels/mattermost"
         },
         "qqbot": {
-            "description": "@sliverp/qqbot プラグイン経由で QQ ボットに接続します",
+            "description": "@tencent-connect/openclaw-qqbot プラグイン経由で QQ ボットに接続します",
             "fields": {
                 "appId": {
                     "label": "App ID",
@@ -365,7 +375,7 @@
                 "App ID と Client Secret を取得します",
                 "認証情報を入力します"
             ],
-            "docsUrl": "https://github.com/sliverp/qqbot/blob/main/README.zh.md"
+            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/KPIJwlyiGiupMrkiS9ice39Zn2c"
         }
     },
     "viewDocs": "ドキュメントを表示"
