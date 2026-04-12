@@ -1,6 +1,8 @@
 {
   "id": "security-core",
   "name": "Security Core",
+  "version": "0.1.0",
+  "category": "security",
   "description": "Standalone security plugin based on SecureClaw original code with trimmed runtime guard.",
   "configSchema": {
     "type": "object",

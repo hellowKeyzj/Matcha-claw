@@ -1,13 +1,18 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { registerSecurityRuntime } from "../../application/security-runtime.js";
+import {
+  SECURITY_CORE_PLUGIN_DESCRIPTION,
+  SECURITY_CORE_PLUGIN_ID,
+  SECURITY_CORE_PLUGIN_NAME,
+} from "../../manifest.js";
 
-const plugin = {
-  id: "security-core",
-  name: "Security Core",
-  description: "SecureClaw-original based standalone security plugin.",
+const plugin = definePluginEntry({
+  id: SECURITY_CORE_PLUGIN_ID,
+  name: SECURITY_CORE_PLUGIN_NAME,
+  description: SECURITY_CORE_PLUGIN_DESCRIPTION,
   register(api: OpenClawPluginApi) {
     registerSecurityRuntime(api);
   },
-};
+});
 
 export default plugin;

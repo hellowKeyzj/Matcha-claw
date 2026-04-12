@@ -177,14 +177,6 @@ function isParamsGuardResult(value: BeforeToolCallResult): value is {
   return typeof record.params === "object" && record.params !== null;
 }
 
-function registerOptionalGatewayExitHook(
-  api: OpenClawPluginApi,
-  handler: () => Promise<void>,
-): void {
-  const onAny = api.on as unknown as (hookName: string, hookHandler: (...args: unknown[]) => unknown) => void;
-  onAny("gateway_exit", handler as (...args: unknown[]) => unknown);
-}
-
 function freezeRuntimeConfigSnapshot(input: SecurityCoreRuntimeConfig): SecurityCoreRuntimeConfig {
   const snapshot = {
     ...input,
@@ -599,15 +591,6 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
         await stopSelectedMonitors();
       } catch (error) {
         api.logger.warn?.(`[security-core] monitor stop failed on gateway_stop: ${String(error)}`);
-      }
-    });
-
-    registerOptionalGatewayExitHook(api, async () => {
-      stopAdvisorySchedule();
-      try {
-        await stopSelectedMonitors();
-      } catch (error) {
-        api.logger.warn?.(`[security-core] monitor stop failed on gateway_exit: ${String(error)}`);
       }
     });
 
