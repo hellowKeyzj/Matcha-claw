@@ -11,12 +11,12 @@
 
 ## 2. 真相源与基线
 
-- 事件清单：`openclaw/src/gateway/server-methods-list.ts` 的 `GATEWAY_EVENTS`
-- 广播与慢连接策略：`openclaw/src/gateway/server-broadcast.ts`
-- Node 事件入口：`openclaw/src/gateway/server-node-events.ts`
-- 协议帧结构：`openclaw/src/gateway/protocol/schema/frames.ts`
-- 同步基线：`openclaw@2026.3.13`（commit `8023f4c70`）
-- 本文更新时间：2026-03-13
+- 事件清单：`openclaw/dist/gateway-cli-*.js` 内 `GATEWAY_EVENTS`
+- 广播与慢连接策略：`openclaw/dist/gateway-cli-*.js`（`server-broadcast` 打包段）
+- Node 事件入口：`openclaw/dist/server-node-events-*.js`
+- 协议帧结构：`openclaw/src/gateway/protocol/schema/frames.ts`（类型语义）
+- 同步基线：`openclaw@2026.4.1`
+- 本文更新时间：2026-04-11
 
 ## 3. 事件帧结构
 
@@ -41,7 +41,7 @@ Gateway 事件统一使用 `event` 帧：
 - `stateVersion` 仅在部分状态型事件中出现（如 `presence`、`health`）。
 - `hello-ok` 不是事件帧，而是 `connect` 的 `res.payload`。
 
-## 4. Gateway -> WS 事件清单（19）
+## 4. Gateway -> WS 事件清单（24）
 
 来源：`GATEWAY_EVENTS` + `events.ts` 常量。
 
@@ -50,6 +50,9 @@ Gateway 事件统一使用 `event` 帧：
 | `connect.challenge` | Gateway -> 新连接 | 不走广播器 | 握手挑战帧 |
 | `agent` | Gateway -> WS 客户端 | 默认 `false` | 运行流事件 |
 | `chat` | Gateway -> WS 客户端 | `delta=true`，关键帧默认 `false` | 会话消息流 |
+| `session.message` | Gateway -> WS 客户端 | `true` | 会话 transcript 增量消息（会话水合/增量监听） |
+| `session.tool` | Gateway -> WS 客户端 | `true` | 会话工具事件流（面向会话订阅） |
+| `sessions.changed` | Gateway -> WS 客户端 | `true` | 会话列表/元数据变化通知 |
 | `presence` | Gateway -> WS 客户端 | `true` | 系统存在态 |
 | `tick` | Gateway -> WS 客户端 | `true` | 心跳时钟 |
 | `talk.mode` | Gateway -> WS 客户端 | `true` | 对讲模式状态 |
@@ -65,6 +68,8 @@ Gateway 事件统一使用 `event` 帧：
 | `voicewake.changed` | Gateway -> WS 客户端 | `true` | 唤醒词变更 |
 | `exec.approval.requested` | Gateway -> WS 客户端 | `true` | 执行审批待处理 |
 | `exec.approval.resolved` | Gateway -> WS 客户端 | `true` | 执行审批已处理 |
+| `plugin.approval.requested` | Gateway -> WS 客户端 | `true` | 插件审批待处理 |
+| `plugin.approval.resolved` | Gateway -> WS 客户端 | `true` | 插件审批已处理 |
 | `update.available` | Gateway -> WS 客户端 | `true` | 启动更新检测结果 |
 
 ## 5. `agent` 与 `chat` 关键语义
@@ -88,7 +93,7 @@ Gateway 事件统一使用 `event` 帧：
 - `tool` 流在部分订阅路径会做字段裁剪（如非 full verbose 时去掉 `result/partialResult`）。
 - 出现 run 序列缺口时，网关会补发 `stream=error`（原因 `seq gap`）。
 
-`chat` 事件状态机（`ChatEventSchema`）：
+`chat` 事件状态机：
 
 - `delta`
 - `final`
@@ -98,7 +103,7 @@ Gateway 事件统一使用 `event` 帧：
 策略：
 
 - `delta` 高频，广播使用 `dropIfSlow: true`。
-- `final/error/aborted` 为关键帧，默认不丢，慢连接将被关闭。
+- `final/error/aborted` 为关键帧，默认不丢；慢连接时会触发关闭而不是丢弃。
 
 ## 6. 慢连接与权限过滤
 
@@ -113,8 +118,10 @@ Gateway 事件统一使用 `event` 帧：
 事件权限过滤（广播层）：
 
 - `exec.approval.requested/resolved`：需要 `operator.approvals`（`operator.admin` 可覆盖）
+- `plugin.approval.requested/resolved`：需要 `operator.approvals`（`operator.admin` 可覆盖）
 - `device.pair.requested/resolved`：需要 `operator.pairing`（`operator.admin` 可覆盖）
 - `node.pair.requested/resolved`：需要 `operator.pairing`（`operator.admin` 可覆盖）
+- `sessions.changed` / `session.message` / `session.tool`：需要 `operator.read`（`operator.write` 可覆盖，`operator.admin` 可覆盖）
 
 ## 7. Node -> Gateway（`node.event`）当前实现支持事件
 
@@ -144,6 +151,7 @@ Gateway 事件统一使用 `event` 帧：
 
 - `src/gateway/server-methods-list.ts`（`GATEWAY_EVENTS` 变更）
 - `src/gateway/server-broadcast.ts`（`dropIfSlow` 与权限过滤）
-- `src/gateway/server-chat.ts`（`agent/chat` 事件语义与桥接）
+- `src/gateway/server-chat.ts` + `src/gateway/chat-abort.ts`（`agent/chat` 事件语义与桥接）
+- `src/gateway/server-methods/plugin-approval.ts` + `src/gateway/server-methods/exec-approval.ts`（审批事件）
 - `src/gateway/server-node-events.ts`（`node.event` 支持事件）
 - `src/gateway/protocol/schema/frames.ts`（事件帧字段变化）

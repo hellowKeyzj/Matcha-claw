@@ -1,11 +1,16 @@
 import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
 import { BUILTIN_PROVIDER_TYPES } from './provider-types';
 import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
-import { removeProviderKeyFromOpenClaw } from '../openclaw/openclaw-auth-profile-store';
+import {
+  removeProviderKeyFromOpenClaw,
+  saveProviderKeyToOpenClaw,
+} from '../openclaw/openclaw-auth-profile-store';
 import {
   getActiveOpenClawProviders,
   getOpenClawProvidersConfig,
   removeProviderFromOpenClaw,
+  setOpenClawDefaultModel,
+  setOpenClawDefaultModelWithOverride,
 } from '../openclaw/openclaw-provider-config-service';
 
 type LocalDispatchResponse = {
@@ -62,6 +67,72 @@ function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function normalizeFallbackModelRefs(providerKey: string, fallbackModels: unknown): string[] {
+  return toStringArray(fallbackModels).map((model) => (
+    model.startsWith(`${providerKey}/`) ? model : `${providerKey}/${model}`
+  ));
+}
+
+function normalizeProviderProtocol(
+  protocol: unknown,
+): 'openai-completions' | 'openai-responses' | 'anthropic-messages' {
+  if (protocol === 'openai-responses') {
+    return 'openai-responses';
+  }
+  if (protocol === 'anthropic-messages') {
+    return 'anthropic-messages';
+  }
+  return 'openai-completions';
+}
+
+function normalizeProviderHeaders(headers: unknown): Record<string, string> | undefined {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
+    return undefined;
+  }
+  const normalized = Object.fromEntries(
+    Object.entries(headers as Record<string, unknown>)
+      .filter(
+        ([key, value]): value is string =>
+          typeof key === 'string'
+          && key.trim().length > 0
+          && typeof value === 'string'
+          && value.trim().length > 0,
+      )
+      .map(([key, value]) => [key, value.trim()]),
+  );
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeProviderBaseUrl(
+  vendorId: string,
+  baseUrl: unknown,
+  apiProtocol: 'openai-completions' | 'openai-responses' | 'anthropic-messages',
+): string | undefined {
+  if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) {
+    return undefined;
+  }
+
+  const normalized = baseUrl.trim().replace(/\/+$/, '');
+  if (vendorId !== 'custom' && vendorId !== 'ollama') {
+    return normalized;
+  }
+
+  if (apiProtocol === 'openai-responses') {
+    return normalized.replace(/\/responses?$/i, '');
+  }
+  if (apiProtocol === 'anthropic-messages') {
+    return normalized.replace(/\/v1\/messages$/i, '').replace(/\/messages$/i, '');
+  }
+  return normalized.replace(/\/chat\/completions$/i, '');
+}
+
 function normalizeIsoTimestamp(value: unknown): string {
   return typeof value === 'string' && value.trim().length > 0
     ? value
@@ -96,6 +167,56 @@ function resolveProviderCleanupKeys(accountId: string, account: Record<string, a
 
 export class ProviderAccountsService {
   constructor(private readonly deps: ProviderAccountsServiceDeps) {}
+
+  private async syncStoreToOpenClaw(store: ProviderStore): Promise<void> {
+    for (const [accountId, rawAccount] of Object.entries(store.accounts)) {
+      if (!isRecord(rawAccount)) {
+        continue;
+      }
+      const vendorId = typeof rawAccount.vendorId === 'string' ? rawAccount.vendorId : '';
+      if (!vendorId) {
+        continue;
+      }
+
+      const providerKey = getOpenClawProviderKeyForType(vendorId, accountId);
+      const apiKey = typeof store.apiKeys[accountId] === 'string' ? store.apiKeys[accountId].trim() : '';
+      if (apiKey) {
+        await saveProviderKeyToOpenClaw(providerKey, apiKey);
+      } else {
+        await removeProviderKeyFromOpenClaw(providerKey);
+        if (providerKey !== accountId) {
+          await removeProviderKeyFromOpenClaw(accountId);
+        }
+      }
+    }
+
+    const defaultAccountId = typeof store.defaultAccountId === 'string' ? store.defaultAccountId : '';
+    const defaultAccountRaw = defaultAccountId ? store.accounts[defaultAccountId] : null;
+    if (!defaultAccountId || !isRecord(defaultAccountRaw)) {
+      return;
+    }
+
+    const vendorId = typeof defaultAccountRaw.vendorId === 'string' ? defaultAccountRaw.vendorId : '';
+    if (!vendorId) {
+      return;
+    }
+
+    const providerKey = getOpenClawProviderKeyForType(vendorId, defaultAccountId);
+    const model = typeof defaultAccountRaw.model === 'string' ? defaultAccountRaw.model : undefined;
+    const fallbackModels = normalizeFallbackModelRefs(providerKey, defaultAccountRaw.fallbackModels);
+
+    if (vendorId === 'custom' || vendorId === 'ollama') {
+      const protocol = normalizeProviderProtocol(defaultAccountRaw.apiProtocol);
+      await setOpenClawDefaultModelWithOverride(providerKey, model, {
+        baseUrl: normalizeProviderBaseUrl(vendorId, defaultAccountRaw.baseUrl, protocol),
+        api: protocol,
+        headers: normalizeProviderHeaders(defaultAccountRaw.headers),
+      }, fallbackModels);
+      return;
+    }
+
+    await setOpenClawDefaultModel(providerKey, model, fallbackModels);
+  }
 
   async list() {
     const store = await this.deps.readProviderStore();
@@ -250,6 +371,7 @@ export class ProviderAccountsService {
       store.accounts[account.id].isDefault = true;
     }
     await this.deps.writeProviderStore(store);
+    await this.syncStoreToOpenClaw(store);
     return {
       status: 200,
       data: {
@@ -280,6 +402,7 @@ export class ProviderAccountsService {
       account.isDefault = account.id === accountId;
     }
     await this.deps.writeProviderStore(store);
+    await this.syncStoreToOpenClaw(store);
     return {
       status: 200,
       data: { success: true },
@@ -457,6 +580,7 @@ export class ProviderAccountsService {
       }
     }
     await this.deps.writeProviderStore(store);
+    await this.syncStoreToOpenClaw(store);
     return {
       status: 200,
       data: { success: true, account: next },
@@ -474,6 +598,7 @@ export class ProviderAccountsService {
         await removeProviderKeyFromOpenClaw(providerKey);
       }
       await this.deps.writeProviderStore(store);
+      await this.syncStoreToOpenClaw(store);
       return {
         status: 200,
         data: { success: true },
@@ -491,6 +616,7 @@ export class ProviderAccountsService {
       await removeProviderFromOpenClaw(providerKey);
     }
     await this.deps.writeProviderStore(store);
+    await this.syncStoreToOpenClaw(store);
     return {
       status: 200,
       data: { success: true },

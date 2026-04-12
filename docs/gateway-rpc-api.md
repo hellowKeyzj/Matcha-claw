@@ -4,8 +4,19 @@
 
 - 用途：作为 `Matcha-claw` 对接 `openclaw Gateway` 的 RPC 协议单一参考。
 - 目标读者：`src/lib/host-api.ts`、`src/lib/api-client.ts`、页面数据层开发者。
-- 同步基线：`openclaw@2026.3.13`（commit `8023f4c70`，2026-03-13）。
-- 本文更新时间：2026-03-13。
+- 同步基线：`openclaw@2026.4.1`（npm 包内 `dist` 产物）。
+- 本文更新时间：2026-04-10。
+
+当前文档的“事实来源”：
+
+- 握手宣告方法与事件：
+  - `node_modules/.pnpm/openclaw@2026.4.1_*/node_modules/openclaw/dist/gateway-cli-6Ksv5U_O.js`
+  - 关键常量：`BASE_METHODS`、`GATEWAY_EVENTS`
+- 权限映射：
+  - `node_modules/.pnpm/openclaw@2026.4.1_*/node_modules/openclaw/dist/method-scopes-DOxx6FV1.js`
+  - 关键常量：`METHOD_SCOPE_GROUPS`、`NODE_ROLE_METHODS`
+- 握手与帧语义：
+  - `node_modules/.pnpm/openclaw@2026.4.1_*/node_modules/openclaw/docs/gateway/protocol.md`
 
 ## 2. 帧结构与握手
 
@@ -45,29 +56,36 @@
 }
 ```
 
-握手流程：
+握手流程（2026.4.1）：
 
-1. WebSocket 建连后，Gateway 先推 `connect.challenge` 事件。
-2. 客户端必须发送 `connect` 请求（首包）。
-3. Gateway 返回 `hello-ok`（作为 `connect` 的 `payload`）。
+1. WebSocket 建连后，Gateway 先推 `connect.challenge` 事件（包含 `nonce`）。
+2. 客户端第一帧必须发送 `connect` 请求（首包约束）。
+3. Gateway 返回 `hello-ok`（`connect` 的 `payload.type === "hello-ok"`）。
 
 ## 3. 方法清单来源（非常重要）
 
 `openclaw` 里有两层“方法集合”：
 
-1. **握手宣告方法（100 个）**
-   - 来源：`openclaw/src/gateway/server-methods-list.ts` 的 `BASE_METHODS`。
-   - 用途：在握手中告诉客户端“标准可用方法”。
-2. **实现层可处理方法（112 个核心静态方法）**
-   - 来源：`openclaw/src/gateway/server-methods.ts` + `src/gateway/server-methods/*.ts` + `server.impl.ts` 注入的额外 handlers。
-   - 说明：其中有少量方法当前不在握手 `methods` 字段里，但实现仍可处理。
+1. 握手宣告方法（当前 111 个）
+   - 来源：`BASE_METHODS`
+   - 用途：`connect` 成功后在握手信息中对外声明“标准可用方法”。
+2. 实现层可处理但未进握手宣告的方法（当前 13 个）
+   - 来源：`METHOD_SCOPE_GROUPS` 差集 + `config.openFile` 实现处理器。
+   - 用途：兼容或控制平面辅助能力，默认不建议新功能优先依赖。
+
+另外：
+
+- 运行时插件会动态扩展方法集合（`pluginRegistry.gatewayHandlers`）。
+- 所以最终可调用方法 = `BASE_METHODS` + 插件注册方法（去重）。
+- 例如：`browser.request` 不在 4.1 的 `BASE_METHODS`，但浏览器扩展启用后会注册此方法。
 
 对 `Matcha-claw` 的约束：
 
 - 新功能默认优先使用“握手宣告方法”。
 - 使用“实现层额外方法”前，先在本项目文档和调用层显式标注（防后续版本变动）。
+- 使用“插件动态方法”前，必须先确认插件加载策略与禁用场景。
 
-## 4. 握手宣告方法（100）
+## 4. 握手宣告方法（111）
 
 ```text
 health
@@ -97,14 +115,19 @@ exec.approvals.node.set
 exec.approval.request
 exec.approval.waitDecision
 exec.approval.resolve
+plugin.approval.request
+plugin.approval.waitDecision
+plugin.approval.resolve
 wizard.start
 wizard.next
 wizard.cancel
 wizard.status
 talk.config
+talk.speak
 talk.mode
 models.list
 tools.catalog
+tools.effective
 agents.list
 agents.create
 agents.update
@@ -122,7 +145,14 @@ voicewake.set
 secrets.reload
 secrets.resolve
 sessions.list
+sessions.subscribe
+sessions.unsubscribe
+sessions.messages.subscribe
+sessions.messages.unsubscribe
 sessions.preview
+sessions.create
+sessions.send
+sessions.abort
 sessions.patch
 sessions.reset
 sessions.delete
@@ -166,13 +196,12 @@ send
 agent
 agent.identity.get
 agent.wait
-browser.request
 chat.history
 chat.abort
 chat.send
 ```
 
-## 5. 实现层额外可处理方法（当前 12 个）
+## 5. 实现层额外可处理方法（13）
 
 以下方法在实现层可处理，但不在当前握手 `methods` 列表中：
 
@@ -184,6 +213,7 @@ poll
 push.test
 sessions.get
 sessions.resolve
+sessions.steer
 sessions.usage
 sessions.usage.logs
 sessions.usage.timeseries
@@ -191,14 +221,15 @@ web.login.start
 web.login.wait
 ```
 
-## 6. Gateway 事件清单（19）
-
-来源：`openclaw/src/gateway/server-methods-list.ts` + `src/gateway/events.ts`。
+## 6. Gateway 事件清单（23）
 
 ```text
 connect.challenge
 agent
 chat
+session.message
+session.tool
+sessions.changed
 presence
 tick
 talk.mode
@@ -214,12 +245,52 @@ device.pair.resolved
 voicewake.changed
 exec.approval.requested
 exec.approval.resolved
-update.available
+plugin.approval.requested
+plugin.approval.resolved
 ```
 
-## 7. 权限模型（operator 角色）
+## 7. 2026.3.13 → 2026.4.1 差异
 
-来源：`openclaw/src/gateway/method-scopes.ts`。
+握手宣告方法：
+
+- 数量：`100 -> 111`
+- 新增（12）：
+  - `plugin.approval.request`
+  - `plugin.approval.waitDecision`
+  - `plugin.approval.resolve`
+  - `talk.speak`
+  - `tools.effective`
+  - `sessions.subscribe`
+  - `sessions.unsubscribe`
+  - `sessions.messages.subscribe`
+  - `sessions.messages.unsubscribe`
+  - `sessions.create`
+  - `sessions.send`
+  - `sessions.abort`
+- 移除（1）：
+  - `browser.request`（转为插件动态注册能力）
+
+实现层额外方法：
+
+- 数量：`12 -> 13`
+- 新增：
+  - `sessions.steer`
+
+事件：
+
+- 数量：`19 -> 23`
+- 新增（5）：
+  - `session.message`
+  - `session.tool`
+  - `sessions.changed`
+  - `plugin.approval.requested`
+  - `plugin.approval.resolved`
+- 移除（1）：
+  - `update.available`
+
+## 8. 权限模型（operator 角色）
+
+来源：`method-scopes-DOxx6FV1.js`。
 
 - Scope 常量：
   - `operator.read`
@@ -237,12 +308,12 @@ update.available
   - `node.invoke.result`
   - `node.event`
   - `node.pending.drain`
+  - `node.canvas.capability.refresh`
   - `node.pending.pull`
   - `node.pending.ack`
-  - `node.canvas.capability.refresh`
   - `skills.bins`
 
-## 8. 在 Matcha-claw 的落地红线
+## 9. 在 Matcha-claw 的落地红线
 
 - Renderer 禁止直接 `ipcRenderer.invoke('gateway:rpc', ...)`。
 - Renderer 禁止直接调用 Gateway HTTP/WS 地址。
@@ -250,14 +321,15 @@ update.available
   - `src/lib/host-api.ts`
   - `src/lib/api-client.ts`
 - 新增 RPC 方法时，必须同步：
-  1. 本文“方法清单/权限”
-  2. `api-client` 参数与错误映射
-  3. 页面层调用点和兜底提示
+  1. 本文“方法清单/权限”。
+  2. `api-client` 参数与错误映射。
+  3. 页面层调用点和异常提示。
 
-## 9. 升级核对清单（每次同步 openclaw 必做）
+## 10. 升级核对清单（每次同步 openclaw 必做）
 
-1. 对比 `openclaw/src/gateway/server-methods-list.ts`（握手宣告）。
-2. 对比 `openclaw/src/gateway/server-methods.ts` 与 `src/gateway/server-methods/*.ts`（实现能力）。
-3. 对比 `openclaw/src/gateway/method-scopes.ts`（权限变化）。
-4. 对比 `openclaw/src/gateway/events.ts` 与 `server-methods-list.ts`（事件变化）。
-5. 回归测试：`Matcha-claw` 的核心页面加载、刷新、错误提示与超时重试。
+1. 对比 `gateway-cli-*.js` 的 `BASE_METHODS`（握手宣告方法）。
+2. 对比 `gateway-cli-*.js` 的 `GATEWAY_EVENTS`（事件）。
+3. 对比 `method-scopes-*.js` 的 `METHOD_SCOPE_GROUPS` 与 `NODE_ROLE_METHODS`（权限/角色边界）。
+4. 额外 grep 关键实现方法（例如 `config.openFile`、`sessions.steer`、`chat.inject`），确认“实现层额外方法”是否变化。
+5. 检查插件动态方法（`pluginRegistry.gatewayHandlers`）是否新增了被 UI 依赖的方法。
+6. 回归测试：`Matcha-claw` 的核心页面加载、刷新、错误提示与超时链路。
