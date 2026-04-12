@@ -1,10 +1,20 @@
 {
   "id": "task-manager",
   "name": "Task Manager",
-  "description": "Structured task runtime with checkpoint-based resume and blocking support.",
+  "description": "Claude-style persistent task list and scheduling plugin.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "storageRoot": {
+        "type": "string"
+      },
+      "defaultTaskListStrategy": {
+        "type": "string"
+      },
+      "enableAutoClaim": {
+        "type": "boolean"
+      }
+    }
   }
 }

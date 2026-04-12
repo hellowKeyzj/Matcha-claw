@@ -59,7 +59,7 @@ describe('tasks navigation', () => {
     expect(screen.queryByRole('link', { name: 'Cron Tasks' })).not.toBeInTheDocument();
   });
 
-  it('路由 /tasks 渲染任务中心并包含两个页签', () => {
+  it('路由 /tasks 渲染任务中心并包含两个页签', async () => {
     enableMainAppRoutes();
 
     render(
@@ -68,16 +68,16 @@ describe('tasks navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole('heading', { name: 'Task Center' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Long Tasks' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Scheduled Tasks' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Task Center' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Long Tasks' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Scheduled Tasks' })).toBeInTheDocument();
     expect(screen.getByText('Incomplete')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'All Time' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Last 7 Days' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Last 30 Days' })).toBeInTheDocument();
   });
 
-  it('路由 /cron 会重定向到任务中心的定时任务页签', () => {
+  it('路由 /cron 会重定向到任务中心的定时任务页签', async () => {
     enableMainAppRoutes();
 
     render(
@@ -86,11 +86,11 @@ describe('tasks navigation', () => {
       </MemoryRouter>,
     );
 
-    const scheduledTab = screen.getByRole('tab', { name: 'Scheduled Tasks' });
+    const scheduledTab = await screen.findByRole('tab', { name: 'Scheduled Tasks' });
     expect(scheduledTab).toHaveAttribute('data-state', 'active');
   });
 
-  it('路由 /providers 渲染模型独立页面', () => {
+  it('路由 /providers 渲染模型独立页面', async () => {
     enableMainAppRoutes();
 
     render(
@@ -99,6 +99,6 @@ describe('tasks navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole('heading', { name: 'Models' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Models' })).toBeInTheDocument();
   });
 });

@@ -6,15 +6,13 @@ const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
 const getPluginCatalogMock = vi.fn();
 const getPluginRuntimeMock = vi.fn();
 const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
-const resumeTaskMock = vi.fn();
-const wakeTaskSessionMock = vi.fn();
+const updateTaskMock = vi.fn();
 
 vi.mock('@/services/openclaw/task-manager-client', () => ({
   getWorkspaceDir: (...args: unknown[]) => getWorkspaceDirMock(...args),
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
   listTasks: (...args: unknown[]) => listTasksMock(...args),
-  resumeTask: (...args: unknown[]) => resumeTaskMock(...args),
-  wakeTaskSession: (...args: unknown[]) => wakeTaskSessionMock(...args),
+  updateTask: (...args: unknown[]) => updateTaskMock(...args),
 }));
 
 vi.mock('@/services/openclaw/plugin-manager-client', () => ({
@@ -26,12 +24,13 @@ vi.mock('@/services/openclaw/plugin-manager-client', () => ({
 function task(overrides: Partial<Task>): Task {
   return {
     id: 'task-1',
-    goal: 'goal',
-    status: 'running',
-    progress: 0.5,
-    plan_markdown: '- [ ] step',
-    created_at: 1,
-    updated_at: 2,
+    subject: 'task',
+    description: 'desc',
+    status: 'in_progress',
+    blockedBy: [],
+    blocks: [],
+    createdAt: 1,
+    updatedAt: 2,
     ...overrides,
   };
 }
@@ -44,11 +43,10 @@ describe('task center store', () => {
     getPluginCatalogMock.mockReset();
     getPluginRuntimeMock.mockReset();
     listTasksMock.mockReset();
-    resumeTaskMock.mockReset();
-    wakeTaskSessionMock.mockReset();
+    updateTaskMock.mockReset();
   });
 
-  it('init 在插件可用时加载任务并生成 blockedQueue', async () => {
+  it('init 在插件可用时加载任务列表', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
     getPluginCatalogMock.mockResolvedValue({
@@ -61,8 +59,8 @@ describe('task center store', () => {
       },
     });
     listTasksMock.mockResolvedValue([
-      task({ id: 'waiting-1', status: 'waiting_for_input', blocked_info: { reason: 'need_user_confirm', confirm_id: 'c1', question: '请输入审批意见' } }),
-      task({ id: 'running-1', status: 'running' }),
+      task({ id: 'pending-1', status: 'pending' }),
+      task({ id: 'running-1', status: 'in_progress' }),
     ]);
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
@@ -71,12 +69,13 @@ describe('task center store', () => {
     const state = useTaskCenterStore.getState();
     expect(state.pluginInstalled).toBe(true);
     expect(state.pluginEnabled).toBe(true);
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
     expect(state.tasks).toHaveLength(2);
-    expect(state.blockedQueue).toHaveLength(1);
-    expect(state.blockedQueue[0]).toMatchObject({ taskId: 'waiting-1', confirmId: 'c1' });
   });
 
-  it('resumeBlockedTask 提交后会更新任务并移除阻塞队列', async () => {
+  it('首次 init 进入 initialLoading，完成后不再阻塞', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
     getPluginCatalogMock.mockResolvedValue({
@@ -88,30 +87,146 @@ describe('task center store', () => {
         enabledPluginIds: ['task-manager'],
       },
     });
-    listTasksMock.mockResolvedValue([
-      task({ id: 'waiting-2', status: 'waiting_for_input', blocked_info: { reason: 'need_user_confirm', confirm_id: 'c2', question: '是否继续' } }),
-    ]);
-    resumeTaskMock.mockResolvedValue(task({ id: 'waiting-2', status: 'running', blocked_info: undefined }));
+    let resolveListTasks: ((value: Task[]) => void) | null = null;
+    listTasksMock.mockReturnValue(new Promise<Task[]>((resolve) => {
+      resolveListTasks = resolve;
+    }));
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+
+    const initPromise = useTaskCenterStore.getState().init();
+    expect(useTaskCenterStore.getState().initialLoading).toBe(true);
+    expect(useTaskCenterStore.getState().refreshing).toBe(false);
+
+    resolveListTasks?.([task({ id: 'task-init-1', status: 'pending' })]);
+    await initPromise;
+
+    const state = useTaskCenterStore.getState();
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.tasks.map((item) => item.id)).toEqual(['task-init-1']);
+  });
+
+  it('refreshTasks 会重新拉取 scope 内任务', async () => {
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
+    });
+    listTasksMock
+      .mockResolvedValueOnce([task({ id: 'task-1', status: 'pending' })])
+      .mockResolvedValueOnce([task({ id: 'task-2', status: 'in_progress' })]);
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     await useTaskCenterStore.getState().init();
 
-    await useTaskCenterStore.getState().resumeBlockedTask({
-      taskId: 'waiting-2',
-      confirmId: 'c2',
-      decision: 'approve',
-    });
+    await useTaskCenterStore.getState().refreshTasks();
 
-    const state = useTaskCenterStore.getState();
-    expect(resumeTaskMock).toHaveBeenCalled();
-    expect(state.blockedQueue).toHaveLength(0);
-    expect(state.tasks[0]?.status).toBe('running');
+    expect(useTaskCenterStore.getState().tasks.map((item) => item.id)).toEqual(['task-2']);
   });
 
-  it('handleGatewayNotification 兼容 task_created 并写入任务列表', async () => {
+  it('已有快照时 refresh 失败保留旧任务列表', async () => {
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
+    });
+    listTasksMock.mockResolvedValueOnce([task({ id: 'task-keep-1', status: 'pending' })]);
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    await useTaskCenterStore.getState().init();
+
+    listTasksMock.mockRejectedValueOnce(new Error('refresh failed'));
+    await useTaskCenterStore.getState().refreshTasks();
+
+    const state = useTaskCenterStore.getState();
+    expect(state.tasks.map((item) => item.id)).toEqual(['task-keep-1']);
+    expect(state.refreshing).toBe(false);
+    expect(state.initialLoading).toBe(false);
+    expect(state.error).toBe('refresh failed');
+  });
+
+  it('deleteTaskById 会映射为 updateTask(status=completed)', async () => {
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
+    });
+    listTasksMock.mockResolvedValue([task({ id: 'task-delete-1', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
+    updateTaskMock.mockResolvedValue({
+      task: task({ id: 'task-delete-1', status: 'completed' }),
+      updatedFields: ['status'],
+      statusChange: { from: 'in_progress', to: 'completed' },
+    });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    await useTaskCenterStore.getState().init();
+
+    await useTaskCenterStore.getState().deleteTaskById({ taskId: 'task-delete-1' });
+
+    expect(updateTaskMock).toHaveBeenCalledWith({
+      taskId: 'task-delete-1',
+      status: 'completed',
+      workspaceDir: 'E:/workspace/main',
+    });
+    const state = useTaskCenterStore.getState();
+    expect(state.tasks[0]?.status).toBe('completed');
+  });
+
+  it('deleteTaskById 期间仅切换 mutating，不触发刷新阻塞', async () => {
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    getPluginCatalogMock.mockResolvedValue({
+      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
+    });
+    getPluginRuntimeMock.mockResolvedValue({
+      execution: {
+        pluginExecutionEnabled: true,
+        enabledPluginIds: ['task-manager'],
+      },
+    });
+    listTasksMock.mockResolvedValue([task({ id: 'task-delete-2', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
+    let resolveUpdateTask: (() => void) | null = null;
+    updateTaskMock.mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        resolveUpdateTask = resolve;
+      });
+      return {
+        task: task({ id: 'task-delete-2', status: 'completed' }),
+      };
+    });
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    await useTaskCenterStore.getState().init();
+
+    const deletingPromise = useTaskCenterStore.getState().deleteTaskById({ taskId: 'task-delete-2' });
+    expect(useTaskCenterStore.getState().mutating).toBe(true);
+    expect(useTaskCenterStore.getState().refreshing).toBe(false);
+
+    resolveUpdateTask?.();
+    await deletingPromise;
+    expect(useTaskCenterStore.getState().mutating).toBe(false);
+  });
+
+  it('handleGatewayNotification 写入 task 更新', async () => {
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
 
     useTaskCenterStore.getState().handleGatewayNotification({
-      method: 'task_created',
+      method: 'task_manager.updated',
       params: {
         task: task({ id: 'task-created-2', status: 'pending' }),
       },
@@ -119,5 +234,23 @@ describe('task center store', () => {
 
     const state = useTaskCenterStore.getState();
     expect(state.tasks.some((item) => item.id === 'task-created-2')).toBe(true);
+  });
+
+  it('handleGatewayNotification 支持 task_manager.deleted 删除任务', async () => {
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    useTaskCenterStore.setState({
+      tasks: [
+        task({ id: 'task-delete-a', status: 'pending' }),
+        task({ id: 'task-delete-b', status: 'in_progress' }),
+      ],
+    } as never);
+
+    useTaskCenterStore.getState().handleGatewayNotification({
+      method: 'task_manager.deleted',
+      params: { taskId: 'task-delete-a' },
+    });
+
+    const state = useTaskCenterStore.getState();
+    expect(state.tasks.map((item) => item.id)).toEqual(['task-delete-b']);
   });
 });

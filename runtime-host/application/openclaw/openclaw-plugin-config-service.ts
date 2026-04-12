@@ -26,6 +26,60 @@ function readPluginAllowlist(config: Record<string, unknown>): string[] {
   );
 }
 
+function readPluginLoadPaths(config: Record<string, unknown>): string[] {
+  const plugins = isRecord(config.plugins) ? config.plugins : {};
+  const load = isRecord(plugins.load) ? plugins.load : {};
+  const rawPaths = Array.isArray(load.paths) ? load.paths : [];
+  const next: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of rawPaths) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+    const normalized = entry.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    next.push(normalized);
+  }
+  return next;
+}
+
+function normalizePathForCompare(pathname: string): string {
+  return resolve(pathname).replace(/\\/g, '/').toLowerCase();
+}
+
+function isBundledPluginLoadPath(pathname: string): boolean {
+  if (!isAbsolute(pathname)) {
+    return false;
+  }
+  const normalized = normalizePathForCompare(pathname);
+  if (normalized.includes('/node_modules/openclaw/extensions')) {
+    return true;
+  }
+  const localBuildPluginsRoot = normalizePathForCompare(join(process.cwd(), 'build', 'openclaw-plugins'));
+  return normalized === localBuildPluginsRoot || normalized.startsWith(`${localBuildPluginsRoot}/`);
+}
+
+function sanitizePluginLoadPaths(paths: readonly string[]): string[] {
+  const next: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of paths) {
+    const trimmed = entry.trim();
+    if (!trimmed || isBundledPluginLoadPath(trimmed)) {
+      continue;
+    }
+    const key = isAbsolute(trimmed) ? normalizePathForCompare(trimmed) : trimmed;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    next.push(trimmed);
+  }
+  return next;
+}
+
 export function readEnabledPluginIdsFromOpenClawConfig(): string[] {
   const config = readOpenClawConfigJson();
   const allow = readPluginAllowlist(config);
@@ -102,6 +156,27 @@ async function discoverPluginSkillIdsByPluginId(): Promise<Map<string, string[]>
       // ignore malformed manifests
     }
   }));
+
+  return result;
+}
+
+async function discoverOpenClawLoadPathByPluginId(): Promise<Map<string, string>> {
+  const discovery = createPluginDiscovery();
+  const discoveredPlugins = await discovery.discover();
+  const result = new Map<string, string>();
+
+  for (const plugin of discoveredPlugins) {
+    if (plugin.platform !== 'openclaw') {
+      continue;
+    }
+    if (plugin.source === 'openclaw-extension') {
+      continue;
+    }
+    if (!plugin.rootDir.trim()) {
+      continue;
+    }
+    result.set(plugin.id, plugin.rootDir);
+  }
 
   return result;
 }
@@ -190,6 +265,34 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
 
   plugins.allow = normalizedPluginIds;
   plugins.entries = nextEntries;
+  const nextLoadPaths = sanitizePluginLoadPaths(readPluginLoadPaths(config));
+  const loadPathByPluginId = await discoverOpenClawLoadPathByPluginId();
+  const seenLoadPaths = new Set(
+    nextLoadPaths.map((entry) => isAbsolute(entry) ? normalizePathForCompare(entry) : entry),
+  );
+  for (const pluginId of normalizedPluginIds) {
+    const loadPath = loadPathByPluginId.get(pluginId);
+    if (!loadPath) {
+      continue;
+    }
+    const normalizedPath = loadPath.trim();
+    if (!normalizedPath || isBundledPluginLoadPath(normalizedPath)) {
+      continue;
+    }
+    const dedupeKey = isAbsolute(normalizedPath)
+      ? normalizePathForCompare(normalizedPath)
+      : normalizedPath;
+    if (seenLoadPaths.has(dedupeKey)) {
+      continue;
+    }
+    seenLoadPaths.add(dedupeKey);
+    nextLoadPaths.push(normalizedPath);
+  }
+  if (nextLoadPaths.length > 0) {
+    const load = isRecord(plugins.load) ? { ...plugins.load } : {};
+    load.paths = nextLoadPaths;
+    plugins.load = load;
+  }
 
   const skills = isRecord(config.skills) ? { ...config.skills } : {};
   const nextSkillEntries = cloneSkillEntries(config);

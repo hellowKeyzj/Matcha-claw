@@ -180,6 +180,13 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(firstClaim.task.taskId).toBe('task-1');
     expect(firstClaim.task.status).toBe('claimed');
 
+    const running = await harness.dispatchOk<{ task: { taskId: string; status: string } }>(
+      'POST',
+      '/api/team-runtime/task-update',
+      { teamId, taskId: 'task-1', status: 'running' },
+    );
+    expect(running.task.status).toBe('running');
+
     const done = await harness.dispatchOk<{ task: { taskId: string; status: string } }>(
       'POST',
       '/api/team-runtime/task-update',

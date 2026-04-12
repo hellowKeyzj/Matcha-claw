@@ -40,11 +40,10 @@
   },
   "toolLabels": {
     "task_create": "创建任务",
-    "task_block": "任务阻塞",
-    "task_resume": "恢复任务",
-    "task_finish": "结束任务",
     "task_list": "任务列表",
     "task_get": "获取任务详情",
+    "task_update": "更新任务",
+    "task_claim": "领取任务",
     "sessions_list": "会话列表",
     "sessions_send": "发送到会话",
     "sessions_spawn": "创建子会话",

@@ -4,122 +4,69 @@ import {
   hostGatewayRpc,
 } from '@/lib/host-api';
 
-export type TaskStatus =
-  | 'pending'
-  | 'running'
-  | 'waiting_for_input'
-  | 'waiting_approval'
-  | 'completed'
-  | 'failed';
-
-export interface TaskBlockedInfo {
-  reason: 'need_user_confirm' | 'waiting_external_approval';
-  confirm_id?: string;
-  grace_until?: number;
-  input_mode?: 'decision' | 'free_text';
-  question?: string;
-  description?: string;
-  webhook_token?: string;
-  expires_at?: number;
-}
-
-export type TaskStepStatus = 'pending' | 'running' | 'blocked' | 'completed' | 'failed';
-
-export interface TaskStep {
-  id: string;
-  title: string;
-  description?: string;
-  depends_on: string[];
-  status: TaskStepStatus;
-  created_at: number;
-  updated_at: number;
-  started_at?: number;
-  finished_at?: number;
-}
-
-export type TaskCheckpointKind = 'checkpoint' | 'block' | 'resume' | 'finish';
-
-export interface TaskCheckpoint {
-  id: string;
-  kind: TaskCheckpointKind;
-  summary: string;
-  created_at: number;
-  payload?: Record<string, unknown>;
-}
+export type TaskStatus = 'pending' | 'in_progress' | 'completed';
 
 export interface Task {
   id: string;
-  goal: string;
+  subject: string;
+  description: string;
   status: TaskStatus;
-  progress: number;
-  steps: TaskStep[];
-  current_step_id?: string;
-  checkpoints: TaskCheckpoint[];
-  assigned_session?: string;
-  blocked_info?: TaskBlockedInfo;
-  result_summary?: string;
-  failure_reason?: string;
-  finished_at?: number;
-  created_at: number;
-  updated_at: number;
+  owner?: string;
+  blockedBy: string[];
+  blocks: string[];
+  activeForm?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
   workspaceDir?: string;
+  // Frontend-local session affinity for quick reopen/navigation.
+  sessionAffinityKey?: string;
 }
-
-export type TaskNotification =
-  | {
-      method: 'task_progress_update';
-      params: { taskId: string; progress: number; status: TaskStatus; task?: Task };
-    }
-  | {
-      method: 'task_status_changed';
-      params: { taskId: string; from?: TaskStatus | null; to: TaskStatus; reason?: string; task?: Task };
-    }
-  | {
-      method: 'task_blocked';
-      params: {
-        taskId: string;
-        type: 'waiting_for_input' | 'waiting_approval';
-        confirmId?: string;
-        inputMode?: 'decision' | 'free_text';
-        question?: string;
-        description?: string;
-        expiresAt?: number;
-        graceUntil?: number;
-        task?: Task;
-      };
-    }
-  | {
-      method: 'task_needs_resume';
-      params: {
-        taskId: string;
-        confirmId?: string;
-        resumeReason: string;
-        decision?: 'approve' | 'reject';
-        userInput?: string;
-        resumePacket?: Record<string, unknown>;
-        task?: Task;
-      };
-    }
-  | {
-      method: 'task_deleted';
-      params: {
-        taskId: string;
-        reason?: string;
-        task?: Task;
-      };
-    };
 
 const TASK_RPC_TIMEOUT_MS = 60_000;
 
-function resolveRandomId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs = TASK_RPC_TIMEOUT_MS): Promise<T> {
   return await hostGatewayRpc<T>(method, params, timeoutMs);
+}
+
+function normalizeStatus(raw: unknown): TaskStatus {
+  if (raw === 'in_progress' || raw === 'completed') {
+    return raw;
+  }
+  return 'pending';
+}
+
+function normalizeStringArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.filter((item): item is string => typeof item === 'string');
+}
+
+function normalizeTask(raw: unknown, workspaceDir?: string): Task {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const subject = typeof row.subject === 'string' && row.subject.trim().length > 0
+    ? row.subject.trim()
+    : 'Untitled task';
+  const createdAt = typeof row.createdAt === 'number' ? row.createdAt : Date.now();
+  const updatedAt = typeof row.updatedAt === 'number' ? row.updatedAt : createdAt;
+
+  return {
+    id: typeof row.id === 'string' ? row.id : '',
+    subject,
+    description: typeof row.description === 'string' ? row.description : '',
+    status: normalizeStatus(row.status),
+    ...(typeof row.owner === 'string' && row.owner.trim().length > 0 ? { owner: row.owner.trim() } : {}),
+    blockedBy: normalizeStringArray(row.blockedBy),
+    blocks: normalizeStringArray(row.blocks),
+    ...(typeof row.activeForm === 'string' && row.activeForm.trim().length > 0 ? { activeForm: row.activeForm.trim() } : {}),
+    ...(row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+      ? { metadata: row.metadata as Record<string, unknown> }
+      : {}),
+    createdAt,
+    updatedAt,
+    ...(workspaceDir ? { workspaceDir } : {}),
+  };
 }
 
 export async function getWorkspaceDir(): Promise<string | null> {
@@ -139,119 +86,112 @@ export async function getTaskWorkspaceDirs(): Promise<string[]> {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 }
 
-export async function listTasks(workspaceDir?: string): Promise<Task[]> {
-  const result = await gatewayRpc<{ tasks?: Task[] } | Task[]>('task_list', workspaceDir ? { workspaceDir } : {}, TASK_RPC_TIMEOUT_MS);
-  if (Array.isArray(result)) {
-    return result;
-  }
-  return Array.isArray(result.tasks) ? result.tasks : [];
+export async function listTasks(workspaceDir?: string, taskListId?: string): Promise<Task[]> {
+  const result = await gatewayRpc<{ tasks?: unknown[] }>(
+    'task_manager.list',
+    {
+      ...(workspaceDir ? { workspaceDir } : {}),
+      ...(taskListId ? { taskListId } : {}),
+    },
+    TASK_RPC_TIMEOUT_MS,
+  );
+  const rows = Array.isArray(result.tasks) ? result.tasks : [];
+  return rows.map((row) => normalizeTask(row, workspaceDir));
 }
 
-export async function getTask(taskId: string, workspaceDir?: string): Promise<Task | null> {
-  const result = await gatewayRpc<{ task?: Task | null }>(
-    'task_get',
+export async function getTask(taskId: string, workspaceDir?: string, taskListId?: string): Promise<Task | null> {
+  const result = await gatewayRpc<{ task?: unknown | null }>(
+    'task_manager.get',
     {
       taskId,
       ...(workspaceDir ? { workspaceDir } : {}),
+      ...(taskListId ? { taskListId } : {}),
     },
     TASK_RPC_TIMEOUT_MS,
   );
-  return result.task ?? null;
-}
-
-export async function resumeTask(
-  taskId: string,
-  options?: { confirmId?: string; decision?: 'approve' | 'reject'; userInput?: string; workspaceDir?: string },
-): Promise<Task> {
-  const result = await gatewayRpc<{ task: Task }>(
-    'task_resume',
-    {
-      taskId,
-      ...(typeof options?.confirmId === 'string' && options.confirmId.trim().length > 0
-        ? { confirmId: options.confirmId.trim() }
-        : {}),
-      ...(typeof options?.decision === 'string' ? { decision: options.decision } : {}),
-      ...(typeof options?.userInput === 'string' ? { userInput: options.userInput } : {}),
-      ...(options?.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
-    },
-    TASK_RPC_TIMEOUT_MS,
-  );
-  return result.task;
-}
-
-export async function deleteTask(
-  taskId: string,
-  options?: { workspaceDir?: string; reason?: string },
-): Promise<{ deleted: boolean; taskId: string }> {
-  return gatewayRpc<{ deleted: boolean; taskId: string }>(
-    'task_delete',
-    {
-      taskId,
-      ...(options?.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
-      ...(typeof options?.reason === 'string' && options.reason.trim().length > 0
-        ? { reason: options.reason.trim() }
-        : {}),
-    },
-    TASK_RPC_TIMEOUT_MS,
-  );
-}
-
-function parseAgentIdFromSessionKey(sessionKey?: string): string | null {
-  if (!sessionKey) {
+  if (!result.task) {
     return null;
   }
-  const matched = sessionKey.match(/^agent:([^:]+):/i);
-  return matched?.[1] ?? null;
+  return normalizeTask(result.task, workspaceDir);
 }
 
-function resolveResumeTarget(assignedSession?: string): { agentId: string; sessionKey: string } {
-  const normalizedAssigned = typeof assignedSession === 'string' ? assignedSession.trim() : '';
-  const agentId = parseAgentIdFromSessionKey(normalizedAssigned) ?? 'main';
+export async function createTask(payload: {
+  subject: string;
+  description: string;
+  activeForm?: string;
+  metadata?: Record<string, unknown>;
+  workspaceDir?: string;
+  taskListId?: string;
+}): Promise<Task> {
+  const result = await gatewayRpc<{ task: unknown }>(
+    'task_manager.create',
+    {
+      subject: payload.subject,
+      description: payload.description,
+      ...(payload.activeForm ? { activeForm: payload.activeForm } : {}),
+      ...(payload.metadata ? { metadata: payload.metadata } : {}),
+      ...(payload.workspaceDir ? { workspaceDir: payload.workspaceDir } : {}),
+      ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
+    },
+    TASK_RPC_TIMEOUT_MS,
+  );
+  return normalizeTask(result.task, payload.workspaceDir);
+}
+
+export async function updateTask(payload: {
+  taskId: string;
+  status?: TaskStatus;
+  subject?: string;
+  description?: string;
+  activeForm?: string | null;
+  owner?: string | null;
+  addBlockedBy?: string[];
+  addBlocks?: string[];
+  metadata?: Record<string, unknown>;
+  workspaceDir?: string;
+  taskListId?: string;
+}): Promise<{ task: Task; updatedFields: string[]; statusChange?: { from: string; to: string } }> {
+  const result = await gatewayRpc<{ task: unknown; updatedFields?: string[]; statusChange?: { from: string; to: string } }>(
+    'task_manager.update',
+    {
+      taskId: payload.taskId,
+      ...(payload.status ? { status: payload.status } : {}),
+      ...(payload.subject ? { subject: payload.subject } : {}),
+      ...(payload.description ? { description: payload.description } : {}),
+      ...(payload.activeForm !== undefined ? { activeForm: payload.activeForm } : {}),
+      ...(payload.owner !== undefined ? { owner: payload.owner } : {}),
+      ...(payload.addBlockedBy ? { addBlockedBy: payload.addBlockedBy } : {}),
+      ...(payload.addBlocks ? { addBlocks: payload.addBlocks } : {}),
+      ...(payload.metadata ? { metadata: payload.metadata } : {}),
+      ...(payload.workspaceDir ? { workspaceDir: payload.workspaceDir } : {}),
+      ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
+    },
+    TASK_RPC_TIMEOUT_MS,
+  );
   return {
-    agentId,
-    sessionKey: normalizedAssigned || `agent:${agentId}:main`,
+    task: normalizeTask(result.task, payload.workspaceDir),
+    updatedFields: Array.isArray(result.updatedFields) ? result.updatedFields : [],
+    ...(result.statusChange ? { statusChange: result.statusChange } : {}),
   };
 }
 
-function buildWakeTaskMessage(
-  taskId: string,
-  options?: {
-    message?: string;
-    task?: Task;
-  },
-): string {
-  const lines: string[] = [`请恢复执行任务 ${taskId}。`];
-  const task = options?.task;
-  if (task) {
-    lines.push(`任务目标：${task.goal}`);
-    lines.push(`任务状态：${task.status}（progress=${task.progress}）`);
-    const currentStep = task.steps.find((step) => step.id === task.current_step_id);
-    if (currentStep) {
-      lines.push(`当前步骤：${currentStep.title}`);
-      if (currentStep.description) {
-        lines.push(`步骤说明：${currentStep.description}`);
-      }
-    }
-    if (task.workspaceDir) {
-      lines.push(`任务文件路径：${task.workspaceDir}\\.task-manager\\tasks.json`);
-    }
-  }
-  if (options?.message) {
-    lines.push(`附加信息：${options.message}`);
-  }
-  lines.push('请优先依据任务上下文推进，不要假设任务目录是 .tasks。');
-  return lines.join('\n');
-}
-
-export async function wakeTaskSession(
-  taskId: string,
-  options?: { message?: string; assignedSession?: string; task?: Task },
-): Promise<void> {
-  const target = resolveResumeTarget(options?.assignedSession);
-  await gatewayRpc('agent', {
-    agentId: target.agentId,
-    sessionKey: target.sessionKey,
-    message: buildWakeTaskMessage(taskId, options),
-    idempotencyKey: `task-resume:${target.agentId}:${taskId}:${resolveRandomId()}`,
-  });
+export async function claimTask(payload: {
+  taskId: string;
+  owner?: string;
+  workspaceDir?: string;
+  taskListId?: string;
+  sessionKey?: string;
+}): Promise<Task> {
+  const result = await gatewayRpc<{ task: unknown }>(
+    'task_manager.claim',
+    {
+      taskId: payload.taskId,
+      ...(payload.owner ? { owner: payload.owner } : {}),
+      ...(payload.workspaceDir ? { workspaceDir: payload.workspaceDir } : {}),
+      ...(payload.taskListId ? { taskListId: payload.taskListId } : {}),
+      ...(payload.sessionKey ? { sessionKey: payload.sessionKey } : {}),
+    },
+    TASK_RPC_TIMEOUT_MS,
+  );
+  return normalizeTask(result.task, payload.workspaceDir);
 }

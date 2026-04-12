@@ -50,6 +50,7 @@ describe('openclaw plugin config service', () => {
 
   it('同步启用插件列表时会更新 allow/entries 并保留安装元数据', async () => {
     const pluginRoot = join(pluginDiscoveryRoot, 'unit-test-plugin');
+    const staleBundledPath = join(process.cwd(), 'build', 'openclaw-plugins', 'task-manager');
     mkdirSync(join(pluginRoot, 'skills', 'unit-skill'), { recursive: true });
     writeFileSync(join(pluginRoot, 'openclaw.plugin.json'), JSON.stringify({
       id: 'unit-test-plugin',
@@ -63,6 +64,9 @@ describe('openclaw plugin config service', () => {
           'plugin-a': { enabled: true, source: 'path' },
           'plugin-b': { enabled: true, source: 'npm' },
           'unit-test-plugin': { enabled: false, source: 'path' },
+        },
+        load: {
+          paths: ['/tmp/existing-plugin-path', staleBundledPath],
         },
         installs: {
           'plugin-a': { installPath: '/tmp/plugin-a' },
@@ -83,6 +87,7 @@ describe('openclaw plugin config service', () => {
       plugins: {
         allow: string[];
         entries: Record<string, { enabled?: boolean; source?: string }>;
+        load: { paths: string[] };
         installs: Record<string, { installPath?: string }>;
       };
       skills: {
@@ -102,6 +107,15 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.installs['plugin-a']).toMatchObject({
       installPath: '/tmp/plugin-a',
     });
+    expect(nextConfig.plugins).toMatchObject({
+      load: {
+        paths: expect.arrayContaining([
+          '/tmp/existing-plugin-path',
+          pluginRoot,
+        ]),
+      },
+    });
+    expect(nextConfig.plugins.load.paths).not.toContain(staleBundledPath);
     expect(nextConfig.skills.entries['unit-skill']).toMatchObject({
       enabled: true,
       env: { sample: '1' },

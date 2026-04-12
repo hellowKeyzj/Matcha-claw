@@ -13,76 +13,115 @@ describe('task manager client', () => {
     hostGatewayRpcMock.mockReset();
   });
 
-  it('listTasks 通过 gateway:rpc 拉取任务列表', async () => {
-    hostGatewayRpcMock.mockResolvedValueOnce({ tasks: [{ id: 'task-1' }] });
+  it('listTasks 通过 task_manager.list 拉取任务摘要', async () => {
+    hostGatewayRpcMock.mockResolvedValueOnce({
+      tasks: [
+        { id: 'task-1', subject: '整理需求', status: 'in_progress', blockedBy: [] },
+      ],
+    });
     const { listTasks } = await import('@/services/openclaw/task-manager-client');
     const tasks = await listTasks('E:/workspace/main');
 
     expect(tasks).toHaveLength(1);
-    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_list', { workspaceDir: 'E:/workspace/main' }, 60000);
+    expect(tasks[0]).toMatchObject({
+      id: 'task-1',
+      subject: '整理需求',
+      status: 'in_progress',
+    });
+    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_manager.list', { workspaceDir: 'E:/workspace/main' }, 60000);
   });
 
-  it('resumeTask 透传 confirmId/decision/userInput', async () => {
+  it('createTask 通过 task_manager.create 创建任务', async () => {
     hostGatewayRpcMock.mockResolvedValueOnce({
-      task: { id: 'task-2', goal: 'goal', status: 'running', progress: 0.6, plan_markdown: '', created_at: 1, updated_at: 2 },
+      task: {
+        id: 'task-2',
+        subject: '实现接口',
+        description: '完成 task manager claim 接口',
+        status: 'pending',
+        blockedBy: [],
+        blocks: [],
+        createdAt: 1,
+        updatedAt: 2,
+      },
     });
-    const { resumeTask } = await import('@/services/openclaw/task-manager-client');
-    const task = await resumeTask('task-2', {
-      confirmId: 'confirm-1',
-      decision: 'approve',
-      userInput: 'yes',
+    const { createTask } = await import('@/services/openclaw/task-manager-client');
+    const task = await createTask({
+      subject: '实现接口',
+      description: '完成 task manager claim 接口',
       workspaceDir: 'E:/workspace/main',
     });
 
     expect(task.id).toBe('task-2');
-    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_resume', {
-      taskId: 'task-2',
-      confirmId: 'confirm-1',
-      decision: 'approve',
-      userInput: 'yes',
+    expect(task.status).toBe('pending');
+    expect(task.subject).toBe('实现接口');
+    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_manager.create', {
+      subject: '实现接口',
+      description: '完成 task manager claim 接口',
       workspaceDir: 'E:/workspace/main',
     }, 60000);
   });
 
-  it('wakeTaskSession 会携带任务上下文与 workspace 路径', async () => {
-    hostGatewayRpcMock.mockResolvedValueOnce({});
-    const { wakeTaskSession } = await import('@/services/openclaw/task-manager-client');
-    await wakeTaskSession('task-3', {
-      assignedSession: 'agent:main:task:abc',
+  it('updateTask 透传可更新字段并返回更新结果', async () => {
+    hostGatewayRpcMock.mockResolvedValueOnce({
       task: {
         id: 'task-3',
-        goal: '导出任务日志',
-        status: 'running',
-        progress: 0.2,
-        steps: [
-          {
-            id: 'step-1',
-            title: '需求分析',
-            status: 'running',
-            depends_on: [],
-            created_at: 1,
-            updated_at: 2,
-          },
-        ],
-        current_step_id: 'step-1',
-        checkpoints: [],
-        created_at: 1,
-        updated_at: 2,
-        workspaceDir: 'C:/Users/Mr.Key/.openclaw/workspace',
+        subject: '完成开发',
+        description: '全部完成',
+        status: 'completed',
+        blockedBy: [],
+        blocks: [],
+        createdAt: 1,
+        updatedAt: 3,
       },
+      updatedFields: ['status'],
+      statusChange: { from: 'in_progress', to: 'completed' },
+    });
+    const { updateTask } = await import('@/services/openclaw/task-manager-client');
+    const result = await updateTask({
+      taskId: 'task-3',
+      status: 'completed',
+      workspaceDir: 'E:/workspace/main',
     });
 
-    expect(hostGatewayRpcMock).toHaveBeenCalledWith(
-      'agent',
-      expect.objectContaining({
-        agentId: 'main',
-        sessionKey: 'agent:main:task:abc',
-      }),
-      60000,
-    );
-    const payload = hostGatewayRpcMock.mock.calls[0]?.[1] as { message?: string };
-    expect(payload.message).toContain('请恢复执行任务 task-3');
-    expect(payload.message).toContain('任务目标：导出任务日志');
-    expect(payload.message).toContain('任务文件路径：C:/Users/Mr.Key/.openclaw/workspace\\.task-manager\\tasks.json');
+    expect(result.task.status).toBe('completed');
+    expect(result.updatedFields).toEqual(['status']);
+    expect(result.statusChange).toEqual({ from: 'in_progress', to: 'completed' });
+    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_manager.update', {
+      taskId: 'task-3',
+      status: 'completed',
+      workspaceDir: 'E:/workspace/main',
+    }, 60000);
+  });
+
+  it('claimTask 通过 task_manager.claim 领取任务', async () => {
+    hostGatewayRpcMock.mockResolvedValueOnce({
+      task: {
+        id: 'task-4',
+        subject: '修复回归',
+        description: '处理 store 竞态',
+        status: 'in_progress',
+        owner: 'agent-alpha',
+        blockedBy: [],
+        blocks: [],
+        createdAt: 1,
+        updatedAt: 4,
+      },
+    });
+    const { claimTask } = await import('@/services/openclaw/task-manager-client');
+    const task = await claimTask({
+      taskId: 'task-4',
+      owner: 'agent-alpha',
+      workspaceDir: 'E:/workspace/main',
+      sessionKey: 'agent:alpha:main',
+    });
+
+    expect(task.status).toBe('in_progress');
+    expect(task.owner).toBe('agent-alpha');
+    expect(hostGatewayRpcMock).toHaveBeenCalledWith('task_manager.claim', {
+      taskId: 'task-4',
+      owner: 'agent-alpha',
+      workspaceDir: 'E:/workspace/main',
+      sessionKey: 'agent:alpha:main',
+    }, 60000);
   });
 });

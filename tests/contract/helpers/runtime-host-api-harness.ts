@@ -189,7 +189,7 @@ export async function createRuntimeHostApiHarness(
   const parentDispatchToken = `runtime-host-test-token-${randomUUID()}`;
   const parentApiServer = await startParentApiServer(parentApiPort, parentDispatchToken);
 
-  const scriptPath = resolve(process.cwd(), 'runtime-host', 'api', 'host-process.cjs');
+  const scriptPath = resolve(process.cwd(), 'runtime-host', 'host-process.cjs');
   const manager = createRuntimeHostProcessManager({
     scriptPath,
     port: runtimeHostPort,
@@ -253,4 +253,3 @@ export async function createRuntimeHostApiHarness(
     },
   };
 }
-
