@@ -92,7 +92,9 @@ function coalesceTaskNotifications(
 
   for (const payload of notifications) {
     const method = payload.method;
-    if (method !== 'task_progress_update' && method !== 'task_status_changed') {
+    const isTaskNotification = typeof method === 'string'
+      && (method.startsWith('task_') || method.startsWith('task_manager.'));
+    if (!isTaskNotification) {
       passthrough.push(payload);
       continue;
     }
@@ -197,7 +199,10 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     return;
   }
 
-  if (typeof payload.method === 'string' && payload.method.startsWith('task_')) {
+  if (
+    typeof payload.method === 'string'
+    && (payload.method.startsWith('task_') || payload.method.startsWith('task_manager.'))
+  ) {
     enqueueTaskNotification(payload);
     return;
   }

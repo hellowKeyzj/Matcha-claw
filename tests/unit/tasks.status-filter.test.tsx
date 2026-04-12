@@ -15,40 +15,34 @@ function setupStores() {
   useTaskCenterStore.setState({
     tasks: [
       {
-        id: 'task-running',
-        goal: 'Task Running',
-        status: 'running',
-        progress: 0.4,
-        plan_markdown: '',
-        created_at: 100,
-        updated_at: 200,
+        id: 'task-in-progress',
+        subject: 'Task In Progress',
+        description: 'desc',
+        status: 'in_progress',
+        blockedBy: [],
+        blocks: [],
+        createdAt: 100,
+        updatedAt: 200,
       },
       {
-        id: 'task-waiting',
-        goal: 'Task Waiting',
-        status: 'waiting_for_input',
-        progress: 0.2,
-        plan_markdown: '',
-        created_at: 100,
-        updated_at: 200,
+        id: 'task-pending',
+        subject: 'Task Pending',
+        description: 'desc',
+        status: 'pending',
+        blockedBy: [],
+        blocks: [],
+        createdAt: 100,
+        updatedAt: 200,
       },
       {
         id: 'task-completed',
-        goal: 'Task Completed',
+        subject: 'Task Completed',
+        description: 'desc',
         status: 'completed',
-        progress: 1,
-        plan_markdown: '',
-        created_at: 100,
-        updated_at: 200,
-      },
-      {
-        id: 'task-failed',
-        goal: 'Task Failed',
-        status: 'failed',
-        progress: 0.6,
-        plan_markdown: '',
-        created_at: 100,
-        updated_at: 200,
+        blockedBy: [],
+        blocks: [],
+        createdAt: 100,
+        updatedAt: 200,
       },
     ],
     loading: false,
@@ -59,11 +53,8 @@ function setupStores() {
     pluginInstalled: true,
     pluginEnabled: true,
     pluginVersion: undefined,
-    blockedQueue: [],
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
-    closeBlockedDialog: vi.fn(),
     handleGatewayNotification: vi.fn(),
   } as never);
 
@@ -80,21 +71,18 @@ describe('tasks status filter', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole('button', { name: /Task Running/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Task Waiting/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Task In Progress/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Task Pending/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Task Completed/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Task Failed/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^Completed$/i }));
     expect(screen.getByRole('button', { name: /Task Completed/i })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Task Running/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Task Waiting/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Task Failed/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Task In Progress/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Task Pending/i })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^Incomplete$/i }));
     expect(screen.queryByRole('button', { name: /Task Completed/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Task Running/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Task Waiting/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Task Failed/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Task In Progress/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Task Pending/i })).toBeInTheDocument();
   });
 });

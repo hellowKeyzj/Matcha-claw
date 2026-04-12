@@ -15,7 +15,6 @@ import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
@@ -30,16 +29,14 @@ import type { Task } from '@/services/openclaw/task-manager-client';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'completed') return 'success';
-  if (status === 'failed') return 'destructive';
-  if (status === 'running') return 'default';
+  if (status === 'in_progress') return 'default';
   return 'secondary';
 }
 
 function statusDotClass(status: string): string {
   if (status === 'completed') return 'bg-emerald-500';
-  if (status === 'failed') return 'bg-red-500';
-  if (status === 'running') return 'bg-blue-500';
-  if (status === 'waiting_for_input' || status === 'waiting_approval') return 'bg-amber-500';
+  if (status === 'in_progress') return 'bg-blue-500';
+  if (status === 'pending') return 'bg-amber-500';
   return 'bg-slate-400';
 }
 
@@ -74,7 +71,7 @@ function normalizeTaskTimestampMs(raw: number | undefined): number | null {
 }
 
 function resolveTaskTimestampMs(task: Task): number | null {
-  return normalizeTaskTimestampMs(task.updated_at) ?? normalizeTaskTimestampMs(task.created_at);
+  return normalizeTaskTimestampMs(task.updatedAt) ?? normalizeTaskTimestampMs(task.createdAt);
 }
 
 function resolveDateRangeMs(dateFrom: string, dateTo: string): { startMs: number | null; endMs: number | null } {
@@ -100,17 +97,10 @@ function isIncompleteTask(task: Task): boolean {
 
 function matchesStatusFilter(task: Task, filter: TaskStatusFilter): boolean {
   if (filter === 'all') return true;
-  if (filter === 'running') return task.status === 'running';
-  if (filter === 'waiting') return task.status === 'waiting_for_input' || task.status === 'waiting_approval';
+  if (filter === 'running') return task.status === 'in_progress';
+  if (filter === 'waiting') return task.status === 'pending';
   if (filter === 'completed') return task.status === 'completed';
   return isIncompleteTask(task);
-}
-
-function stepBadgeVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
-  if (status === 'completed') return 'success';
-  if (status === 'failed') return 'destructive';
-  if (status === 'running') return 'default';
-  return 'secondary';
 }
 
 function formatDateTime(value: number | undefined): string {
@@ -127,21 +117,20 @@ export function TasksPage() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const {
     tasks,
-    loading,
+    snapshotReady,
+    initialLoading,
+    refreshing,
+    mutating,
     initialized,
     error,
     pluginInstalled,
     pluginEnabled,
-    blockedQueue,
     init,
     refreshTasks,
-    resumeBlockedTask,
     deleteTaskById,
-    closeBlockedDialog,
   } = useTaskCenterStore();
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [inputDraftByConfirmId, setInputDraftByConfirmId] = useState<Record<string, string>>({});
   const [statsWindow, setStatsWindow] = useState<TaskStatsWindow>('all');
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
   const [dateFrom, setDateFrom] = useState('');
@@ -154,6 +143,8 @@ export function TasksPage() {
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
+  const manualRefreshBusy = refreshing || mutating;
+  const showInitialLoading = !snapshotReady && initialLoading;
   const tasksForView = useMemo(
     () => (taskHeavyContentReady ? tasks : []),
     [taskHeavyContentReady, tasks],
@@ -208,9 +199,7 @@ export function TasksPage() {
   }, [taskHeavyContentReady]);
 
   const hasActiveTasks = useMemo(
-    () =>
-      tasks.some((task) =>
-        task.status === 'pending' || task.status === 'running' || task.status === 'waiting_for_input' || task.status === 'waiting_approval'),
+    () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
     [tasks],
   );
 
@@ -444,28 +433,14 @@ export function TasksPage() {
     () => filteredTasks.find((task) => task.id === effectiveSelectedTaskId) ?? null,
     [effectiveSelectedTaskId, filteredTasks],
   );
-  const selectedTaskSteps = useMemo(() => selectedTask?.steps ?? [], [selectedTask?.steps]);
-  const selectedTaskCheckpoints = useMemo(
-    () => (selectedTask?.checkpoints ?? []).slice().sort((a, b) => b.created_at - a.created_at),
-    [selectedTask?.checkpoints],
-  );
-  const currentStep = useMemo(
-    () => selectedTaskSteps.find((step) => step.id === selectedTask?.current_step_id) ?? null,
-    [selectedTask?.current_step_id, selectedTaskSteps],
-  );
-  const stepsSummary = useMemo(() => {
-    const total = selectedTaskSteps.length;
-    const done = selectedTaskSteps.filter((step) => step.status === 'completed').length;
-    return { done, total };
-  }, [selectedTaskSteps]);
 
   const taskStatusSummary = useMemo(() => {
     return statsTasks.reduce(
       (acc, task) => {
-        if (task.status === 'running') {
+        if (task.status === 'in_progress') {
           acc.running += 1;
         }
-        if (task.status === 'waiting_for_input' || task.status === 'waiting_approval') {
+        if (task.status === 'pending') {
           acc.waiting += 1;
         }
         if (task.status === 'completed') {
@@ -483,21 +458,6 @@ export function TasksPage() {
   const waitingCount = taskStatusSummary.waiting;
   const completedCount = taskStatusSummary.completed;
   const incompleteCount = taskStatusSummary.incomplete;
-
-  const handleResumeConfirm = async (payload: { taskId: string; confirmId: string; decision?: 'approve' | 'reject'; userInput?: string }) => {
-    await resumeBlockedTask(payload);
-    const next = useTaskCenterStore.getState();
-    if (next.error) {
-      toast.error(next.error);
-      return;
-    }
-    setInputDraftByConfirmId((prev) => {
-      const cloned = { ...prev };
-      delete cloned[payload.confirmId];
-      return cloned;
-    });
-    toast.success(t('toast.resumed'));
-  };
 
   const handleDeleteTask = (taskId: string) => {
     if (!taskId) {
@@ -592,7 +552,7 @@ export function TasksPage() {
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               {!pluginInstalled || !pluginEnabled ? (
-                <Button type="button" size="sm" onClick={() => navigate('/plugins')} disabled={loading}>
+                <Button type="button" size="sm" onClick={() => navigate('/plugins')} disabled={mutating}>
                   <Wrench className="mr-2 h-4 w-4" />
                   {t('openPluginCenter')}
                 </Button>
@@ -646,9 +606,9 @@ export function TasksPage() {
                 aria-label={t('refresh')}
                 title={t('refresh')}
                 onClick={() => void refreshTasks()}
-                disabled={loading || !pluginInstalled || !pluginEnabled}
+                disabled={manualRefreshBusy || !pluginInstalled || !pluginEnabled}
               >
-                <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+                <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
               </Button>
             </div>
           </div>
@@ -662,19 +622,26 @@ export function TasksPage() {
             </Card>
           )}
 
-          {(!pluginInstalled || !pluginEnabled) && (
+          {initialized && (!pluginInstalled || !pluginEnabled) && (
             <Card className="border-blue-500 bg-blue-50 dark:bg-blue-900/10">
               <CardHeader>
                 <CardTitle className="text-lg">{t('plugin.title')}</CardTitle>
                 <CardDescription>{t('plugin.description')}</CardDescription>
               </CardHeader>
               <CardContent>
-                <Button onClick={() => navigate('/plugins')} disabled={loading}>
+                <Button onClick={() => navigate('/plugins')} disabled={mutating}>
                   <Wrench className="mr-2 h-4 w-4" />
                   {t('openPluginCenter')}
                 </Button>
               </CardContent>
             </Card>
+          )}
+
+          {refreshing && snapshotReady && (
+            <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              {t('common:status.loading', 'Loading...')}
+            </div>
           )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
@@ -726,7 +693,28 @@ export function TasksPage() {
             </Card>
           )}
 
-          {!initialized ? null : (
+          {showInitialLoading ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
+              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
+                <CardContent className="space-y-3 p-6">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <div key={`task-initial-placeholder-${index}`} className="rounded-lg border p-3">
+                      <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
+                      <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" />
+                      <div className="mt-2 h-2 w-16 animate-pulse rounded bg-muted" />
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+              <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
+                <CardContent className="space-y-3 p-6">
+                  <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+                  <div className="h-16 w-full animate-pulse rounded bg-muted" />
+                  <div className="h-20 w-full animate-pulse rounded bg-muted" />
+                </CardContent>
+              </Card>
+            </div>
+          ) : (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
               <Card className={cn(TASK_CENTER_SURFACE_CARD_CLASS, 'flex h-[70vh] flex-col overflow-hidden')}>
                 <CardHeader className="shrink-0">
@@ -761,22 +749,18 @@ export function TasksPage() {
                           onClick={() => setSelectedTaskId(task.id)}
                         >
                           <div className="flex items-start justify-between gap-2">
-                            <p className="line-clamp-2 text-sm font-medium">{task.goal}</p>
+                            <p className="line-clamp-2 text-sm font-medium">{task.subject}</p>
                             <span
                               className={cn('mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full', statusDotClass(task.status))}
                               title={task.status}
                               aria-label={task.status}
                             />
                           </div>
-                          <div className="mt-3 space-y-1">
-                            <Progress
-                              value={Math.round(task.progress * 100)}
-                              className={cn(
-                                'h-1.5 bg-muted/70',
-                                task.status === 'completed' ? '[&>div]:bg-emerald-500' : '[&>div]:bg-slate-500/80',
-                              )}
-                            />
-                            <p className="text-xs text-muted-foreground">{Math.round(task.progress * 100)}%</p>
+                          <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span>{task.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}</span>
+                            <span>
+                              {t('detail.blockedByCount', { count: task.blockedBy.length, defaultValue: '{{count}} blockers' })}
+                            </span>
                           </div>
                         </button>
                       ))}
@@ -802,7 +786,7 @@ export function TasksPage() {
                 <CardHeader className="shrink-0">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <CardTitle>{selectedTask ? selectedTask.goal : t('detailTitle')}</CardTitle>
+                      <CardTitle>{selectedTask ? selectedTask.subject : t('detailTitle')}</CardTitle>
                       <CardDescription>{selectedTask?.id || '-'}</CardDescription>
                     </div>
                     {selectedTask ? (
@@ -811,8 +795,8 @@ export function TasksPage() {
                         size="sm"
                         variant="ghost"
                         className="shrink-0"
-                        onClick={() => void handleDeleteTask(selectedTask.id)}
-                        disabled={loading}
+                      onClick={() => void handleDeleteTask(selectedTask.id)}
+                        disabled={mutating}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />
                         <span className="ml-1 text-destructive">{t('actions.delete')}</span>
@@ -833,86 +817,56 @@ export function TasksPage() {
                     <div className="space-y-4">
                       <div className="flex items-center gap-2">
                         <Badge variant={statusVariant(selectedTask.status)}>{selectedTask.status}</Badge>
-                        <span className="text-sm text-muted-foreground">{Math.round(selectedTask.progress * 100)}%</span>
+                        <span className="text-sm text-muted-foreground">
+                          {selectedTask.owner || t('detail.unassigned', { defaultValue: 'Unassigned' })}
+                        </span>
                       </div>
-                      {selectedTask.blocked_info?.question ? (
-                        <div className="rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-300">
-                          {selectedTask.blocked_info.question}
-                        </div>
-                      ) : null}
-                      {selectedTask.blocked_info?.description ? (
-                        <div className="rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-300">
-                          {selectedTask.blocked_info.description}
-                        </div>
-                      ) : null}
+
                       <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
-                        <p className="text-sm font-medium text-muted-foreground">{t('detailTitle')}</p>
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between rounded-md border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                            <span>{t('stepsOverview')}</span>
-                            <span>
-                              {stepsSummary.done}/{stepsSummary.total} {t('completedTag')}
-                            </span>
-                          </div>
-
-                          {currentStep ? (
-                            <div className="rounded-md border border-blue-300 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-300">
-                              {t('currentStep')}: {currentStep.title}
-                            </div>
-                          ) : null}
-
-                          {selectedTaskSteps.length === 0 ? (
-                            <p className="text-sm text-muted-foreground">{t('noSteps')}</p>
-                          ) : (
-                            <div className="space-y-2">
-                              {selectedTaskSteps.map((step) => (
-                                <div key={`${selectedTask.id}-${step.id}`} className="rounded-md border bg-background/80 p-3">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0 flex-1">
-                                      <p className="truncate text-sm font-medium">{step.title}</p>
-                                      {step.description ? (
-                                        <p className="mt-1 text-xs text-muted-foreground">{step.description}</p>
-                                      ) : null}
-                                      {step.depends_on.length > 0 ? (
-                                        <p className="mt-1 text-xs text-muted-foreground">
-                                          {t('dependsOn')}: {step.depends_on.join(', ')}
-                                        </p>
-                                      ) : null}
-                                    </div>
-                                    <Badge variant={stepBadgeVariant(step.status)}>{step.status}</Badge>
-                                  </div>
-                                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                                    <span>{t('createdAt')}: {formatDateTime(step.created_at)}</span>
-                                    {step.started_at ? <span>{t('startedAt')}: {formatDateTime(step.started_at)}</span> : null}
-                                    {step.finished_at ? <span>{t('finishedAt')}: {formatDateTime(step.finished_at)}</span> : null}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
+                        <p className="text-sm font-medium text-muted-foreground">
+                          {t('detail.description', { defaultValue: 'Description' })}
+                        </p>
+                        <p className="whitespace-pre-wrap text-sm text-foreground">
+                          {selectedTask.description || '-'}
+                        </p>
                       </div>
 
                       <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
                         <div className="flex items-center justify-between">
-                          <p className="text-sm font-medium text-muted-foreground">{t('checkpointsTitle')}</p>
-                          <span className="text-xs text-muted-foreground">{selectedTaskCheckpoints.length}</span>
+                          <p className="text-sm font-medium text-muted-foreground">
+                            {t('detail.dependencies', { defaultValue: 'Dependencies' })}
+                          </p>
                         </div>
-                        {selectedTaskCheckpoints.length === 0 ? (
-                          <p className="text-sm text-muted-foreground">{t('noCheckpoints')}</p>
-                        ) : (
-                          <div className="space-y-2">
-                            {selectedTaskCheckpoints.slice(0, 8).map((checkpoint) => (
-                              <div key={checkpoint.id} className="rounded-md border bg-background/80 p-3">
-                                <div className="flex items-center justify-between gap-3">
-                                  <Badge variant="secondary">{checkpoint.kind}</Badge>
-                                  <span className="text-[11px] text-muted-foreground">{formatDateTime(checkpoint.created_at)}</span>
-                                </div>
-                                <p className="mt-2 text-sm">{checkpoint.summary}</p>
-                              </div>
-                            ))}
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <div className="rounded-md border bg-background/80 p-3">
+                            <p className="text-xs text-muted-foreground">
+                              {t('detail.blockedBy', { defaultValue: 'Blocked By' })}
+                            </p>
+                            <p className="mt-1 break-all text-sm">
+                              {selectedTask.blockedBy.length > 0 ? selectedTask.blockedBy.join(', ') : '-'}
+                            </p>
                           </div>
-                        )}
+                          <div className="rounded-md border bg-background/80 p-3">
+                            <p className="text-xs text-muted-foreground">
+                              {t('detail.blocks', { defaultValue: 'Blocks' })}
+                            </p>
+                            <p className="mt-1 break-all text-sm">
+                              {selectedTask.blocks.length > 0 ? selectedTask.blocks.join(', ') : '-'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <div className="rounded-md border bg-background/80 p-3">
+                            <p className="text-xs text-muted-foreground">{t('createdAt')}</p>
+                            <p className="mt-1 text-sm">{formatDateTime(selectedTask.createdAt)}</p>
+                          </div>
+                          <div className="rounded-md border bg-background/80 p-3">
+                            <p className="text-xs text-muted-foreground">
+                              {t('detail.updatedAt', { defaultValue: 'Updated' })}
+                            </p>
+                            <p className="mt-1 text-sm">{formatDateTime(selectedTask.updatedAt)}</p>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -926,97 +880,6 @@ export function TasksPage() {
           <Cron embedded />
         </TabsContent>
       </Tabs>
-
-      {blockedQueue.length > 0 && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <Card className="w-full max-w-2xl">
-            <CardHeader>
-              <CardTitle>{t('blocked.title')}</CardTitle>
-              <CardDescription>{t('blocked.pendingCount', { count: blockedQueue.length })}</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-                {blockedQueue.map((blocked) => (
-                  <div key={`${blocked.taskId}-${blocked.confirmId}`} className="space-y-3 rounded-md border bg-background p-3">
-                    <div>
-                      <p className="text-xs text-muted-foreground">{blocked.taskId}</p>
-                      <p className="mt-1 text-sm font-medium">{blocked.prompt}</p>
-                    </div>
-                    {blocked.inputMode === 'free_text' && blocked.type === 'waiting_for_input' ? (
-                      <div className="space-y-2">
-                        <textarea
-                          value={inputDraftByConfirmId[blocked.confirmId] ?? ''}
-                          onChange={(event) => {
-                            const nextValue = event.target.value;
-                            setInputDraftByConfirmId((prev) => ({
-                              ...prev,
-                              [blocked.confirmId]: nextValue,
-                            }));
-                          }}
-                          placeholder={t('blocked.inputPlaceholder')}
-                          className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        />
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            variant="outline"
-                            onClick={() => closeBlockedDialog({ taskId: blocked.taskId, confirmId: blocked.confirmId })}
-                          >
-                            {t('blocked.close')}
-                          </Button>
-                          <Button
-                            disabled={!((inputDraftByConfirmId[blocked.confirmId] ?? '').trim())}
-                            onClick={() =>
-                              void handleResumeConfirm({
-                                taskId: blocked.taskId,
-                                confirmId: blocked.confirmId,
-                                userInput: (inputDraftByConfirmId[blocked.confirmId] ?? '').trim(),
-                              })
-                            }
-                          >
-                            {t('blocked.submitInput')}
-                          </Button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => closeBlockedDialog({ taskId: blocked.taskId, confirmId: blocked.confirmId })}
-                        >
-                          {t('blocked.close')}
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          onClick={() =>
-                            void handleResumeConfirm({
-                              taskId: blocked.taskId,
-                              confirmId: blocked.confirmId,
-                              decision: 'reject',
-                            })
-                          }
-                        >
-                          {t('blocked.reject')}
-                        </Button>
-                        <Button
-                          onClick={() =>
-                            void handleResumeConfirm({
-                              taskId: blocked.taskId,
-                              confirmId: blocked.confirmId,
-                              decision: 'approve',
-                            })
-                          }
-                        >
-                          {t('blocked.confirm')}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
 
       <ConfirmDialog
         open={!!taskToDelete}

@@ -53,7 +53,7 @@ interface SidebarProps {
 
 interface PendingBlockerCard {
   id: string;
-  source: 'team_mailbox' | 'task_manager' | 'chat_approval';
+  source: 'team_mailbox' | 'chat_approval';
   teamId: string;
   teamName: string;
   title: string;
@@ -84,7 +84,6 @@ function formatMessageTime(createdAt: number): string {
 const SIDEBAR_BLOCKER_RENDER_LIMIT = 8;
 const TEAM_MAILBOX_SCAN_LIMIT = 80;
 const TEAM_MAILBOX_CARD_LIMIT = 3;
-const TASK_BLOCKER_SCAN_LIMIT = 24;
 const CHAT_APPROVAL_SCAN_LIMIT = 24;
 const SIDEBAR_PREFETCH_FALLBACK_DELAY_MS = 120;
 const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
@@ -139,15 +138,11 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const taskCenterTasks = useTaskCenterStore((state) => state.tasks);
-  const blockedQueue = useTaskCenterStore((state) => state.blockedQueue);
   const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
   const sessionLabels = useChatStore((state) => state.sessionLabels);
   const chatSessions = useChatStore((state) => state.sessions);
   const deferredTeams = useDeferredValue(teams);
   const deferredMailboxByTeamId = useDeferredValue(mailboxByTeamId);
-  const deferredTaskCenterTasks = useDeferredValue(taskCenterTasks);
-  const deferredBlockedQueue = useDeferredValue(blockedQueue);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
   const deferredSessionLabels = useDeferredValue(sessionLabels);
   const deferredChatSessions = useDeferredValue(chatSessions);
@@ -208,33 +203,6 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
       }
     }
 
-    const taskById = new Map(deferredTaskCenterTasks.map((task) => [task.id, task]));
-    const blockedSlice = deferredBlockedQueue.slice(-TASK_BLOCKER_SCAN_LIMIT);
-    for (let index = blockedSlice.length - 1; index >= 0; index -= 1) {
-      const blocked = blockedSlice[index];
-      const task = taskById.get(blocked.taskId);
-      const statusLabel = blocked.type === 'waiting_approval'
-        ? t('sidebar.pendingBlockerTypeApproval')
-        : t('sidebar.pendingBlockerTypeInput');
-      const goal = typeof task?.goal === 'string' && task.goal.trim().length > 0
-        ? task.goal.trim()
-        : blocked.taskId;
-      cards.push({
-        id: `task:${blocked.taskId}:${blocked.confirmId}`,
-        source: 'task_manager',
-        teamId: '',
-        teamName: t('sidebar.tasks'),
-        title: `${statusLabel} · ${goal}`,
-        content: blocked.prompt,
-        from: blocked.taskId,
-        createdAt: (
-          (typeof task?.updated_at === 'number' ? task.updated_at : 0)
-          || (typeof task?.created_at === 'number' ? task.created_at : 0)
-          || 0
-        ),
-      });
-    }
-
     const sessionDisplayNameByKey = new Map(
       deferredChatSessions.map((session) => [session.key, session.displayName || session.key]),
     );
@@ -271,12 +239,10 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
   }, [
-    deferredBlockedQueue,
     deferredChatSessions,
     deferredMailboxByTeamId,
     deferredPendingApprovalsBySession,
     deferredSessionLabels,
-    deferredTaskCenterTasks,
     deferredTeams,
     t,
   ]);
@@ -315,9 +281,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
                 <span className="truncate">
                   {card.source === 'team_mailbox'
                     ? card.teamName
-                    : card.source === 'chat_approval'
-                      ? t('sidebar.pendingBlockerSourceChat')
-                      : t('sidebar.pendingBlockerSourceTask')}
+                    : t('sidebar.pendingBlockerSourceChat')}
                 </span>
                 <span>{formatMessageTime(card.createdAt)}</span>
               </div>
@@ -330,9 +294,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
               <div className="mt-1 text-[11px] text-muted-foreground">
                 {card.source === 'team_mailbox'
                   ? t('sidebar.pendingBlockerFrom', { from: card.from })
-                  : card.source === 'chat_approval'
-                    ? t('sidebar.pendingBlockerApprovalId', { id: card.from })
-                    : t('sidebar.pendingBlockerTaskId', { taskId: card.from })}
+                  : t('sidebar.pendingBlockerApprovalId', { id: card.from })}
               </div>
             </button>
           ))}

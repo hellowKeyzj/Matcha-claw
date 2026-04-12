@@ -40,11 +40,10 @@
   },
   "toolLabels": {
     "task_create": "Create task",
-    "task_block": "Block task",
-    "task_resume": "Resume task",
-    "task_finish": "Finish task",
     "task_list": "Task list",
     "task_get": "Get task details",
+    "task_update": "Update task",
+    "task_claim": "Claim task",
     "sessions_list": "Session list",
     "sessions_send": "Send to session",
     "sessions_spawn": "Spawn sub-session",

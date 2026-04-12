@@ -16,7 +16,7 @@
 - Node 事件入口：`openclaw/dist/server-node-events-*.js`
 - 协议帧结构：`openclaw/src/gateway/protocol/schema/frames.ts`（类型语义）
 - 同步基线：`openclaw@2026.4.1`
-- 本文更新时间：2026-04-11
+- 本文更新时间：2026-04-12
 
 ## 3. 事件帧结构
 
@@ -139,13 +139,29 @@ Gateway 事件统一使用 `event` 帧：
 
 注意：这里是 `node.event` 的 `params.event` 值，不是 `hello-ok.features.events` 广播事件名。
 
-## 8. 与 `gateway-rpc-api.md` 的关系
+## 8. Matcha-claw 任务通知链路（应用层补充）
+
+说明：以下属于 `Matcha-claw` 应用层对 `gateway:notification` 的消费约定，不属于 OpenClaw 核心 `GATEWAY_EVENTS` 标准集。
+
+- 入口：
+  - Host 事件：`gateway:notification`
+  - Renderer 处理：`src/stores/gateway.ts` -> `src/stores/task-center-store.ts`
+- 任务通知识别：
+  - `method` 以 `task_manager.` 开头（当前主路径）
+  - `method` 以 `task_` 开头（历史兜底路径）
+- 任务数据最小契约：
+  - 若 `params.task` 存在，则按任务对象增量合并
+  - 若删除事件（如 `task_manager.deleted` / `task_deleted`）携带 `params.taskId`，则从任务中心移除
+- 批处理策略：
+  - 短时间窗口内（48ms）按 `taskId` 合并同任务多次更新，保留最后一条，减少 UI 抖动
+
+## 9. 与 `gateway-rpc-api.md` 的关系
 
 - `gateway-rpc-api.md`：方法（`req/res`）主参考，并附事件总表索引。
 - 本文：事件模型、事件语义、广播策略主参考。
 - 变更策略：升级 openclaw 时两份文档必须同基线提交更新，避免一新一旧。
 
-## 9. 升级核对清单
+## 10. 升级核对清单
 
 每次升级 openclaw 至少核对以下文件：
 

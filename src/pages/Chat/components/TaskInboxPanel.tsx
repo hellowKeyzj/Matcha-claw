@@ -1,15 +1,12 @@
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import { AlertCircle, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import { Textarea } from '@/components/ui/textarea';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { cn } from '@/lib/utils';
-import { getBlockedPrompt, resolveTaskInputMode } from '@/lib/task-inbox';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 
@@ -23,10 +20,10 @@ const TASK_INBOX_POLL_NORMAL_MS = 15_000;
 const TASK_INBOX_POLL_BACKGROUND_MS = 60_000;
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
-  if (status === 'running') {
+  if (status === 'in_progress') {
     return 'default';
   }
-  if (status === 'pending' || status === 'waiting_for_input' || status === 'waiting_approval') {
+  if (status === 'pending') {
     return 'secondary';
   }
   if (status === 'completed') {
@@ -35,14 +32,14 @@ function statusVariant(status: string): 'default' | 'secondary' | 'destructive' 
   return 'destructive';
 }
 
-function progressToPercent(progress: number): number {
-  if (!Number.isFinite(progress)) {
-    return 0;
+function statusToPercent(status: string): number {
+  if (status === 'completed') {
+    return 100;
   }
-  if (progress <= 1) {
-    return Math.max(0, Math.min(100, Math.round(progress * 100)));
+  if (status === 'in_progress') {
+    return 50;
   }
-  return Math.max(0, Math.min(100, Math.round(progress)));
+  return 0;
 }
 
 export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, onToggleCollapse }: TaskInboxPanelProps) {
@@ -55,23 +52,14 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
   const initialized = useTaskInboxStore((state) => state.initialized);
   const error = useTaskInboxStore((state) => state.error);
   const workspaceLabel = useTaskInboxStore((state) => state.workspaceLabel);
-  const submittingTaskIds = useTaskInboxStore((state) => state.submittingTaskIds);
   const init = useTaskInboxStore((state) => state.init);
   const refreshTasks = useTaskInboxStore((state) => state.refreshTasks);
-  const submitDecision = useTaskInboxStore((state) => state.submitDecision);
-  const submitFreeText = useTaskInboxStore((state) => state.submitFreeText);
   const openTaskSession = useTaskInboxStore((state) => state.openTaskSession);
   const clearError = useTaskInboxStore((state) => state.clearError);
 
-  const [inputDraftByConfirmId, setInputDraftByConfirmId] = useState<Record<string, string>>({});
   const unfinishedCount = tasks.length;
   const hasActiveTasks = useMemo(
-    () =>
-      tasks.some((task) =>
-        task.status === 'pending'
-        || task.status === 'running'
-        || task.status === 'waiting_for_input'
-        || task.status === 'waiting_approval'),
+    () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
     [tasks],
   );
 
@@ -142,64 +130,12 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
     };
   }, [hasActiveTasks, isGatewayRunning, refreshTasks]);
 
-  const taskViews = useMemo(() => {
-    return tasks.map((task) => {
-      const confirmId = typeof task.blocked_info?.confirm_id === 'string'
-        ? task.blocked_info.confirm_id.trim()
-        : '';
-      const blockedPrompt = getBlockedPrompt(task);
-      const inputMode = resolveTaskInputMode(task);
-      const waitingState = task.status === 'waiting_for_input' || task.status === 'waiting_approval';
-      return {
-        task,
-        confirmId,
-        blockedPrompt,
-        inputMode,
-        canSubmitDecision: waitingState && inputMode === 'decision' && Boolean(confirmId),
-        canSubmitFreeText: task.status === 'waiting_for_input' && inputMode === 'free_text' && Boolean(confirmId),
-      };
-    });
-  }, [tasks]);
-
   const handleOpenSession = (taskId: string) => {
     const result = openTaskSession(taskId);
     if (result.switched) {
       return;
     }
     toast.error(t('taskInbox.taskNotFound'));
-  };
-
-  const handleDecision = async (payload: { taskId: string; confirmId: string; decision: 'approve' | 'reject' }) => {
-    await submitDecision(payload);
-    const next = useTaskInboxStore.getState();
-    if (next.error) {
-      toast.error(next.error);
-      return;
-    }
-    toast.success(t('taskInbox.toast.resumed'));
-  };
-
-  const handleSubmitFreeText = async (payload: { taskId: string; confirmId: string }) => {
-    const inputValue = (inputDraftByConfirmId[payload.confirmId] ?? '').trim();
-    if (!inputValue) {
-      return;
-    }
-    await submitFreeText({
-      taskId: payload.taskId,
-      confirmId: payload.confirmId,
-      userInput: inputValue,
-    });
-    const next = useTaskInboxStore.getState();
-    if (next.error) {
-      toast.error(next.error);
-      return;
-    }
-    setInputDraftByConfirmId((state) => {
-      const cloned = { ...state };
-      delete cloned[payload.confirmId];
-      return cloned;
-    });
-    toast.success(t('taskInbox.toast.resumed'));
   };
 
   if (collapsed) {
@@ -280,16 +216,13 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
           </div>
         ) : null}
 
-        {!loading && initialized && taskViews.length === 0 ? (
+        {!loading && initialized && tasks.length === 0 ? (
           <p className="rounded-md border bg-background px-3 py-6 text-center text-sm text-muted-foreground">
             {t('taskInbox.empty')}
           </p>
         ) : null}
 
-        {taskViews.map((item) => {
-          const { task, confirmId, blockedPrompt, canSubmitDecision, canSubmitFreeText } = item;
-          const taskSubmitting = submittingTaskIds.includes(task.id);
-
+        {tasks.map((task) => {
           return (
             <Card key={`${task.id}-${task.workspaceDir || 'default'}`} className="bg-background/95">
               <CardContent className="space-y-3 p-3">
@@ -300,7 +233,7 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="line-clamp-2 text-sm font-medium">{task.goal || t('taskInbox.untitledTask')}</p>
+                      <p className="line-clamp-2 text-sm font-medium">{task.subject || t('taskInbox.untitledTask')}</p>
                       <p className="mt-1 truncate text-[11px] text-muted-foreground">{task.id}</p>
                     </div>
                     <Badge variant={statusVariant(task.status)}>
@@ -309,15 +242,8 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
                   </div>
 
                   <div className="space-y-1">
-                    <Progress value={progressToPercent(task.progress)} className="h-1.5 bg-muted/70 [&>div]:bg-slate-500/80" />
-                    <p className="text-xs text-muted-foreground">{progressToPercent(task.progress)}%</p>
+                    <p className="text-xs text-muted-foreground">{statusToPercent(task.status)}%</p>
                   </div>
-
-                  <p className="text-xs text-muted-foreground">
-                    {task.assigned_session
-                      ? t('taskInbox.assignedSessionReady')
-                      : t('taskInbox.assignedSessionMissing')}
-                  </p>
                 </button>
 
                 <Button
@@ -328,55 +254,6 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
                 >
                   {t('taskInbox.openSession')}
                 </Button>
-
-                {blockedPrompt ? (
-                  <div className="rounded-md border border-yellow-300/70 bg-yellow-50/70 px-2.5 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/20 dark:text-yellow-300">
-                    {blockedPrompt}
-                  </div>
-                ) : null}
-
-                {canSubmitFreeText ? (
-                  <div className="space-y-2">
-                    <Textarea
-                      value={inputDraftByConfirmId[confirmId] ?? ''}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setInputDraftByConfirmId((state) => ({
-                          ...state,
-                          [confirmId]: nextValue,
-                        }));
-                      }}
-                      placeholder={t('taskInbox.inputPlaceholder')}
-                      className="min-h-20"
-                      disabled={!isGatewayRunning || taskSubmitting}
-                    />
-                    <Button
-                      className="w-full"
-                      disabled={!isGatewayRunning || taskSubmitting || !((inputDraftByConfirmId[confirmId] ?? '').trim())}
-                      onClick={() => void handleSubmitFreeText({ taskId: task.id, confirmId })}
-                    >
-                      {t('taskInbox.submitInput')}
-                    </Button>
-                  </div>
-                ) : null}
-
-                {canSubmitDecision ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button
-                      variant="secondary"
-                      disabled={!isGatewayRunning || taskSubmitting}
-                      onClick={() => void handleDecision({ taskId: task.id, confirmId, decision: 'reject' })}
-                    >
-                      {t('taskInbox.reject')}
-                    </Button>
-                    <Button
-                      disabled={!isGatewayRunning || taskSubmitting}
-                      onClick={() => void handleDecision({ taskId: task.id, confirmId, decision: 'approve' })}
-                    >
-                      {t('taskInbox.approve')}
-                    </Button>
-                  </div>
-                ) : null}
               </CardContent>
             </Card>
           );

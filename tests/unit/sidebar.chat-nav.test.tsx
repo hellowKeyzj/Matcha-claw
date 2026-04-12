@@ -89,11 +89,8 @@ function setupSidebarState() {
     pluginInstalled: true,
     pluginEnabled: true,
     pluginVersion: undefined,
-    blockedQueue: [],
     init: vi.fn().mockResolvedValue(undefined),
     refreshTasks: vi.fn().mockResolvedValue(undefined),
-    resumeBlockedTask: vi.fn().mockResolvedValue(undefined),
-    closeBlockedDialog: vi.fn(),
     handleGatewayNotification: vi.fn(),
   } as never);
   i18n.changeLanguage('en');
@@ -177,38 +174,6 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText('Task task-123')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Task task-123/i }));
     expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
-  });
-
-  it('renders task-manager blockers and navigates to tasks page', () => {
-    setupSidebarState();
-    useTaskCenterStore.setState({
-      blockedQueue: [
-        {
-          taskId: 'task-456',
-          confirmId: 'confirm-1',
-          prompt: 'Need manual approval',
-          type: 'waiting_approval',
-          inputMode: 'decision',
-        },
-      ],
-      tasks: [
-        {
-          id: 'task-456',
-          goal: 'Deploy release pipeline',
-          status: 'waiting_approval',
-          progress: 0.5,
-          created_at: 100,
-          updated_at: 200,
-        },
-      ],
-    } as never);
-
-    mountSidebar('/dashboard');
-
-    expect(screen.getAllByText('Task Center').length).toBeGreaterThan(0);
-    expect(screen.getByText(/Approval Blocker/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Deploy release pipeline/i }));
-    expect(screen.getByTestId('location-echo')).toHaveTextContent('/tasks');
   });
 
   it('renders chat approval blockers and navigates to target chat session', () => {
