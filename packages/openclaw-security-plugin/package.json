@@ -2,7 +2,7 @@
   "name": "@matchaclaw/security-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Standalone security plugin for Matcha-claw",
+  "description": "Standalone security plugin based on SecureClaw original code with trimmed runtime guard.",
   "type": "module",
   "openclaw": {
     "extensions": [
