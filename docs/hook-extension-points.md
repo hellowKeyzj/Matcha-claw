@@ -2,7 +2,7 @@
 read_when:
   - 你要基于插件扩展 OpenClaw 行为
   - 你要确认 Hook 的完整插入点、可修改字段、执行顺序和异常语义
-summary: OpenClaw 插件 Hook 完整插入点与使用说明（24 个 Hook）
+summary: OpenClaw 插件 Hook 完整插入点与使用说明（26 个 Hook）
 title: Hook 插入点与使用
 ---
 
@@ -12,9 +12,13 @@ title: Hook 插入点与使用
 
 本文描述的是 **插件 Hook（`api.on(...)`）**，对应源码：
 
-- `src/plugins/types.ts`（Hook 名称、event/context/result 类型）
-- `src/plugins/hooks.ts`（执行模型、合并规则、优先级）
-- `src/plugins/hook-runner-global.ts`（全局 runner 生命周期）
+- `dist/plugin-sdk/src/plugins/types.d.ts`（Hook 名称、event/context/result 类型）
+- `dist/plugin-sdk/src/plugins/hooks.d.ts`（SDK 暴露 API）
+- `dist/hook-runner-global-*.js`（执行模型、合并规则、优先级）
+- `dist/dispatch-*.js`（`inbound_claim` / `before_dispatch` 触发链路）
+
+同步基线：`openclaw@2026.4.1`  
+本文更新时间：2026-04-11
 
 不包含老的内部 `HOOK.md` 事件脚本机制。
 
@@ -25,6 +29,7 @@ title: Hook 插入点与使用
 - 所有 Hook 按 `priority` **降序**执行（值越大优先级越高）。
 - 修改型 Hook：串行执行并合并结果。
 - 观察型 Hook：并行执行（`Promise.all`）。
+- Claim 型 Hook：串行执行，**第一个返回 `{ handled: true }` 的处理器立即获胜**（`inbound_claim`、`before_dispatch`）。
 
 ### 2.2 错误语义
 
@@ -38,7 +43,7 @@ title: Hook 插入点与使用
 - `tool_result_persist`
 - `before_message_write`
 
-## 3. 完整插入点清单（24）
+## 3. 完整插入点清单（26）
 
 | Hook | 类型 | 主要触发位置 | 返回值 |
 |---|---|---|---|
@@ -51,10 +56,12 @@ title: Hook 插入点与使用
 | `before_compaction` | 观察型（并行） | `compact.ts`、`run.ts` overflow 分支 | `void` |
 | `after_compaction` | 观察型（并行） | `compact.ts`、`run.ts` overflow 分支 | `void` |
 | `before_reset` | 观察型（并行） | `src/auto-reply/reply/commands-core.ts`（/new /reset） | `void` |
+| `inbound_claim` | Claim 型（串行） | `src/auto-reply/reply/dispatch-from-config.ts`（入站消息分发前置认领） | `{ handled: boolean }` |
 | `message_received` | 观察型（并行） | `src/auto-reply/reply/dispatch-from-config.ts` | `void` |
+| `before_dispatch` | Claim 型（串行） | `src/auto-reply/reply/dispatch-from-config.ts`（模型分发前） | `{ handled: boolean, text?: string }` |
 | `message_sending` | 修改型（串行） | `infra/outbound/deliver.ts`、`telegram/bot/delivery.replies.ts`、`channels/plugins/outbound/slack.ts` | `{ content?, cancel? }` |
 | `message_sent` | 观察型（并行） | `infra/outbound/deliver.ts`、`telegram/bot/delivery.replies.ts` | `void` |
-| `before_tool_call` | 修改型（串行） | `src/agents/pi-tools.before-tool-call.ts`（工具执行前） | `{ params?, block?, blockReason? }` |
+| `before_tool_call` | 修改型（串行） | `src/agents/pi-tools.before-tool-call.ts`（工具执行前） | `{ params?, block?, blockReason?, requireApproval? }` |
 | `after_tool_call` | 观察型（并行） | `src/agents/pi-embedded-subscribe.handlers.tools.ts` | `void` |
 | `tool_result_persist` | 修改型（串行，同步） | `src/agents/session-tool-result-guard-wrapper.ts` | `{ message? }` |
 | `before_message_write` | 修改型（串行，同步） | `src/agents/session-tool-result-guard-wrapper.ts` | `{ block?, message? }` |
@@ -75,35 +82,45 @@ title: Hook 插入点与使用
 
 ### 4.2 `before_prompt_build`
 
-- `systemPrompt`：后执行的结果可覆盖前者。
-- `prependContext`：按执行顺序拼接。
-- `prependSystemContext`：按执行顺序拼接。
-- `appendSystemContext`：按执行顺序拼接。
+- `systemPrompt`：**高优先级先到先得**（后续不覆盖）。
+- `prependContext`：按执行顺序拼接（高优先级在前）。
+- `prependSystemContext`：按执行顺序拼接（高优先级在前）。
+- `appendSystemContext`：按执行顺序拼接（高优先级在前）。
 
-### 4.3 `message_sending`
+### 4.3 Claim 型 Hook（`inbound_claim` / `before_dispatch`）
+
+- 两者都采用 first-claim-wins：第一个 `{ handled: true }` 立即结束该 Hook 链。
+- `before_dispatch` 在分发链路中若返回 `handled=true`，会跳过默认 dispatch，并以 `before_dispatch_handled` 作为处理完成原因。
+
+### 4.4 `message_sending`
 
 - `content`：后执行可覆盖前者。
-- `cancel`：后执行可覆盖前者。
+- `cancel`：`sticky true`（任一 Hook 置 `true` 后保持 `true`）。
+- 当 `cancel=true` 时立即短路，后续处理器不再执行。
 
-### 4.4 `before_tool_call`
+### 4.5 `before_tool_call`
 
-- `params` / `block` / `blockReason`：后执行可覆盖前者。
+- `params`：默认后执行可覆盖前者；但当已有 `requireApproval.pluginId` 且与当前 Hook 不同插件时，不允许覆盖之前的 `params`。
+- `block`：`sticky true`，任一返回 `true` 即保持为 `true`。
+- `blockReason`：后执行可覆盖前者。
+- `requireApproval`：先到先得；runner 会自动注入触发该审批的 `pluginId`。
+- 当 `block=true` 时立即短路，后续处理器不再执行。
 
-### 4.5 `subagent_spawning`
+### 4.6 `subagent_spawning`
 
 - 任一 Hook 返回 `status:"error"`，整体即错误。
 - `threadBindingReady` 取 OR（任一 true 即 true）。
 
-### 4.6 `subagent_delivery_target`
+### 4.7 `subagent_delivery_target`
 
 - 一旦已有 `origin`，后续不再覆盖（高优先级优先）。
 
-### 4.7 `before_message_write`
+### 4.8 `before_message_write`
 
 - 任一 Hook 返回 `{ block: true }`，立即阻断写入。
 - 若返回 `{ message }`，后续 Hook 看到的是修改后的 message。
 
-### 4.8 `tool_result_persist`
+### 4.9 `tool_result_persist`
 
 - 同步串行改写 `message`，最终结果写入 transcript。
 
@@ -143,11 +160,14 @@ module.exports = {
 ## 6. 使用建议（面向后续功能开发）
 
 1. 需要“改写请求”的场景优先用修改型 Hook（`before_*`）。
-2. 需要“审计/埋点”的场景优先用观察型 Hook（`*_end`、`message_*`、`llm_*`）。
-3. 涉及 transcript 热路径时，优先使用同步 Hook：
+2. 需要“抢占处理权/跳过默认分发”的场景优先用 Claim 型 Hook：
+   - `inbound_claim`
+   - `before_dispatch`
+3. 需要“审计/埋点”的场景优先用观察型 Hook（`*_end`、`message_*`、`llm_*`）。
+4. 涉及 transcript 热路径时，优先使用同步 Hook：
    - `tool_result_persist`
    - `before_message_write`
-4. 需要跨插件确定覆盖权时，明确设置 `priority`，并在插件文档写清优先级约定。
+5. 需要跨插件确定覆盖权时，明确设置 `priority`，并在插件文档写清优先级约定。
 
 ## 7. 调试清单
 

@@ -96,6 +96,16 @@ interface SessionRuntimeSnapshot {
   approvalStatus: ApprovalStatus;
 }
 
+function resolveSessionThinkingLevelFromList(
+  sessions: ChatSession[],
+  sessionKey: string,
+): string | null {
+  const found = sessions.find((session) => session.key === sessionKey);
+  if (!found || typeof found.thinkingLevel !== 'string') return null;
+  const normalized = found.thinkingLevel.trim();
+  return normalized || null;
+}
+
 interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -323,6 +333,7 @@ const CHAT_HISTORY_FULL_LIMIT = 200;
 const CHAT_HISTORY_QUIET_PROBE_LIMIT = 64;
 const CHAT_HISTORY_QUIET_FULL_LIMIT = 120;
 const CHAT_HISTORY_LOADING_TIMEOUT_MS = 15_000;
+let _historyLoadRunId = 0;
 const _historyFingerprintBySession = new Map<string, string>();
 const _historyProbeFingerprintBySession = new Map<string, string>();
 const _historyQuickFingerprintBySession = new Map<string, string>();
@@ -348,49 +359,6 @@ function clearHistoryPoll(): void {
 
 const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
-const SESSION_HYDRATE_HEAD_LIMIT = 80;
-const SESSION_HYDRATE_BACKGROUND_LIMIT = 80;
-const SESSION_HYDRATE_HEAD_BATCH_SIZE = 2;
-const SESSION_HYDRATE_BACKGROUND_DELAY_MS = 120;
-
-interface SessionHydrationRecord {
-  sessionKey: string;
-  label: string | null;
-  lastActivity: number | null;
-}
-
-let _sessionHydrationRunId = 0;
-let _sessionHydrationTimer: ReturnType<typeof setTimeout> | null = null;
-
-function clearSessionHydrationTimer(): void {
-  if (_sessionHydrationTimer) {
-    clearTimeout(_sessionHydrationTimer);
-    _sessionHydrationTimer = null;
-  }
-}
-
-async function fetchSessionHydrationRecord(
-  sessionKey: string,
-  limit: number,
-): Promise<SessionHydrationRecord | null> {
-  try {
-    const response = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-      'chat.history',
-      { sessionKey, limit },
-    );
-    const messages = Array.isArray(response.messages) ? response.messages as RawMessage[] : [];
-    const lastMessage = messages[messages.length - 1];
-    const resolvedLabel = resolveSessionLabelFromMessages(messages);
-    const lastActivity = lastMessage?.timestamp ? toMs(lastMessage.timestamp) : null;
-    return {
-      sessionKey,
-      label: resolvedLabel || null,
-      lastActivity,
-    };
-  } catch {
-    return null;
-  }
-}
 
 // ── Local image cache ─────────────────────────────────────────
 // The Gateway doesn't store image attachments in session content blocks,
@@ -1795,6 +1763,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .filter((session) => typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt))
             .map((session) => [session.key, session.updatedAt!]),
         );
+        const discoveredLabels = Object.fromEntries(
+          sessionsWithCurrent
+            .map((session) => {
+              const explicit = (session.label || session.displayName || '').trim();
+              if (!explicit || explicit === session.key) {
+                return null;
+              }
+              return [session.key, explicit] as const;
+            })
+            .filter((entry): entry is readonly [string, string] => entry != null),
+        );
 
         const snapshot = get();
         const sessionsChanged = !areSessionsEquivalent(snapshot.sessions, sessionsWithCurrent);
@@ -1802,8 +1781,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const discoveredActivityChanged = Object.entries(discoveredActivity).some(
           ([sessionKey, updatedAt]) => snapshot.sessionLastActivity[sessionKey] !== updatedAt,
         );
+        const discoveredLabelsChanged = Object.entries(discoveredLabels).some(
+          ([sessionKey, label]) => snapshot.sessionLabels[sessionKey] !== label,
+        );
 
-        if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged) {
+        if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
           set((state) => {
             const next: Partial<ChatState> = {};
 
@@ -1819,135 +1801,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...discoveredActivity,
               };
             }
+            if (discoveredLabelsChanged) {
+              next.sessionLabels = {
+                ...state.sessionLabels,
+                ...discoveredLabels,
+              };
+            }
 
             return next;
           });
         }
 
-        if (currentSessionKey !== nextSessionKey) {
-          get().loadHistory();
-        }
-
-        const hydrationRunId = ++_sessionHydrationRunId;
-        clearSessionHydrationTimer();
-
-        // Background: hydrate missing session title + activity from history.
-        // Avoid re-fetching sessions that already have label/activity to reduce
-        // sidebar thrash when Chat page periodically refreshes sessions.
-        const snapshotAfterListUpdate = get();
-        const sessionsToHydrate = sessionsWithCurrent.filter((session) => {
-          if (session.key.endsWith(':main')) {
-            return false;
-          }
-          const hasLabel = Boolean(snapshotAfterListUpdate.sessionLabels[session.key]);
-          const hasActivity = typeof snapshotAfterListUpdate.sessionLastActivity[session.key] === 'number';
-          return !hasLabel || !hasActivity;
-        });
-
-        if (sessionsToHydrate.length > 0) {
-          void (async () => {
-            const applyHydrationRecords = (records: SessionHydrationRecord[]): void => {
-              const validRecords = records.filter((item): item is SessionHydrationRecord => Boolean(item));
-              if (validRecords.length === 0 || hydrationRunId !== _sessionHydrationRunId) {
-                return;
-              }
-
-              set((state) => {
-                let nextLabels = state.sessionLabels;
-                let labelsChanged = false;
-                let nextActivity = state.sessionLastActivity;
-                let activityChanged = false;
-
-                for (const record of validRecords) {
-                  if (record.label && state.sessionLabels[record.sessionKey] !== record.label) {
-                    if (!labelsChanged) {
-                      nextLabels = { ...state.sessionLabels };
-                      labelsChanged = true;
-                    }
-                    nextLabels[record.sessionKey] = record.label;
-                  }
-                  if (
-                    typeof record.lastActivity === 'number'
-                    && state.sessionLastActivity[record.sessionKey] !== record.lastActivity
-                  ) {
-                    if (!activityChanged) {
-                      nextActivity = { ...state.sessionLastActivity };
-                      activityChanged = true;
-                    }
-                    nextActivity[record.sessionKey] = record.lastActivity;
-                  }
-                }
-
-                const next: Partial<ChatState> = {};
-                if (labelsChanged) {
-                  next.sessionLabels = nextLabels;
-                }
-                if (activityChanged) {
-                  next.sessionLastActivity = nextActivity;
-                }
-                return next;
-              });
-            };
-
-            const prioritizedCurrentSession = sessionsToHydrate.find((session) => session.key === nextSessionKey);
-            const remainingSessions = sessionsToHydrate.filter((session) => session.key !== prioritizedCurrentSession?.key);
-            const headBatchSessions = remainingSessions.slice(0, SESSION_HYDRATE_HEAD_BATCH_SIZE);
-            const backgroundQueue = remainingSessions.slice(SESSION_HYDRATE_HEAD_BATCH_SIZE);
-
-            if (prioritizedCurrentSession) {
-              const primaryRecord = await fetchSessionHydrationRecord(
-                prioritizedCurrentSession.key,
-                SESSION_HYDRATE_HEAD_LIMIT,
-              );
-              if (primaryRecord) {
-                applyHydrationRecords([primaryRecord]);
-              }
-            }
-
-            if (hydrationRunId !== _sessionHydrationRunId) {
-              return;
-            }
-
-            if (headBatchSessions.length > 0) {
-              const headRecords = await Promise.all(
-                headBatchSessions.map((session) => fetchSessionHydrationRecord(session.key, SESSION_HYDRATE_HEAD_LIMIT)),
-              );
-              applyHydrationRecords(headRecords.filter((record): record is SessionHydrationRecord => Boolean(record)));
-            }
-
-            if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
-              return;
-            }
-
-            const runBackgroundHydration = async () => {
-              if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
-                return;
-              }
-
-              const session = backgroundQueue.shift();
-              if (!session) {
-                return;
-              }
-
-              const record = await fetchSessionHydrationRecord(session.key, SESSION_HYDRATE_BACKGROUND_LIMIT);
-              if (record) {
-                applyHydrationRecords([record]);
-              }
-
-              if (hydrationRunId !== _sessionHydrationRunId || backgroundQueue.length === 0) {
-                return;
-              }
-
-              _sessionHydrationTimer = setTimeout(() => {
-                void runBackgroundHydration();
-              }, SESSION_HYDRATE_BACKGROUND_DELAY_MS);
-            };
-
-            _sessionHydrationTimer = setTimeout(() => {
-              void runBackgroundHydration();
-            }, SESSION_HYDRATE_BACKGROUND_DELAY_MS);
-          })();
-        }
       }
     } catch (err) {
       console.warn('Failed to load sessions:', err);
@@ -2202,12 +2066,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadHistory: async (quiet = false) => {
     const requestedSessionKey = get().currentSessionKey;
+    const historyLoadRunId = quiet ? 0 : ++_historyLoadRunId;
     let loadingSafetyTimer: ReturnType<typeof setTimeout> | null = null;
     if (!quiet) {
       set({ loading: true, error: null });
       loadingSafetyTimer = setTimeout(() => {
         set((state) => {
-          if (state.currentSessionKey !== requestedSessionKey || !state.loading) {
+          if (historyLoadRunId !== _historyLoadRunId || !state.loading) {
             return state;
           }
           return { loading: false };
@@ -2318,10 +2183,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           nextStatePatch.thinkingLevel = thinkingLevel;
           changed = true;
         }
-        if (state.loading) {
-          nextStatePatch.loading = false;
-          changed = true;
-        }
         if (resolvedLabel && state.sessionLabels[requestedSessionKey] !== resolvedLabel) {
           nextStatePatch.sessionLabels = {
             ...state.sessionLabels,
@@ -2382,6 +2243,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const fetchHistoryWindow = async (
       limit: number,
     ): Promise<{ rawMessages: RawMessage[]; thinkingLevel: string | null }> => {
+      // Preferred path on OpenClaw 4.1+: sessions.get returns transcript messages
+      // without depending on model-pricing bootstrap.
+      try {
+        const sessionsGetData = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+          'sessions.get',
+          { key: requestedSessionKey, limit },
+        );
+        if (Array.isArray(sessionsGetData?.messages)) {
+          let rawMessages = sessionsGetData.messages as RawMessage[];
+          const thinkingLevel = resolveSessionThinkingLevelFromList(get().sessions, requestedSessionKey);
+          if (rawMessages.length === 0) {
+            rawMessages = await loadCronFallbackMessages(requestedSessionKey, limit);
+          }
+          return { rawMessages, thinkingLevel };
+        }
+      } catch {
+        // Ignore and fall back to chat.history for backward compatibility.
+      }
+
+      // Compatibility path for older runtimes.
       const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
         'chat.history',
         { sessionKey: requestedSessionKey, limit },
@@ -2436,7 +2317,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const full = await fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT);
       // 防止异步竞态：请求返回时若用户已切到其它会话，直接丢弃本次结果。
       if (get().currentSessionKey !== requestedSessionKey) {
-        set({ loading: false });
         return;
       }
       const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
@@ -2447,9 +2327,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.warn('Failed to load chat history:', err);
       const fallbackMessages = await loadCronFallbackMessages(requestedSessionKey, CHAT_HISTORY_FULL_LIMIT);
       if (get().currentSessionKey !== requestedSessionKey) {
-        if (!quiet) {
-          set({ loading: false });
-        }
         return;
       }
       if (fallbackMessages.length > 0) {
@@ -2462,11 +2339,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         _historyFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
         _historyProbeFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
         _historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
-        set({ messages: [], loading: false });
+        set({ messages: [] });
       }
     } finally {
       if (loadingSafetyTimer) {
         clearTimeout(loadingSafetyTimer);
+      }
+      if (!quiet) {
+        set((state) => {
+          if (historyLoadRunId !== _historyLoadRunId || !state.loading) {
+            return state;
+          }
+          return { loading: false };
+        });
       }
     }
   },

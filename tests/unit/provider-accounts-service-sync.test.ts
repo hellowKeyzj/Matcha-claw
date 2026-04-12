@@ -4,22 +4,31 @@ const {
   getActiveOpenClawProvidersMock,
   getOpenClawProvidersConfigMock,
   removeProviderFromOpenClawMock,
+  setOpenClawDefaultModelMock,
+  setOpenClawDefaultModelWithOverrideMock,
   removeProviderKeyFromOpenClawMock,
+  saveProviderKeyToOpenClawMock,
 } = vi.hoisted(() => ({
   getActiveOpenClawProvidersMock: vi.fn(),
   getOpenClawProvidersConfigMock: vi.fn(),
   removeProviderFromOpenClawMock: vi.fn(),
+  setOpenClawDefaultModelMock: vi.fn(),
+  setOpenClawDefaultModelWithOverrideMock: vi.fn(),
   removeProviderKeyFromOpenClawMock: vi.fn(),
+  saveProviderKeyToOpenClawMock: vi.fn(),
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
   getActiveOpenClawProviders: getActiveOpenClawProvidersMock,
   getOpenClawProvidersConfig: getOpenClawProvidersConfigMock,
   removeProviderFromOpenClaw: removeProviderFromOpenClawMock,
+  setOpenClawDefaultModel: setOpenClawDefaultModelMock,
+  setOpenClawDefaultModelWithOverride: setOpenClawDefaultModelWithOverrideMock,
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', () => ({
   removeProviderKeyFromOpenClaw: removeProviderKeyFromOpenClawMock,
+  saveProviderKeyToOpenClaw: saveProviderKeyToOpenClawMock,
 }));
 
 import { ProviderAccountsService } from '../../runtime-host/application/providers/accounts';
@@ -28,6 +37,9 @@ function createServiceWithStore(store: {
   defaultAccountId: string | null;
   accounts: Record<string, any>;
   apiKeys: Record<string, string>;
+}, overrides?: {
+  normalizeAccount?: (input: unknown, current?: Record<string, any> | null) => any;
+  normalizeFallbackAccount?: (accounts: any[], deletedId: string) => string | null;
 }) {
   const writeProviderStore = vi.fn(async () => {});
   const service = new ProviderAccountsService({
@@ -43,8 +55,8 @@ function createServiceWithStore(store: {
       });
     },
     accountToStatus: (account, apiKey) => ({ id: account.id, hasKey: Boolean(apiKey) }),
-    normalizeAccount: () => null,
-    normalizeFallbackAccount: () => null,
+    normalizeAccount: overrides?.normalizeAccount || (() => null),
+    normalizeFallbackAccount: overrides?.normalizeFallbackAccount || (() => null),
     validateApiKey: async () => ({}),
     requestParentShellAction: async () => ({ status: 200, data: {} }),
     mapParentTransportResponse: () => ({ status: 200, data: {} }),
@@ -60,7 +72,10 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
     getActiveOpenClawProvidersMock.mockReset();
     getOpenClawProvidersConfigMock.mockReset();
     removeProviderFromOpenClawMock.mockReset();
+    setOpenClawDefaultModelMock.mockReset();
+    setOpenClawDefaultModelWithOverrideMock.mockReset();
     removeProviderKeyFromOpenClawMock.mockReset();
+    saveProviderKeyToOpenClawMock.mockReset();
     getOpenClawProvidersConfigMock.mockResolvedValue({
       providers: {},
       defaultModel: undefined,
@@ -193,6 +208,95 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
     expect(store.apiKeys['minimax-portal']).toBeUndefined();
     expect(store.defaultAccountId).toBe('minimax-portal-cn-uuid');
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ProviderAccountsService create/setDefault（写入后立即同步 openclaw）', () => {
+  beforeEach(() => {
+    setOpenClawDefaultModelMock.mockReset();
+    setOpenClawDefaultModelWithOverrideMock.mockReset();
+    saveProviderKeyToOpenClawMock.mockReset();
+  });
+
+  it('新增第一个 custom 账号后，会同步 auth profile 与默认模型覆盖配置', async () => {
+    const store = {
+      defaultAccountId: null,
+      accounts: {},
+      apiKeys: {},
+    };
+    const normalizedAccount = {
+      id: 'custom-12345678',
+      vendorId: 'custom',
+      label: '自定义',
+      authMode: 'api_key',
+      baseUrl: 'https://api.example.com/v1',
+      apiProtocol: 'openai-completions',
+      headers: { 'User-Agent': 'MatchaClaw/1.0' },
+      model: 'my-model',
+      fallbackModels: ['backup-model'],
+      enabled: true,
+      isDefault: false,
+      createdAt: '2026-04-10T00:00:00.000Z',
+      updatedAt: '2026-04-10T00:00:00.000Z',
+    };
+
+    const { service, writeProviderStore } = createServiceWithStore(store, {
+      normalizeAccount: () => normalizedAccount,
+    });
+
+    const result = await service.create({
+      account: normalizedAccount,
+      apiKey: 'sk-custom',
+    });
+
+    expect(result.status).toBe(200);
+    expect(writeProviderStore).toHaveBeenCalledTimes(1);
+    expect(saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
+    expect(setOpenClawDefaultModelWithOverrideMock).toHaveBeenCalledWith(
+      'custom-12345678',
+      'my-model',
+      expect.objectContaining({
+        baseUrl: 'https://api.example.com/v1',
+        api: 'openai-completions',
+        headers: { 'User-Agent': 'MatchaClaw/1.0' },
+      }),
+      ['custom-12345678/backup-model'],
+    );
+    expect(setOpenClawDefaultModelMock).not.toHaveBeenCalled();
+  });
+
+  it('切换默认账号后，会重新同步默认模型到 openclaw', async () => {
+    const store = {
+      defaultAccountId: 'openai-main',
+      accounts: {
+        'openai-main': {
+          id: 'openai-main',
+          vendorId: 'openai',
+          model: 'gpt-5.4',
+          updatedAt: '2026-04-09T00:00:00.000Z',
+        },
+        'moonshot-main': {
+          id: 'moonshot-main',
+          vendorId: 'moonshot',
+          model: 'kimi-k2.5',
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        },
+      },
+      apiKeys: {
+        'openai-main': 'sk-openai',
+        'moonshot-main': 'sk-moonshot',
+      },
+    };
+    const { service } = createServiceWithStore(store);
+
+    const result = await service.setDefault({ accountId: 'moonshot-main' });
+
+    expect(result.status).toBe(200);
+    expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
+      'moonshot',
+      'kimi-k2.5',
+      [],
+    );
   });
 });
 
