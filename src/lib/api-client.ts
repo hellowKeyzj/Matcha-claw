@@ -583,40 +583,6 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
     return String(errorValue);
   };
 
-  const sendConnect = async (_challengeNonce: string) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Gateway WS not open during connect handshake');
-    }
-    const token = await Promise.resolve(resolveToken());
-    connectRequestId = `connect-${Date.now()}`;
-    const auth =
-      typeof token === 'string' && token.trim().length > 0
-        ? { token }
-        : undefined;
-    socket.send(JSON.stringify({
-      type: 'req',
-      id: connectRequestId,
-      method: 'connect',
-      params: {
-        minProtocol: 3,
-        maxProtocol: 3,
-        client: {
-          id: 'openclaw-control-ui',
-          displayName: 'MatchaClaw UI',
-          version: '1.0.0',
-          platform: window.electron?.platform ?? 'unknown',
-          mode: 'webchat',
-        },
-        auth,
-        caps: ['tool-events'],
-        role: 'operator',
-        scopes: ['operator.admin'],
-        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
-        locale: typeof navigator !== 'undefined' ? navigator.language : 'en',
-      },
-    }));
-  };
-
   const ensureConnection = async (): Promise<WebSocket> => {
     if (socket && socket.readyState === WebSocket.OPEN && handshakeDone) {
       return socket;
@@ -632,77 +598,142 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
       }
       const ws = websocketFactory(url);
       socket = ws;
+      const tokenPromise = Promise.resolve(resolveToken()).catch(() => null);
 
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error('Gateway WS connect timeout'));
-        }, timeoutMs);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let handshakeStarted = false;
+          let handshakeFinished = false;
+          let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+          const openTimer = setTimeout(() => {
+            rejectOnce(new Error('Gateway WS connect timeout'));
+          }, timeoutMs);
+          const cleanup = () => {
+            clearTimeout(openTimer);
+            if (handshakeTimer) {
+              clearTimeout(handshakeTimer);
+              handshakeTimer = null;
+            }
+            ws.removeEventListener('open', onOpen);
+            ws.removeEventListener('error', onError);
+            ws.removeEventListener('close', onClose);
+            ws.removeEventListener('message', onHandshakeMessage);
+          };
+          const resolveOnce = () => {
+            if (handshakeFinished) return;
+            handshakeFinished = true;
+            cleanup();
+            resolve();
+          };
+          const rejectOnce = (error: Error) => {
+            if (handshakeFinished) return;
+            handshakeFinished = true;
+            cleanup();
+            reject(error);
+          };
+          const sendConnect = async (_challengeNonce: string) => {
+            if (connectRequestId) return;
+            if (ws.readyState !== WebSocket.OPEN) {
+              throw new Error('Gateway WS not open during connect handshake');
+            }
+            const token = await tokenPromise;
+            connectRequestId = `connect-${Date.now()}`;
+            const auth =
+              typeof token === 'string' && token.trim().length > 0
+                ? { token }
+                : undefined;
+            ws.send(JSON.stringify({
+              type: 'req',
+              id: connectRequestId,
+              method: 'connect',
+              params: {
+                minProtocol: 3,
+                maxProtocol: 3,
+                client: {
+                  id: 'openclaw-control-ui',
+                  displayName: 'MatchaClaw UI',
+                  version: '1.0.0',
+                  platform: window.electron?.platform ?? 'unknown',
+                  mode: 'webchat',
+                },
+                auth,
+                caps: ['tool-events'],
+                role: 'operator',
+                scopes: ['operator.admin'],
+                userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+                locale: typeof navigator !== 'undefined' ? navigator.language : 'en',
+              },
+            }));
+          };
+          const onOpen = () => {
+            if (handshakeStarted) return;
+            handshakeStarted = true;
+            clearTimeout(openTimer);
+            handshakeTimer = setTimeout(() => {
+              rejectOnce(new Error('Gateway WS handshake timeout'));
+            }, timeoutMs);
+          };
+          const onError = () => {
+            rejectOnce(new Error(handshakeStarted ? 'Gateway WS handshake failed' : 'Gateway WS open failed'));
+          };
+          const onClose = () => {
+            rejectOnce(new Error('Gateway WS closed before connect'));
+          };
 
-        const cleanup = () => {
-          clearTimeout(timer);
-          ws.removeEventListener('open', onOpen);
-          ws.removeEventListener('error', onError);
-        };
-
-        const onOpen = () => {
-          cleanup();
-          resolve();
-        };
-        const onError = () => {
-          cleanup();
-          reject(new Error('Gateway WS open failed'));
-        };
-
-        ws.addEventListener('open', onOpen);
-        ws.addEventListener('error', onError);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error('Gateway WS handshake timeout'));
-        }, timeoutMs);
-
-        const cleanup = () => {
-          clearTimeout(timer);
-          ws.removeEventListener('message', onHandshakeMessage);
-        };
-
-        const onHandshakeMessage = (event: MessageEvent) => {
-          try {
-            const msg = JSON.parse(String(event.data)) as Record<string, unknown>;
-            if (msg.type === 'event' && msg.event === 'connect.challenge') {
-              const payload = (msg.payload ?? {}) as Record<string, unknown>;
-              const nonce = typeof payload.nonce === 'string' ? payload.nonce : '';
-              if (!nonce) {
-                cleanup();
-                reject(new Error('Gateway WS challenge nonce missing'));
-                return;
-              }
-              void sendConnect(nonce).catch((err) => {
-                cleanup();
-                reject(err);
-              });
+          const onHandshakeMessage = (event: MessageEvent) => {
+            if (!handshakeStarted) {
               return;
             }
-
-            if (msg.type === 'res' && typeof msg.id === 'string' && msg.id === connectRequestId) {
-              const ok = msg.ok !== false && !msg.error;
-              if (!ok) {
-                cleanup();
-                reject(new Error(`Gateway WS connect failed: ${formatGatewayError(msg.error)}`));
+            try {
+              const msg = JSON.parse(String(event.data)) as Record<string, unknown>;
+              if (msg.type === 'event' && msg.event === 'connect.challenge') {
+                const payload = (msg.payload ?? {}) as Record<string, unknown>;
+                const nonce = typeof payload.nonce === 'string' ? payload.nonce : '';
+                if (!nonce) {
+                  rejectOnce(new Error('Gateway WS challenge nonce missing'));
+                  return;
+                }
+                void sendConnect(nonce).catch((err) => {
+                  rejectOnce(err instanceof Error ? err : new Error(String(err)));
+                });
                 return;
               }
-              handshakeDone = true;
-              cleanup();
-              resolve();
-            }
-          } catch {
-            // ignore parse errors during handshake
-          }
-        };
 
-        ws.addEventListener('message', onHandshakeMessage);
-      });
+              if (msg.type === 'res' && typeof msg.id === 'string' && msg.id === connectRequestId) {
+                const ok = msg.ok !== false && !msg.error;
+                if (!ok) {
+                  rejectOnce(new Error(`Gateway WS connect failed: ${formatGatewayError(msg.error)}`));
+                  return;
+                }
+                connectRequestId = null;
+                handshakeDone = true;
+                resolveOnce();
+              }
+            } catch {
+              // ignore parse errors during handshake
+            }
+          };
+
+          ws.addEventListener('message', onHandshakeMessage);
+          ws.addEventListener('open', onOpen);
+          ws.addEventListener('error', onError);
+          ws.addEventListener('close', onClose);
+
+          if (ws.readyState === WebSocket.OPEN) {
+            onOpen();
+          }
+        });
+      } catch (error) {
+        socket = null;
+        handshakeDone = false;
+        connectRequestId = null;
+        try {
+          ws.close();
+        } catch {
+          // ignore close errors while cleaning up failed handshake
+        }
+        throw error;
+      }
 
       ws.addEventListener('message', (event) => {
         try {
