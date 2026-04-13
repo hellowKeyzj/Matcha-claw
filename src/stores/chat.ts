@@ -109,7 +109,10 @@ function resolveSessionThinkingLevelFromList(
 interface ChatState {
   // Messages
   messages: RawMessage[];
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
   error: string | null;
 
   // Streaming
@@ -132,6 +135,8 @@ interface ChatState {
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
+  /** Whether a session already has a stable render snapshot in memory */
+  sessionReadyByKey: Record<string, boolean>;
   /** Per-session runtime snapshot to avoid blank UI while switching sessions */
   sessionRuntimeByKey: Record<string, SessionRuntimeSnapshot>;
 
@@ -141,6 +146,7 @@ interface ChatState {
 
   // Actions
   loadSessions: () => Promise<void>;
+  openAgentConversation: (agentId: string) => void;
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => void;
   deleteSession: (key: string) => Promise<void>;
@@ -334,6 +340,7 @@ const CHAT_HISTORY_QUIET_PROBE_LIMIT = 64;
 const CHAT_HISTORY_QUIET_FULL_LIMIT = 120;
 const CHAT_HISTORY_LOADING_TIMEOUT_MS = 15_000;
 let _historyLoadRunId = 0;
+let _mutatingCounter = 0;
 const _historyFingerprintBySession = new Map<string, string>();
 const _historyProbeFingerprintBySession = new Map<string, string>();
 const _historyQuickFingerprintBySession = new Map<string, string>();
@@ -354,6 +361,20 @@ function clearHistoryPoll(): void {
   if (_historyPollTimer) {
     clearTimeout(_historyPollTimer);
     _historyPollTimer = null;
+  }
+}
+
+function beginGlobalMutating(set: (next: Partial<ChatState>) => void): void {
+  _mutatingCounter += 1;
+  if (_mutatingCounter === 1) {
+    set({ mutating: true });
+  }
+}
+
+function finishGlobalMutating(set: (next: Partial<ChatState>) => void): void {
+  _mutatingCounter = Math.max(0, _mutatingCounter - 1);
+  if (_mutatingCounter === 0) {
+    set({ mutating: false });
   }
 }
 
@@ -1144,6 +1165,80 @@ function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
   return `agent:${normalized}`;
 }
 
+function parseAgentIdFromSessionKey(sessionKey: string): string | null {
+  const matched = sessionKey.match(/^agent:([^:]+):/i);
+  return matched?.[1] ?? null;
+}
+
+function parseSessionTimestampMs(sessionKey: string): number | null {
+  const suffix = sessionKey.split(':').slice(2).join(':') || sessionKey;
+  const matched = suffix.match(/session-(\d{8,16})/i);
+  if (!matched) return null;
+  const raw = Number(matched[1]);
+  if (!Number.isFinite(raw)) return null;
+  return matched[1].length <= 10 ? raw * 1000 : raw;
+}
+
+function resolveSessionActivityMs(
+  session: ChatSession,
+  sessionLastActivity: Record<string, number>,
+): number {
+  const fromStore = sessionLastActivity[session.key];
+  if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
+    return fromStore;
+  }
+  if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
+    return session.updatedAt;
+  }
+  return parseSessionTimestampMs(session.key) ?? 0;
+}
+
+function resolvePreferredSessionKeyForAgent(
+  agentId: string,
+  sessions: ChatSession[],
+  sessionLastActivity: Record<string, number>,
+): string | null {
+  const canonicalKey = `agent:${agentId}:main`;
+  const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
+  if (owned.length === 0) {
+    return null;
+  }
+  if (owned.some((session) => session.key === canonicalKey)) {
+    return canonicalKey;
+  }
+  const sorted = [...owned].sort((left, right) => {
+    const leftActivity = resolveSessionActivityMs(left, sessionLastActivity);
+    const rightActivity = resolveSessionActivityMs(right, sessionLastActivity);
+    if (leftActivity !== rightActivity) {
+      return rightActivity - leftActivity;
+    }
+    return left.key.localeCompare(right.key);
+  });
+  return sorted[0]?.key ?? null;
+}
+
+function shouldKeepMissingCurrentSession(
+  sessionKey: string,
+  state: Pick<ChatState, 'messages' | 'sessionLabels' | 'sessionLastActivity' | 'sessionRuntimeByKey'>,
+  backendSessionCount: number,
+): boolean {
+  if (!sessionKey) {
+    return false;
+  }
+  if (backendSessionCount === 0) {
+    return true;
+  }
+  const hasMessages = state.messages.length > 0;
+  const hasLabel = Boolean(state.sessionLabels[sessionKey]);
+  const hasActivity = Boolean(state.sessionLastActivity[sessionKey]);
+  const hasRuntime = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, sessionKey);
+  if (!sessionKey.endsWith(':main')) {
+    // Keep only local draft sessions (created but still truly empty).
+    return !hasMessages && !hasLabel && !hasActivity && !hasRuntime;
+  }
+  return hasMessages || hasLabel || hasActivity || hasRuntime;
+}
+
 function parseSessionUpdatedAtMs(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return toMs(value);
@@ -1676,7 +1771,10 @@ function parseGatewayApprovalResponse(
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
   error: null,
 
   sending: false,
@@ -1694,6 +1792,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentSessionKey: DEFAULT_SESSION_KEY,
   sessionLabels: {},
   sessionLastActivity: {},
+  sessionReadyByKey: {},
   sessionRuntimeByKey: {},
 
   showThinking: true,
@@ -1735,7 +1834,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return true;
         });
 
-        const { currentSessionKey } = get();
+        const stateSnapshot = get();
+        const { currentSessionKey } = stateSnapshot;
         let nextSessionKey = currentSessionKey || DEFAULT_SESSION_KEY;
         if (!nextSessionKey.startsWith('agent:')) {
           const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
@@ -1743,15 +1843,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
             nextSessionKey = canonicalMatch;
           }
         }
-        if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
-          // Current session not found in the backend list
-          const isNewEmptySession = get().messages.length === 0;
-          if (!isNewEmptySession) {
+        const hasSessionInBackend = (sessionKey: string): boolean => dedupedSessions.some((session) => session.key === sessionKey);
+        let shouldKeepMissingCurrent = false;
+        if (!hasSessionInBackend(nextSessionKey)) {
+          shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
+            nextSessionKey,
+            stateSnapshot,
+            dedupedSessions.length,
+          );
+          if (!shouldKeepMissingCurrent && dedupedSessions.length > 0) {
             nextSessionKey = dedupedSessions[0].key;
           }
         }
-
-        const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
+        const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
+        const sessionsWithCurrent = !currentExistsInBackend && shouldKeepMissingCurrent && nextSessionKey
           ? [
             ...dedupedSessions,
             { key: nextSessionKey, displayName: nextSessionKey },
@@ -1818,6 +1923,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  openAgentConversation: (agentId: string) => {
+    const normalized = agentId.trim();
+    if (!normalized) {
+      return;
+    }
+    const state = get();
+    const preferredSessionKey = resolvePreferredSessionKeyForAgent(
+      normalized,
+      state.sessions,
+      state.sessionLastActivity,
+    );
+    if (preferredSessionKey) {
+      get().switchSession(preferredSessionKey);
+      return;
+    }
+    get().newSession(normalized);
+  },
+
   // ── Switch session ──
 
   switchSession: (key: string) => {
@@ -1841,15 +1964,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       nextSessionRuntimeByKey[currentSessionKey] = snapshotCurrentSessionRuntime(state);
     }
+    const hasTargetRuntimeSnapshot = Object.prototype.hasOwnProperty.call(nextSessionRuntimeByKey, key);
     const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
     const targetPendingApprovals = state.pendingApprovalsBySession[key] ?? [];
     const targetApprovalStatus: ApprovalStatus = targetPendingApprovals.length > 0
       ? 'awaiting_approval'
       : targetRuntime.approvalStatus;
+    const targetSessionReady = Boolean(state.sessionReadyByKey[key])
+      || hasTargetRuntimeSnapshot
+      || _historyFingerprintBySession.has(key);
+    const nextSessionReadyByKey = (() => {
+      const next = { ...state.sessionReadyByKey };
+      if (leavingEmpty) {
+        delete next[currentSessionKey];
+      }
+      if (targetSessionReady) {
+        next[key] = true;
+      }
+      return next;
+    })();
 
     set((s) => ({
       currentSessionKey: key,
       messages: targetRuntime.messages,
+      snapshotReady: state.snapshotReady || targetSessionReady,
+      initialLoading: false,
+      refreshing: false,
       sending: targetRuntime.sending,
       streamingText: targetRuntime.streamingText,
       streamingMessage: targetRuntime.streamingMessage,
@@ -1860,6 +2000,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lastUserMessageAt: targetRuntime.lastUserMessageAt,
       pendingToolImages: targetRuntime.pendingToolImages,
       approvalStatus: targetApprovalStatus,
+      sessionReadyByKey: nextSessionReadyByKey,
       sessionRuntimeByKey: nextSessionRuntimeByKey,
       ...(leavingEmpty ? {
         sessions: s.sessions.filter((s) => s.key !== currentSessionKey),
@@ -1887,8 +2028,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
       _historyPollTimer = setTimeout(pollHistory, 1_000);
     }
+    const shouldQuietReload = targetSessionReady;
     scheduleNextFrame(() => {
-      void get().loadHistory(true);
+      void get().loadHistory(shouldQuietReload);
     });
   },
 
@@ -1902,77 +2044,85 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // newSession() design that avoids sessions.reset to preserve history.
 
   deleteSession: async (key: string) => {
-    // Soft-delete the session's JSONL transcript on disk.
-    // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
-    // sessions.list and token-usage queries both skip it automatically.
+    beginGlobalMutating(set);
     try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        error?: string;
-      }>('/api/sessions/delete', {
-        method: 'POST',
-        body: JSON.stringify({ sessionKey: key }),
-      });
-      if (!result.success) {
-        console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
+      // Soft-delete the session's JSONL transcript on disk.
+      // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
+      // sessions.list and token-usage queries both skip it automatically.
+      try {
+        const result = await hostApiFetch<{
+          success: boolean;
+          error?: string;
+        }>('/api/sessions/delete', {
+          method: 'POST',
+          body: JSON.stringify({ sessionKey: key }),
+        });
+        if (!result.success) {
+          console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
+        }
+      } catch (err) {
+        console.warn(`[deleteSession] Host API call failed for ${key}:`, err);
       }
-    } catch (err) {
-      console.warn(`[deleteSession] Host API call failed for ${key}:`, err);
-    }
+      const { currentSessionKey, sessions } = get();
+      const remaining = sessions.filter((s) => s.key !== key);
+      _historyFingerprintBySession.delete(key);
+      _historyProbeFingerprintBySession.delete(key);
+      _historyQuickFingerprintBySession.delete(key);
 
-    const { currentSessionKey, sessions } = get();
-    const remaining = sessions.filter((s) => s.key !== key);
-    _historyFingerprintBySession.delete(key);
-    _historyProbeFingerprintBySession.delete(key);
-    _historyQuickFingerprintBySession.delete(key);
-
-    if (currentSessionKey === key) {
-      clearHistoryPoll();
-      clearErrorRecoveryTimer();
-      // Switched away from deleted session — pick the first remaining or create new
-      const next = remaining[0];
-      set((s) => ({
-        ...(function buildNextState() {
-          const runtimeMap = Object.fromEntries(
-            Object.entries(s.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key),
-          );
-          const nextRuntime = resolveSessionRuntime(runtimeMap[next?.key ?? '']);
-          return {
-            sessionRuntimeByKey: runtimeMap,
-            messages: nextRuntime.messages,
-            sending: nextRuntime.sending,
-            streamingText: nextRuntime.streamingText,
-            streamingMessage: nextRuntime.streamingMessage,
-            streamingTools: nextRuntime.streamingTools,
-            activeRunId: nextRuntime.activeRunId,
-            pendingFinal: nextRuntime.pendingFinal,
-            lastUserMessageAt: nextRuntime.lastUserMessageAt,
-            pendingToolImages: nextRuntime.pendingToolImages,
-            approvalStatus: nextRuntime.approvalStatus,
-          };
-        })(),
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        pendingApprovalsBySession: Object.fromEntries(
-          Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
-        ),
-        error: null,
-        currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
-      }));
-      if (next) {
-        get().loadHistory();
+      if (currentSessionKey === key) {
+        clearHistoryPoll();
+        clearErrorRecoveryTimer();
+        // Switched away from deleted session — pick the first remaining or create new
+        const next = remaining[0];
+        set((s) => ({
+          ...(function buildNextState() {
+            const runtimeMap = Object.fromEntries(
+              Object.entries(s.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key),
+            );
+            const nextRuntime = resolveSessionRuntime(runtimeMap[next?.key ?? '']);
+            return {
+              sessionRuntimeByKey: runtimeMap,
+              messages: nextRuntime.messages,
+              sending: nextRuntime.sending,
+              streamingText: nextRuntime.streamingText,
+              streamingMessage: nextRuntime.streamingMessage,
+              streamingTools: nextRuntime.streamingTools,
+              activeRunId: nextRuntime.activeRunId,
+              pendingFinal: nextRuntime.pendingFinal,
+              lastUserMessageAt: nextRuntime.lastUserMessageAt,
+              pendingToolImages: nextRuntime.pendingToolImages,
+              approvalStatus: nextRuntime.approvalStatus,
+            };
+          })(),
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionReadyByKey: Object.fromEntries(Object.entries(s.sessionReadyByKey).filter(([k]) => k !== key)),
+          pendingApprovalsBySession: Object.fromEntries(
+            Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
+          ),
+          error: null,
+          initialLoading: false,
+          refreshing: false,
+          currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
+        }));
+        if (next) {
+          get().loadHistory();
+        }
+      } else {
+        set((s) => ({
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionReadyByKey: Object.fromEntries(Object.entries(s.sessionReadyByKey).filter(([k]) => k !== key)),
+          sessionRuntimeByKey: Object.fromEntries(Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== key)),
+          pendingApprovalsBySession: Object.fromEntries(
+            Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
+          ),
+        }));
       }
-    } else {
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        sessionRuntimeByKey: Object.fromEntries(Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== key)),
-        pendingApprovalsBySession: Object.fromEntries(
-          Object.entries(s.pendingApprovalsBySession).filter(([k]) => k !== key),
-        ),
-      }));
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 
@@ -2020,6 +2170,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionLastActivity: leavingEmpty
         ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
         : s.sessionLastActivity,
+      sessionReadyByKey: (() => {
+        const next = { ...s.sessionReadyByKey };
+        if (leavingEmpty) {
+          delete next[currentSessionKey];
+        }
+        next[newKey] = true;
+        return next;
+      })(),
       pendingApprovalsBySession: (() => {
         if (!leavingEmpty) return s.pendingApprovalsBySession;
         return Object.fromEntries(
@@ -2027,6 +2185,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
       })(),
       ...createEmptySessionRuntime(),
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
       error: null,
     }));
   },
@@ -2053,6 +2214,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionLastActivity: Object.fromEntries(
         Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
       ),
+      sessionReadyByKey: Object.fromEntries(
+        Object.entries(s.sessionReadyByKey).filter(([k]) => k !== currentSessionKey),
+      ),
       sessionRuntimeByKey: Object.fromEntries(
         Object.entries(s.sessionRuntimeByKey).filter(([k]) => k !== currentSessionKey),
       ),
@@ -2069,13 +2233,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const historyLoadRunId = quiet ? 0 : ++_historyLoadRunId;
     let loadingSafetyTimer: ReturnType<typeof setTimeout> | null = null;
     if (!quiet) {
-      set({ loading: true, error: null });
+      const snapshot = get();
+      const hasSnapshot = Boolean(snapshot.sessionReadyByKey[requestedSessionKey]) || snapshot.messages.length > 0;
+      set({
+        initialLoading: !hasSnapshot,
+        refreshing: hasSnapshot,
+        error: null,
+      });
       loadingSafetyTimer = setTimeout(() => {
         set((state) => {
-          if (historyLoadRunId !== _historyLoadRunId || !state.loading) {
+          if (historyLoadRunId !== _historyLoadRunId || (!state.initialLoading && !state.refreshing)) {
             return state;
           }
-          return { loading: false };
+          return { initialLoading: false, refreshing: false };
         });
       }, CHAT_HISTORY_LOADING_TIMEOUT_MS);
     }
@@ -2091,8 +2261,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         && currentStateForQuickPath.thinkingLevel === thinkingLevel
       );
       if (canSkipWithQuickFingerprint) {
-        if (!quiet && currentStateForQuickPath.loading) {
-          set({ loading: false });
+        if (!quiet && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
+          set((state) => {
+            const alreadyReady = Boolean(state.sessionReadyByKey[requestedSessionKey]);
+            if (alreadyReady) {
+              return { initialLoading: false, refreshing: false, snapshotReady: true };
+            }
+            return {
+              initialLoading: false,
+              refreshing: false,
+              snapshotReady: true,
+              sessionReadyByKey: {
+                ...state.sessionReadyByKey,
+                [requestedSessionKey]: true,
+              },
+            };
+          });
+        } else if (!currentStateForQuickPath.sessionReadyByKey[requestedSessionKey]) {
+          set((state) => ({
+            sessionReadyByKey: {
+              ...state.sessionReadyByKey,
+              [requestedSessionKey]: true,
+            },
+          }));
         }
         return;
       }
@@ -2174,6 +2365,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const nextStatePatch: Partial<ChatState> = {};
         let changed = false;
 
+        if (!state.snapshotReady) {
+          nextStatePatch.snapshotReady = true;
+          changed = true;
+        }
+        if (!state.sessionReadyByKey[requestedSessionKey]) {
+          nextStatePatch.sessionReadyByKey = {
+            ...state.sessionReadyByKey,
+            [requestedSessionKey]: true,
+          };
+          changed = true;
+        }
+        if (state.initialLoading || state.refreshing) {
+          nextStatePatch.initialLoading = false;
+          nextStatePatch.refreshing = false;
+          changed = true;
+        }
         if (!areMessagesEquivalent(state.messages, finalMessages)) {
           nextStatePatch.messages = finalMessages;
           didMessageListChange = true;
@@ -2292,6 +2499,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           && hasKnownFullSnapshot
           && hasRenderableMessages
         ) {
+          if (!get().sessionReadyByKey[requestedSessionKey]) {
+            set((state) => ({
+              sessionReadyByKey: {
+                ...state.sessionReadyByKey,
+                [requestedSessionKey]: true,
+              },
+            }));
+          }
           return;
         }
 
@@ -2339,7 +2554,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         _historyFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
         _historyProbeFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
         _historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
-        set({ messages: [] });
+        set({
+          snapshotReady: true,
+          initialLoading: false,
+          refreshing: false,
+          sessionReadyByKey: {
+            ...get().sessionReadyByKey,
+            [requestedSessionKey]: true,
+          },
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     } finally {
       if (loadingSafetyTimer) {
@@ -2347,10 +2571,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       if (!quiet) {
         set((state) => {
-          if (historyLoadRunId !== _historyLoadRunId || !state.loading) {
+          if (historyLoadRunId !== _historyLoadRunId || (!state.initialLoading && !state.refreshing)) {
             return state;
           }
-          return { loading: false };
+          return { initialLoading: false, refreshing: false };
         });
       }
     }
@@ -2486,6 +2710,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     setTimeout(checkStuck, 30_000);
 
+    beginGlobalMutating(set);
     try {
       const idempotencyKey = crypto.randomUUID();
       const hasMedia = attachments && attachments.length > 0;
@@ -2595,6 +2820,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       clearHistoryPoll();
       set({ error: errMsg, sending: false, approvalStatus: 'idle' });
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 
@@ -2616,6 +2843,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     set({ streamingTools: [] });
 
+    beginGlobalMutating(set);
     try {
       for (const approval of pendingApprovals) {
         await useGatewayStore.getState().rpc(
@@ -2635,6 +2863,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
     } catch (err) {
       set({ error: String(err) });
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 
@@ -2721,6 +2951,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   resolveApproval: async (id: string, decision: ApprovalDecision) => {
     const approvalId = id.trim();
     if (!approvalId) return;
+    beginGlobalMutating(set);
     try {
       await useGatewayStore.getState().rpc(
         'exec.approval.resolve',
@@ -2743,6 +2974,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set({ error: message });
       await get().syncPendingApprovals(get().currentSessionKey);
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 

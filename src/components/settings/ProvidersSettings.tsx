@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Plus,
+  RefreshCw,
   Trash2,
   Edit,
   Eye,
@@ -56,6 +57,7 @@ import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 import { invokeIpc } from '@/lib/api-client';
 import { useSettingsStore } from '@/stores/settings';
+import { useGatewayStore } from '@/stores/gateway';
 import { subscribeHostEvent } from '@/lib/host-events';
 
 type ArkMode = 'apikey' | 'codeplan';
@@ -157,12 +159,14 @@ function getAuthModeLabel(
 export function ProvidersSettings() {
   const { t } = useTranslation('settings');
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const gatewayState = useGatewayStore((state) => state.status.state);
   const {
-    statuses,
-    accounts,
-    vendors,
-    defaultAccountId,
-    loading,
+    providerSnapshot,
+    snapshotReady,
+    initialLoading,
+    refreshing,
+    mutatingActionsByAccountId,
+    error,
     refreshProviderSnapshot,
     createAccount,
     removeAccount,
@@ -170,9 +174,16 @@ export function ProvidersSettings() {
     setDefaultAccount,
     validateAccountApiKey,
   } = useProviderStore();
+  const {
+    statuses,
+    accounts,
+    vendors,
+    defaultAccountId,
+  } = providerSnapshot;
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const wasGatewayRunningRef = React.useRef(gatewayState === 'running');
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
   const displayProviders = useMemo(
@@ -182,8 +193,54 @@ export function ProvidersSettings() {
 
   // Fetch providers on mount
   useEffect(() => {
-    refreshProviderSnapshot();
+    void refreshProviderSnapshot({
+      trigger: 'background',
+      reason: 'providers_settings_mount',
+    });
   }, [refreshProviderSnapshot]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      void refreshProviderSnapshot({
+        trigger: 'background',
+        reason: 'window_focus',
+      });
+    };
+    const handleOnline = () => {
+      void refreshProviderSnapshot({
+        trigger: 'background',
+        reason: 'network_online',
+      });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshProviderSnapshot({
+          trigger: 'background',
+          reason: 'visibility_visible',
+        });
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refreshProviderSnapshot]);
+
+  useEffect(() => {
+    if (!wasGatewayRunningRef.current && gatewayState === 'running') {
+      void refreshProviderSnapshot({
+        trigger: 'background',
+        reason: 'gateway_reconnected',
+      });
+    }
+    wasGatewayRunningRef.current = gatewayState === 'running';
+  }, [gatewayState, refreshProviderSnapshot]);
 
   const handleAddProvider = async (
     type: ProviderType,
@@ -250,17 +307,67 @@ export function ProvidersSettings() {
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => setShowAddDialog(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          {t('aiProviders.add')}
-        </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-h-5">
+          {refreshing && snapshotReady ? (
+            <div className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>{t('aiProviders.status.refreshing')}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void refreshProviderSnapshot({
+                trigger: 'manual',
+                reason: 'user_manual_refresh',
+              });
+            }}
+            disabled={initialLoading || refreshing}
+          >
+            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
+            {t('aiProviders.status.refresh')}
+          </Button>
+          <Button size="sm" onClick={() => setShowAddDialog(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            {t('aiProviders.add')}
+          </Button>
+        </div>
       </div>
 
-      {loading ? (
+      {error && snapshotReady ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      ) : null}
+
+      {initialLoading && !snapshotReady ? (
         <div className="flex items-center justify-center py-8">
           <Loader2 className="h-6 w-6 animate-spin" />
         </div>
+      ) : !snapshotReady && error ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center gap-3 py-10 text-center">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void refreshProviderSnapshot({
+                  trigger: 'manual',
+                  reason: 'user_retry_refresh',
+                });
+              }}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              {t('aiProviders.status.retry')}
+            </Button>
+          </CardContent>
+        </Card>
       ) : displayProviders.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
@@ -282,6 +389,9 @@ export function ProvidersSettings() {
               key={item.account.id}
               item={item}
               allProviders={displayProviders}
+              isMutating={Boolean(mutatingActionsByAccountId[item.account.id])}
+              isDeleting={Boolean(mutatingActionsByAccountId[item.account.id]?.delete)}
+              isSettingDefault={Boolean(mutatingActionsByAccountId[item.account.id]?.setDefault)}
               isDefault={item.account.id === defaultAccountId}
               isEditing={editingProvider === item.account.id}
               onEdit={() => setEditingProvider(item.account.id)}
@@ -332,6 +442,9 @@ export function ProvidersSettings() {
 interface ProviderCardProps {
   item: ProviderListItem;
   allProviders: ProviderListItem[];
+  isMutating: boolean;
+  isDeleting: boolean;
+  isSettingDefault: boolean;
   isDefault: boolean;
   isEditing: boolean;
   onEdit: () => void;
@@ -355,6 +468,9 @@ interface ProviderCardProps {
 function ProviderCard({
   item,
   allProviders,
+  isMutating,
+  isDeleting,
+  isSettingDefault,
   isDefault,
   isEditing,
   onEdit,
@@ -920,22 +1036,44 @@ function ProviderCard({
                 className="h-7 w-7"
                 onClick={isDefault ? undefined : onSetDefault}
                 title={isDefault ? t('aiProviders.card.default') : t('aiProviders.card.setDefault')}
-                disabled={isDefault}
+                disabled={isDefault || isMutating}
               >
-                <Star
-                  className={cn(
-                    'h-3.5 w-3.5 transition-colors',
-                    isDefault
-                      ? 'fill-yellow-400 text-yellow-400'
-                      : 'text-muted-foreground'
-                  )}
-                />
+                {isSettingDefault ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Star
+                    className={cn(
+                      'h-3.5 w-3.5 transition-colors',
+                      isDefault
+                        ? 'fill-yellow-400 text-yellow-400'
+                        : 'text-muted-foreground'
+                    )}
+                  />
+                )}
               </Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onEdit} title={t('aiProviders.card.editKey')}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={onEdit}
+                title={t('aiProviders.card.editKey')}
+                disabled={isMutating}
+              >
                 <Edit className="h-3.5 w-3.5" />
               </Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onDelete} title={t('aiProviders.card.delete')}>
-                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={onDelete}
+                title={t('aiProviders.card.delete')}
+                disabled={isMutating}
+              >
+                {isDeleting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                )}
               </Button>
             </div>
           </div>
@@ -1105,7 +1243,10 @@ function AddProviderDialog({
       // So we just fetch the latest list from the backend to update the UI.
       try {
         const store = useProviderStore.getState();
-        await store.refreshProviderSnapshot();
+        await store.refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'oauth_success_reconcile',
+        });
 
         // OAuth sign-in should immediately become active default to avoid
         // leaving runtime on an API-key-only provider/model.

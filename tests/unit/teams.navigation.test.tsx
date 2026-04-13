@@ -21,7 +21,10 @@ function enableMainAppRoutes() {
     agents: [],
     availableModels: [],
     modelsLoading: false,
-    loading: false,
+    snapshotReady: true,
+    initialLoading: false,
+    refreshing: false,
+    mutating: false,
     error: null,
     selectedAgentId: null,
     loadAgents: vi.fn().mockResolvedValue(undefined),
@@ -55,7 +58,7 @@ describe('teams navigation', () => {
     expect(teamsLink).toHaveAttribute('href', '/teams');
   });
 
-  it('renders teams page at /teams', () => {
+  it('renders teams page at /teams', async () => {
     enableMainAppRoutes();
 
     render(
@@ -64,6 +67,6 @@ describe('teams navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('Agents Workspace')).toBeInTheDocument();
+    expect(await screen.findByText('Agents Workspace')).toBeInTheDocument();
   });
 });

@@ -25,10 +25,112 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function mockSkillsFetchDependencies() {
+  hostApiFetchMock.mockImplementation(async (path: string) => {
+    if (path === '/api/skills/configs') {
+      return {};
+    }
+    if (path === '/api/clawhub/list') {
+      return { success: true, results: [] };
+    }
+    throw new Error(`Unexpected hostApiFetch path: ${path}`);
+  });
+}
+
 describe('skills store availability and search cache', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+  });
+
+  it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
+    const deferredRpc = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
+    rpcMock.mockReturnValue(deferredRpc.promise);
+    mockSkillsFetchDependencies();
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    const fetchPromise = useSkillsStore.getState().fetchSkills();
+
+    expect(useSkillsStore.getState().snapshotReady).toBe(false);
+    expect(useSkillsStore.getState().initialLoading).toBe(true);
+    expect(useSkillsStore.getState().refreshing).toBe(false);
+
+    deferredRpc.resolve({ skills: [{ skillKey: 'demo-skill', disabled: false }] });
+    await fetchPromise;
+
+    const state = useSkillsStore.getState();
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.skills[0]?.id).toBe('demo-skill');
+  });
+
+  it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
+    rpcMock.mockResolvedValueOnce({
+      skills: [{ skillKey: 'demo-skill', disabled: false }],
+    });
+    mockSkillsFetchDependencies();
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    await useSkillsStore.getState().fetchSkills();
+
+    rpcMock.mockRejectedValueOnce(new Error('rate limit exceeded'));
+    const refreshPromise = useSkillsStore.getState().fetchSkills({ force: true });
+
+    expect(useSkillsStore.getState().refreshing).toBe(true);
+    expect(useSkillsStore.getState().initialLoading).toBe(false);
+
+    await refreshPromise;
+
+    const state = useSkillsStore.getState();
+    expect(state.snapshotReady).toBe(true);
+    expect(state.refreshing).toBe(false);
+    expect(state.skills[0]?.id).toBe('demo-skill');
+    expect(state.error).toBe('fetchRateLimitError');
+  });
+
+  it('fetchSkills 并发请求会单飞去重', async () => {
+    const deferredRpc = createDeferred<{ skills: Array<{ skillKey: string; disabled?: boolean }> }>();
+    rpcMock.mockReturnValue(deferredRpc.promise);
+    mockSkillsFetchDependencies();
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    const first = useSkillsStore.getState().fetchSkills();
+    const second = useSkillsStore.getState().fetchSkills();
+
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+
+    deferredRpc.resolve({ skills: [{ skillKey: 'singleflight-skill', disabled: false }] });
+    await Promise.all([first, second]);
+  });
+
+  it('enableSkill 会维护 mutatingBySkillId 生命周期', async () => {
+    const deferredRpc = createDeferred<{ success: boolean }>();
+    rpcMock.mockReturnValue(deferredRpc.promise);
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.getState().setSkills([
+      {
+        id: 'demo-skill',
+        slug: 'demo-skill',
+        name: 'Demo Skill',
+        description: 'demo',
+        enabled: false,
+        icon: '🧩',
+      },
+    ]);
+
+    const enablePromise = useSkillsStore.getState().enableSkill('demo-skill');
+    expect(useSkillsStore.getState().mutating).toBe(true);
+    expect(useSkillsStore.getState().mutatingBySkillId['demo-skill']).toBe(1);
+
+    deferredRpc.resolve({ success: true });
+    await enablePromise;
+
+    const state = useSkillsStore.getState();
+    expect(state.mutating).toBe(false);
+    expect(state.mutatingBySkillId['demo-skill']).toBeUndefined();
+    expect(state.skills[0]?.enabled).toBe(true);
   });
 
   it('maps skills.status availability fields into Skill model', async () => {

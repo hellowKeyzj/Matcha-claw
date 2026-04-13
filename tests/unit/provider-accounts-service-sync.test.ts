@@ -1,16 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
-  getActiveOpenClawProvidersMock,
-  getOpenClawProvidersConfigMock,
+  getOpenClawProvidersSnapshotMock,
   removeProviderFromOpenClawMock,
   setOpenClawDefaultModelMock,
   setOpenClawDefaultModelWithOverrideMock,
   removeProviderKeyFromOpenClawMock,
   saveProviderKeyToOpenClawMock,
 } = vi.hoisted(() => ({
-  getActiveOpenClawProvidersMock: vi.fn(),
-  getOpenClawProvidersConfigMock: vi.fn(),
+  getOpenClawProvidersSnapshotMock: vi.fn(),
   removeProviderFromOpenClawMock: vi.fn(),
   setOpenClawDefaultModelMock: vi.fn(),
   setOpenClawDefaultModelWithOverrideMock: vi.fn(),
@@ -19,8 +17,7 @@ const {
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
-  getActiveOpenClawProviders: getActiveOpenClawProvidersMock,
-  getOpenClawProvidersConfig: getOpenClawProvidersConfigMock,
+  getOpenClawProvidersSnapshot: getOpenClawProvidersSnapshotMock,
   removeProviderFromOpenClaw: removeProviderFromOpenClawMock,
   setOpenClawDefaultModel: setOpenClawDefaultModelMock,
   setOpenClawDefaultModelWithOverride: setOpenClawDefaultModelWithOverrideMock,
@@ -69,21 +66,25 @@ function createServiceWithStore(store: {
 
 describe('ProviderAccountsService list（openclaw.json 单一显示源）', () => {
   beforeEach(() => {
-    getActiveOpenClawProvidersMock.mockReset();
-    getOpenClawProvidersConfigMock.mockReset();
+    getOpenClawProvidersSnapshotMock.mockReset();
     removeProviderFromOpenClawMock.mockReset();
     setOpenClawDefaultModelMock.mockReset();
     setOpenClawDefaultModelWithOverrideMock.mockReset();
     removeProviderKeyFromOpenClawMock.mockReset();
     saveProviderKeyToOpenClawMock.mockReset();
-    getOpenClawProvidersConfigMock.mockResolvedValue({
+    getOpenClawProvidersSnapshotMock.mockResolvedValue({
       providers: {},
       defaultModel: undefined,
+      activeProviders: new Set<string>(),
     });
   });
 
   it('activeProviders 为空时返回空列表（不再把本地 store 当显示源）', async () => {
-    getActiveOpenClawProvidersMock.mockResolvedValue(new Set<string>());
+    getOpenClawProvidersSnapshotMock.mockResolvedValue({
+      providers: {},
+      defaultModel: undefined,
+      activeProviders: new Set<string>(),
+    });
 
     const store = {
       defaultAccountId: 'openai-main',
@@ -107,12 +108,12 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
   });
 
   it('只展示 activeProviders 内的账号，非激活账号不再显示', async () => {
-    getActiveOpenClawProvidersMock.mockResolvedValue(new Set<string>(['openai']));
-    getOpenClawProvidersConfigMock.mockResolvedValue({
+    getOpenClawProvidersSnapshotMock.mockResolvedValue({
       providers: {
         openai: { baseUrl: 'https://api.openai.com/v1' },
       },
       defaultModel: 'openai/gpt-5.2',
+      activeProviders: new Set<string>(['openai']),
     });
 
     const store = {
@@ -137,8 +138,7 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
   });
 
   it('store 无匹配时会从 openclaw.json 回填 provider（含 headers）', async () => {
-    getActiveOpenClawProvidersMock.mockResolvedValue(new Set<string>(['custom-gateway']));
-    getOpenClawProvidersConfigMock.mockResolvedValue({
+    getOpenClawProvidersSnapshotMock.mockResolvedValue({
       providers: {
         'custom-gateway': {
           baseUrl: 'https://gateway.example.com/v1',
@@ -146,6 +146,7 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
         },
       },
       defaultModel: 'custom-gateway/gpt-5.4',
+      activeProviders: new Set<string>(['custom-gateway']),
     });
 
     const store = {
@@ -171,12 +172,12 @@ describe('ProviderAccountsService list（openclaw.json 单一显示源）', () =
   });
 
   it('minimax 发生同 key 重复时优先保留 CN 别名账号并清理重复项', async () => {
-    getActiveOpenClawProvidersMock.mockResolvedValue(new Set<string>(['minimax-portal']));
-    getOpenClawProvidersConfigMock.mockResolvedValue({
+    getOpenClawProvidersSnapshotMock.mockResolvedValue({
       providers: {
         'minimax-portal': { baseUrl: 'https://api.minimaxi.com/anthropic' },
       },
       defaultModel: undefined,
+      activeProviders: new Set<string>(['minimax-portal']),
     });
 
     const store = {

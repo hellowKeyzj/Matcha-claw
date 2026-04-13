@@ -5,7 +5,10 @@ import { useGatewayStore } from '@/stores/gateway';
 function resetChatStoreForApprovalTests() {
   useChatStore.setState({
     messages: [],
-    loading: false,
+    snapshotReady: false,
+    initialLoading: false,
+    refreshing: false,
+    mutating: false,
     error: null,
     sending: false,
     activeRunId: null,

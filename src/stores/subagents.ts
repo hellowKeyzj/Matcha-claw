@@ -105,9 +105,13 @@ interface ReadConfigForDisplayOptions {
 
 interface SubagentsState {
   agents: SubagentSummary[];
+  lastLoadedAt: number | null;
   availableModels: ModelCatalogEntry[];
   modelsLoading: boolean;
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
   error: string | null;
   managedAgentId: string | null;
   draftPromptByAgent: Record<string, string>;
@@ -585,6 +589,39 @@ function normalizeAgents(
   });
 }
 
+function mergeKnownIdentityEmoji(
+  agents: SubagentSummary[],
+  previousAgents: SubagentSummary[],
+): SubagentSummary[] {
+  if (agents.length === 0) {
+    return agents;
+  }
+
+  const previousEmojiById = new Map<string, string>();
+  for (const agent of previousAgents) {
+    const emoji = getOptionalString(agent.identityEmoji) ?? resolveIdentityEmojiFromAgentMeta(agent);
+    if (!emoji) {
+      continue;
+    }
+    previousEmojiById.set(agent.id, emoji);
+  }
+
+  return agents.map((agent) => {
+    const fromRuntimeMeta = resolveIdentityEmojiFromAgentMeta(agent);
+    const fromSelf = getOptionalString(agent.identityEmoji);
+    const fromPrevious = previousEmojiById.get(agent.id);
+    const fromCache = readIdentityEmojiFromCache(agent.id);
+    const nextEmoji = fromRuntimeMeta ?? fromSelf ?? fromPrevious ?? (fromCache ?? undefined);
+    if (!nextEmoji || nextEmoji === agent.identityEmoji) {
+      return agent;
+    }
+    return {
+      ...agent,
+      identityEmoji: nextEmoji,
+    };
+  });
+}
+
 function resolveDefaultAgentFromState(agents: SubagentSummary[]): SubagentSummary | undefined {
   return agents.find((agent) => agent.isDefault);
 }
@@ -1042,6 +1079,7 @@ const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentT
 let latestLoadAgentsRequestId = 0;
 let agentsStateMutationVersion = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
+let activeMutatingOperationCount = 0;
 const pendingDeletedAgentIds = new Set<string>();
 let inflightLoadAgentsTask: Promise<void> | null = null;
 
@@ -1059,6 +1097,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   latestLoadAgentsRequestId = 0;
   agentsStateMutationVersion = 0;
   agentMutationChain = Promise.resolve();
+  activeMutatingOperationCount = 0;
   inflightLoadAgentsTask = null;
 }
 
@@ -1107,6 +1146,22 @@ function runSerializedAgentMutation<T>(task: () => Promise<T>): Promise<T> {
   const run = agentMutationChain.then(task, task);
   agentMutationChain = run.then(() => undefined, () => undefined);
   return run;
+}
+
+function beginGlobalMutating(setState: (partial: Partial<SubagentsState>) => void): void {
+  activeMutatingOperationCount += 1;
+  setState({
+    mutating: true,
+    error: null,
+  });
+}
+
+function finishGlobalMutating(setState: (partial: Partial<SubagentsState>) => void): void {
+  activeMutatingOperationCount = Math.max(0, activeMutatingOperationCount - 1);
+  if (activeMutatingOperationCount !== 0) {
+    return;
+  }
+  setState({ mutating: false });
 }
 
 async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
@@ -1165,9 +1220,13 @@ function areAgentListsEquivalent(left: SubagentSummary[], right: SubagentSummary
 
 export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   agents: [],
+  lastLoadedAt: null,
   availableModels: [],
   modelsLoading: false,
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
   error: null,
   managedAgentId: null,
   draftPromptByAgent: {},
@@ -1195,10 +1254,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     const requestId = ++latestLoadAgentsRequestId;
-    const shouldShowLoading = get().agents.length === 0;
-    if (shouldShowLoading) {
-      set({ loading: true, error: null });
-    }
+    const stateBeforeLoad = get();
+    const hasSnapshot = stateBeforeLoad.snapshotReady || stateBeforeLoad.agents.length > 0;
+    set({
+      initialLoading: !hasSnapshot,
+      refreshing: hasSnapshot,
+      error: null,
+    });
 
     const task = (async () => {
       try {
@@ -1212,18 +1274,21 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         const stateSnapshot = get();
+        const stableAgents = mergeKnownIdentityEmoji(normalizedAgents, stateSnapshot.agents);
         const selectedAgentId = stateSnapshot.selectedAgentId;
-        const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
+        const hasSelected = selectedAgentId && stableAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
-        const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
-        const nextSelectedAgentId = hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null);
+        const hasManaged = managedAgentId && stableAgents.some((agent) => agent.id === managedAgentId);
+        const nextSelectedAgentId = hasSelected ? selectedAgentId : (stableAgents[0]?.id ?? null);
         const nextManagedAgentId = hasManaged ? managedAgentId : null;
         const shouldPatchAgents = (
-          !areAgentListsEquivalent(stateSnapshot.agents, normalizedAgents)
+          !areAgentListsEquivalent(stateSnapshot.agents, stableAgents)
           || stateSnapshot.selectedAgentId !== nextSelectedAgentId
           || stateSnapshot.managedAgentId !== nextManagedAgentId
           || stateSnapshot.error !== null
-          || stateSnapshot.loading
+          || stateSnapshot.initialLoading
+          || stateSnapshot.refreshing
+          || !stateSnapshot.snapshotReady
         );
         const hydrationSourceVersion = shouldPatchAgents
           ? bumpAgentsStateMutationVersion()
@@ -1231,15 +1296,25 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
         if (shouldPatchAgents) {
           set({
-            agents: normalizedAgents,
+            agents: stableAgents,
+            lastLoadedAt: Date.now(),
             selectedAgentId: nextSelectedAgentId,
             managedAgentId: nextManagedAgentId,
+            snapshotReady: true,
+            initialLoading: false,
+            refreshing: false,
             error: null,
-            loading: false,
+          });
+        } else {
+          set({
+            lastLoadedAt: Date.now(),
+            initialLoading: false,
+            refreshing: false,
+            error: null,
           });
         }
 
-        void hydrateAgentIdentityEmoji(normalizedAgents)
+        void hydrateAgentIdentityEmoji(stableAgents)
           .then((hydratedAgents) => {
             if (requestId !== latestLoadAgentsRequestId) {
               return;
@@ -1288,7 +1363,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         set({
-          loading: false,
+          initialLoading: false,
+          refreshing: false,
           error: error instanceof Error ? error.message : 'Failed to load subagents',
         });
       } finally {
@@ -1391,7 +1467,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   createAgent: async ({ name, workspace, model, emoji }) => runSerializedAgentMutation(async () => {
-    set({ loading: true, error: null });
+    beginGlobalMutating(set);
     try {
       void workspace;
       const trimmedName = name.trim();
@@ -1447,13 +1523,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     } catch (error) {
       const message = getErrorMessage(error) || 'Failed to create subagent';
       set({
-        loading: false,
         error: message,
       });
       if (error instanceof Error) {
         throw error;
       }
       throw new Error(message, { cause: error });
+    } finally {
+      finishGlobalMutating(set);
     }
   }),
 
@@ -1501,7 +1578,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       return createdAgentId;
     }
 
-    set({ loading: true, error: null });
+    beginGlobalMutating(set);
     try {
       for (const [name, content] of fileEntries) {
         await rpc('agents.files.set', {
@@ -1521,7 +1598,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       await rpc('agents.files.list', { agentId: createdAgentId });
       await get().loadAgents();
       set((state) => ({
-        loading: false,
         persistedFilesByAgent: {
           ...state.persistedFilesByAgent,
           [createdAgentId]: {
@@ -1534,10 +1610,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     } catch (error) {
       const message = getErrorMessage(error) || `Agent "${createdAgentId}" created, but template file copy failed`;
       set({
-        loading: false,
         error: message,
       });
       throw error instanceof Error ? error : new Error(message, { cause: error });
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 
@@ -1571,7 +1648,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const nextWorkspace = workspace.trim();
     const nextModel = getOptionalString(model);
 
-    set({ loading: true, error: null });
+    beginGlobalMutating(set);
     try {
       if (identityChanged || (modelChanged && nextModel !== undefined)) {
         const updatePayload: Record<string, unknown> = {
@@ -1596,9 +1673,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       await get().loadAgents();
     } catch (error) {
       set({
-        loading: false,
         error: getErrorMessage(error) || 'Failed to update subagent',
       });
+    } finally {
+      finishGlobalMutating(set);
     }
   }),
 
@@ -1612,7 +1690,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       return;
     }
 
-    set({ loading: true, error: null });
+    beginGlobalMutating(set);
     const agentsSnapshot = get().agents;
     const selectedAgentIdSnapshot = get().selectedAgentId;
     const managedAgentIdSnapshot = get().managedAgentId;
@@ -1637,7 +1715,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         };
       });
       await rpc('agents.delete', { agentId, deleteFiles: true });
-      set({ loading: false, error: null });
     } catch (error) {
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
       if (normalizedAgentId) {
@@ -1648,9 +1725,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         agents: agentsSnapshot,
         selectedAgentId: selectedAgentIdSnapshot,
         managedAgentId: managedAgentIdSnapshot,
-        loading: false,
         error: getErrorMessage(error) || 'Failed to delete subagent',
       });
+    } finally {
+      finishGlobalMutating(set);
     }
   }),
 
@@ -1672,9 +1750,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (!existingSessionKey && !persistedFiles) {
       persistedFiles = await get().loadPersistedFilesForAgent(agentId);
     }
+    beginGlobalMutating(set);
     set((state) => ({
-      loading: true,
-      error: null,
       draftError: null,
       draftRawOutputByAgent: {
         ...state.draftRawOutputByAgent,
@@ -1778,10 +1855,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const nextDraftGeneratingByAgent = { ...state.draftGeneratingByAgent };
         delete nextDraftGeneratingByAgent[agentId];
         return {
-          loading: false,
           draftGeneratingByAgent: nextDraftGeneratingByAgent,
         };
       });
+      finishGlobalMutating(set);
     }
   },
 
@@ -1808,9 +1885,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       throw new Error('No approved draft content to apply');
     }
 
+    beginGlobalMutating(set);
     set((state) => ({
-      loading: true,
-      error: null,
       draftApplyingByAgent: {
         ...state.draftApplyingByAgent,
         [agentId]: true,
@@ -1827,7 +1903,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       await rpc('agents.files.list', { agentId });
       await get().loadAgents();
       set((state) => ({
-        loading: false,
         draftByFile: {},
         previewDiffByFile: {},
         draftError: null,
@@ -1849,7 +1924,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }));
     } catch (error) {
       set((state) => ({
-        loading: false,
         error: error instanceof Error ? error.message : 'Failed to apply draft',
         draftApplyingByAgent: {
           ...state.draftApplyingByAgent,
@@ -1857,6 +1931,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         },
       }));
       throw error;
+    } finally {
+      finishGlobalMutating(set);
     }
   },
 }));

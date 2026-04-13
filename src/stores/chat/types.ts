@@ -88,6 +88,7 @@ export interface ChatState {
 
   // Actions
   loadSessions: () => Promise<void>;
+  openAgentConversation: (agentId: string) => void;
   switchSession: (key: string) => void;
   newSession: (agentId?: string) => void;
   deleteSession: (key: string) => Promise<void>;

@@ -16,7 +16,10 @@ describe('subagents prompt pipeline', () => {
     resetGatewayClientMocks();
     useSubagentsStore.setState({
       agents: [{ id: 'writer', name: 'Writer', isDefault: false }],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       managedAgentId: null,
       draftPromptByAgent: {},
@@ -437,7 +440,6 @@ describe('subagents prompt pipeline', () => {
     expect(useSubagentsStore.getState().persistedFilesByAgent.writer).toBeTruthy();
   });
 });
-
 
 
 

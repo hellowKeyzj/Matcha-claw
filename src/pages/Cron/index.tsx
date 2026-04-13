@@ -625,16 +625,18 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
 // Job Card Component
 interface CronJobCardProps {
   job: CronJob;
+  isMutating: boolean;
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
   onTrigger: () => Promise<{ ran: boolean; reason?: string }>;
 }
 
-function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
+function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
   const { t } = useTranslation('cron');
   const [triggering, setTriggering] = useState(false);
   const isRunning = Boolean(job.runningAt);
+  const actionsDisabled = isMutating || triggering;
 
   const handleTrigger = async () => {
     setTriggering(true);
@@ -694,8 +696,12 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
             {isRunning && (
               <Badge variant="default">{t('stats.running')}</Badge>
             )}
+            {isMutating && (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            )}
             <Switch
               checked={job.enabled}
+              disabled={isMutating}
               onCheckedChange={onToggle}
             />
           </div>
@@ -762,7 +768,7 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
             variant="ghost"
             size="sm"
             onClick={handleTrigger}
-            disabled={triggering || isRunning}
+            disabled={actionsDisabled || isRunning}
           >
             {triggering ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -771,11 +777,11 @@ function CronJobCard({ job, onToggle, onEdit, onDelete, onTrigger }: CronJobCard
             )}
             <span className="ml-1">{t('card.runNow')}</span>
           </Button>
-          <Button variant="ghost" size="sm" onClick={onEdit}>
+          <Button variant="ghost" size="sm" onClick={onEdit} disabled={isMutating}>
             <Edit className="h-4 w-4" />
             <span className="ml-1">{t('common:actions.edit', 'Edit')}</span>
           </Button>
-          <Button variant="ghost" size="sm" onClick={handleDelete}>
+          <Button variant="ghost" size="sm" onClick={handleDelete} disabled={isMutating}>
             <Trash2 className="h-4 w-4 text-destructive" />
             <span className="ml-1 text-destructive">{t('common:actions.delete', 'Delete')}</span>
           </Button>
@@ -791,13 +797,29 @@ interface CronProps {
 
 export function Cron({ embedded = false }: CronProps) {
   const { t } = useTranslation('cron');
-  const { jobs, loading, error, fetchJobs, createJob, updateJob, toggleJob, deleteJob, triggerJob } = useCronStore();
+  const {
+    jobs,
+    snapshotReady,
+    initialLoading,
+    refreshing,
+    mutating,
+    mutatingByJobId,
+    error,
+    fetchJobs,
+    createJob,
+    updateJob,
+    toggleJob,
+    deleteJob,
+    triggerJob,
+  } = useCronStore();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [showDialog, setShowDialog] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | undefined>();
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
+  const manualRefreshBusy = refreshing || mutating;
+  const showInitialLoading = !snapshotReady && initialLoading;
 
   // Fetch jobs on mount
   useEffect(() => {
@@ -836,20 +858,26 @@ export function Cron({ embedded = false }: CronProps) {
           <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
         )}
         <div className="flex gap-2">
+          {refreshing && snapshotReady && (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t('common:status.loading', 'Loading...')}
+            </span>
+          )}
           <Button
             variant="outline"
             onClick={() => { void fetchJobs(); }}
-            disabled={!isGatewayRunning || loading}
+            disabled={!isGatewayRunning || manualRefreshBusy}
           >
-            <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
-            {t('refresh')}
+            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
+            {manualRefreshBusy ? t('common:status.loading', 'Loading...') : t('refresh')}
           </Button>
           <Button
             onClick={() => {
               setEditingJob(undefined);
               setShowDialog(true);
             }}
-            disabled={!isGatewayRunning}
+            disabled={!isGatewayRunning || mutating}
           >
             <Plus className="h-4 w-4 mr-2" />
             {t('newTask')}
@@ -912,7 +940,14 @@ export function Cron({ embedded = false }: CronProps) {
       )}
 
       {/* Jobs List */}
-      {jobs.length === 0 ? (
+      {showInitialLoading ? (
+        <Card className={TASK_CENTER_SURFACE_CARD_CLASS}>
+          <CardContent className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{t('common:status.loading', 'Loading...')}</span>
+          </CardContent>
+        </Card>
+      ) : jobs.length === 0 ? (
         <Card className={TASK_CENTER_SURFACE_CARD_CLASS}>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Clock className="h-12 w-12 text-muted-foreground mb-4" />
@@ -938,6 +973,7 @@ export function Cron({ embedded = false }: CronProps) {
             <CronJobCard
               key={job.id}
               job={job}
+              isMutating={Boolean(mutatingByJobId[job.id])}
               onToggle={(enabled) => handleToggle(job.id, enabled)}
               onEdit={() => {
                 setEditingJob(job);

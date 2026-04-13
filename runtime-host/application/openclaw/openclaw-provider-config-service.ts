@@ -654,73 +654,30 @@ export async function setOpenClawDefaultModelWithOverride(
   });
 }
 
-export async function getActiveOpenClawProviders(): Promise<Set<string>> {
-  const activeProviders = new Set<string>();
-
-  try {
-    const config = await readOpenClawJson();
-    const providers = (config.models as Record<string, unknown> | undefined)?.providers;
-    if (providers && typeof providers === 'object') {
-      for (const key of Object.keys(providers as Record<string, unknown>)) {
-        activeProviders.add(key);
-      }
-    }
-
-    const plugins = (config.plugins as Record<string, unknown> | undefined)?.entries;
-    if (plugins && typeof plugins === 'object') {
-      for (const [pluginId, meta] of Object.entries(plugins as Record<string, unknown>)) {
-        if (pluginId.endsWith('-auth') && (meta as Record<string, unknown>).enabled) {
-          activeProviders.add(pluginId.replace(/-auth$/, ''));
-        }
-      }
-    }
-
-    const agents = (
-      config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
-        ? (config.agents as Record<string, unknown>)
-        : {}
-    );
-    const defaults = (
-      agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
-        ? (agents.defaults as Record<string, unknown>)
-        : {}
-    );
-    const modelConfig = (
-      defaults.model && typeof defaults.model === 'object' && !Array.isArray(defaults.model)
-        ? (defaults.model as Record<string, unknown>)
-        : {}
-    );
-    const primaryModel = typeof modelConfig.primary === 'string' ? modelConfig.primary : undefined;
-    if (primaryModel?.includes('/')) {
-      activeProviders.add(primaryModel.split('/')[0]);
-    }
-
-    const auth = config.auth as Record<string, unknown> | undefined;
-    addProvidersFromProfileEntries(auth?.profiles as Record<string, unknown> | undefined, activeProviders);
-
-    const authProfileProviders = await getProvidersFromAuthProfileStores();
-    for (const provider of authProfileProviders) {
-      activeProviders.add(provider);
-    }
-  } catch (error) {
-    logger.warn('Failed to read openclaw.json for active providers:', error);
-  }
-
-  return activeProviders;
-}
-
-export async function getOpenClawProvidersConfig(): Promise<{
+export async function getOpenClawProvidersSnapshot(): Promise<{
   providers: Record<string, Record<string, unknown>>;
   defaultModel: string | undefined;
+  activeProviders: Set<string>;
 }> {
   try {
     const config = await readOpenClawJson();
     const models = (config.models && typeof config.models === 'object' && !Array.isArray(config.models))
       ? (config.models as Record<string, unknown>)
       : {};
-    const providers = (models.providers && typeof models.providers === 'object' && !Array.isArray(models.providers))
-      ? (models.providers as Record<string, Record<string, unknown>>)
+    const providersRaw = (models.providers && typeof models.providers === 'object' && !Array.isArray(models.providers))
+      ? (models.providers as Record<string, unknown>)
       : {};
+    const providers = Object.fromEntries(
+      Object.entries(providersRaw).map(([providerId, providerEntry]) => (
+        [
+          providerId,
+          providerEntry && typeof providerEntry === 'object' && !Array.isArray(providerEntry)
+            ? { ...(providerEntry as Record<string, unknown>) }
+            : {},
+        ] as const
+      )),
+    ) as Record<string, Record<string, unknown>>;
+    const activeProviders = new Set<string>(Object.keys(providers));
 
     const agents = (config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents))
       ? (config.agents as Record<string, unknown>)
@@ -732,6 +689,18 @@ export async function getOpenClawProvidersConfig(): Promise<{
       ? (defaults.model as Record<string, unknown>)
       : {};
     const defaultModel = typeof modelConfig.primary === 'string' ? modelConfig.primary : undefined;
+    if (defaultModel?.includes('/')) {
+      activeProviders.add(defaultModel.split('/')[0]);
+    }
+
+    const plugins = (config.plugins as Record<string, unknown> | undefined)?.entries;
+    if (plugins && typeof plugins === 'object') {
+      for (const [pluginId, meta] of Object.entries(plugins as Record<string, unknown>)) {
+        if (pluginId.endsWith('-auth') && (meta as Record<string, unknown>).enabled) {
+          activeProviders.add(pluginId.replace(/-auth$/, ''));
+        }
+      }
+    }
 
     const authProviders = new Set<string>();
     const auth = config.auth as Record<string, unknown> | undefined;
@@ -746,17 +715,39 @@ export async function getOpenClawProvidersConfig(): Promise<{
       if (!providers[provider]) {
         providers[provider] = {};
       }
+      activeProviders.add(provider);
     }
 
-    return { providers, defaultModel };
-  } catch {
-    return { providers: {}, defaultModel: undefined };
+    return { providers, defaultModel, activeProviders };
+  } catch (error) {
+    logger.warn('Failed to read openclaw provider snapshot:', error);
+    return { providers: {}, defaultModel: undefined, activeProviders: new Set<string>() };
   }
+}
+
+export async function getActiveOpenClawProviders(): Promise<Set<string>> {
+  const { activeProviders } = await getOpenClawProvidersSnapshot();
+  return activeProviders;
+}
+
+export async function getOpenClawProvidersConfig(): Promise<{
+  providers: Record<string, Record<string, unknown>>;
+  defaultModel: string | undefined;
+}> {
+  const { providers, defaultModel } = await getOpenClawProvidersSnapshot();
+  return { providers, defaultModel };
 }
 
 function isBundledPluginLoadPath(pathname: string): boolean {
   const normalized = pathname.replace(/\\/g, '/');
-  return normalized.includes('node_modules/openclaw/extensions');
+  if (normalized.includes('node_modules/openclaw/extensions')) {
+    return true;
+  }
+  if (!isAbsolute(pathname)) {
+    return false;
+  }
+  const localBuildPluginsRoot = join(process.cwd(), 'build', 'openclaw-plugins').replace(/\\/g, '/');
+  return normalized === localBuildPluginsRoot || normalized.startsWith(`${localBuildPluginsRoot}/`);
 }
 
 async function sanitizePluginsLoadPaths(config: Record<string, unknown>): Promise<boolean> {

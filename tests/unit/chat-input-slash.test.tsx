@@ -14,11 +14,13 @@ type SkillMock = {
 const fetchSkillsMock = vi.fn(async () => {});
 const skillsStoreState: {
   skills: SkillMock[];
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
   fetchSkills: () => Promise<void>;
 } = {
   skills: [],
-  loading: false,
+  snapshotReady: true,
+  initialLoading: false,
   fetchSkills: fetchSkillsMock,
 };
 const chatStoreState: {
@@ -46,7 +48,8 @@ describe('chat input slash skills', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     skillsStoreState.skills = [];
-    skillsStoreState.loading = false;
+    skillsStoreState.snapshotReady = true;
+    skillsStoreState.initialLoading = false;
     chatStoreState.currentSessionKey = 'agent:main:main';
     subagentsStoreState.agents = [];
   });

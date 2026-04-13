@@ -17,6 +17,7 @@ describe('host-events', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     window.localStorage.clear();
+    delete (window as unknown as Record<string, unknown>).__MATCHACLAW_HOST_EVENT_HUB__;
   });
 
   it('subscribes through IPC for mapped host events', async () => {

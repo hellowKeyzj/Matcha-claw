@@ -21,7 +21,10 @@ function enableMainAppRoutes() {
     agents: [],
     availableModels: [],
     modelsLoading: false,
-    loading: false,
+    snapshotReady: true,
+    initialLoading: false,
+    refreshing: false,
+    mutating: false,
     error: null,
     selectedAgentId: null,
     loadAgents: vi.fn().mockResolvedValue(undefined),
@@ -55,7 +58,7 @@ describe('subagents navigation', () => {
     expect(subagentsLink).toHaveAttribute('href', '/subagents');
   });
 
-  it('renders subagents page at /subagents', () => {
+  it('renders subagents page at /subagents', async () => {
     enableMainAppRoutes();
 
     render(
@@ -64,7 +67,6 @@ describe('subagents navigation', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('Subagent Workspace')).toBeInTheDocument();
+    expect(await screen.findByText('Subagent Workspace')).toBeInTheDocument();
   });
 });
-

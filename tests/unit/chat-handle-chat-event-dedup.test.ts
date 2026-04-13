@@ -26,7 +26,10 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
 
     useChatStore.setState({
       messages: [],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       sending: true,
       activeRunId: 'run-1',

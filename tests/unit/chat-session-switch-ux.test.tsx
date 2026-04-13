@@ -92,7 +92,10 @@ describe('chat 会话切换 UI 回归', () => {
           id: 'pending-user-msg',
         },
       ],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       sending: true,
       activeRunId: 'run-test',
@@ -305,5 +308,91 @@ describe('chat 会话切换 UI 回归', () => {
       expect(scrollToIndexMock).toHaveBeenCalled();
       expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([2, { align: 'end' }]);
     });
+  });
+
+  it('从其他页面通过 session 参数进入未就绪会话时，不应先闪 Welcome 空态', async () => {
+    const pendingLoad = new Promise<void>(() => {
+      // keep pending on purpose, we only care about the transition frame
+    });
+    const loadHistoryPending = vi.fn().mockReturnValue(pendingLoad);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:fresh:main', displayName: 'agent:fresh:main' },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: 'existing message in current session',
+          timestamp: Date.now() / 1000,
+          id: 'existing-message',
+        },
+      ],
+      snapshotReady: true,
+      sessionRuntimeByKey: {},
+      loadHistory: loadHistoryPending,
+      loadSessions,
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/?session=agent:fresh:main']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(useChatStore.getState().currentSessionKey).toBe('agent:fresh:main');
+    });
+
+    expect(screen.queryByText('MatchaClaw Chat')).not.toBeInTheDocument();
+  });
+
+  it('已有新鲜 agent 快照时，进入 Chat 不应重复调用 loadAgents', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+      ],
+      snapshotReady: true,
+      lastLoadedAt: Date.now(),
+      loadAgents,
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main', displayName: 'agent:test:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'hello',
+          timestamp: Date.now() / 1000,
+          id: 'assistant-hello',
+        },
+      ],
+      snapshotReady: true,
+      sessionReadyByKey: { 'agent:test:main': true },
+      loadSessions,
+      loadHistory,
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(loadSessions).toHaveBeenCalledTimes(1);
+    });
+    expect(loadAgents).not.toHaveBeenCalled();
   });
 });

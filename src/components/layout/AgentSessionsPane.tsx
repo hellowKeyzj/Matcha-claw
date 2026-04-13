@@ -4,7 +4,6 @@ import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useChatStore, type ChatSession } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
@@ -113,7 +112,7 @@ function normalizeSessionTitle(text: string): string {
   return `${cleaned.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
 }
 
-function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): string {
+function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): string | null {
   const canonical = `agent:${agentId}:main`;
   const canonicalMatch = sessions.find((session) => session.key === canonical);
   if (canonicalMatch) {
@@ -122,7 +121,7 @@ function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): s
   if (sessions.length > 0) {
     return sessions[0].key;
   }
-  return canonical;
+  return null;
 }
 
 function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
@@ -249,19 +248,17 @@ function inferUntitledSessionLabel(
 
 interface AgentListItemProps {
   node: AgentSessionNode;
-  preferredSessionKey: string;
   isAgentActive: boolean;
   newSessionLabel: string;
-  onSwitchSession: (sessionKey: string) => void;
+  onOpenAgent: (agentId: string) => void;
   onCreateSessionForAgent: (agentId: string) => void;
 }
 
 const AgentListItem = memo(function AgentListItem({
   node,
-  preferredSessionKey,
   isAgentActive,
   newSessionLabel,
-  onSwitchSession,
+  onOpenAgent,
   onCreateSessionForAgent,
 }: AgentListItemProps) {
   return (
@@ -278,7 +275,7 @@ const AgentListItem = memo(function AgentListItem({
         type="button"
         data-testid={`agent-item-${node.agentId}`}
         className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left text-sm font-medium"
-        onClick={() => onSwitchSession(preferredSessionKey)}
+        onClick={() => onOpenAgent(node.agentId)}
       >
         <span
           aria-hidden
@@ -385,19 +382,21 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const agents = useSubagentsStore((state) => state.agents);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const subagentsSnapshotReady = useSubagentsStore((state) => state.snapshotReady);
+  const subagentsInitialLoading = useSubagentsStore((state) => state.initialLoading);
   const sessions = useChatStore((state) => state.sessions);
   const sessionLabels = useChatStore((state) => state.sessionLabels);
   const sessionLastActivity = useChatStore((state) => state.sessionLastActivity);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const switchSession = useChatStore((state) => state.switchSession);
+  const openAgentConversation = useChatStore((state) => state.openAgentConversation);
   const newSession = useChatStore((state) => state.newSession);
   const deleteSession = useChatStore((state) => state.deleteSession);
-  const loadSessions = useChatStore((state) => state.loadSessions);
-  const isGatewayRunning = useGatewayStore((state) => state.status.state === 'running');
   const deferredSessions = useDeferredValue(sessions);
   const deferredSessionLabels = useDeferredValue(sessionLabels);
   const deferredSessionLastActivity = useDeferredValue(sessionLastActivity);
+  const agentDataReady = subagentsSnapshotReady || agents.length > 0;
+  const showAgentLoading = !agentDataReady || subagentsInitialLoading;
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
     () => loadCollapsedSessionBucketMap(),
   );
@@ -407,15 +406,10 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     title: string;
   } | null>(null);
 
-  useEffect(() => {
-    if (!isGatewayRunning) {
-      return;
-    }
-    void loadAgents();
-    void loadSessions();
-  }, [isGatewayRunning, loadAgents, loadSessions]);
-
   const agentSessionNodes = useMemo<AgentSessionNode[]>(() => {
+    if (!agentDataReady) {
+      return [];
+    }
     const agentById = new Map(agents.map((agent) => [agent.id, agent] as const));
     const agentOrder = new Map(agents.map((agent, index) => [agent.id, index] as const));
     const sessionsByAgent = new Map<string, ChatSession[]>();
@@ -461,7 +455,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
           sessions: sortedSessions,
         };
       });
-  }, [agents, deferredSessionLastActivity, deferredSessions]);
+  }, [agentDataReady, agents, deferredSessionLastActivity, deferredSessions]);
 
   const preferredSessionKeyByAgent = useMemo(() => {
     return new Map(
@@ -532,6 +526,13 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
       navigate('/');
     });
   }, [navigate, switchSession]);
+
+  const handleOpenAgent = useCallback((agentId: string) => {
+    startTransition(() => {
+      openAgentConversation(agentId);
+      navigate('/');
+    });
+  }, [navigate, openAgentConversation]);
 
   const handleCreateSessionForAgent = useCallback((agentId: string) => {
     startTransition(() => {
@@ -666,7 +667,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 data-testid="agent-list-scroll-area"
                 className="min-h-0 overflow-y-auto pr-1"
               >
-                {agentSessionNodes.length === 0 ? (
+                {showAgentLoading ? (
+                  <p data-testid="agent-list-loading" className="px-2 py-1 text-xs text-muted-foreground">
+                    Loading...
+                  </p>
+                ) : agentSessionNodes.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>
                 ) : (
                   <div className="space-y-1">
@@ -674,10 +679,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                       <AgentListItem
                         key={node.agentId}
                         node={node}
-                        preferredSessionKey={preferredSessionKeyByAgent.get(node.agentId) ?? `agent:${node.agentId}:main`}
                         isAgentActive={activeAgentId === node.agentId}
                         newSessionLabel={t('sidebar.newSession')}
-                        onSwitchSession={handleSwitchSession}
+                        onOpenAgent={handleOpenAgent}
                         onCreateSessionForAgent={handleCreateSessionForAgent}
                       />
                     ))}
@@ -694,7 +698,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                 data-testid="session-list-scroll-area"
                 className="min-h-0 flex-1 overflow-y-auto pr-1"
               >
-                {globalSessions.length === 0 ? (
+                {showAgentLoading ? (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">Loading...</p>
+                ) : globalSessions.length === 0 ? (
                   <p className="px-2 py-1 text-xs text-muted-foreground">{t('sidebar.noAgentSessions')}</p>
                 ) : (
                   <div className="space-y-1">

@@ -46,12 +46,22 @@ function assertRequiredString(value: unknown, fieldName: string) {
   return normalized;
 }
 
-const CLAWHUB_DEFAULT_REGISTRY = 'https://clawhub.ai';
+const CLAWHUB_PRIMARY_REGISTRY = 'https://cn.clawhub-mirror.com';
+const CLAWHUB_BACKUP_REGISTRY = 'https://mirror-cn.clawhub.com';
 
-function resolveRegistryBase() {
-  const explicit = String(process.env.CLAWHUB_REGISTRY || process.env.CLAWDHUB_REGISTRY || '').trim();
-  const registry = explicit || CLAWHUB_DEFAULT_REGISTRY;
-  return registry.replace(/\/+$/, '');
+function normalizeRegistryBase(value: string) {
+  return value.replace(/\/+$/, '');
+}
+
+function resolveRegistryBases() {
+  const explicit = String(process.env.CLAWHUB_REGISTRY || '').trim();
+  if (explicit) {
+    return [normalizeRegistryBase(explicit)];
+  }
+  return Array.from(new Set([
+    normalizeRegistryBase(CLAWHUB_PRIMARY_REGISTRY),
+    normalizeRegistryBase(CLAWHUB_BACKUP_REGISTRY),
+  ]));
 }
 
 async function readClawHubToken() {
@@ -61,8 +71,13 @@ async function readClawHubToken() {
   return normalized || undefined;
 }
 
-async function fetchRegistryJson(routePath: string, query?: Record<string, unknown>) {
-  const url = new URL(routePath, `${resolveRegistryBase()}/`);
+async function fetchRegistryJsonFromBase(
+  registryBase: string,
+  routePath: string,
+  token?: string,
+  query?: Record<string, unknown>,
+) {
+  const url = new URL(routePath, `${registryBase}/`);
   const queryEntries = isRecord(query) ? Object.entries(query) : [];
   for (const [key, value] of queryEntries) {
     if (value == null) continue;
@@ -71,7 +86,6 @@ async function fetchRegistryJson(routePath: string, query?: Record<string, unkno
     url.searchParams.set(key, normalized);
   }
 
-  const token = await readClawHubToken();
   const headers = {
     Accept: 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -96,9 +110,29 @@ async function fetchRegistryJson(routePath: string, query?: Record<string, unkno
   }
 }
 
-function mapSearchResults(payload: Record<string, any>) {
+async function fetchRegistryJson(routePath: string, query?: Record<string, unknown>) {
+  const registries = resolveRegistryBases();
+  const token = await readClawHubToken();
+  const errors: string[] = [];
+  for (const registryBase of registries) {
+    try {
+      return await fetchRegistryJsonFromBase(registryBase, routePath, token, query);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${registryBase}: ${message}`);
+    }
+  }
+  throw new Error(errors.join(' | ') || 'Failed to reach ClawHub registry');
+}
+
+function normalizeOptionalNumber(value: unknown) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function mapSearchResults(payload: Record<string, any>, options?: { sortByHot?: boolean }) {
   const rows = Array.isArray(payload.results) ? payload.results : [];
-  return rows
+  const mapped = rows
     .map((item) => {
       if (!isRecord(item)) return null;
       const slug = typeof item.slug === 'string' ? item.slug.trim() : '';
@@ -108,33 +142,42 @@ function mapSearchResults(payload: Record<string, any>) {
         : slug;
       const description = typeof item.summary === 'string' ? item.summary.trim() : '';
       const version = typeof item.version === 'string' && item.version.trim() ? item.version.trim() : 'latest';
-      return { slug, name, description, version };
-    })
-    .filter(Boolean);
-}
-
-function mapExploreResults(payload: Record<string, any>) {
-  const rows = Array.isArray(payload.items) ? payload.items : [];
-  return rows
-    .map((item) => {
-      if (!isRecord(item)) return null;
-      const slug = typeof item.slug === 'string' ? item.slug.trim() : '';
-      if (!slug) return null;
-      const name = typeof item.displayName === 'string' && item.displayName.trim()
-        ? item.displayName.trim()
-        : slug;
-      const latestVersion = isRecord(item.latestVersion) && typeof item.latestVersion.version === 'string'
-        ? item.latestVersion.version
-        : 'latest';
-      const description = typeof item.summary === 'string' ? item.summary.trim() : '';
+      const author = isRecord(item.metaContent) && typeof item.metaContent.owner === 'string'
+        ? item.metaContent.owner.trim()
+        : (typeof item.author === 'string' ? item.author.trim() : '');
+      const stats = isRecord(item.stats) ? item.stats : {};
       return {
         slug,
         name,
-        version: String(latestVersion || 'latest').trim() || 'latest',
         description,
+        version,
+        author: author || undefined,
+        downloads: normalizeOptionalNumber(stats.downloads),
+        stars: normalizeOptionalNumber(stats.stars),
+        score: normalizeOptionalNumber(item.score) ?? 0,
       };
     })
-    .filter(Boolean);
+    .filter((item): item is {
+      slug: string;
+      name: string;
+      description: string;
+      version: string;
+      author?: string;
+      downloads?: number;
+      stars?: number;
+      score: number;
+    } => Boolean(item));
+
+  if (options?.sortByHot) {
+    mapped.sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+      return left.name.localeCompare(right.name);
+    });
+  }
+
+  return mapped.map(({ score: _score, ...item }) => item);
 }
 
 function normalizeLimit(value: unknown, fallback: number) {
@@ -161,7 +204,11 @@ function resolveCliEntry() {
   return candidates.find((candidate) => existsSync(candidate)) || null;
 }
 
-function runCommand(args: string[]) {
+type CliCommandResult =
+  | { ok: true; stdout: string; stderr: string }
+  | { ok: false; error: string };
+
+function runCommand(args: string[], registryBase: string): CliCommandResult {
   const entry = resolveCliEntry();
   if (!entry) {
     return {
@@ -182,6 +229,7 @@ function runCommand(args: string[]) {
       CI: 'true',
       FORCE_COLOR: '0',
       CLAWHUB_WORKDIR: workDir,
+      CLAWHUB_REGISTRY: registryBase,
     },
   });
   if (result.error) {
@@ -197,6 +245,22 @@ function runCommand(args: string[]) {
     ok: true,
     stdout: String(result.stdout || '').trim(),
     stderr: String(result.stderr || '').trim(),
+  };
+}
+
+function runCommandWithRegistryFallback(args: string[]): CliCommandResult {
+  const registries = resolveRegistryBases();
+  const errors: string[] = [];
+  for (const registryBase of registries) {
+    const result = runCommand(args, registryBase);
+    if (result.ok) {
+      return result;
+    }
+    errors.push(`${registryBase}: ${result.error}`);
+  }
+  return {
+    ok: false,
+    error: errors.join(' | ') || 'clawhub command failed',
   };
 }
 
@@ -302,11 +366,10 @@ export class ClawHubService {
     const query = typeof params.query === 'string' ? params.query.trim() : '';
     const limit = normalizeLimit(params.limit, query ? 50 : 25);
     if (!query) {
-      const payload = await fetchRegistryJson('/api/v1/skills', {
+      const payload = await fetchRegistryJson('/api/v1/search', {
         limit: String(limit),
-        sort: 'updated',
       });
-      return mapExploreResults(payload);
+      return mapSearchResults(payload, { sortByHot: true });
     }
     const payload = await fetchRegistryJson('/api/v1/search', {
       q: query,
@@ -332,7 +395,7 @@ export class ClawHubService {
     if (params.force === true) {
       args.push('--force');
     }
-    const result = runCommand(args);
+    const result = runCommandWithRegistryFallback(args);
     if (!result.ok) {
       throw new Error(result.error || 'clawhub install failed');
     }

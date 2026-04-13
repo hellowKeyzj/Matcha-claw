@@ -21,6 +21,10 @@
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
     },
+    "status": {
+        "refreshing": "Refreshing...",
+        "mutating": "Applying changes..."
+    },
     "taskPanel": {
         "stepStatus": {
             "running": "Running",

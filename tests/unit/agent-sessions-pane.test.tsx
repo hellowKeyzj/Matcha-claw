@@ -91,6 +91,30 @@ describe('agent sessions pane', () => {
     expect(newSession).toHaveBeenCalledWith('test');
   });
 
+  it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
+    const switchSession = vi.fn();
+    const openAgentConversation = vi.fn();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      switchSession,
+      newSession: vi.fn(),
+      openAgentConversation,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+    fireEvent.click(screen.getByTestId('agent-item-test'));
+
+    expect(openAgentConversation).toHaveBeenCalledWith('test');
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
   it('可删除会话并触发 deleteSession', async () => {
     const deleteSession = vi.fn().mockResolvedValue(undefined);
     const now = Date.now();
@@ -170,5 +194,34 @@ describe('agent sessions pane', () => {
     expect(agentScrollArea).not.toBe(sessionScrollArea);
     expect(agentScrollArea.className).toContain('overflow-y-auto');
     expect(sessionScrollArea.className).toContain('overflow-y-auto');
+  });
+
+  it('agents 数据未就绪时，不应先渲染默认 emoji 的 agent 行', () => {
+    useSubagentsStore.setState({
+      agents: [],
+      snapshotReady: false,
+      initialLoading: true,
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.queryByTestId('agent-item-main')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-item-test')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-list-loading')).toBeInTheDocument();
   });
 });

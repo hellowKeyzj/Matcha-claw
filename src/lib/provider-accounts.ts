@@ -19,7 +19,7 @@ export interface ProviderListItem {
   status?: ProviderWithKeyInfo;
 }
 
-function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
+export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
   const snapshot = value && typeof value === 'object'
     ? (value as Partial<ProviderSnapshot>)
     : {};

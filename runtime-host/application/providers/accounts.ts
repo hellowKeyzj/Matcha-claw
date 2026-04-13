@@ -6,8 +6,7 @@ import {
   saveProviderKeyToOpenClaw,
 } from '../openclaw/openclaw-auth-profile-store';
 import {
-  getActiveOpenClawProviders,
-  getOpenClawProvidersConfig,
+  getOpenClawProvidersSnapshot,
   removeProviderFromOpenClaw,
   setOpenClawDefaultModel,
   setOpenClawDefaultModelWithOverride,
@@ -221,8 +220,7 @@ export class ProviderAccountsService {
   async list() {
     const store = await this.deps.readProviderStore();
     const builtinProviderTypes = new Set<string>(BUILTIN_PROVIDER_TYPES);
-    const { providers, defaultModel } = await getOpenClawProvidersConfig();
-    const activeProviders = await getActiveOpenClawProviders();
+    const { providers, defaultModel, activeProviders } = await getOpenClawProvidersSnapshot();
 
     if (activeProviders.size === 0) {
       return {

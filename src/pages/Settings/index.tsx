@@ -52,9 +52,7 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApiFetch, hostOpenClawGetCliCommand } from '@/lib/host-api';
 import {
-  hostSettingsGetValue,
   hostSettingsPutPatch,
-  hostSettingsPutValue,
 } from '@/lib/settings-runtime';
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -214,10 +212,6 @@ export function Settings() {
   const [proxyEnabledDraft, setProxyEnabledDraft] = useState(false);
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
-  const [clawHubTokenInput, setClawHubTokenInput] = useState('');
-  const [showClawHubTokenPlain, setShowClawHubTokenPlain] = useState(false);
-  const [savingClawHubToken, setSavingClawHubToken] = useState(false);
-  const [loggingInClawHub, setLoggingInClawHub] = useState(false);
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
@@ -595,14 +589,6 @@ export function Settings() {
   ]);
 
   useEffect(() => {
-    void hostSettingsGetValue<string>('clawHubToken')
-      .then((value) => {
-        setClawHubTokenInput(typeof value === 'string' ? value : '');
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
     void refreshLicenseGateSnapshot();
     void loadStoredLicenseKey();
   }, [refreshLicenseGateSnapshot, loadStoredLicenseKey]);
@@ -648,60 +634,6 @@ export function Settings() {
       setSavingProxy(false);
     }
   };
-
-  const handleSaveClawHubToken = useCallback(async () => {
-    setSavingClawHubToken(true);
-    try {
-      const normalizedToken = clawHubTokenInput.trim().replace(/^Bearer\s+/i, '').trim();
-      await hostSettingsPutValue('clawHubToken', normalizedToken);
-      setClawHubTokenInput(normalizedToken);
-      toast.success(t('gateway.clawHubTokenSaved'));
-      trackUiEvent('settings.clawhub_token_saved', { hasToken: normalizedToken.length > 0 });
-    } catch (error) {
-      toast.error(`${t('gateway.clawHubTokenSaveFailed')}: ${toUserMessage(error)}`);
-    } finally {
-      setSavingClawHubToken(false);
-    }
-  }, [clawHubTokenInput, t]);
-
-  const handleClearClawHubToken = useCallback(async () => {
-    setSavingClawHubToken(true);
-    try {
-      await hostSettingsPutValue('clawHubToken', '');
-      setClawHubTokenInput('');
-      setShowClawHubTokenPlain(false);
-      toast.success(t('gateway.clawHubTokenCleared'));
-      trackUiEvent('settings.clawhub_token_cleared');
-    } catch (error) {
-      toast.error(`${t('gateway.clawHubTokenClearFailed')}: ${toUserMessage(error)}`);
-    } finally {
-      setSavingClawHubToken(false);
-    }
-  }, [t]);
-
-  const handleOpenClawHubSite = useCallback(() => {
-    void invokeIpc('shell:openExternal', 'https://clawhub.ai');
-  }, []);
-
-  const handleLoginAndSyncClawHubToken = useCallback(async () => {
-    setLoggingInClawHub(true);
-    toast.info(t('gateway.clawHubAutoLoginWaiting'));
-    try {
-      await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/auth/login', {
-        method: 'POST',
-        timeoutMs: 180000,
-      });
-      const normalizedToken = await hostSettingsGetValue<string>('clawHubToken');
-      setClawHubTokenInput(normalizedToken);
-      setShowClawHubTokenPlain(false);
-      toast.success(t('gateway.clawHubTokenAutoSynced'));
-      trackUiEvent('settings.clawhub_token_auto_synced', { hasToken: normalizedToken.length > 0 });
-    } catch (error) {
-      toast.error(`${t('gateway.clawHubTokenAutoSyncFailed')}: ${toUserMessage(error)}`);
-    } finally {
-      setLoggingInClawHub(false);
-    }
-  }, [t]);
 
   const telemetryStats = useMemo(() => {
     let errorCount = 0;
@@ -1153,88 +1085,6 @@ export function Settings() {
               checked={gatewayAutoStart}
               onCheckedChange={setGatewayAutoStart}
             />
-          </div>
-
-          <Separator />
-
-          <div className="space-y-2 rounded-md border border-border/60 p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <Label>{t('gateway.clawHubTokenTitle')}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('gateway.clawHubTokenDesc')}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleOpenClawHubSite}
-                >
-                  <ExternalLink className="mr-2 h-4 w-4" />
-                  {t('gateway.clawHubOpenSite')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    void handleLoginAndSyncClawHubToken();
-                  }}
-                  disabled={loggingInClawHub}
-                >
-                  {loggingInClawHub ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : null}
-                  {t('gateway.clawHubAutoLogin')}
-                </Button>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Input
-                value={clawHubTokenInput}
-                onChange={(event) => setClawHubTokenInput(event.target.value)}
-                type={showClawHubTokenPlain ? 'text' : 'password'}
-                placeholder={t('gateway.clawHubTokenPlaceholder')}
-                className="font-mono"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setShowClawHubTokenPlain((prev) => !prev)}
-              >
-                {showClawHubTokenPlain ? (
-                  <EyeOff className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  void handleClearClawHubToken();
-                }}
-                disabled={savingClawHubToken || loggingInClawHub || clawHubTokenInput.trim().length === 0}
-              >
-                {t('common:actions.clear')}
-              </Button>
-              <Button
-                type="button"
-                onClick={() => {
-                  void handleSaveClawHubToken();
-                }}
-                disabled={savingClawHubToken || loggingInClawHub}
-              >
-                {savingClawHubToken ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : null}
-                {t('common:actions.save')}
-              </Button>
-            </div>
           </div>
 
           <Separator />

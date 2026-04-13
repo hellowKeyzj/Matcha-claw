@@ -1,48 +1,65 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostChannelsFetchSnapshotMock = vi.fn();
+const hostChannelsDeleteConfigMock = vi.fn();
 const hostChannelsConnectMock = vi.fn();
 const hostChannelsDisconnectMock = vi.fn();
 const hostChannelsRequestQrCodeMock = vi.fn();
-const hostApiFetchMock = vi.fn();
 
 vi.mock('../../src/lib/channel-runtime', () => ({
   hostChannelsFetchSnapshot: (...args: unknown[]) => hostChannelsFetchSnapshotMock(...args),
+  hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),
   hostChannelsConnect: (...args: unknown[]) => hostChannelsConnectMock(...args),
   hostChannelsDisconnect: (...args: unknown[]) => hostChannelsDisconnectMock(...args),
   hostChannelsRequestQrCode: (...args: unknown[]) => hostChannelsRequestQrCodeMock(...args),
 }));
 
-vi.mock('../../src/lib/host-api', () => ({
-  hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
+function buildSnapshot(channelId: string, accountId = 'main') {
+  return {
+    success: true,
+    snapshot: {
+      channelOrder: [channelId],
+      channels: { [channelId]: { configured: true } },
+      channelAccounts: { [channelId]: [{ accountId, connected: true, name: accountId }] },
+      channelDefaultAccountId: { [channelId]: accountId },
+    },
+  };
+}
 
 describe('channels store', () => {
   beforeEach(() => {
     vi.resetModules();
     hostChannelsFetchSnapshotMock.mockReset();
+    hostChannelsDeleteConfigMock.mockReset();
     hostChannelsConnectMock.mockReset();
     hostChannelsDisconnectMock.mockReset();
     hostChannelsRequestQrCodeMock.mockReset();
-    hostApiFetchMock.mockReset();
   });
 
-  it('fetchChannels 通过 channel runtime helper 读取 snapshot，而不是直连 gateway store', async () => {
-    hostChannelsFetchSnapshotMock.mockResolvedValue({
-      success: true,
-      snapshot: {
-        channelOrder: ['wecom'],
-        channels: { wecom: { configured: true } },
-        channelAccounts: { wecom: [{ accountId: 'main', connected: true, name: 'main' }] },
-        channelDefaultAccountId: { wecom: 'main' },
-      },
-    });
+  it('首次无快照时进入 initialLoading，成功后写入快照', async () => {
+    let resolveFetch: ((value: ReturnType<typeof buildSnapshot>) => void) | null = null;
+    hostChannelsFetchSnapshotMock.mockReturnValue(
+      new Promise<ReturnType<typeof buildSnapshot>>((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
 
     const { useChannelsStore } = await import('../../src/stores/channels');
-    await useChannelsStore.getState().fetchChannels();
+    const fetchPromise = useChannelsStore.getState().fetchChannels();
 
-    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
-    expect(useChannelsStore.getState().channels).toEqual([
+    expect(useChannelsStore.getState().snapshotReady).toBe(false);
+    expect(useChannelsStore.getState().initialLoading).toBe(true);
+    expect(useChannelsStore.getState().refreshing).toBe(false);
+
+    resolveFetch?.(buildSnapshot('wecom'));
+    await fetchPromise;
+
+    const state = useChannelsStore.getState();
+    expect(state.snapshotReady).toBe(true);
+    expect(state.initialLoading).toBe(false);
+    expect(state.refreshing).toBe(false);
+    expect(state.error).toBeNull();
+    expect(state.channels).toEqual([
       {
         id: 'wecom-main',
         type: 'wecom',
@@ -52,6 +69,77 @@ describe('channels store', () => {
         error: undefined,
       },
     ]);
+  });
+
+  it('已有快照时刷新失败保留旧数据，不回退空白', async () => {
+    hostChannelsFetchSnapshotMock.mockResolvedValueOnce(buildSnapshot('wecom'));
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    await useChannelsStore.getState().fetchChannels();
+
+    hostChannelsFetchSnapshotMock.mockRejectedValueOnce(new Error('network down'));
+    const refreshPromise = useChannelsStore.getState().fetchChannels();
+    expect(useChannelsStore.getState().refreshing).toBe(true);
+    expect(useChannelsStore.getState().initialLoading).toBe(false);
+
+    await refreshPromise;
+
+    const state = useChannelsStore.getState();
+    expect(state.snapshotReady).toBe(true);
+    expect(state.refreshing).toBe(false);
+    expect(state.channels).toEqual([
+      expect.objectContaining({
+        id: 'wecom-main',
+        type: 'wecom',
+        status: 'connected',
+      }),
+    ]);
+    expect(state.error).toBe('network down');
+  });
+
+  it('fetchChannels 并发请求会单飞去重', async () => {
+    let resolveFetch: ((value: ReturnType<typeof buildSnapshot>) => void) | null = null;
+    hostChannelsFetchSnapshotMock.mockReturnValue(
+      new Promise<ReturnType<typeof buildSnapshot>>((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    const first = useChannelsStore.getState().fetchChannels();
+    const second = useChannelsStore.getState().fetchChannels();
+
+    expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch?.(buildSnapshot('wecom'));
+    await Promise.all([first, second]);
+  });
+
+  it('deleteChannel 会维护 mutatingByChannelId 生命周期', async () => {
+    let resolveDelete: (() => void) | null = null;
+    hostChannelsDeleteConfigMock.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveDelete = resolve;
+      }),
+    );
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    useChannelsStore.getState().setChannels([
+      { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected' },
+    ]);
+
+    const deletePromise = useChannelsStore.getState().deleteChannel('wecom-main');
+    expect(useChannelsStore.getState().mutating).toBe(true);
+    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
+
+    resolveDelete?.();
+    await deletePromise;
+
+    const state = useChannelsStore.getState();
+    expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('wecom');
+    expect(state.mutating).toBe(false);
+    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
+    expect(state.channels).toEqual([]);
   });
 
   it('多账号场景下，存在健康账号时整体状态应保持 connected', async () => {
@@ -105,22 +193,66 @@ describe('channels store', () => {
     ]);
   });
 
-  it('connect/disconnect/requestQrCode 通过 channel runtime helper 执行', async () => {
+  it('connectChannel 会维护 mutatingByChannelId 生命周期', async () => {
+    let resolveConnect: (() => void) | null = null;
+    hostChannelsConnectMock.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveConnect = resolve;
+      }),
+    );
+
     const { useChannelsStore } = await import('../../src/stores/channels');
     useChannelsStore.getState().setChannels([
       { id: 'wecom-main', type: 'wecom', name: 'main', status: 'disconnected' },
     ]);
 
-    hostChannelsConnectMock.mockResolvedValue({ success: true });
-    hostChannelsDisconnectMock.mockResolvedValue({ success: true });
+    const connectPromise = useChannelsStore.getState().connectChannel('wecom-main');
+    expect(useChannelsStore.getState().mutating).toBe(true);
+    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
+    expect(useChannelsStore.getState().channels[0]?.status).toBe('connecting');
+
+    resolveConnect?.();
+    await connectPromise;
+
+    const state = useChannelsStore.getState();
+    expect(state.mutating).toBe(false);
+    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
+    expect(state.channels[0]?.status).toBe('connected');
+  });
+
+  it('disconnectChannel 会维护 mutatingByChannelId 生命周期', async () => {
+    let resolveDisconnect: (() => void) | null = null;
+    hostChannelsDisconnectMock.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        resolveDisconnect = resolve;
+      }),
+    );
+
+    const { useChannelsStore } = await import('../../src/stores/channels');
+    useChannelsStore.getState().setChannels([
+      { id: 'wecom-main', type: 'wecom', name: 'main', status: 'connected' },
+    ]);
+
+    const disconnectPromise = useChannelsStore.getState().disconnectChannel('wecom-main');
+    expect(useChannelsStore.getState().mutating).toBe(true);
+    expect(useChannelsStore.getState().mutatingByChannelId['wecom-main']).toBe(1);
+
+    resolveDisconnect?.();
+    await disconnectPromise;
+
+    const state = useChannelsStore.getState();
+    expect(state.mutating).toBe(false);
+    expect(state.mutatingByChannelId['wecom-main']).toBeUndefined();
+    expect(state.channels[0]?.status).toBe('disconnected');
+  });
+
+  it('requestQrCode 通过 channel runtime helper 执行', async () => {
+    const { useChannelsStore } = await import('../../src/stores/channels');
+
     hostChannelsRequestQrCodeMock.mockResolvedValue({ success: true, qrCode: 'qr', sessionId: 's-1' });
 
-    await useChannelsStore.getState().connectChannel('wecom-main');
-    await useChannelsStore.getState().disconnectChannel('wecom-main');
     const qr = await useChannelsStore.getState().requestQrCode('whatsapp');
 
-    expect(hostChannelsConnectMock).toHaveBeenCalledWith('wecom-main');
-    expect(hostChannelsDisconnectMock).toHaveBeenCalledWith('wecom-main');
     expect(hostChannelsRequestQrCodeMock).toHaveBeenCalledWith('whatsapp');
     expect(qr).toEqual({ qrCode: 'qr', sessionId: 's-1' });
   });

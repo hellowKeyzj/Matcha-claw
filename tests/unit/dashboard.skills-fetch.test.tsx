@@ -1,7 +1,9 @@
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Dashboard } from '@/pages/Dashboard';
+import { useDashboardUiStore } from '@/stores/dashboard-ui';
+import { useDashboardUsageStore } from '@/stores/dashboard-usage';
 
 const fetchChannelsMock = vi.fn(async () => {});
 const fetchSkillsMock = vi.fn(async () => {});
@@ -9,7 +11,7 @@ const hostApiFetchMock = vi.fn(async (path: string) => {
   if (path === '/api/runtime-host/usage/recent') {
     return [
       {
-        timestamp: '2026-03-15T00:00:00.000Z',
+        timestamp: new Date().toISOString(),
         sessionId: 's-1',
         agentId: 'main',
         model: 'demo-model',
@@ -83,6 +85,22 @@ vi.mock('react-i18next', () => ({
 describe('dashboard skills fetch behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useDashboardUiStore.setState({
+      dashboardHeavyContentReady: true,
+      usageGroupBy: 'model',
+      usageWindow: '7d',
+      usagePage: 1,
+    });
+    useDashboardUsageStore.setState({
+      usageHistory: [],
+      usageHistoryReady: false,
+      initialLoading: false,
+      refreshing: false,
+      usagePanelReady: true,
+      usageChartReady: false,
+      usageDetailListReady: false,
+      error: null,
+    });
   });
 
   it('技能列表已有数据时，不重复触发 fetchSkills', async () => {
@@ -111,6 +129,20 @@ describe('dashboard skills fetch behavior', () => {
 
     await waitFor(() => {
       expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('token 历史有数据时，明细列表应结束骨架并渲染记录', async () => {
+    skillsState.skills = [];
+
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText('demo-model').length).toBeGreaterThan(0);
     });
   });
 });

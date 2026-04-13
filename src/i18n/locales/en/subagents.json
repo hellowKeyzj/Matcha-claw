@@ -2,6 +2,10 @@
   "title": "Subagent Workspace",
   "subtitle": "Manage subagents and model settings.",
   "newSubagent": "New Subagent",
+  "status": {
+    "refreshing": "Refreshing...",
+    "mutating": "Saving changes..."
+  },
   "empty": "No subagents found.",
   "modelGuide": {
     "description": "Please go to Models to add a model first.",

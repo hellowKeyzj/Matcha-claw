@@ -27,6 +27,79 @@ function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
   return `agent:${normalized}`;
 }
 
+function parseAgentIdFromSessionKey(sessionKey: string): string | null {
+  const matched = sessionKey.match(/^agent:([^:]+):/i);
+  return matched?.[1] ?? null;
+}
+
+function parseSessionTimestampMs(sessionKey: string): number | null {
+  const suffix = sessionKey.split(':').slice(2).join(':') || sessionKey;
+  const matched = suffix.match(/session-(\d{8,16})/i);
+  if (!matched) return null;
+  const raw = Number(matched[1]);
+  if (!Number.isFinite(raw)) return null;
+  return matched[1].length <= 10 ? raw * 1000 : raw;
+}
+
+function resolveSessionActivityMs(
+  session: ChatSession,
+  sessionLastActivity: Record<string, number>,
+): number {
+  const fromStore = sessionLastActivity[session.key];
+  if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
+    return fromStore;
+  }
+  if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
+    return session.updatedAt;
+  }
+  return parseSessionTimestampMs(session.key) ?? 0;
+}
+
+function resolvePreferredSessionKeyForAgent(
+  agentId: string,
+  sessions: ChatSession[],
+  sessionLastActivity: Record<string, number>,
+): string | null {
+  const canonicalKey = `agent:${agentId}:main`;
+  const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
+  if (owned.length === 0) {
+    return null;
+  }
+  if (owned.some((session) => session.key === canonicalKey)) {
+    return canonicalKey;
+  }
+  const sorted = [...owned].sort((left, right) => {
+    const leftActivity = resolveSessionActivityMs(left, sessionLastActivity);
+    const rightActivity = resolveSessionActivityMs(right, sessionLastActivity);
+    if (leftActivity !== rightActivity) {
+      return rightActivity - leftActivity;
+    }
+    return left.key.localeCompare(right.key);
+  });
+  return sorted[0]?.key ?? null;
+}
+
+function shouldKeepMissingCurrentSession(
+  sessionKey: string,
+  state: Pick<ReturnType<ChatGet>, 'messages' | 'sessionLabels' | 'sessionLastActivity'>,
+  backendSessionCount: number,
+): boolean {
+  if (!sessionKey) {
+    return false;
+  }
+  if (backendSessionCount === 0) {
+    return true;
+  }
+  const hasMessages = state.messages.length > 0;
+  const hasLabel = Boolean(state.sessionLabels[sessionKey]);
+  const hasActivity = Boolean(state.sessionLastActivity[sessionKey]);
+  if (!sessionKey.endsWith(':main')) {
+    // Keep only local draft sessions (created but still truly empty).
+    return !hasMessages && !hasLabel && !hasActivity;
+  }
+  return hasMessages || hasLabel || hasActivity;
+}
+
 function isTrulyEmptyNonMainSession(
   currentSessionKey: string,
   state: Pick<ReturnType<ChatGet>, 'messages' | 'sessionLastActivity' | 'sessionLabels'>,
@@ -40,7 +113,7 @@ function isTrulyEmptyNonMainSession(
 export function createSessionActions(
   set: ChatSet,
   get: ChatGet,
-): Pick<SessionHistoryActions, 'loadSessions' | 'switchSession' | 'newSession' | 'deleteSession' | 'cleanupEmptySession'> {
+): Pick<SessionHistoryActions, 'loadSessions' | 'openAgentConversation' | 'switchSession' | 'newSession' | 'deleteSession' | 'cleanupEmptySession'> {
   return {
     loadSessions: async () => {
       try {
@@ -81,7 +154,8 @@ export function createSessionActions(
             return true;
           });
 
-          const { currentSessionKey } = get();
+          const stateSnapshot = get();
+          const { currentSessionKey } = stateSnapshot;
           let nextSessionKey = currentSessionKey || DEFAULT_SESSION_KEY;
           if (!nextSessionKey.startsWith('agent:')) {
             const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
@@ -89,15 +163,21 @@ export function createSessionActions(
               nextSessionKey = canonicalMatch;
             }
           }
-          if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
-            // Current session not found in the backend list
-            const isNewEmptySession = get().messages.length === 0;
-            if (!isNewEmptySession) {
+          const hasSessionInBackend = (sessionKey: string): boolean => dedupedSessions.some((session) => session.key === sessionKey);
+          let shouldKeepMissingCurrent = false;
+          if (!hasSessionInBackend(nextSessionKey)) {
+            shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
+              nextSessionKey,
+              stateSnapshot,
+              dedupedSessions.length,
+            );
+            if (!shouldKeepMissingCurrent && dedupedSessions.length > 0) {
               nextSessionKey = dedupedSessions[0].key;
             }
           }
 
-          const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
+          const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
+          const sessionsWithCurrent = !currentExistsInBackend && shouldKeepMissingCurrent && nextSessionKey
             ? [
               ...dedupedSessions,
               { key: nextSessionKey, displayName: nextSessionKey },
@@ -160,6 +240,24 @@ export function createSessionActions(
       } catch (err) {
         console.warn('Failed to load sessions:', err);
       }
+    },
+
+    openAgentConversation: (agentId: string) => {
+      const normalized = agentId.trim();
+      if (!normalized) {
+        return;
+      }
+      const state = get();
+      const preferredSessionKey = resolvePreferredSessionKeyForAgent(
+        normalized,
+        state.sessions,
+        state.sessionLastActivity,
+      );
+      if (preferredSessionKey) {
+        get().switchSession(preferredSessionKey);
+        return;
+      }
+      get().newSession(normalized);
     },
 
     // ── Switch session ──

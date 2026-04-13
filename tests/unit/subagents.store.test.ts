@@ -767,7 +767,8 @@ describe('subagents store', () => {
 
     const agents = useSubagentsStore.getState().agents;
     expect(agents).toMatchObject([{ id: 'main', name: 'Main-new' }]);
-    expect(useSubagentsStore.getState().loading).toBe(false);
+    expect(useSubagentsStore.getState().initialLoading).toBe(false);
+    expect(useSubagentsStore.getState().refreshing).toBe(false);
   });
 
   it('loadAgents 会先用 agents.list.identity，再回退 agent.identity.get 补齐 emoji', async () => {
@@ -812,6 +813,69 @@ describe('subagents store', () => {
         isDefault: false,
         identityEmoji: '📊',
       });
+    });
+  });
+
+  it('loadAgents 刷新时保留已有 identityEmoji，避免回退默认头像', async () => {
+    const rpc = gatewayClientRpcMock;
+    let agentsListCallCount = 0;
+    let resolveSecondIdentity: ((value: unknown) => void) | null = null;
+    const secondIdentityTask = new Promise((resolve) => {
+      resolveSecondIdentity = resolve;
+    });
+
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'agents.list') {
+        agentsListCallCount += 1;
+        return {
+          success: true,
+          result: {
+            agents: [
+              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+              { id: 'writer', name: 'Writer' },
+            ],
+            defaultId: 'main',
+          },
+        };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            config: {},
+          },
+        };
+      }
+      if (method === 'agent.identity.get') {
+        const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
+        if (agentId !== 'writer') {
+          return { success: true, result: { agentId } };
+        }
+        if (agentsListCallCount === 1) {
+          return { success: true, result: { agentId, emoji: '📊' } };
+        }
+        return secondIdentityTask;
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await useSubagentsStore.getState().loadAgents();
+    await vi.waitFor(() => {
+      const writer = useSubagentsStore.getState().agents.find((agent) => agent.id === 'writer');
+      expect(writer?.identityEmoji).toBe('📊');
+    });
+
+    await useSubagentsStore.getState().loadAgents();
+
+    const writerAfterSecondLoad = useSubagentsStore.getState().agents.find((agent) => agent.id === 'writer');
+    expect(writerAfterSecondLoad?.identityEmoji).toBe('📊');
+
+    resolveSecondIdentity?.({
+      success: true,
+      result: {
+        agentId: 'writer',
+        emoji: '📊',
+      },
     });
   });
 
@@ -960,7 +1024,5 @@ describe('subagents store', () => {
     expect(rpc).not.toHaveBeenCalledWith('agents.list', {});
   });
 });
-
-
 
 
