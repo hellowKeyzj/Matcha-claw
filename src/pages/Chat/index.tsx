@@ -37,6 +37,7 @@ const CHAT_STICKY_BOTTOM_THRESHOLD_PX = 120;
 const CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX = 168;
 const CHAT_VIRTUAL_OVERSCAN = 8;
 const SUBAGENT_HISTORY_LIMIT = 200;
+const SUBAGENTS_SNAPSHOT_TTL_MS = 15_000;
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const EMPTY_MESSAGES: RawMessage[] = [];
 const EMPTY_STRING_SET = new Set<string>();
@@ -78,14 +79,6 @@ function clampTaskInboxWidth(width: number, containerWidth: number): number {
     containerWidth - CHAT_MAIN_MIN_WIDTH - TASK_INBOX_RESIZER_WIDTH,
   );
   return clamp(width, TASK_INBOX_MIN_WIDTH, Math.min(TASK_INBOX_MAX_WIDTH, maxWidth));
-}
-
-function buildAgentChatSessionKey(agentId: string): string {
-  const normalized = agentId.trim();
-  if (!normalized) {
-    return '';
-  }
-  return `agent:${normalized}:main`;
 }
 
 function parseAgentIdFromSessionKey(sessionKey: string): string {
@@ -149,7 +142,9 @@ export function Chat() {
   const isGatewayRunning = gatewayStatus.state === 'running';
 
   const messages = useChatStore((s) => s.messages);
-  const loading = useChatStore((s) => s.loading);
+  const initialLoading = useChatStore((s) => s.initialLoading);
+  const refreshing = useChatStore((s) => s.refreshing);
+  const mutating = useChatStore((s) => s.mutating);
   const sending = useChatStore((s) => s.sending);
   const error = useChatStore((s) => s.error);
   const showThinking = useChatStore((s) => s.showThinking);
@@ -162,7 +157,9 @@ export function Chat() {
   const loadHistory = useChatStore((s) => s.loadHistory);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const switchSession = useChatStore((s) => s.switchSession);
+  const openAgentConversation = useChatStore((s) => s.openAgentConversation);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
+  const currentSessionReady = useChatStore((s) => Boolean(s.sessionReadyByKey[s.currentSessionKey]));
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abortRun = useChatStore((s) => s.abortRun);
   const clearError = useChatStore((s) => s.clearError);
@@ -170,7 +167,8 @@ export function Chat() {
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
   const updateAgent = useSubagentsStore((s) => s.updateAgent);
   const skills = useSkillsStore((s) => s.skills);
-  const skillsLoading = useSkillsStore((s) => s.loading);
+  const skillsSnapshotReady = useSkillsStore((s) => s.snapshotReady);
+  const skillsInitialLoading = useSkillsStore((s) => s.initialLoading);
   const fetchSkills = useSkillsStore((s) => s.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((s) => s.userAvatarDataUrl);
 
@@ -282,13 +280,26 @@ export function Chat() {
     const params = new URLSearchParams(location.search);
     const sessionParam = params.get('session')?.trim() ?? '';
     const agentParam = params.get('agent')?.trim() ?? '';
-    const targetSessionKey = sessionParam || buildAgentChatSessionKey(agentParam);
     (async () => {
-      await loadAgents();
+      const subagentsState = useSubagentsStore.getState();
+      const shouldLoadAgents = (
+        !subagentsState.snapshotReady
+        || subagentsState.agents.length === 0
+        || !subagentsState.lastLoadedAt
+        || (Date.now() - subagentsState.lastLoadedAt) > SUBAGENTS_SNAPSHOT_TTL_MS
+      );
+      if (shouldLoadAgents) {
+        await loadAgents();
+      }
       await loadSessions();
       if (cancelled) return;
-      if (targetSessionKey) {
-        switchSession(targetSessionKey);
+      if (sessionParam) {
+        switchSession(sessionParam);
+        navigate('/', { replace: true });
+        return;
+      }
+      if (agentParam) {
+        openAgentConversation(agentParam);
         navigate('/', { replace: true });
         return;
       }
@@ -300,7 +311,7 @@ export function Chat() {
       // empty session so it doesn't linger as a ghost entry in the sidebar.
       cleanupEmptySession();
     };
-  }, [cleanupEmptySession, isGatewayRunning, loadAgents, loadHistory, loadSessions, location.search, navigate, switchSession]);
+  }, [cleanupEmptySession, isGatewayRunning, loadAgents, loadHistory, loadSessions, location.search, navigate, openAgentConversation, switchSession]);
 
   // Update timestamp when sending starts
   useEffect(() => {
@@ -520,11 +531,12 @@ export function Chat() {
       waitingApproval,
     ],
   );
-  const loadingVisible = useMinLoading(loading && !sending);
   const hasRenderableRows = chatRows.length > 0;
-  const showBlockingLoading = loadingVisible && !sending && !hasRenderableRows;
-  const showOverlayLoading = loadingVisible && !sending && hasRenderableRows;
-  const isEmptyState = !showBlockingLoading && !sending && chatRows.length === 0;
+  const waitingForSessionSnapshot = !sending && !hasRenderableRows && !currentSessionReady;
+  const loadingVisible = useMinLoading(waitingForSessionSnapshot || (initialLoading && !sending));
+  const showBlockingLoading = waitingForSessionSnapshot && loadingVisible;
+  const showBackgroundStatus = !showBlockingLoading && (refreshing || mutating);
+  const isEmptyState = !showBlockingLoading && !sending && chatRows.length === 0 && currentSessionReady;
   const {
     handleViewportPointerDown,
     handleViewportScroll,
@@ -592,10 +604,10 @@ export function Chat() {
       return;
     }
     setSkillConfigOpen(true);
-    if (skills.length === 0 && !skillsLoading) {
+    if (!skillsSnapshotReady && !skillsInitialLoading) {
       void fetchSkills();
     }
-  }, [currentAgent, fetchSkills, skills.length, skillsLoading]);
+  }, [currentAgent, fetchSkills, skillsInitialLoading, skillsSnapshotReady]);
 
   useEffect(() => {
     if (!skillConfigOpen || !currentAgent) {
@@ -654,6 +666,12 @@ export function Chat() {
     >
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-card">
         <div className="flex shrink-0 items-center justify-end px-2 py-2 md:px-4">
+          {showBackgroundStatus && (
+            <div className="mr-2 inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>{refreshing ? t('status.refreshing') : t('status.mutating')}</span>
+            </div>
+          )}
           <Button
             type="button"
             size="sm"
@@ -721,13 +739,6 @@ export function Chat() {
               )}
             </div>
           </div>
-          {showOverlayLoading && (
-            <div className="pointer-events-auto absolute inset-0 z-10 flex items-center justify-center bg-background/20 backdrop-blur-[1px]">
-              <div className="rounded-full border border-border bg-background p-2.5 shadow-md">
-                <LoadingSpinner size="md" />
-              </div>
-            </div>
-          )}
         </div>
 
         {error && (
@@ -777,7 +788,7 @@ export function Chat() {
           open={skillConfigOpen}
           title={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}
           skillOptions={availableSkillOptions}
-          skillsLoading={skillsLoading}
+          skillsLoading={!skillsSnapshotReady && skillsInitialLoading}
           selectedSkillIds={selectedSkillIds}
           submitting={skillConfigSaving}
           onToggleSkill={(skillId, checked) => {

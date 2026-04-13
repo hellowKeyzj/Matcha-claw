@@ -7,7 +7,10 @@ type RpcMock = ReturnType<typeof vi.fn<(method: string, params?: unknown) => Pro
 function resetChatStoreState() {
   useChatStore.setState({
     messages: [],
-    loading: false,
+    snapshotReady: false,
+    initialLoading: false,
+    refreshing: false,
+    mutating: false,
     error: null,
     sending: false,
     activeRunId: null,
@@ -185,7 +188,44 @@ describe('chat session labeling', () => {
     expect(state.sessionLabels['agent:alpha:session-1']).toBe('Alpha 会话');
   });
 
-  it('loadHistory 进行中切换会话时，loading 也应在安全超时后自动清理', async () => {
+  it('loadSessions 不应保留无本地痕迹且后端不存在的 canonical main 会话 key', async () => {
+    resetChatStoreState();
+    useChatStore.setState({
+      currentSessionKey: 'agent:feedback:main',
+      messages: [],
+      sessions: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    } as never);
+
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            {
+              key: 'agent:main:main',
+              label: 'Main 会话',
+              updatedAt: 1_800_000_333_000,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().loadSessions();
+
+    const state = useChatStore.getState();
+    expect(state.currentSessionKey).toBe('agent:main:main');
+    expect(state.sessions.some((session) => session.key === 'agent:feedback:main')).toBe(false);
+  });
+
+  it('loadHistory 进行中切换会话时，应在安全超时后自动清理 initialLoading/refreshing', async () => {
     vi.useFakeTimers();
     try {
       resetChatStoreState();
@@ -208,12 +248,13 @@ describe('chat session labeling', () => {
       } as never);
 
       const loadPromise = useChatStore.getState().loadHistory(false);
-      expect(useChatStore.getState().loading).toBe(true);
+      expect(useChatStore.getState().initialLoading || useChatStore.getState().refreshing).toBe(true);
 
       // 模拟加载中被其它入口改写当前会话（首屏并发常见路径）
       useChatStore.setState({ currentSessionKey: 'agent:beta:session-2' } as never);
       await vi.advanceTimersByTimeAsync(15_100);
-      expect(useChatStore.getState().loading).toBe(false);
+      expect(useChatStore.getState().initialLoading).toBe(false);
+      expect(useChatStore.getState().refreshing).toBe(false);
 
       // 结束挂起请求，避免遗留异步
       await Promise.resolve();

@@ -1,56 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
+import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from '@/stores/gateway';
+import { usePluginsStore } from '@/stores/plugins-store';
 import { useTranslation } from 'react-i18next';
-
-type PluginCatalogItem = {
-  id: string;
-  name: string;
-  version: string;
-  kind: 'builtin' | 'third-party';
-  platform: 'openclaw' | 'matchaclaw';
-  category: string;
-  description?: string;
-  enabled: boolean;
-};
-
-type RuntimePayload = {
-  success: boolean;
-  state: {
-    lifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error';
-    runtimeLifecycle: 'idle' | 'booting' | 'ready' | 'degraded' | 'stopped';
-    activePluginCount: number;
-    pluginExecutionEnabled: boolean;
-    enabledPluginIds: string[];
-    lastError?: string;
-  };
-  health: {
-    ok: boolean;
-    lifecycle: 'idle' | 'booting' | 'ready' | 'degraded' | 'stopped';
-    activePluginCount: number;
-    degradedPlugins: string[];
-    error?: string;
-  };
-  execution: {
-    pluginExecutionEnabled: boolean;
-    enabledPluginIds: string[];
-  };
-};
-
-type CatalogPayload = {
-  success: boolean;
-  execution: {
-    pluginExecutionEnabled: boolean;
-    enabledPluginIds: string[];
-  };
-  plugins: PluginCatalogItem[];
-};
 
 function formatLifecycleLabel(lifecycle: string): string {
   switch (lifecycle) {
@@ -87,38 +45,33 @@ export function PluginsPage() {
   const { t } = useTranslation(['plugins', 'common']);
   const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
   const initGatewayEvents = useGatewayStore((state) => state.init);
-  const [loading, setLoading] = useState(true);
-  const [busyAction, setBusyAction] = useState<'refresh' | 'execution' | 'toggle-plugin' | 'restart' | null>(null);
-  const [runtime, setRuntime] = useState<RuntimePayload | null>(null);
-  const [plugins, setPlugins] = useState<PluginCatalogItem[]>([]);
-
-  const loadSnapshot = useCallback(async () => {
-    const [runtimePayload, catalogPayload] = await Promise.all([
-      hostApiFetch<RuntimePayload>('/api/plugins/runtime'),
-      hostApiFetch<CatalogPayload>('/api/plugins/catalog'),
-    ]);
-    setRuntime(runtimePayload);
-    setPlugins(catalogPayload.plugins);
-  }, []);
+  const pluginSnapshot = usePluginsStore((state) => state.pluginSnapshot);
+  const snapshotReady = usePluginsStore((state) => state.snapshotReady);
+  const initialLoading = usePluginsStore((state) => state.initialLoading);
+  const refreshing = usePluginsStore((state) => state.refreshing);
+  const refreshReason = usePluginsStore((state) => state.refreshReason);
+  const mutating = usePluginsStore((state) => state.mutating);
+  const mutatingAction = usePluginsStore((state) => state.mutatingAction);
+  const mutatingPluginId = usePluginsStore((state) => state.mutatingPluginId);
+  const error = usePluginsStore((state) => state.error);
+  const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
+  const restartHostAction = usePluginsStore((state) => state.restartHost);
+  const toggleExecutionAction = usePluginsStore((state) => state.toggleExecution);
+  const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
+  const manualRefreshing = refreshing && refreshReason === 'manual';
 
   useEffect(() => {
-    let cancelled = false;
     void initGatewayEvents();
-    setLoading(true);
-    void loadSnapshot()
-      .catch(() => {
-        if (cancelled) return;
+    const hadSnapshot = usePluginsStore.getState().snapshotReady;
+    void refreshSnapshot({ reason: 'initial' }).catch(() => {
+      if (!hadSnapshot) {
         toast.error(t('plugins:errors.loadFailed'));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [initGatewayEvents, loadSnapshot, t]);
+      }
+    });
+  }, [initGatewayEvents, refreshSnapshot, t]);
+
+  const runtime = pluginSnapshot.runtime;
+  const plugins = pluginSnapshot.plugins;
 
   const enabledPluginIds = useMemo(
     () => runtime?.execution.enabledPluginIds ?? [],
@@ -155,66 +108,36 @@ export function PluginsPage() {
     : '';
 
   const refresh = useCallback(async () => {
-    setBusyAction('refresh');
     try {
-      await loadSnapshot();
+      await refreshSnapshot({ reason: 'manual' });
     } catch {
       toast.error(t('plugins:errors.loadFailed'));
-    } finally {
-      setBusyAction(null);
     }
-  }, [loadSnapshot, t]);
+  }, [refreshSnapshot, t]);
 
   const restartHost = useCallback(async () => {
-    setBusyAction('restart');
     try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/restart', { method: 'POST' });
-      setRuntime(payload);
-      await loadSnapshot();
+      await restartHostAction();
     } catch {
       toast.error(t('plugins:errors.restartFailed'));
-    } finally {
-      setBusyAction(null);
     }
-  }, [loadSnapshot, t]);
+  }, [restartHostAction, t]);
 
   const toggleExecution = useCallback(async (nextValue: boolean) => {
-    setBusyAction('execution');
     try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/execution', {
-        method: 'PUT',
-        body: JSON.stringify({ enabled: nextValue }),
-      });
-      setRuntime(payload);
-      await loadSnapshot();
+      await toggleExecutionAction(nextValue);
     } catch {
       toast.error(t('plugins:errors.toggleExecutionFailed'));
-    } finally {
-      setBusyAction(null);
     }
-  }, [loadSnapshot, t]);
+  }, [toggleExecutionAction, t]);
 
   const togglePluginEnabled = useCallback(async (pluginId: string, nextEnabled: boolean) => {
-    if (!runtime) {
-      return;
-    }
-    const nextIds = nextEnabled
-      ? Array.from(new Set([...enabledPluginIds, pluginId]))
-      : enabledPluginIds.filter((id) => id !== pluginId);
-    setBusyAction('toggle-plugin');
     try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/enabled-plugins', {
-        method: 'PUT',
-        body: JSON.stringify({ pluginIds: nextIds }),
-      });
-      setRuntime(payload);
-      await loadSnapshot();
+      await togglePluginEnabledAction(pluginId, nextEnabled);
     } catch {
       toast.error(t('plugins:errors.togglePluginFailed'));
-    } finally {
-      setBusyAction(null);
     }
-  }, [enabledPluginIds, loadSnapshot, runtime, t]);
+  }, [togglePluginEnabledAction, t]);
 
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-4 md:p-6">
@@ -222,6 +145,11 @@ export function PluginsPage() {
         <h1 className="text-2xl font-semibold">{t('plugins:title')}</h1>
         <p className="text-sm text-muted-foreground">{t('plugins:description')}</p>
       </header>
+      {error && (
+        <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+          {t(error)}
+        </p>
+      )}
 
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-4">
@@ -229,17 +157,23 @@ export function PluginsPage() {
             <CardTitle>{t('plugins:runtime.title')}</CardTitle>
             <CardDescription>{t('plugins:runtime.description')}</CardDescription>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => void refresh()} disabled={busyAction !== null}>
-              {busyAction === 'refresh' ? t('plugins:runtime.busy') : t('plugins:runtime.refresh')}
+          <div className="flex items-center gap-2">
+            {refreshing && !manualRefreshing && (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t('common:status.loading')}
+              </span>
+            )}
+            <Button variant="outline" onClick={() => void refresh()} disabled={manualRefreshing || mutating}>
+              {manualRefreshing ? t('plugins:runtime.busy') : t('plugins:runtime.refresh')}
             </Button>
-            <Button onClick={() => void restartHost()} disabled={busyAction !== null}>
-              {busyAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart')}
+            <Button onClick={() => void restartHost()} disabled={manualRefreshing || mutating}>
+              {mutatingAction === 'restart' ? t('plugins:runtime.busy') : t('plugins:runtime.restart')}
             </Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          {loading ? (
+          {!snapshotReady && initialLoading ? (
             <p className="text-sm text-muted-foreground">{t('common:status.loading')}</p>
           ) : (
             <>
@@ -304,7 +238,7 @@ export function PluginsPage() {
             <Switch
               id="plugin-execution-toggle"
               checked={executionEnabled}
-              disabled={loading || busyAction !== null}
+              disabled={!snapshotReady || initialLoading || manualRefreshing || mutatingAction !== null}
               onCheckedChange={(checked) => {
                 void toggleExecution(checked);
               }}
@@ -319,7 +253,7 @@ export function PluginsPage() {
           <CardDescription>{t('plugins:catalog.description')}</CardDescription>
         </CardHeader>
         <CardContent>
-          {loading ? (
+          {!snapshotReady && initialLoading ? (
             <p className="text-sm text-muted-foreground">{t('common:status.loading')}</p>
           ) : plugins.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t('plugins:catalog.empty')}</p>
@@ -354,9 +288,12 @@ export function PluginsPage() {
                   <span className="truncate text-sm">{plugin.category}</span>
                   <span className="truncate text-sm">{plugin.version}</span>
                   <div className="justify-self-end">
+                    {mutatingPluginId === plugin.id && (
+                      <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                    )}
                     <Switch
                       checked={enabledPluginIdSet.has(plugin.id)}
-                      disabled={busyAction !== null}
+                      disabled={!snapshotReady || initialLoading || manualRefreshing || mutatingAction !== null || mutatingPluginId !== null}
                       onCheckedChange={(checked) => {
                         void togglePluginEnabled(plugin.id, checked);
                       }}

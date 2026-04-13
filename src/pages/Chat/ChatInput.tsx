@@ -174,7 +174,8 @@ export const ChatInput = memo(function ChatInput({
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
   const skills = useSkillsStore((state) => state.skills);
-  const skillsLoading = useSkillsStore((state) => state.loading);
+  const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
+  const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
   const agents = useSubagentsStore((state) => state.agents);
@@ -208,11 +209,11 @@ export const ChatInput = memo(function ChatInput({
   }, [disabled]);
 
   useEffect(() => {
-    if (!slashOpen || skills.length > 0 || skillsLoading) {
+    if (!slashOpen || skillsSnapshotReady || skillsInitialLoading) {
       return;
     }
     void fetchSkills();
-  }, [fetchSkills, skills.length, skillsLoading, slashOpen]);
+  }, [fetchSkills, skillsInitialLoading, skillsSnapshotReady, slashOpen]);
 
   useEffect(() => {
     if (!slashOpen || slashItems.length === 0) {

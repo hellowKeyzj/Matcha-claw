@@ -31,6 +31,7 @@
         "title": "Recent Token Usage",
         "description": "The latest assistant responses with recorded token usage.",
         "loading": "Loading token usage history...",
+        "refreshFailed": "Failed to refresh token usage history. Showing cached data.",
         "empty": "No token usage history yet",
         "groupByModel": "By model",
         "groupByTime": "By time",

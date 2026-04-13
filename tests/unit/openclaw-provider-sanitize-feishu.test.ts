@@ -226,6 +226,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
   it('会清理 plugins.load.paths 下失效或 bundled 的绝对路径', async () => {
     const retainedAbsolutePath = 'C:\\Users\\Mr.Key\\.openclaw\\plugins\\custom';
+    const localBuildPluginPath = join(process.cwd(), 'build', 'openclaw-plugins', 'task-manager');
     fileExistsMock.mockImplementation(
       async (pathname: string) => pathname === '/mock/openclaw.json' || pathname === retainedAbsolutePath,
     );
@@ -239,6 +240,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
             'C:\\Users\\Mr.Key\\node_modules\\openclaw\\extensions\\wecom',
             'C:\\Users\\Mr.Key\\.openclaw\\plugins\\missing',
             './relative-plugin-path',
+            localBuildPluginPath,
             retainedAbsolutePath,
           ],
         },

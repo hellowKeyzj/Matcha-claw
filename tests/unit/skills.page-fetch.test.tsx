@@ -27,7 +27,10 @@ const gatewayState = {
 
 const skillsState: {
   skills: Array<{ id: string; name: string; description: string; enabled: boolean; isBundled?: boolean; eligible?: boolean }>;
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
   error: string | null;
   fetchSkills: typeof fetchSkillsMock;
   enableSkill: (skillId: string) => Promise<void>;
@@ -41,7 +44,10 @@ const skillsState: {
   installing: Record<string, boolean>;
 } = {
   skills: [],
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
   error: null,
   fetchSkills: fetchSkillsMock,
   enableSkill: async () => {},
@@ -87,6 +93,7 @@ describe('skills page fetch behavior', () => {
     skillsState.skills = [
       { id: 's1', name: 'Skill1', description: 'd', enabled: true, isBundled: true, eligible: true },
     ];
+    skillsState.snapshotReady = true;
 
     render(
       <MemoryRouter>
@@ -98,6 +105,7 @@ describe('skills page fetch behavior', () => {
 
   it('skills 为空时触发 fetchSkills', async () => {
     skillsState.skills = [];
+    skillsState.snapshotReady = false;
 
     render(
       <MemoryRouter>
@@ -119,6 +127,7 @@ describe('skills page fetch behavior', () => {
       isBundled: index % 3 === 0,
       eligible: true,
     }));
+    skillsState.snapshotReady = true;
 
     const { container } = render(
       <MemoryRouter>

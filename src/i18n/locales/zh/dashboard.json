@@ -31,6 +31,7 @@
         "title": "最近 Token 消耗",
         "description": "展示最近带有 token 用量记录的助手回复。",
         "loading": "正在加载 token 消耗历史...",
+        "refreshFailed": "刷新 token 消耗历史失败，当前展示缓存数据。",
         "empty": "还没有 token 消耗历史",
         "groupByModel": "按模型",
         "groupByTime": "按时间",

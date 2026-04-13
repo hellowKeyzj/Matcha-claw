@@ -4,6 +4,7 @@ describe('host events unsubscribe', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    delete (window as unknown as Record<string, unknown>).__MATCHACLAW_HOST_EVENT_HUB__;
   });
 
   it('优先使用 preload on() 返回的退订函数，避免监听器泄漏', async () => {
@@ -41,5 +42,29 @@ describe('host events unsubscribe', () => {
     expect(on).toHaveBeenCalledWith('host:event', expect.any(Function));
     expect(off).toHaveBeenCalledTimes(1);
     expect(off).toHaveBeenCalledWith('host:event', expect.any(Function));
+  });
+
+  it('多个事件订阅应复用单个 host:event listener，并在最后一个订阅释放后再退订', async () => {
+    const unsubscribe = vi.fn();
+    const on = vi.fn().mockReturnValue(unsubscribe);
+    const off = vi.fn();
+
+    (window as unknown as { electron: unknown }).electron = {
+      ipcRenderer: { on, off },
+    };
+
+    const { subscribeHostEvent } = await import('@/lib/host-events');
+    const disposeStatus = subscribeHostEvent('gateway:status', vi.fn());
+    const disposeError = subscribeHostEvent('gateway:error', vi.fn());
+
+    expect(on).toHaveBeenCalledTimes(1);
+    expect(on).toHaveBeenCalledWith('host:event', expect.any(Function));
+
+    disposeStatus();
+    expect(unsubscribe).not.toHaveBeenCalled();
+
+    disposeError();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(off).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -8,23 +8,28 @@ import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import { hostApiFetch } from '@/lib/host-api';
 import {
   hostSecurityApplyRemediation,
   hostSecurityCheckAdvisories,
   hostSecurityCheckIntegrity,
-  hostSecurityFetchRuleCatalog,
   hostSecurityPreviewRemediation,
-  hostSecurityReadAudit,
-  hostSecurityReadPolicy,
   hostSecurityRebaselineIntegrity,
   hostSecurityRollbackRemediation,
   hostSecurityRunEmergencyResponse,
   hostSecurityRunQuickAudit,
   hostSecurityScanSkills,
-  hostSecurityWritePolicy,
 } from '@/lib/security-runtime';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSecurityPolicyStore } from '@/stores/security-policy-store';
+import {
+  useSecuritySupportStore,
+  type AuditItem,
+  type AllowlistRegexTab,
+  type PlatformTool,
+  type RemediationActionItem,
+  type RuleCatalogPlatform,
+  type SecuritySectionKey,
+} from '@/stores/security-support-store';
 import { useTranslation } from 'react-i18next';
 
 type Preset = 'strict' | 'balanced' | 'relaxed';
@@ -69,175 +74,9 @@ type RuntimePolicy = {
   secretPatterns: string[];
 };
 
-type SecurityPolicy = {
-  preset: Preset;
-  securityPolicyVersion: number;
-  runtime: RuntimePolicy;
-};
-
-type AuditItem = {
-  ts: number;
-  toolName: string;
-  risk: string;
-  action: string;
-  decision: string;
-  ruleId?: string;
-  detail?: string;
-};
-
-type RemediationActionItem = {
-  id: string;
-  title: string;
-  description: string;
-  risk: string;
-};
-
-type PlatformTool = {
-  id: string;
-  name?: string;
-  source?: string;
-  enabled?: boolean;
-  description?: string;
-  version?: string;
-};
-type AllowlistRegexTab = 'allowlistTools' | 'allowlistSessions' | 'destructivePatterns' | 'secretPatterns';
-type RuleCatalogPlatform = 'all' | 'universal' | 'linux' | 'windows' | 'macos' | 'powershell';
-type RuleCatalogItem = {
-  platform: Exclude<RuleCatalogPlatform, 'all'>;
-  command: string;
-  category: string;
-  severity: string;
-  reason: string;
-};
-type SecuritySectionKey =
-  | 'runtime'
-  | 'matrix'
-  | 'ruleCatalog'
-  | 'allowlistRegex'
-  | 'policyGuards'
-  | 'actionCenter'
-  | 'auditHits';
-
-const ALL_ACTIONS: Action[] = ['block', 'redact', 'confirm', 'warn', 'log'];
 const DESTRUCTIVE_ACTIONS: Action[] = ['block', 'confirm', 'warn', 'log'];
 const SECRET_ACTIONS: Action[] = ['block', 'redact', 'confirm', 'warn', 'log'];
 const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low'];
-
-function normalizeDestructiveAction(value: Action): Action {
-  if (value === 'redact') return 'warn';
-  return value;
-}
-
-const PRESET_RUNTIME_TEMPLATES: Record<Preset, RuntimePolicy> = {
-  strict: {
-    runtimeGuardEnabled: true,
-    auditOnGatewayStart: true,
-    autoHarden: false,
-    enablePromptInjectionGuard: true,
-    blockDestructive: true,
-    blockSecrets: true,
-    monitors: { credentials: true, memory: true, cost: true },
-    logging: { logDetections: true },
-    allowPathPrefixes: [],
-    allowDomains: [],
-    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
-    auditDailyCostLimitUsd: 5,
-    auditFailureMode: null,
-    promptInjectionPatterns: [],
-    allowlist: { tools: [], sessions: [] },
-    destructive: {
-      action: 'block',
-      severityActions: { critical: 'block', high: 'block', medium: 'confirm', low: 'warn' },
-      categories: {
-        fileDelete: true,
-        gitDestructive: true,
-        sqlDestructive: true,
-        systemDestructive: true,
-        processKill: true,
-        networkDestructive: true,
-        privilegeEscalation: true,
-      },
-    },
-    secrets: {
-      action: 'block',
-      severityActions: { critical: 'block', high: 'block', medium: 'block', low: 'redact' },
-    },
-    destructivePatterns: [],
-    secretPatterns: [],
-  },
-  balanced: {
-    runtimeGuardEnabled: true,
-    auditOnGatewayStart: true,
-    autoHarden: false,
-    enablePromptInjectionGuard: true,
-    blockDestructive: true,
-    blockSecrets: true,
-    monitors: { credentials: true, memory: true, cost: false },
-    logging: { logDetections: true },
-    allowPathPrefixes: [],
-    allowDomains: [],
-    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
-    auditDailyCostLimitUsd: 5,
-    auditFailureMode: null,
-    promptInjectionPatterns: [],
-    allowlist: { tools: [], sessions: [] },
-    destructive: {
-      action: 'confirm',
-      severityActions: { critical: 'block', high: 'confirm', medium: 'confirm', low: 'warn' },
-      categories: {
-        fileDelete: true,
-        gitDestructive: true,
-        sqlDestructive: true,
-        systemDestructive: true,
-        processKill: true,
-        networkDestructive: true,
-        privilegeEscalation: true,
-      },
-    },
-    secrets: {
-      action: 'block',
-      severityActions: { critical: 'block', high: 'block', medium: 'redact', low: 'warn' },
-    },
-    destructivePatterns: [],
-    secretPatterns: [],
-  },
-  relaxed: {
-    runtimeGuardEnabled: true,
-    auditOnGatewayStart: true,
-    autoHarden: false,
-    enablePromptInjectionGuard: true,
-    blockDestructive: true,
-    blockSecrets: true,
-    monitors: { credentials: true, memory: true, cost: false },
-    logging: { logDetections: true },
-    allowPathPrefixes: [],
-    allowDomains: [],
-    auditEgressAllowlist: ['api.anthropic.com', 'api.openai.com', 'generativelanguage.googleapis.com'],
-    auditDailyCostLimitUsd: 5,
-    auditFailureMode: null,
-    promptInjectionPatterns: [],
-    allowlist: { tools: [], sessions: [] },
-    destructive: {
-      action: 'warn',
-      severityActions: { critical: 'confirm', high: 'warn', medium: 'warn', low: 'log' },
-      categories: {
-        fileDelete: true,
-        gitDestructive: true,
-        sqlDestructive: true,
-        systemDestructive: true,
-        processKill: true,
-        networkDestructive: true,
-        privilegeEscalation: true,
-      },
-    },
-    secrets: {
-      action: 'redact',
-      severityActions: { critical: 'block', high: 'redact', medium: 'warn', low: 'log' },
-    },
-    destructivePatterns: [],
-    secretPatterns: [],
-  },
-};
 
 const RULE_CATALOG_REASON_KEY_MAP: Record<string, string> = {
   '递归强删目录树': 'recursive_force_delete_tree',
@@ -276,16 +115,6 @@ const RULE_CATALOG_COMMAND_TOKEN_KEY_MAP: Record<string, string> = {
   'flush 为 critical': 'flush_is_critical',
 };
 
-function cloneRuntimeTemplate(preset: Preset): RuntimePolicy {
-  return JSON.parse(JSON.stringify(PRESET_RUNTIME_TEMPLATES[preset])) as RuntimePolicy;
-}
-
-const DEFAULT_POLICY: SecurityPolicy = {
-  preset: 'balanced',
-  securityPolicyVersion: 1,
-  runtime: cloneRuntimeTemplate('balanced'),
-};
-
 function list(text: string): string[] {
   return [...new Set(text.split(/[\n,]/g).map((v) => v.trim()).filter(Boolean))];
 }
@@ -302,168 +131,50 @@ function normalizeRuleReasonText(reason: string): string {
     .replace(/\s+/g, ' ');
 }
 
-function normalizeStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
-}
-
-function normalizePolicy(raw: unknown): SecurityPolicy {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return DEFAULT_POLICY;
-  }
-  const record = raw as Record<string, unknown>;
-  const runtimeRaw = (record.runtime && typeof record.runtime === 'object' && !Array.isArray(record.runtime))
-    ? record.runtime as Record<string, unknown>
-    : {};
-  const monitors = (runtimeRaw.monitors && typeof runtimeRaw.monitors === 'object' && !Array.isArray(runtimeRaw.monitors))
-    ? runtimeRaw.monitors as Record<string, unknown>
-    : {};
-  const logging = (runtimeRaw.logging && typeof runtimeRaw.logging === 'object' && !Array.isArray(runtimeRaw.logging))
-    ? runtimeRaw.logging as Record<string, unknown>
-    : {};
-  const allowlist = (runtimeRaw.allowlist && typeof runtimeRaw.allowlist === 'object' && !Array.isArray(runtimeRaw.allowlist))
-    ? runtimeRaw.allowlist as Record<string, unknown>
-    : {};
-  const destructive = (runtimeRaw.destructive && typeof runtimeRaw.destructive === 'object' && !Array.isArray(runtimeRaw.destructive))
-    ? runtimeRaw.destructive as Record<string, unknown>
-    : {};
-  const secrets = (runtimeRaw.secrets && typeof runtimeRaw.secrets === 'object' && !Array.isArray(runtimeRaw.secrets))
-    ? runtimeRaw.secrets as Record<string, unknown>
-    : {};
-  const categories = (destructive.categories && typeof destructive.categories === 'object' && !Array.isArray(destructive.categories))
-    ? destructive.categories as Record<string, unknown>
-    : {};
-  const preset = record.preset === 'strict' || record.preset === 'balanced' || record.preset === 'relaxed'
-    ? record.preset
-    : DEFAULT_POLICY.preset;
-  const runtimeTemplate = cloneRuntimeTemplate(preset);
-  const version = Number(record.securityPolicyVersion);
-  const securityPolicyVersion = Number.isFinite(version) && version > 0 ? Math.floor(version) : 1;
-  const toBool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
-  const toAction = (v: unknown, d: Action) => (ALL_ACTIONS.includes(v as Action) ? v as Action : d);
-  const toPositiveNumber = (v: unknown, d: number) => {
-    const raw = Number(v);
-    return Number.isFinite(raw) && raw > 0 ? raw : d;
-  };
-  const toFailureMode = (v: unknown, d: FailureMode): FailureMode => {
-    if (v === null || v === undefined) return d;
-    if (v === 'block_all' || v === 'safe_mode' || v === 'read_only') return v;
-    return d;
-  };
-  const toSeverityActions = (v: unknown, defaults: Record<Severity, Action>) => {
-    const rawActions = v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
-    return {
-      critical: toAction(rawActions.critical, defaults.critical),
-      high: toAction(rawActions.high, defaults.high),
-      medium: toAction(rawActions.medium, defaults.medium),
-      low: toAction(rawActions.low, defaults.low),
-    };
-  };
-  return {
-    preset,
-    securityPolicyVersion,
-    runtime: {
-      runtimeGuardEnabled: toBool(runtimeRaw.runtimeGuardEnabled, runtimeTemplate.runtimeGuardEnabled),
-      auditOnGatewayStart: toBool(runtimeRaw.auditOnGatewayStart, runtimeTemplate.auditOnGatewayStart),
-      autoHarden: toBool(runtimeRaw.autoHarden, runtimeTemplate.autoHarden),
-      enablePromptInjectionGuard: toBool(runtimeRaw.enablePromptInjectionGuard, runtimeTemplate.enablePromptInjectionGuard),
-      blockDestructive: toBool(runtimeRaw.blockDestructive, runtimeTemplate.blockDestructive),
-      blockSecrets: toBool(runtimeRaw.blockSecrets, runtimeTemplate.blockSecrets),
-      monitors: {
-        credentials: toBool(monitors.credentials, runtimeTemplate.monitors.credentials),
-        memory: toBool(monitors.memory, runtimeTemplate.monitors.memory),
-        cost: toBool(monitors.cost, runtimeTemplate.monitors.cost),
-      },
-      logging: {
-        logDetections: toBool(logging.logDetections, runtimeTemplate.logging.logDetections),
-      },
-      allowPathPrefixes: normalizeStringList(
-        runtimeRaw.allowPathPrefixes ?? runtimeTemplate.allowPathPrefixes,
-      ),
-      allowDomains: normalizeStringList(
-        runtimeRaw.allowDomains ?? runtimeTemplate.allowDomains,
-      ),
-      auditEgressAllowlist: normalizeStringList(
-        runtimeRaw.auditEgressAllowlist ?? runtimeTemplate.auditEgressAllowlist,
-      ),
-      auditDailyCostLimitUsd: toPositiveNumber(
-        runtimeRaw.auditDailyCostLimitUsd,
-        runtimeTemplate.auditDailyCostLimitUsd,
-      ),
-      auditFailureMode: toFailureMode(
-        runtimeRaw.auditFailureMode,
-        runtimeTemplate.auditFailureMode,
-      ),
-      promptInjectionPatterns: normalizeStringList(runtimeRaw.promptInjectionPatterns ?? runtimeTemplate.promptInjectionPatterns),
-      allowlist: {
-        tools: normalizeStringList(allowlist.tools),
-        sessions: normalizeStringList(allowlist.sessions),
-      },
-      destructive: {
-        action: normalizeDestructiveAction(toAction(destructive.action, runtimeTemplate.destructive.action)),
-        severityActions: (() => {
-          const actions = toSeverityActions(destructive.severityActions, runtimeTemplate.destructive.severityActions);
-          return {
-            critical: normalizeDestructiveAction(actions.critical),
-            high: normalizeDestructiveAction(actions.high),
-            medium: normalizeDestructiveAction(actions.medium),
-            low: normalizeDestructiveAction(actions.low),
-          };
-        })(),
-        categories: {
-          fileDelete: toBool(categories.fileDelete, runtimeTemplate.destructive.categories.fileDelete),
-          gitDestructive: toBool(categories.gitDestructive, runtimeTemplate.destructive.categories.gitDestructive),
-          sqlDestructive: toBool(categories.sqlDestructive, runtimeTemplate.destructive.categories.sqlDestructive),
-          systemDestructive: toBool(categories.systemDestructive, runtimeTemplate.destructive.categories.systemDestructive),
-          processKill: toBool(categories.processKill, runtimeTemplate.destructive.categories.processKill),
-          networkDestructive: toBool(categories.networkDestructive, runtimeTemplate.destructive.categories.networkDestructive),
-          privilegeEscalation: toBool(categories.privilegeEscalation, runtimeTemplate.destructive.categories.privilegeEscalation),
-        },
-      },
-      secrets: {
-        action: toAction(secrets.action, runtimeTemplate.secrets.action),
-        severityActions: toSeverityActions(secrets.severityActions, runtimeTemplate.secrets.severityActions),
-      },
-      destructivePatterns: Array.isArray(runtimeRaw.destructivePatterns)
-        ? runtimeRaw.destructivePatterns.filter((x): x is string => typeof x === 'string')
-        : [],
-      secretPatterns: Array.isArray(runtimeRaw.secretPatterns)
-        ? runtimeRaw.secretPatterns.filter((x): x is string => typeof x === 'string')
-        : [],
-    },
-  };
-}
-
 export function SecurityPage() {
   const { t, i18n } = useTranslation('security');
   const gatewayState = useGatewayStore((state) => state.status.state);
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [policy, setPolicy] = useState<SecurityPolicy>(DEFAULT_POLICY);
-  const [savedPolicySnapshot, setSavedPolicySnapshot] = useState<SecurityPolicy>(DEFAULT_POLICY);
-  const [error, setError] = useState<string | null>(null);
-  const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
-  const [loadingAudit, setLoadingAudit] = useState(false);
-  const [securityOpBusy, setSecurityOpBusy] = useState<string | null>(null);
-  const [securityOpResult, setSecurityOpResult] = useState('');
-  const [remediationActions, setRemediationActions] = useState<RemediationActionItem[]>([]);
-  const [selectedRemediationActions, setSelectedRemediationActions] = useState<string[]>([]);
-  const [lastRemediationSnapshotId, setLastRemediationSnapshotId] = useState<string | null>(null);
-  const [platformTools, setPlatformTools] = useState<PlatformTool[]>([]);
-  const [loadingPlatformTools, setLoadingPlatformTools] = useState(false);
-  const [platformToolsError, setPlatformToolsError] = useState<string | null>(null);
-  const [platformToolsHydrated, setPlatformToolsHydrated] = useState(false);
-  const [allowlistRegexTab, setAllowlistRegexTab] = useState<AllowlistRegexTab>('allowlistTools');
-  const [ruleCatalog, setRuleCatalog] = useState<RuleCatalogItem[]>([]);
-  const [loadingRuleCatalog, setLoadingRuleCatalog] = useState(false);
-  const [ruleCatalogError, setRuleCatalogError] = useState<string | null>(null);
-  const [ruleCatalogPlatform, setRuleCatalogPlatform] = useState<RuleCatalogPlatform>('all');
-  const [activeSection, setActiveSection] = useState<SecuritySectionKey>('runtime');
+  const policyReady = useSecurityPolicyStore((state) => state.policyReady);
+  const initialLoading = useSecurityPolicyStore((state) => state.initialLoading);
+  const refreshing = useSecurityPolicyStore((state) => state.refreshing);
+  const saving = useSecurityPolicyStore((state) => state.mutating);
+  const policy = useSecurityPolicyStore((state) => state.policy);
+  const savedPolicySnapshot = useSecurityPolicyStore((state) => state.savedPolicySnapshot);
+  const policyError = useSecurityPolicyStore((state) => state.error);
+  const updateRuntime = useSecurityPolicyStore((state) => state.updateRuntime);
+  const applyPresetTemplate = useSecurityPolicyStore((state) => state.applyPresetTemplate);
+  const loadPolicy = useSecurityPolicyStore((state) => state.loadPolicy);
+  const savePolicy = useSecurityPolicyStore((state) => state.savePolicy);
+  const auditItems = useSecuritySupportStore((state) => state.auditItems);
+  const loadingAudit = useSecuritySupportStore((state) => state.loadingAudit);
+  const platformTools = useSecuritySupportStore((state) => state.platformTools);
+  const loadingPlatformTools = useSecuritySupportStore((state) => state.loadingPlatformTools);
+  const platformToolsError = useSecuritySupportStore((state) => state.platformToolsError);
+  const platformToolsHydrated = useSecuritySupportStore((state) => state.platformToolsHydrated);
+  const ruleCatalog = useSecuritySupportStore((state) => state.ruleCatalog);
+  const loadingRuleCatalog = useSecuritySupportStore((state) => state.loadingRuleCatalog);
+  const ruleCatalogError = useSecuritySupportStore((state) => state.ruleCatalogError);
+  const loadPlatformTools = useSecuritySupportStore((state) => state.loadPlatformTools);
+  const loadRuleCatalog = useSecuritySupportStore((state) => state.loadRuleCatalog);
+  const loadRecentAudits = useSecuritySupportStore((state) => state.loadRecentAudits);
+  const securityOpBusy = useSecuritySupportStore((state) => state.securityOpBusy);
+  const securityOpResult = useSecuritySupportStore((state) => state.securityOpResult);
+  const remediationActions = useSecuritySupportStore((state) => state.remediationActions);
+  const selectedRemediationActions = useSecuritySupportStore((state) => state.selectedRemediationActions);
+  const lastRemediationSnapshotId = useSecuritySupportStore((state) => state.lastRemediationSnapshotId);
+  const allowlistRegexTab = useSecuritySupportStore((state) => state.allowlistRegexTab);
+  const ruleCatalogPlatform = useSecuritySupportStore((state) => state.ruleCatalogPlatform);
+  const activeSection = useSecuritySupportStore((state) => state.activeSection);
+  const setSecurityOpBusy = useSecuritySupportStore((state) => state.setSecurityOpBusy);
+  const setSecurityOpResult = useSecuritySupportStore((state) => state.setSecurityOpResult);
+  const setRemediationActions = useSecuritySupportStore((state) => state.setRemediationActions);
+  const setSelectedRemediationActions = useSecuritySupportStore((state) => state.setSelectedRemediationActions);
+  const setLastRemediationSnapshotId = useSecuritySupportStore((state) => state.setLastRemediationSnapshotId);
+  const setAllowlistRegexTab = useSecuritySupportStore((state) => state.setAllowlistRegexTab);
+  const setRuleCatalogPlatform = useSecuritySupportStore((state) => state.setRuleCatalogPlatform);
+  const setActiveSection = useSecuritySupportStore((state) => state.setActiveSection);
 
-  const updateRuntime = useCallback((updater: (current: RuntimePolicy) => RuntimePolicy) => {
-    setPolicy((prev) => ({ ...prev, runtime: updater(prev.runtime) }));
-  }, []);
   const getActionLabel = useCallback((action: Action) => t(`matrix.action.${action}`), [t]);
   const getSeverityLabel = useCallback((severity: Severity) => t(`matrix.severity.${severity}`), [t]);
   const getCategoryLabel = useCallback(
@@ -471,128 +182,22 @@ export function SecurityPage() {
     [t],
   );
 
-  const applyPresetTemplate = useCallback((nextPreset: Preset) => {
-    setPolicy((prev) => ({
-      ...prev,
-      preset: nextPreset,
-      runtime: cloneRuntimeTemplate(nextPreset),
-    }));
-  }, []);
-
-  const loadPolicy = useCallback(async () => {
-    setLoading(true);
-    try {
-      const payload = await hostSecurityReadPolicy<unknown>();
-      const normalized = normalizePolicy(payload);
-      setPolicy(normalized);
-      setSavedPolicySnapshot(normalized);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('errors.loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
   useEffect(() => {
     void loadPolicy();
   }, [loadPolicy]);
 
-  const savePolicy = useCallback(async () => {
-    setSaving(true);
+  const handleSavePolicy = useCallback(async () => {
     try {
-      const payload: SecurityPolicy = policy;
-      await hostSecurityWritePolicy(payload);
-      setPolicy(payload);
-      setSavedPolicySnapshot(payload);
+      await savePolicy();
       toast.success(t('messages.saved'));
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('errors.saveFailed'));
-      toast.error(t('messages.saveFailed'));
-    } finally {
-      setSaving(false);
-    }
-  }, [policy, t]);
-
-  const loadPlatformTools = useCallback(async (options?: { refresh?: boolean }) => {
-    const refresh = options?.refresh === true;
-    setLoadingPlatformTools(true);
-    setPlatformToolsHydrated(true);
-    try {
-      const payload = await hostApiFetch<{ success?: boolean; tools?: PlatformTool[] }>(
-        `/api/platform/tools?includeDisabled=true&refresh=${refresh ? 'true' : 'false'}`,
-      );
-      const tools = Array.isArray(payload?.tools) ? payload.tools : [];
-      const normalized = tools
-        .filter((tool): tool is PlatformTool => Boolean(tool && typeof tool.id === 'string' && tool.id.trim().length > 0))
-        .map((tool) => ({
-          id: tool.id.trim(),
-          name: typeof tool.name === 'string' ? tool.name : undefined,
-          source: typeof tool.source === 'string' ? tool.source : undefined,
-          enabled: typeof tool.enabled === 'boolean' ? tool.enabled : undefined,
-          description: typeof tool.description === 'string' ? tool.description : undefined,
-          version: typeof tool.version === 'string' ? tool.version : undefined,
-        }))
-        .sort((a, b) => {
-          const enabledRankA = a.enabled === false ? 1 : 0;
-          const enabledRankB = b.enabled === false ? 1 : 0;
-          if (enabledRankA !== enabledRankB) return enabledRankA - enabledRankB;
-          return a.id.localeCompare(b.id);
-        });
-      setPlatformTools(normalized);
-      setPlatformToolsError(null);
-    } catch (e) {
-      setPlatformTools([]);
-      setPlatformToolsError(e instanceof Error ? e.message : t('errors.loadToolsFailed'));
-    } finally {
-      setLoadingPlatformTools(false);
-    }
-  }, [t]);
-
-  const loadRuleCatalog = useCallback(async () => {
-    setLoadingRuleCatalog(true);
-    try {
-      const payload = await hostSecurityFetchRuleCatalog<{ success?: boolean; items?: RuleCatalogItem[] }>();
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      const allowedPlatforms = new Set<Exclude<RuleCatalogPlatform, 'all'>>(['universal', 'linux', 'windows', 'macos', 'powershell']);
-      const normalized = items.filter((item): item is RuleCatalogItem => {
-        if (!item || typeof item !== 'object') return false;
-        if (!item.platform || typeof item.platform !== 'string' || !allowedPlatforms.has(item.platform as Exclude<RuleCatalogPlatform, 'all'>)) return false;
-        if (!item.command || typeof item.command !== 'string') return false;
-        if (!item.category || typeof item.category !== 'string') return false;
-        if (!item.severity || typeof item.severity !== 'string') return false;
-        return typeof item.reason === 'string';
-      });
-      setRuleCatalog(normalized);
-      setRuleCatalogError(null);
-    } catch (e) {
-      setRuleCatalog([]);
-      setRuleCatalogError(e instanceof Error ? e.message : t('errors.loadRuleCatalogFailed'));
-    } finally {
-      setLoadingRuleCatalog(false);
-    }
-  }, [t]);
-
-  const loadRecentAudits = useCallback(async () => {
-    if (gatewayState !== 'running') {
-      setAuditItems([]);
-      return;
-    }
-    setLoadingAudit(true);
-    try {
-      const result = await hostSecurityReadAudit<{ items?: AuditItem[] }>({ page: 1, pageSize: 8 });
-      setAuditItems(Array.isArray(result.items) ? result.items : []);
     } catch {
-      setAuditItems([]);
-    } finally {
-      setLoadingAudit(false);
+      toast.error(t('messages.saveFailed'));
     }
-  }, [gatewayState]);
+  }, [savePolicy, t]);
 
   useEffect(() => {
-    void loadRecentAudits();
-  }, [loadRecentAudits]);
+    void loadRecentAudits({ gatewayState, page: 1, pageSize: 8 });
+  }, [gatewayState, loadRecentAudits]);
 
   useEffect(() => {
     if (activeSection !== 'allowlistRegex') return;
@@ -621,7 +226,7 @@ export function SecurityPage() {
     } finally {
       setSecurityOpBusy(null);
     }
-  }, [gatewayState, t]);
+  }, [gatewayState, setSecurityOpBusy, setSecurityOpResult, t]);
 
   const runtime = policy.runtime;
   const isDirty = useMemo(
@@ -771,7 +376,7 @@ export function SecurityPage() {
     return /[\u3400-\u9FFF]/u.test(rawDescription) ? '' : rawDescription;
   }, [i18n.language, t]);
 
-  if (loading) {
+  if (!policyReady && initialLoading) {
     return <section className="space-y-4"><p className="text-sm text-muted-foreground">{t('loading')}</p></section>;
   }
 
@@ -783,18 +388,27 @@ export function SecurityPage() {
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
+          {refreshing && (
+            <Badge variant="outline" className="text-xs font-normal">
+              {t('loading')}
+            </Badge>
+          )}
           {isDirty && (
             <Badge variant="outline" className="border-amber-500 text-amber-700">
               {t('page.unsaved')}
             </Badge>
           )}
-          <Button onClick={() => void savePolicy()} disabled={saving || !isDirty}>
+          <Button onClick={() => void handleSavePolicy()} disabled={saving || !isDirty}>
             {saving ? t('actions.saving') : t('actions.save')}
           </Button>
         </div>
       </header>
 
-      {error && <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+      {policyError && (
+        <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+          {policyError.startsWith('errors.') ? t(policyError) : policyError}
+        </p>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
         <Card className="h-fit border-border/60 bg-card/80">
@@ -972,7 +586,7 @@ export function SecurityPage() {
 
           {ruleCatalogError && (
             <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-              {ruleCatalogError}
+              {ruleCatalogError.startsWith('errors.') ? t(ruleCatalogError) : ruleCatalogError}
             </p>
           )}
 
@@ -1052,7 +666,7 @@ export function SecurityPage() {
               </div>
               {platformToolsError && (
                 <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-                  {platformToolsError}
+                  {platformToolsError.startsWith('errors.') ? t(platformToolsError) : platformToolsError}
                 </p>
               )}
               <div className="max-h-80 overflow-x-hidden overflow-y-auto rounded-md border p-2">
@@ -1226,7 +840,6 @@ export function SecurityPage() {
               const payload = await hostSecurityPreviewRemediation<{ actions?: RemediationActionItem[] }>();
               const actions = Array.isArray(payload.actions) ? payload.actions : [];
               setRemediationActions(actions);
-              setSelectedRemediationActions(actions.map((item) => item.id));
               return payload;
             })}>{t('actionCenter.remediationPreview')}</Button>
             <Button disabled={securityOpBusy !== null || selectedRemediationActions.length === 0} onClick={() => void runSecurityOp(t('actionCenter.remediationApply'), async () => {
@@ -1257,7 +870,7 @@ export function SecurityPage() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div><CardTitle>{t('audit.title')}</CardTitle><CardDescription>{t('audit.description')}</CardDescription></div>
-          <Button variant="outline" size="sm" onClick={() => void loadRecentAudits()}>{t('audit.refresh')}</Button>
+          <Button variant="outline" size="sm" onClick={() => void loadRecentAudits({ gatewayState, page: 1, pageSize: 8 })}>{t('audit.refresh')}</Button>
         </CardHeader>
         <CardContent>
           {gatewayState !== 'running' ? <p className="text-sm text-muted-foreground">{t('audit.gatewayStopped')}</p> : loadingAudit ? <p className="text-sm text-muted-foreground">{t('audit.loading')}</p> : auditItems.length === 0 ? <p className="text-sm text-muted-foreground">{t('audit.empty')}</p> : (

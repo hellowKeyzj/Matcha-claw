@@ -51,6 +51,7 @@ export function createChatActions(
 ): Pick<
   ChatState,
   | 'loadSessions'
+  | 'openAgentConversation'
   | 'switchSession'
   | 'newSession'
   | 'deleteSession'

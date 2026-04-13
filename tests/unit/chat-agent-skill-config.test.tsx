@@ -49,7 +49,10 @@ describe('chat agent skill configuration', () => {
 
     useChatStore.setState({
       messages: [],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       sending: false,
       activeRunId: null,
@@ -87,7 +90,9 @@ describe('chat agent skill configuration', () => {
         { id: 'feishu-doc', name: 'Feishu Doc', description: 'doc', enabled: true, eligible: true, icon: '📄' },
         { id: 'disabled-skill', name: 'Disabled Skill', description: 'disabled', enabled: false, eligible: true, icon: '🚫' },
       ],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
       fetchSkills: vi.fn().mockResolvedValue(undefined),
     });
   });

@@ -101,10 +101,45 @@ function mapErrorCodeToSkillErrorKey(
   return 'rateLimitError';
 }
 
+function hasMutatingSkills(mutatingBySkillId: Record<string, number>): boolean {
+  return Object.keys(mutatingBySkillId).length > 0;
+}
+
+function incrementMutatingSkill(
+  mutatingBySkillId: Record<string, number>,
+  skillId: string,
+): Record<string, number> {
+  const current = mutatingBySkillId[skillId] ?? 0;
+  return {
+    ...mutatingBySkillId,
+    [skillId]: current + 1,
+  };
+}
+
+function decrementMutatingSkill(
+  mutatingBySkillId: Record<string, number>,
+  skillId: string,
+): Record<string, number> {
+  const current = mutatingBySkillId[skillId] ?? 0;
+  if (current <= 1) {
+    const next = { ...mutatingBySkillId };
+    delete next[skillId];
+    return next;
+  }
+  return {
+    ...mutatingBySkillId,
+    [skillId]: current - 1,
+  };
+}
+
 interface SkillsState {
   skills: Skill[];
   searchResults: MarketplaceSkill[];
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
+  mutatingBySkillId: Record<string, number>;
   searching: boolean;
   searchError: string | null;
   installing: Record<string, boolean>; // slug -> boolean
@@ -124,7 +159,11 @@ interface SkillsState {
 export const useSkillsStore = create<SkillsState>((set, get) => ({
   skills: [],
   searchResults: [],
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
+  mutatingBySkillId: {},
   searching: false,
   searchError: null,
   installing: {},
@@ -133,19 +172,30 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   fetchSkills: async (options) => {
     const force = options?.force === true;
     const now = Date.now();
+    const hasSnapshot = get().snapshotReady;
 
     if (inflightSkillsFetch) {
       await inflightSkillsFetch;
       return;
     }
-    if (!force && get().skills.length > 0 && now - lastSkillsFetchAt < SKILLS_FETCH_MIN_INTERVAL_MS) {
+    if (!force && hasSnapshot && now - lastSkillsFetchAt < SKILLS_FETCH_MIN_INTERVAL_MS) {
       return;
     }
 
-    // Only show loading state if we have no skills yet (initial load)
-    if (get().skills.length === 0) {
-      set({ loading: true, error: null });
+    if (!hasSnapshot) {
+      set({
+        initialLoading: true,
+        refreshing: false,
+        error: null,
+      });
+    } else {
+      set({
+        refreshing: true,
+        initialLoading: false,
+        error: null,
+      });
     }
+
     inflightSkillsFetch = (async () => {
       try {
         const gatewayPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
@@ -228,11 +278,21 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         }
 
         lastSkillsFetchAt = Date.now();
-        set({ skills: combinedSkills, loading: false, error: null });
+        set({
+          skills: combinedSkills,
+          snapshotReady: true,
+          initialLoading: false,
+          refreshing: false,
+          error: null,
+        });
       } catch (error) {
         console.error('Failed to fetch skills:', error);
         const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
-        set({ loading: false, error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch') });
+        set({
+          initialLoading: false,
+          refreshing: false,
+          error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch'),
+        });
       } finally {
         inflightSkillsFetch = null;
       }
@@ -288,7 +348,14 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     if (get().installing[slug]) {
       return;
     }
-    set((state) => ({ installing: { ...state.installing, [slug]: true } }));
+    set((state) => {
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, slug);
+      return {
+        installing: { ...state.installing, [slug]: true },
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
     try {
       const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/install', {
         method: 'POST',
@@ -310,13 +377,25 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       set((state) => {
         const newInstalling = { ...state.installing };
         delete newInstalling[slug];
-        return { installing: newInstalling };
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, slug);
+        return {
+          installing: newInstalling,
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
       });
     }
   },
 
   uninstallSkill: async (slug: string) => {
-    set((state) => ({ installing: { ...state.installing, [slug]: true } }));
+    set((state) => {
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, slug);
+      return {
+        installing: { ...state.installing, [slug]: true },
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
     try {
       const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/clawhub/uninstall', {
         method: 'POST',
@@ -334,13 +413,25 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       set((state) => {
         const newInstalling = { ...state.installing };
         delete newInstalling[slug];
-        return { installing: newInstalling };
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, slug);
+        return {
+          installing: newInstalling,
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
       });
     }
   },
 
   enableSkill: async (skillId) => {
     const { updateSkill } = get();
+    set((state) => {
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
+      return {
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
 
     try {
       await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: true });
@@ -348,6 +439,14 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to enable skill:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillId);
+        return {
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
+      });
     }
   },
 
@@ -358,6 +457,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     if (skill?.isCore) {
       throw new Error('Cannot disable core skill');
     }
+    set((state) => {
+      const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
+      return {
+        mutatingBySkillId: nextMutating,
+        mutating: true,
+      };
+    });
 
     try {
       await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: false });
@@ -365,10 +471,23 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to disable skill:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillId);
+        return {
+          mutatingBySkillId: nextMutating,
+          mutating: hasMutatingSkills(nextMutating),
+        };
+      });
     }
   },
 
-  setSkills: (skills) => set({ skills }),
+  setSkills: (skills) => set({
+    skills,
+    snapshotReady: true,
+    initialLoading: false,
+    refreshing: false,
+  }),
 
   updateSkill: (skillId, updates) => {
     set((state) => ({

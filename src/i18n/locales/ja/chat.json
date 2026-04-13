@@ -21,6 +21,10 @@
         "showThinking": "思考を表示",
         "hideThinking": "思考を非表示"
     },
+    "status": {
+        "refreshing": "更新中...",
+        "mutating": "変更を反映中..."
+    },
     "taskPanel": {
         "stepStatus": {
             "running": "実行中",

@@ -9,7 +9,10 @@ describe('chat store newSession agent targeting', () => {
     loadHistory.mockClear();
     useChatStore.setState({
       messages: [],
-      loading: false,
+      snapshotReady: false,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       sending: false,
       activeRunId: null,

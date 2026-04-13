@@ -2,6 +2,10 @@
   "title": "サブAgentワークスペース",
   "subtitle": "サブAgentとモデル設定を管理します。",
   "newSubagent": "新規サブAgent",
+  "status": {
+    "refreshing": "更新中...",
+    "mutating": "変更を保存中..."
+  },
   "empty": "サブAgentが見つかりません。",
   "modelGuide": {
     "description": "先に「モデル」でモデルを追加してください。",

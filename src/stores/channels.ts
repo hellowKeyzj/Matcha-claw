@@ -24,7 +24,11 @@ interface FetchChannelsOptions {
 
 interface ChannelsState {
   channels: Channel[];
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
+  mutatingByChannelId: Record<string, number>;
   error: string | null;
 
   // Actions
@@ -39,8 +43,39 @@ interface ChannelsState {
 }
 
 const CHANNELS_SILENT_REFRESH_MIN_GAP_MS = 1200;
-let channelsSilentInflightFetch: Promise<void> | null = null;
+let inflightChannelsFetchPromise: Promise<void> | null = null;
 let channelsLastFetchAtMs = 0;
+
+function hasMutatingChannels(mutatingByChannelId: Record<string, number>): boolean {
+  return Object.keys(mutatingByChannelId).length > 0;
+}
+
+function incrementMutatingChannel(
+  mutatingByChannelId: Record<string, number>,
+  channelId: string,
+): Record<string, number> {
+  const current = mutatingByChannelId[channelId] ?? 0;
+  return {
+    ...mutatingByChannelId,
+    [channelId]: current + 1,
+  };
+}
+
+function decrementMutatingChannel(
+  mutatingByChannelId: Record<string, number>,
+  channelId: string,
+): Record<string, number> {
+  const current = mutatingByChannelId[channelId] ?? 0;
+  if (current <= 1) {
+    const next = { ...mutatingByChannelId };
+    delete next[channelId];
+    return next;
+  }
+  return {
+    ...mutatingByChannelId,
+    [channelId]: current - 1,
+  };
+}
 
 function areChannelsEquivalent(left: Channel[], right: Channel[]): boolean {
   if (left === right) {
@@ -68,24 +103,32 @@ function areChannelsEquivalent(left: Channel[], right: Channel[]): boolean {
 
 export const useChannelsStore = create<ChannelsState>((set, get) => ({
   channels: [],
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
+  mutatingByChannelId: {},
   error: null,
 
   fetchChannels: async (options) => {
     const silent = options?.silent === true;
     const now = Date.now();
-    if (silent && get().channels.length > 0 && now - channelsLastFetchAtMs < CHANNELS_SILENT_REFRESH_MIN_GAP_MS) {
+    const hasSnapshot = get().snapshotReady;
+    if (silent && hasSnapshot && now - channelsLastFetchAtMs < CHANNELS_SILENT_REFRESH_MIN_GAP_MS) {
       return;
     }
-    if (silent && channelsSilentInflightFetch) {
-      await channelsSilentInflightFetch;
+    if (inflightChannelsFetchPromise) {
+      await inflightChannelsFetchPromise;
       return;
     }
 
-    if (!silent) {
-      set({ loading: true, error: null });
+    if (!hasSnapshot) {
+      set({ initialLoading: true, refreshing: false, error: null });
+    } else if (!silent) {
+      set({ refreshing: true, initialLoading: false, error: null });
     }
-    const runFetch = async () => {
+
+    const runFetch = (async () => {
       try {
         const result = await hostChannelsFetchSnapshot();
         const data = result.snapshot as {
@@ -153,46 +196,71 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           }
 
           channelsLastFetchAtMs = Date.now();
-          if (silent) {
-            set((state) => (
-              areChannelsEquivalent(state.channels, channels)
-                ? state
-                : { ...state, channels }
-            ));
-          } else {
-            set((state) => {
-              const unchanged = areChannelsEquivalent(state.channels, channels);
-              return unchanged
-                ? { ...state, loading: false, error: null }
-                : { ...state, channels, loading: false, error: null };
-            });
-          }
+          set((state) => {
+            const unchanged = areChannelsEquivalent(state.channels, channels);
+            if (unchanged) {
+              if (state.snapshotReady && state.error === null && !state.initialLoading && !state.refreshing) {
+                return state;
+              }
+              return {
+                ...state,
+                snapshotReady: true,
+                initialLoading: false,
+                refreshing: false,
+                error: null,
+              };
+            }
+            return {
+              ...state,
+              channels,
+              snapshotReady: true,
+              initialLoading: false,
+              refreshing: false,
+              error: null,
+            };
+          });
         } else {
-          // Gateway not available - try to show channels from local config
-          if (!silent) {
-            set({ channels: [], loading: false });
-          }
+          // Gateway not available - keep stale channels and surface refresh error.
+          const shouldSurfaceError = !silent || !hasSnapshot;
+          set((state) => ({
+            ...state,
+            initialLoading: false,
+            refreshing: false,
+            error: shouldSurfaceError ? 'Failed to load channel snapshot' : state.error,
+          }));
         }
-      } catch {
-        // Gateway not connected, show empty
-        if (!silent) {
-          set({ channels: [], loading: false });
-        }
+      } catch (error) {
+        // Gateway not connected, keep stale channels and surface refresh error.
+        const shouldSurfaceError = !silent || !hasSnapshot;
+        set((state) => ({
+          ...state,
+          initialLoading: false,
+          refreshing: false,
+          error: shouldSurfaceError
+            ? (error instanceof Error ? error.message : 'Failed to load channel snapshot')
+            : state.error,
+        }));
       }
-    };
+    })();
 
-    if (silent) {
-      channelsSilentInflightFetch = runFetch().finally(() => {
-        channelsSilentInflightFetch = null;
-      });
-      await channelsSilentInflightFetch;
-      return;
+    inflightChannelsFetchPromise = runFetch;
+    try {
+      await runFetch;
+    } finally {
+      if (inflightChannelsFetchPromise === runFetch) {
+        inflightChannelsFetchPromise = null;
+      }
     }
-
-    await runFetch();
   },
 
   deleteChannel: async (channelId) => {
+    set((state) => {
+      const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
+      return {
+        mutatingByChannelId: next,
+        mutating: true,
+      };
+    });
     const channelTypeFromState = get().channels.find((channel) => channel.id === channelId)?.type;
     const placeholderMatch = channelId.match(/^(.*)-default$/);
     const channelType = channelTypeFromState ?? (placeholderMatch?.[1] as ChannelType | undefined);
@@ -200,6 +268,13 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       set((state) => ({
         channels: state.channels.filter((c) => c.id !== channelId),
       }));
+      set((state) => {
+        const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+        return {
+          mutatingByChannelId: next,
+          mutating: hasMutatingChannels(next),
+        };
+      });
       return;
     }
 
@@ -213,9 +288,23 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     set((state) => ({
       channels: state.channels.filter((c) => c.id !== channelId),
     }));
+    set((state) => {
+      const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+      return {
+        mutatingByChannelId: next,
+        mutating: hasMutatingChannels(next),
+      };
+    });
   },
 
   connectChannel: async (channelId) => {
+    set((state) => {
+      const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
+      return {
+        mutatingByChannelId: next,
+        mutating: true,
+      };
+    });
     const { updateChannel } = get();
     updateChannel(channelId, { status: 'connecting', error: undefined });
 
@@ -224,10 +313,25 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       updateChannel(channelId, { status: 'connected' });
     } catch (error) {
       updateChannel(channelId, { status: 'error', error: String(error) });
+    } finally {
+      set((state) => {
+        const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+        return {
+          mutatingByChannelId: next,
+          mutating: hasMutatingChannels(next),
+        };
+      });
     }
   },
 
   disconnectChannel: async (channelId) => {
+    set((state) => {
+      const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
+      return {
+        mutatingByChannelId: next,
+        mutating: true,
+      };
+    });
     const { updateChannel } = get();
 
     try {
@@ -237,6 +341,13 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     updateChannel(channelId, { status: 'disconnected', error: undefined });
+    set((state) => {
+      const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
+      return {
+        mutatingByChannelId: next,
+        mutating: hasMutatingChannels(next),
+      };
+    });
   },
 
   requestQrCode: async (channelType) => {
@@ -247,7 +358,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     };
   },
 
-  setChannels: (channels) => set({ channels }),
+  setChannels: (channels) => set({ channels, snapshotReady: true }),
 
   updateChannel: (channelId, updates) => {
     set((state) => ({

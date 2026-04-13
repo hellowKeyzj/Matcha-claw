@@ -9,6 +9,7 @@ import {
 
 const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
+const DEFAULT_HOST_GATEWAY_RPC_TIMEOUT_MS = 45000;
 let cachedHostApiToken: string | null = null;
 
 type HostApiRequestInit = RequestInit & {
@@ -128,14 +129,18 @@ export async function hostGatewayRequest<TResult = unknown>(
   payload?: unknown,
   timeoutMs?: number,
 ): Promise<HostGatewayRpcResult<TResult>> {
+  const resolvedTimeoutMs =
+    typeof timeoutMs === 'number' && timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_HOST_GATEWAY_RPC_TIMEOUT_MS;
   return await hostApiFetch<HostGatewayRpcResult<TResult>>('/api/gateway/rpc', {
     method: 'POST',
     body: JSON.stringify({
       method,
       ...(payload !== undefined ? { params: payload } : {}),
-      ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
+      timeoutMs: resolvedTimeoutMs,
     }),
-    timeoutMs,
+    timeoutMs: resolvedTimeoutMs,
   });
 }
 

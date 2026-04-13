@@ -208,6 +208,40 @@ async function startClawHubRegistryServer(
       const q = url.searchParams.get('q') || '';
       res.statusCode = 200;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      if (!q) {
+        res.end(JSON.stringify({
+          results: [
+            {
+              slug: 'daily-summary',
+              displayName: 'Daily Summary',
+              summary: 'Daily summary skill',
+              version: '0.9.1',
+              score: 35,
+              metaContent: { owner: 'matcha-labs' },
+              stats: { downloads: 4500, stars: 120 },
+            },
+            {
+              slug: 'project-planner',
+              displayName: 'Project Planner',
+              summary: 'Plan projects and milestones',
+              version: '2.1.0',
+              score: 91,
+              metaContent: { owner: 'matcha-team' },
+              stats: { downloads: 15500, stars: 980 },
+            },
+            {
+              slug: 'git-helper',
+              displayName: 'Git Helper',
+              summary: 'Git helper skill',
+              version: '1.2.3',
+              score: 68,
+              metaContent: { owner: 'matcha-utils' },
+              stats: { downloads: 7800, stars: 260 },
+            },
+          ],
+        }));
+        return;
+      }
       res.end(JSON.stringify({
         results: [
           {
@@ -215,6 +249,9 @@ async function startClawHubRegistryServer(
             displayName: q ? `Git Helper (${q})` : 'Git Helper',
             summary: 'Git helper skill',
             version: '1.2.3',
+            score: 62,
+            metaContent: { owner: 'matcha-utils' },
+            stats: { downloads: 7800, stars: 260 },
           },
         ],
       }));
@@ -1262,6 +1299,57 @@ describe('runtime-host process manager', () => {
       expect(searchPayload.data?.results?.[0]).toMatchObject({
         slug: 'git-helper',
         name: 'Git Helper (git)',
+      });
+      expect(searchPayload.data?.results?.[0]).toMatchObject({
+        author: 'matcha-utils',
+        downloads: 7800,
+        stars: 260,
+      });
+
+      const discoveryResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: 1,
+          method: 'POST',
+          route: '/api/clawhub/search',
+          payload: { query: '' },
+        }),
+      });
+      const discoveryPayload = await discoveryResponse.json() as {
+        success: boolean;
+        status: number;
+        data?: {
+          success?: boolean;
+          results?: Array<{
+            slug?: string;
+            name?: string;
+            author?: string;
+            downloads?: number;
+            stars?: number;
+          }>;
+        };
+      };
+      expect(discoveryResponse.status).toBe(200);
+      expect(discoveryPayload).toMatchObject({
+        success: true,
+        status: 200,
+        data: {
+          success: true,
+        },
+      });
+      expect(discoveryPayload.data?.results?.[0]).toMatchObject({
+        slug: 'project-planner',
+        name: 'Project Planner',
+        author: 'matcha-team',
+        downloads: 15500,
+        stars: 980,
+      });
+      expect(discoveryPayload.data?.results?.[1]).toMatchObject({
+        slug: 'git-helper',
+      });
+      expect(discoveryPayload.data?.results?.[2]).toMatchObject({
+        slug: 'daily-summary',
       });
 
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);

@@ -3,7 +3,6 @@
  * Browse and manage AI skills
  */
 import { memo, useDeferredValue, useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Search,
   Puzzle,
@@ -50,6 +49,11 @@ import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
+const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
+
+function buildMarketplaceSkillUrl(slug: string) {
+  return `${CLAWHUB_MARKETPLACE_PRIMARY_URL}/s/${slug}`;
+}
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
   if (!skill.enabled) return 'disabled';
@@ -150,7 +154,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
 
   const handleOpenClawhub = async () => {
     if (skill.slug) {
-      await invokeIpc('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
+      await invokeIpc('shell:openExternal', buildMarketplaceSkillUrl(skill.slug));
     }
   };
 
@@ -497,6 +501,7 @@ interface MarketplaceSkillCardProps {
   skill: MarketplaceSkill;
   isInstalling: boolean;
   isInstalled: boolean;
+  onOpenDetail: () => void;
   onInstall: () => void;
   onUninstall: () => void;
 }
@@ -505,38 +510,37 @@ function MarketplaceSkillCard({
   skill,
   isInstalling,
   isInstalled,
+  onOpenDetail,
   onInstall,
   onUninstall
 }: MarketplaceSkillCardProps) {
-  const handleCardClick = () => {
-    void invokeIpc('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`);
-  };
-
   return (
     <Card
-      className="hover:border-primary/50 transition-colors cursor-pointer group"
-      onClick={handleCardClick}
+      className="group flex h-full cursor-pointer flex-col overflow-hidden transition-colors hover:border-primary/50"
+      onClick={onOpenDetail}
     >
       <CardHeader className="pb-3">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center text-xl group-hover:scale-110 transition-transform">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xl transition-transform group-hover:scale-110">
               📦
             </div>
-            <div>
-              <CardTitle className="text-base group-hover:text-primary transition-colors">{skill.name}</CardTitle>
-              <CardDescription className="text-xs flex items-center gap-2">
-                <span>v{skill.version}</span>
+            <div className="min-w-0">
+              <CardTitle className="min-h-[3rem] break-words text-base leading-6 transition-colors group-hover:text-primary line-clamp-2">
+                {skill.name}
+              </CardTitle>
+              <CardDescription className="mt-1 flex min-w-0 items-center gap-2 text-xs">
+                <span className="shrink-0">v{skill.version}</span>
                 {skill.author && (
                   <>
-                    <span>•</span>
-                    <span>{skill.author}</span>
+                    <span className="shrink-0">•</span>
+                    <span className="truncate">{skill.author}</span>
                   </>
                 )}
               </CardDescription>
             </div>
           </div>
-          <div onClick={(e) => e.stopPropagation()}>
+          <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
             <Button
               variant={isInstalled ? 'destructive' : 'default'}
               size="icon"
@@ -556,11 +560,11 @@ function MarketplaceSkillCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent>
-        <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+      <CardContent className="flex flex-1 flex-col">
+        <p className="mb-3 min-h-[3rem] text-sm text-muted-foreground line-clamp-2">
           {skill.description}
         </p>
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        <div className="mt-auto flex min-h-4 items-center gap-4 text-xs text-muted-foreground">
           {skill.downloads !== undefined && (
             <div className="flex items-center gap-1">
               <Download className="h-3 w-3" />
@@ -576,6 +580,101 @@ function MarketplaceSkillCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+interface MarketplaceSkillDetailDialogProps {
+  skill: MarketplaceSkill;
+  isInstalling: boolean;
+  isInstalled: boolean;
+  onInstall: () => void;
+  onUninstall: () => void;
+  onClose: () => void;
+}
+
+function MarketplaceSkillDetailDialog({
+  skill,
+  isInstalling,
+  isInstalled,
+  onInstall,
+  onUninstall,
+  onClose,
+}: MarketplaceSkillDetailDialogProps) {
+  const openMarketplacePage = () => {
+    void invokeIpc('shell:openExternal', buildMarketplaceSkillUrl(skill.slug));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
+      <Card className="w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <CardHeader className="flex flex-row items-start justify-between pb-2">
+          <div className="flex items-center gap-4 min-w-0">
+            <span className="text-4xl shrink-0">📦</span>
+            <div className="min-w-0">
+              <CardTitle className="text-xl break-words">{skill.name}</CardTitle>
+              <CardDescription className="mt-1 text-sm flex min-w-0 items-center gap-2">
+                <span className="shrink-0">v{skill.version}</span>
+                {skill.author && (
+                  <>
+                    <span className="shrink-0">•</span>
+                    <span className="truncate">{skill.author}</span>
+                  </>
+                )}
+              </CardDescription>
+            </div>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </CardHeader>
+
+        <CardContent className="space-y-4 overflow-y-auto">
+          <div>
+            <h3 className="text-sm font-medium text-muted-foreground">描述</h3>
+            <p className="text-sm mt-1 leading-6">{skill.description || '-'}</p>
+          </div>
+
+          {(skill.downloads !== undefined || skill.stars !== undefined) && (
+            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+              {skill.downloads !== undefined && (
+                <Badge variant="outline" className="gap-1">
+                  <Download className="h-3 w-3" />
+                  {skill.downloads.toLocaleString()}
+                </Badge>
+              )}
+              {skill.stars !== undefined && (
+                <Badge variant="outline" className="gap-1">
+                  <Sparkles className="h-3 w-3" />
+                  {skill.stars.toLocaleString()}
+                </Badge>
+              )}
+            </div>
+          )}
+        </CardContent>
+
+        <div className="flex items-center justify-between p-4 border-t bg-muted/10 gap-2">
+          <Button variant="outline" className="gap-2" onClick={openMarketplacePage}>
+            <Globe className="h-4 w-4" />
+            ClawHub
+          </Button>
+          <Button
+            variant={isInstalled ? 'destructive' : 'default'}
+            className="gap-2"
+            onClick={isInstalled ? onUninstall : onInstall}
+            disabled={isInstalling}
+          >
+            {isInstalling ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : isInstalled ? (
+              <Trash2 className="h-4 w-4" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+            {isInstalled ? 'Uninstall' : 'Install'}
+          </Button>
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -727,9 +826,11 @@ const SkillGridCard = memo(function SkillGridCard({
 });
 
 export function Skills() {
-  const navigate = useNavigate();
   const skills = useSkillsStore((state) => state.skills);
-  const loading = useSkillsStore((state) => state.loading);
+  const snapshotReady = useSkillsStore((state) => state.snapshotReady);
+  const initialLoading = useSkillsStore((state) => state.initialLoading);
+  const refreshing = useSkillsStore((state) => state.refreshing);
+  const mutating = useSkillsStore((state) => state.mutating);
   const error = useSkillsStore((state) => state.error);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const enableSkill = useSkillsStore((state) => state.enableSkill);
@@ -746,6 +847,7 @@ export function Skills() {
   const [searchQuery, setSearchQuery] = useState('');
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
+  const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
   const isAllTabActive = activeTab === 'all';
   const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
@@ -775,12 +877,12 @@ export function Skills() {
 
   // Fetch skills on mount.
   // 技能数据通常在 App 启动预热/其他页面交互后已存在，切页进入技能页时
-  // 仅在本地为空才自动拉取，避免重复触发 skills.status 带来日志噪音。
+  // 仅在本地快照未就绪时自动拉取，避免重复触发 skills.status 带来日志噪音。
   useEffect(() => {
-    if (isGatewayRunning && skills.length === 0) {
+    if (isGatewayRunning && !snapshotReady) {
       void fetchSkills();
     }
-  }, [fetchSkills, isGatewayRunning, skills.length]);
+  }, [fetchSkills, isGatewayRunning, snapshotReady]);
 
   useEffect(() => {
     if (skillsHeavyContentReady) {
@@ -841,6 +943,8 @@ export function Skills() {
       return a.name.localeCompare(b.name);
     });
   }, [deferredSearchQuery, deferredSelectedSource, skillsForView]);
+  const showInitialLoading = !snapshotReady && initialLoading;
+  const manualRefreshBusy = refreshing || mutating;
 
   const filteredSkillCards = useMemo<SkillGridCardViewModel[]>(() => {
     const configurableLabel = t('detail.configurable');
@@ -1076,9 +1180,16 @@ export function Skills() {
     void handleUninstall(slug);
   }, [handleUninstall]);
 
-  const handleOpenClawHubTokenSettings = useCallback(() => {
-    navigate('/settings?section=gateway');
-  }, [navigate]);
+  const selectedMarketplaceInstalled = useMemo(() => {
+    if (!selectedMarketplaceSkill) {
+      return false;
+    }
+    return safeSkills.some((s) => s.id === selectedMarketplaceSkill.slug || s.name === selectedMarketplaceSkill.name);
+  }, [safeSkills, selectedMarketplaceSkill]);
+
+  const selectedMarketplaceInstalling = selectedMarketplaceSkill
+    ? Boolean(installing[selectedMarketplaceSkill.slug])
+    : false;
 
   return (
     <div className="space-y-6">
@@ -1091,8 +1202,8 @@ export function Skills() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!isGatewayRunning}>
-            <RefreshCw className="h-4 w-4 mr-2" />
+          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!isGatewayRunning || manualRefreshBusy}>
+            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
           {hasInstalledSkills && (
@@ -1114,6 +1225,13 @@ export function Skills() {
             </span>
           </CardContent>
         </Card>
+      )}
+
+      {refreshing && snapshotReady && (
+        <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          {t('common:status.loading', 'Loading...')}
+        </div>
       )}
 
       {/* Tabs */}
@@ -1230,7 +1348,7 @@ export function Skills() {
                 </Card>
               ))}
             </div>
-          ) : loading && safeSkills.length === 0 ? (
+          ) : showInitialLoading ? (
             <Card>
               <CardContent className="flex flex-col items-center justify-center py-12">
                 <LoadingSpinner size="lg" />
@@ -1274,15 +1392,11 @@ export function Skills() {
               </CardContent>
             </Card>
             <Card className="border-info/30 bg-info/5">
-              <CardContent className="py-3 text-sm flex items-start justify-between gap-3 text-muted-foreground">
+              <CardContent className="py-3 text-sm flex items-start gap-3 text-muted-foreground">
                 <div className="flex items-start gap-2">
                   <Download className="h-4 w-4 mt-0.5 shrink-0" />
-                  <span className="whitespace-pre-line">{t('marketplace.manualAndTokenHint', { path: skillsDirPath })}</span>
+                  <span>{t('marketplace.manualInstallHint', { path: skillsDirPath })}</span>
                 </div>
-                <Button type="button" variant="outline" size="sm" onClick={handleOpenClawHubTokenSettings}>
-                  <Key className="mr-2 h-4 w-4" />
-                  {t('marketplace.openTokenSettings')}
-                </Button>
               </CardContent>
             </Card>
             <div className="flex gap-4">
@@ -1335,6 +1449,7 @@ export function Skills() {
                       skill={skill}
                       isInstalling={!!installing[skill.slug]}
                       isInstalled={isInstalled}
+                      onOpenDetail={() => setSelectedMarketplaceSkill(skill)}
                       onInstall={() => handleInstall(skill.slug)}
                       onUninstall={() => handleUninstall(skill.slug)}
                     />
@@ -1391,6 +1506,17 @@ export function Skills() {
             setSelectedSkill({ ...selectedSkill, enabled });
           }}
           onOpenFolder={handleOpenSkillFolder}
+        />
+      )}
+
+      {selectedMarketplaceSkill && (
+        <MarketplaceSkillDetailDialog
+          skill={selectedMarketplaceSkill}
+          isInstalled={selectedMarketplaceInstalled}
+          isInstalling={selectedMarketplaceInstalling}
+          onInstall={() => { void handleInstall(selectedMarketplaceSkill.slug); }}
+          onUninstall={() => { void handleUninstall(selectedMarketplaceSkill.slug); }}
+          onClose={() => setSelectedMarketplaceSkill(null)}
         />
       )}
     </div>

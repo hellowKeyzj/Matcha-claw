@@ -9,7 +9,10 @@ describe('subagents diff and apply', () => {
     resetGatewayClientMocks();
     useSubagentsStore.setState({
       agents: [{ id: 'writer', name: 'Writer', isDefault: false }],
-      loading: false,
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
       error: null,
       managedAgentId: 'writer',
       draftPromptByAgent: { writer: 'old prompt' },
@@ -119,4 +122,3 @@ describe('subagents diff and apply', () => {
     expect(state.draftPromptByAgent.writer).toBeUndefined();
   });
 });
-

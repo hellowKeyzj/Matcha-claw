@@ -2,7 +2,7 @@
  * Dashboard Page
  * Main overview page showing system status and quick actions
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   MessageSquare,
@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Wrench,
+  Loader2,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -24,6 +25,8 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useChannelsStore } from '@/stores/channels';
 import { useSkillsStore } from '@/stores/skills';
 import { useSettingsStore } from '@/stores/settings';
+import { useDashboardUsageStore } from '@/stores/dashboard-usage';
+import { useDashboardUiStore } from '@/stores/dashboard-ui';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { FeedbackState } from '@/components/common/FeedbackState';
 import { hostApiFetch } from '@/lib/host-api';
@@ -33,14 +36,9 @@ import { useTranslation } from 'react-i18next';
 import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
-  type UsageGroupBy,
-  type UsageHistoryEntry,
-  type UsageWindow,
 } from './usage-history';
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
-const USAGE_FETCH_RETRY_DELAY_MS = 1500;
-const USAGE_FETCH_SAFETY_TIMEOUT_MS = 30_000;
 const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 export function Dashboard() {
@@ -56,22 +54,26 @@ export function Dashboard() {
   const usageFetchMaxAttempts = window.electron?.platform === 'win32'
     ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
     : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
+  const usageHistory = useDashboardUsageStore((state) => state.usageHistory);
+  const usageHistoryReady = useDashboardUsageStore((state) => state.usageHistoryReady);
+  const usageInitialLoading = useDashboardUsageStore((state) => state.initialLoading);
+  const usageRefreshingState = useDashboardUsageStore((state) => state.refreshing);
+  const usagePanelReady = useDashboardUsageStore((state) => state.usagePanelReady);
+  const usageChartReady = useDashboardUsageStore((state) => state.usageChartReady);
+  const usageDetailListReady = useDashboardUsageStore((state) => state.usageDetailListReady);
+  const usageFetchError = useDashboardUsageStore((state) => state.error);
+  const setUsagePanelReady = useDashboardUsageStore((state) => state.setUsagePanelReady);
+  const setUsageVisualizationReady = useDashboardUsageStore((state) => state.setUsageVisualizationReady);
+  const refreshUsageHistory = useDashboardUsageStore((state) => state.refreshUsageHistory);
+  const dashboardHeavyContentReady = useDashboardUiStore((state) => state.dashboardHeavyContentReady);
+  const usageGroupBy = useDashboardUiStore((state) => state.usageGroupBy);
+  const usageWindow = useDashboardUiStore((state) => state.usageWindow);
+  const usagePage = useDashboardUiStore((state) => state.usagePage);
+  const setDashboardHeavyContentReady = useDashboardUiStore((state) => state.setDashboardHeavyContentReady);
+  const setUsageGroupBy = useDashboardUiStore((state) => state.setUsageGroupBy);
+  const setUsageWindow = useDashboardUiStore((state) => state.setUsageWindow);
+  const setUsagePage = useDashboardUiStore((state) => state.setUsagePage);
   const [uptime, setUptime] = useState(0);
-  const [usageHistory, setUsageHistory] = useState<UsageHistoryEntry[]>([]);
-  const [usageGroupBy, setUsageGroupBy] = useState<UsageGroupBy>('model');
-  const [usageWindow, setUsageWindow] = useState<UsageWindow>('7d');
-  const [usagePage, setUsagePage] = useState(1);
-  const [dashboardHeavyContentReady, setDashboardHeavyContentReady] = useState(
-    () => channels.length > 0 || skills.length > 0,
-  );
-  const [usagePanelReady, setUsagePanelReady] = useState(false);
-  const [usageChartReady, setUsageChartReady] = useState(false);
-  const [usageDetailListReady, setUsageDetailListReady] = useState(false);
-  const [usageFetchPending, setUsageFetchPending] = useState(false);
-  const usageFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const usageFetchSafetyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const usageFetchGenerationRef = useRef(0);
-  const usageVisualizationPrimedRef = useRef(false);
 
   // Track page view on mount only.
   useEffect(() => {
@@ -93,148 +95,17 @@ export function Dashboard() {
   // Fetch token usage history with retry when Gateway just restarted and
   // history data may not be ready yet.
   useEffect(() => {
-    if (usageFetchTimerRef.current) {
-      clearTimeout(usageFetchTimerRef.current);
-      usageFetchTimerRef.current = null;
-    }
-    if (usageFetchSafetyTimeoutRef.current) {
-      clearTimeout(usageFetchSafetyTimeoutRef.current);
-      usageFetchSafetyTimeoutRef.current = null;
-    }
-
     if (!isGatewayRunning) {
-      setUsageFetchPending(false);
       return;
     }
 
-    const generation = usageFetchGenerationRef.current + 1;
-    usageFetchGenerationRef.current = generation;
-    setUsageFetchPending(true);
     const restartMarker = `${gatewayStatus.pid ?? 'na'}:${gatewayStatus.connectedAt ?? 'na'}`;
-    trackUiEvent('dashboard.token_usage_fetch_started', {
-      generation,
+    void refreshUsageHistory({
+      maxAttempts: usageFetchMaxAttempts,
       restartMarker,
+      reason: 'dashboard_refresh',
     });
-
-    const settleUsageFetchPending = () => {
-      if (usageFetchGenerationRef.current !== generation) {
-        return;
-      }
-      setUsageFetchPending(false);
-      if (usageFetchSafetyTimeoutRef.current) {
-        clearTimeout(usageFetchSafetyTimeoutRef.current);
-        usageFetchSafetyTimeoutRef.current = null;
-      }
-    };
-
-    usageFetchSafetyTimeoutRef.current = setTimeout(() => {
-      if (usageFetchGenerationRef.current !== generation) {
-        return;
-      }
-      setUsageFetchPending(false);
-      usageFetchSafetyTimeoutRef.current = null;
-      trackUiEvent('dashboard.token_usage_fetch_safety_timeout', {
-        generation,
-        restartMarker,
-      });
-    }, USAGE_FETCH_SAFETY_TIMEOUT_MS);
-
-    const fetchUsageHistoryWithRetry = async (attempt: number) => {
-      trackUiEvent('dashboard.token_usage_fetch_attempt', {
-        generation,
-        attempt,
-        restartMarker,
-      });
-
-      try {
-        const entries = await hostApiFetch<UsageHistoryEntry[]>('/api/runtime-host/usage/recent');
-        if (usageFetchGenerationRef.current !== generation) {
-          return;
-        }
-
-        const normalized = Array.isArray(entries) ? entries : [];
-        setUsageHistory(normalized);
-        setUsagePage(1);
-        trackUiEvent('dashboard.token_usage_fetch_succeeded', {
-          generation,
-          attempt,
-          records: normalized.length,
-          restartMarker,
-        });
-
-        if (normalized.length === 0 && attempt < usageFetchMaxAttempts) {
-          trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
-            generation,
-            attempt,
-            reason: 'empty',
-            restartMarker,
-          });
-          const nextDelay = document.visibilityState === 'visible'
-            ? USAGE_FETCH_RETRY_DELAY_MS
-            : Math.max(USAGE_FETCH_RETRY_DELAY_MS, 5000);
-          usageFetchTimerRef.current = setTimeout(() => {
-            void fetchUsageHistoryWithRetry(attempt + 1);
-          }, nextDelay);
-        } else if (normalized.length === 0) {
-          trackUiEvent('dashboard.token_usage_fetch_exhausted', {
-            generation,
-            attempt,
-            reason: 'empty',
-            restartMarker,
-          });
-          settleUsageFetchPending();
-        } else {
-          settleUsageFetchPending();
-        }
-      } catch (error) {
-        if (usageFetchGenerationRef.current !== generation) {
-          return;
-        }
-        trackUiEvent('dashboard.token_usage_fetch_failed_attempt', {
-          generation,
-          attempt,
-          restartMarker,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        if (attempt < usageFetchMaxAttempts) {
-          trackUiEvent('dashboard.token_usage_fetch_retry_scheduled', {
-            generation,
-            attempt,
-            reason: 'error',
-            restartMarker,
-          });
-          const nextDelay = document.visibilityState === 'visible'
-            ? USAGE_FETCH_RETRY_DELAY_MS
-            : Math.max(USAGE_FETCH_RETRY_DELAY_MS, 5000);
-          usageFetchTimerRef.current = setTimeout(() => {
-            void fetchUsageHistoryWithRetry(attempt + 1);
-          }, nextDelay);
-          return;
-        }
-        setUsageHistory([]);
-        trackUiEvent('dashboard.token_usage_fetch_exhausted', {
-          generation,
-          attempt,
-          reason: 'error',
-          restartMarker,
-        });
-        settleUsageFetchPending();
-      }
-    };
-
-    void fetchUsageHistoryWithRetry(1);
-
-    return () => {
-      if (usageFetchSafetyTimeoutRef.current) {
-        clearTimeout(usageFetchSafetyTimeoutRef.current);
-        usageFetchSafetyTimeoutRef.current = null;
-      }
-      if (usageFetchTimerRef.current) {
-        clearTimeout(usageFetchTimerRef.current);
-        usageFetchTimerRef.current = null;
-      }
-    };
-  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning, usageFetchMaxAttempts]);
+  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning, refreshUsageHistory, usageFetchMaxAttempts]);
 
   useEffect(() => {
     if (dashboardHeavyContentReady) {
@@ -248,7 +119,7 @@ export function Dashboard() {
       useAnimationFrame: true,
     });
     return cancel;
-  }, [dashboardHeavyContentReady]);
+  }, [dashboardHeavyContentReady, setDashboardHeavyContentReady]);
 
   useEffect(() => {
     if (!dashboardHeavyContentReady && (channels.length > 0 || skills.length > 0)) {
@@ -262,7 +133,7 @@ export function Dashboard() {
       return cancel;
     }
     return undefined;
-  }, [channels.length, dashboardHeavyContentReady, skills.length]);
+  }, [channels.length, dashboardHeavyContentReady, setDashboardHeavyContentReady, skills.length]);
 
   useEffect(() => {
     if (usagePanelReady) {
@@ -276,7 +147,7 @@ export function Dashboard() {
       useAnimationFrame: false,
     });
     return cancel;
-  }, [usagePanelReady]);
+  }, [setUsagePanelReady, usagePanelReady]);
 
   useEffect(() => {
     if (!usagePanelReady && usageHistory.length > 0) {
@@ -290,27 +161,31 @@ export function Dashboard() {
       return cancel;
     }
     return undefined;
-  }, [usageHistory.length, usagePanelReady]);
+  }, [setUsagePanelReady, usageHistory.length, usagePanelReady]);
 
   useEffect(() => {
     if (!isGatewayRunning || !usagePanelReady || usageHistory.length === 0) {
-      usageVisualizationPrimedRef.current = false;
       return;
     }
-    if (usageVisualizationPrimedRef.current || (usageChartReady && usageDetailListReady)) {
+    if (usageChartReady && usageDetailListReady) {
       return;
     }
-    usageVisualizationPrimedRef.current = true;
     const cancel = scheduleIdleReady(() => {
-      setUsageChartReady((prev) => (prev ? prev : true));
-      setUsageDetailListReady((prev) => (prev ? prev : true));
+      setUsageVisualizationReady(true);
     }, {
       idleTimeoutMs: 320,
       fallbackDelayMs: 100,
       useAnimationFrame: true,
     });
     return cancel;
-  }, [isGatewayRunning, usageChartReady, usageDetailListReady, usageHistory.length, usagePanelReady]);
+  }, [
+    isGatewayRunning,
+    setUsageVisualizationReady,
+    usageChartReady,
+    usageDetailListReady,
+    usageHistory.length,
+    usagePanelReady,
+  ]);
 
   // Calculate statistics safely
   const connectedChannels = Array.isArray(channels) ? channels.filter((c) => c.status === 'connected').length : 0;
@@ -320,8 +195,8 @@ export function Dashboard() {
   );
   const enabledSkills = enabledSkillsList.length;
   const visibleUsageHistory = useMemo(
-    () => (isGatewayRunning ? usageHistory : []),
-    [isGatewayRunning, usageHistory],
+    () => usageHistory,
+    [usageHistory],
   );
   const filteredUsageHistory = useMemo(
     () => filterUsageHistoryByWindow(visibleUsageHistory, usageWindow),
@@ -344,7 +219,11 @@ export function Dashboard() {
     () => filteredUsageHistory.slice((safeUsagePage - 1) * usagePageSize, safeUsagePage * usagePageSize),
     [filteredUsageHistory, safeUsagePage],
   );
-  const usageLoading = isGatewayRunning && usageFetchPending;
+  const usageRefreshing = isGatewayRunning && usageRefreshingState && usageHistoryReady;
+  const showUsageInitialLoading = (
+    (!usagePanelReady && !usageHistoryReady)
+    || (isGatewayRunning && usageInitialLoading && visibleUsageHistory.length === 0)
+  );
   const usageSummary = useMemo(
     () => filteredUsageHistory.reduce(
       (acc, entry) => ({
@@ -655,21 +534,40 @@ export function Dashboard() {
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">{t('recentTokenHistory.title')}</CardTitle>
-          <CardDescription>{t('recentTokenHistory.description')}</CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-lg">{t('recentTokenHistory.title')}</CardTitle>
+            <CardDescription>{t('recentTokenHistory.description')}</CardDescription>
+          </div>
+          {usageRefreshing && (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t('recentTokenHistory.loading')}
+            </span>
+          )}
         </CardHeader>
         <CardContent>
-          {!usagePanelReady ? (
-            <FeedbackState state="loading" title={t('recentTokenHistory.loading')} />
-          ) : usageLoading ? (
+          {showUsageInitialLoading ? (
             <FeedbackState state="loading" title={t('recentTokenHistory.loading')} />
           ) : visibleUsageHistory.length === 0 ? (
-            <FeedbackState state="empty" title={t('recentTokenHistory.empty')} />
+            usageFetchError ? (
+              <FeedbackState
+                state="error"
+                title={t('recentTokenHistory.refreshFailed')}
+                description={usageFetchError}
+              />
+            ) : (
+              <FeedbackState state="empty" title={t('recentTokenHistory.empty')} />
+            )
           ) : filteredUsageHistory.length === 0 ? (
             <FeedbackState state="empty" title={t('recentTokenHistory.emptyForWindow')} />
           ) : (
             <div className="space-y-5">
+              {usageFetchError && (
+                <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
+                  {t('recentTokenHistory.refreshFailed')}
+                </p>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex rounded-lg border p-1">
@@ -678,7 +576,6 @@ export function Dashboard() {
                       size="sm"
                       onClick={() => {
                         setUsageGroupBy('model');
-                        setUsagePage(1);
                       }}
                     >
                       {t('recentTokenHistory.groupByModel')}
@@ -688,7 +585,6 @@ export function Dashboard() {
                       size="sm"
                       onClick={() => {
                         setUsageGroupBy('day');
-                        setUsagePage(1);
                       }}
                     >
                       {t('recentTokenHistory.groupByTime')}
@@ -700,7 +596,6 @@ export function Dashboard() {
                       size="sm"
                       onClick={() => {
                         setUsageWindow('7d');
-                        setUsagePage(1);
                       }}
                     >
                       {t('recentTokenHistory.last7Days')}
@@ -710,7 +605,6 @@ export function Dashboard() {
                       size="sm"
                       onClick={() => {
                         setUsageWindow('30d');
-                        setUsagePage(1);
                       }}
                     >
                       {t('recentTokenHistory.last30Days')}
@@ -720,7 +614,6 @@ export function Dashboard() {
                       size="sm"
                       onClick={() => {
                         setUsageWindow('all');
-                        setUsagePage(1);
                       }}
                     >
                       {t('recentTokenHistory.allTime')}

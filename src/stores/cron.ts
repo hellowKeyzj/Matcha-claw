@@ -8,7 +8,11 @@ import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/c
 
 interface CronState {
   jobs: CronJob[];
-  loading: boolean;
+  snapshotReady: boolean;
+  initialLoading: boolean;
+  refreshing: boolean;
+  mutating: boolean;
+  mutatingByJobId: Record<string, number>;
   error: string | null;
   
   // Actions
@@ -28,46 +32,108 @@ function decodeCronJobs(payload: unknown): CronJob[] {
   return payload as CronJob[];
 }
 
-export const useCronStore = create<CronState>((set) => ({
+let inflightCronFetchPromise: Promise<void> | null = null;
+
+function hasMutatingJobs(mutatingByJobId: Record<string, number>): boolean {
+  return Object.keys(mutatingByJobId).length > 0;
+}
+
+function incrementMutatingJob(mutatingByJobId: Record<string, number>, jobId: string): Record<string, number> {
+  const current = mutatingByJobId[jobId] ?? 0;
+  return {
+    ...mutatingByJobId,
+    [jobId]: current + 1,
+  };
+}
+
+function decrementMutatingJob(mutatingByJobId: Record<string, number>, jobId: string): Record<string, number> {
+  const current = mutatingByJobId[jobId] ?? 0;
+  if (current <= 1) {
+    const next = { ...mutatingByJobId };
+    delete next[jobId];
+    return next;
+  }
+  return {
+    ...mutatingByJobId,
+    [jobId]: current - 1,
+  };
+}
+
+export const useCronStore = create<CronState>((set, get) => ({
   jobs: [],
-  loading: false,
+  snapshotReady: false,
+  initialLoading: false,
+  refreshing: false,
+  mutating: false,
+  mutatingByJobId: {},
   error: null,
   
-  fetchJobs: async (options) => {
-    const silent = options?.silent === true;
-    if (!silent) {
-      set({ loading: true, error: null });
+  fetchJobs: async (_options) => {
+    if (inflightCronFetchPromise) {
+      await inflightCronFetchPromise;
+      return;
     }
-    
-    try {
-      const jobs = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
-      if (silent) {
-        set({ jobs });
-      } else {
-        set({ jobs, loading: false });
+    const hasSnapshot = get().snapshotReady;
+    if (hasSnapshot) {
+      set({ refreshing: true, initialLoading: false, error: null });
+    } else {
+      set({ initialLoading: true, refreshing: false, error: null });
+    }
+
+    const task = (async () => {
+      try {
+        const jobs = decodeCronJobs(await hostApiFetch<unknown>('/api/cron/jobs'));
+        set({
+          jobs,
+          snapshotReady: true,
+          initialLoading: false,
+          refreshing: false,
+          error: null,
+        });
+      } catch (error) {
+        set({
+          initialLoading: false,
+          refreshing: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-    } catch (error) {
-      if (!silent) {
-        set({ error: String(error), loading: false });
+    })();
+
+    inflightCronFetchPromise = task;
+    try {
+      await task;
+    } finally {
+      if (inflightCronFetchPromise === task) {
+        inflightCronFetchPromise = null;
       }
     }
   },
   
   createJob: async (input) => {
+    set({ mutating: true });
     try {
       const job = await hostApiFetch<CronJob>('/api/cron/jobs', {
         method: 'POST',
         body: JSON.stringify(input),
       });
-      set((state) => ({ jobs: [...state.jobs, job] }));
+      set((state) => ({ jobs: [...state.jobs, job], snapshotReady: true }));
       return job;
     } catch (error) {
       console.error('Failed to create cron job:', error);
       throw error;
+    } finally {
+      set({ mutating: false });
     }
   },
   
   updateJob: async (id, input) => {
+    set((state) => {
+      const next = incrementMutatingJob(state.mutatingByJobId, id);
+      return {
+        mutatingByJobId: next,
+        mutating: true,
+      };
+    });
     try {
       await hostApiFetch(`/api/cron/jobs/${encodeURIComponent(id)}`, {
         method: 'PUT',
@@ -81,10 +147,25 @@ export const useCronStore = create<CronState>((set) => ({
     } catch (error) {
       console.error('Failed to update cron job:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const next = decrementMutatingJob(state.mutatingByJobId, id);
+        return {
+          mutatingByJobId: next,
+          mutating: hasMutatingJobs(next),
+        };
+      });
     }
   },
   
   deleteJob: async (id) => {
+    set((state) => {
+      const next = incrementMutatingJob(state.mutatingByJobId, id);
+      return {
+        mutatingByJobId: next,
+        mutating: true,
+      };
+    });
     try {
       await hostApiFetch(`/api/cron/jobs/${encodeURIComponent(id)}`, {
         method: 'DELETE',
@@ -95,10 +176,25 @@ export const useCronStore = create<CronState>((set) => ({
     } catch (error) {
       console.error('Failed to delete cron job:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const next = decrementMutatingJob(state.mutatingByJobId, id);
+        return {
+          mutatingByJobId: next,
+          mutating: hasMutatingJobs(next),
+        };
+      });
     }
   },
   
   toggleJob: async (id, enabled) => {
+    set((state) => {
+      const next = incrementMutatingJob(state.mutatingByJobId, id);
+      return {
+        mutatingByJobId: next,
+        mutating: true,
+      };
+    });
     try {
       await hostApiFetch('/api/cron/toggle', {
         method: 'POST',
@@ -112,10 +208,25 @@ export const useCronStore = create<CronState>((set) => ({
     } catch (error) {
       console.error('Failed to toggle cron job:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const next = decrementMutatingJob(state.mutatingByJobId, id);
+        return {
+          mutatingByJobId: next,
+          mutating: hasMutatingJobs(next),
+        };
+      });
     }
   },
   
   triggerJob: async (id) => {
+    set((state) => {
+      const next = incrementMutatingJob(state.mutatingByJobId, id);
+      return {
+        mutatingByJobId: next,
+        mutating: true,
+      };
+    });
     try {
       const result = await hostApiFetch<{ ok?: boolean; ran?: boolean; reason?: string }>('/api/cron/trigger', {
         method: 'POST',
@@ -136,8 +247,16 @@ export const useCronStore = create<CronState>((set) => ({
     } catch (error) {
       console.error('Failed to trigger cron job:', error);
       throw error;
+    } finally {
+      set((state) => {
+        const next = decrementMutatingJob(state.mutatingByJobId, id);
+        return {
+          mutatingByJobId: next,
+          mutating: hasMutatingJobs(next),
+        };
+      });
     }
   },
   
-  setJobs: (jobs) => set({ jobs }),
+  setJobs: (jobs) => set({ jobs, snapshotReady: true }),
 }));

@@ -42,6 +42,11 @@
       "fallback": "Fallback Settings"
     },
     "add": "Add Provider",
+    "status": {
+      "refresh": "Refresh",
+      "refreshing": "Refreshing providers...",
+      "retry": "Retry refresh"
+    },
     "custom": "Custom",
     "notRequired": "Not required",
     "empty": {
@@ -203,19 +208,7 @@
     "proxyBypassHelp": "Semicolon, comma, or newline separated hosts that should connect directly.",
     "proxyRestartNote": "Saving reapplies Electron networking and restarts the Gateway immediately.",
     "proxySaved": "Proxy settings saved",
-    "proxySaveFailed": "Failed to save proxy settings",
-    "clawHubTokenTitle": "ClawHub Token",
-    "clawHubTokenDesc": "Used to configure your ClawHub login token.",
-    "clawHubTokenPlaceholder": "Enter ClawHub token (e.g. clh_xxx)",
-    "clawHubTokenSaved": "ClawHub token saved",
-    "clawHubTokenCleared": "ClawHub token cleared",
-    "clawHubTokenSaveFailed": "Failed to save ClawHub token",
-    "clawHubTokenClearFailed": "Failed to clear ClawHub token",
-    "clawHubOpenSite": "Open ClawHub",
-    "clawHubAutoLogin": "Login & Auto Fetch",
-    "clawHubAutoLoginWaiting": "Browser opened. Complete authorization on the ClawHub page...",
-    "clawHubTokenAutoSynced": "Logged into ClawHub and synced token automatically",
-    "clawHubTokenAutoSyncFailed": "ClawHub auto login failed"
+    "proxySaveFailed": "Failed to save proxy settings"
   },
   "updates": {
     "title": "Updates",

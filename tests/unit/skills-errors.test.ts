@@ -23,7 +23,15 @@ describe('skills store error mapping', () => {
 
   it('maps fetchSkills rate-limit error by AppError code', async () => {
     rpcMock.mockResolvedValueOnce({ skills: [] });
-    hostApiFetchMock.mockRejectedValueOnce(new Error('rate limit exceeded'));
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/skills/configs') {
+        throw new Error('rate limit exceeded');
+      }
+      if (path === '/api/clawhub/list') {
+        return { success: true, results: [] };
+      }
+      throw new Error(`Unexpected hostApiFetch path: ${path}`);
+    });
 
     const { useSkillsStore } = await import('@/stores/skills');
     await useSkillsStore.getState().fetchSkills();

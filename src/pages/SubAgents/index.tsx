@@ -100,7 +100,10 @@ export function SubAgents() {
   const { t: tTemplate } = useTranslation('subagentTemplates');
   const navigate = useNavigate();
   const agents = useSubagentsStore((state) => state.agents);
-  const loading = useSubagentsStore((state) => state.loading);
+  const snapshotReady = useSubagentsStore((state) => state.snapshotReady);
+  const initialLoading = useSubagentsStore((state) => state.initialLoading);
+  const refreshing = useSubagentsStore((state) => state.refreshing);
+  const mutating = useSubagentsStore((state) => state.mutating);
   const error = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
@@ -143,7 +146,7 @@ export function SubAgents() {
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
-    () => import.meta.env.MODE === 'test',
+    () => import.meta.env.MODE === 'test' || agents.length > 0 || snapshotReady,
   );
   const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayState = useGatewayStore((state) => state.status.state);
@@ -161,6 +164,8 @@ export function SubAgents() {
   const draftRawOutput = managedAgentId ? (draftRawOutputByAgent[managedAgentId] ?? '') : '';
   const hasAvailableModels = availableModels.length > 0;
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
+  const hasAgentCards = agents.length > 0;
+  const showSubagentGridSkeleton = !hasAgentCards && !snapshotReady && (initialLoading || !subagentsHeavyContentReady);
 
   useEffect(() => {
     void loadAgents();
@@ -209,6 +214,12 @@ export function SubAgents() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (agents.length > 0 && !subagentsHeavyContentReady) {
+      setSubagentsHeavyContentReady(true);
+    }
+  }, [agents.length, subagentsHeavyContentReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -502,7 +513,15 @@ export function SubAgents() {
           <h1 className="text-2xl font-bold">{t('title')}</h1>
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
-        <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>
+        <div className="flex items-center gap-2">
+          {(refreshing || mutating) && (
+            <span className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs text-muted-foreground">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-primary" />
+              {refreshing ? t('status.refreshing') : t('status.mutating')}
+            </span>
+          )}
+          <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>
+        </div>
       </header>
 
       {error && (
@@ -642,7 +661,7 @@ export function SubAgents() {
         )}
       </section>
 
-      {!subagentsHeavyContentReady ? (
+      {showSubagentGridSkeleton ? (
         <div data-testid="subagent-card-grid" className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, index) => (
             <div key={`subagents-card-placeholder-${index}`} className="rounded-lg border bg-card p-4">
@@ -679,7 +698,7 @@ export function SubAgents() {
         </div>
       )}
 
-      {subagentsHeavyContentReady && !loading && agents.length === 0 && (
+      {!initialLoading && snapshotReady && agents.length === 0 && (
         <p className="text-sm text-muted-foreground">{t('empty')}</p>
       )}
       <SubagentDeleteDialog
