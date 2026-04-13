@@ -5,8 +5,6 @@ import { Dashboard } from '@/pages/Dashboard';
 import { useDashboardUiStore } from '@/stores/dashboard-ui';
 import { useDashboardUsageStore } from '@/stores/dashboard-usage';
 
-const fetchChannelsMock = vi.fn(async () => {});
-const fetchSkillsMock = vi.fn(async () => {});
 const hostApiFetchMock = vi.fn(async (path: string) => {
   if (path === '/api/runtime-host/usage/recent') {
     return [
@@ -36,36 +34,8 @@ const gatewayState = {
   },
 };
 
-const channelsState = {
-  channels: [],
-  fetchChannels: fetchChannelsMock,
-};
-
-const skillsState: {
-  skills: Array<{ id: string; enabled: boolean; name: string }>;
-  fetchSkills: typeof fetchSkillsMock;
-} = {
-  skills: [],
-  fetchSkills: fetchSkillsMock,
-};
-
 vi.mock('@/stores/gateway', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
-}));
-
-vi.mock('@/stores/channels', () => ({
-  useChannelsStore: (selector?: (state: typeof channelsState) => unknown) =>
-    typeof selector === 'function' ? selector(channelsState) : channelsState,
-}));
-
-vi.mock('@/stores/skills', () => ({
-  useSkillsStore: (selector?: (state: typeof skillsState) => unknown) =>
-    typeof selector === 'function' ? selector(skillsState) : skillsState,
-}));
-
-vi.mock('@/stores/settings', () => ({
-  useSettingsStore: (selector: (state: { devModeUnlocked: boolean }) => unknown) =>
-    selector({ devModeUnlocked: false }),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -82,7 +52,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-describe('dashboard skills fetch behavior', () => {
+describe('dashboard page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useDashboardUiStore.setState({
@@ -103,9 +73,7 @@ describe('dashboard skills fetch behavior', () => {
     });
   });
 
-  it('技能列表已有数据时，不重复触发 fetchSkills', async () => {
-    skillsState.skills = [{ id: 'skill-1', enabled: true, name: 'Skill 1' }];
-
+  it('不再渲染快捷入口到频道和技能页面', async () => {
     render(
       <MemoryRouter>
         <Dashboard />
@@ -113,28 +81,14 @@ describe('dashboard skills fetch behavior', () => {
     );
 
     await waitFor(() => {
-      expect(fetchChannelsMock).toHaveBeenCalled();
+      expect(hostApiFetchMock).toHaveBeenCalled();
     });
-    expect(fetchSkillsMock).not.toHaveBeenCalled();
-  });
 
-  it('技能列表为空时，才触发 fetchSkills', async () => {
-    skillsState.skills = [];
-
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
-    });
+    expect(screen.queryByRole('link', { name: /addChannel/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /installSkill/i })).not.toBeInTheDocument();
   });
 
   it('token 历史有数据时，明细列表应结束骨架并渲染记录', async () => {
-    skillsState.skills = [];
-
     render(
       <MemoryRouter>
         <Dashboard />

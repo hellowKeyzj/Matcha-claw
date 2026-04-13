@@ -114,7 +114,7 @@ interface PluginsStoreState {
   mutatingAction: 'execution' | 'restart' | null;
   mutatingPluginId: string | null;
   error: string | null;
-  refreshSnapshot: (options?: { reason?: PluginRefreshReason }) => Promise<void>;
+  refreshSnapshot: (options?: { reason?: PluginRefreshReason; silent?: boolean }) => Promise<void>;
   restartHost: () => Promise<void>;
   toggleExecution: (nextValue: boolean) => Promise<void>;
   togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
@@ -138,10 +138,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     const reason = options?.reason ?? 'background';
     const requestId = ++latestPluginRefreshRequestId;
     const hasSnapshot = get().snapshotReady;
+    const silent = options?.silent ?? ((reason === 'initial' || reason === 'background') && hasSnapshot);
     if (hasSnapshot) {
       set({
-        refreshing: true,
-        refreshReason: reason,
+        refreshing: !silent,
+        refreshReason: silent ? null : reason,
         initialLoading: false,
         error: null,
       });

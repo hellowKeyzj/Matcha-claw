@@ -103,6 +103,10 @@ interface ReadConfigForDisplayOptions {
   forceRefresh?: boolean;
 }
 
+interface LoadAgentsOptions {
+  silent?: boolean;
+}
+
 interface SubagentsState {
   agents: SubagentSummary[];
   lastLoadedAt: number | null;
@@ -125,7 +129,7 @@ interface SubagentsState {
   draftError: string | null;
   previewDiffByFile: PreviewDiffByFile;
   selectedAgentId: string | null;
-  loadAgents: () => Promise<void>;
+  loadAgents: (options?: LoadAgentsOptions) => Promise<void>;
   loadAvailableModels: () => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
@@ -1241,12 +1245,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   previewDiffByFile: {},
   selectedAgentId: null,
 
-  loadAgents: async () => {
+  loadAgents: async (options) => {
+    const silent = options?.silent === true;
     if (inflightLoadAgentsTask) {
       if (!queuedLoadAgentsTask) {
         queuedLoadAgentsTask = inflightLoadAgentsTask.finally(async () => {
           queuedLoadAgentsTask = null;
-          await get().loadAgents();
+          await get().loadAgents(options);
         });
       }
       await queuedLoadAgentsTask;
@@ -1258,7 +1263,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const hasSnapshot = stateBeforeLoad.snapshotReady || stateBeforeLoad.agents.length > 0;
     set({
       initialLoading: !hasSnapshot,
-      refreshing: hasSnapshot,
+      refreshing: hasSnapshot && !silent,
       error: null,
     });
 
@@ -1515,7 +1520,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
       }
       invalidateConfigDisplayCache();
-      await get().loadAgents();
+      await get().loadAgents({ silent: true });
       if (partialFailureMessage) {
         set({ error: partialFailureMessage });
       }
@@ -1596,7 +1601,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
       }
       await rpc('agents.files.list', { agentId: createdAgentId });
-      await get().loadAgents();
+      await get().loadAgents({ silent: true });
       set((state) => ({
         persistedFilesByAgent: {
           ...state.persistedFilesByAgent,
@@ -1670,7 +1675,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         await updateAgentSkillsConfig(agentId, nextSkills);
       }
       invalidateConfigDisplayCache();
-      await get().loadAgents();
+      await get().loadAgents({ silent: true });
     } catch (error) {
       set({
         error: getErrorMessage(error) || 'Failed to update subagent',
@@ -1901,7 +1906,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
       }
       await rpc('agents.files.list', { agentId });
-      await get().loadAgents();
+      await get().loadAgents({ silent: true });
       set((state) => ({
         draftByFile: {},
         previewDiffByFile: {},

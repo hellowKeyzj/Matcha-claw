@@ -42,6 +42,7 @@ import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
 import { scheduleIdleReady } from '@/lib/idle-ready';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { toast } from 'sonner';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/skill';
@@ -851,7 +852,9 @@ export function Skills() {
   const [activeTab, setActiveTab] = useState('all');
   const isAllTabActive = activeTab === 'all';
   const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
-  const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(false);
+  const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(
+    () => import.meta.env.MODE === 'test' || skills.length > 0 || snapshotReady,
+  );
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -880,12 +883,16 @@ export function Skills() {
   // 仅在本地快照未就绪时自动拉取，避免重复触发 skills.status 带来日志噪音。
   useEffect(() => {
     if (isGatewayRunning && !snapshotReady) {
-      void fetchSkills();
+      void fetchSkills({ silent: true });
     }
   }, [fetchSkills, isGatewayRunning, snapshotReady]);
 
   useEffect(() => {
     if (skillsHeavyContentReady) {
+      return;
+    }
+    if (snapshotReady) {
+      setSkillsHeavyContentReady(true);
       return;
     }
     const cancel = scheduleIdleReady(() => {
@@ -896,7 +903,7 @@ export function Skills() {
       useAnimationFrame: true,
     });
     return cancel;
-  }, [skillsHeavyContentReady]);
+  }, [skillsHeavyContentReady, snapshotReady]);
 
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
@@ -945,6 +952,7 @@ export function Skills() {
   }, [deferredSearchQuery, deferredSelectedSource, skillsForView]);
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
+  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   const filteredSkillCards = useMemo<SkillGridCardViewModel[]>(() => {
     const configurableLabel = t('detail.configurable');
@@ -1227,7 +1235,7 @@ export function Skills() {
         </Card>
       )}
 
-      {refreshing && snapshotReady && (
+      {showRefreshingHint && (
         <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
           <RefreshCw className="h-3.5 w-3.5 animate-spin" />
           {t('common:status.loading', 'Loading...')}

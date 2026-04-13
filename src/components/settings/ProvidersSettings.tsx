@@ -26,6 +26,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import {
   useProviderStore,
   type ProviderAccount,
@@ -183,6 +184,7 @@ export function ProvidersSettings() {
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const [manualRefreshPending, setManualRefreshPending] = useState(false);
   const wasGatewayRunningRef = React.useRef(gatewayState === 'running');
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
@@ -190,6 +192,7 @@ export function ProvidersSettings() {
     () => buildProviderListItems(accounts, statuses, vendors, defaultAccountId),
     [accounts, statuses, vendors, defaultAccountId],
   );
+  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   // Fetch providers on mount
   useEffect(() => {
@@ -241,6 +244,19 @@ export function ProvidersSettings() {
     }
     wasGatewayRunningRef.current = gatewayState === 'running';
   }, [gatewayState, refreshProviderSnapshot]);
+
+  const handleManualRefresh = () => {
+    if (manualRefreshPending) {
+      return;
+    }
+    setManualRefreshPending(true);
+    void refreshProviderSnapshot({
+      trigger: 'manual',
+      reason: 'user_manual_refresh',
+    }).finally(() => {
+      setManualRefreshPending(false);
+    });
+  };
 
   const handleAddProvider = async (
     type: ProviderType,
@@ -309,7 +325,7 @@ export function ProvidersSettings() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-h-5">
-          {refreshing && snapshotReady ? (
+          {showRefreshingHint ? (
             <div className="inline-flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>{t('aiProviders.status.refreshing')}</span>
@@ -321,15 +337,10 @@ export function ProvidersSettings() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => {
-              void refreshProviderSnapshot({
-                trigger: 'manual',
-                reason: 'user_manual_refresh',
-              });
-            }}
-            disabled={initialLoading || refreshing}
+            onClick={handleManualRefresh}
+            disabled={initialLoading || refreshing || manualRefreshPending}
           >
-            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
+            <RefreshCw className={cn('h-4 w-4 mr-2', manualRefreshPending && 'animate-spin')} />
             {t('aiProviders.status.refresh')}
           </Button>
           <Button size="sm" onClick={() => setShowAddDialog(true)}>

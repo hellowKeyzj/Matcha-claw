@@ -6,10 +6,6 @@ import {
   updateTask,
   type Task,
 } from '@/services/openclaw/task-manager-client';
-import {
-  getPluginCatalog,
-  getPluginRuntime,
-} from '@/services/openclaw/plugin-manager-client';
 
 interface TaskCenterState {
   tasks: Task[];
@@ -25,7 +21,7 @@ interface TaskCenterState {
   pluginEnabled: boolean;
   pluginVersion?: string;
   init: () => Promise<void>;
-  refreshTasks: () => Promise<void>;
+  refreshTasks: (options?: { silent?: boolean }) => Promise<void>;
   deleteTaskById: (payload: { taskId: string }) => Promise<void>;
   handleGatewayNotification: (notification: unknown) => void;
 }
@@ -81,6 +77,22 @@ const TASK_CENTER_REFRESH_MIN_GAP_MS = 1_200;
 let taskCenterInitPromise: Promise<void> | null = null;
 let taskCenterRefreshPromise: Promise<void> | null = null;
 let taskCenterLastRefreshAtMs = 0;
+
+function isTaskManagerUnavailableError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const referencesTaskManager = message.includes('task_manager') || message.includes('task-manager');
+  if (!referencesTaskManager) {
+    return false;
+  }
+  return (
+    message.includes('not found')
+    || message.includes('unknown')
+    || message.includes('unsupported')
+    || message.includes('disabled')
+    || message.includes('not enabled')
+    || message.includes('unavailable')
+  );
+}
 
 async function listTasksFromWorkspaceScope(scope: string[]): Promise<Task[]> {
   if (scope.length === 0) {
@@ -149,42 +161,66 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
 
     const task = (async () => {
+      let scope: string[] = [];
+      let workspaceLabel: string | null = null;
       try {
-        const [workspace, workspaceDirs, pluginCatalog, pluginRuntime] = await Promise.all([
-          getWorkspaceDir(),
-          getTaskWorkspaceDirs(),
-          getPluginCatalog(),
-          getPluginRuntime(),
-        ]);
-        const taskManagerPlugin = pluginCatalog.plugins.find((plugin) => plugin.id === 'task-manager');
-        const scope = workspaceDirs.length > 0
+        const workspaceDirs = await getTaskWorkspaceDirs();
+        const workspace = workspaceDirs.length === 0
+          ? await getWorkspaceDir()
+          : null;
+        scope = workspaceDirs.length > 0
           ? workspaceDirs
           : (workspace ? [workspace] : []);
-        const workspaceLabel = scope.length <= 1
+        workspaceLabel = scope.length <= 1
           ? (scope[0] || workspace)
           : `${scope[0]} (+${scope.length - 1})`;
-        const pluginInstalled = Boolean(taskManagerPlugin);
-        const pluginEnabled = Boolean(taskManagerPlugin?.enabled) && pluginRuntime.execution.pluginExecutionEnabled;
-
-        let tasks: Task[] = [];
-        if (pluginInstalled && pluginEnabled) {
-          tasks = await listTasksFromWorkspaceScope(scope);
-        }
 
         set({
           workspaceDir: workspaceLabel || null,
           workspaceDirs: scope,
-          pluginInstalled,
-          pluginEnabled,
-          pluginVersion: taskManagerPlugin?.version,
-          tasks,
+          pluginInstalled: true,
+          pluginEnabled: true,
+          pluginVersion: undefined,
           snapshotReady: true,
           initialized: true,
           initialLoading: false,
-          refreshing: false,
+          refreshing: true,
           error: null,
         });
+
+        const tasks = await listTasksFromWorkspaceScope(scope);
+        set((state) => {
+          if (areTaskListsEquivalent(state.tasks, tasks)) {
+            return {
+              ...state,
+              refreshing: false,
+              error: null,
+            };
+          }
+          return {
+            ...state,
+            tasks,
+            refreshing: false,
+            error: null,
+          };
+        });
       } catch (error) {
+        if (isTaskManagerUnavailableError(error)) {
+          set({
+            workspaceDir: workspaceLabel,
+            workspaceDirs: scope,
+            tasks: [],
+            pluginInstalled: false,
+            pluginEnabled: false,
+            pluginVersion: undefined,
+            snapshotReady: true,
+            initialized: true,
+            initialLoading: false,
+            refreshing: false,
+            error: null,
+          });
+          return;
+        }
         set({
           snapshotReady: true,
           initialized: true,
@@ -205,13 +241,19 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
   },
 
-  refreshTasks: async () => {
+  refreshTasks: async (options) => {
+    const silent = options?.silent === true;
     if (!get().snapshotReady) {
       await get().init();
       return;
     }
     if (taskCenterInitPromise) {
       await taskCenterInitPromise;
+      return;
+    }
+    if (!get().pluginInstalled || !get().pluginEnabled) {
+      set({ refreshing: false, initialLoading: false, error: null, tasks: [] });
+      taskCenterLastRefreshAtMs = Date.now();
       return;
     }
     if (taskCenterRefreshPromise) {
@@ -221,7 +263,9 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     if (Date.now() - taskCenterLastRefreshAtMs < TASK_CENTER_REFRESH_MIN_GAP_MS) {
       return;
     }
-    set({ refreshing: true, initialLoading: false, error: null });
+    if (!silent) {
+      set({ refreshing: true, initialLoading: false, error: null });
+    }
     taskCenterRefreshPromise = (async () => {
       try {
         const tasks = await listTasksFromWorkspaceScope(get().workspaceDirs);

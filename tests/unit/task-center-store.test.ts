@@ -3,8 +3,6 @@ import type { Task } from '@/services/openclaw/task-manager-client';
 
 const getWorkspaceDirMock = vi.fn<() => Promise<string | null>>();
 const getTaskWorkspaceDirsMock = vi.fn<() => Promise<string[]>>();
-const getPluginCatalogMock = vi.fn();
-const getPluginRuntimeMock = vi.fn();
 const listTasksMock = vi.fn<(workspaceDir?: string) => Promise<Task[]>>();
 const updateTaskMock = vi.fn();
 
@@ -13,12 +11,6 @@ vi.mock('@/services/openclaw/task-manager-client', () => ({
   getTaskWorkspaceDirs: (...args: unknown[]) => getTaskWorkspaceDirsMock(...args),
   listTasks: (...args: unknown[]) => listTasksMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),
-}));
-
-vi.mock('@/services/openclaw/plugin-manager-client', () => ({
-  getPluginCatalog: (...args: unknown[]) => getPluginCatalogMock(...args),
-  getPluginRuntime: (...args: unknown[]) => getPluginRuntimeMock(...args),
-  ensurePluginEnabled: vi.fn(),
 }));
 
 function task(overrides: Partial<Task>): Task {
@@ -40,8 +32,6 @@ describe('task center store', () => {
     vi.resetModules();
     getWorkspaceDirMock.mockReset();
     getTaskWorkspaceDirsMock.mockReset();
-    getPluginCatalogMock.mockReset();
-    getPluginRuntimeMock.mockReset();
     listTasksMock.mockReset();
     updateTaskMock.mockReset();
   });
@@ -49,15 +39,6 @@ describe('task center store', () => {
   it('init 在插件可用时加载任务列表', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     listTasksMock.mockResolvedValue([
       task({ id: 'pending-1', status: 'pending' }),
       task({ id: 'running-1', status: 'in_progress' }),
@@ -78,15 +59,6 @@ describe('task center store', () => {
   it('首次 init 进入 initialLoading，完成后不再阻塞', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     let resolveListTasks: ((value: Task[]) => void) | null = null;
     listTasksMock.mockReturnValue(new Promise<Task[]>((resolve) => {
       resolveListTasks = resolve;
@@ -110,15 +82,6 @@ describe('task center store', () => {
   it('refreshTasks 会重新拉取 scope 内任务', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     listTasksMock
       .mockResolvedValueOnce([task({ id: 'task-1', status: 'pending' })])
       .mockResolvedValueOnce([task({ id: 'task-2', status: 'in_progress' })]);
@@ -133,15 +96,6 @@ describe('task center store', () => {
   it('已有快照时 refresh 失败保留旧任务列表', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     listTasksMock.mockResolvedValueOnce([task({ id: 'task-keep-1', status: 'pending' })]);
     const { useTaskCenterStore } = await import('@/stores/task-center-store');
     await useTaskCenterStore.getState().init();
@@ -159,15 +113,6 @@ describe('task center store', () => {
   it('deleteTaskById 会映射为 updateTask(status=completed)', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     listTasksMock.mockResolvedValue([task({ id: 'task-delete-1', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
     updateTaskMock.mockResolvedValue({
       task: task({ id: 'task-delete-1', status: 'completed' }),
@@ -191,15 +136,6 @@ describe('task center store', () => {
   it('deleteTaskById 期间仅切换 mutating，不触发刷新阻塞', async () => {
     getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
     getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
-    getPluginCatalogMock.mockResolvedValue({
-      plugins: [{ id: 'task-manager', enabled: true, version: '1.0.0' }],
-    });
-    getPluginRuntimeMock.mockResolvedValue({
-      execution: {
-        pluginExecutionEnabled: true,
-        enabledPluginIds: ['task-manager'],
-      },
-    });
     listTasksMock.mockResolvedValue([task({ id: 'task-delete-2', status: 'in_progress', workspaceDir: 'E:/workspace/main' })]);
     let resolveUpdateTask: (() => void) | null = null;
     updateTaskMock.mockImplementation(async () => {
@@ -252,5 +188,20 @@ describe('task center store', () => {
 
     const state = useTaskCenterStore.getState();
     expect(state.tasks.map((item) => item.id)).toEqual(['task-delete-b']);
+  });
+
+  it('task_manager 方法不可用时标记插件不可用且不展示错误', async () => {
+    getWorkspaceDirMock.mockResolvedValue('E:/workspace/main');
+    getTaskWorkspaceDirsMock.mockResolvedValue(['E:/workspace/main']);
+    listTasksMock.mockRejectedValue(new Error('gateway method not found: task_manager.list'));
+    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+
+    await useTaskCenterStore.getState().init();
+
+    const state = useTaskCenterStore.getState();
+    expect(state.pluginInstalled).toBe(false);
+    expect(state.pluginEnabled).toBe(false);
+    expect(state.tasks).toEqual([]);
+    expect(state.error).toBe(null);
   });
 });

@@ -22,11 +22,11 @@ import {
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore } from '@/stores/chat';
+import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useSkillsStore } from '@/stores/skills';
-import { useChannelsStore } from '@/stores/channels';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
@@ -34,6 +34,7 @@ import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 
 interface NavItemProps {
   to: string;
@@ -138,9 +139,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
-  const sessionLabels = useChatStore((state) => state.sessionLabels);
-  const chatSessions = useChatStore((state) => state.sessions);
+  const { pendingApprovalsBySession, sessionLabels, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
   const deferredTeams = useDeferredValue(teams);
   const deferredMailboxByTeamId = useDeferredValue(mailboxByTeamId);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
@@ -312,13 +311,13 @@ export function Sidebar({
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
-  const newSession = useChatStore((state) => state.newSession);
+  const newSession = useChatStore(selectSidebarNewSessionAction);
   const gatewayState = useGatewayStore((state) => state.status.state);
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-  const fetchChannels = useChannelsStore((state) => state.fetchChannels);
+  const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const prefetchHandlesRef = useRef<Map<string, PrefetchScheduleHandle>>(new Map());
 
   const navigate = useNavigate();
@@ -368,12 +367,7 @@ export function Sidebar({
     }
 
     if (path === '/skills') {
-      void fetchSkills();
-      return;
-    }
-
-    if (path === '/dashboard') {
-      void fetchChannels({ silent: true });
+      void fetchSkills({ silent: true });
       return;
     }
 
@@ -381,10 +375,9 @@ export function Sidebar({
       if (!taskCenterInitialized) {
         void initTaskCenter();
       }
-      void refreshTaskCenter();
+      void refreshTaskCenter({ silent: true });
     }
   }, [
-    fetchChannels,
     fetchSkills,
     gatewayState,
     initTaskCenter,
@@ -427,13 +420,6 @@ export function Sidebar({
     prefetchHandlesRef.current.set(path, { type: 'timeout', id: timeoutId });
   }, [prefetchNavPath]);
 
-  useEffect(() => {
-    if (gatewayState !== 'running' || taskCenterInitialized) {
-      return;
-    }
-    void initTaskCenter();
-  }, [gatewayState, initTaskCenter, taskCenterInitialized]);
-
   useEffect(() => () => {
     const paths = Array.from(prefetchHandlesRef.current.keys());
     for (const path of paths) {
@@ -445,8 +431,11 @@ export function Sidebar({
     if (location.pathname === to) {
       return;
     }
+    if (to === '/skills' && gatewayState === 'running' && !skillsSnapshotReady) {
+      void fetchSkills({ silent: true });
+    }
     navigate(to);
-  }, [location.pathname, navigate]);
+  }, [fetchSkills, gatewayState, location.pathname, navigate, skillsSnapshotReady]);
 
   return (
     <aside

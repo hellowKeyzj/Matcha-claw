@@ -43,6 +43,7 @@ import {
   hostChannelsValidateCredentials,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import {
   CHANNEL_ICONS,
@@ -138,7 +139,7 @@ export function Channels() {
 
   // Fetch channels on mount
   useEffect(() => {
-    void fetchChannels();
+    void fetchChannels({ silent: true });
   }, [fetchChannels]);
 
   // Fetch configured channel types from config file
@@ -217,6 +218,7 @@ export function Channels() {
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
+  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   return (
     <div className="space-y-6">
@@ -306,7 +308,7 @@ export function Channels() {
         </Card>
       )}
 
-      {refreshing && snapshotReady && (
+      {showRefreshingHint && (
         <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
           <RefreshCw className="h-3.5 w-3.5 animate-spin" />
           {t('common:status.loading', 'Loading...')}

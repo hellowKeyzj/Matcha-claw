@@ -12,6 +12,7 @@ interface RefreshUsageHistoryOptions {
   maxAttempts?: number;
   restartMarker?: string;
   reason?: string;
+  silent?: boolean;
 }
 
 interface DashboardUsageState {
@@ -78,6 +79,7 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
   refreshUsageHistory: async (options) => {
     const restartMarker = options?.restartMarker ?? 'na:na';
     const reason = options?.reason ?? 'background_refresh';
+    const silent = options?.silent === true;
     const maxAttemptsRaw = options?.maxAttempts;
     const maxAttempts = Number.isFinite(maxAttemptsRaw) && Number(maxAttemptsRaw) > 0
       ? Math.max(1, Math.floor(Number(maxAttemptsRaw)))
@@ -91,7 +93,9 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
     const requestId = ++latestUsageRefreshRequestId;
     const hasCache = get().usageHistoryReady;
     if (hasCache) {
-      set({ refreshing: true, initialLoading: false, error: null });
+      if (!silent) {
+        set({ refreshing: true, initialLoading: false, error: null });
+      }
     } else {
       set({ initialLoading: true, refreshing: false, error: null });
     }
