@@ -23,6 +23,7 @@ import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles'
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { scheduleIdleReady } from '@/lib/idle-ready';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import type { Task } from '@/services/openclaw/task-manager-client';
@@ -137,7 +138,7 @@ export function TasksPage() {
   const [dateTo, setDateTo] = useState('');
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
-  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0);
+  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || snapshotReady);
   const [taskToDelete, setTaskToDelete] = useState<{ id: string } | null>(null);
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
@@ -145,6 +146,7 @@ export function TasksPage() {
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
   const manualRefreshBusy = refreshing || mutating;
   const showInitialLoading = !snapshotReady && initialLoading;
+  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
   const tasksForView = useMemo(
     () => (taskHeavyContentReady ? tasks : []),
     [taskHeavyContentReady, tasks],
@@ -155,7 +157,7 @@ export function TasksPage() {
       void init();
       return;
     }
-    void refreshTasks();
+    void refreshTasks({ silent: true });
   }, [init, initialized, refreshTasks]);
 
   useEffect(() => {
@@ -188,6 +190,10 @@ export function TasksPage() {
     if (taskHeavyContentReady) {
       return;
     }
+    if (snapshotReady && tasks.length <= TASK_LIST_VIRTUAL_THRESHOLD) {
+      setTaskHeavyContentReady(true);
+      return;
+    }
     const cancel = scheduleIdleReady(() => {
       setTaskHeavyContentReady(true);
     }, {
@@ -196,7 +202,7 @@ export function TasksPage() {
       useAnimationFrame: true,
     });
     return cancel;
-  }, [taskHeavyContentReady]);
+  }, [snapshotReady, taskHeavyContentReady, tasks.length]);
 
   const hasActiveTasks = useMemo(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
@@ -231,7 +237,7 @@ export function TasksPage() {
       }
       clearTimer();
       timer = window.setTimeout(() => {
-        void refreshTasks().finally(() => {
+        void refreshTasks({ silent: true }).finally(() => {
           scheduleNext();
         });
       }, resolveDelay());
@@ -243,7 +249,7 @@ export function TasksPage() {
       }
       clearTimer();
       if (document.visibilityState === 'visible') {
-        void refreshTasks().finally(() => {
+        void refreshTasks({ silent: true }).finally(() => {
           scheduleNext();
         });
         return;
@@ -637,7 +643,7 @@ export function TasksPage() {
             </Card>
           )}
 
-          {refreshing && snapshotReady && (
+          {showRefreshingHint && (
             <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <RefreshCw className="h-3.5 w-3.5 animate-spin" />
               {t('common:status.loading', 'Loading...')}

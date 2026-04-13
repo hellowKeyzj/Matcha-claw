@@ -21,6 +21,7 @@ import {
 } from '@/lib/security-runtime';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSecurityPolicyStore } from '@/stores/security-policy-store';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import {
   useSecuritySupportStore,
   type AuditItem,
@@ -174,6 +175,7 @@ export function SecurityPage() {
   const setAllowlistRegexTab = useSecuritySupportStore((state) => state.setAllowlistRegexTab);
   const setRuleCatalogPlatform = useSecuritySupportStore((state) => state.setRuleCatalogPlatform);
   const setActiveSection = useSecuritySupportStore((state) => state.setActiveSection);
+  const showPolicyRefreshingHint = useDelayedFlag(refreshing, 180);
 
   const getActionLabel = useCallback((action: Action) => t(`matrix.action.${action}`), [t]);
   const getSeverityLabel = useCallback((severity: Severity) => t(`matrix.severity.${severity}`), [t]);
@@ -183,7 +185,7 @@ export function SecurityPage() {
   );
 
   useEffect(() => {
-    void loadPolicy();
+    void loadPolicy({ silent: true });
   }, [loadPolicy]);
 
   const handleSavePolicy = useCallback(async () => {
@@ -388,7 +390,7 @@ export function SecurityPage() {
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
-          {refreshing && (
+          {showPolicyRefreshingHint && (
             <Badge variant="outline" className="text-xs font-normal">
               {t('loading')}
             </Badge>

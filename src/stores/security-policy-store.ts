@@ -329,7 +329,7 @@ interface SecurityPolicyState {
   error: string | null;
   updateRuntime: (updater: (current: RuntimePolicy) => RuntimePolicy) => void;
   applyPresetTemplate: (nextPreset: Preset) => void;
-  loadPolicy: () => Promise<void>;
+  loadPolicy: (options?: { silent?: boolean }) => Promise<void>;
   savePolicy: () => Promise<void>;
 }
 
@@ -363,10 +363,11 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
     }));
   },
 
-  loadPolicy: async () => {
+  loadPolicy: async (options) => {
+    const silent = options?.silent === true;
     const hasCachedPolicy = securityPolicyCache !== null;
     if (hasCachedPolicy) {
-      set({ refreshing: true, initialLoading: false });
+      set({ refreshing: !silent, initialLoading: false });
     } else {
       set({ initialLoading: true, refreshing: false });
     }

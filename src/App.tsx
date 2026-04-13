@@ -3,7 +3,7 @@
  * Handles routing and global providers
  */
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
-import { Component, Suspense, useCallback, useEffect, useRef } from 'react';
+import { Component, Suspense, useCallback, useEffect } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
@@ -12,10 +12,10 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { Chat } from './pages/Chat';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
-import { useSkillsStore } from './stores/skills';
 import { useProviderStore } from './stores/providers';
 import { applyGatewayTransportPreference } from './lib/api-client';
 import { hostApiFetch } from './lib/host-api';
+import { useDelayedFlag } from './lib/use-delayed-flag';
 import { TeamsRuntimeDaemon } from './components/runtime/TeamsRuntimeDaemon';
 import {
   SetupRoute,
@@ -30,10 +30,13 @@ import {
   SubAgentsRoute,
   TasksRoute,
   PluginsRoute,
-  preloadCriticalLazyRoutes,
 } from './lib/route-preload';
 
 function RouteLoadingFallback() {
+  const visible = useDelayedFlag(true, 160);
+  if (!visible) {
+    return null;
+  }
   return (
     <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-muted-foreground">
       加载中...
@@ -125,10 +128,6 @@ function App() {
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const initGateway = useGatewayStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
-  const gatewayState = useGatewayStore((state) => state.status.state);
-  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-  const skillsPrefetchedRef = useRef(false);
-  const routeChunksPrefetchedRef = useRef(false);
 
   const fetchLicenseGateSnapshot = useCallback(async (): Promise<LicenseGateSnapshot | null> => {
     try {
@@ -236,80 +235,6 @@ function App() {
   useEffect(() => {
     applyGatewayTransportPreference();
   }, []);
-
-  useEffect(() => {
-    if (!settingsInitialized || !setupComplete) {
-      return;
-    }
-    if (routeChunksPrefetchedRef.current) {
-      return;
-    }
-    routeChunksPrefetchedRef.current = true;
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const prewarm = () => {
-      if (cancelled) {
-        return;
-      }
-      preloadCriticalLazyRoutes();
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(() => prewarm(), { timeout: 1500 });
-    } else {
-      timeoutId = window.setTimeout(prewarm, 500);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [settingsInitialized, setupComplete]);
-
-  useEffect(() => {
-    if (!settingsInitialized || !setupComplete || gatewayState !== 'running') {
-      return;
-    }
-    if (skillsPrefetchedRef.current) {
-      return;
-    }
-    skillsPrefetchedRef.current = true;
-
-    let cancelled = false;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const prewarm = () => {
-      if (cancelled) {
-        return;
-      }
-      void fetchSkills();
-    };
-
-    if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-      idleId = window.requestIdleCallback(() => prewarm(), { timeout: 1500 });
-    } else {
-      timeoutId = window.setTimeout(prewarm, 600);
-    }
-
-    return () => {
-      cancelled = true;
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, [fetchSkills, gatewayState, settingsInitialized, setupComplete]);
 
   return (
     <ErrorBoundary>

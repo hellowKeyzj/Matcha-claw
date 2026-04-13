@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { useChatStore } from '@/stores/chat';
+import { useChatStore, type TaskInboxChatBridgeState } from '@/stores/chat';
 import { claimTask, type Task } from '@/services/openclaw/task-manager-client';
 import { filterUnfinishedTasks } from '@/lib/task-inbox';
 import { useTaskCenterStore } from '@/stores/task-center-store';
@@ -25,7 +25,6 @@ interface TaskInboxState {
   clearError: () => void;
 }
 
-const DEFAULT_TASK_SESSION_KEY = 'agent:main:main';
 const NON_FATAL_CLAIM_ERROR_PATTERN = /(already_claimed|blocked|invalid_transition|task_not_found)/i;
 let autoClaimPromise: Promise<void> | null = null;
 const recoveryPromptFingerprintBySession = new Map<string, string>();
@@ -46,17 +45,8 @@ function mapCenterStateToInbox() {
   };
 }
 
-function currentSessionKey(): string {
-  const value = useChatStore.getState().currentSessionKey;
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    return DEFAULT_TASK_SESSION_KEY;
-  }
-  return value.trim();
-}
-
-function parseOwnerFromSessionKey(sessionKey: string): string {
-  const matched = sessionKey.match(/^agent:([^:]+):/i);
-  return matched?.[1]?.trim() || 'main';
+function readTaskInboxChatBridgeState(): TaskInboxChatBridgeState {
+  return useChatStore.getState().getTaskInboxBridgeState();
 }
 
 function patchTask(list: Task[], nextTask: Task): Task[] {
@@ -167,10 +157,8 @@ function buildRecoveryPrompt(task: Task): string {
 
 async function maybeSendRecoveryPrompt(task: Task, sessionKey: string): Promise<void> {
   const chatState = useChatStore.getState();
-  if (chatState.currentSessionKey !== sessionKey) {
-    return;
-  }
-  if (chatState.sending || chatState.pendingFinal || chatState.activeRunId) {
+  const bridge = chatState.getTaskInboxBridgeState();
+  if (bridge.sessionKey !== sessionKey || !bridge.canSendRecoveryPrompt) {
     return;
   }
 
@@ -181,7 +169,10 @@ async function maybeSendRecoveryPrompt(task: Task, sessionKey: string): Promise<
   recoveryPromptFingerprintBySession.set(sessionKey, fingerprint);
 
   try {
-    await chatState.sendMessage(buildRecoveryPrompt(task));
+    const sent = await chatState.sendTaskInboxRecoveryPrompt(sessionKey, buildRecoveryPrompt(task));
+    if (!sent) {
+      recoveryPromptFingerprintBySession.delete(sessionKey);
+    }
   } catch {
     recoveryPromptFingerprintBySession.delete(sessionKey);
   }
@@ -194,8 +185,7 @@ async function autoClaimForCurrentSession(): Promise<void> {
   }
 
   autoClaimPromise = (async () => {
-    const sessionKey = currentSessionKey();
-    const owner = parseOwnerFromSessionKey(sessionKey);
+    const { sessionKey, owner } = readTaskInboxChatBridgeState();
 
     // Recover session affinity for tasks already owned by current session.
     useTaskCenterStore.setState((state) => {
@@ -292,17 +282,16 @@ export const useTaskInboxStore = create<TaskInboxState>((set) => ({
       return { switched: false, reason: 'task_not_found' as const };
     }
     const chatState = useChatStore.getState();
+    const bridge = chatState.getTaskInboxBridgeState();
     const targetSession = typeof task.sessionAffinityKey === 'string' && task.sessionAffinityKey.trim().length > 0
       ? task.sessionAffinityKey.trim()
-      : (chatState.currentSessionKey || 'agent:main:main');
-    if (targetSession !== chatState.currentSessionKey) {
-      chatState.switchSession(targetSession);
-    }
+      : bridge.sessionKey;
+    const resolvedSession = chatState.openTaskInboxSession(targetSession);
 
     // Persist session affinity in local state so subsequent "open task" keeps landing on the same session.
     useTaskCenterStore.setState((state) => ({
       ...state,
-      tasks: state.tasks.map((row) => row.id === task.id ? { ...row, sessionAffinityKey: targetSession } : row),
+      tasks: state.tasks.map((row) => row.id === task.id ? { ...row, sessionAffinityKey: resolvedSession } : row),
     }));
     void autoClaimForCurrentSession();
 
@@ -331,11 +320,9 @@ useTaskCenterStore.subscribe(() => {
   }));
 });
 
-let lastObservedSessionKey = currentSessionKey();
+let lastObservedSessionKey = readTaskInboxChatBridgeState().sessionKey;
 useChatStore.subscribe((state) => {
-  const nextSessionKey = typeof state.currentSessionKey === 'string' && state.currentSessionKey.trim().length > 0
-    ? state.currentSessionKey.trim()
-    : DEFAULT_TASK_SESSION_KEY;
+  const nextSessionKey = state.getTaskInboxBridgeState().sessionKey;
   if (nextSessionKey === lastObservedSessionKey) {
     return;
   }

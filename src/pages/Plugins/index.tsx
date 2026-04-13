@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useGatewayStore } from '@/stores/gateway';
 import { usePluginsStore } from '@/stores/plugins-store';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
 
 function formatLifecycleLabel(lifecycle: string): string {
@@ -59,11 +60,12 @@ export function PluginsPage() {
   const toggleExecutionAction = usePluginsStore((state) => state.toggleExecution);
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
   const manualRefreshing = refreshing && refreshReason === 'manual';
+  const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
 
   useEffect(() => {
     void initGatewayEvents();
     const hadSnapshot = usePluginsStore.getState().snapshotReady;
-    void refreshSnapshot({ reason: 'initial' }).catch(() => {
+    void refreshSnapshot({ reason: 'initial', silent: true }).catch(() => {
       if (!hadSnapshot) {
         toast.error(t('plugins:errors.loadFailed'));
       }
@@ -158,7 +160,7 @@ export function PluginsPage() {
             <CardDescription>{t('plugins:runtime.description')}</CardDescription>
           </div>
           <div className="flex items-center gap-2">
-            {refreshing && !manualRefreshing && (
+            {showRefreshingHint && (
               <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {t('common:status.loading')}

@@ -146,7 +146,7 @@ interface SkillsState {
   error: string | null;
 
   // Actions
-  fetchSkills: (options?: { force?: boolean }) => Promise<void>;
+  fetchSkills: (options?: { force?: boolean; silent?: boolean }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
   uninstallSkill: (slug: string) => Promise<void>;
@@ -171,6 +171,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
   fetchSkills: async (options) => {
     const force = options?.force === true;
+    const silent = options?.silent === true;
     const now = Date.now();
     const hasSnapshot = get().snapshotReady;
 
@@ -188,9 +189,15 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         refreshing: false,
         error: null,
       });
-    } else {
+    } else if (!silent) {
       set({
         refreshing: true,
+        initialLoading: false,
+        error: null,
+      });
+    } else {
+      set({
+        refreshing: false,
         initialLoading: false,
         error: null,
       });

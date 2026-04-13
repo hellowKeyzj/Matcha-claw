@@ -36,6 +36,7 @@ import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles'
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
@@ -820,6 +821,7 @@ export function Cron({ embedded = false }: CronProps) {
   const isGatewayRunning = gatewayStatus.state === 'running';
   const manualRefreshBusy = refreshing || mutating;
   const showInitialLoading = !snapshotReady && initialLoading;
+  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   // Fetch jobs on mount
   useEffect(() => {
@@ -858,7 +860,7 @@ export function Cron({ embedded = false }: CronProps) {
           <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
         )}
         <div className="flex gap-2">
-          {refreshing && snapshotReady && (
+          {showRefreshingHint && (
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               {t('common:status.loading', 'Loading...')}
