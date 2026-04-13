@@ -244,6 +244,64 @@ describe('api-client', () => {
     await expect(invoker('gateway:rpc', ['chat.history', {}])).rejects.toThrow('proxy unavailable');
   });
 
+  it('gateway ws 握手不会漏掉 open 后立即到达的 challenge 帧', async () => {
+    const socket = new FakeGatewayWebSocket();
+    const invoker = createGatewayWsTransportInvoker({
+      timeoutMs: 200,
+      urlResolver: () => 'ws://127.0.0.1:18789/ws',
+      tokenResolver: () => 'gw-token',
+      websocketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const requestPromise = invoker<{ success: boolean; result: { rows: number[] } }>(
+      'gateway:rpc',
+      ['chat.history', { sessionKey: 's1' }],
+    );
+
+    await Promise.resolve();
+    socket.emit('open');
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: 'nonce-immediate' },
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const connectMessage = socket.sentMessages.find((message) => message.method === 'connect');
+    expect(connectMessage).toBeTruthy();
+
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'res',
+        id: connectMessage?.id,
+        ok: true,
+        payload: { success: true },
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const requestMessage = socket.sentMessages.find((message) => message.method === 'chat.history');
+    expect(requestMessage).toBeTruthy();
+
+    socket.emit('message', {
+      data: JSON.stringify({
+        type: 'res',
+        id: requestMessage?.id,
+        ok: true,
+        payload: { rows: [1, 2] },
+      }),
+    });
+
+    await expect(requestPromise).resolves.toEqual({
+      success: true,
+      result: { rows: [1, 2] },
+    });
+  });
+
   it('gateway ws 握手在 control-ui 没有 token 时改走 host settings 读取网关 token', async () => {
     const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
     invoke
