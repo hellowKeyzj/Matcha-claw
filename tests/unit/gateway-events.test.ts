@@ -33,7 +33,7 @@ describe('gateway store event wiring', () => {
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:error', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:connection', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:notification', expect.any(Function));
-    expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:chat-message', expect.any(Function));
+    expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:conversation-event', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:error', expect.any(Function));
@@ -177,7 +177,7 @@ describe('gateway store event wiring', () => {
     expect(chatState.pendingApprovalsBySession?.['agent:main:main'] ?? []).toEqual([]);
   });
 
-  it('agent completed 通知应清理 chat.send 超时残留错误', async () => {
+  it('run.phase completed 事件应清理 chat.send 超时残留错误', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -199,13 +199,11 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('gateway:notification')?.({
-      method: 'agent',
-      params: {
-        runId: 'run-cleanup',
-        sessionKey: 'agent:main:main',
-        phase: 'completed',
-      },
+    handlers.get('gateway:conversation-event')?.({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-cleanup',
+      sessionKey: 'agent:main:main',
     });
 
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -222,7 +220,7 @@ describe('gateway store event wiring', () => {
     expect(state.error).toBeNull();
   });
 
-  it('agent 聊天事件同时出现在 notification 和 chat-message 时，不应重复转发到 chat store', async () => {
+  it('agent 通知与 conversation chat.message 同时到达时，不应重复转发到 chat store', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -262,8 +260,9 @@ describe('gateway store event wiring', () => {
     };
 
     handlers.get('gateway:notification')?.(agentPayload);
-    handlers.get('gateway:chat-message')?.({
-      message: {
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
         runId: 'run-1',
         sessionKey: 'agent:main:main',
         state: 'final',
@@ -288,6 +287,196 @@ describe('gateway store event wiring', () => {
         content: 'hello',
       },
     });
+  });
+
+  it('非结构化 gateway:conversation-event 载荷应直接忽略（不再 renderer 侧兜底归一化）', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleChatEventMock = vi.fn();
+    useChatStore.setState({
+      handleChatEvent: handleChatEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sending: true,
+      activeRunId: 'run-non-structured',
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:conversation-event')?.({
+      message: {
+        role: 'assistant',
+        content: 'legacy payload without state',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleChatEventMock).not.toHaveBeenCalled();
+  });
+
+  it('legacy chat 与结构化 final 同时到达时，应只消费结构化 final', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleChatEventMock = vi.fn();
+    useChatStore.setState({
+      handleChatEvent: handleChatEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sending: true,
+      activeRunId: 'run-legacy-1',
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        role: 'assistant',
+        content: '[[reply_to_current]]你好呀！有什么想让我帮你做的吗?',
+      },
+    });
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        runId: 'run-legacy-1',
+        sessionKey: 'agent:main:main',
+        state: 'final',
+        message: {
+          role: 'assistant',
+          content: '你好呀！有什么想让我帮你做的吗?',
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
+    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'final',
+    }));
+  });
+
+  it('user legacy metadata 与结构化 final 同时到达时，应只消费结构化 final', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleChatEventMock = vi.fn();
+    useChatStore.setState({
+      handleChatEvent: handleChatEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sending: true,
+      activeRunId: 'run-user-1',
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        role: 'user',
+        content: '[Tue 2026-04-14 20:11 GMT+8]你好 [message_id: u-1]',
+      },
+    });
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        runId: 'run-user-1',
+        sessionKey: 'agent:main:main',
+        state: 'final',
+        message: {
+          role: 'user',
+          content: '你好',
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
+    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'final',
+      runId: 'run-user-1',
+    }));
+  });
+
+  it('assistant legacy 与结构化 final 同时到达时，应只消费结构化 final', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleChatEventMock = vi.fn();
+    useChatStore.setState({
+      handleChatEvent: handleChatEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sending: true,
+      activeRunId: 'run-assistant-1',
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        role: 'assistant',
+        content: '我能做的事情挺多，  简单说：\n\n- 回答问题，陪你聊天',
+      },
+    });
+    handlers.get('gateway:conversation-event')?.({
+      type: 'chat.message',
+      event: {
+        runId: 'run-assistant-1',
+        sessionKey: 'agent:main:main',
+        state: 'final',
+        message: {
+          role: 'assistant',
+          content: '我能做的事情挺多，简单说： - 回答问题，陪你聊天',
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
+    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'final',
+      runId: 'run-assistant-1',
+    }));
   });
 
   it('task_manager.* 通知会进入 task center，并按 taskId 合并批量更新', async () => {

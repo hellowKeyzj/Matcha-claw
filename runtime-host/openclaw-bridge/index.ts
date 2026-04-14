@@ -1,6 +1,10 @@
 export { createOpenClawBridge, type OpenClawBridge } from './bridge';
 export { createGatewayClient, type GatewayConnectionState, type GatewayConnectionStatePayload, type GatewayClientOptions } from './client';
-export { dispatchGatewayProtocolEvent, type GatewayProtocolEventDispatcher } from './events';
+export {
+  __resetGatewayChatEventDedupStateForTest,
+  dispatchGatewayProtocolEvent,
+  type GatewayProtocolEventDispatcher,
+} from './events';
 export {
   isGatewayEventFrame,
   isGatewayResponseFrame,

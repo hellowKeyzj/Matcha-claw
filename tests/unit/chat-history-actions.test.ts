@@ -367,4 +367,16 @@ describe('chat history actions', () => {
       preview: 'data:image/png;base64,abc',
     });
   });
+
+  it('layer key contract keeps history message fields inside snapshot layer only', async () => {
+    const {
+      CHAT_RUNTIME_LAYER_KEYS,
+      CHAT_SNAPSHOT_LAYER_KEYS,
+      CHAT_VIEW_LAYER_KEYS,
+    } = await import('@/stores/chat/types');
+
+    expect(CHAT_SNAPSHOT_LAYER_KEYS).toContain('messages');
+    expect(CHAT_RUNTIME_LAYER_KEYS).not.toContain('messages');
+    expect(CHAT_VIEW_LAYER_KEYS).not.toContain('messages');
+  });
 });

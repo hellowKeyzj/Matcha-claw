@@ -205,4 +205,23 @@ describe('chat session actions', () => {
     expect(next.currentSessionKey).toBe('agent:test:session-1712222222222');
     nowSpy.mockRestore();
   });
+
+  it('state ownership keys across snapshot/runtime/view layers do not overlap', async () => {
+    const {
+      CHAT_RUNTIME_LAYER_KEYS,
+      CHAT_SNAPSHOT_LAYER_KEYS,
+      CHAT_VIEW_LAYER_KEYS,
+    } = await import('@/stores/chat/types');
+
+    const allKeys = [
+      ...CHAT_SNAPSHOT_LAYER_KEYS,
+      ...CHAT_RUNTIME_LAYER_KEYS,
+      ...CHAT_VIEW_LAYER_KEYS,
+    ];
+
+    expect(new Set(allKeys).size).toBe(allKeys.length);
+    expect(CHAT_SNAPSHOT_LAYER_KEYS).toContain('messages');
+    expect(CHAT_RUNTIME_LAYER_KEYS).toContain('streamingMessage');
+    expect(CHAT_VIEW_LAYER_KEYS).toContain('snapshotReady');
+  });
 });

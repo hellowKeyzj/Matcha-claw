@@ -48,7 +48,7 @@ export type RuntimeHostShellAction =
 
 export type RuntimeHostGatewayForwardEventName =
   | 'gateway:notification'
-  | 'gateway:chat-message'
+  | 'gateway:conversation-event'
   | 'gateway:channel-status'
   | 'gateway:error'
   | 'gateway:connection';

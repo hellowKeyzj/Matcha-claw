@@ -3,7 +3,7 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, useMemo, memo, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, memo, type ReactNode } from 'react';
 import { User, Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -21,6 +21,7 @@ interface ChatMessageProps {
   assistantAvatarEmoji?: string;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
+  preferPlainText?: boolean;
   streamingTools?: Array<{
     id?: string;
     toolCallId?: string;
@@ -51,6 +52,255 @@ const URI_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 const WINDOWS_ABSOLUTE_PATH_RE = /^[a-z]:[\\/]/i;
 const LOCAL_RELATIVE_PATH_RE = /^\.{1,2}[\\/]/;
 type FileHintPathResolver = (displayPath: string) => string | undefined;
+
+const MARKDOWN_RENDER_CACHE_TTL_MS = 10 * 60_000;
+const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 240;
+const MARKDOWN_RENDER_CACHE_MAX_BYTES = 3 * 1024 * 1024;
+const MARKDOWN_RICH_READY_TTL_MS = 10 * 60_000;
+const MARKDOWN_RICH_READY_MAX_ENTRIES = 400;
+const MARKDOWN_DEFER_SCORE_THRESHOLD = 220;
+const MARKDOWN_VISIBILITY_ROOT_MARGIN = '320px 0px';
+const MARKDOWN_RICH_RENDER_BATCH_SIZE = 1;
+
+interface MarkdownCacheEntry {
+  value: string;
+  bytes: number;
+  expiresAt: number;
+}
+
+interface IdleDeadlineLike {
+  readonly didTimeout: boolean;
+  timeRemaining: () => number;
+}
+
+type IdleCallbackHandle = number | ReturnType<typeof setTimeout>;
+type IdleCallback = (deadline: IdleDeadlineLike) => void;
+
+const markdownRenderCache = new Map<string, MarkdownCacheEntry>();
+let markdownRenderCacheBytes = 0;
+const markdownRichReadyCache = new Map<string, number>();
+const markdownRichRenderQueue: string[] = [];
+const markdownRichRenderQueuedSet = new Set<string>();
+const markdownRichRenderListeners = new Map<string, Set<() => void>>();
+let markdownRichRenderDrainHandle: IdleCallbackHandle | null = null;
+
+function hashStringDjb2(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function buildAttachedFilesSignature(attachedFiles: AttachedFileMeta[]): string {
+  if (attachedFiles.length === 0) {
+    return '';
+  }
+  const parts: string[] = [];
+  for (const file of attachedFiles) {
+    parts.push([
+      file.fileName,
+      file.mimeType,
+      file.fileSize,
+      file.filePath ?? '',
+    ].join(':'));
+  }
+  return hashStringDjb2(parts.join('|'));
+}
+
+function estimateMarkdownRenderScore(text: string): number {
+  if (!text) {
+    return 0;
+  }
+  const lineBreaks = text.match(/\n/g)?.length ?? 0;
+  const codeFenceCount = text.match(/```/g)?.length ?? 0;
+  const linkCount = text.match(/\[[^\]\n]+\]\([^)]+\)/g)?.length ?? 0;
+  const headingCount = text.match(/^#{1,6}\s/mg)?.length ?? 0;
+  const tableHint = text.includes('|') && text.includes('\n') ? 1 : 0;
+  return (
+    Math.ceil(text.length / 80)
+    + lineBreaks * 2
+    + codeFenceCount * 36
+    + linkCount * 6
+    + headingCount * 4
+    + tableHint * 20
+  );
+}
+
+function scheduleIdleCallback(callback: IdleCallback): IdleCallbackHandle {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      requestIdleCallback?: (cb: IdleCallback, options?: { timeout?: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      return win.requestIdleCallback(callback, { timeout: 120 });
+    }
+  }
+  return setTimeout(() => {
+    callback({
+      didTimeout: true,
+      timeRemaining: () => 0,
+    });
+  }, 0);
+}
+
+function pruneMarkdownRenderCache(now = Date.now()): void {
+  for (const [key, entry] of markdownRenderCache.entries()) {
+    if (entry.expiresAt > now) {
+      continue;
+    }
+    markdownRenderCache.delete(key);
+    markdownRenderCacheBytes = Math.max(0, markdownRenderCacheBytes - entry.bytes);
+  }
+}
+
+function getProcessedMarkdownFromCache(cacheKey: string): string | undefined {
+  const now = Date.now();
+  const entry = markdownRenderCache.get(cacheKey);
+  if (!entry) {
+    return undefined;
+  }
+  if (entry.expiresAt <= now) {
+    markdownRenderCache.delete(cacheKey);
+    markdownRenderCacheBytes = Math.max(0, markdownRenderCacheBytes - entry.bytes);
+    return undefined;
+  }
+  // LRU refresh
+  markdownRenderCache.delete(cacheKey);
+  markdownRenderCache.set(cacheKey, {
+    ...entry,
+    expiresAt: now + MARKDOWN_RENDER_CACHE_TTL_MS,
+  });
+  return entry.value;
+}
+
+function rememberProcessedMarkdown(cacheKey: string, value: string): void {
+  const now = Date.now();
+  pruneMarkdownRenderCache(now);
+  const bytes = value.length * 2;
+  const previous = markdownRenderCache.get(cacheKey);
+  if (previous) {
+    markdownRenderCache.delete(cacheKey);
+    markdownRenderCacheBytes = Math.max(0, markdownRenderCacheBytes - previous.bytes);
+  }
+
+  markdownRenderCache.set(cacheKey, {
+    value,
+    bytes,
+    expiresAt: now + MARKDOWN_RENDER_CACHE_TTL_MS,
+  });
+  markdownRenderCacheBytes += bytes;
+
+  while (
+    markdownRenderCache.size > MARKDOWN_RENDER_CACHE_MAX_ENTRIES
+    || markdownRenderCacheBytes > MARKDOWN_RENDER_CACHE_MAX_BYTES
+  ) {
+    const oldestKey = markdownRenderCache.keys().next().value;
+    if (typeof oldestKey !== 'string') {
+      break;
+    }
+    const oldest = markdownRenderCache.get(oldestKey);
+    markdownRenderCache.delete(oldestKey);
+    markdownRenderCacheBytes = Math.max(0, markdownRenderCacheBytes - (oldest?.bytes ?? 0));
+  }
+}
+
+function getOrBuildProcessedMarkdown(cacheKey: string, builder: () => string): string {
+  const cached = getProcessedMarkdownFromCache(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const built = builder();
+  rememberProcessedMarkdown(cacheKey, built);
+  return built;
+}
+
+function hasRichReadyCache(cacheKey: string): boolean {
+  const expiresAt = markdownRichReadyCache.get(cacheKey);
+  if (!expiresAt) {
+    return false;
+  }
+  if (expiresAt <= Date.now()) {
+    markdownRichReadyCache.delete(cacheKey);
+    return false;
+  }
+  return true;
+}
+
+function markRichReadyCache(cacheKey: string): void {
+  const now = Date.now();
+  markdownRichReadyCache.set(cacheKey, now + MARKDOWN_RICH_READY_TTL_MS);
+  while (markdownRichReadyCache.size > MARKDOWN_RICH_READY_MAX_ENTRIES) {
+    const oldestKey = markdownRichReadyCache.keys().next().value;
+    if (typeof oldestKey !== 'string') {
+      break;
+    }
+    markdownRichReadyCache.delete(oldestKey);
+  }
+}
+
+function scheduleMarkdownRichRenderDrain(): void {
+  if (markdownRichRenderDrainHandle != null) {
+    return;
+  }
+  markdownRichRenderDrainHandle = scheduleIdleCallback((deadline) => {
+    markdownRichRenderDrainHandle = null;
+    let processed = 0;
+    while (markdownRichRenderQueue.length > 0 && processed < MARKDOWN_RICH_RENDER_BATCH_SIZE) {
+      const cacheKey = markdownRichRenderQueue.shift();
+      if (!cacheKey) {
+        continue;
+      }
+      markdownRichRenderQueuedSet.delete(cacheKey);
+      markRichReadyCache(cacheKey);
+      const listeners = markdownRichRenderListeners.get(cacheKey);
+      if (listeners && listeners.size > 0) {
+        markdownRichRenderListeners.delete(cacheKey);
+        for (const listener of listeners) {
+          listener();
+        }
+      }
+      processed += 1;
+      if (!deadline.didTimeout && deadline.timeRemaining() <= 2) {
+        break;
+      }
+    }
+    if (markdownRichRenderQueue.length > 0) {
+      scheduleMarkdownRichRenderDrain();
+    }
+  });
+}
+
+function requestMarkdownRichRender(cacheKey: string, onReady: () => void): () => void {
+  if (hasRichReadyCache(cacheKey)) {
+    onReady();
+    return () => {};
+  }
+
+  let listeners = markdownRichRenderListeners.get(cacheKey);
+  if (!listeners) {
+    listeners = new Set();
+    markdownRichRenderListeners.set(cacheKey, listeners);
+  }
+  listeners.add(onReady);
+
+  if (!markdownRichRenderQueuedSet.has(cacheKey)) {
+    markdownRichRenderQueuedSet.add(cacheKey);
+    markdownRichRenderQueue.push(cacheKey);
+    scheduleMarkdownRichRenderDrain();
+  }
+
+  return () => {
+    const current = markdownRichRenderListeners.get(cacheKey);
+    if (!current) {
+      return;
+    }
+    current.delete(onReady);
+    if (current.size === 0) {
+      markdownRichRenderListeners.delete(cacheKey);
+    }
+  };
+}
 
 function decodeMaybeEncodedPath(path: string): string {
   try {
@@ -222,6 +472,7 @@ export const ChatMessage = memo(function ChatMessage({
   assistantAvatarEmoji,
   userAvatarImageUrl,
   isStreaming = false,
+  preferPlainText = false,
   streamingTools = [],
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
@@ -242,6 +493,20 @@ export const ChatMessage = memo(function ChatMessage({
   const resolveFileHintPath = useMemo(
     () => createFileHintPathResolver(attachedFiles),
     [attachedFiles],
+  );
+  const markdownCacheKey = useMemo(() => {
+    const messageId = typeof message.id === 'string' ? message.id.trim() : '';
+    const roleKey = typeof message.role === 'string' ? message.role : 'assistant';
+    const timestampKey = typeof message.timestamp === 'number' ? String(message.timestamp) : 'na';
+    return [
+      messageId || `${roleKey}:${timestampKey}`,
+      hashStringDjb2(text),
+      buildAttachedFilesSignature(attachedFiles),
+    ].join('|');
+  }, [attachedFiles, message.id, message.role, message.timestamp, text]);
+  const shouldDeferRichMarkdown = useMemo(
+    () => estimateMarkdownRenderScore(text) >= MARKDOWN_DEFER_SCORE_THRESHOLD,
+    [text],
   );
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
 
@@ -366,7 +631,10 @@ export const ChatMessage = memo(function ChatMessage({
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
+            preferPlainText={preferPlainText}
             resolveFileHintPath={resolveFileHintPath}
+            markdownCacheKey={markdownCacheKey}
+            deferRichMarkdown={shouldDeferRichMarkdown}
           />
         )}
 
@@ -532,13 +800,20 @@ const MessageBubble = memo(function MessageBubble({
   text,
   isUser,
   isStreaming,
+  preferPlainText,
   resolveFileHintPath,
+  markdownCacheKey,
+  deferRichMarkdown,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
+  preferPlainText: boolean;
   resolveFileHintPath?: FileHintPathResolver;
+  markdownCacheKey: string;
+  deferRichMarkdown: boolean;
 }) {
+  const bubbleRef = useRef<HTMLDivElement>(null);
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
       return;
@@ -550,12 +825,103 @@ const MessageBubble = memo(function MessageBubble({
     }
   }, []);
 
+  const renderPlainText = !isUser && (isStreaming || preferPlainText);
+  const shouldTrackRichRender = !isUser && !renderPlainText;
+  const shouldDeferRichRender = shouldTrackRichRender && deferRichMarkdown;
+  const [deferredRichRenderState, setDeferredRichRenderState] = useState(() => ({
+    key: markdownCacheKey,
+    ready: hasRichReadyCache(markdownCacheKey),
+  }));
+  const richRenderReadyFromCache = hasRichReadyCache(markdownCacheKey);
+  const richRenderReady = (
+    !shouldTrackRichRender
+    || !shouldDeferRichRender
+    || richRenderReadyFromCache
+    || (deferredRichRenderState.key === markdownCacheKey && deferredRichRenderState.ready)
+  );
+
+  useEffect(() => {
+    if (!shouldTrackRichRender) {
+      return;
+    }
+    if (!shouldDeferRichRender) {
+      markRichReadyCache(markdownCacheKey);
+      return;
+    }
+    if (richRenderReadyFromCache) {
+      return;
+    }
+    let cancelled = false;
+    let releaseRichRenderRequest: (() => void) | null = null;
+    let observer: IntersectionObserver | null = null;
+
+    const scheduleRichRender = () => {
+      if (releaseRichRenderRequest) {
+        return;
+      }
+      releaseRichRenderRequest = requestMarkdownRichRender(markdownCacheKey, () => {
+        if (cancelled) {
+          return;
+        }
+        setDeferredRichRenderState((previous) => {
+          if (previous.key === markdownCacheKey && previous.ready) {
+            return previous;
+          }
+          return {
+            key: markdownCacheKey,
+            ready: true,
+          };
+        });
+      });
+    };
+
+    const canObserve = typeof window !== 'undefined' && typeof window.IntersectionObserver === 'function';
+    const target = bubbleRef.current;
+    if (canObserve && target) {
+      observer = new window.IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) {
+            continue;
+          }
+          observer?.disconnect();
+          observer = null;
+          scheduleRichRender();
+          break;
+        }
+      }, {
+        root: null,
+        rootMargin: MARKDOWN_VISIBILITY_ROOT_MARGIN,
+        threshold: 0,
+      });
+      observer.observe(target);
+    } else {
+      scheduleRichRender();
+    }
+
+    return () => {
+      cancelled = true;
+      if (observer) {
+        observer.disconnect();
+      }
+      releaseRichRenderRequest?.();
+    };
+  }, [markdownCacheKey, richRenderReadyFromCache, shouldDeferRichRender, shouldTrackRichRender]);
+
+  const shouldRenderRichMarkdown = shouldTrackRichRender && richRenderReady;
   const markdownContent = useMemo(
-    () => linkifyFileHintsInMarkdown(
-      migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
-      resolveFileHintPath,
-    ),
-    [resolveFileHintPath, text],
+    () => {
+      if (!shouldRenderRichMarkdown) {
+        return '';
+      }
+      return getOrBuildProcessedMarkdown(
+        markdownCacheKey,
+        () => linkifyFileHintsInMarkdown(
+          migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
+          resolveFileHintPath,
+        ),
+      );
+    },
+    [markdownCacheKey, resolveFileHintPath, shouldRenderRichMarkdown, text],
   );
 
   const markdownComponents = useMemo(
@@ -605,6 +971,7 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <div
+      ref={bubbleRef}
       className={cn(
         'relative',
         isUser ? 'rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground' : 'w-full bg-transparent px-0 py-0',
@@ -615,7 +982,12 @@ const MessageBubble = memo(function MessageBubble({
     >
       {isUser ? (
         <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
-      ) : (
+      ) : renderPlainText ? (
+        <div className="whitespace-pre-wrap break-words break-all text-sm leading-6">
+          {text}
+          {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
+        </div>
+      ) : shouldRenderRichMarkdown ? (
         <div className="prose prose-sm dark:prose-invert max-w-none break-words break-all">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -629,10 +1001,9 @@ const MessageBubble = memo(function MessageBubble({
           >
             {markdownContent}
           </ReactMarkdown>
-          {isStreaming && (
-            <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />
-          )}
         </div>
+      ) : (
+        <p className="whitespace-pre-wrap break-words break-all text-sm leading-6">{text}</p>
       )}
 
     </div>

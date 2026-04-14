@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 import { RUNTIME_HOST_TRANSPORT_VERSION } from '../../electron/main/runtime-host-contract';
 
-const scriptPath = join(process.cwd(), 'runtime-host', 'api', 'host-process.cjs');
+const scriptPath = join(process.cwd(), 'runtime-host', 'host-process.cjs');
 const port = 46391;
 
 const manager = createRuntimeHostProcessManager({

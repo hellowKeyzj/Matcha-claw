@@ -115,6 +115,51 @@ describe('chat session labeling', () => {
     expect(state.messages).toEqual([{ role: 'assistant', content: 'beta session content' }]);
   });
 
+  it('sending 期间 loadHistory 若已包含同语义用户消息，不应再追加 optimistic 用户消息', async () => {
+    const sentAtMs = Date.now();
+    resetChatStoreState();
+    useChatStore.setState({
+      currentSessionKey: 'agent:alpha:session-1',
+      sending: true,
+      lastUserMessageAt: sentAtMs,
+      messages: [
+        {
+          role: 'user',
+          id: 'optimistic-user-1',
+          content: '你好',
+          timestamp: sentAtMs / 1000,
+        },
+      ],
+    } as never);
+
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'sessions.get') {
+        return {
+          messages: [
+            {
+              role: 'user',
+              id: 'gateway-user-1',
+              content: '[Tue 2026-04-14 20:11 GMT+8] 你好 [message_id: u-1]',
+              timestamp: (sentAtMs + 8_000) / 1000,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().loadHistory(false);
+
+    const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]?.id).toBe('gateway-user-1');
+  });
+
   it('loadSessions 仅使用 sessions.list 元数据，不触发 chat.history 扇出请求', async () => {
     const rpcMock = vi.fn(async (method: string) => {
       if (method === 'sessions.list') {
@@ -313,7 +358,7 @@ describe('chat session labeling', () => {
 
     expect(rpcMock).toHaveBeenCalledWith('sessions.get', {
       key: 'agent:alpha:session-1',
-      limit: 200,
+      limit: 10,
     });
     expect(rpcMock).not.toHaveBeenCalledWith('chat.history', expect.anything());
     const state = useChatStore.getState();

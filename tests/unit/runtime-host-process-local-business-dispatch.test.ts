@@ -73,7 +73,6 @@ describe('runtime-host process local business dispatch registry', () => {
       'channel',
       'openclaw',
       'skills',
-      'task_plugin',
       'team_runtime',
       'clawhub',
       'toolchain_uv',

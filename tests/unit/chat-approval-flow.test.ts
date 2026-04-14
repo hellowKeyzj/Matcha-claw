@@ -171,13 +171,94 @@ describe('chat 审批等待态流程', () => {
 
     const state = useChatStore.getState() as unknown as {
       error: string | null;
-      streamingMessage: unknown;
     };
     expect(state.error).toBeNull();
-    expect(state.streamingMessage).toEqual({
-      role: 'assistant',
-      content: 'working...',
-    });
+  });
+
+  it('delta 事件应按帧合并更新：当前 tick 不改 streamingMessage，下一帧再落地', () => {
+    vi.useFakeTimers();
+    try {
+      useChatStore.setState({
+        sending: true,
+        activeRunId: 'run-delta-batched',
+        error: null,
+        streamingMessage: null,
+        streamingTools: [],
+      } as never);
+
+      useChatStore.getState().handleChatEvent({
+        state: 'delta',
+        runId: 'run-delta-batched',
+        message: {
+          role: 'assistant',
+          content: 'frame-batched',
+        },
+      });
+
+      const stateBeforeFlush = useChatStore.getState() as unknown as {
+        streamingMessage: unknown;
+      };
+      expect(stateBeforeFlush.streamingMessage).toBeNull();
+
+      vi.advanceTimersByTime(40);
+
+      const stateAfterFlush = useChatStore.getState() as unknown as {
+        streamingMessage: unknown;
+      };
+      expect(stateAfterFlush.streamingMessage).toEqual({
+        role: 'assistant',
+        content: 'frame-batched',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('同一帧内连续 delta 应合并为最新快照落地', () => {
+    vi.useFakeTimers();
+    try {
+      useChatStore.setState({
+        sending: true,
+        activeRunId: 'run-delta-merge',
+        error: null,
+        streamingMessage: null,
+        streamingTools: [],
+      } as never);
+
+      useChatStore.getState().handleChatEvent({
+        state: 'delta',
+        runId: 'run-delta-merge',
+        message: {
+          role: 'assistant',
+          content: 'hello',
+        },
+      });
+      useChatStore.getState().handleChatEvent({
+        state: 'delta',
+        runId: 'run-delta-merge',
+        message: {
+          role: 'assistant',
+          content: 'hello world',
+        },
+      });
+
+      const stateBeforeFlush = useChatStore.getState() as unknown as {
+        streamingMessage: unknown;
+      };
+      expect(stateBeforeFlush.streamingMessage).toBeNull();
+
+      vi.advanceTimersByTime(40);
+
+      const stateAfterFlush = useChatStore.getState() as unknown as {
+        streamingMessage: unknown;
+      };
+      expect(stateAfterFlush.streamingMessage).toEqual({
+        role: 'assistant',
+        content: 'hello world',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('停止时应先 deny 当前会话 pending 审批，再 chat.abort', async () => {

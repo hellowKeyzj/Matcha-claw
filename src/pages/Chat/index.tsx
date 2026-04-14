@@ -4,81 +4,220 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { AlertCircle, Bot, Loader2, MessageSquare, Settings2, Sparkles, X } from 'lucide-react';
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Button } from '@/components/ui/button';
-import { useChatStore, type ApprovalDecision, type ApprovalItem, type RawMessage } from '@/stores/chat';
+import { useShallow } from 'zustand/react/shallow';
+import { useChatStore, type RawMessage } from '@/stores/chat';
+import { selectChatPageState } from '@/stores/chat/selectors';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
-import { ChatToolbar } from './ChatToolbar';
-import { ExecutionGraphCard } from './ExecutionGraphCard';
 import { TaskInboxPanel } from './components/TaskInboxPanel';
+import { AgentSkillConfigDialog, type AgentSkillOption } from './components/AgentSkillConfigDialog';
+import { WelcomeScreen } from './components/ChatStates';
+import { ChatRowItem } from './components/ChatRowItem';
+import { ChatHeaderBar } from './components/ChatHeaderBar';
+import { ChatApprovalDock, ChatErrorBanner } from './components/ChatRuntimeDock';
 import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import { buildChatRows, resolveMessageRowKey, type ChatRow, type ExecutionGraphData } from './chat-row-model';
-import { deriveTaskSteps, parseSubagentCompletionInfo } from './task-visualization';
+import { trackUiTiming } from '@/lib/telemetry';
+import {
+  appendRuntimeChatRows,
+  appendMessageRows,
+  buildStaticChatRowsWithMeta,
+  canAppendMessageList,
+  isRenderableChatMessage,
+  type ChatRow,
+  type ExecutionGraphData,
+} from './chat-row-model';
 import { useChatScrollOrchestrator } from './useChatScrollOrchestrator';
 import { useMinLoading } from './useMinLoading';
+import { useTaskInboxLayout } from './useTaskInboxLayout';
+import { useExecutionGraphs } from './useExecutionGraphs';
 
-const TASK_INBOX_MIN_WIDTH = 260;
-const TASK_INBOX_MAX_WIDTH = 560;
-const TASK_INBOX_DEFAULT_WIDTH = 360;
-const TASK_INBOX_RESIZER_WIDTH = 6;
-const CHAT_MAIN_MIN_WIDTH = 520;
 const CHAT_STICKY_BOTTOM_THRESHOLD_PX = 120;
 const CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX = 168;
 const CHAT_VIRTUAL_OVERSCAN = 8;
-const SUBAGENT_HISTORY_LIMIT = 200;
 const SUBAGENTS_SNAPSHOT_TTL_MS = 15_000;
-const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const EMPTY_MESSAGES: RawMessage[] = [];
-const EMPTY_STRING_SET = new Set<string>();
+const NEW_SESSION_KEY_PATTERN = /^agent:[^:]+:session-\d{8,16}$/i;
+const STATIC_ROWS_CACHE_MAX_SESSIONS = 20;
+const CHAT_FIRST_PAINT_RENDERABLE_LIMIT = 8;
+const SESSION_RENDER_WINDOW_MAX_SESSIONS = 40;
+const SESSION_RENDER_WINDOW_EXPAND_STEP = 24;
+const SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX = 12;
+const SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX = 180;
+const SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS = 140;
+const HISTORY_IDLE_LOAD_TIMEOUT_MS = 1000;
 
-interface CompletionEventAnchor {
-  eventIndex: number;
-  triggerIndex: number;
-  replyIndex: number | null;
-  sessionKey: string;
-  sessionId?: string;
-  agentId?: string;
+interface SessionStaticRowsCache {
+  messagesRef: RawMessage[];
+  executionGraphsRef: ExecutionGraphData[];
+  rows: ChatRow[];
+  renderableCount: number;
 }
 
-interface AgentSkillOption {
-  id: string;
-  name: string;
-  icon?: string;
+const globalStaticRowsCache = new Map<string, SessionStaticRowsCache>();
+const globalSessionRenderableWindowLimit = new Map<string, number>();
+const globalRenderWindowSliceCache = new WeakMap<RawMessage[], Map<number, RenderWindowSliceResult>>();
+
+type IdleTaskHandle = number | ReturnType<typeof setTimeout>;
+
+function nowMs(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
+function roundTiming(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.round(value * 100) / 100;
 }
 
-function loadTaskInboxWidth(): number {
-  try {
-    const raw = Number(window.localStorage.getItem('chat:task-inbox-width') || TASK_INBOX_DEFAULT_WIDTH);
-    if (!Number.isFinite(raw)) {
-      return TASK_INBOX_DEFAULT_WIDTH;
+function scheduleIdleTask(task: () => void, timeoutMs = HISTORY_IDLE_LOAD_TIMEOUT_MS): IdleTaskHandle {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      return win.requestIdleCallback(() => task(), { timeout: timeoutMs });
     }
-    return clamp(raw, TASK_INBOX_MIN_WIDTH, TASK_INBOX_MAX_WIDTH);
-  } catch {
-    return TASK_INBOX_DEFAULT_WIDTH;
+  }
+  return setTimeout(task, 80);
+}
+
+function cancelIdleTask(handle: IdleTaskHandle): void {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.cancelIdleCallback === 'function' && typeof handle === 'number') {
+      win.cancelIdleCallback(handle);
+      return;
+    }
+  }
+  clearTimeout(handle);
+}
+
+function getSessionRenderableWindowLimit(sessionKey: string): number {
+  const cached = globalSessionRenderableWindowLimit.get(sessionKey);
+  if (typeof cached === 'number' && Number.isFinite(cached) && cached >= CHAT_FIRST_PAINT_RENDERABLE_LIMIT) {
+    return cached;
+  }
+  return CHAT_FIRST_PAINT_RENDERABLE_LIMIT;
+}
+
+function updateSessionRenderableWindowLimit(sessionKey: string, nextLimit: number): void {
+  const normalized = Math.max(CHAT_FIRST_PAINT_RENDERABLE_LIMIT, Math.floor(nextLimit));
+  if (globalSessionRenderableWindowLimit.has(sessionKey)) {
+    globalSessionRenderableWindowLimit.delete(sessionKey);
+  }
+  globalSessionRenderableWindowLimit.set(sessionKey, normalized);
+  while (globalSessionRenderableWindowLimit.size > SESSION_RENDER_WINDOW_MAX_SESSIONS) {
+    const oldestKey = globalSessionRenderableWindowLimit.keys().next().value;
+    if (typeof oldestKey !== 'string') {
+      break;
+    }
+    globalSessionRenderableWindowLimit.delete(oldestKey);
   }
 }
 
-function clampTaskInboxWidth(width: number, containerWidth: number): number {
-  const maxWidth = Math.max(
-    TASK_INBOX_MIN_WIDTH,
-    containerWidth - CHAT_MAIN_MIN_WIDTH - TASK_INBOX_RESIZER_WIDTH,
-  );
-  return clamp(width, TASK_INBOX_MIN_WIDTH, Math.min(TASK_INBOX_MAX_WIDTH, maxWidth));
+interface RenderWindowSliceResult {
+  messages: RawMessage[];
+  hasOlderRenderableMessages: boolean;
+}
+
+type PrependWindowTxn =
+  | { phase: 'idle' }
+  | {
+    phase: 'scheduled';
+    id: number;
+    sessionKey: string;
+    rowKey: string;
+    rowOffsetPx: number;
+    previousScrollTop: number;
+    previousScrollHeight: number;
+  };
+
+function sliceMessagesForFirstPaint(
+  messages: RawMessage[],
+  renderableLimit: number,
+): RenderWindowSliceResult {
+  if (messages.length === 0) {
+    return { messages, hasOlderRenderableMessages: false };
+  }
+  let renderableCount = 0;
+  let startIndex = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (!isRenderableChatMessage(messages[index])) {
+      continue;
+    }
+    renderableCount += 1;
+    if (renderableCount >= renderableLimit) {
+      startIndex = index;
+      break;
+    }
+  }
+  if (startIndex <= 0) {
+    return { messages, hasOlderRenderableMessages: false };
+  }
+  let hasOlderRenderableMessages = false;
+  for (let index = startIndex - 1; index >= 0; index -= 1) {
+    if (!isRenderableChatMessage(messages[index])) {
+      continue;
+    }
+    hasOlderRenderableMessages = true;
+    break;
+  }
+  return {
+    messages: messages.slice(startIndex),
+    hasOlderRenderableMessages,
+  };
+}
+
+function getCachedRenderWindowSlice(
+  messages: RawMessage[],
+  renderableLimit: number,
+): RenderWindowSliceResult {
+  if (messages.length === 0) {
+    return { messages, hasOlderRenderableMessages: false };
+  }
+  const normalizedLimit = Math.max(1, Math.floor(renderableLimit));
+  const byLimit = globalRenderWindowSliceCache.get(messages);
+  const cached = byLimit?.get(normalizedLimit);
+  if (cached) {
+    return cached;
+  }
+  const computed = sliceMessagesForFirstPaint(messages, normalizedLimit);
+  if (byLimit) {
+    byLimit.set(normalizedLimit, computed);
+  } else {
+    globalRenderWindowSliceCache.set(messages, new Map([[normalizedLimit, computed]]));
+  }
+  return computed;
+}
+
+function rememberSessionStaticRowsCache(sessionKey: string, cache: SessionStaticRowsCache): void {
+  if (globalStaticRowsCache.has(sessionKey)) {
+    globalStaticRowsCache.delete(sessionKey);
+  }
+  globalStaticRowsCache.set(sessionKey, cache);
+  while (globalStaticRowsCache.size > STATIC_ROWS_CACHE_MAX_SESSIONS) {
+    const oldestKey = globalStaticRowsCache.keys().next().value;
+    if (typeof oldestKey !== 'string') {
+      break;
+    }
+    globalStaticRowsCache.delete(oldestKey);
+  }
 }
 
 function parseAgentIdFromSessionKey(sessionKey: string): string {
@@ -93,46 +232,6 @@ function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean
   return isDefault ? '⚙️' : '🤖';
 }
 
-function findCompletionEventAnchors(messages: RawMessage[]): CompletionEventAnchor[] {
-  const anchors: CompletionEventAnchor[] = [];
-  for (const [eventIndex, message] of messages.entries()) {
-    const completionInfo = parseSubagentCompletionInfo(message);
-    if (!completionInfo) continue;
-
-    let triggerIndex = eventIndex;
-    for (let index = eventIndex - 1; index >= 0; index -= 1) {
-      const previous = messages[index];
-      if (previous.role !== 'user') continue;
-      if (parseSubagentCompletionInfo(previous)) continue;
-      triggerIndex = index;
-      break;
-    }
-
-    let replyIndex: number | null = null;
-    for (let index = eventIndex + 1; index < messages.length; index += 1) {
-      if (messages[index]?.role === 'assistant') {
-        replyIndex = index;
-        break;
-      }
-    }
-
-    anchors.push({
-      eventIndex,
-      triggerIndex,
-      replyIndex,
-      sessionKey: completionInfo.sessionKey,
-      ...(completionInfo.sessionId ? { sessionId: completionInfo.sessionId } : {}),
-      ...(completionInfo.agentId ? { agentId: completionInfo.agentId } : {}),
-    });
-  }
-  return anchors;
-}
-
-function isRenderableChatMessage(message: RawMessage): boolean {
-  const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
-  return role !== 'toolresult' && role !== 'tool_result';
-}
-
 export function Chat() {
   const { t } = useTranslation('chat');
   const location = useLocation();
@@ -141,28 +240,32 @@ export function Chat() {
   const gatewayRpc = useGatewayStore((s) => s.rpc);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
-  const messages = useChatStore((s) => s.messages);
-  const initialLoading = useChatStore((s) => s.initialLoading);
-  const refreshing = useChatStore((s) => s.refreshing);
-  const mutating = useChatStore((s) => s.mutating);
-  const sending = useChatStore((s) => s.sending);
-  const error = useChatStore((s) => s.error);
-  const showThinking = useChatStore((s) => s.showThinking);
-  const streamingMessage = useChatStore((s) => s.streamingMessage);
-  const streamingTools = useChatStore((s) => s.streamingTools);
-  const pendingFinal = useChatStore((s) => s.pendingFinal);
-  const approvalStatus = useChatStore((s) => s.approvalStatus);
-  const currentPendingApprovals = useChatStore((s) => s.pendingApprovalsBySession[s.currentSessionKey] ?? EMPTY_APPROVAL_ITEMS);
-  const resolveApproval = useChatStore((s) => s.resolveApproval);
-  const loadHistory = useChatStore((s) => s.loadHistory);
-  const loadSessions = useChatStore((s) => s.loadSessions);
-  const switchSession = useChatStore((s) => s.switchSession);
-  const openAgentConversation = useChatStore((s) => s.openAgentConversation);
-  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
-  const currentSessionReady = useChatStore((s) => Boolean(s.sessionReadyByKey[s.currentSessionKey]));
-  const sendMessage = useChatStore((s) => s.sendMessage);
-  const abortRun = useChatStore((s) => s.abortRun);
-  const clearError = useChatStore((s) => s.clearError);
+  const {
+    messages,
+    initialLoading,
+    refreshing,
+    mutating,
+    sending,
+    error,
+    showThinking,
+    streamingMessage,
+    streamingTools,
+    pendingFinal,
+    approvalStatus,
+    currentPendingApprovals,
+    resolveApproval,
+    loadHistory,
+    loadSessions,
+    switchSession,
+    openAgentConversation,
+    currentSessionKey,
+    currentSessionReady,
+    currentSessionHasActivity,
+    sendMessage,
+    abortRun,
+    clearError,
+    cleanupEmptySession,
+  } = useChatStore(useShallow(selectChatPageState));
   const agents = useSubagentsStore((s) => s.agents);
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
   const updateAgent = useSubagentsStore((s) => s.updateAgent);
@@ -172,101 +275,43 @@ export function Chat() {
   const fetchSkills = useSkillsStore((s) => s.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((s) => s.userAvatarDataUrl);
 
-  const cleanupEmptySession = useChatStore((s) => s.cleanupEmptySession);
-
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
-  const resizeRafRef = useRef<number | null>(null);
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
-  const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('chat:task-inbox-collapsed') === '1';
-    } catch {
-      return false;
-    }
-  });
-  const [taskInboxWidth, setTaskInboxWidth] = useState<number>(() => loadTaskInboxWidth());
+  const initialHistoryIdleHandleRef = useRef<IdleTaskHandle | null>(null);
+  const {
+    taskInboxCollapsed,
+    setTaskInboxCollapsed,
+    taskInboxWidth,
+    startTaskInboxResize,
+    taskInboxResizerWidth,
+  } = useTaskInboxLayout(chatLayoutRef);
   const [skillConfigOpen, setSkillConfigOpen] = useState(false);
   const [skillConfigSaving, setSkillConfigSaving] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-  const [subagentHistoryBySession, setSubagentHistoryBySession] = useState<Record<string, RawMessage[]>>({});
-  const subagentHistoryLoadingRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('chat:task-inbox-collapsed', taskInboxCollapsed ? '1' : '0');
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [taskInboxCollapsed]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('chat:task-inbox-width', String(taskInboxWidth));
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [taskInboxWidth]);
-
-  useEffect(() => {
-    const applyResize = () => {
-      const containerWidth = chatLayoutRef.current?.clientWidth ?? window.innerWidth;
-      setTaskInboxWidth((prev) => {
-        const next = clampTaskInboxWidth(prev, containerWidth);
-        return next === prev ? prev : next;
-      });
-    };
-
-    const scheduleResize = () => {
-      if (resizeRafRef.current != null) {
-        return;
-      }
-      resizeRafRef.current = window.requestAnimationFrame(() => {
-        resizeRafRef.current = null;
-        applyResize();
-      });
-    };
-
-    scheduleResize();
-    window.addEventListener('resize', scheduleResize);
-    return () => {
-      window.removeEventListener('resize', scheduleResize);
-      if (resizeRafRef.current != null) {
-        window.cancelAnimationFrame(resizeRafRef.current);
-        resizeRafRef.current = null;
-      }
-    };
-  }, []);
-
-  const startTaskInboxResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (taskInboxCollapsed) {
-      return;
-    }
-    event.preventDefault();
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const rect = chatLayoutRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-      const rawWidth = rect.right - moveEvent.clientX - TASK_INBOX_RESIZER_WIDTH;
-      const next = clampTaskInboxWidth(rawWidth, rect.width);
-      setTaskInboxWidth(next);
-    };
-
-    const onMouseUp = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
+  const [, setRenderWindowVersion] = useState(0);
+  const sessionWindowBudgetInitializedRef = useRef<string | null>(null);
+  const expandWindowArmedRef = useRef(true);
+  const expandWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prependWindowTxnRef = useRef<PrependWindowTxn>({ phase: 'idle' });
+  const prependWindowTxnSeqRef = useRef(0);
+  const sessionFirstPaintRef = useRef<{
+    sessionKey: string;
+    startedAt: number;
+    reported: boolean;
+  } | null>(null);
+  const sessionPipelineCostRef = useRef<{
+    sessionKey: string;
+    rowSliceMs: number;
+    staticRowsMs: number;
+    runtimeRowsMs: number;
+  }>({
+    sessionKey: currentSessionKey,
+    rowSliceMs: 0,
+    staticRowsMs: 0,
+    runtimeRowsMs: 0,
+  });
 
   // Load data when gateway is running.
   // When the store already holds messages for this session (i.e. the user
@@ -280,6 +325,13 @@ export function Chat() {
     const params = new URLSearchParams(location.search);
     const sessionParam = params.get('session')?.trim() ?? '';
     const agentParam = params.get('agent')?.trim() ?? '';
+    if (sessionParam) {
+      switchSession(sessionParam);
+      navigate('/', { replace: true });
+    } else if (agentParam) {
+      openAgentConversation(agentParam);
+      navigate('/', { replace: true });
+    }
     (async () => {
       const subagentsState = useSubagentsStore.getState();
       const shouldLoadAgents = (
@@ -293,20 +345,27 @@ export function Chat() {
       }
       await loadSessions();
       if (cancelled) return;
-      if (sessionParam) {
-        switchSession(sessionParam);
-        navigate('/', { replace: true });
+      if (sessionParam || agentParam) {
         return;
       }
-      if (agentParam) {
-        openAgentConversation(agentParam);
-        navigate('/', { replace: true });
+      if (hasExistingMessages) {
+        initialHistoryIdleHandleRef.current = scheduleIdleTask(() => {
+          initialHistoryIdleHandleRef.current = null;
+          if (cancelled) {
+            return;
+          }
+          void loadHistory(true);
+        });
         return;
       }
-      await loadHistory(hasExistingMessages);
+      await loadHistory(false);
     })();
     return () => {
       cancelled = true;
+      if (initialHistoryIdleHandleRef.current != null) {
+        cancelIdleTask(initialHistoryIdleHandleRef.current);
+        initialHistoryIdleHandleRef.current = null;
+      }
       // If the user navigates away without sending any messages, remove the
       // empty session so it doesn't linger as a ghost entry in the sidebar.
       cleanupEmptySession();
@@ -323,208 +382,124 @@ export function Chat() {
   }, [sending, streamingTimestamp]);
 
   const waitingApproval = approvalStatus === 'awaiting_approval';
-  const completionAnchors = useMemo(
-    () => findCompletionEventAnchors(messages),
-    [messages],
+  const isSessionWindowBudgetFirstPass = sessionWindowBudgetInitializedRef.current !== currentSessionKey;
+  const sessionRenderableWindowLimit = isSessionWindowBudgetFirstPass
+    ? CHAT_FIRST_PAINT_RENDERABLE_LIMIT
+    : getSessionRenderableWindowLimit(currentSessionKey);
+  const renderWindowSlice = useMemo(
+    () => {
+      const startedAt = nowMs();
+      const slice = getCachedRenderWindowSlice(messages, sessionRenderableWindowLimit);
+      const cost = sessionPipelineCostRef.current;
+      if (cost.sessionKey === currentSessionKey) {
+        cost.rowSliceMs += Math.max(0, nowMs() - startedAt);
+      }
+      return slice;
+    },
+    [currentSessionKey, messages, sessionRenderableWindowLimit],
   );
+  const rowSourceMessages = renderWindowSlice.messages;
+  const hasOlderRenderableRows = renderWindowSlice.hasOlderRenderableMessages;
 
-  useEffect(() => {
-    if (!isGatewayRunning) {
-      return;
-    }
-    let cancelled = false;
-    const existing = subagentHistoryBySession;
-    const pendingSessionKeys = Array.from(new Set(
-      completionAnchors
-        .map((anchor) => anchor.sessionKey)
-        .filter((sessionKey) => !!sessionKey && !(sessionKey in existing) && !subagentHistoryLoadingRef.current.has(sessionKey)),
-    ));
-    if (pendingSessionKeys.length === 0) {
-      return;
-    }
-
-    for (const sessionKey of pendingSessionKeys) {
-      subagentHistoryLoadingRef.current.add(sessionKey);
-      void gatewayRpc<Record<string, unknown>>('chat.history', {
-        sessionKey,
-        limit: SUBAGENT_HISTORY_LIMIT,
-      }).then((result) => {
-        if (cancelled) {
-          return;
-        }
-        const loaded = Array.isArray(result.messages) ? result.messages as RawMessage[] : EMPTY_MESSAGES;
-        setSubagentHistoryBySession((previous) => {
-          if (sessionKey in previous) {
-            return previous;
-          }
-          return {
-            ...previous,
-            [sessionKey]: loaded,
-          };
-        });
-      }).catch(() => {
-        if (cancelled) {
-          return;
-        }
-        setSubagentHistoryBySession((previous) => {
-          if (sessionKey in previous) {
-            return previous;
-          }
-          return {
-            ...previous,
-            [sessionKey]: EMPTY_MESSAGES,
-          };
-        });
-      }).finally(() => {
-        subagentHistoryLoadingRef.current.delete(sessionKey);
-      });
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [completionAnchors, gatewayRpc, isGatewayRunning, subagentHistoryBySession]);
-
-  const executionGraphs = useMemo<ExecutionGraphData[]>(() => {
-    if (completionAnchors.length === 0) {
-      return [];
-    }
-
-    const messageKeyByIndex = new Map<number, string>();
-    let renderableIndex = 0;
-    for (const [index, message] of messages.entries()) {
-      if (!isRenderableChatMessage(message)) {
-        continue;
-      }
-      messageKeyByIndex.set(index, resolveMessageRowKey(message, renderableIndex));
-      renderableIndex += 1;
-    }
-
-    const graphs: ExecutionGraphData[] = [];
-    for (const [anchorIndex, anchor] of completionAnchors.entries()) {
-      const triggerMessageKey = messageKeyByIndex.get(anchor.triggerIndex) ?? messageKeyByIndex.get(anchor.eventIndex);
-      if (!triggerMessageKey) {
-        continue;
-      }
-      const replyMessageKey = anchor.replyIndex != null ? messageKeyByIndex.get(anchor.replyIndex) : undefined;
-      const includeStreaming = sending && anchorIndex === completionAnchors.length - 1;
-      const mainStart = anchor.triggerIndex;
-      const mainEnd = anchor.replyIndex != null ? anchor.replyIndex + 1 : messages.length;
-      const mainMessages = messages.slice(mainStart, mainEnd);
-      const childMessages = subagentHistoryBySession[anchor.sessionKey] ?? EMPTY_MESSAGES;
-
-      const mainSteps = deriveTaskSteps({
-        messages: mainMessages,
-        streamingMessage: includeStreaming ? streamingMessage : null,
-        streamingTools: includeStreaming ? streamingTools : [],
-        sending: includeStreaming ? sending : false,
-        pendingFinal: includeStreaming ? pendingFinal : false,
-        showThinking,
-      });
-      const childSteps = childMessages.length > 0
-        ? deriveTaskSteps({
-            messages: childMessages,
-            streamingMessage: null,
-            streamingTools: [],
-            sending: false,
-            pendingFinal: false,
-            showThinking,
-          })
-        : [];
-
-      const resolvedAgentName = anchor.agentId
-        ? (agents.find((agent) => agent.id === anchor.agentId)?.name || anchor.agentId)
-        : 'subagent';
-
-      const steps = [...mainSteps];
-      if (childSteps.length > 0) {
-        const childRootId = `child-root:${anchor.sessionKey}`;
-        steps.push({
-          id: childRootId,
-          label: `${resolvedAgentName} subagent`,
-          status: 'completed',
-          kind: 'system',
-          detail: anchor.sessionKey,
-          depth: 1,
-          parentId: 'agent-run',
-        });
-        for (const [stepIndex, step] of childSteps.entries()) {
-          steps.push({
-            ...step,
-            id: `child:${anchor.sessionKey}:${step.id || stepIndex}`,
-            depth: Math.max(step.depth + 1, 2),
-            parentId: childRootId,
-          });
-        }
-      }
-
-      const suppressToolCardMessageKeys: string[] = [];
-      for (let index = mainStart; index < mainEnd; index += 1) {
-        const message = messages[index];
-        if (message?.role !== 'assistant') continue;
-        const key = messageKeyByIndex.get(index);
-        if (key) {
-          suppressToolCardMessageKeys.push(key);
-        }
-      }
-
-      graphs.push({
-        id: `${currentSessionKey}:${anchor.sessionKey}:${anchor.eventIndex}`,
-        anchorMessageKey: triggerMessageKey,
-        triggerMessageKey,
-        ...(replyMessageKey ? { replyMessageKey } : {}),
-        agentLabel: resolvedAgentName,
-        sessionLabel: anchor.sessionId || anchor.sessionKey,
-        steps: steps.slice(0, 32),
-        active: includeStreaming,
-        suppressToolCardMessageKeys,
-      });
-    }
-
-    return graphs;
-  }, [
-    agents,
-    completionAnchors,
+  const deferredMessages = useDeferredValue(messages);
+  const deferredSessionKey = useDeferredValue(currentSessionKey);
+  const executionGraphInputReady = deferredSessionKey === currentSessionKey && deferredMessages === messages;
+  const { executionGraphs, suppressedToolCardRowKeys } = useExecutionGraphs({
+    messages: executionGraphInputReady ? rowSourceMessages : EMPTY_MESSAGES,
     currentSessionKey,
-    messages,
-    pendingFinal,
+    agents,
+    isGatewayRunning,
+    gatewayRpc,
     sending,
+    pendingFinal,
     showThinking,
     streamingMessage,
     streamingTools,
-    subagentHistoryBySession,
-  ]);
+  });
 
-  const suppressedToolCardRowKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const graph of executionGraphs) {
-      for (const key of graph.suppressToolCardMessageKeys || []) {
-        keys.add(key);
+  const staticChatRows = useMemo(
+    () => {
+      const startedAt = nowMs();
+      const previousCache = globalStaticRowsCache.get(currentSessionKey);
+      if (
+        previousCache
+        && previousCache.messagesRef === rowSourceMessages
+        && previousCache.executionGraphsRef === executionGraphs
+      ) {
+        const cost = sessionPipelineCostRef.current;
+        if (cost.sessionKey === currentSessionKey) {
+          cost.staticRowsMs += Math.max(0, nowMs() - startedAt);
+        }
+        return previousCache.rows;
       }
-    }
-    return keys;
-  }, [executionGraphs]);
 
+      let rows: ChatRow[];
+      let renderableCount: number;
+      const canIncrementalAppend = Boolean(
+        previousCache
+        && previousCache.executionGraphsRef === executionGraphs
+        && canAppendMessageList(previousCache.messagesRef, rowSourceMessages),
+      );
+      if (canIncrementalAppend && previousCache) {
+        const appended = appendMessageRows(
+          currentSessionKey,
+          previousCache.rows,
+          rowSourceMessages,
+          previousCache.messagesRef.length,
+          previousCache.renderableCount,
+        );
+        rows = appended.rows;
+        renderableCount = appended.renderableCount;
+      } else {
+        const built = buildStaticChatRowsWithMeta({
+          sessionKey: currentSessionKey,
+          messages: rowSourceMessages,
+          executionGraphs,
+        });
+        rows = built.rows;
+        renderableCount = built.renderableCount;
+      }
+
+      rememberSessionStaticRowsCache(currentSessionKey, {
+        messagesRef: rowSourceMessages,
+        executionGraphsRef: executionGraphs,
+        rows,
+        renderableCount,
+      });
+      const cost = sessionPipelineCostRef.current;
+      if (cost.sessionKey === currentSessionKey) {
+        cost.staticRowsMs += Math.max(0, nowMs() - startedAt);
+      }
+      return rows;
+    },
+    [currentSessionKey, executionGraphs, rowSourceMessages],
+  );
   const chatRows = useMemo(
-    () => buildChatRows({
-      sessionKey: currentSessionKey,
-      messages,
-      sending,
-      pendingFinal,
-      waitingApproval,
-      showThinking,
-      streamingMessage,
-      streamingTools,
-      streamingTimestamp,
-      executionGraphs,
-    }),
+    () => {
+      const startedAt = nowMs();
+      const rows = appendRuntimeChatRows({
+        sessionKey: currentSessionKey,
+        baseRows: staticChatRows,
+        sending,
+        pendingFinal,
+        waitingApproval,
+        showThinking,
+        streamingMessage,
+        streamingTools,
+        streamingTimestamp,
+      });
+      const cost = sessionPipelineCostRef.current;
+      if (cost.sessionKey === currentSessionKey) {
+        cost.runtimeRowsMs += Math.max(0, nowMs() - startedAt);
+      }
+      return rows;
+    },
     [
       currentSessionKey,
-      executionGraphs,
-      messages,
       pendingFinal,
       sending,
       showThinking,
+      staticChatRows,
       streamingMessage,
       streamingTimestamp,
       streamingTools,
@@ -533,16 +508,62 @@ export function Chat() {
   );
   const hasRenderableRows = chatRows.length > 0;
   const waitingForSessionSnapshot = !sending && !hasRenderableRows && !currentSessionReady;
-  const loadingVisible = useMinLoading(waitingForSessionSnapshot || (initialLoading && !sending));
-  const showBlockingLoading = waitingForSessionSnapshot && loadingVisible;
+  const isColdInitialLoad = initialLoading && !sending;
+  const loadingVisible = useMinLoading(waitingForSessionSnapshot || isColdInitialLoad, isColdInitialLoad ? 450 : 0);
+  const likelyFreshSession = (
+    waitingForSessionSnapshot
+    && !currentSessionHasActivity
+    && NEW_SESSION_KEY_PATTERN.test(currentSessionKey)
+  );
+  const showBlockingLoading = waitingForSessionSnapshot && !likelyFreshSession && loadingVisible;
   const showBackgroundStatus = !showBlockingLoading && (refreshing || mutating);
-  const isEmptyState = !showBlockingLoading && !sending && chatRows.length === 0 && currentSessionReady;
+  const isEmptyState = !showBlockingLoading && !sending && chatRows.length === 0 && (currentSessionReady || likelyFreshSession);
+
+  useEffect(() => {
+    const now = nowMs();
+    sessionFirstPaintRef.current = {
+      sessionKey: currentSessionKey,
+      startedAt: now,
+      reported: false,
+    };
+    sessionPipelineCostRef.current = {
+      sessionKey: currentSessionKey,
+      rowSliceMs: 0,
+      staticRowsMs: 0,
+      runtimeRowsMs: 0,
+    };
+  }, [currentSessionKey]);
+
+  useEffect(() => {
+    const tracker = sessionFirstPaintRef.current;
+    if (!tracker || tracker.reported || tracker.sessionKey !== currentSessionKey) {
+      return;
+    }
+    const hasFirstPaint = !showBlockingLoading && (chatRows.length > 0 || isEmptyState);
+    if (!hasFirstPaint) {
+      return;
+    }
+    const now = nowMs();
+    tracker.reported = true;
+    const pipelineCost = sessionPipelineCostRef.current;
+    trackUiTiming('chat.session_first_paint', Math.max(0, now - tracker.startedAt), {
+      sessionKey: currentSessionKey,
+      rowCount: chatRows.length,
+      emptyState: isEmptyState,
+      rowSliceMs: pipelineCost.sessionKey === currentSessionKey ? roundTiming(pipelineCost.rowSliceMs) : 0,
+      staticRowsMs: pipelineCost.sessionKey === currentSessionKey ? roundTiming(pipelineCost.staticRowsMs) : 0,
+      runtimeRowsMs: pipelineCost.sessionKey === currentSessionKey ? roundTiming(pipelineCost.runtimeRowsMs) : 0,
+      richRenderDeferred: false,
+    });
+  }, [chatRows.length, currentSessionKey, isEmptyState, showBlockingLoading]);
+
   const {
     handleViewportPointerDown,
     handleViewportScroll,
     handleViewportTouchMove,
     handleViewportWheel,
     handleVirtualizerChange,
+    scrollState,
   } = useChatScrollOrchestrator({
     currentSessionKey,
     rows: chatRows,
@@ -550,21 +571,168 @@ export function Chat() {
     contentRef: messageContentRef,
     stickyBottomThresholdPx: CHAT_STICKY_BOTTOM_THRESHOLD_PX,
   });
-  const chatRowKeys = useMemo(
-    () => chatRows.map((row) => row.key),
-    [chatRows],
-  );
+  useEffect(() => {
+    return () => {
+      if (expandWindowTimerRef.current != null) {
+        clearTimeout(expandWindowTimerRef.current);
+        expandWindowTimerRef.current = null;
+      }
+      globalSessionRenderableWindowLimit.clear();
+      sessionWindowBudgetInitializedRef.current = null;
+      prependWindowTxnRef.current = { phase: 'idle' };
+    };
+  }, []);
+
+  useEffect(() => {
+    sessionWindowBudgetInitializedRef.current = currentSessionKey;
+    updateSessionRenderableWindowLimit(currentSessionKey, CHAT_FIRST_PAINT_RENDERABLE_LIMIT);
+    expandWindowArmedRef.current = true;
+    if (expandWindowTimerRef.current != null) {
+      clearTimeout(expandWindowTimerRef.current);
+      expandWindowTimerRef.current = null;
+    }
+    prependWindowTxnRef.current = { phase: 'idle' };
+  }, [currentSessionKey]);
+
   const messageVirtualizer = useVirtualizer({
     count: chatRows.length,
     getScrollElement: () => messagesViewportRef.current,
     estimateSize: () => CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX,
     overscan: CHAT_VIRTUAL_OVERSCAN,
-    getItemKey: (index) => chatRowKeys[index] ?? `idx:${index}`,
+    getItemKey: (index) => chatRows[index]?.key ?? `idx:${index}`,
     onChange: (instance) => {
       handleVirtualizerChange(instance);
     },
   });
   const virtualMessageItems = messageVirtualizer.getVirtualItems();
+
+  useLayoutEffect(() => {
+    const txn = prependWindowTxnRef.current;
+    if (txn.phase !== 'scheduled' || txn.sessionKey !== currentSessionKey) {
+      return;
+    }
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (scrollState.mode !== 'detached' || scrollState.command.type !== 'none') {
+      prependWindowTxnRef.current = { phase: 'idle' };
+      return;
+    }
+
+    const targetIndex = chatRows.findIndex((row) => row.key === txn.rowKey);
+    if (targetIndex >= 0) {
+      messageVirtualizer.scrollToIndex(targetIndex, { align: 'start' });
+    }
+
+    let anchorElement: HTMLDivElement | null = null;
+    const rowElements = viewport.querySelectorAll<HTMLDivElement>('[data-chat-row-key]');
+    for (const element of rowElements) {
+      if (element.dataset.chatRowKey === txn.rowKey) {
+        anchorElement = element;
+        break;
+      }
+    }
+
+    if (anchorElement) {
+      const viewportTop = viewport.getBoundingClientRect().top;
+      const currentRowTop = anchorElement.getBoundingClientRect().top - viewportTop;
+      const desiredRowTop = -txn.rowOffsetPx;
+      const delta = currentRowTop - desiredRowTop;
+      if (Math.abs(delta) > 0.5) {
+        viewport.scrollTop += delta;
+      }
+      prependWindowTxnRef.current = { phase: 'idle' };
+      return;
+    }
+
+    const totalHeightDelta = viewport.scrollHeight - txn.previousScrollHeight;
+    if (Number.isFinite(totalHeightDelta) && Math.abs(totalHeightDelta) > 0.5) {
+      viewport.scrollTop = Math.max(0, txn.previousScrollTop + totalHeightDelta);
+    }
+    prependWindowTxnRef.current = { phase: 'idle' };
+  }, [chatRows, currentSessionKey, messageVirtualizer, scrollState.command.type, scrollState.mode]);
+
+  const maybeExpandRenderableWindow = useCallback(() => {
+    if (scrollState.mode !== 'detached' || scrollState.command.type !== 'none') {
+      return;
+    }
+    if (!hasOlderRenderableRows) {
+      return;
+    }
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (viewport.scrollTop > SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX) {
+      expandWindowArmedRef.current = true;
+      if (expandWindowTimerRef.current != null) {
+        clearTimeout(expandWindowTimerRef.current);
+        expandWindowTimerRef.current = null;
+      }
+      return;
+    }
+    if (viewport.scrollTop > SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX) {
+      return;
+    }
+    if (!expandWindowArmedRef.current) {
+      return;
+    }
+    if (expandWindowTimerRef.current != null) {
+      clearTimeout(expandWindowTimerRef.current);
+    }
+    const sessionKeyAtSchedule = currentSessionKey;
+    expandWindowTimerRef.current = setTimeout(() => {
+      expandWindowTimerRef.current = null;
+      const activeViewport = messagesViewportRef.current;
+      if (!activeViewport || activeViewport.scrollTop > SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX) {
+        return;
+      }
+      if (useChatStore.getState().currentSessionKey !== sessionKeyAtSchedule || !expandWindowArmedRef.current) {
+        return;
+      }
+      const visibleItems = messageVirtualizer.getVirtualItems();
+      let anchorItem = visibleItems.find((item) => (
+        item.start <= activeViewport.scrollTop
+        && (item.start + item.size) > activeViewport.scrollTop
+      ));
+      if (!anchorItem) {
+        anchorItem = visibleItems[0];
+      }
+      const anchorRow = anchorItem ? chatRows[anchorItem.index] : undefined;
+      const anchorRowKey = anchorRow?.key ?? null;
+      if (anchorRowKey) {
+        prependWindowTxnSeqRef.current += 1;
+        prependWindowTxnRef.current = {
+          phase: 'scheduled',
+          id: prependWindowTxnSeqRef.current,
+          sessionKey: sessionKeyAtSchedule,
+          rowKey: anchorRowKey,
+          rowOffsetPx: Math.max(0, activeViewport.scrollTop - (anchorItem?.start ?? activeViewport.scrollTop)),
+          previousScrollTop: activeViewport.scrollTop,
+          previousScrollHeight: activeViewport.scrollHeight,
+        };
+      } else {
+        prependWindowTxnRef.current = { phase: 'idle' };
+      }
+      const currentLimit = getSessionRenderableWindowLimit(sessionKeyAtSchedule);
+      updateSessionRenderableWindowLimit(sessionKeyAtSchedule, currentLimit + SESSION_RENDER_WINDOW_EXPAND_STEP);
+      expandWindowArmedRef.current = false;
+      setRenderWindowVersion((value) => value + 1);
+    }, SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS);
+  }, [
+    chatRows,
+    currentSessionKey,
+    hasOlderRenderableRows,
+    messageVirtualizer,
+    scrollState.command.type,
+    scrollState.mode,
+  ]);
+  const handleViewportScrollWithWindowing = useCallback(() => {
+    handleViewportScroll();
+    maybeExpandRenderableWindow();
+  }, [handleViewportScroll, maybeExpandRenderableWindow]);
+
   const scrollToRowKey = useCallback((rowKey?: string) => {
     if (!rowKey) {
       return;
@@ -661,30 +829,19 @@ export function Chat() {
       )}
       style={{
         ['--task-inbox-width' as string]: `${taskInboxWidth}px`,
-        ['--task-inbox-resizer-width' as string]: `${TASK_INBOX_RESIZER_WIDTH}px`,
+        ['--task-inbox-resizer-width' as string]: `${taskInboxResizerWidth}px`,
       }}
     >
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-card">
-        <div className="flex shrink-0 items-center justify-end px-2 py-2 md:px-4">
-          {showBackgroundStatus && (
-            <div className="mr-2 inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs text-muted-foreground">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              <span>{refreshing ? t('status.refreshing') : t('status.mutating')}</span>
-            </div>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="mr-2 h-8"
-            disabled={!currentAgent}
-            onClick={openSkillConfigDialog}
-          >
-            <Settings2 className="mr-1 h-3.5 w-3.5" />
-            {t('toolbar.skillConfig')}
-          </Button>
-          <ChatToolbar />
-        </div>
+        <ChatHeaderBar
+          showBackgroundStatus={showBackgroundStatus}
+          refreshing={refreshing}
+          hasCurrentAgent={Boolean(currentAgent)}
+          onOpenSkillConfig={openSkillConfigDialog}
+          skillConfigLabel={t('toolbar.skillConfig')}
+          statusRefreshingLabel={t('status.refreshing')}
+          statusMutatingLabel={t('status.mutating')}
+        />
 
         <div className="relative min-h-0 flex-1">
           <div
@@ -694,11 +851,11 @@ export function Chat() {
               isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
             )}
             onPointerDownCapture={handleViewportPointerDown}
-            onScroll={handleViewportScroll}
+            onScroll={handleViewportScrollWithWindowing}
             onTouchMoveCapture={handleViewportTouchMove}
             onWheelCapture={handleViewportWheel}
           >
-            <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-center justify-center')}>
+            <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-start justify-center')}>
               {showBlockingLoading ? (
                 <div className="flex h-full items-center justify-center py-20">
                   <LoadingSpinner size="lg" />
@@ -720,6 +877,7 @@ export function Chat() {
                       <div
                         key={virtualItem.key}
                         data-index={virtualItem.index}
+                        data-chat-row-key={row.key}
                         ref={messageVirtualizer.measureElement}
                         className="absolute left-0 top-0 w-full pb-4"
                         style={{ transform: `translateY(${virtualItem.start}px)` }}
@@ -742,37 +900,19 @@ export function Chat() {
         </div>
 
         {error && (
-          <div className="border-t border-destructive/20 bg-destructive/10 px-4 py-2">
-            <div className="mx-auto flex max-w-4xl items-center justify-between">
-              <p className="flex items-center gap-2 text-sm text-destructive">
-                <AlertCircle className="h-4 w-4" />
-                {error}
-              </p>
-              <button
-                onClick={clearError}
-                className="text-xs text-destructive/60 underline hover:text-destructive"
-              >
-                {t('common:actions.dismiss')}
-              </button>
-            </div>
-          </div>
+          <ChatErrorBanner
+            error={error}
+            dismissLabel={t('common:actions.dismiss')}
+            onDismiss={clearError}
+          />
         )}
 
         {waitingApproval && (
-          <div className="border-t border-primary/20 bg-card/70 px-4 py-3" data-testid="chat-approval-dock">
-            <div className="mx-auto max-w-4xl">
-              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                <span>{t('approval.waitingLabel')}</span>
-              </div>
-              {currentPendingApprovals.length > 0 && (
-                <ApprovalActionsPanel
-                  approvals={currentPendingApprovals}
-                  onResolve={(id, decision) => void resolveApproval(id, decision)}
-                />
-              )}
-            </div>
-          </div>
+          <ChatApprovalDock
+            waitingLabel={t('approval.waitingLabel')}
+            approvals={currentPendingApprovals}
+            onResolve={(id, decision) => void resolveApproval(id, decision)}
+          />
         )}
 
         <ChatInput
@@ -823,276 +963,6 @@ export function Chat() {
         collapsed={taskInboxCollapsed}
         onToggleCollapse={() => setTaskInboxCollapsed((prev) => !prev)}
       />
-    </div>
-  );
-}
-
-function ChatRowItem({
-  row,
-  showThinking,
-  assistantAvatarEmoji,
-  userAvatarImageUrl,
-  suppressedToolCardRowKeys = EMPTY_STRING_SET,
-  onJumpToRowKey,
-}: {
-  row: ChatRow;
-  showThinking: boolean;
-  assistantAvatarEmoji?: string;
-  userAvatarImageUrl?: string | null;
-  suppressedToolCardRowKeys?: Set<string>;
-  onJumpToRowKey?: (rowKey?: string) => void;
-}) {
-  if (row.kind === 'message') {
-    return (
-      <ChatMessage
-        message={row.message}
-        showThinking={showThinking}
-        suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
-        assistantAvatarEmoji={assistantAvatarEmoji}
-        userAvatarImageUrl={userAvatarImageUrl}
-      />
-    );
-  }
-
-  if (row.kind === 'execution_graph') {
-    return (
-      <ExecutionGraphCard
-        agentLabel={row.graph.agentLabel}
-        sessionLabel={row.graph.sessionLabel}
-        steps={row.graph.steps}
-        active={row.graph.active}
-        onJumpToTrigger={() => onJumpToRowKey?.(row.graph.triggerMessageKey)}
-        onJumpToReply={() => onJumpToRowKey?.(row.graph.replyMessageKey)}
-      />
-    );
-  }
-
-  if (row.kind === 'streaming') {
-    return (
-      <ChatMessage
-        message={row.message}
-        showThinking={showThinking}
-        isStreaming
-        streamingTools={row.streamingTools}
-        assistantAvatarEmoji={assistantAvatarEmoji}
-        userAvatarImageUrl={userAvatarImageUrl}
-      />
-    );
-  }
-
-  if (row.kind === 'activity') {
-    return <ActivityIndicator />;
-  }
-
-  return <TypingIndicator />;
-}
-
-function AgentSkillConfigDialog({
-  open,
-  title,
-  skillOptions,
-  skillsLoading,
-  selectedSkillIds,
-  submitting,
-  onToggleSkill,
-  onClose,
-  onSubmit,
-}: {
-  open: boolean;
-  title: string;
-  skillOptions: AgentSkillOption[];
-  skillsLoading: boolean;
-  selectedSkillIds: string[];
-  submitting: boolean;
-  onToggleSkill: (skillId: string, checked: boolean) => void;
-  onClose: () => void;
-  onSubmit: () => void;
-}) {
-  const { t } = useTranslation('chat');
-  if (!open) {
-    return null;
-  }
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <section
-        role="dialog"
-        aria-label={title}
-        className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-xl border bg-background p-5 shadow-xl"
-      >
-        <header className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">{title}</h2>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t('common:actions.close')}
-            onClick={onClose}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </header>
-        <div className="mt-4 rounded-lg border bg-muted/20 p-3">
-          {skillsLoading ? (
-            <p className="text-sm text-muted-foreground">{t('skillConfigDialog.loading')}</p>
-          ) : skillOptions.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t('skillConfigDialog.empty')}</p>
-          ) : (
-            <div className="grid gap-2 md:grid-cols-2">
-              {skillOptions.map((skill) => {
-                const checked = selectedSkillIds.includes(skill.id);
-                const inputId = `chat-agent-skill-${skill.id}`;
-                return (
-                  <label
-                    key={skill.id}
-                    htmlFor={inputId}
-                    className={cn(
-                      'flex items-center gap-2 rounded-md border px-2 py-1.5 text-sm',
-                      checked ? 'border-primary bg-primary/5' : 'border-border bg-background',
-                    )}
-                  >
-                    <input
-                      id={inputId}
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(event) => onToggleSkill(skill.id, event.target.checked)}
-                    />
-                    <span aria-hidden>{skill.icon?.trim() || '🧩'}</span>
-                    <span className="truncate">{skill.name}</span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        <div className="mt-4 flex justify-end gap-2 border-t pt-3">
-          <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
-            {t('skillConfigDialog.cancel')}
-          </Button>
-          <Button type="button" onClick={onSubmit} disabled={submitting}>
-            {t('skillConfigDialog.save')}
-          </Button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-// ── Welcome Screen ──────────────────────────────────────────────
-
-function WelcomeScreen() {
-  const { t } = useTranslation('chat');
-  return (
-    <div className="flex w-full flex-col items-center justify-center text-center">
-      <div className="mb-8 flex h-16 w-16 items-center justify-center rounded-[1.5rem] border border-border bg-secondary text-foreground">
-        <Bot className="h-7 w-7" />
-      </div>
-      <h2 className="mb-2 text-[2rem] font-semibold tracking-[-0.04em]">{t('welcome.title')}</h2>
-      <p className="mb-8 max-w-xl text-[15px] leading-7 text-muted-foreground">
-        {t('welcome.subtitle')}
-      </p>
-
-      <div className="mt-2 grid w-full max-w-3xl gap-4 md:grid-cols-2">
-        {[
-          { icon: MessageSquare, title: t('welcome.askQuestions'), desc: t('welcome.askQuestionsDesc') },
-          { icon: Sparkles, title: t('welcome.creativeTasks'), desc: t('welcome.creativeTasksDesc') },
-        ].map((item, i) => (
-          <button
-            key={i}
-            type="button"
-            className="rounded-[1.5rem] border border-border bg-card px-5 py-5 text-left transition-colors hover:bg-secondary"
-          >
-            <item.icon className="mb-3 h-5 w-5 text-foreground" />
-            <h3 className="font-medium text-foreground">{item.title}</h3>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">{item.desc}</p>
-          </button>
-        ))}
-      </div>
-
-    </div>
-  );
-}
-
-// ── Typing Indicator ────────────────────────────────────────────
-
-function TypingIndicator() {
-  return (
-    <div className="flex gap-3">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-blue-600 text-white">
-        <Sparkles className="h-4 w-4" />
-      </div>
-      <div className="bg-muted rounded-2xl px-4 py-3">
-        <div className="flex gap-1">
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Activity Indicator (shown between tool cycles) ─────────────
-
-function ActivityIndicator() {
-  const label = 'Processing tool results...';
-  return (
-    <div className="flex gap-3">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-blue-600 text-white">
-        <Sparkles className="h-4 w-4" />
-      </div>
-      <div className="bg-muted rounded-2xl px-4 py-3">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>{label}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ApprovalActionsPanel({
-  approvals,
-  onResolve,
-}: {
-  approvals: ApprovalItem[];
-  onResolve: (id: string, decision: ApprovalDecision) => void;
-}) {
-  const { t } = useTranslation('chat');
-  return (
-    <div className="w-full rounded-xl border border-primary/20 bg-background/80 p-3">
-      <div className="mb-2 text-sm font-medium text-foreground">{t('approval.panelTitle')}</div>
-      <div className="space-y-2">
-        {approvals.map((approval) => (
-          <div key={approval.id} className="rounded-lg border border-border/70 bg-background/70 p-2">
-            <div className="mb-2 text-xs text-muted-foreground">
-              {t('approval.pendingTool', { tool: approval.toolName || t('approval.unknownTool') })}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'allow-once')}
-                className="rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15"
-              >
-                {t('approval.allowOnce')}
-              </button>
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'allow-always')}
-                className="rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15"
-              >
-                {t('approval.allowAlways')}
-              </button>
-              <button
-                type="button"
-                onClick={() => onResolve(approval.id, 'deny')}
-                className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-xs font-medium text-destructive transition hover:bg-destructive/15"
-              >
-                {t('approval.deny')}
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

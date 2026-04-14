@@ -66,8 +66,8 @@ const gatewayClient = createGatewayClient({
       // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
     });
   },
-  onGatewayChatMessage: (payload) => {
-    void emitParentGatewayEvent('gateway:chat-message', payload).catch(() => {
+  onGatewayConversationEvent: (payload) => {
+    void emitParentGatewayEvent('gateway:conversation-event', payload).catch(() => {
       // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
     });
   },

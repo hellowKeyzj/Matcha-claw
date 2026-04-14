@@ -10,6 +10,7 @@ import {
   type GatewayNotification,
   type GatewayResponseFrame,
 } from './protocol';
+import type { GatewayConversationEvent } from './events';
 import {
   buildDeviceAuthPayloadV3,
   loadOrCreateDeviceIdentity,
@@ -35,7 +36,7 @@ export interface GatewayConnectionStatePayload {
 
 export interface GatewayClientOptions {
   readonly onGatewayNotification?: (notification: GatewayNotification) => void;
-  readonly onGatewayChatMessage?: (payload: { message: unknown }) => void;
+  readonly onGatewayConversationEvent?: (payload: GatewayConversationEvent) => void;
   readonly onGatewayChannelStatus?: (payload: { channelId: string; status: string }) => void;
   readonly onGatewayError?: (error: Error) => void;
   readonly onGatewayConnectionState?: (payload: GatewayConnectionStatePayload) => void;
@@ -321,8 +322,8 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
               emitNotification: (notification) => {
                 options.onGatewayNotification?.(notification);
               },
-              emitChatMessage: (payload) => {
-                options.onGatewayChatMessage?.(payload);
+              emitConversationEvent: (payload) => {
+                options.onGatewayConversationEvent?.(payload);
               },
               emitChannelStatus: (payload) => {
                 options.onGatewayChannelStatus?.(payload);

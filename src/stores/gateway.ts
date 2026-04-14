@@ -70,6 +70,111 @@ interface GatewayState {
   clearError: () => void;
 }
 
+type GatewayConversationRunPhase = 'started' | 'completed' | 'error' | 'aborted';
+
+type GatewayConversationEvent =
+  | {
+    type: 'chat.message';
+    event: Record<string, unknown>;
+  }
+  | {
+    type: 'run.phase';
+    phase: GatewayConversationRunPhase;
+    runId?: string;
+    sessionKey?: string;
+  };
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeRunPhase(phaseRaw: unknown): GatewayConversationRunPhase | null {
+  const phase = typeof phaseRaw === 'string' ? phaseRaw.trim().toLowerCase() : '';
+  if (!phase) {
+    return null;
+  }
+  if (phase === 'started' || phase === 'start') {
+    return 'started';
+  }
+  if (phase === 'completed' || phase === 'done' || phase === 'finished' || phase === 'end') {
+    return 'completed';
+  }
+  if (phase === 'error' || phase === 'failed') {
+    return 'error';
+  }
+  if (phase === 'aborted' || phase === 'abort' || phase === 'cancelled' || phase === 'canceled') {
+    return 'aborted';
+  }
+  return null;
+}
+
+function parseStructuredGatewayChatEvent(data: unknown): Record<string, unknown> | null {
+  const candidate = asRecord(data);
+  if (!candidate) {
+    return null;
+  }
+  const rawState = typeof candidate.state === 'string' ? candidate.state.trim().toLowerCase() : '';
+  if (!rawState) {
+    return null;
+  }
+  const state = (rawState === 'completed' || rawState === 'done' || rawState === 'finished' || rawState === 'end')
+    ? 'final'
+    : rawState;
+  if (!state) {
+    return null;
+  }
+
+  const rawMessage = candidate.message;
+  if (rawMessage !== undefined && (typeof rawMessage !== 'object' || rawMessage == null || Array.isArray(rawMessage))) {
+    return null;
+  }
+
+  const runId = typeof candidate.runId === 'string' ? candidate.runId.trim() : '';
+  const sessionKey = typeof candidate.sessionKey === 'string' ? candidate.sessionKey.trim() : '';
+
+  return {
+    ...candidate,
+    state,
+    ...(runId ? { runId } : {}),
+    ...(sessionKey ? { sessionKey } : {}),
+  };
+}
+
+function parseGatewayConversationEvent(payload: unknown): GatewayConversationEvent | null {
+  const input = asRecord(payload);
+  if (!input) {
+    return null;
+  }
+  if (input.type === 'chat.message') {
+    const event = parseStructuredGatewayChatEvent(input.event);
+    if (!event) {
+      return null;
+    }
+    return {
+      type: 'chat.message',
+      event,
+    };
+  }
+  if (input.type === 'run.phase') {
+    const phase = normalizeRunPhase(input.phase);
+    if (!phase) {
+      return null;
+    }
+    const runId = typeof input.runId === 'string' ? input.runId.trim() : '';
+    const sessionKey = typeof input.sessionKey === 'string' ? input.sessionKey.trim() : '';
+    return {
+      type: 'run.phase',
+      phase,
+      ...(runId ? { runId } : {}),
+      ...(sessionKey ? { sessionKey } : {}),
+    };
+  }
+  return null;
+}
+
 async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
   return await hostApiFetch<GatewayStatus>('/api/gateway/status');
 }
@@ -204,20 +309,17 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     && (payload.method.startsWith('task_') || payload.method.startsWith('task_manager.'))
   ) {
     enqueueTaskNotification(payload);
-    return;
   }
+}
 
-  if (payload.method !== 'agent') {
-    return;
-  }
-
-  const p = payload.params;
-  const data = (p.data && typeof p.data === 'object') ? (p.data as Record<string, unknown>) : {};
-  const phase = data.phase ?? p.phase;
-
-  const runId = p.runId ?? data.runId;
-  const sessionKey = p.sessionKey ?? data.sessionKey;
-  if (phase === 'started' && runId != null && sessionKey != null) {
+function handleGatewayRunPhaseEvent(event: {
+  phase: GatewayConversationRunPhase;
+  runId?: string;
+  sessionKey?: string;
+}): void {
+  const runId = event.runId;
+  const sessionKey = event.sessionKey;
+  if (event.phase === 'started' && runId != null && sessionKey != null) {
     try {
       const state = useChatStore.getState();
       const resolvedSessionKey = String(sessionKey);
@@ -227,7 +329,6 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
       if (shouldRefreshSessions) {
         void state.loadSessions();
       }
-
       state.handleChatEvent({
         state: 'started',
         runId,
@@ -236,9 +337,10 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     } catch {
       // ignore
     }
+    return;
   }
 
-  if (phase === 'completed' || phase === 'done' || phase === 'finished' || phase === 'end') {
+  if (event.phase === 'completed' || event.phase === 'error' || event.phase === 'aborted') {
     try {
       const state = useChatStore.getState();
       const resolvedSessionKey = sessionKey != null ? String(sessionKey) : null;
@@ -271,23 +373,18 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 }
 
-function handleGatewayChatMessage(data: unknown): void {
+function handleGatewayConversationEvent(payload: unknown): void {
   try {
-    const chatData = data as Record<string, unknown>;
-    const payload = ('message' in chatData && typeof chatData.message === 'object')
-      ? chatData.message as Record<string, unknown>
-      : chatData;
-
-    if (payload.state) {
-      useChatStore.getState().handleChatEvent(payload);
+    const event = parseGatewayConversationEvent(payload);
+    if (!event) {
       return;
     }
-
-    useChatStore.getState().handleChatEvent({
-      state: 'final',
-      message: payload,
-      runId: chatData.runId ?? payload.runId,
-    });
+    if (event.type === 'run.phase') {
+      handleGatewayRunPhaseEvent(event);
+      return;
+    }
+    const chatState = useChatStore.getState();
+    chatState.handleChatEvent(event.event);
   } catch {
     // ignore
   }
@@ -381,8 +478,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               handleGatewayNotification(payload);
             },
           ));
-          unsubscribers.push(subscribeHostEvent('gateway:chat-message', (payload) => {
-            handleGatewayChatMessage(payload);
+          unsubscribers.push(subscribeHostEvent('gateway:conversation-event', (payload) => {
+            handleGatewayConversationEvent(payload);
           }));
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
             'gateway:channel-status',

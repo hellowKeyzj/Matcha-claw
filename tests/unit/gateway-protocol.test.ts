@@ -1,5 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
-import { dispatchGatewayProtocolEvent, isGatewayEventFrame, isGatewayResponseFrame } from '../../runtime-host/openclaw-bridge';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  __resetGatewayChatEventDedupStateForTest,
+  dispatchGatewayProtocolEvent,
+  isGatewayEventFrame,
+  isGatewayResponseFrame,
+} from '../../runtime-host/openclaw-bridge';
 
 describe('gateway protocol guards', () => {
   it('只识别 OpenClaw 响应帧', () => {
@@ -32,12 +37,65 @@ describe('gateway protocol guards', () => {
 });
 
 describe('dispatchProtocolEvent', () => {
-  it('agent 事件会发 chat:message 与 notification', () => {
+  beforeEach(() => {
+    __resetGatewayChatEventDedupStateForTest();
+  });
+
+  it('chat 事件无明确终态字段时，会归一化为结构化 delta 再下发', () => {
     const emitNotification = vi.fn();
-    const emitChatMessage = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'chat',
+      {
+        role: 'assistant',
+        content: 'hello',
+      },
+    );
+
+    expect(emitNotification).not.toHaveBeenCalled();
+    expect(emitConversationEvent).toHaveBeenCalledTimes(1);
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        message: { role: 'assistant', content: 'hello' },
+      },
+    });
+  });
+
+  it('chat 事件包含 stopReason 时，应归一化为 final', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'chat',
+      {
+        role: 'assistant',
+        content: 'all done',
+        stopReason: 'end_turn',
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledTimes(1);
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'chat.message',
+      event: expect.objectContaining({
+        state: 'final',
+      }),
+    });
+  });
+
+  it('agent 非生命周期事件只透传 notification，不进入 conversation 通道', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
     dispatchGatewayProtocolEvent(
-      { emitNotification, emitChatMessage, emitChannelStatus },
+      { emitNotification, emitConversationEvent, emitChannelStatus },
       'agent',
       {
         runId: 'run-1',
@@ -52,15 +110,7 @@ describe('dispatchProtocolEvent', () => {
       },
     );
 
-    expect(emitChatMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.objectContaining({
-          runId: 'run-1',
-          sessionKey: 'agent:main:main',
-          state: 'final',
-        }),
-      }),
-    );
+    expect(emitConversationEvent).not.toHaveBeenCalled();
     expect(emitNotification).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'agent',
@@ -68,17 +118,41 @@ describe('dispatchProtocolEvent', () => {
     );
   });
 
-  it('未知事件只透传 notification', () => {
+  it('agent 生命周期事件会归一化为 run.phase conversation 事件', () => {
     const emitNotification = vi.fn();
-    const emitChatMessage = vi.fn();
+    const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
     dispatchGatewayProtocolEvent(
-      { emitNotification, emitChatMessage, emitChannelStatus },
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'agent',
+      {
+        runId: 'run-2',
+        sessionKey: 'agent:main:main',
+        data: {
+          phase: 'started',
+        },
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'run.phase',
+      phase: 'started',
+      runId: 'run-2',
+      sessionKey: 'agent:main:main',
+    });
+  });
+
+  it('未知事件只透传 notification', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
       'exec.approval.requested',
       { id: 'approval-1' },
     );
 
-    expect(emitChatMessage).not.toHaveBeenCalled();
+    expect(emitConversationEvent).not.toHaveBeenCalled();
     expect(emitChannelStatus).not.toHaveBeenCalled();
     expect(emitNotification).toHaveBeenCalledTimes(1);
     expect(emitNotification).toHaveBeenCalledWith({

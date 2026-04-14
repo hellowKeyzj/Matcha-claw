@@ -107,8 +107,12 @@ describe('runtime-host proxy routes', () => {
     expect(sendJsonMock).not.toHaveBeenCalled();
   });
 
-  it('插件运行态路由改由主进程直管，不再走 runtime-host-proxy', async () => {
-    const runtimeHostRequest = vi.fn();
+  it('插件运行态路由会走 runtime-host-proxy 转发', async () => {
+    const runtimeHostRequest = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { success: true },
+    } satisfies RuntimeHostRouteResult);
+    parseJsonBodyMock.mockResolvedValueOnce({ pluginIds: ['task-manager'] });
 
     const { handleRuntimeHostProxyRoutes } = await import('../../electron/api/routes/runtime-host-proxy');
     const handled = await handleRuntimeHostProxyRoutes(
@@ -118,8 +122,12 @@ describe('runtime-host proxy routes', () => {
       { runtimeHost: { request: runtimeHostRequest } } as never,
     );
 
-    expect(handled).toBe(false);
-    expect(runtimeHostRequest).not.toHaveBeenCalled();
-    expect(sendJsonMock).not.toHaveBeenCalled();
+    expect(handled).toBe(true);
+    expect(runtimeHostRequest).toHaveBeenCalledWith(
+      'PUT',
+      '/api/plugins/runtime/enabled-plugins',
+      { pluginIds: ['task-manager'] },
+    );
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, { success: true });
   });
 });

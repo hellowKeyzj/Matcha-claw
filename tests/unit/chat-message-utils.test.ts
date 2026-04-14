@@ -1,0 +1,79 @@
+import { describe, expect, it } from 'vitest';
+import { extractText } from '@/pages/Chat/message-utils';
+
+describe('chat message utils', () => {
+  it('strips sender untrusted metadata block from user messages', () => {
+    const text = extractText({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: [
+            'Sender (untrusted metadata):',
+            '```json',
+            '{',
+            '  "label": "MatchaClaw (gateway-client)",',
+            '  "id": "gateway-client"',
+            '}',
+            '```',
+            '[Tue 2026-04-14 00:11 GMT+8]你好',
+          ].join('\n'),
+        },
+      ],
+    });
+
+    expect(text).toBe('你好');
+  });
+
+  it('strips legacy conversation metadata block from user messages', () => {
+    const text = extractText({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: [
+            'Conversation info (untrusted metadata):',
+            '```json',
+            '{ "foo": "bar" }',
+            '```',
+            '[Tue 2026-04-14 00:11 GMT+8]hello',
+          ].join('\n'),
+        },
+      ],
+    });
+
+    expect(text).toBe('hello');
+  });
+
+  it('strips sender metadata block when role is User (uppercase)', () => {
+    const text = extractText({
+      role: 'User',
+      content: [
+        {
+          type: 'text',
+          text: [
+            'Sender (untrusted metadata):',
+            '```json',
+            '{',
+            '  "label": "MatchaClaw (gateway-client)",',
+            '  "id": "gateway-client"',
+            '}',
+            '```',
+            '[Tue 2026-04-14 00:11 GMT+8]你好',
+          ].join('\n'),
+        },
+      ],
+    });
+
+    expect(text).toBe('你好');
+  });
+
+  it('strips assistant reply directive prefix', () => {
+    const text = extractText({
+      role: 'assistant',
+      content: '[[reply_to_current]]你好呀！有什么想让我帮你做的吗？',
+    });
+
+    expect(text).toBe('你好呀！有什么想让我帮你做的吗？');
+  });
+});
