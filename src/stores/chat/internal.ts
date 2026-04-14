@@ -3,6 +3,55 @@ import { createRuntimeActions } from './runtime-actions';
 import { createSessionHistoryActions } from './session-history-actions';
 import type { ChatGet, ChatSet } from './store-api';
 
+export const initialSnapshotLayerState: Pick<
+  ChatState,
+  | 'messages'
+  | 'sessions'
+  | 'currentSessionKey'
+  | 'sessionLabels'
+  | 'sessionLastActivity'
+> = {
+  messages: [],
+  sessions: [],
+  currentSessionKey: DEFAULT_SESSION_KEY,
+  sessionLabels: {},
+  sessionLastActivity: {},
+};
+
+export const initialRuntimeLayerState: Pick<
+  ChatState,
+  | 'sending'
+  | 'activeRunId'
+  | 'streamingText'
+  | 'streamingMessage'
+  | 'streamingTools'
+  | 'pendingFinal'
+  | 'lastUserMessageAt'
+  | 'pendingToolImages'
+> = {
+  sending: false,
+  activeRunId: null,
+  streamingText: '',
+  streamingMessage: null,
+  streamingTools: [],
+  pendingFinal: false,
+  lastUserMessageAt: null,
+  pendingToolImages: [],
+};
+
+export const initialViewLayerState: Pick<
+  ChatState,
+  | 'loading'
+  | 'error'
+  | 'showThinking'
+  | 'thinkingLevel'
+> = {
+  loading: false,
+  error: null,
+  showThinking: true,
+  thinkingLevel: null,
+};
+
 export const initialChatState: Pick<
   ChatState,
   | 'messages'
@@ -23,26 +72,9 @@ export const initialChatState: Pick<
   | 'showThinking'
   | 'thinkingLevel'
 > = {
-  messages: [],
-  loading: false,
-  error: null,
-
-  sending: false,
-  activeRunId: null,
-  streamingText: '',
-  streamingMessage: null,
-  streamingTools: [],
-  pendingFinal: false,
-  lastUserMessageAt: null,
-  pendingToolImages: [],
-
-  sessions: [],
-  currentSessionKey: DEFAULT_SESSION_KEY,
-  sessionLabels: {},
-  sessionLastActivity: {},
-
-  showThinking: true,
-  thinkingLevel: null,
+  ...initialSnapshotLayerState,
+  ...initialRuntimeLayerState,
+  ...initialViewLayerState,
 };
 
 export function createChatActions(

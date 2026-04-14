@@ -5,24 +5,50 @@
  */
 import type { RawMessage, ContentBlock } from '@/stores/chat';
 
+function stripLeadingUntrustedMetadataBlocks(text: string): string {
+  const fencedPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?```[a-z]*\n[\s\S]*?```\s*/i;
+  const inlineJsonPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?\{[\s\S]*?\}\s*/i;
+
+  let output = text;
+  while (true) {
+    const next = output
+      .replace(fencedPattern, '')
+      .replace(inlineJsonPattern, '');
+    if (next === output) {
+      break;
+    }
+    output = next;
+  }
+  return output;
+}
+
+function stripAssistantReplyDirectivePrefix(text: string): string {
+  return text
+    .replace(/^\s*(?:\[\[reply_to_[a-z0-9:_-]+\]\]\s*)+/ig, '')
+    .trim();
+}
+
 /**
  * Clean Gateway metadata from user message text for display.
  * Strips: [media attached: ... | ...], [message_id: ...],
  * and the timestamp prefix [Day Date Time Timezone].
  */
 function cleanUserText(text: string): string {
-  return text
+  const cleaned = text
     // Remove [media attached: path (mime) | path] references
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     // Remove [message_id: uuid]
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
-    // Remove Gateway-injected "Conversation info (untrusted metadata): ```json...```" block
+    // Remove Gateway-injected "<label> (untrusted metadata): ..." block(s)
     .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    // Fallback: remove "Conversation info (...): {...}" without code block wrapper
     .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
+    .replace(/^Sender\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
+    .replace(/^Sender\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
     // Remove Gateway timestamp prefix like [Fri 2026-02-13 22:39 GMT+8]
     .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
-    .trim();
+    // Generic fallback for future "<something> (untrusted metadata): ..." variants
+    .replace(/^\s*[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*/i, '');
+  return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
 }
 
 /**
@@ -33,8 +59,9 @@ function cleanUserText(text: string): string {
 export function extractText(message: RawMessage | unknown): string {
   if (!message || typeof message !== 'object') return '';
   const msg = message as Record<string, unknown>;
+  const role = typeof msg.role === 'string' ? msg.role.toLowerCase() : '';
   const content = msg.content;
-  const isUser = msg.role === 'user';
+  const isUser = role === 'user';
 
   let result = '';
 
@@ -59,6 +86,9 @@ export function extractText(message: RawMessage | unknown): string {
   // Strip Gateway metadata from user messages for clean display
   if (isUser && result) {
     result = cleanUserText(result);
+  }
+  if (role === 'assistant' && result) {
+    result = stripAssistantReplyDirectivePrefix(result);
   }
 
   return result;

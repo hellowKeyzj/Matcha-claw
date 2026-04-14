@@ -49,7 +49,6 @@ export type LocalBusinessHandlerKey =
   | 'channel'
   | 'openclaw'
   | 'skills'
-  | 'task_plugin'
   | 'team_runtime'
   | 'clawhub'
   | 'toolchain_uv'

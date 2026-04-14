@@ -10,6 +10,28 @@ import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 
 const scrollToIndexMock = vi.fn();
+const VIRTUAL_WINDOW_SIZE = 10;
+let virtualWindowStartIndex = 0;
+let triggerResizeObserver: (() => void) | null = null;
+
+class ResizeObserverStub {
+  private readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    triggerResizeObserver = () => {
+      act(() => {
+        this.callback([], this as unknown as ResizeObserver);
+      });
+    };
+  }
+
+  observe() {}
+
+  unobserve() {}
+
+  disconnect() {}
+}
 
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({
@@ -19,16 +41,48 @@ vi.mock('@tanstack/react-virtual', () => ({
     count: number;
     onChange?: (instance: { scrollToIndex: typeof scrollToIndexMock }, sync: boolean) => void;
   }) => {
+    const getClampedStartIndex = () => {
+      if (count <= 0) {
+        return 0;
+      }
+      return Math.min(
+        Math.max(0, virtualWindowStartIndex),
+        Math.max(0, count - 1),
+      );
+    };
+
     const instance = {
-      getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
-        index,
-        key: `virtual-item-${index}`,
-        start: index * 120,
-        size: 120,
-      })),
+      getVirtualItems: () => {
+        const start = getClampedStartIndex();
+        const end = Math.min(count, start + VIRTUAL_WINDOW_SIZE);
+        return Array.from({ length: Math.max(0, end - start) }, (_, offset) => {
+          const index = start + offset;
+          return {
+            index,
+            key: `virtual-item-${index}`,
+            start: index * 120,
+            size: 120,
+          };
+        });
+      },
       getTotalSize: () => count * 120,
       measureElement: vi.fn(),
-      scrollToIndex: scrollToIndexMock,
+      scrollToIndex: (
+        index: number,
+        options?: { align?: 'start' | 'center' | 'end' | 'auto' },
+      ) => {
+        scrollToIndexMock(index, options);
+        if (count <= 0) {
+          virtualWindowStartIndex = 0;
+          return;
+        }
+        const clampedIndex = Math.min(Math.max(0, index), Math.max(0, count - 1));
+        if (options?.align === 'end') {
+          virtualWindowStartIndex = Math.max(0, clampedIndex - (VIRTUAL_WINDOW_SIZE - 1));
+          return;
+        }
+        virtualWindowStartIndex = clampedIndex;
+      },
     };
     queueMicrotask(() => {
       act(() => {
@@ -45,6 +99,9 @@ describe('chat 会话切换 UI 回归', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
     scrollToIndexMock.mockReset();
+    virtualWindowStartIndex = 0;
+    triggerResizeObserver = null;
+    (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
@@ -226,9 +283,12 @@ describe('chat 会话切换 UI 回归', () => {
       expect(scrollToIndexMock).toHaveBeenCalled();
       expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([0, { align: 'end' }]);
     });
+    await waitFor(() => {
+      expect(viewport.scrollTop).toBe(1200);
+    });
   });
 
-  it('离开会话前已上翻历史，再次点开时也应落在最新消息底部', async () => {
+  it('离开会话前已上翻历史，再次点开时应重新吸底并落在最新消息底部', async () => {
     const { container } = render(
       <MemoryRouter initialEntries={['/']}>
         <TooltipProvider>
@@ -261,9 +321,161 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     await waitFor(() => {
-      expect(scrollToIndexMock).toHaveBeenCalled();
-      expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([1, { align: 'end' }]);
+      expect(viewport.scrollTop).toBe(1200);
     });
+    expect(scrollToIndexMock).toHaveBeenCalled();
+    expect(scrollToIndexMock.mock.calls.at(-1)).toEqual([1, { align: 'end' }]);
+  });
+
+  it('切换会话时 assistant markdown 不应先退化为纯文本，避免闪烁抖动', async () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:another:main', displayName: 'agent:another:main' },
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'plain message',
+          timestamp: Date.now() / 1000,
+          id: 'plain-message',
+        },
+      ],
+      sessionRuntimeByKey: {
+        'agent:another:main': {
+          messages: [
+            {
+              role: 'assistant',
+              content: '[OpenAI](https://openai.com)',
+              timestamp: Date.now() / 1000,
+              id: 'markdown-message',
+            },
+          ],
+          sending: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          approvalStatus: 'idle',
+        },
+      },
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle',
+      snapshotReady: true,
+      sessionReadyByKey: {
+        'agent:test:main': true,
+        'agent:another:main': true,
+      },
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:another:main');
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'OpenAI' })).toBeInTheDocument();
+    });
+    expect(screen.queryByText('[OpenAI](https://openai.com)')).not.toBeInTheDocument();
+  });
+
+  it('sessionRuntimeByKey 超限时应按 LRU 收敛，并保留当前与 sending 会话快照', () => {
+    const runtimeByKey: Record<string, {
+      messages: Array<{ role: string; content: string; timestamp: number; id: string }>;
+      sending: boolean;
+      activeRunId: string | null;
+      streamingText: string;
+      streamingMessage: null;
+      streamingTools: [];
+      pendingFinal: boolean;
+      lastUserMessageAt: null;
+      pendingToolImages: [];
+      approvalStatus: 'idle';
+    }> = {};
+    const runtimeSessions = Array.from({ length: 72 }, (_, index) => `agent:test:session-lru-${index}`);
+    const sendingKeepKey = runtimeSessions[1];
+    const targetKey = runtimeSessions[runtimeSessions.length - 1];
+
+    for (const sessionKey of runtimeSessions) {
+      runtimeByKey[sessionKey] = {
+        messages: [{
+          role: 'assistant',
+          content: `runtime-${sessionKey}`,
+          timestamp: Date.now() / 1000,
+          id: `runtime-${sessionKey}`,
+        }],
+        sending: sessionKey === sendingKeepKey,
+        activeRunId: sessionKey === sendingKeepKey ? 'run-keep' : null,
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+        approvalStatus: 'idle',
+      };
+    }
+
+    useChatStore.setState((state) => ({
+      ...state,
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ...runtimeSessions.map((key) => ({ key, displayName: key })),
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'main session snapshot',
+          timestamp: Date.now() / 1000,
+          id: 'main-session-msg',
+        },
+      ],
+      sessionRuntimeByKey: runtimeByKey,
+      sessionReadyByKey: {
+        'agent:test:main': true,
+        [targetKey]: true,
+      },
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle',
+    }));
+
+    act(() => {
+      useChatStore.getState().switchSession(targetKey);
+    });
+
+    const next = useChatStore.getState();
+    const runtimeKeys = Object.keys(next.sessionRuntimeByKey);
+    expect(next.currentSessionKey).toBe(targetKey);
+    expect(runtimeKeys.length).toBeLessThanOrEqual(48);
+    expect(next.sessionRuntimeByKey[targetKey]).toBeDefined();
+    expect(next.sessionRuntimeByKey['agent:test:main']).toBeDefined();
+    expect(next.sessionRuntimeByKey[sendingKeepKey]?.sending).toBe(true);
   });
 
   it('原本在底部附近时，新消息追加后应继续自动吸底', async () => {
@@ -310,6 +522,209 @@ describe('chat 会话切换 UI 回归', () => {
     });
   });
 
+  it('流式内容增长但行数不变时，仍应持续吸底', async () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    fireEvent.scroll(viewport);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    scrollToIndexMock.mockClear();
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 980 });
+
+    act(() => {
+      useChatStore.setState({
+        sending: true,
+        pendingFinal: false,
+        streamingMessage: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'streaming text line 1\nstreaming text line 2\nstreaming text line 3' },
+          ],
+        },
+      } as never);
+    });
+
+    triggerResizeObserver?.();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(viewport.scrollTop).toBe(980);
+    });
+    expect(scrollToIndexMock).not.toHaveBeenCalled();
+  });
+
+  it('顶部触发扩窗时，不应误判为会话切换并自动回到底部', async () => {
+    const nowTs = Date.now() / 1000;
+    const longMessages = Array.from({ length: 24 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `long-history-message-${index}`,
+      timestamp: nowTs + index,
+      id: `long-history-${index}`,
+    }));
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main', displayName: 'agent:test:main' }],
+      messages: longMessages,
+      snapshotReady: true,
+      sessionReadyByKey: { 'agent:test:main': true },
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    // 首屏窗口化后，最早消息不应立刻可见
+    expect(screen.queryByText('long-history-message-0')).not.toBeInTheDocument();
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 3600 });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    scrollToIndexMock.mockClear();
+    fireEvent.wheel(viewport, { deltaY: -240 });
+    fireEvent.scroll(viewport);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.wheel(viewport, { deltaY: -180 });
+    fireEvent.scroll(viewport);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+
+    await waitFor(() => {
+      const hasAnchorMaterializeScroll = scrollToIndexMock.mock.calls.some((call) => {
+        const index = call[0] as number;
+        const options = call[1] as { align?: string } | undefined;
+        return options?.align === 'start' && index >= 8;
+      });
+      expect(hasAnchorMaterializeScroll).toBe(true);
+    });
+    // 关键断言：扩窗后不应被强制拉回底部（align:end）
+    const hasForcedBottomScroll = scrollToIndexMock.mock.calls.some((call) => {
+      const options = call[1] as { align?: string } | undefined;
+      return options?.align === 'end';
+    });
+    expect(hasForcedBottomScroll).toBe(false);
+    const hasAnchorMaterializeScroll = scrollToIndexMock.mock.calls.some((call) => {
+      const index = call[0] as number;
+      const options = call[1] as { align?: string } | undefined;
+      return options?.align === 'start' && index >= 8;
+    });
+    expect(hasAnchorMaterializeScroll).toBe(true);
+  });
+
+  it('扩窗后离开再进入同会话，首屏窗口应重置为固定预算，避免继承上次扩窗', async () => {
+    const nowTs = Date.now() / 1000;
+    const longMessages = Array.from({ length: 24 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `long-history-message-${index}`,
+      timestamp: nowTs + index,
+      id: `long-history-reset-${index}`,
+    }));
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main', displayName: 'agent:test:main' }],
+      messages: longMessages,
+      snapshotReady: true,
+      sessionReadyByKey: { 'agent:test:main': true },
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const firstMount = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    const firstViewport = firstMount.container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(firstViewport).toBeTruthy();
+    if (!firstViewport) {
+      return;
+    }
+
+    Object.defineProperty(firstViewport, 'scrollHeight', { configurable: true, value: 3600 });
+    Object.defineProperty(firstViewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(firstViewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    scrollToIndexMock.mockClear();
+    fireEvent.wheel(firstViewport, { deltaY: -240 });
+    fireEvent.scroll(firstViewport);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.wheel(firstViewport, { deltaY: -180 });
+    fireEvent.scroll(firstViewport);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+
+    await waitFor(() => {
+      const hasExpanded = scrollToIndexMock.mock.calls.some((call) => {
+        const index = call[0] as number;
+        const options = call[1] as { align?: string } | undefined;
+        return options?.align === 'start' && index >= 8;
+      });
+      expect(hasExpanded).toBe(true);
+    });
+
+    firstMount.unmount();
+
+    scrollToIndexMock.mockClear();
+    const secondMount = render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('long-history-message-16')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('long-history-message-15')).not.toBeInTheDocument();
+
+    secondMount.unmount();
+  });
+
   it('从其他页面通过 session 参数进入未就绪会话时，不应先闪 Welcome 空态', async () => {
     const pendingLoad = new Promise<void>(() => {
       // keep pending on purpose, we only care about the transition frame
@@ -349,6 +764,52 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     expect(screen.queryByText('MatchaClaw Chat')).not.toBeInTheDocument();
+  });
+
+  it('从其他页面进入全新会话时，应直接显示 Welcome，不阻塞转圈', async () => {
+    const pendingLoad = new Promise<void>(() => {
+      // keep pending on purpose, we only care about first paint
+    });
+    const loadHistoryPending = vi.fn().mockReturnValue(pendingLoad);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const freshSessionKey = 'agent:test:session-1760000000000';
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: freshSessionKey, displayName: freshSessionKey },
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'existing message in current session',
+          timestamp: Date.now() / 1000,
+          id: 'existing-message',
+        },
+      ],
+      snapshotReady: true,
+      sessionRuntimeByKey: {},
+      sessionLastActivity: {
+        'agent:test:main': Date.now(),
+      },
+      loadHistory: loadHistoryPending,
+      loadSessions,
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={[`/?session=${freshSessionKey}`]}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(useChatStore.getState().currentSessionKey).toBe(freshSessionKey);
+    });
+
+    expect(screen.getByText('MatchaClaw Chat')).toBeInTheDocument();
   });
 
   it('已有新鲜 agent 快照时，进入 Chat 不应重复调用 loadAgents', async () => {
@@ -396,3 +857,4 @@ describe('chat 会话切换 UI 回归', () => {
     expect(loadAgents).not.toHaveBeenCalled();
   });
 });
+

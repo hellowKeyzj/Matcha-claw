@@ -54,6 +54,10 @@ function readViewportNearBottom(
   }, stickyBottomThresholdPx);
 }
 
+function scheduleNextFrame(task: () => void): void {
+  setTimeout(task, 16);
+}
+
 export function useChatScrollOrchestrator({
   currentSessionKey,
   rows,
@@ -72,7 +76,11 @@ export function useChatScrollOrchestrator({
   );
   const scrollStateRef = useRef<ChatScrollState>(scrollState);
   const virtualizerRef = useRef<ChatVirtualizerLike | null>(null);
-  const userScrollIntentRef = useRef(false);
+  const viewportReadyRef = useRef<boolean | null>(null);
+  const lastResizeMetricsRef = useRef<{ scrollHeight: number; clientHeight: number } | null>(null);
+  const lastSessionKeyRef = useRef(currentSessionKey);
+  const maybeCompleteBottomCommandRef = useRef<() => void>(() => {});
+  const maybeExecutePendingCommandRef = useRef<() => void>(() => {});
 
   useLayoutEffect(() => {
     scrollStateRef.current = scrollState;
@@ -93,18 +101,58 @@ export function useChatScrollOrchestrator({
     dispatch({ type: 'BOTTOM_REACHED' });
   }, [stickyBottomThresholdPx, viewportRef]);
 
-  const maybeExecutePendingCommand = useCallback((instance?: ChatVirtualizerLike | null) => {
-    const targetVirtualizer = instance ?? virtualizerRef.current;
-    if (!targetVirtualizer) {
+  const forceCompleteBottomCommand = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
       return;
     }
+    viewport.scrollTop = viewport.scrollHeight;
+    dispatch({ type: 'BOTTOM_REACHED' });
+  }, [viewportRef]);
+
+  const maybeExecutePendingCommand = useCallback((instance?: ChatVirtualizerLike | null) => {
     const current = scrollStateRef.current;
     if (!shouldExecuteChatScrollCommand(current)) {
       return;
     }
+    if (current.programmaticScrollInFlight) {
+      return;
+    }
+
+    if (current.command.type === 'follow-resize') {
+      dispatch({ type: 'COMMAND_EXECUTION_STARTED' });
+      forceCompleteBottomCommand();
+      return;
+    }
+
+    const targetVirtualizer = instance ?? virtualizerRef.current;
+    if (!targetVirtualizer) {
+      return;
+    }
+    dispatch({ type: 'COMMAND_EXECUTION_STARTED' });
     targetVirtualizer.scrollToIndex(current.command.targetRowCount - 1, { align: 'end' });
-    maybeCompleteBottomCommand();
+    scheduleNextFrame(() => {
+      const latest = scrollStateRef.current;
+      if (
+        latest.command.type === 'none'
+        || latest.command.targetRowCount !== current.command.targetRowCount
+        || latest.command.targetRowKey !== current.command.targetRowKey
+      ) {
+        return;
+      }
+      forceCompleteBottomCommand();
+    });
+  }, [forceCompleteBottomCommand]);
+
+  useLayoutEffect(() => {
+    maybeCompleteBottomCommandRef.current = maybeCompleteBottomCommand;
   }, [maybeCompleteBottomCommand]);
+
+  useLayoutEffect(() => {
+    maybeExecutePendingCommandRef.current = () => {
+      maybeExecutePendingCommand();
+    };
+  }, [maybeExecutePendingCommand]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -114,8 +162,27 @@ export function useChatScrollOrchestrator({
     }
 
     const observer = new ResizeObserver(() => {
-      maybeExecutePendingCommand();
-      maybeCompleteBottomCommand();
+      let didResize = false;
+      const activeViewport = viewportRef.current;
+      if (activeViewport) {
+        const nextMetrics = {
+          scrollHeight: activeViewport.scrollHeight,
+          clientHeight: activeViewport.clientHeight,
+        };
+        const prevMetrics = lastResizeMetricsRef.current;
+        const changed = !prevMetrics
+          || prevMetrics.scrollHeight !== nextMetrics.scrollHeight
+          || prevMetrics.clientHeight !== nextMetrics.clientHeight;
+        if (changed) {
+          lastResizeMetricsRef.current = nextMetrics;
+          didResize = true;
+          dispatch({ type: 'CONTENT_RESIZED' });
+        }
+      }
+      if (didResize) {
+        maybeExecutePendingCommandRef.current();
+      }
+      maybeCompleteBottomCommandRef.current();
     });
 
     if (viewport) {
@@ -126,16 +193,14 @@ export function useChatScrollOrchestrator({
     }
 
     return () => observer.disconnect();
-  }, [
-    contentRef,
-    currentSessionKey,
-    maybeCompleteBottomCommand,
-    maybeExecutePendingCommand,
-    rows.length,
-    viewportRef,
-  ]);
+  }, [contentRef, viewportRef]);
 
   useLayoutEffect(() => {
+    if (lastSessionKeyRef.current === currentSessionKey) {
+      return;
+    }
+    lastSessionKeyRef.current = currentSessionKey;
+    lastResizeMetricsRef.current = null;
     dispatch({
       type: 'SESSION_SWITCHED',
       sessionKey: currentSessionKey,
@@ -153,10 +218,12 @@ export function useChatScrollOrchestrator({
   }, [rowSnapshot.lastRowKey, rowSnapshot.rowCount]);
 
   useLayoutEffect(() => {
-    dispatch({
-      type: 'VIEWPORT_READY_CHANGED',
-      ready: viewportRef.current != null,
-    });
+    const ready = viewportRef.current != null;
+    if (viewportReadyRef.current === ready) {
+      return;
+    }
+    viewportReadyRef.current = ready;
+    dispatch({ type: 'VIEWPORT_READY_CHANGED', ready });
   });
 
   useLayoutEffect(() => {
@@ -169,6 +236,13 @@ export function useChatScrollOrchestrator({
     scrollState.viewportReady,
   ]);
 
+  const markUserScrollIntent = useCallback(() => {
+    dispatch({
+      type: 'USER_SCROLL_INTENT',
+      atMs: Date.now(),
+    });
+  }, []);
+
   const handleViewportScroll = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) {
@@ -178,16 +252,12 @@ export function useChatScrollOrchestrator({
     dispatch({
       type: 'VIEWPORT_POSITION_CHANGED',
       isNearBottom,
+      atMs: Date.now(),
     });
     if (isNearBottom) {
       maybeCompleteBottomCommand();
-      userScrollIntentRef.current = false;
       return;
     }
-    if (userScrollIntentRef.current) {
-      dispatch({ type: 'USER_DETACHED' });
-    }
-    userScrollIntentRef.current = false;
   }, [maybeCompleteBottomCommand, stickyBottomThresholdPx, viewportRef]);
 
   const handleVirtualizerChange = useCallback((instance: ChatVirtualizerLike) => {
@@ -197,15 +267,9 @@ export function useChatScrollOrchestrator({
 
   return {
     handleViewportScroll,
-    handleViewportPointerDown: () => {
-      userScrollIntentRef.current = true;
-    },
-    handleViewportTouchMove: () => {
-      userScrollIntentRef.current = true;
-    },
-    handleViewportWheel: () => {
-      userScrollIntentRef.current = true;
-    },
+    handleViewportPointerDown: markUserScrollIntent,
+    handleViewportTouchMove: markUserScrollIntent,
+    handleViewportWheel: markUserScrollIntent,
     handleVirtualizerChange,
     scrollState,
   };

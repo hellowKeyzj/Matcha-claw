@@ -1,5 +1,7 @@
 export type ChatScrollMode = 'opening' | 'sticky' | 'detached';
 
+export const USER_SCROLL_INTENT_MAX_AGE_MS = 300;
+
 export type ChatScrollCommand =
   | {
     type: 'none';
@@ -7,7 +9,7 @@ export type ChatScrollCommand =
     targetRowCount: 0;
   }
   | {
-    type: 'open-to-latest' | 'follow-append';
+    type: 'open-to-latest' | 'follow-append' | 'follow-resize';
     targetRowKey: string;
     targetRowCount: number;
   };
@@ -20,6 +22,8 @@ export interface ChatScrollState {
   rowCount: number;
   viewportReady: boolean;
   isNearBottom: boolean;
+  userScrollIntentAtMs: number | null;
+  programmaticScrollInFlight: boolean;
 }
 
 export type ChatScrollEvent =
@@ -35,15 +39,23 @@ export type ChatScrollEvent =
     rowCount: number;
   }
   | {
+    type: 'CONTENT_RESIZED';
+  }
+  | {
     type: 'VIEWPORT_READY_CHANGED';
     ready: boolean;
   }
   | {
     type: 'VIEWPORT_POSITION_CHANGED';
     isNearBottom: boolean;
+    atMs: number;
   }
   | {
-    type: 'USER_DETACHED';
+    type: 'USER_SCROLL_INTENT';
+    atMs: number;
+  }
+  | {
+    type: 'COMMAND_EXECUTION_STARTED';
   }
   | {
     type: 'BOTTOM_REACHED';
@@ -64,7 +76,7 @@ function createNoneCommand(): ChatScrollCommand {
 }
 
 function createCommand(
-  type: 'open-to-latest' | 'follow-append',
+  type: 'open-to-latest' | 'follow-append' | 'follow-resize',
   lastRowKey: string | null,
   rowCount: number,
 ): ChatScrollCommand {
@@ -91,6 +103,8 @@ export function createInitialChatScrollState({
     rowCount,
     viewportReady: false,
     isNearBottom: false,
+    userScrollIntentAtMs: null,
+    programmaticScrollInFlight: false,
   };
 }
 
@@ -117,6 +131,8 @@ export function reduceChatScrollState(
         lastRowKey: event.lastRowKey,
         rowCount: event.rowCount,
         isNearBottom: false,
+        userScrollIntentAtMs: null,
+        programmaticScrollInFlight: false,
       };
     }
 
@@ -136,6 +152,7 @@ export function reduceChatScrollState(
         return {
           ...nextBase,
           command: createNoneCommand(),
+          programmaticScrollInFlight: false,
         };
       }
 
@@ -163,6 +180,22 @@ export function reduceChatScrollState(
       return nextBase;
     }
 
+    case 'CONTENT_RESIZED': {
+      if (state.mode !== 'sticky') {
+        return state;
+      }
+      if (state.command.type !== 'none') {
+        return state;
+      }
+      if (state.rowCount <= 0 || state.lastRowKey == null) {
+        return state;
+      }
+      return {
+        ...state,
+        command: createCommand('follow-resize', state.lastRowKey, state.rowCount),
+      };
+    }
+
     case 'VIEWPORT_READY_CHANGED': {
       if (state.viewportReady === event.ready) {
         return state;
@@ -175,12 +208,28 @@ export function reduceChatScrollState(
 
     case 'VIEWPORT_POSITION_CHANGED': {
       if (!event.isNearBottom) {
-        if (!state.isNearBottom) {
+        const hasFreshUserScrollIntent = state.userScrollIntentAtMs != null
+          && (event.atMs - state.userScrollIntentAtMs) <= USER_SCROLL_INTENT_MAX_AGE_MS;
+        if (hasFreshUserScrollIntent && !state.programmaticScrollInFlight) {
+          return {
+            ...state,
+            mode: 'detached',
+            command: createNoneCommand(),
+            isNearBottom: false,
+            userScrollIntentAtMs: null,
+            programmaticScrollInFlight: false,
+          };
+        }
+        const hasStaleUserScrollIntent = state.userScrollIntentAtMs != null && !hasFreshUserScrollIntent;
+        if (!state.isNearBottom && !hasStaleUserScrollIntent) {
           return state;
         }
         return {
           ...state,
           isNearBottom: false,
+          ...(hasStaleUserScrollIntent
+            ? { userScrollIntentAtMs: null }
+            : {}),
         };
       }
 
@@ -206,18 +255,30 @@ export function reduceChatScrollState(
       return {
         ...state,
         isNearBottom: true,
+        userScrollIntentAtMs: null,
       };
     }
 
-    case 'USER_DETACHED': {
-      if (state.mode === 'detached' && state.command.type === 'none' && !state.isNearBottom) {
+    case 'USER_SCROLL_INTENT': {
+      if (state.userScrollIntentAtMs === event.atMs) {
         return state;
       }
       return {
         ...state,
-        mode: 'detached',
-        command: createNoneCommand(),
-        isNearBottom: false,
+        userScrollIntentAtMs: event.atMs,
+      };
+    }
+
+    case 'COMMAND_EXECUTION_STARTED': {
+      if (state.command.type === 'none') {
+        return state;
+      }
+      if (state.programmaticScrollInFlight) {
+        return state;
+      }
+      return {
+        ...state,
+        programmaticScrollInFlight: true,
       };
     }
 
@@ -227,6 +288,8 @@ export function reduceChatScrollState(
         mode: 'sticky',
         command: createNoneCommand(),
         isNearBottom: true,
+        userScrollIntentAtMs: null,
+        programmaticScrollInFlight: false,
       };
     }
 

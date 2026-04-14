@@ -263,6 +263,52 @@ describe('runtime-host internal routes', () => {
     });
   });
 
+  it('gateway-events 支持 gateway:conversation-event 事件透传', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({
+      version: 1,
+      eventName: 'gateway:conversation-event',
+      payload: {
+        type: 'chat.message',
+        event: {
+          state: 'final',
+          runId: 'run-2',
+          sessionKey: 'agent:main:main',
+          message: { role: 'assistant', content: 'hi' },
+        },
+      },
+    });
+    const emitGatewayEvent = vi.fn();
+
+    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
+    const handled = await handleRuntimeHostInternalRoutes(
+      {
+        method: 'POST',
+        headers: {
+          'x-runtime-host-dispatch-token': 'test-token',
+        },
+      } as unknown as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/internal/runtime-host/gateway-events'),
+      {
+        runtimeHost: {
+          getInternalDispatchToken: () => 'test-token',
+          emitGatewayEvent,
+        },
+      } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(emitGatewayEvent).toHaveBeenCalledWith('gateway:conversation-event', {
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-2',
+        sessionKey: 'agent:main:main',
+        message: { role: 'assistant', content: 'hi' },
+      },
+    });
+  });
+
   it('execution-sync set_enabled_plugin_ids 会调用 setEnabledPluginIds', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       version: 1,

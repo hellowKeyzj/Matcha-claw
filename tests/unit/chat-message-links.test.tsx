@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import type { RawMessage } from '@/stores/chat';
 
@@ -273,5 +273,66 @@ describe('chat message links', () => {
       'shell:openPath',
       'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md',
     );
+  });
+
+  it('heavy assistant markdown should defer rich render and upgrade on idle', async () => {
+    const longMarkdown = Array.from(
+      { length: 80 },
+      (_, index) => `line-${index}: [OpenAI](https://openai.com) with **bold** text and \`code\``,
+    ).join('\n');
+    const message: RawMessage = {
+      role: 'assistant',
+      content: longMarkdown,
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+      />,
+    );
+
+    expect(screen.queryByRole('link', { name: 'OpenAI' })).toBeNull();
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
+    });
+  });
+
+  it('assistant streaming message should use plain text render and skip markdown linkification', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '[OpenAI](https://openai.com)',
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+        isStreaming
+      />,
+    );
+
+    expect(screen.queryByRole('link', { name: 'OpenAI' })).toBeNull();
+    expect(screen.getByText('[OpenAI](https://openai.com)')).toBeInTheDocument();
+    expect(invokeIpcMock).not.toHaveBeenCalled();
+  });
+
+  it('assistant message should support forced plain text render before rich mode unlock', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '[OpenAI](https://openai.com)',
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+        preferPlainText
+      />,
+    );
+
+    expect(screen.queryByRole('link', { name: 'OpenAI' })).toBeNull();
+    expect(screen.getByText('[OpenAI](https://openai.com)')).toBeInTheDocument();
   });
 });

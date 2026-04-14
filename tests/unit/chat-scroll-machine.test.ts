@@ -40,7 +40,7 @@ describe('chat scroll machine', () => {
     expect(settled.command.type).toBe('none');
   });
 
-  it('sticky 状态下末尾追加消息，应生成 follow-append 命令；用户主动上翻后应清掉命令', () => {
+  it('sticky 状态下末尾追加消息，应生成 follow-append；用户主动上翻后应进入 detached', () => {
     const initial = createInitialChatScrollState({
       sessionKey: 'agent:main:main',
       lastRowKey: 'row-3',
@@ -64,13 +64,20 @@ describe('chat scroll machine', () => {
     const scrolledAway = reduceChatScrollState(appended, {
       type: 'VIEWPORT_POSITION_CHANGED',
       isNearBottom: false,
+      atMs: 1_000,
     });
 
     expect(scrolledAway.mode).toBe('sticky');
     expect(scrolledAway.command.type).toBe('follow-append');
 
-    const detached = reduceChatScrollState(scrolledAway, {
-      type: 'USER_DETACHED',
+    const withIntent = reduceChatScrollState(scrolledAway, {
+      type: 'USER_SCROLL_INTENT',
+      atMs: 1_050,
+    });
+    const detached = reduceChatScrollState(withIntent, {
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom: false,
+      atMs: 1_060,
     });
 
     expect(detached.mode).toBe('detached');
@@ -92,10 +99,43 @@ describe('chat scroll machine', () => {
     const intermediate = reduceChatScrollState(pending, {
       type: 'VIEWPORT_POSITION_CHANGED',
       isNearBottom: false,
+      atMs: 1_000,
     });
 
     expect(intermediate.mode).toBe('opening');
     expect(intermediate.command.type).toBe('open-to-latest');
     expect(shouldExecuteChatScrollCommand(intermediate)).toBe(true);
+  });
+
+  it('程序化命令执行中，用户滚动意图不应导致脱底', () => {
+    const initial = reduceChatScrollState(
+      createInitialChatScrollState({
+        sessionKey: 'agent:main:main',
+        lastRowKey: 'row-2',
+        rowCount: 2,
+      }),
+      { type: 'BOTTOM_REACHED' },
+    );
+    const appended = reduceChatScrollState(initial, {
+      type: 'ROWS_CHANGED',
+      lastRowKey: 'row-3',
+      rowCount: 3,
+    });
+    const inFlight = reduceChatScrollState(appended, {
+      type: 'COMMAND_EXECUTION_STARTED',
+    });
+    const withIntent = reduceChatScrollState(inFlight, {
+      type: 'USER_SCROLL_INTENT',
+      atMs: 2_000,
+    });
+    const moved = reduceChatScrollState(withIntent, {
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom: false,
+      atMs: 2_020,
+    });
+
+    expect(moved.mode).toBe('sticky');
+    expect(moved.command.type).toBe('follow-append');
+    expect(moved.programmaticScrollInFlight).toBe(true);
   });
 });

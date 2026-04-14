@@ -53,33 +53,148 @@ interface BuildChatRowsInput {
   executionGraphs?: ExecutionGraphData[];
 }
 
-function isRenderableMessage(message: RawMessage): boolean {
+interface BuildStaticChatRowsInput {
+  sessionKey: string;
+  messages: RawMessage[];
+  executionGraphs?: ExecutionGraphData[];
+}
+
+interface BuildStaticChatRowsResult {
+  rows: ChatRow[];
+  renderableCount: number;
+}
+
+interface AppendRuntimeChatRowsInput {
+  sessionKey: string;
+  baseRows: ChatRow[];
+  sending: boolean;
+  pendingFinal: boolean;
+  waitingApproval: boolean;
+  showThinking: boolean;
+  streamingMessage: unknown | null;
+  streamingTools: ToolStatus[];
+  streamingTimestamp: number;
+}
+
+const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
+let anonymousMessageKeySeq = 0;
+
+export function isRenderableChatMessage(message: RawMessage): boolean {
   const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
   return role !== 'toolresult' && role !== 'tool_result';
 }
 
-export function resolveMessageRowKey(message: RawMessage, index: number): string {
-  if (typeof message.id === 'string' && message.id.trim()) {
-    return `id:${message.id}`;
+export function canAppendMessageList(
+  previous: RawMessage[],
+  next: RawMessage[],
+): boolean {
+  if (previous.length > next.length) {
+    return false;
   }
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index] !== next[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function appendMessageRows(
+  sessionKey: string,
+  baseRows: ChatRow[],
+  messages: RawMessage[],
+  fromIndex: number,
+  startRenderableIndex: number,
+): {
+  rows: ChatRow[];
+  renderableCount: number;
+} {
+  if (fromIndex >= messages.length) {
+    return {
+      rows: baseRows,
+      renderableCount: startRenderableIndex,
+    };
+  }
+
+  const rows = [...baseRows];
+  let renderableIndex = startRenderableIndex;
+  for (let index = fromIndex; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!isRenderableChatMessage(message)) {
+      continue;
+    }
+    rows.push({
+      key: resolveMessageRowKey(sessionKey, message, renderableIndex),
+      kind: 'message',
+      message,
+    });
+    renderableIndex += 1;
+  }
+
+  return {
+    rows,
+    renderableCount: renderableIndex,
+  };
+}
+
+function resolveAnonymousMessageRowKey(sessionKey: string, message: RawMessage): string {
+  const existing = anonymousMessageKeyByRef.get(message);
+  if (existing) {
+    return existing;
+  }
+  anonymousMessageKeySeq += 1;
   const role = typeof message.role === 'string' ? message.role : 'unknown';
   const timestamp = typeof message.timestamp === 'number' ? message.timestamp : 'na';
   const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
-  return `fallback:${role}:${timestamp}:${toolCallId}:${index}`;
+  const next = `session:${sessionKey}|anon:${role}:${timestamp}:${toolCallId}:${anonymousMessageKeySeq}`;
+  anonymousMessageKeyByRef.set(message, next);
+  return next;
 }
 
-export function buildChatRows({
+export function resolveMessageRowKey(sessionKey: string, message: RawMessage, _index: number): string {
+  if (typeof message.id === 'string' && message.id.trim()) {
+    return `session:${sessionKey}|id:${message.id}`;
+  }
+  return resolveAnonymousMessageRowKey(sessionKey, message);
+}
+
+export function buildStaticChatRows({
   sessionKey,
   messages,
-  sending,
-  pendingFinal,
-  waitingApproval,
-  showThinking,
-  streamingMessage,
-  streamingTools,
-  streamingTimestamp,
   executionGraphs = [],
-}: BuildChatRowsInput): ChatRow[] {
+}: BuildStaticChatRowsInput): ChatRow[] {
+  return buildStaticChatRowsWithMeta({
+    sessionKey,
+    messages,
+    executionGraphs,
+  }).rows;
+}
+
+export function buildStaticChatRowsWithMeta({
+  sessionKey,
+  messages,
+  executionGraphs = [],
+}: BuildStaticChatRowsInput): BuildStaticChatRowsResult {
+  if (executionGraphs.length === 0) {
+    const rows: ChatRow[] = [];
+    let renderableCount = 0;
+    for (const message of messages) {
+      if (!isRenderableChatMessage(message)) {
+        continue;
+      }
+      rows.push({
+        key: resolveMessageRowKey(sessionKey, message, renderableCount),
+        kind: 'message',
+        message,
+      });
+      renderableCount += 1;
+    }
+    return {
+      rows,
+      renderableCount,
+    };
+  }
+
   const graphByAnchorMessageKey = new Map<string, ExecutionGraphData[]>();
   for (const graph of executionGraphs) {
     const anchorKey = graph.anchorMessageKey;
@@ -94,9 +209,13 @@ export function buildChatRows({
 
   const insertedGraphIds = new Set<string>();
   const rows: ChatRow[] = [];
-  const renderableMessages = messages.filter(isRenderableMessage);
-  for (const [index, message] of renderableMessages.entries()) {
-    const messageKey = resolveMessageRowKey(message, index);
+  let renderableIndex = 0;
+  for (const message of messages) {
+    if (!isRenderableChatMessage(message)) {
+      continue;
+    }
+    const messageKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
+    renderableIndex += 1;
     rows.push({
       key: messageKey,
       kind: 'message',
@@ -127,6 +246,31 @@ export function buildChatRows({
     });
   }
 
+  return {
+    rows,
+    renderableCount: renderableIndex,
+  };
+}
+
+export function appendRuntimeChatRows({
+  sessionKey,
+  baseRows,
+  sending,
+  pendingFinal,
+  waitingApproval,
+  showThinking,
+  streamingMessage,
+  streamingTools,
+  streamingTimestamp,
+}: AppendRuntimeChatRowsInput): ChatRow[] {
+  let rows = baseRows;
+  const ensureMutableRows = () => {
+    if (rows === baseRows) {
+      rows = [...baseRows];
+    }
+    return rows;
+  };
+
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as { role?: string; content?: unknown; timestamp?: number }
     : null;
@@ -144,7 +288,7 @@ export function buildChatRows({
   const shouldRenderStreaming = sending && hasAnyStreamContent;
 
   if (shouldRenderStreaming) {
-    rows.push({
+    ensureMutableRows().push({
       key: `streaming:${sessionKey}`,
       kind: 'streaming',
       message: (streamMsg
@@ -164,18 +308,48 @@ export function buildChatRows({
   }
 
   if (sending && pendingFinal && !waitingApproval && !shouldRenderStreaming) {
-    rows.push({
+    ensureMutableRows().push({
       key: `activity:${sessionKey}`,
       kind: 'activity',
     });
   }
 
   if (sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent) {
-    rows.push({
+    ensureMutableRows().push({
       key: `typing:${sessionKey}`,
       kind: 'typing',
     });
   }
 
   return rows;
+}
+
+export function buildChatRows({
+  sessionKey,
+  messages,
+  sending,
+  pendingFinal,
+  waitingApproval,
+  showThinking,
+  streamingMessage,
+  streamingTools,
+  streamingTimestamp,
+  executionGraphs = [],
+}: BuildChatRowsInput): ChatRow[] {
+  const baseRows = buildStaticChatRows({
+    sessionKey,
+    messages,
+    executionGraphs,
+  });
+  return appendRuntimeChatRows({
+    sessionKey,
+    baseRows,
+    sending,
+    pendingFinal,
+    waitingApproval,
+    showThinking,
+    streamingMessage,
+    streamingTools,
+    streamingTimestamp,
+  });
 }

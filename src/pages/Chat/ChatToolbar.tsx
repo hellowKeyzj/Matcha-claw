@@ -5,18 +5,16 @@
  */
 import { RefreshCw, Brain } from 'lucide-react';
 import { memo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
+import { selectChatToolbarState } from '@/stores/chat/selectors';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
 export const ChatToolbar = memo(function ChatToolbar() {
-  const refresh = useChatStore((s) => s.refresh);
-  const initialLoading = useChatStore((s) => s.initialLoading);
-  const refreshing = useChatStore((s) => s.refreshing);
-  const showThinking = useChatStore((s) => s.showThinking);
-  const toggleThinking = useChatStore((s) => s.toggleThinking);
+  const { refresh, initialLoading, refreshing, showThinking, toggleThinking } = useChatStore(useShallow(selectChatToolbarState));
   const { t } = useTranslation('chat');
   const refreshBusy = initialLoading || refreshing;
 

@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { useChatStore } from '@/stores/chat';
+import { selectChatInputSessionKey } from '@/stores/chat/selectors';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { cn } from '@/lib/utils';
@@ -177,7 +178,7 @@ export const ChatInput = memo(function ChatInput({
   const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const currentSessionKey = useChatStore(selectChatInputSessionKey);
   const agents = useSubagentsStore((state) => state.agents);
   const allowedSkillIdSet = useMemo(() => {
     const matched = currentSessionKey.match(/^agent:([^:]+):/i);

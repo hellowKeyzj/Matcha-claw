@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { buildChatRows, type ExecutionGraphData } from '@/pages/Chat/chat-row-model';
+import {
+  appendRuntimeChatRows,
+  buildChatRows,
+  buildStaticChatRows,
+  type ExecutionGraphData,
+} from '@/pages/Chat/chat-row-model';
 import {
   createInitialChatScrollState,
   reduceChatScrollState,
@@ -9,6 +14,63 @@ import {
 import { isChatViewportNearBottom } from '@/pages/Chat/useChatScrollOrchestrator';
 
 describe('chat 行模型', () => {
+  it('运行态无附加行时，应复用静态行引用避免额外重建', () => {
+    const baseRows = buildStaticChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'hello',
+          timestamp: 1,
+        } satisfies RawMessage,
+      ],
+      executionGraphs: [],
+    });
+
+    const rows = appendRuntimeChatRows({
+      sessionKey: 'agent:main:main',
+      baseRows,
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+
+    expect(rows).toBe(baseRows);
+    expect(rows.map((row) => row.kind)).toEqual(['message']);
+  });
+
+  it('运行态有 streaming 行时，应返回新数组并追加 transient 行', () => {
+    const baseRows = buildStaticChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [],
+      executionGraphs: [],
+    });
+
+    const rows = appendRuntimeChatRows({
+      sessionKey: 'agent:main:main',
+      baseRows,
+      sending: true,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: {
+        role: 'assistant',
+        content: 'streaming response',
+        timestamp: 2,
+      },
+      streamingTools: [],
+      streamingTimestamp: 2,
+    });
+
+    expect(rows).not.toBe(baseRows);
+    expect(rows.map((row) => row.kind)).toEqual(['streaming']);
+  });
+
   it('应把历史消息和流式消息合成统一的聊天行列表', () => {
     const rows = buildChatRows({
       sessionKey: 'agent:main:main',
@@ -35,6 +97,41 @@ describe('chat 行模型', () => {
 
     expect(rows.map((row) => row.kind)).toEqual(['message', 'streaming']);
     expect(rows.at(-1)?.key).toBe('streaming:agent:main:main');
+  });
+
+  it('不同会话里相同 message.id 的行 key 必须隔离，避免虚拟列表缓存串会话', () => {
+    const sameMessage: RawMessage = {
+      id: 'shared-id',
+      role: 'assistant',
+      content: 'same id',
+      timestamp: 1,
+    };
+    const rowsA = buildChatRows({
+      sessionKey: 'agent:a:main',
+      messages: [sameMessage],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+    const rowsB = buildChatRows({
+      sessionKey: 'agent:b:main',
+      messages: [sameMessage],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+
+    expect(rowsA[0]?.key).toBe('session:agent:a:main|id:shared-id');
+    expect(rowsB[0]?.key).toBe('session:agent:b:main|id:shared-id');
+    expect(rowsA[0]?.key).not.toBe(rowsB[0]?.key);
   });
 
   it('只有处理中提示时，应把它作为 activity 行加入虚拟列表', () => {
@@ -72,11 +169,12 @@ describe('chat 行模型', () => {
   });
 
   it('有执行图时，应在锚点消息后插入 execution_graph 行', () => {
+    const sessionKey = 'agent:main:main';
     const graph: ExecutionGraphData = {
       id: 'graph-1',
-      anchorMessageKey: 'id:user-1',
-      triggerMessageKey: 'id:user-1',
-      replyMessageKey: 'id:assistant-1',
+      anchorMessageKey: `session:${sessionKey}|id:user-1`,
+      triggerMessageKey: `session:${sessionKey}|id:user-1`,
+      replyMessageKey: `session:${sessionKey}|id:assistant-1`,
       agentLabel: 'coder',
       sessionLabel: 'agent:coder:subagent:child-1',
       steps: [
@@ -92,7 +190,7 @@ describe('chat 行模型', () => {
     };
 
     const rows = buildChatRows({
-      sessionKey: 'agent:main:main',
+      sessionKey,
       messages: [
         {
           id: 'user-1',
@@ -170,6 +268,28 @@ describe('chat 打开与吸底命令', () => {
     });
   });
 
+  it('行数不变但内容高度变化时，sticky 模式应生成 follow-resize 命令', () => {
+    const sticky = reduceChatScrollState(
+      createInitialChatScrollState({
+        sessionKey: 'agent:main:main',
+        lastRowKey: 'row-2',
+        rowCount: 2,
+      }),
+      { type: 'BOTTOM_REACHED' },
+    );
+
+    const resized = reduceChatScrollState(sticky, {
+      type: 'CONTENT_RESIZED',
+    });
+
+    expect(resized.mode).toBe('sticky');
+    expect(resized.command).toEqual({
+      type: 'follow-resize',
+      targetRowKey: 'row-2',
+      targetRowCount: 2,
+    });
+  });
+
   it('程序化滚动经过旧位置时，不应把打开命令误清掉', () => {
     const pending = reduceChatScrollState(
       createInitialChatScrollState({
@@ -186,10 +306,68 @@ describe('chat 打开与吸底命令', () => {
     const scrolledPastOldPosition = reduceChatScrollState(pending, {
       type: 'VIEWPORT_POSITION_CHANGED',
       isNearBottom: false,
+      atMs: 1_000,
     });
 
     expect(scrolledPastOldPosition.command.type).toBe('open-to-latest');
     expect(scrolledPastOldPosition.mode).toBe('opening');
+  });
+
+  it('程序滚动执行中，即使存在用户滚动意图也不应误脱底', () => {
+    const sticky = reduceChatScrollState(
+      createInitialChatScrollState({
+        sessionKey: 'agent:main:main',
+        lastRowKey: 'row-3',
+        rowCount: 3,
+      }),
+      { type: 'BOTTOM_REACHED' },
+    );
+
+    const appended = reduceChatScrollState(sticky, {
+      type: 'ROWS_CHANGED',
+      lastRowKey: 'row-4',
+      rowCount: 4,
+    });
+    const withIntent = reduceChatScrollState(appended, {
+      type: 'USER_SCROLL_INTENT',
+      atMs: 1_000,
+    });
+    const inFlight = reduceChatScrollState(withIntent, {
+      type: 'COMMAND_EXECUTION_STARTED',
+    });
+    const moved = reduceChatScrollState(inFlight, {
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom: false,
+      atMs: 1_050,
+    });
+
+    expect(moved.mode).toBe('sticky');
+    expect(moved.command.type).toBe('follow-append');
+    expect(moved.programmaticScrollInFlight).toBe(true);
+  });
+
+  it('用户主动上滑时应进入 detached', () => {
+    const sticky = reduceChatScrollState(
+      createInitialChatScrollState({
+        sessionKey: 'agent:main:main',
+        lastRowKey: 'row-3',
+        rowCount: 3,
+      }),
+      { type: 'BOTTOM_REACHED' },
+    );
+    const withIntent = reduceChatScrollState(sticky, {
+      type: 'USER_SCROLL_INTENT',
+      atMs: 1_000,
+    });
+    const detached = reduceChatScrollState(withIntent, {
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom: false,
+      atMs: 1_050,
+    });
+
+    expect(detached.mode).toBe('detached');
+    expect(detached.command.type).toBe('none');
+    expect(detached.programmaticScrollInFlight).toBe(false);
   });
 });
 
@@ -209,4 +387,5 @@ describe('chat 底部阈值判断', () => {
       clientHeight: 320,
     }, 120)).toBe(false);
   });
+
 });

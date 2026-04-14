@@ -4,9 +4,11 @@ import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useChatStore, type ChatSession } from '@/stores/chat';
+import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
+import { useShallow } from 'zustand/react/shallow';
 
 interface AgentSessionsPaneProps {
   expandedWidth?: number;
@@ -384,14 +386,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const agents = useSubagentsStore((state) => state.agents);
   const subagentsSnapshotReady = useSubagentsStore((state) => state.snapshotReady);
   const subagentsInitialLoading = useSubagentsStore((state) => state.initialLoading);
-  const sessions = useChatStore((state) => state.sessions);
-  const sessionLabels = useChatStore((state) => state.sessionLabels);
-  const sessionLastActivity = useChatStore((state) => state.sessionLastActivity);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const switchSession = useChatStore((state) => state.switchSession);
-  const openAgentConversation = useChatStore((state) => state.openAgentConversation);
-  const newSession = useChatStore((state) => state.newSession);
-  const deleteSession = useChatStore((state) => state.deleteSession);
+  const {
+    sessions,
+    sessionLabels,
+    sessionLastActivity,
+    currentSessionKey,
+    switchSession,
+    openAgentConversation,
+    newSession,
+    deleteSession,
+  } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const deferredSessions = useDeferredValue(sessions);
   const deferredSessionLabels = useDeferredValue(sessionLabels);
   const deferredSessionLastActivity = useDeferredValue(sessionLastActivity);
