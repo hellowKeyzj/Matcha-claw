@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
+import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
   getSubagentTemplateById,
@@ -166,16 +167,17 @@ export function SubAgents() {
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
   const showSubagentGridSkeleton = !hasAgentCards && !snapshotReady && (initialLoading || !subagentsHeavyContentReady);
+  const showRefreshingHint = useDelayedFlag(refreshing, 180);
 
   useEffect(() => {
-    void loadAgents();
+    void loadAgents({ silent: true });
     void loadAvailableModels();
   }, [loadAgents, loadAvailableModels]);
 
   useEffect(() => {
     const isGatewayRunning = gatewayState === 'running';
     if (isGatewayRunning && !wasGatewayRunningRef.current) {
-      void loadAgents();
+      void loadAgents({ silent: true });
       void loadAvailableModels();
     }
     wasGatewayRunningRef.current = isGatewayRunning;
@@ -514,10 +516,10 @@ export function SubAgents() {
           <p className="text-sm text-muted-foreground">{t('subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
-          {(refreshing || mutating) && (
+          {(showRefreshingHint || mutating) && (
             <span className="inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs text-muted-foreground">
               <span className="h-2 w-2 animate-pulse rounded-full bg-primary" />
-              {refreshing ? t('status.refreshing') : t('status.mutating')}
+              {mutating ? t('status.mutating') : t('status.refreshing')}
             </span>
           )}
           <Button onClick={openCreateDialog}>{t('newSubagent')}</Button>

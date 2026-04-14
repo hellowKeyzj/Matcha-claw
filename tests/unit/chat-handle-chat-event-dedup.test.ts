@@ -189,7 +189,7 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
 
     const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
     expect(userMessages).toHaveLength(1);
-    expect(userMessages[0]?.id).toBe('gateway-user-1');
+    expect(userMessages[0]?.id).toBe('optimistic-user-1');
   });
 
   it('toolresult final 不应把纯文本 streaming assistant 快照进 messages，避免后续 assistant final 重复', () => {

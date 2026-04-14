@@ -208,6 +208,24 @@ export function reduceChatScrollState(
 
     case 'VIEWPORT_POSITION_CHANGED': {
       if (!event.isNearBottom) {
+        // When an auto-follow command is pending, a transient non-bottom
+        // position can happen before COMMAND_EXECUTION_STARTED is observed.
+        // Do not treat that transient as user detach.
+        if (state.command.type !== 'none') {
+          const hasStaleUserScrollIntent = state.userScrollIntentAtMs != null
+            && (event.atMs - state.userScrollIntentAtMs) > USER_SCROLL_INTENT_MAX_AGE_MS;
+          if (!state.isNearBottom && !hasStaleUserScrollIntent) {
+            return state;
+          }
+          return {
+            ...state,
+            isNearBottom: false,
+            ...(hasStaleUserScrollIntent
+              ? { userScrollIntentAtMs: null }
+              : {}),
+          };
+        }
+
         const hasFreshUserScrollIntent = state.userScrollIntentAtMs != null
           && (event.atMs - state.userScrollIntentAtMs) <= USER_SCROLL_INTENT_MAX_AGE_MS;
         if (hasFreshUserScrollIntent && !state.programmaticScrollInFlight) {

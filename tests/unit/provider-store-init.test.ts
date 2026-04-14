@@ -150,7 +150,7 @@ describe('useProviderStore.init', () => {
     expect(state.error).toContain('Provider snapshot request timed out');
   });
 
-  it('已有快照时刷新不会回退到阻塞式 initialLoading', async () => {
+  it('已有快照时 background 刷新不会回退到阻塞式 initialLoading', async () => {
     let resolveSnapshot: ((value: unknown) => void) | null = null;
     const snapshotTask = new Promise((resolve) => {
       resolveSnapshot = resolve;
@@ -199,7 +199,7 @@ describe('useProviderStore.init', () => {
 
     const refreshTask = useProviderStore.getState().refreshProviderSnapshot();
     expect(useProviderStore.getState().initialLoading).toBe(false);
-    expect(useProviderStore.getState().refreshing).toBe(true);
+    expect(useProviderStore.getState().refreshing).toBe(false);
 
     resolveSnapshot?.({
       statuses: [{ id: 'openai-main', hasKey: true }],
@@ -216,7 +216,7 @@ describe('useProviderStore.init', () => {
     expect(useProviderStore.getState().refreshing).toBe(false);
   });
 
-  it('空快照也应视为已加载，后续刷新走 refreshing', async () => {
+  it('空快照也应视为已加载，后续 background 刷新走静默', async () => {
     fetchProviderSnapshotMock.mockResolvedValueOnce({
       statuses: [],
       accounts: [],
@@ -237,7 +237,7 @@ describe('useProviderStore.init', () => {
     const refreshTask = useProviderStore.getState().refreshProviderSnapshot();
     expect(useProviderStore.getState().snapshotReady).toBe(true);
     expect(useProviderStore.getState().initialLoading).toBe(false);
-    expect(useProviderStore.getState().refreshing).toBe(true);
+    expect(useProviderStore.getState().refreshing).toBe(false);
 
     resolveSnapshot?.({
       statuses: [],

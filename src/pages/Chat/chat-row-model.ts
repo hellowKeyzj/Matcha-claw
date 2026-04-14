@@ -76,8 +76,56 @@ interface AppendRuntimeChatRowsInput {
   streamingTimestamp: number;
 }
 
+function resolveRuntimeRowKey(sessionKey: string): string {
+  return `runtime:${sessionKey}`;
+}
+
 const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
-let anonymousMessageKeySeq = 0;
+
+function hashStringDjb2(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function serializeContentForAnonymousKey(content: unknown): string {
+  if (typeof content === 'string') {
+    return content.trim().slice(0, 512);
+  }
+  if (!Array.isArray(content)) {
+    return '';
+  }
+  const parts: string[] = [];
+  for (const block of content as Array<Record<string, unknown>>) {
+    if (!block || typeof block !== 'object') {
+      continue;
+    }
+    const type = typeof block.type === 'string' ? block.type : '';
+    if (type === 'text' && typeof block.text === 'string') {
+      parts.push(`t:${block.text.trim()}`);
+      continue;
+    }
+    if ((type === 'tool_use' || type === 'toolCall')) {
+      const id = typeof block.id === 'string' ? block.id : '';
+      const name = typeof block.name === 'string' ? block.name : '';
+      parts.push(`u:${id}:${name}`);
+      continue;
+    }
+    if ((type === 'tool_result' || type === 'toolResult')) {
+      const toolUseId = typeof block.tool_use_id === 'string'
+        ? block.tool_use_id
+        : (typeof block.toolUseId === 'string' ? block.toolUseId : '');
+      parts.push(`r:${toolUseId}`);
+      continue;
+    }
+    if (type) {
+      parts.push(`x:${type}`);
+    }
+  }
+  return parts.join('|').slice(0, 512);
+}
 
 export function isRenderableChatMessage(message: RawMessage): boolean {
   const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
@@ -138,17 +186,21 @@ export function appendMessageRows(
 }
 
 function resolveAnonymousMessageRowKey(sessionKey: string, message: RawMessage): string {
+  const role = typeof message.role === 'string' ? message.role : 'unknown';
+  const timestamp = typeof message.timestamp === 'number'
+    ? String(message.timestamp)
+    : 'na';
+  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
+  const contentSignature = hashStringDjb2(serializeContentForAnonymousKey(message.content));
+  const deterministic = `session:${sessionKey}|anon:${role}:${timestamp}:${toolCallId}:${contentSignature}`;
+
+  // Preserve old WeakMap fast-path for repeated renders of the same object ref.
   const existing = anonymousMessageKeyByRef.get(message);
-  if (existing) {
+  if (existing === deterministic) {
     return existing;
   }
-  anonymousMessageKeySeq += 1;
-  const role = typeof message.role === 'string' ? message.role : 'unknown';
-  const timestamp = typeof message.timestamp === 'number' ? message.timestamp : 'na';
-  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
-  const next = `session:${sessionKey}|anon:${role}:${timestamp}:${toolCallId}:${anonymousMessageKeySeq}`;
-  anonymousMessageKeyByRef.set(message, next);
-  return next;
+  anonymousMessageKeyByRef.set(message, deterministic);
+  return deterministic;
 }
 
 export function resolveMessageRowKey(sessionKey: string, message: RawMessage, _index: number): string {
@@ -289,7 +341,7 @@ export function appendRuntimeChatRows({
 
   if (shouldRenderStreaming) {
     ensureMutableRows().push({
-      key: `streaming:${sessionKey}`,
+      key: resolveRuntimeRowKey(sessionKey),
       kind: 'streaming',
       message: (streamMsg
         ? {
@@ -309,14 +361,14 @@ export function appendRuntimeChatRows({
 
   if (sending && pendingFinal && !waitingApproval && !shouldRenderStreaming) {
     ensureMutableRows().push({
-      key: `activity:${sessionKey}`,
+      key: resolveRuntimeRowKey(sessionKey),
       kind: 'activity',
     });
   }
 
   if (sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent) {
     ensureMutableRows().push({
-      key: `typing:${sessionKey}`,
+      key: resolveRuntimeRowKey(sessionKey),
       kind: 'typing',
     });
   }

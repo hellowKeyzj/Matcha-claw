@@ -10,6 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
 import { invokeIpc } from '@/lib/api-client';
+import { preloadLazyRouteForPath } from '@/lib/route-preload';
 
 export function TitleBar() {
   const platform = window.electron?.platform;
@@ -56,6 +57,10 @@ function WindowsTitleBar() {
     navigate('/settings');
   };
 
+  const handleSettingsHover = () => {
+    void preloadLazyRouteForPath('/settings');
+  };
+
   return (
     <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/96 px-3 backdrop-blur-xl">
       <div className="no-drag flex items-center gap-2">
@@ -68,6 +73,8 @@ function WindowsTitleBar() {
       <div className="no-drag flex h-full">
         <button
           onClick={handleOpenSettings}
+          onMouseEnter={handleSettingsHover}
+          onFocus={handleSettingsHover}
           className="flex h-full w-11 items-center justify-center rounded-[var(--radius-pill)] text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
           title={t('sidebar.settings')}
         >

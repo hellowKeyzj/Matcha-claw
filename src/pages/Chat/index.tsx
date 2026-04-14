@@ -850,6 +850,7 @@ export function Chat() {
               'h-full overflow-y-auto px-4 py-4 md:px-6',
               isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
             )}
+            style={{ overflowAnchor: 'none' }}
             onPointerDownCapture={handleViewportPointerDown}
             onScroll={handleViewportScrollWithWindowing}
             onTouchMoveCapture={handleViewportTouchMove}
@@ -866,7 +867,7 @@ export function Chat() {
                 <div
                   ref={messageContentRef}
                   className="relative w-full"
-                  style={{ height: messageVirtualizer.getTotalSize() }}
+                  style={{ height: messageVirtualizer.getTotalSize(), overflowAnchor: 'none' }}
                 >
                   {virtualMessageItems.map((virtualItem) => {
                     const row = chatRows[virtualItem.index];

@@ -365,6 +365,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     const requestId = ++latestProviderSnapshotRequestId;
     const stateBeforeRefresh = get();
     const hasSnapshot = stateBeforeRefresh.snapshotReady;
+    const silentRefresh = trigger === 'background' && hasSnapshot;
     const previousFingerprint = snapshotFingerprint(stateBeforeRefresh.providerSnapshot);
     const endRefreshTiming = startUiTiming(refreshEvent, {
       reason,
@@ -374,7 +375,11 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     });
 
     if (hasSnapshot) {
-      set({ refreshing: true, initialLoading: false, error: null });
+      if (silentRefresh) {
+        set({ refreshing: false, initialLoading: false, error: null });
+      } else {
+        set({ refreshing: true, initialLoading: false, error: null });
+      }
     } else {
       set({ initialLoading: true, refreshing: false, error: null });
     }
