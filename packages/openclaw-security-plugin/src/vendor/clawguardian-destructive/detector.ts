@@ -122,6 +122,7 @@ const destructiveRulesConfig = destructiveRulesRaw as DestructiveRuleConfig;
 let compiledRulesCache: CompiledRules | undefined;
 const EXEC_STYLE_TOOL_RE = /(?:^|\.)(exec|bash|run|shell|command)$/i;
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "rd", "del", "erase", "remove", "remove-item"]);
+const POWERSHELL_HOST_COMMANDS = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
 
 function compileRegex(pattern: string, flags = "i"): RegExp {
   return new RegExp(pattern, flags);
@@ -657,6 +658,18 @@ function normalizeCommandName(rawCommand: string): string {
   return (parts[parts.length - 1] ?? "").toLowerCase();
 }
 
+function shouldApplyPowershellRules(toolName: string, cmdName: string): boolean {
+  if (!EXEC_STYLE_TOOL_RE.test(toolName)) {
+    return false;
+  }
+  if (POWERSHELL_HOST_COMMANDS.has(cmdName)) {
+    return true;
+  }
+  // 支持 exec-style 工具直接执行 PowerShell cmdlet（例如 Remove-Item）
+  // 但避免把 netsh / route 等非 cmdlet 命令误当成 PowerShell 规则。
+  return /^[a-z]+-[a-z0-9]+$/i.test(cmdName);
+}
+
 function normalizeArgForPathCheck(arg: string): string {
   return arg.replace(/^['"]+|['"]+$/g, "");
 }
@@ -812,7 +825,7 @@ export function detectDestructive(
 
   // exec-style 工具下，支持直接 PowerShell cmdlet（例如 Remove-Item ...）
   // 不要求必须以 "powershell/pwsh" 作为命令前缀。
-  if (fullCommand && EXEC_STYLE_TOOL_RE.test(name)) {
+  if (fullCommand && shouldApplyPowershellRules(name, cmdName)) {
     const psMatch = applyPowershellRules(fullCommand.toLowerCase());
     if (psMatch) {
       return psMatch;

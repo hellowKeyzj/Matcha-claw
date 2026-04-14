@@ -1008,11 +1008,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             const matchedHistoryMessage = enrichedMessages[matchedHistoryIndex];
             const optimisticFiles = optimistic._attachedFiles ?? [];
             const historyFiles = matchedHistoryMessage?._attachedFiles ?? [];
-            if (optimisticFiles.length > 0 && historyFiles.length === 0) {
+            const optimisticId = typeof optimistic.id === 'string' && optimistic.id.trim()
+              ? optimistic.id.trim()
+              : '';
+            const shouldPreserveOptimisticId = Boolean(
+              optimisticId
+              && matchedHistoryMessage?.id !== optimisticId,
+            );
+            const shouldHydrateOptimisticFiles = optimisticFiles.length > 0 && historyFiles.length === 0;
+            if (shouldPreserveOptimisticId || shouldHydrateOptimisticFiles) {
               const merged = [...enrichedMessages];
               merged[matchedHistoryIndex] = {
                 ...matchedHistoryMessage,
-                _attachedFiles: optimisticFiles.map((file) => ({ ...file })),
+                ...(shouldPreserveOptimisticId ? { id: optimisticId } : {}),
+                ...(shouldHydrateOptimisticFiles
+                  ? { _attachedFiles: optimisticFiles.map((file) => ({ ...file })) }
+                  : {}),
               };
               finalMessages = merged;
             }
@@ -1973,8 +1984,16 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             }
             if (optimisticUserIndex >= 0) {
               const optimisticUser = s.messages[optimisticUserIndex];
+              const optimisticUserId = (
+                optimisticUser
+                && typeof optimisticUser.id === 'string'
+                && optimisticUser.id.trim()
+              )
+                ? optimisticUser.id.trim()
+                : '';
               const mergedUserMessage: RawMessage = {
                 ...msgWithImages,
+                ...(optimisticUserId ? { id: optimisticUserId } : {}),
                 _attachedFiles: msgWithImages._attachedFiles && msgWithImages._attachedFiles.length > 0
                   ? msgWithImages._attachedFiles
                   : optimisticUser?._attachedFiles,

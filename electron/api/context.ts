@@ -11,7 +11,6 @@ export interface HostApiContext {
 }
 
 export type RuntimeHostApiContext = Pick<HostApiContext, 'runtimeHost'>;
-export type PluginApiContext = Pick<HostApiContext, 'runtimeHost' | 'gatewayManager'>;
 
 export type GatewayApiContext = Pick<HostApiContext, 'gatewayManager' | 'runtimeHost'>;
 
@@ -24,4 +23,3 @@ export type AppApiContext = Pick<HostApiContext, 'eventBus' | 'gatewayManager'>;
 export type LogApiContext = {};
 
 export type FileApiContext = {};
-

@@ -25,12 +25,32 @@ interface ChatViewportMetrics {
   clientHeight: number;
 }
 
+interface ChatViewportSizeMetrics {
+  scrollHeight: number;
+  clientHeight: number;
+}
+
 export function isChatViewportNearBottom(
   metrics: ChatViewportMetrics,
   thresholdPx: number,
 ): boolean {
   const distanceToBottom = metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight;
   return distanceToBottom <= thresholdPx;
+}
+
+export function computeBottomLockedScrollTopOnResize(
+  previousMetrics: ChatViewportSizeMetrics,
+  nextMetrics: ChatViewportSizeMetrics,
+  currentScrollTop: number,
+): number | null {
+  const delta = (
+    (nextMetrics.scrollHeight - previousMetrics.scrollHeight)
+    - (nextMetrics.clientHeight - previousMetrics.clientHeight)
+  );
+  if (!Number.isFinite(delta) || Math.abs(delta) <= 0.5) {
+    return null;
+  }
+  return Math.max(0, currentScrollTop + delta);
 }
 
 function buildRowSnapshot(rows: ChatRow[]): { lastRowKey: string | null; rowCount: number } {
@@ -58,6 +78,8 @@ function scheduleNextFrame(task: () => void): void {
   setTimeout(task, 16);
 }
 
+const CHAT_SCROLL_COMMAND_MAX_ATTEMPTS = 4;
+
 export function useChatScrollOrchestrator({
   currentSessionKey,
   rows,
@@ -77,7 +99,7 @@ export function useChatScrollOrchestrator({
   const scrollStateRef = useRef<ChatScrollState>(scrollState);
   const virtualizerRef = useRef<ChatVirtualizerLike | null>(null);
   const viewportReadyRef = useRef<boolean | null>(null);
-  const lastResizeMetricsRef = useRef<{ scrollHeight: number; clientHeight: number } | null>(null);
+  const lastResizeMetricsRef = useRef<ChatViewportSizeMetrics | null>(null);
   const lastSessionKeyRef = useRef(currentSessionKey);
   const maybeCompleteBottomCommandRef = useRef<() => void>(() => {});
   const maybeExecutePendingCommandRef = useRef<() => void>(() => {});
@@ -101,15 +123,6 @@ export function useChatScrollOrchestrator({
     dispatch({ type: 'BOTTOM_REACHED' });
   }, [stickyBottomThresholdPx, viewportRef]);
 
-  const forceCompleteBottomCommand = useCallback(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) {
-      return;
-    }
-    viewport.scrollTop = viewport.scrollHeight;
-    dispatch({ type: 'BOTTOM_REACHED' });
-  }, [viewportRef]);
-
   const maybeExecutePendingCommand = useCallback((instance?: ChatVirtualizerLike | null) => {
     const current = scrollStateRef.current;
     if (!shouldExecuteChatScrollCommand(current)) {
@@ -119,30 +132,41 @@ export function useChatScrollOrchestrator({
       return;
     }
 
-    if (current.command.type === 'follow-resize') {
-      dispatch({ type: 'COMMAND_EXECUTION_STARTED' });
-      forceCompleteBottomCommand();
-      return;
-    }
-
     const targetVirtualizer = instance ?? virtualizerRef.current;
     if (!targetVirtualizer) {
       return;
     }
     dispatch({ type: 'COMMAND_EXECUTION_STARTED' });
-    targetVirtualizer.scrollToIndex(current.command.targetRowCount - 1, { align: 'end' });
-    scheduleNextFrame(() => {
-      const latest = scrollStateRef.current;
-      if (
-        latest.command.type === 'none'
-        || latest.command.targetRowCount !== current.command.targetRowCount
-        || latest.command.targetRowKey !== current.command.targetRowKey
-      ) {
-        return;
-      }
-      forceCompleteBottomCommand();
-    });
-  }, [forceCompleteBottomCommand]);
+    const targetRowCount = current.command.targetRowCount;
+    const targetRowKey = current.command.targetRowKey;
+    const targetIndex = Math.max(0, targetRowCount - 1);
+
+    const runAttempt = (attempt: number) => {
+      targetVirtualizer.scrollToIndex(targetIndex, { align: 'end' });
+      scheduleNextFrame(() => {
+        const latest = scrollStateRef.current;
+        if (
+          latest.command.type === 'none'
+          || latest.command.targetRowCount !== targetRowCount
+          || latest.command.targetRowKey !== targetRowKey
+        ) {
+          return;
+        }
+        const viewport = viewportRef.current;
+        if (viewport && readViewportNearBottom(viewport, stickyBottomThresholdPx)) {
+          dispatch({ type: 'BOTTOM_REACHED' });
+          return;
+        }
+        if (attempt >= CHAT_SCROLL_COMMAND_MAX_ATTEMPTS) {
+          dispatch({ type: 'BOTTOM_REACHED' });
+          return;
+        }
+        runAttempt(attempt + 1);
+      });
+    };
+
+    runAttempt(1);
+  }, [stickyBottomThresholdPx, viewportRef]);
 
   useLayoutEffect(() => {
     maybeCompleteBottomCommandRef.current = maybeCompleteBottomCommand;
@@ -174,6 +198,32 @@ export function useChatScrollOrchestrator({
           || prevMetrics.scrollHeight !== nextMetrics.scrollHeight
           || prevMetrics.clientHeight !== nextMetrics.clientHeight;
         if (changed) {
+          const currentScrollState = scrollStateRef.current;
+          if (
+            prevMetrics
+            && currentScrollState.mode !== 'detached'
+          ) {
+            const wasNearBottomBeforeResize = isChatViewportNearBottom({
+              scrollHeight: prevMetrics.scrollHeight,
+              scrollTop: activeViewport.scrollTop,
+              clientHeight: prevMetrics.clientHeight,
+            }, stickyBottomThresholdPx);
+            const shouldLockBottom = (
+              wasNearBottomBeforeResize
+              || currentScrollState.command.type !== 'none'
+              || currentScrollState.mode === 'opening'
+            );
+            if (shouldLockBottom) {
+              const compensatedScrollTop = computeBottomLockedScrollTopOnResize(
+                prevMetrics,
+                nextMetrics,
+                activeViewport.scrollTop,
+              );
+              if (compensatedScrollTop != null) {
+                activeViewport.scrollTop = compensatedScrollTop;
+              }
+            }
+          }
           lastResizeMetricsRef.current = nextMetrics;
           didResize = true;
           dispatch({ type: 'CONTENT_RESIZED' });
@@ -193,7 +243,7 @@ export function useChatScrollOrchestrator({
     }
 
     return () => observer.disconnect();
-  }, [contentRef, viewportRef]);
+  }, [contentRef, stickyBottomThresholdPx, viewportRef]);
 
   useLayoutEffect(() => {
     if (lastSessionKeyRef.current === currentSessionKey) {

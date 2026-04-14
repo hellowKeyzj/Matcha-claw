@@ -68,14 +68,17 @@ export const useCronStore = create<CronState>((set, get) => ({
   mutatingByJobId: {},
   error: null,
   
-  fetchJobs: async (_options) => {
+  fetchJobs: async (options) => {
+    const silent = options?.silent === true;
     if (inflightCronFetchPromise) {
       await inflightCronFetchPromise;
       return;
     }
     const hasSnapshot = get().snapshotReady;
     if (hasSnapshot) {
-      set({ refreshing: true, initialLoading: false, error: null });
+      if (!silent) {
+        set({ refreshing: true, initialLoading: false, error: null });
+      }
     } else {
       set({ initialLoading: true, refreshing: false, error: null });
     }

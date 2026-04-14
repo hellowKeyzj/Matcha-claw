@@ -5,7 +5,6 @@ import { logger } from '../utils/logger';
 import type { HostApiContext } from './context';
 import { handleAppRoutes } from './routes/app';
 import { handleGatewayRoutes } from './routes/gateway';
-import { handlePluginRoutes } from './routes/plugins';
 import { handleRuntimeHostInternalRoutes } from './routes/runtime-host-internal';
 import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
@@ -25,7 +24,6 @@ const mainOwnedHandlers: RouteHandler[] = [
   handleRuntimeHostInternalRoutes,
   handleAppRoutes,
   handleGatewayRoutes,
-  handlePluginRoutes,
   handleFileRoutes,
   handleDiagnosticsRoutes,
   handleLogRoutes,

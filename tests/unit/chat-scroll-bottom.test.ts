@@ -11,7 +11,10 @@ import {
   reduceChatScrollState,
   shouldExecuteChatScrollCommand,
 } from '@/pages/Chat/chat-scroll-machine';
-import { isChatViewportNearBottom } from '@/pages/Chat/useChatScrollOrchestrator';
+import {
+  computeBottomLockedScrollTopOnResize,
+  isChatViewportNearBottom,
+} from '@/pages/Chat/useChatScrollOrchestrator';
 
 describe('chat 行模型', () => {
   it('运行态无附加行时，应复用静态行引用避免额外重建', () => {
@@ -96,7 +99,7 @@ describe('chat 行模型', () => {
     });
 
     expect(rows.map((row) => row.kind)).toEqual(['message', 'streaming']);
-    expect(rows.at(-1)?.key).toBe('streaming:agent:main:main');
+    expect(rows.at(-1)?.key).toBe('runtime:agent:main:main');
   });
 
   it('不同会话里相同 message.id 的行 key 必须隔离，避免虚拟列表缓存串会话', () => {
@@ -134,6 +137,46 @@ describe('chat 行模型', () => {
     expect(rowsA[0]?.key).not.toBe(rowsB[0]?.key);
   });
 
+  it('无 id 消息在 history 对象替换后应保持稳定 key，避免虚拟列表闪跳', () => {
+    const firstRows = buildChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          role: 'assistant',
+          content: '同一条历史消息',
+          timestamp: 123,
+        } satisfies RawMessage,
+      ],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+
+    const secondRows = buildChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          role: 'assistant',
+          content: '同一条历史消息',
+          timestamp: 123,
+        } satisfies RawMessage,
+      ],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+
+    expect(firstRows[0]?.key).toBe(secondRows[0]?.key);
+  });
+
   it('只有处理中提示时，应把它作为 activity 行加入虚拟列表', () => {
     const rows = buildChatRows({
       sessionKey: 'agent:main:main',
@@ -148,7 +191,7 @@ describe('chat 行模型', () => {
     });
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: 'activity', key: 'activity:agent:main:main' });
+    expect(rows[0]).toMatchObject({ kind: 'activity', key: 'runtime:agent:main:main' });
   });
 
   it('只有打字提示时，应把它作为 typing 行加入虚拟列表', () => {
@@ -165,7 +208,7 @@ describe('chat 行模型', () => {
     });
 
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: 'typing', key: 'typing:agent:main:main' });
+    expect(rows[0]).toMatchObject({ kind: 'typing', key: 'runtime:agent:main:main' });
   });
 
   it('有执行图时，应在锚点消息后插入 execution_graph 行', () => {
@@ -388,4 +431,34 @@ describe('chat 底部阈值判断', () => {
     }, 120)).toBe(false);
   });
 
+});
+
+describe('chat resize 底部锚点补偿', () => {
+  it('内容高度上涨时，应按增量补偿 scrollTop 以保持吸底', () => {
+    const nextTop = computeBottomLockedScrollTopOnResize(
+      { scrollHeight: 1000, clientHeight: 320 },
+      { scrollHeight: 1140, clientHeight: 320 },
+      680,
+    );
+    expect(nextTop).toBe(820);
+  });
+
+  it('视口高度变化时，应同时考虑 clientHeight 差值', () => {
+    const nextTop = computeBottomLockedScrollTopOnResize(
+      { scrollHeight: 1200, clientHeight: 400 },
+      { scrollHeight: 1260, clientHeight: 360 },
+      800,
+    );
+    // delta = +60 - (-40) = +100
+    expect(nextTop).toBe(900);
+  });
+
+  it('变化不足阈值时，不应触发补偿', () => {
+    const nextTop = computeBottomLockedScrollTopOnResize(
+      { scrollHeight: 1000, clientHeight: 320 },
+      { scrollHeight: 1000.2, clientHeight: 320 },
+      680,
+    );
+    expect(nextTop).toBeNull();
+  });
 });

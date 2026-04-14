@@ -157,7 +157,7 @@ describe('chat session labeling', () => {
 
     const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
     expect(userMessages).toHaveLength(1);
-    expect(userMessages[0]?.id).toBe('gateway-user-1');
+    expect(userMessages[0]?.id).toBe('optimistic-user-1');
   });
 
   it('loadSessions 仅使用 sessions.list 元数据，不触发 chat.history 扇出请求', async () => {

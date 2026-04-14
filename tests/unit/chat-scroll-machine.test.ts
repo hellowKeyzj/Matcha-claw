@@ -40,7 +40,7 @@ describe('chat scroll machine', () => {
     expect(settled.command.type).toBe('none');
   });
 
-  it('sticky 状态下末尾追加消息，应生成 follow-append；用户主动上翻后应进入 detached', () => {
+  it('sticky 状态下末尾追加消息，应生成 follow-append；命令完成后用户主动上翻应进入 detached', () => {
     const initial = createInitialChatScrollState({
       sessionKey: 'agent:main:main',
       lastRowKey: 'row-3',
@@ -70,7 +70,10 @@ describe('chat scroll machine', () => {
     expect(scrolledAway.mode).toBe('sticky');
     expect(scrolledAway.command.type).toBe('follow-append');
 
-    const withIntent = reduceChatScrollState(scrolledAway, {
+    const settled = reduceChatScrollState(scrolledAway, {
+      type: 'BOTTOM_REACHED',
+    });
+    const withIntent = reduceChatScrollState(settled, {
       type: 'USER_SCROLL_INTENT',
       atMs: 1_050,
     });
@@ -137,5 +140,34 @@ describe('chat scroll machine', () => {
     expect(moved.mode).toBe('sticky');
     expect(moved.command.type).toBe('follow-append');
     expect(moved.programmaticScrollInFlight).toBe(true);
+  });
+
+  it('命令已排队但尚未标记 inFlight 时，瞬时非底部位置不应误判为用户脱底', () => {
+    const sticky = reduceChatScrollState(
+      createInitialChatScrollState({
+        sessionKey: 'agent:main:main',
+        lastRowKey: 'row-2',
+        rowCount: 2,
+      }),
+      { type: 'BOTTOM_REACHED' },
+    );
+    const withIntent = reduceChatScrollState(sticky, {
+      type: 'USER_SCROLL_INTENT',
+      atMs: 1_000,
+    });
+    const appended = reduceChatScrollState(withIntent, {
+      type: 'ROWS_CHANGED',
+      lastRowKey: 'row-3',
+      rowCount: 3,
+    });
+    const transientNotBottom = reduceChatScrollState(appended, {
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom: false,
+      atMs: 1_050,
+    });
+
+    expect(transientNotBottom.mode).toBe('sticky');
+    expect(transientNotBottom.command.type).toBe('follow-append');
+    expect(transientNotBottom.programmaticScrollInFlight).toBe(false);
   });
 });

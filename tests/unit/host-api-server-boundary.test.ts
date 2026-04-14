@@ -4,7 +4,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 const hoisted = vi.hoisted(() => ({
   handleAppRoutesMock: vi.fn(async () => false),
   handleGatewayRoutesMock: vi.fn(async () => false),
-  handlePluginRoutesMock: vi.fn(async () => false),
   handleRuntimeHostInternalRoutesMock: vi.fn(async () => false),
   handleFileRoutesMock: vi.fn(async () => false),
   handleDiagnosticsRoutesMock: vi.fn(async () => false),
@@ -19,10 +18,6 @@ vi.mock('../../electron/api/routes/app', () => ({
 
 vi.mock('../../electron/api/routes/gateway', () => ({
   handleGatewayRoutes: (...args: unknown[]) => hoisted.handleGatewayRoutesMock(...args),
-}));
-
-vi.mock('../../electron/api/routes/plugins', () => ({
-  handlePluginRoutes: (...args: unknown[]) => hoisted.handlePluginRoutesMock(...args),
 }));
 
 vi.mock('../../electron/api/routes/runtime-host-internal', () => ({
