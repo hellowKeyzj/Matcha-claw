@@ -39,6 +39,7 @@ interface SettingsState {
   // UI State
   sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
+  chatHistoryPipelineStrategyKey: string;
 
   // Setup
   setupComplete: boolean;
@@ -63,6 +64,7 @@ interface SettingsState {
   setAutoDownloadUpdate: (value: boolean) => void;
   setSidebarCollapsed: (value: boolean) => void;
   setDevModeUnlocked: (value: boolean) => void;
+  setChatHistoryPipelineStrategyKey: (value: string) => void;
   markSetupComplete: () => void;
   resetSettings: () => Promise<void>;
 }
@@ -84,6 +86,7 @@ const defaultSettings = {
   autoDownloadUpdate: false,
   sidebarCollapsed: false,
   devModeUnlocked: false,
+  chatHistoryPipelineStrategyKey: '',
   setupComplete: false,
   initialized: false,
 };
@@ -186,6 +189,11 @@ export const useSettingsStore = create<SettingsState>()(
       setDevModeUnlocked: (devModeUnlocked) => {
         set({ devModeUnlocked });
         void hostSettingsPutValue('devModeUnlocked', devModeUnlocked).catch(() => {});
+      },
+      setChatHistoryPipelineStrategyKey: (value) => {
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        set({ chatHistoryPipelineStrategyKey: normalized });
+        void hostSettingsPutValue('chatHistoryPipelineStrategyKey', normalized).catch(() => {});
       },
       markSetupComplete: () => {
         set({ setupComplete: true });
