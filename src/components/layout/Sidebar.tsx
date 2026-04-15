@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
-import { useChatStore } from '@/stores/chat';
+import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
@@ -32,6 +32,7 @@ import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
+import type { TeamMailboxMessage } from '@/features/teams/api/runtime-client';
 import { useTranslation } from 'react-i18next';
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -64,6 +65,11 @@ interface PendingBlockerCard {
   sessionKey?: string;
 }
 
+const EMPTY_TEAM_MAILBOX: TeamMailboxMessage[] = [];
+const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
+const teamMailboxCardsCacheByMailboxRef = new WeakMap<TeamMailboxMessage[], Map<string, PendingBlockerCard[]>>();
+const approvalCardsCacheByApprovalsRef = new WeakMap<ApprovalItem[], Map<string, PendingBlockerCard[]>>();
+
 function simplifyMessage(content: string): string {
   const normalized = String(content || '').replace(/\s+/g, ' ').trim();
   if (normalized.length <= 72) {
@@ -92,6 +98,91 @@ const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
 type PrefetchScheduleHandle =
   | { type: 'idle'; id: number }
   | { type: 'timeout'; id: number };
+
+function buildTeamMailboxBlockerCards(input: {
+  teamId: string;
+  teamName: string;
+  mailbox: TeamMailboxMessage[];
+  t: (key: string, options?: Record<string, unknown>) => string;
+}): PendingBlockerCard[] {
+  if (input.mailbox.length === 0) {
+    return [];
+  }
+  const cards: PendingBlockerCard[] = [];
+  const startIndex = Math.max(0, input.mailbox.length - TEAM_MAILBOX_SCAN_LIMIT);
+  const latestDecisionAtByTask = new Map<string, number>();
+
+  for (let index = input.mailbox.length - 1; index >= startIndex; index -= 1) {
+    const message = input.mailbox[index];
+    if (message.kind !== 'decision' || !message.relatedTaskId) {
+      continue;
+    }
+    const prev = latestDecisionAtByTask.get(message.relatedTaskId) ?? 0;
+    if (message.createdAt > prev) {
+      latestDecisionAtByTask.set(message.relatedTaskId, message.createdAt);
+    }
+  }
+
+  let perTeamCards = 0;
+  for (let index = input.mailbox.length - 1; index >= startIndex; index -= 1) {
+    if (perTeamCards >= TEAM_MAILBOX_CARD_LIMIT) {
+      break;
+    }
+    const message = input.mailbox[index];
+    if (message.kind !== 'question' || !message.relatedTaskId) {
+      continue;
+    }
+    const decidedAt = latestDecisionAtByTask.get(message.relatedTaskId) ?? 0;
+    if (decidedAt >= message.createdAt) {
+      continue;
+    }
+    cards.push({
+      id: `team:${input.teamId}:${message.msgId}`,
+      source: 'team_mailbox',
+      teamId: input.teamId,
+      teamName: input.teamName,
+      title: input.t('sidebar.pendingBlockerTask', { taskId: message.relatedTaskId }),
+      content: message.content,
+      from: message.fromAgentId,
+      createdAt: message.createdAt,
+    });
+    perTeamCards += 1;
+  }
+
+  return cards;
+}
+
+function buildApprovalBlockerCards(input: {
+  sessionKey: string;
+  approvals: ApprovalItem[];
+  sessionLabel: string;
+  approvalTitlePrefix: string;
+  approvalHint: string;
+}): PendingBlockerCard[] {
+  if (input.approvals.length === 0) {
+    return [];
+  }
+  const cards: PendingBlockerCard[] = [];
+  const startIndex = Math.max(0, input.approvals.length - CHAT_APPROVAL_SCAN_LIMIT);
+  for (let index = input.approvals.length - 1; index >= startIndex; index -= 1) {
+    const approval = input.approvals[index];
+    const toolName = typeof approval.toolName === 'string' && approval.toolName.trim().length > 0
+      ? approval.toolName.trim()
+      : 'tool-call';
+    cards.push({
+      id: `chat-approval:${approval.id}`,
+      source: 'chat_approval',
+      teamId: '',
+      teamName: input.sessionLabel,
+      title: `${input.approvalTitlePrefix} · ${toolName}`,
+      content: input.approvalHint,
+      from: approval.id,
+      createdAt: approval.createdAtMs,
+      sessionKey: input.sessionKey,
+    });
+  }
+  return cards;
+}
 
 function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   return (
@@ -134,7 +225,7 @@ function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate
 }
 
 const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
@@ -146,105 +237,95 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const deferredSessionLabels = useDeferredValue(sessionLabels);
   const deferredChatSessions = useDeferredValue(chatSessions);
 
-  const pendingBlockers = useMemo<PendingBlockerCard[]>(() => {
+  const teamMailboxCards = useMemo(() => {
     const cards: PendingBlockerCard[] = [];
+
     for (const team of deferredTeams) {
-      const mailbox = deferredMailboxByTeamId[team.id] ?? [];
-      if (mailbox.length === 0) {
-        continue;
+      const mailbox = deferredMailboxByTeamId[team.id] ?? EMPTY_TEAM_MAILBOX;
+      let variants = teamMailboxCardsCacheByMailboxRef.get(mailbox);
+      if (!variants) {
+        variants = new Map<string, PendingBlockerCard[]>();
+        teamMailboxCardsCacheByMailboxRef.set(mailbox, variants);
       }
-      const startIndex = Math.max(0, mailbox.length - TEAM_MAILBOX_SCAN_LIMIT);
-
-      const latestDecisionAtByTask = new Map<string, number>();
-      for (let index = mailbox.length - 1; index >= startIndex; index -= 1) {
-        const message = mailbox[index];
-        if (message.kind !== 'decision' || !message.relatedTaskId) {
-          continue;
-        }
-        const prev = latestDecisionAtByTask.get(message.relatedTaskId) ?? 0;
-        if (message.createdAt > prev) {
-          latestDecisionAtByTask.set(message.relatedTaskId, message.createdAt);
-        }
-      }
-
-      let perTeamCards = 0;
-      for (let index = mailbox.length - 1; index >= startIndex; index -= 1) {
-        if (perTeamCards >= TEAM_MAILBOX_CARD_LIMIT) {
-          break;
-        }
-        const message = mailbox[index];
-        if (message.kind !== 'question') {
-          continue;
-        }
-        if (!message.relatedTaskId) {
-          continue;
-        }
-        if (message.relatedTaskId) {
-          const decidedAt = latestDecisionAtByTask.get(message.relatedTaskId) ?? 0;
-          if (decidedAt >= message.createdAt) {
-            continue;
-          }
-        }
-        const title = message.relatedTaskId
-          ? t('sidebar.pendingBlockerTask', { taskId: message.relatedTaskId })
-          : t('sidebar.pendingBlockerGeneral');
-        cards.push({
-          id: `team:${team.id}:${message.msgId}`,
-          source: 'team_mailbox',
+      const variantKey = `${team.id}|${team.name}|${i18n.language}`;
+      let teamCards = variants.get(variantKey);
+      if (!teamCards) {
+        teamCards = buildTeamMailboxBlockerCards({
           teamId: team.id,
           teamName: team.name,
-          title,
-          content: message.content,
-          from: message.fromAgentId,
-          createdAt: message.createdAt,
+          mailbox,
+          t,
         });
-        perTeamCards += 1;
+        variants.set(variantKey, teamCards);
+      }
+      if (teamCards.length > 0) {
+        cards.push(...teamCards);
       }
     }
 
+    return cards;
+  }, [deferredMailboxByTeamId, deferredTeams, i18n.language, t]);
+
+  const approvalCards = useMemo(() => {
     const sessionDisplayNameByKey = new Map(
       deferredChatSessions.map((session) => [session.key, session.displayName || session.key]),
     );
-    let approvalCards = 0;
-    for (const [sessionKey, approvals] of Object.entries(deferredPendingApprovalsBySession)) {
-      const startIndex = Math.max(0, approvals.length - CHAT_APPROVAL_SCAN_LIMIT);
-      for (let index = approvals.length - 1; index >= startIndex; index -= 1) {
-        if (approvalCards >= CHAT_APPROVAL_SCAN_LIMIT) {
-          break;
-        }
-        const approval = approvals[index];
-        const toolName = typeof approval.toolName === 'string' && approval.toolName.trim().length > 0
-          ? approval.toolName.trim()
-          : 'tool-call';
-        const sessionLabel = deferredSessionLabels[sessionKey]
-          || sessionDisplayNameByKey.get(sessionKey)
-          || sessionKey;
-        cards.push({
-          id: `chat-approval:${approval.id}`,
-          source: 'chat_approval',
-          teamId: '',
-          teamName: sessionLabel,
-          title: `${t('sidebar.pendingBlockerTypeApproval')} · ${toolName}`,
-          content: t('sidebar.pendingBlockerApprovalHint'),
-          from: approval.id,
-          createdAt: approval.createdAtMs,
+    const cards: PendingBlockerCard[] = [];
+    let approvalCardsCount = 0;
+    const approvalTitlePrefix = t('sidebar.pendingBlockerTypeApproval');
+    const approvalHint = t('sidebar.pendingBlockerApprovalHint');
+
+    for (const [sessionKey, approvalItems] of Object.entries(deferredPendingApprovalsBySession)) {
+      if (approvalCardsCount >= CHAT_APPROVAL_SCAN_LIMIT) {
+        break;
+      }
+      const approvals = approvalItems ?? EMPTY_APPROVAL_ITEMS;
+      const sessionLabel = deferredSessionLabels[sessionKey]
+        || sessionDisplayNameByKey.get(sessionKey)
+        || sessionKey;
+      let variants = approvalCardsCacheByApprovalsRef.get(approvals);
+      if (!variants) {
+        variants = new Map<string, PendingBlockerCard[]>();
+        approvalCardsCacheByApprovalsRef.set(approvals, variants);
+      }
+      const variantKey = `${sessionKey}|${sessionLabel}|${i18n.language}|${approvalTitlePrefix}|${approvalHint}`;
+      let sessionCards = variants.get(variantKey);
+      if (!sessionCards) {
+        sessionCards = buildApprovalBlockerCards({
           sessionKey,
+          approvals,
+          sessionLabel,
+          approvalTitlePrefix,
+          approvalHint,
         });
-        approvalCards += 1;
+        variants.set(variantKey, sessionCards);
+      }
+      if (sessionCards.length === 0) {
+        continue;
+      }
+      const remain = CHAT_APPROVAL_SCAN_LIMIT - approvalCardsCount;
+      if (sessionCards.length <= remain) {
+        cards.push(...sessionCards);
+        approvalCardsCount += sessionCards.length;
+      } else {
+        cards.push(...sessionCards.slice(0, remain));
+        approvalCardsCount += remain;
       }
     }
-
-    return cards
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
+    return cards;
   }, [
     deferredChatSessions,
-    deferredMailboxByTeamId,
     deferredPendingApprovalsBySession,
     deferredSessionLabels,
-    deferredTeams,
+    i18n.language,
     t,
   ]);
+
+  const pendingBlockers = useMemo<PendingBlockerCard[]>(() => {
+    return [...teamMailboxCards, ...approvalCards]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
+  }, [approvalCards, teamMailboxCards]);
 
   return (
     <section className="mt-4 rounded-[1rem] border border-border/80 bg-secondary/55 p-2.5">

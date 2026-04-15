@@ -1,138 +1,177 @@
-import { hostApiFetch, hostGatewayRequest } from '@/lib/host-api';
-import { getCanonicalPrefixFromSessions, getMessageText, toMs } from './helpers';
-import { DEFAULT_CANONICAL_PREFIX, DEFAULT_SESSION_KEY, type ChatSession, type RawMessage } from './types';
-import type { ChatGet, ChatSet, SessionHistoryActions } from './store-api';
+import { hostApiFetch } from '@/lib/host-api';
+import { useGatewayStore } from '../gateway';
+import {
+  getCanonicalPrefixFromSessions,
+  isTrulyEmptyNonMainSession,
+  parseSessionUpdatedAtMs,
+  resolveCanonicalPrefixForAgent,
+  resolvePreferredSessionKeyForAgent,
+  shouldKeepMissingCurrentSession,
+} from './session-helpers';
+import { clearPendingDeltaBatch } from './delta-frame-helpers';
+import {
+  clearErrorRecoveryTimer,
+  clearHistoryPoll,
+  setHistoryPollTimer,
+} from './timers';
+import { resetToolSnapshotTxnState } from './tool-snapshot-txn';
+import {
+  areSessionsEquivalent,
+  createEmptySessionRuntime,
+  resolveSessionRuntime,
+  snapshotCurrentSessionRuntime,
+} from './store-state-helpers';
+import { reduceRuntimeOverlay } from './overlay-reducer';
+import type { StoreHistoryCache } from './history-cache';
+import type {
+  ChatSession,
+  ChatStoreState,
+  SessionRuntimeSnapshot,
+} from './types';
 
-function parseSessionUpdatedAtMs(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return toMs(value);
+const SESSION_RUNTIME_CACHE_MAX_SESSIONS = 48;
+
+type ChatStoreSetFn = (
+  partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+  replace?: false,
+) => void;
+
+type ChatStoreGetFn = () => ChatStoreState;
+
+interface CreateStoreSessionActionsInput {
+  set: ChatStoreSetFn;
+  get: ChatStoreGetFn;
+  beginMutating: () => void;
+  finishMutating: () => void;
+  defaultCanonicalPrefix: string;
+  defaultSessionKey: string;
+  historyRuntime: StoreHistoryCache;
+}
+
+type StoreSessionActions = Pick<
+  ChatStoreState,
+  'loadSessions' | 'openAgentConversation' | 'switchSession' | 'deleteSession' | 'newSession' | 'cleanupEmptySession'
+>;
+
+function scheduleNextFrame(task: () => void): void {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => task());
+    return;
   }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
+  setTimeout(task, 16);
+}
+
+function scheduleIdleTask(task: () => void, timeoutMs = 1000): void {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      win.requestIdleCallback(() => task(), { timeout: timeoutMs });
+      return;
     }
   }
-  return undefined;
+  setTimeout(task, 80);
 }
 
-function resolveCanonicalPrefixForAgent(agentId?: string): string | null {
-  if (typeof agentId !== 'string') {
-    return null;
-  }
-  const normalized = agentId.trim();
-  if (!normalized) {
-    return null;
-  }
-  return `agent:${normalized}`;
-}
-
-function parseAgentIdFromSessionKey(sessionKey: string): string | null {
-  const matched = sessionKey.match(/^agent:([^:]+):/i);
-  return matched?.[1] ?? null;
-}
-
-function parseSessionTimestampMs(sessionKey: string): number | null {
-  const suffix = sessionKey.split(':').slice(2).join(':') || sessionKey;
-  const matched = suffix.match(/session-(\d{8,16})/i);
-  if (!matched) return null;
-  const raw = Number(matched[1]);
-  if (!Number.isFinite(raw)) return null;
-  return matched[1].length <= 10 ? raw * 1000 : raw;
-}
-
-function resolveSessionActivityMs(
-  session: ChatSession,
-  sessionLastActivity: Record<string, number>,
-): number {
-  const fromStore = sessionLastActivity[session.key];
-  if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
-    return fromStore;
-  }
-  if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
-    return session.updatedAt;
-  }
-  return parseSessionTimestampMs(session.key) ?? 0;
-}
-
-function resolvePreferredSessionKeyForAgent(
-  agentId: string,
-  sessions: ChatSession[],
-  sessionLastActivity: Record<string, number>,
-): string | null {
-  const canonicalKey = `agent:${agentId}:main`;
-  const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
-  if (owned.length === 0) {
-    return null;
-  }
-  if (owned.some((session) => session.key === canonicalKey)) {
-    return canonicalKey;
-  }
-  const sorted = [...owned].sort((left, right) => {
-    const leftActivity = resolveSessionActivityMs(left, sessionLastActivity);
-    const rightActivity = resolveSessionActivityMs(right, sessionLastActivity);
-    if (leftActivity !== rightActivity) {
-      return rightActivity - leftActivity;
-    }
-    return left.key.localeCompare(right.key);
-  });
-  return sorted[0]?.key ?? null;
-}
-
-function shouldKeepMissingCurrentSession(
+function clearSessionHistoryFingerprints(
+  historyRuntime: StoreHistoryCache,
   sessionKey: string,
-  state: Pick<ReturnType<ChatGet>, 'messages' | 'sessionLabels' | 'sessionLastActivity'>,
-  backendSessionCount: number,
-): boolean {
+): void {
+  historyRuntime.historyFingerprintBySession.delete(sessionKey);
+  historyRuntime.historyProbeFingerprintBySession.delete(sessionKey);
+  historyRuntime.historyQuickFingerprintBySession.delete(sessionKey);
+  historyRuntime.historyRenderFingerprintBySession.delete(sessionKey);
+}
+
+function touchSessionRuntimeSnapshot(
+  runtimeByKey: Record<string, SessionRuntimeSnapshot>,
+  sessionKey: string,
+  snapshot?: SessionRuntimeSnapshot,
+): void {
   if (!sessionKey) {
-    return false;
+    return;
   }
-  if (backendSessionCount === 0) {
-    return true;
+  const value = snapshot ?? runtimeByKey[sessionKey];
+  if (!value) {
+    return;
   }
-  const hasMessages = state.messages.length > 0;
-  const hasLabel = Boolean(state.sessionLabels[sessionKey]);
-  const hasActivity = Boolean(state.sessionLastActivity[sessionKey]);
-  if (!sessionKey.endsWith(':main')) {
-    // Keep only local draft sessions (created but still truly empty).
-    return !hasMessages && !hasLabel && !hasActivity;
+  if (Object.prototype.hasOwnProperty.call(runtimeByKey, sessionKey)) {
+    delete runtimeByKey[sessionKey];
   }
-  return hasMessages || hasLabel || hasActivity;
+  runtimeByKey[sessionKey] = value;
 }
 
-function isTrulyEmptyNonMainSession(
-  currentSessionKey: string,
-  state: Pick<ReturnType<ChatGet>, 'messages' | 'sessionLastActivity' | 'sessionLabels'>,
-): boolean {
-  return !currentSessionKey.endsWith(':main')
-    && state.messages.length === 0
-    && !state.sessionLastActivity[currentSessionKey]
-    && !state.sessionLabels[currentSessionKey];
+function trimSessionRuntimeSnapshots(
+  runtimeByKey: Record<string, SessionRuntimeSnapshot>,
+  keepSessionKeys: string[],
+): void {
+  const keys = Object.keys(runtimeByKey);
+  if (keys.length <= SESSION_RUNTIME_CACHE_MAX_SESSIONS) {
+    return;
+  }
+
+  const keepSet = new Set(keepSessionKeys.filter((key) => typeof key === 'string' && key.trim().length > 0));
+  for (const [sessionKey, runtime] of Object.entries(runtimeByKey)) {
+    if (runtime?.sending) {
+      keepSet.add(sessionKey);
+    }
+  }
+
+  let overflow = keys.length - SESSION_RUNTIME_CACHE_MAX_SESSIONS;
+  for (const sessionKey of keys) {
+    if (overflow <= 0) {
+      break;
+    }
+    if (keepSet.has(sessionKey)) {
+      continue;
+    }
+    delete runtimeByKey[sessionKey];
+    overflow -= 1;
+  }
+
+  if (overflow <= 0) {
+    return;
+  }
+
+  const hardKeepSet = new Set(keepSessionKeys.filter((key) => typeof key === 'string' && key.trim().length > 0));
+  for (const sessionKey of Object.keys(runtimeByKey)) {
+    if (overflow <= 0) {
+      break;
+    }
+    if (hardKeepSet.has(sessionKey)) {
+      continue;
+    }
+    delete runtimeByKey[sessionKey];
+    overflow -= 1;
+  }
 }
 
-export function createSessionActions(
-  set: ChatSet,
-  get: ChatGet,
-): Pick<SessionHistoryActions, 'loadSessions' | 'openAgentConversation' | 'switchSession' | 'newSession' | 'deleteSession' | 'cleanupEmptySession'> {
+export function createStoreSessionActions(input: CreateStoreSessionActionsInput): StoreSessionActions {
+  const {
+    set,
+    get,
+    beginMutating,
+    finishMutating,
+    defaultCanonicalPrefix,
+    defaultSessionKey,
+    historyRuntime,
+  } = input;
+
   return {
     loadSessions: async () => {
       try {
-        const result = await hostGatewayRequest<Record<string, unknown>>(
-          'sessions.list',
-          {},
-        );
-
-        if (result.success && result.result) {
-          const data = result.result;
+        const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
+        if (data) {
           const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
-          const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => ({
-            key: String(s.key || ''),
-            label: s.label ? String(s.label) : undefined,
-            displayName: s.displayName ? String(s.displayName) : undefined,
-            thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
-            model: s.model ? String(s.model) : undefined,
-            updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
-          })).filter((s: ChatSession) => s.key);
+          const sessions: ChatSession[] = rawSessions.map((session: Record<string, unknown>) => ({
+            key: String(session.key || ''),
+            label: session.label ? String(session.label) : undefined,
+            displayName: session.displayName ? String(session.displayName) : undefined,
+            thinkingLevel: session.thinkingLevel ? String(session.thinkingLevel) : undefined,
+            model: session.model ? String(session.model) : undefined,
+            updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
+          })).filter((session: ChatSession) => session.key);
 
           const canonicalBySuffix = new Map<string, string>();
           for (const session of sessions) {
@@ -145,18 +184,17 @@ export function createSessionActions(
             }
           }
 
-          // Deduplicate: if both short and canonical existed, keep canonical only
           const seen = new Set<string>();
-          const dedupedSessions = sessions.filter((s) => {
-            if (!s.key.startsWith('agent:') && canonicalBySuffix.has(s.key)) return false;
-            if (seen.has(s.key)) return false;
-            seen.add(s.key);
+          const dedupedSessions = sessions.filter((session) => {
+            if (!session.key.startsWith('agent:') && canonicalBySuffix.has(session.key)) return false;
+            if (seen.has(session.key)) return false;
+            seen.add(session.key);
             return true;
           });
 
           const stateSnapshot = get();
           const { currentSessionKey } = stateSnapshot;
-          let nextSessionKey = currentSessionKey || DEFAULT_SESSION_KEY;
+          let nextSessionKey = currentSessionKey || defaultSessionKey;
           if (!nextSessionKey.startsWith('agent:')) {
             const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
             if (canonicalMatch) {
@@ -175,7 +213,6 @@ export function createSessionActions(
               nextSessionKey = dedupedSessions[0].key;
             }
           }
-
           const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
           const sessionsWithCurrent = !currentExistsInBackend && shouldKeepMissingCurrent && nextSessionKey
             ? [
@@ -189,56 +226,57 @@ export function createSessionActions(
               .filter((session) => typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt))
               .map((session) => [session.key, session.updatedAt!]),
           );
+          const discoveredLabels = Object.fromEntries(
+            sessionsWithCurrent
+              .map((session) => {
+                const explicit = (session.label || session.displayName || '').trim();
+                if (!explicit || explicit === session.key) {
+                  return null;
+                }
+                return [session.key, explicit] as const;
+              })
+              .filter((entry): entry is readonly [string, string] => entry != null),
+          );
 
-          set((state) => ({
-            sessions: sessionsWithCurrent,
-            currentSessionKey: nextSessionKey,
-            sessionLastActivity: {
-              ...state.sessionLastActivity,
-              ...discoveredActivity,
-            },
-          }));
+          const snapshot = get();
+          const sessionsChanged = !areSessionsEquivalent(snapshot.sessions, sessionsWithCurrent);
+          const sessionKeyChanged = snapshot.currentSessionKey !== nextSessionKey;
+          const discoveredActivityChanged = Object.entries(discoveredActivity).some(
+            ([sessionKey, updatedAt]) => snapshot.sessionLastActivity[sessionKey] !== updatedAt,
+          );
+          const discoveredLabelsChanged = Object.entries(discoveredLabels).some(
+            ([sessionKey, label]) => snapshot.sessionLabels[sessionKey] !== label,
+          );
 
-          if (currentSessionKey !== nextSessionKey) {
-            get().loadHistory();
-          }
+          if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
+            set((state) => {
+              const next: Partial<ChatStoreState> = {};
 
-          // Background: fetch first user message for every non-main session to populate labels upfront.
-          // Uses a small limit so it's cheap; runs in parallel and doesn't block anything.
-          const sessionsToLabel = sessionsWithCurrent.filter((s) => !s.key.endsWith(':main'));
-          if (sessionsToLabel.length > 0) {
-            void Promise.all(
-              sessionsToLabel.map(async (session) => {
-                try {
-                  const r = await hostGatewayRequest<Record<string, unknown>>(
-                    'chat.history',
-                    { sessionKey: session.key, limit: 1000 },
-                  );
-                  if (!r.success || !r.result) return;
-                  const msgs = Array.isArray(r.result.messages) ? r.result.messages as RawMessage[] : [];
-                  const firstUser = msgs.find((m) => m.role === 'user');
-                  const lastMsg = msgs[msgs.length - 1];
-                  set((s) => {
-                    const next: Partial<typeof s> = {};
-                    if (firstUser) {
-                      const labelText = getMessageText(firstUser.content).trim();
-                      if (labelText) {
-                        const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
-                        next.sessionLabels = { ...s.sessionLabels, [session.key]: truncated };
-                      }
-                    }
-                    if (lastMsg?.timestamp) {
-                      next.sessionLastActivity = { ...s.sessionLastActivity, [session.key]: toMs(lastMsg.timestamp) };
-                    }
-                    return next;
-                  });
-                } catch { /* ignore per-session errors */ }
-              }),
-            );
+              if (sessionsChanged) {
+                next.sessions = sessionsWithCurrent;
+              }
+              if (sessionKeyChanged) {
+                next.currentSessionKey = nextSessionKey;
+              }
+              if (discoveredActivityChanged) {
+                next.sessionLastActivity = {
+                  ...state.sessionLastActivity,
+                  ...discoveredActivity,
+                };
+              }
+              if (discoveredLabelsChanged) {
+                next.sessionLabels = {
+                  ...state.sessionLabels,
+                  ...discoveredLabels,
+                };
+              }
+
+              return next;
+            });
           }
         }
-      } catch (err) {
-        console.warn('Failed to load sessions:', err);
+      } catch {
+        void 0;
       }
     },
 
@@ -260,159 +298,264 @@ export function createSessionActions(
       get().newSession(normalized);
     },
 
-    // ── Switch session ──
-
     switchSession: (key: string) => {
+      if (key === get().currentSessionKey) {
+        return;
+      }
+      clearHistoryPoll();
+      clearErrorRecoveryTimer();
+      clearPendingDeltaBatch();
+      resetToolSnapshotTxnState();
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
-      set((s) => ({
+      if (leavingEmpty) {
+        clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+      }
+      const nextSessionRuntimeByKey = { ...state.sessionRuntimeByKey };
+
+      if (leavingEmpty) {
+        delete nextSessionRuntimeByKey[currentSessionKey];
+      } else {
+        touchSessionRuntimeSnapshot(
+          nextSessionRuntimeByKey,
+          currentSessionKey,
+          snapshotCurrentSessionRuntime(state),
+        );
+      }
+      touchSessionRuntimeSnapshot(nextSessionRuntimeByKey, key);
+      trimSessionRuntimeSnapshots(nextSessionRuntimeByKey, [currentSessionKey, key]);
+      const hasTargetRuntimeSnapshot = Object.prototype.hasOwnProperty.call(nextSessionRuntimeByKey, key);
+      const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
+      const targetPendingApprovals = state.pendingApprovalsBySession[key] ?? [];
+      const targetRuntimePatch = reduceRuntimeOverlay(state, {
+        type: 'session_runtime_restored',
+        targetRuntime,
+        currentPendingApprovals: targetPendingApprovals.length,
+      });
+      const targetSessionReady = Boolean(state.sessionReadyByKey[key])
+        || hasTargetRuntimeSnapshot
+        || historyRuntime.historyFingerprintBySession.has(key);
+      const nextSessionReadyByKey = (() => {
+        const next = { ...state.sessionReadyByKey };
+        if (leavingEmpty) {
+          delete next[currentSessionKey];
+        }
+        if (targetSessionReady) {
+          next[key] = true;
+        }
+        return next;
+      })();
+
+      set((stateValue) => ({
         currentSessionKey: key,
-        messages: [],
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
+        messages: targetRuntime.messages,
+        snapshotReady: state.snapshotReady || targetSessionReady,
+        initialLoading: false,
+        refreshing: false,
+        ...targetRuntimePatch,
         error: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
+        sessionReadyByKey: nextSessionReadyByKey,
+        sessionRuntimeByKey: nextSessionRuntimeByKey,
         ...(leavingEmpty ? {
-          sessions: s.sessions.filter((s) => s.key !== currentSessionKey),
+          sessions: stateValue.sessions.filter((session) => session.key !== currentSessionKey),
           sessionLabels: Object.fromEntries(
-            Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+            Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
           ),
           sessionLastActivity: Object.fromEntries(
-            Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+            Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey),
           ),
         } : {}),
       }));
-      get().loadHistory();
+      if (targetRuntime.sending) {
+        const POLL_INTERVAL = 4_000;
+        const pollHistory = () => {
+          const current = get();
+          if (!current.sending) {
+            clearHistoryPoll();
+            return;
+          }
+          if (!current.streamingMessage) {
+            void current.loadHistory(true);
+          }
+          setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL));
+        };
+        setHistoryPollTimer(setTimeout(pollHistory, 1_000));
+      }
+      const shouldQuietReload = targetSessionReady;
+      const shouldDeferQuietReload = shouldQuietReload && !targetRuntime.sending;
+      scheduleNextFrame(() => {
+        if (shouldDeferQuietReload) {
+          scheduleIdleTask(() => {
+            void get().loadHistory(true);
+          });
+          return;
+        }
+        void get().loadHistory(shouldQuietReload);
+      });
     },
-
-    // ── Delete session ──
-    //
-    // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
-    // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
-    // Deletion is therefore a local-only UI operation: the session is removed from
-    // the sidebar list and its labels/activity maps are cleared.  The underlying
-    // JSONL history file on disk is intentionally left intact, consistent with the
-    // newSession() design that avoids sessions.reset to preserve history.
 
     deleteSession: async (key: string) => {
-      // Soft-delete the session's JSONL transcript on disk.
-      // Host API renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
-      // sessions.list and token-usage queries both skip it automatically.
+      clearPendingDeltaBatch();
+      beginMutating();
       try {
-        const result = await hostApiFetch<{
-          success: boolean;
-          error?: string;
-        }>('/api/sessions/delete', {
-          method: 'POST',
-          body: JSON.stringify({ sessionKey: key }),
-        });
-        if (!result.success) {
-          console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
+        try {
+          await hostApiFetch<{
+            success: boolean;
+            error?: string;
+          }>('/api/sessions/delete', {
+            method: 'POST',
+            body: JSON.stringify({ sessionKey: key }),
+          });
+        } catch {
+          void 0;
         }
-      } catch (err) {
-        console.warn(`[deleteSession] Host API call failed for ${key}:`, err);
-      }
+        const { currentSessionKey, sessions } = get();
+        const remaining = sessions.filter((session) => session.key !== key);
+        clearSessionHistoryFingerprints(historyRuntime, key);
 
-      const { currentSessionKey, sessions } = get();
-      const remaining = sessions.filter((s) => s.key !== key);
-
-      if (currentSessionKey === key) {
-        // Switched away from deleted session — pick the first remaining or create new
-        const next = remaining[0];
-        set((s) => ({
-          sessions: remaining,
-          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-          messages: [],
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          activeRunId: null,
-          error: null,
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-          currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
-        }));
-        if (next) {
-          get().loadHistory();
+        if (currentSessionKey === key) {
+          clearHistoryPoll();
+          clearErrorRecoveryTimer();
+          const next = remaining[0];
+          set((state) => ({
+            ...(function buildNextState() {
+              const runtimeMap = Object.fromEntries(
+                Object.entries(state.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key),
+              );
+              const nextRuntime = resolveSessionRuntime(runtimeMap[next?.key ?? '']);
+              const nextPendingApprovalsCount = next?.key
+                ? (state.pendingApprovalsBySession[next.key] ?? []).length
+                : 0;
+              const nextRuntimePatch = reduceRuntimeOverlay(state, {
+                type: 'session_runtime_restored',
+                targetRuntime: nextRuntime,
+                currentPendingApprovals: nextPendingApprovalsCount,
+              });
+              return {
+                sessionRuntimeByKey: runtimeMap,
+                messages: nextRuntime.messages,
+                ...nextRuntimePatch,
+              };
+            })(),
+            sessions: remaining,
+            sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
+            sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
+            sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
+            pendingApprovalsBySession: Object.fromEntries(
+              Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
+            ),
+            error: null,
+            initialLoading: false,
+            refreshing: false,
+            currentSessionKey: next?.key ?? defaultSessionKey,
+          }));
+          if (next) {
+            get().loadHistory();
+          }
+        } else {
+          set((state) => ({
+            sessions: remaining,
+            sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
+            sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
+            sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
+            sessionRuntimeByKey: Object.fromEntries(Object.entries(state.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key)),
+            pendingApprovalsBySession: Object.fromEntries(
+              Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
+            ),
+          }));
         }
-      } else {
-        set((s) => ({
-          sessions: remaining,
-          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        }));
+      } finally {
+        finishMutating();
       }
     },
 
-    // ── New session ──
-
     newSession: (agentId?: string) => {
-      // Generate a new unique session key and switch to it.
-      // NOTE: We intentionally do NOT call sessions.reset on the old session.
-      // sessions.reset archives (renames) the session JSONL file, making old
-      // conversation history inaccessible when the user switches back to it.
+      clearHistoryPoll();
+      clearErrorRecoveryTimer();
+      clearPendingDeltaBatch();
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
+      if (leavingEmpty) {
+        clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+      }
       const prefix = resolveCanonicalPrefixForAgent(agentId)
         ?? getCanonicalPrefixFromSessions(get().sessions, currentSessionKey)
-        ?? DEFAULT_CANONICAL_PREFIX;
+        ?? defaultCanonicalPrefix;
       const newKey = `${prefix}:session-${Date.now()}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
-      set((s) => ({
+      set((stateValue) => ({
+        sessionRuntimeByKey: (() => {
+          const next = { ...stateValue.sessionRuntimeByKey };
+          if (leavingEmpty) {
+            delete next[currentSessionKey];
+          } else {
+            touchSessionRuntimeSnapshot(next, currentSessionKey, snapshotCurrentSessionRuntime(stateValue));
+          }
+          delete next[newKey];
+          trimSessionRuntimeSnapshots(next, [currentSessionKey, newKey]);
+          return next;
+        })(),
         currentSessionKey: newKey,
         sessions: [
-          ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
+          ...(leavingEmpty ? stateValue.sessions.filter((session) => session.key !== currentSessionKey) : stateValue.sessions),
           newSessionEntry,
         ],
         sessionLabels: leavingEmpty
-          ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
-          : s.sessionLabels,
+          ? Object.fromEntries(Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey))
+          : stateValue.sessionLabels,
         sessionLastActivity: leavingEmpty
-          ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
-          : s.sessionLastActivity,
-        messages: [],
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
+          ? Object.fromEntries(Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey))
+          : stateValue.sessionLastActivity,
+        sessionReadyByKey: (() => {
+          const next = { ...stateValue.sessionReadyByKey };
+          if (leavingEmpty) {
+            delete next[currentSessionKey];
+          }
+          next[newKey] = true;
+          return next;
+        })(),
+        pendingApprovalsBySession: (() => {
+          if (!leavingEmpty) return stateValue.pendingApprovalsBySession;
+          return Object.fromEntries(
+            Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+          );
+        })(),
+        ...createEmptySessionRuntime(),
+        snapshotReady: true,
+        initialLoading: false,
+        refreshing: false,
         error: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
       }));
     },
-
-    // ── Cleanup empty session on navigate away ──
 
     cleanupEmptySession: () => {
       const state = get();
       const { currentSessionKey } = state;
-      // Only remove non-main sessions that were never used (no messages sent).
-      // This mirrors the "leavingEmpty" logic in switchSession so that creating
-      // a new session and immediately navigating away doesn't leave a ghost entry
-      // in the sidebar.
       const isEmptyNonMain = isTrulyEmptyNonMainSession(currentSessionKey, state);
       if (!isEmptyNonMain) return;
-      set((s) => ({
-        sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
+      clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+      set((stateValue) => ({
+        sessions: stateValue.sessions.filter((session) => session.key !== currentSessionKey),
         sessionLabels: Object.fromEntries(
-          Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+          Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
         ),
         sessionLastActivity: Object.fromEntries(
-          Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+          Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+        ),
+        sessionReadyByKey: Object.fromEntries(
+          Object.entries(stateValue.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+        ),
+        sessionRuntimeByKey: Object.fromEntries(
+          Object.entries(stateValue.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+        ),
+        pendingApprovalsBySession: Object.fromEntries(
+          Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
         ),
       }));
     },
-
-    // ── Load chat history ──
-
   };
 }
+
+

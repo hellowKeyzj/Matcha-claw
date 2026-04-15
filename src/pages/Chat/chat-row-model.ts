@@ -1,6 +1,6 @@
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
-import type { TaskStep } from './task-visualization';
+import type { TaskStep } from './task-viz';
 
 export interface ExecutionGraphData {
   id: string;
@@ -405,3 +405,4 @@ export function buildChatRows({
     streamingTimestamp,
   });
 }
+

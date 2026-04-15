@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Sparkles, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import type { TaskStep } from './task-visualization';
+import type { TaskStep } from './task-viz';
 
 interface ExecutionGraphCardProps {
   agentLabel: string;
@@ -186,3 +186,4 @@ export function ExecutionGraphCard({
     </div>
   );
 }
+

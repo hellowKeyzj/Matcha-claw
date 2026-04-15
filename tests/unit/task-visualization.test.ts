@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { deriveTaskSteps, parseSubagentCompletionInfo } from '@/pages/Chat/task-visualization';
+import { deriveTaskSteps, parseSubagentCompletionInfo } from '@/pages/Chat/task-viz';
 
 describe('deriveTaskSteps', () => {
   it('builds running steps from streaming thinking and tool status', () => {
@@ -154,3 +154,4 @@ status: completed successfully`,
     });
   });
 });
+

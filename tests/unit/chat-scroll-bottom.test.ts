@@ -14,7 +14,7 @@ import {
 import {
   computeBottomLockedScrollTopOnResize,
   isChatViewportNearBottom,
-} from '@/pages/Chat/useChatScrollOrchestrator';
+} from '@/pages/Chat/useChatScroll';
 
 describe('chat 行模型', () => {
   it('运行态无附加行时，应复用静态行引用避免额外重建', () => {
@@ -462,3 +462,4 @@ describe('chat resize 底部锚点补偿', () => {
     expect(nextTop).toBeNull();
   });
 });
+

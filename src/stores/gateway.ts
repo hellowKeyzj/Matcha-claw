@@ -6,6 +6,12 @@ import { create } from 'zustand';
 import { hostApiFetch, hostGatewayRpc } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { GatewayStatus } from '../types/gateway';
+import {
+  normalizeGatewayNotificationEvent,
+  type ChatDomainEvent,
+  type ChatRuntimeDomainEvent,
+} from './chat/event-normalizer';
+import { subscribeChatConversationEvents } from './chat/transport-adapter';
 import { useChatStore } from './chat';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
@@ -68,111 +74,6 @@ interface GatewayState {
   rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   setStatus: (status: GatewayStatus) => void;
   clearError: () => void;
-}
-
-type GatewayConversationRunPhase = 'started' | 'completed' | 'error' | 'aborted';
-
-type GatewayConversationEvent =
-  | {
-    type: 'chat.message';
-    event: Record<string, unknown>;
-  }
-  | {
-    type: 'run.phase';
-    phase: GatewayConversationRunPhase;
-    runId?: string;
-    sessionKey?: string;
-  };
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function normalizeRunPhase(phaseRaw: unknown): GatewayConversationRunPhase | null {
-  const phase = typeof phaseRaw === 'string' ? phaseRaw.trim().toLowerCase() : '';
-  if (!phase) {
-    return null;
-  }
-  if (phase === 'started' || phase === 'start') {
-    return 'started';
-  }
-  if (phase === 'completed' || phase === 'done' || phase === 'finished' || phase === 'end') {
-    return 'completed';
-  }
-  if (phase === 'error' || phase === 'failed') {
-    return 'error';
-  }
-  if (phase === 'aborted' || phase === 'abort' || phase === 'cancelled' || phase === 'canceled') {
-    return 'aborted';
-  }
-  return null;
-}
-
-function parseStructuredGatewayChatEvent(data: unknown): Record<string, unknown> | null {
-  const candidate = asRecord(data);
-  if (!candidate) {
-    return null;
-  }
-  const rawState = typeof candidate.state === 'string' ? candidate.state.trim().toLowerCase() : '';
-  if (!rawState) {
-    return null;
-  }
-  const state = (rawState === 'completed' || rawState === 'done' || rawState === 'finished' || rawState === 'end')
-    ? 'final'
-    : rawState;
-  if (!state) {
-    return null;
-  }
-
-  const rawMessage = candidate.message;
-  if (rawMessage !== undefined && (typeof rawMessage !== 'object' || rawMessage == null || Array.isArray(rawMessage))) {
-    return null;
-  }
-
-  const runId = typeof candidate.runId === 'string' ? candidate.runId.trim() : '';
-  const sessionKey = typeof candidate.sessionKey === 'string' ? candidate.sessionKey.trim() : '';
-
-  return {
-    ...candidate,
-    state,
-    ...(runId ? { runId } : {}),
-    ...(sessionKey ? { sessionKey } : {}),
-  };
-}
-
-function parseGatewayConversationEvent(payload: unknown): GatewayConversationEvent | null {
-  const input = asRecord(payload);
-  if (!input) {
-    return null;
-  }
-  if (input.type === 'chat.message') {
-    const event = parseStructuredGatewayChatEvent(input.event);
-    if (!event) {
-      return null;
-    }
-    return {
-      type: 'chat.message',
-      event,
-    };
-  }
-  if (input.type === 'run.phase') {
-    const phase = normalizeRunPhase(input.phase);
-    if (!phase) {
-      return null;
-    }
-    const runId = typeof input.runId === 'string' ? input.runId.trim() : '';
-    const sessionKey = typeof input.sessionKey === 'string' ? input.sessionKey.trim() : '';
-    return {
-      type: 'run.phase',
-      phase,
-      ...(runId ? { runId } : {}),
-      ...(sessionKey ? { sessionKey } : {}),
-    };
-  }
-  return null;
 }
 
 async function fetchGatewayStatusSnapshot(): Promise<GatewayStatus> {
@@ -263,44 +164,9 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
     return;
   }
 
-  const extractApprovalPayload = (params: Record<string, unknown>): Record<string, unknown> => {
-    const request = (params.request && typeof params.request === 'object')
-      ? params.request as Record<string, unknown>
-      : undefined;
-    const data = (params.data && typeof params.data === 'object')
-      ? params.data as Record<string, unknown>
-      : undefined;
-    const sessionKey = params.sessionKey ?? data?.sessionKey ?? request?.sessionKey;
-    const runId = params.runId ?? data?.runId ?? request?.runId;
-    const toolName = params.toolName ?? data?.toolName ?? request?.toolName;
-    const createdAt = params.createdAt ?? data?.createdAt ?? request?.createdAt;
-    const expiresAt = params.expiresAt ?? data?.expiresAt ?? request?.expiresAt;
-    return {
-      ...params,
-      ...(request ? { request } : {}),
-      ...(sessionKey != null ? { sessionKey } : {}),
-      ...(runId != null ? { runId } : {}),
-      ...(toolName != null ? { toolName } : {}),
-      ...(createdAt != null ? { createdAt } : {}),
-      ...(expiresAt != null ? { expiresAt } : {}),
-    };
-  };
-
-  if (payload.method === 'exec.approval.requested') {
-    try {
-      useChatStore.getState().handleApprovalRequested(extractApprovalPayload(payload.params!));
-    } catch {
-      // ignore
-    }
-    return;
-  }
-
-  if (payload.method === 'exec.approval.resolved') {
-    try {
-      useChatStore.getState().handleApprovalResolved(extractApprovalPayload(payload.params!));
-    } catch {
-      // ignore
-    }
+  const domainEvent = normalizeGatewayNotificationEvent(payload);
+  if (domainEvent) {
+    handleChatDomainEvent(domainEvent);
     return;
   }
 
@@ -312,82 +178,67 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 }
 
-function handleGatewayRunPhaseEvent(event: {
-  phase: GatewayConversationRunPhase;
-  runId?: string;
-  sessionKey?: string;
-}): void {
-  const runId = event.runId;
-  const sessionKey = event.sessionKey;
-  if (event.phase === 'started' && runId != null && sessionKey != null) {
-    try {
-      const state = useChatStore.getState();
-      const resolvedSessionKey = String(sessionKey);
-      const shouldRefreshSessions =
-        resolvedSessionKey !== state.currentSessionKey
-        || !state.sessions.some((session) => session.key === resolvedSessionKey);
-      if (shouldRefreshSessions) {
-        void state.loadSessions();
-      }
-      state.handleChatEvent({
-        state: 'started',
-        runId,
-        sessionKey: resolvedSessionKey,
-      });
-    } catch {
-      // ignore
-    }
+function maybeRefreshChatSessionsFromRuntimeEvent(
+  state: ReturnType<typeof useChatStore.getState>,
+  event: ChatRuntimeDomainEvent,
+): void {
+  if (event.source !== 'run.phase') {
     return;
   }
-
-  if (event.phase === 'completed' || event.phase === 'error' || event.phase === 'aborted') {
-    try {
-      const state = useChatStore.getState();
-      const resolvedSessionKey = sessionKey != null ? String(sessionKey) : null;
-      const shouldRefreshSessions = resolvedSessionKey != null && (
-        resolvedSessionKey !== state.currentSessionKey
-        || !state.sessions.some((session) => session.key === resolvedSessionKey)
-      );
-      if (shouldRefreshSessions) {
-        void state.loadSessions();
-      }
-
-      const matchesCurrentSession = resolvedSessionKey == null || resolvedSessionKey === state.currentSessionKey;
-      const matchesActiveRun = runId != null && state.activeRunId != null && String(runId) === state.activeRunId;
-
-      if (matchesCurrentSession || matchesActiveRun) {
-        void state.loadHistory(true);
-      }
-      if ((matchesCurrentSession || matchesActiveRun) && state.sending) {
-        useChatStore.setState({
-          sending: false,
-          activeRunId: null,
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          error: null,
-        });
-      }
-    } catch {
-      // ignore
-    }
+  if (event.phase !== 'started' && event.phase !== 'final' && event.phase !== 'error' && event.phase !== 'aborted') {
+    return;
   }
+  if (!event.sessionKey) {
+    return;
+  }
+  const shouldRefreshSessions =
+    event.sessionKey !== state.currentSessionKey
+    || !state.sessions.some((session) => session.key === event.sessionKey);
+  if (!shouldRefreshSessions) {
+    return;
+  }
+  void state.loadSessions();
 }
 
-function handleGatewayConversationEvent(payload: unknown): void {
+function maybeRefreshChatHistoryFromRuntimeEvent(
+  state: ReturnType<typeof useChatStore.getState>,
+  event: ChatRuntimeDomainEvent,
+): void {
+  if (event.source !== 'run.phase') {
+    return;
+  }
+  if (event.phase !== 'error' && event.phase !== 'aborted') {
+    return;
+  }
+  const matchesCurrentSession = event.sessionKey == null || event.sessionKey === state.currentSessionKey;
+  const matchesActiveRun = event.runId != null && state.activeRunId != null && event.runId === state.activeRunId;
+  if (!matchesCurrentSession && !matchesActiveRun && event.sessionKey != null) {
+    return;
+  }
+  void state.loadHistory(true);
+}
+
+function handleChatDomainEvent(event: ChatDomainEvent): void {
   try {
-    const event = parseGatewayConversationEvent(payload);
-    if (!event) {
+    const state = useChatStore.getState();
+    if (event.kind === 'chat.runtime') {
+      maybeRefreshChatSessionsFromRuntimeEvent(state, event);
+      maybeRefreshChatHistoryFromRuntimeEvent(state, event);
+      state.handleChatEvent(event.event);
       return;
     }
-    if (event.type === 'run.phase') {
-      handleGatewayRunPhaseEvent(event);
+    if (event.kind === 'chat.approval.requested') {
+      state.handleApprovalRequested(event.payload);
       return;
     }
-    const chatState = useChatStore.getState();
-    chatState.handleChatEvent(event.event);
+    state.handleApprovalResolved(event.payload);
   } catch {
     // ignore
   }
+}
+
+function handleGatewayConversationEvent(event: ChatRuntimeDomainEvent): void {
+  handleChatDomainEvent(event);
 }
 
 function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconnected' | 'error' {
@@ -478,8 +329,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               handleGatewayNotification(payload);
             },
           ));
-          unsubscribers.push(subscribeHostEvent('gateway:conversation-event', (payload) => {
-            handleGatewayConversationEvent(payload);
+          unsubscribers.push(subscribeChatConversationEvents((event) => {
+            handleGatewayConversationEvent(event);
           }));
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
             'gateway:channel-status',

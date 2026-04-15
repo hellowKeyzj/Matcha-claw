@@ -1,8 +1,5 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
-
-function toMs(ts: number): number {
-  return ts < 1e12 ? ts * 1000 : ts;
-}
+import { toMs } from './store-state-helpers';
 
 export function resolveSessionThinkingLevelFromList(
   sessions: ChatSession[],
@@ -113,7 +110,8 @@ export function resolvePreferredSessionKeyForAgent(
 
 export function shouldKeepMissingCurrentSession(
   sessionKey: string,
-  state: Pick<ChatStoreState, 'messages' | 'sessionLabels' | 'sessionLastActivity' | 'sessionRuntimeByKey'>,
+  state: Pick<ChatStoreState, 'messages' | 'sessionLabels' | 'sessionLastActivity'>
+    & { sessionRuntimeByKey?: Record<string, unknown> },
   backendSessionCount: number,
 ): boolean {
   if (!sessionKey) {
@@ -125,7 +123,9 @@ export function shouldKeepMissingCurrentSession(
   const hasMessages = state.messages.length > 0;
   const hasLabel = Boolean(state.sessionLabels[sessionKey]);
   const hasActivity = Boolean(state.sessionLastActivity[sessionKey]);
-  const hasRuntime = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, sessionKey);
+  const hasRuntime = state.sessionRuntimeByKey
+    ? Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, sessionKey)
+    : false;
   if (!sessionKey.endsWith(':main')) {
     // Keep only local draft sessions (created but still truly empty).
     return !hasMessages && !hasLabel && !hasActivity && !hasRuntime;
@@ -155,4 +155,3 @@ export function isTrulyEmptyNonMainSession(
     && !state.sessionLastActivity[currentSessionKey]
     && !state.sessionLabels[currentSessionKey];
 }
-

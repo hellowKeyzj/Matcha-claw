@@ -44,6 +44,17 @@ interface SelectedSkill {
   icon: string;
 }
 
+interface StagedFilePayload {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+}
+
+const STAGE_BUFFER_CONCURRENCY = 3;
+
 interface ChatInputProps {
   onSend: (text: string, attachments?: FileAttachment[]) => void;
   onStop?: () => void;
@@ -96,6 +107,34 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
   });
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const normalizedConcurrency = Math.max(1, Math.floor(concurrency));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const runWorker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) {
+        return;
+      }
+      results[index] = await worker(items[index], index);
+    }
+  };
+
+  const workerCount = Math.min(items.length, normalizedConcurrency);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
+}
+
 function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -144,6 +183,23 @@ function buildSkillPrefixedMessage(text: string, selectedSkills: SelectedSkill[]
     return prefix;
   }
   return `${prefix}\n${text}`;
+}
+
+function buildStagingAttachment(
+  id: string,
+  fileName: string,
+  mimeType: string,
+  fileSize: number,
+): FileAttachment {
+  return {
+    id,
+    fileName,
+    mimeType,
+    fileSize,
+    stagedPath: '',
+    preview: null,
+    status: 'staging',
+  };
 }
 
 // ── Component ────────────────────────────────────────────────────
@@ -353,6 +409,7 @@ export const ChatInput = memo(function ChatInput({
   // ── File staging via native dialog ─────────────────────────────
 
   const pickFiles = useCallback(async () => {
+    let tempIds: string[] = [];
     try {
       const result = await invokeIpc('dialog:open', {
         properties: ['openFile', 'multiSelections'],
@@ -360,120 +417,110 @@ export const ChatInput = memo(function ChatInput({
       if (result.canceled || !result.filePaths?.length) return;
 
       // Add placeholder entries immediately
-      const tempIds: string[] = [];
-      for (const filePath of result.filePaths) {
+      const stagingAttachments = result.filePaths.map((filePath) => {
         const tempId = crypto.randomUUID();
         tempIds.push(tempId);
         // Handle both Unix (/) and Windows (\) path separators
         const fileName = filePath.split(/[\\/]/).pop() || 'file';
-        setAttachments(prev => [...prev, {
-          id: tempId,
-          fileName,
-          mimeType: '',
-          fileSize: 0,
-          stagedPath: '',
-          preview: null,
-          status: 'staging' as const,
-        }]);
-      }
+        return buildStagingAttachment(tempId, fileName, '', 0);
+      });
+      setAttachments((prev) => [...prev, ...stagingAttachments]);
 
       // Stage all files via IPC
-      console.log('[pickFiles] Staging files:', result.filePaths);
-      const staged = await hostApiFetch<Array<{
-        id: string;
-        fileName: string;
-        mimeType: string;
-        fileSize: number;
-        stagedPath: string;
-        preview: string | null;
-      }>>('/api/files/stage-paths', {
+      const staged = await hostApiFetch<StagedFilePayload[]>('/api/files/stage-paths', {
         method: 'POST',
         body: JSON.stringify({ filePaths: result.filePaths }),
       });
-      console.log('[pickFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
 
       // Update each placeholder with real data
-      setAttachments(prev => {
-        let updated = [...prev];
-        for (let i = 0; i < tempIds.length; i++) {
-          const tempId = tempIds[i];
-          const data = staged[i];
-          if (data) {
-            updated = updated.map(a =>
-              a.id === tempId
-                ? { ...data, status: 'ready' as const }
-                : a,
-            );
-          } else {
-            console.warn(`[pickFiles] No staged data for tempId=${tempId} at index ${i}`);
-            updated = updated.map(a =>
-              a.id === tempId
-                ? { ...a, status: 'error' as const, error: 'Staging failed' }
-                : a,
-            );
-          }
+      const updatesByTempId = new Map<string, FileAttachment>();
+      for (let i = 0; i < tempIds.length; i++) {
+        const tempId = tempIds[i];
+        const data = staged[i];
+        if (data) {
+          updatesByTempId.set(tempId, { ...data, status: 'ready' });
+        } else {
+          const fallback = stagingAttachments[i];
+          updatesByTempId.set(tempId, {
+            ...fallback,
+            status: 'error',
+            error: 'Staging failed',
+          });
         }
-        return updated;
-      });
+      }
+      setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
     } catch (err) {
-      console.error('[pickFiles] Failed to stage files:', err);
       // Mark any stuck 'staging' attachments as 'error' so the user can remove them
       // and the send button isn't permanently blocked
-      setAttachments(prev => prev.map(a =>
-        a.status === 'staging'
-          ? { ...a, status: 'error' as const, error: String(err) }
-          : a,
-      ));
+      const failedIds = new Set(tempIds);
+      setAttachments((prev) => prev.map((attachment) => (
+        failedIds.has(attachment.id)
+          ? { ...attachment, status: 'error', error: String(err) }
+          : attachment
+      )));
     }
   }, []);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
   const stageBufferFiles = useCallback(async (files: globalThis.File[]) => {
-    for (const file of files) {
-      const tempId = crypto.randomUUID();
-      setAttachments(prev => [...prev, {
-        id: tempId,
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        fileSize: file.size,
-        stagedPath: '',
-        preview: null,
-        status: 'staging' as const,
-      }]);
-
-      try {
-        console.log(`[stageBuffer] Reading file: ${file.name} (${file.type}, ${file.size} bytes)`);
-        const base64 = await readFileAsBase64(file);
-        console.log(`[stageBuffer] Base64 length: ${base64?.length ?? 'null'}`);
-        const staged = await hostApiFetch<{
-          id: string;
-          fileName: string;
-          mimeType: string;
-          fileSize: number;
-          stagedPath: string;
-          preview: string | null;
-        }>('/api/files/stage-buffer', {
-          method: 'POST',
-          body: JSON.stringify({
-            base64,
-            fileName: file.name,
-            mimeType: file.type || 'application/octet-stream',
-          }),
-        });
-        console.log(`[stageBuffer] Staged: id=${staged?.id}, path=${staged?.stagedPath}, size=${staged?.fileSize}`);
-        setAttachments(prev => prev.map(a =>
-          a.id === tempId ? { ...staged, status: 'ready' as const } : a,
-        ));
-      } catch (err) {
-        console.error(`[stageBuffer] Error staging ${file.name}:`, err);
-        setAttachments(prev => prev.map(a =>
-          a.id === tempId
-            ? { ...a, status: 'error' as const, error: String(err) }
-            : a,
-        ));
-      }
+    if (files.length === 0) {
+      return;
     }
+
+    const queue = files.map((file) => ({
+      file,
+      tempId: crypto.randomUUID(),
+      fallback: buildStagingAttachment(
+        '',
+        file.name,
+        file.type || 'application/octet-stream',
+        file.size,
+      ),
+    }));
+    const placeholders = queue.map(({ file, tempId }) => (
+      buildStagingAttachment(
+        tempId,
+        file.name,
+        file.type || 'application/octet-stream',
+        file.size,
+      )
+    ));
+    setAttachments((prev) => [...prev, ...placeholders]);
+
+    const results = await mapWithConcurrency(
+      queue,
+      STAGE_BUFFER_CONCURRENCY,
+      async ({ file, tempId, fallback }) => {
+        try {
+          const base64 = await readFileAsBase64(file);
+          const staged = await hostApiFetch<StagedFilePayload>('/api/files/stage-buffer', {
+            method: 'POST',
+            body: JSON.stringify({
+              base64,
+              fileName: file.name,
+              mimeType: file.type || 'application/octet-stream',
+            }),
+          });
+          return { tempId, attachment: { ...staged, status: 'ready' as const } };
+        } catch (err) {
+          return {
+            tempId,
+            attachment: {
+              ...fallback,
+              id: tempId,
+              status: 'error' as const,
+              error: String(err),
+            },
+          };
+        }
+      },
+    );
+
+    const updatesByTempId = new Map<string, FileAttachment>(
+      results.map((result) => [result.tempId, result.attachment] as const),
+    );
+    setAttachments((prev) => prev.map((attachment) => updatesByTempId.get(attachment.id) ?? attachment));
   }, []);
 
   // ── Attachment management ──────────────────────────────────────
@@ -499,13 +546,6 @@ export const ChatInput = memo(function ChatInput({
     const rawText = input.trim();
     const textToSend = buildSkillPrefixedMessage(rawText, selectedSkills);
     const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
-    console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
-    if (attachmentsToSend) {
-      console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
-        id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
-        stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
-      })));
-    }
     setInput('');
     closeMention();
     closeSlash();

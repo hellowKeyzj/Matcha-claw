@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -30,6 +30,23 @@ interface SessionListNode {
   agentId: string;
   agentName: string;
   identityEmoji?: string;
+}
+
+interface SessionSortEntry {
+  session: ChatSession;
+  agentId: string;
+  activityMs: number;
+}
+
+interface SessionActivityIndex {
+  entriesByKey: Map<string, SessionSortEntry>;
+  sortedKeys: string[];
+}
+
+interface SessionAggregation {
+  sessionsByAgent: Map<string, ChatSession[]>;
+  sortedSessionKeys: string[];
+  entryByKey: Map<string, SessionSortEntry>;
 }
 
 const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
@@ -172,6 +189,122 @@ function resolveSessionActivityMs(
     return session.updatedAt;
   }
   return parseSessionTimestamp(session.key) ?? 0;
+}
+
+function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEntry): number {
+  if (left.activityMs !== right.activityMs) {
+    return right.activityMs - left.activityMs;
+  }
+  return left.session.key.localeCompare(right.session.key);
+}
+
+function removeSortedSessionKey(sortedKeys: string[], key: string): void {
+  const index = sortedKeys.indexOf(key);
+  if (index >= 0) {
+    sortedKeys.splice(index, 1);
+  }
+}
+
+function insertSortedSessionKey(
+  sortedKeys: string[],
+  key: string,
+  entriesByKey: Map<string, SessionSortEntry>,
+): void {
+  const nextEntry = entriesByKey.get(key);
+  if (!nextEntry) {
+    return;
+  }
+  let low = 0;
+  let high = sortedKeys.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const midEntry = entriesByKey.get(sortedKeys[mid]);
+    if (!midEntry) {
+      low = mid + 1;
+      continue;
+    }
+    const compare = compareSessionSortEntries(nextEntry, midEntry);
+    if (compare < 0) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  sortedKeys.splice(low, 0, key);
+}
+
+function buildIncrementalSessionActivityIndex(input: {
+  previous: SessionActivityIndex;
+  sessions: ChatSession[];
+  sessionLastActivityMap: Record<string, number>;
+}): SessionActivityIndex {
+  const entriesByKey = new Map(input.previous.entriesByKey);
+  const sortedKeys = [...input.previous.sortedKeys];
+  const seen = new Set<string>();
+
+  for (const session of input.sessions) {
+    const key = session.key;
+    seen.add(key);
+    const agentId = parseAgentIdFromSessionKey(key);
+    if (!agentId) {
+      if (entriesByKey.has(key)) {
+        entriesByKey.delete(key);
+        removeSortedSessionKey(sortedKeys, key);
+      }
+      continue;
+    }
+    const activityMs = resolveSessionActivityMs(session, input.sessionLastActivityMap);
+    const previousEntry = entriesByKey.get(key);
+    if (!previousEntry) {
+      entriesByKey.set(key, { session, agentId, activityMs });
+      insertSortedSessionKey(sortedKeys, key, entriesByKey);
+      continue;
+    }
+    const sortChanged = previousEntry.agentId !== agentId || previousEntry.activityMs !== activityMs;
+    if (sortChanged) {
+      removeSortedSessionKey(sortedKeys, key);
+      entriesByKey.set(key, { session, agentId, activityMs });
+      insertSortedSessionKey(sortedKeys, key, entriesByKey);
+      continue;
+    }
+    if (previousEntry.session !== session) {
+      entriesByKey.set(key, {
+        ...previousEntry,
+        session,
+      });
+    }
+  }
+
+  for (const key of Array.from(entriesByKey.keys())) {
+    if (seen.has(key)) {
+      continue;
+    }
+    entriesByKey.delete(key);
+    removeSortedSessionKey(sortedKeys, key);
+  }
+
+  return {
+    entriesByKey,
+    sortedKeys,
+  };
+}
+
+function buildSessionAggregation(index: SessionActivityIndex): SessionAggregation {
+  const sessionsByAgent = new Map<string, ChatSession[]>();
+  for (const key of index.sortedKeys) {
+    const entry = index.entriesByKey.get(key);
+    if (!entry) {
+      continue;
+    }
+    const bucket = sessionsByAgent.get(entry.agentId) ?? [];
+    bucket.push(entry.session);
+    sessionsByAgent.set(entry.agentId, bucket);
+  }
+  return {
+    sessionsByAgent,
+    sortedSessionKeys: [...index.sortedKeys],
+    entryByKey: index.entriesByKey,
+  };
 }
 
 function matchesBucket(ageMs: number, spec: SessionBucketSpec): boolean {
@@ -409,6 +542,20 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     key: string;
     title: string;
   } | null>(null);
+  const sessionActivityIndexRef = useRef<SessionActivityIndex>({
+    entriesByKey: new Map<string, SessionSortEntry>(),
+    sortedKeys: [],
+  });
+
+  const sessionAggregation = useMemo<SessionAggregation>(() => {
+    const nextIndex = buildIncrementalSessionActivityIndex({
+      previous: sessionActivityIndexRef.current,
+      sessions: deferredSessions,
+      sessionLastActivityMap: deferredSessionLastActivity,
+    });
+    sessionActivityIndexRef.current = nextIndex;
+    return buildSessionAggregation(nextIndex);
+  }, [deferredSessionLastActivity, deferredSessions]);
 
   const agentSessionNodes = useMemo<AgentSessionNode[]>(() => {
     if (!agentDataReady) {
@@ -416,17 +563,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     }
     const agentById = new Map(agents.map((agent) => [agent.id, agent] as const));
     const agentOrder = new Map(agents.map((agent, index) => [agent.id, index] as const));
-    const sessionsByAgent = new Map<string, ChatSession[]>();
-
-    for (const session of deferredSessions) {
-      const agentId = parseAgentIdFromSessionKey(session.key);
-      if (!agentId) {
-        continue;
-      }
-      const bucket = sessionsByAgent.get(agentId) ?? [];
-      bucket.push(session);
-      sessionsByAgent.set(agentId, bucket);
-    }
+    const sessionsByAgent = sessionAggregation.sessionsByAgent;
 
     const visibleAgentIds = new Set<string>([
       ...agents.map((agent) => agent.id),
@@ -444,27 +581,23 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
       })
       .map((agentId) => {
         const agent = agentById.get(agentId);
-        const sortedSessions = [...(sessionsByAgent.get(agentId) ?? [])].sort((left, right) => {
-          const leftActivity = deferredSessionLastActivity[left.key] ?? parseSessionTimestamp(left.key) ?? 0;
-          const rightActivity = deferredSessionLastActivity[right.key] ?? parseSessionTimestamp(right.key) ?? 0;
-          if (leftActivity !== rightActivity) {
-            return rightActivity - leftActivity;
-          }
-          return left.key.localeCompare(right.key);
-        });
         return {
           agentId,
           agentName: agent?.name?.trim() || agentId,
           identityEmoji: resolveAgentEmoji(agent?.identityEmoji ?? agent?.identity?.emoji, Boolean(agent?.isDefault)),
-          sessions: sortedSessions,
+          sessions: sessionsByAgent.get(agentId) ?? [],
         };
       });
-  }, [agentDataReady, agents, deferredSessionLastActivity, deferredSessions]);
+  }, [agentDataReady, agents, sessionAggregation]);
 
   const preferredSessionKeyByAgent = useMemo(() => {
     return new Map(
       agentSessionNodes.map((node) => [node.agentId, resolvePreferredSessionKey(node.agentId, node.sessions)] as const),
     );
+  }, [agentSessionNodes]);
+
+  const agentNodeById = useMemo(() => {
+    return new Map(agentSessionNodes.map((node) => [node.agentId, node] as const));
   }, [agentSessionNodes]);
 
   const activeAgentId = useMemo(() => {
@@ -477,31 +610,24 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
 
   const globalSessionNodes = useMemo<SessionListNode[]>(() => {
     const nodes: SessionListNode[] = [];
-    for (const agentNode of agentSessionNodes) {
-      const preferredSessionKey = preferredSessionKeyByAgent.get(agentNode.agentId);
-      for (const session of agentNode.sessions) {
-        if (session.key === preferredSessionKey) {
-          continue;
-        }
-        nodes.push({
-          session,
-          agentId: agentNode.agentId,
-          agentName: agentNode.agentName,
-          identityEmoji: agentNode.identityEmoji,
-        });
+    for (const sessionKey of sessionAggregation.sortedSessionKeys) {
+      const entry = sessionAggregation.entryByKey.get(sessionKey);
+      if (!entry) {
+        continue;
       }
+      if (preferredSessionKeyByAgent.get(entry.agentId) === sessionKey) {
+        continue;
+      }
+      const owner = agentNodeById.get(entry.agentId);
+      nodes.push({
+        session: entry.session,
+        agentId: entry.agentId,
+        agentName: owner?.agentName ?? entry.agentId,
+        identityEmoji: owner?.identityEmoji ?? '🤖',
+      });
     }
-
-    nodes.sort((left, right) => {
-      const leftActivity = deferredSessionLastActivity[left.session.key] ?? parseSessionTimestamp(left.session.key) ?? 0;
-      const rightActivity = deferredSessionLastActivity[right.session.key] ?? parseSessionTimestamp(right.session.key) ?? 0;
-      if (leftActivity !== rightActivity) {
-        return rightActivity - leftActivity;
-      }
-      return left.session.key.localeCompare(right.session.key);
-    });
     return nodes;
-  }, [agentSessionNodes, deferredSessionLastActivity, preferredSessionKeyByAgent]);
+  }, [agentNodeById, preferredSessionKeyByAgent, sessionAggregation]);
 
   const globalSessions = useMemo(() => globalSessionNodes.map((node) => node.session), [globalSessionNodes]);
 

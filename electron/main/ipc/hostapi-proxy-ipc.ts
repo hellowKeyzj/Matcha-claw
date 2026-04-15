@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
 import { getHostApiToken } from '../../api/server';
+import { handleE2EChatHostApiFetch } from './e2e-chat';
 
 type HostApiFetchRequest = {
   path?: string;
@@ -15,6 +16,10 @@ export function registerHostApiProxyHandlers(): void {
   ipcMain.handle('hostapi:token', () => getHostApiToken());
 
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
+    const e2eMock = handleE2EChatHostApiFetch(request);
+    if (e2eMock) {
+      return e2eMock;
+    }
     try {
       const port = getPort('MATCHACLAW_HOST_API');
       const normalizedPath = request?.path
