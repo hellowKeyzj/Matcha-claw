@@ -34,6 +34,7 @@ import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
+import { resolveHistoryLoadPipelineStrategyKey } from '@/stores/chat/history-pipeline-strategies';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   getGatewayWsDiagnosticEnabled,
@@ -102,6 +103,40 @@ interface DiagnosticsBundleResponse {
   zipPath: string;
   generatedAt: string;
   fileCount: number;
+}
+
+const HISTORY_PIPELINE_PRESET_KEYS = [
+  'default',
+  'active_only',
+  'quiet_only',
+  'probe_only',
+] as const;
+const TELEMETRY_WINDOW_MINUTES_OPTIONS = [0, 5, 15, 60] as const;
+const HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN = 5;
+const HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN_MAX = 999;
+const HISTORY_STRATEGY_SORT_KEYS = ['count', 'avgMs', 'p95Ms', 'p99Ms'] as const;
+
+type HistoryStrategySortKey = (typeof HISTORY_STRATEGY_SORT_KEYS)[number];
+type HistoryStrategySortDirection = 'asc' | 'desc';
+
+const HISTORY_STRATEGY_SORT_LABEL_KEY: Record<HistoryStrategySortKey, string> = {
+  count: 'developer.telemetrySortCount',
+  avgMs: 'developer.telemetrySortAvg',
+  p95Ms: 'developer.telemetrySortP95',
+  p99Ms: 'developer.telemetrySortP99',
+};
+
+function computePercentile(values: number[], percentile: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1),
+  );
+  const value = sorted[position];
+  return Number.isFinite(value) ? Math.round(value) : 0;
 }
 
 function maskLicenseKeyForDisplay(raw: string): string {
@@ -200,6 +235,8 @@ export function Settings() {
   const setAutoDownloadUpdate = useSettingsStore((state) => state.setAutoDownloadUpdate);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
+  const chatHistoryPipelineStrategyKey = useSettingsStore((state) => state.chatHistoryPipelineStrategyKey);
+  const setChatHistoryPipelineStrategyKey = useSettingsStore((state) => state.setChatHistoryPipelineStrategyKey);
 
   const gatewayStatus = useGatewayStore((state) => state.status);
   const restartGateway = useGatewayStore((state) => state.restart);
@@ -213,8 +250,16 @@ export function Settings() {
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
+  const [historyPipelineStrategyDraft, setHistoryPipelineStrategyDraft] = useState('');
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
+  const [telemetryWindowMinutes, setTelemetryWindowMinutes] = useState<number>(15);
+  const [telemetryHistoryOnly, setTelemetryHistoryOnly] = useState(false);
+  const [historyStrategySampleMinDraft, setHistoryStrategySampleMinDraft] = useState(
+    String(HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN),
+  );
+  const [historyStrategySortKey, setHistoryStrategySortKey] = useState<HistoryStrategySortKey>('count');
+  const [historyStrategySortDirection, setHistoryStrategySortDirection] = useState<HistoryStrategySortDirection>('desc');
 
   const isWindows = window.electron.platform === 'win32';
   const showCliTools = true;
@@ -575,6 +620,10 @@ export function Settings() {
     setProxyBypassRulesDraft(proxyBypassRules);
   }, [proxyBypassRules]);
 
+  useEffect(() => {
+    setHistoryPipelineStrategyDraft(chatHistoryPipelineStrategyKey || '');
+  }, [chatHistoryPipelineStrategyKey]);
+
   const proxySettingsDirty = useMemo(() => (
     proxyEnabledDraft !== proxyEnabled
     || proxyServerDraft.trim() !== proxyServer
@@ -587,6 +636,29 @@ export function Settings() {
     proxyServer,
     proxyServerDraft,
   ]);
+  const normalizedHistoryPipelineStrategyDraft = useMemo(
+    () => historyPipelineStrategyDraft.trim(),
+    [historyPipelineStrategyDraft],
+  );
+  const effectiveHistoryPipelineStrategyKey = useMemo(
+    () => resolveHistoryLoadPipelineStrategyKey(
+      normalizedHistoryPipelineStrategyDraft || null,
+    ),
+    [normalizedHistoryPipelineStrategyDraft],
+  );
+  const historyPipelineStrategyDirty = normalizedHistoryPipelineStrategyDraft !== (chatHistoryPipelineStrategyKey || '');
+  const historyPipelineFallsBackToDefault = (
+    normalizedHistoryPipelineStrategyDraft.length > 0
+    && effectiveHistoryPipelineStrategyKey === 'default'
+    && normalizedHistoryPipelineStrategyDraft.toLowerCase() !== 'default'
+  );
+  const historyStrategySampleMin = useMemo(() => {
+    const parsed = Number.parseInt(historyStrategySampleMinDraft, 10);
+    if (!Number.isFinite(parsed) || parsed < HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN) {
+      return HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN;
+    }
+    return Math.min(HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN_MAX, parsed);
+  }, [historyStrategySampleMinDraft]);
 
   useEffect(() => {
     void refreshLicenseGateSnapshot();
@@ -635,10 +707,25 @@ export function Settings() {
     }
   };
 
+  const filteredTelemetryEntries = useMemo(() => {
+    let entries = telemetryEntries;
+    if (telemetryWindowMinutes > 0) {
+      const cutoff = Date.now() - (telemetryWindowMinutes * 60 * 1000);
+      entries = entries.filter((entry) => {
+        const ts = Date.parse(entry.ts);
+        return Number.isFinite(ts) && ts >= cutoff;
+      });
+    }
+    if (telemetryHistoryOnly) {
+      entries = entries.filter((entry) => entry.event.startsWith('chat.history_'));
+    }
+    return entries;
+  }, [telemetryEntries, telemetryHistoryOnly, telemetryWindowMinutes]);
+
   const telemetryStats = useMemo(() => {
     let errorCount = 0;
     let slowCount = 0;
-    for (const entry of telemetryEntries) {
+    for (const entry of filteredTelemetryEntries) {
       if (entry.event.endsWith('_error') || entry.event.includes('request_error')) {
         errorCount += 1;
       }
@@ -649,8 +736,8 @@ export function Settings() {
         slowCount += 1;
       }
     }
-    return { total: telemetryEntries.length, errorCount, slowCount };
-  }, [telemetryEntries]);
+    return { total: filteredTelemetryEntries.length, errorCount, slowCount };
+  }, [filteredTelemetryEntries]);
 
   const telemetryByEvent = useMemo(() => {
     const map = new Map<string, {
@@ -663,7 +750,7 @@ export function Settings() {
       lastTs: string;
     }>();
 
-    for (const entry of telemetryEntries) {
+    for (const entry of filteredTelemetryEntries) {
       const current = map.get(entry.event) ?? {
         event: entry.event,
         count: 0,
@@ -698,11 +785,96 @@ export function Settings() {
     return [...map.values()]
       .sort((a, b) => b.count - a.count)
       .slice(0, 12);
-  }, [telemetryEntries]);
+  }, [filteredTelemetryEntries]);
+
+  const historyStrategyMetrics = useMemo(() => {
+    const byStrategy = new Map<string, {
+      strategy: string;
+      mode: 'active' | 'quiet' | 'unknown';
+      count: number;
+      durations: number[];
+      successCount: number;
+      recoveredCount: number;
+      failedCount: number;
+    }>();
+
+    for (const entry of filteredTelemetryEntries) {
+      if (entry.event !== 'chat.history_load_total') {
+        continue;
+      }
+      const rawStrategy = typeof entry.payload.strategy === 'string'
+        ? entry.payload.strategy.trim()
+        : '';
+      const strategy = rawStrategy || 'default';
+      const rawOutcome = typeof entry.payload.outcome === 'string'
+        ? entry.payload.outcome.trim()
+        : '';
+      const outcome = rawOutcome || 'success';
+      const mode = typeof entry.payload.quiet === 'boolean'
+        ? (entry.payload.quiet ? 'quiet' : 'active')
+        : 'unknown';
+      const durationMs = typeof entry.payload.durationMs === 'number'
+        ? entry.payload.durationMs
+        : Number.NaN;
+
+      const strategyKey = `${strategy}:${mode}`;
+      const current = byStrategy.get(strategyKey) ?? {
+        strategy,
+        mode,
+        count: 0,
+        durations: [],
+        successCount: 0,
+        recoveredCount: 0,
+        failedCount: 0,
+      };
+      current.count += 1;
+      if (outcome === 'recovered') {
+        current.recoveredCount += 1;
+      } else if (outcome === 'failed' || outcome === 'aborted') {
+        current.failedCount += 1;
+      } else {
+        current.successCount += 1;
+      }
+      if (Number.isFinite(durationMs) && durationMs >= 0) {
+        current.durations.push(durationMs);
+      }
+      byStrategy.set(strategyKey, current);
+    }
+
+    return [...byStrategy.values()]
+      .map((item) => {
+        const totalDuration = item.durations.reduce((sum, value) => sum + value, 0);
+        return {
+          ...item,
+          avgMs: item.durations.length > 0 ? Math.round(totalDuration / item.durations.length) : 0,
+          p50Ms: computePercentile(item.durations, 50),
+          p95Ms: computePercentile(item.durations, 95),
+          p99Ms: computePercentile(item.durations, 99),
+          lowSample: item.count < historyStrategySampleMin,
+        };
+      })
+      .sort((a, b) => {
+        const direction = historyStrategySortDirection === 'asc' ? 1 : -1;
+        const metricDiff = (a[historyStrategySortKey] - b[historyStrategySortKey]) * direction;
+        if (metricDiff !== 0) {
+          return metricDiff;
+        }
+        const countDiff = (a.count - b.count) * direction;
+        if (countDiff !== 0) {
+          return countDiff;
+        }
+        return a.strategy.localeCompare(b.strategy);
+      });
+  }, [
+    filteredTelemetryEntries,
+    historyStrategySampleMin,
+    historyStrategySortDirection,
+    historyStrategySortKey,
+  ]);
 
   const handleCopyTelemetry = async () => {
     try {
-      const serialized = telemetryEntries.map((entry) => JSON.stringify(entry)).join('\n');
+      const serialized = filteredTelemetryEntries.map((entry) => JSON.stringify(entry)).join('\n');
       await navigator.clipboard.writeText(serialized);
       toast.success(t('developer.telemetryCopied'));
     } catch (error) {
@@ -716,6 +888,10 @@ export function Settings() {
     toast.success(t('developer.telemetryCleared'));
   };
 
+  const handleHistoryStrategySampleMinBlur = useCallback(() => {
+    setHistoryStrategySampleMinDraft(String(historyStrategySampleMin));
+  }, [historyStrategySampleMin]);
+
   const handleWsDiagnosticToggle = (enabled: boolean) => {
     setGatewayWsDiagnosticEnabled(enabled);
     setWsDiagnosticEnabled(enabled);
@@ -725,6 +901,31 @@ export function Settings() {
         : t('developer.wsDiagnosticDisabled'),
     );
   };
+
+  const handleSaveHistoryPipelineStrategy = useCallback(() => {
+    setChatHistoryPipelineStrategyKey(normalizedHistoryPipelineStrategyDraft);
+    trackUiEvent('settings.history_pipeline_strategy_updated', {
+      strategy: effectiveHistoryPipelineStrategyKey,
+      raw: normalizedHistoryPipelineStrategyDraft || null,
+    });
+    toast.success(t('developer.historyPipelineSaved'));
+  }, [
+    effectiveHistoryPipelineStrategyKey,
+    normalizedHistoryPipelineStrategyDraft,
+    setChatHistoryPipelineStrategyKey,
+    t,
+  ]);
+
+  const handleResetHistoryPipelineStrategy = useCallback(() => {
+    setHistoryPipelineStrategyDraft('');
+    setChatHistoryPipelineStrategyKey('');
+    trackUiEvent('settings.history_pipeline_strategy_updated', {
+      strategy: 'default',
+      raw: null,
+      reset: true,
+    });
+    toast.success(t('developer.historyPipelineSaved'));
+  }, [setChatHistoryPipelineStrategyKey, t]);
 
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.title') },
@@ -1382,6 +1583,57 @@ export function Settings() {
             )}
 
             <Separator />
+            <div className="space-y-2 rounded-md border border-border/60 p-3">
+              <Label>{t('developer.historyPipeline')}</Label>
+              <p className="text-sm text-muted-foreground">
+                {t('developer.historyPipelineDesc')}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {HISTORY_PIPELINE_PRESET_KEYS.map((key) => (
+                  <Button
+                    key={key}
+                    type="button"
+                    variant={normalizedHistoryPipelineStrategyDraft === key ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setHistoryPipelineStrategyDraft(key)}
+                  >
+                    {key}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input
+                  value={historyPipelineStrategyDraft}
+                  onChange={(event) => setHistoryPipelineStrategyDraft(event.target.value)}
+                  placeholder={t('developer.historyPipelineInputPlaceholder')}
+                  className="font-mono"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleSaveHistoryPipelineStrategy}
+                  disabled={!historyPipelineStrategyDirty}
+                >
+                  {t('common:actions.save')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleResetHistoryPipelineStrategy}
+                >
+                  {t('common:actions.clear')}
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>{t('developer.historyPipelineEffective')}: </span>
+                <Badge variant="secondary" className="font-mono">{effectiveHistoryPipelineStrategyKey}</Badge>
+                {historyPipelineFallsBackToDefault && (
+                  <span>{t('developer.historyPipelineFallbackWarning')}</span>
+                )}
+              </div>
+            </div>
+
+            <Separator />
             <div className="space-y-2">
               <div className="flex items-center justify-between rounded-md border border-border/60 p-3">
                 <div>
@@ -1417,8 +1669,92 @@ export function Settings() {
 
               {showTelemetryViewer && (
                 <div className="space-y-3 rounded-lg border border-border/60 p-3">
+                  <div className="grid gap-3 rounded-md border border-border/60 p-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label>{t('developer.telemetryWindow')}</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {TELEMETRY_WINDOW_MINUTES_OPTIONS.map((minutes) => {
+                          const active = telemetryWindowMinutes === minutes;
+                          return (
+                            <Button
+                              key={minutes}
+                              type="button"
+                              size="sm"
+                              variant={active ? 'default' : 'outline'}
+                              onClick={() => setTelemetryWindowMinutes(minutes)}
+                            >
+                              {minutes === 0
+                                ? t('developer.telemetryWindowAll')
+                                : t('developer.telemetryWindowMinutes', { minutes })}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between rounded-md border border-border/60 p-3">
+                      <div>
+                        <Label>{t('developer.telemetryHistoryOnly')}</Label>
+                        <p className="text-xs text-muted-foreground">
+                          {t('developer.telemetryHistoryOnlyDesc')}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={telemetryHistoryOnly}
+                        onCheckedChange={setTelemetryHistoryOnly}
+                      />
+                    </div>
+                    <div className="space-y-2 rounded-md border border-border/60 p-3 sm:col-span-2 lg:col-span-1">
+                      <Label>{t('developer.historyStrategyMetrics')}</Label>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">{t('developer.telemetryMinSample')}</span>
+                          <Input
+                            type="number"
+                            min={HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN}
+                            max={HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN_MAX}
+                            step={1}
+                            value={historyStrategySampleMinDraft}
+                            onChange={(event) => setHistoryStrategySampleMinDraft(event.target.value)}
+                            onBlur={handleHistoryStrategySampleMinBlur}
+                            className="h-8 w-24 font-mono"
+                          />
+                          <Badge variant="outline">n&lt;{historyStrategySampleMin}</Badge>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <span className="self-center text-xs text-muted-foreground">{t('developer.telemetrySortBy')}</span>
+                          {HISTORY_STRATEGY_SORT_KEYS.map((key) => (
+                            <Button
+                              key={key}
+                              type="button"
+                              size="sm"
+                              variant={historyStrategySortKey === key ? 'default' : 'outline'}
+                              onClick={() => setHistoryStrategySortKey(key)}
+                            >
+                              {t(HISTORY_STRATEGY_SORT_LABEL_KEY[key])}
+                            </Button>
+                          ))}
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setHistoryStrategySortDirection((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                          >
+                            {historyStrategySortDirection === 'desc'
+                              ? t('developer.telemetrySortDesc')
+                              : t('developer.telemetrySortAsc')}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="secondary">{t('developer.telemetryTotal')}: {telemetryStats.total}</Badge>
+                    {filteredTelemetryEntries.length !== telemetryEntries.length && (
+                      <Badge variant="outline">
+                        {t('developer.telemetryFiltered')}: {filteredTelemetryEntries.length}/{telemetryEntries.length}
+                      </Badge>
+                    )}
                     <Badge variant={telemetryStats.errorCount > 0 ? 'destructive' : 'secondary'}>
                       {t('developer.telemetryErrors')}: {telemetryStats.errorCount}
                     </Badge>
@@ -1460,11 +1796,44 @@ export function Settings() {
                         </div>
                       </div>
                     )}
+                    {historyStrategyMetrics.length > 0 && (
+                      <div className="border-b border-border/50 bg-background/70 p-2">
+                        <p className="mb-2 text-[11px] font-semibold text-muted-foreground">
+                          {t('developer.historyStrategyMetrics')}
+                        </p>
+                        <div className="space-y-1 text-[11px]">
+                          {historyStrategyMetrics.map((item) => (
+                            <div
+                              key={`${item.strategy}:${item.mode}`}
+                              className={`grid grid-cols-[minmax(0,0.95fr)_0.55fr_0.5fr_0.65fr_0.65fr_0.65fr_0.65fr_0.5fr_0.5fr_0.5fr_0.7fr] gap-2 rounded border border-border/40 px-2 py-1 ${
+                                item.lowSample ? 'opacity-70' : ''
+                              }`}
+                            >
+                              <span className="truncate font-medium font-mono" title={item.strategy}>{item.strategy}</span>
+                              <span className="text-muted-foreground">{item.mode}</span>
+                              <span className="text-muted-foreground">n={item.count}</span>
+                              <span className="text-muted-foreground">avg={item.avgMs}ms</span>
+                              <span className="text-muted-foreground">p50={item.p50Ms}ms</span>
+                              <span className="text-muted-foreground">p95={item.p95Ms}ms</span>
+                              <span className="text-muted-foreground">p99={item.p99Ms}ms</span>
+                              <span className="text-muted-foreground">ok={item.successCount}</span>
+                              <span className="text-muted-foreground">rec={item.recoveredCount}</span>
+                              <span className="text-muted-foreground">fail={item.failedCount}</span>
+                              <span className="text-muted-foreground">
+                                {item.lowSample
+                                  ? t('developer.telemetryLowSample', { min: historyStrategySampleMin })
+                                  : ''}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="space-y-1 p-2 font-mono text-xs">
-                      {telemetryEntries.length === 0 ? (
+                      {filteredTelemetryEntries.length === 0 ? (
                         <div className="text-muted-foreground">{t('developer.telemetryEmpty')}</div>
                       ) : (
-                        telemetryEntries
+                        filteredTelemetryEntries
                           .slice()
                           .reverse()
                           .map((entry) => (
@@ -1495,3 +1864,4 @@ export function Settings() {
 }
 
 export default Settings;
+
