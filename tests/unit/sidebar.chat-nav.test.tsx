@@ -179,6 +179,49 @@ describe('sidebar chat nav', () => {
     expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
   });
 
+  it('hides question blocker when the same task has a newer decision', () => {
+    setupSidebarState();
+    const now = Date.now();
+    useTeamsStore.setState({
+      teams: [
+        {
+          id: 'team-1',
+          name: 'Team One',
+          leadAgentId: 'main',
+          memberIds: ['main'],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      mailboxByTeamId: {
+        'team-1': [
+          {
+            msgId: 'q2',
+            fromAgentId: 'main',
+            to: 'main',
+            kind: 'question',
+            relatedTaskId: 'task-456',
+            content: 'need decision',
+            createdAt: now - 1000,
+          },
+          {
+            msgId: 'd2',
+            fromAgentId: 'lead',
+            to: 'main',
+            kind: 'decision',
+            relatedTaskId: 'task-456',
+            content: 'approved',
+            createdAt: now,
+          },
+        ],
+      },
+    } as never);
+
+    mountSidebar('/dashboard');
+
+    expect(screen.queryByText('Task task-456')).not.toBeInTheDocument();
+  });
+
   it('renders chat approval blockers and navigates to target chat session', () => {
     setupSidebarState();
     useChatStore.setState({

@@ -1,5 +1,5 @@
 import intermediateToolFillerBlacklistConfig from '@/constants/intermediate-tool-filler-blacklist.json';
-import { isToolResultRole } from './runtime-event-helpers';
+import { isToolResultRole } from './event-helpers';
 import type { ContentBlock, RawMessage } from './types';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
@@ -13,7 +13,6 @@ const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
 const INTERMEDIATE_TOOL_PHRASE_STATS_KEY = 'clawx:intermediate-tool-phrase-stats:v1';
 const INTERMEDIATE_TOOL_PHRASE_STATS_MAX_ITEMS = 200;
 const INTERMEDIATE_TOOL_PHRASE_TRACK_MAX_LENGTH = 120;
-const INTERMEDIATE_TOOL_PHRASE_REPORT_COUNTS = new Set([3, 5, 10, 20, 50]);
 
 interface IntermediateToolPhraseStat {
   sample: string;
@@ -116,10 +115,6 @@ function recordIntermediateToolPhrase(text: string): void {
     lastSeenAt: now,
   };
   saveIntermediateToolPhraseStats(stats);
-
-  if (INTERMEDIATE_TOOL_PHRASE_REPORT_COUNTS.has(nextCount)) {
-    console.info(`[chat] 中间工具套话高频出现 (${nextCount}): ${stats[normalized].sample}`);
-  }
 }
 
 function isBlacklistedIntermediateToolPhrase(text: string): boolean {
@@ -237,6 +232,14 @@ export function normalizeUserTextForReconcile(content: unknown): string {
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, ' ')
     .replace(/\s*([，。！？：；,.!?;:])\s*/g, '$1')
+    .trim();
+}
+
+export function normalizeAssistantFinalTextForDedup(content: unknown): string {
+  return getMessageText(content)
+    .replace(/^\s*(?:\[\[reply_to_[a-z0-9:_-]+\]\]\s*)+/ig, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -362,3 +365,4 @@ export function isInternalMessage(msg: Pick<RawMessage, 'role' | 'content'>): bo
   }
   return false;
 }
+

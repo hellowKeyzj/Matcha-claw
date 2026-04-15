@@ -1,5 +1,5 @@
-import { isToolResultRole, upsertToolStatuses } from './runtime-event-helpers';
-import type { ChatStoreState, RawMessage, ToolStatus } from './types';
+import { reduceRuntimeOverlay } from './overlay-reducer';
+import type { ChatStoreState, ToolStatus } from './types';
 
 const CHAT_DELTA_FRAME_FALLBACK_MS = 33;
 
@@ -35,21 +35,6 @@ function clearPendingDeltaFlushSchedule(): void {
   pendingDeltaFlushQueued = false;
 }
 
-function resolveStreamingMessageFromDelta(
-  currentStreamingMessage: unknown | null,
-  incomingMessage: unknown,
-): unknown | null {
-  if (incomingMessage && typeof incomingMessage === 'object') {
-    const incomingRole = (incomingMessage as RawMessage).role;
-    if (isToolResultRole(incomingRole)) return currentStreamingMessage;
-    const incomingObject = incomingMessage as RawMessage;
-    if (currentStreamingMessage && incomingObject.content === undefined) {
-      return currentStreamingMessage;
-    }
-  }
-  return (incomingMessage ?? currentStreamingMessage) as unknown | null;
-}
-
 export function clearPendingDeltaBatch(): void {
   pendingDeltaBatch = null;
   clearPendingDeltaFlushSchedule();
@@ -78,11 +63,10 @@ export function flushPendingDeltaBatch(set: ChatSet, get: ChatGet): void {
     return;
   }
 
-  set((state) => ({
-    streamingMessage: batch.hasMessage
-      ? resolveStreamingMessageFromDelta(state.streamingMessage, batch.message)
-      : state.streamingMessage,
-    streamingTools: hasUpdates ? upsertToolStatuses(state.streamingTools, batch.updates) : state.streamingTools,
+  set((state) => reduceRuntimeOverlay(state, {
+    type: 'delta_committed',
+    ...(batch.hasMessage ? { message: batch.message } : {}),
+    ...(hasUpdates ? { updates: batch.updates } : {}),
   }));
 }
 
@@ -156,3 +140,4 @@ export function queueDeltaForFrame(
 
   schedulePendingDeltaFlush(set, get);
 }
+

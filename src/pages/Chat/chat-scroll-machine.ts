@@ -208,6 +208,28 @@ export function reduceChatScrollState(
 
     case 'VIEWPORT_POSITION_CHANGED': {
       if (!event.isNearBottom) {
+        const hasFreshUserScrollIntent = state.userScrollIntentAtMs != null
+          && (event.atMs - state.userScrollIntentAtMs) <= USER_SCROLL_INTENT_MAX_AGE_MS;
+        if (hasFreshUserScrollIntent) {
+          const shouldIgnoreIntent = (
+            state.programmaticScrollInFlight
+            && state.command.type === 'follow-append'
+          );
+          if (shouldIgnoreIntent) {
+            return {
+              ...state,
+              isNearBottom: false,
+            };
+          }
+          return {
+            ...state,
+            mode: 'detached',
+            command: createNoneCommand(),
+            isNearBottom: false,
+            userScrollIntentAtMs: null,
+            programmaticScrollInFlight: false,
+          };
+        }
         // When an auto-follow command is pending, a transient non-bottom
         // position can happen before COMMAND_EXECUTION_STARTED is observed.
         // Do not treat that transient as user detach.
@@ -223,19 +245,6 @@ export function reduceChatScrollState(
             ...(hasStaleUserScrollIntent
               ? { userScrollIntentAtMs: null }
               : {}),
-          };
-        }
-
-        const hasFreshUserScrollIntent = state.userScrollIntentAtMs != null
-          && (event.atMs - state.userScrollIntentAtMs) <= USER_SCROLL_INTENT_MAX_AGE_MS;
-        if (hasFreshUserScrollIntent && !state.programmaticScrollInFlight) {
-          return {
-            ...state,
-            mode: 'detached',
-            command: createNoneCommand(),
-            isNearBottom: false,
-            userScrollIntentAtMs: null,
-            programmaticScrollInFlight: false,
           };
         }
         const hasStaleUserScrollIntent = state.userScrollIntentAtMs != null && !hasFreshUserScrollIntent;

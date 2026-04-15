@@ -13,6 +13,14 @@ export function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
+/** Monotonic-ish timer for perf sampling with Date fallback. */
+export function nowMs(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
 function safeStableStringify(value: unknown): string {
   try {
     return JSON.stringify(value) ?? '';
@@ -204,6 +212,7 @@ export function createEmptySessionRuntime(): SessionRuntimeSnapshot {
     messages: EMPTY_MESSAGES,
     sending: false,
     activeRunId: null,
+    runPhase: 'idle',
     streamingText: '',
     streamingMessage: null,
     streamingTools: EMPTY_STREAMING_TOOLS,
@@ -220,6 +229,7 @@ export function snapshotCurrentSessionRuntime(state: ChatStoreState): SessionRun
     messages: state.messages,
     sending: state.sending,
     activeRunId: state.activeRunId,
+    runPhase: state.runPhase,
     streamingText: state.streamingText,
     streamingMessage: state.streamingMessage,
     streamingTools: state.streamingTools,
@@ -236,13 +246,17 @@ export function resolveSessionRuntime(snapshot: SessionRuntimeSnapshot | undefin
   }
   const hasApprovalStatus = typeof snapshot.approvalStatus === 'string';
   const hasPendingToolImages = Array.isArray(snapshot.pendingToolImages);
-  if (hasApprovalStatus && hasPendingToolImages) {
+  const hasRunPhase = typeof snapshot.runPhase === 'string';
+  if (hasApprovalStatus && hasPendingToolImages && hasRunPhase) {
     return snapshot;
   }
   return {
     messages: Array.isArray(snapshot.messages) ? snapshot.messages : EMPTY_MESSAGES,
     sending: snapshot.sending,
     activeRunId: snapshot.activeRunId,
+    runPhase: hasRunPhase
+      ? snapshot.runPhase
+      : (snapshot.sending ? 'submitted' : 'idle'),
     streamingText: snapshot.streamingText,
     streamingMessage: snapshot.streamingMessage,
     streamingTools: Array.isArray(snapshot.streamingTools) ? snapshot.streamingTools : EMPTY_STREAMING_TOOLS,

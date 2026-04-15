@@ -57,6 +57,16 @@ export interface ToolStatus {
   updatedAt: number;
 }
 
+export type ChatRunPhase =
+  | 'idle'
+  | 'submitted'
+  | 'streaming'
+  | 'waiting_tool'
+  | 'finalizing'
+  | 'done'
+  | 'error'
+  | 'aborted';
+
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 
@@ -84,6 +94,7 @@ export interface SessionRuntimeSnapshot {
   messages: RawMessage[];
   sending: boolean;
   activeRunId: string | null;
+  runPhase: ChatRunPhase;
   streamingText: string;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
@@ -113,6 +124,7 @@ export interface ChatSessionSnapshotLayerState {
 export interface ChatRuntimeOverlayLayerState {
   sending: boolean;
   activeRunId: string | null;
+  runPhase: ChatRunPhase;
   streamingText: string;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
@@ -194,6 +206,7 @@ export const CHAT_SNAPSHOT_LAYER_KEYS = [
 export const CHAT_RUNTIME_LAYER_KEYS = [
   'sending',
   'activeRunId',
+  'runPhase',
   'streamingText',
   'streamingMessage',
   'streamingTools',
@@ -214,64 +227,6 @@ export const CHAT_VIEW_LAYER_KEYS = [
   'showThinking',
   'thinkingLevel',
 ] as const satisfies readonly (keyof ChatViewDerivedLayerState)[];
-
-/**
- * Legacy split-store surface used by `src/stores/chat/*.ts` unit-level modules.
- * Production runtime store currently lives in `src/stores/chat/store.ts`.
- */
-export interface ChatState {
-  // Messages
-  messages: RawMessage[];
-  loading: boolean;
-  error: string | null;
-
-  // Streaming
-  sending: boolean;
-  activeRunId: string | null;
-  streamingText: string;
-  streamingMessage: unknown | null;
-  streamingTools: ToolStatus[];
-  pendingFinal: boolean;
-  lastUserMessageAt: number | null;
-  /** Images collected from tool results, attached to the next assistant message */
-  pendingToolImages: AttachedFileMeta[];
-
-  // Sessions
-  sessions: ChatSession[];
-  currentSessionKey: string;
-  /** First user message text per session key, used as display label */
-  sessionLabels: Record<string, string>;
-  /** Last message timestamp (ms) per session key, used for sorting */
-  sessionLastActivity: Record<string, number>;
-
-  // Thinking
-  showThinking: boolean;
-  thinkingLevel: string | null;
-
-  // Actions
-  loadSessions: () => Promise<void>;
-  openAgentConversation: (agentId: string) => void;
-  switchSession: (key: string) => void;
-  newSession: (agentId?: string) => void;
-  deleteSession: (key: string) => Promise<void>;
-  cleanupEmptySession: () => void;
-  loadHistory: (quiet?: boolean) => Promise<void>;
-  sendMessage: (
-    text: string,
-    attachments?: Array<{
-      fileName: string;
-      mimeType: string;
-      fileSize: number;
-      stagedPath: string;
-      preview: string | null;
-    }>
-  ) => Promise<void>;
-  abortRun: () => Promise<void>;
-  handleChatEvent: (event: Record<string, unknown>) => void;
-  toggleThinking: () => void;
-  refresh: () => Promise<void>;
-  clearError: () => void;
-}
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 export const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;

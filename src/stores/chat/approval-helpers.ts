@@ -1,8 +1,6 @@
 import type { ApprovalDecision, ApprovalItem } from './types';
-
-function toMs(ts: number): number {
-  return ts < 1e12 ? ts * 1000 : ts;
-}
+import { toMs } from './store-state-helpers';
+import { asRecord } from './value';
 
 export function normalizeApprovalDecision(value: unknown): ApprovalDecision | undefined {
   if (typeof value !== 'string') return undefined;
@@ -29,11 +27,6 @@ export function resolveApprovalSessionKey(payload: Record<string, unknown>): str
   if (nestedSessionKey) return nestedSessionKey;
 
   return undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
@@ -145,4 +138,3 @@ export function parseGatewayApprovalResponse(
     items: [...dedup.values()].sort((a, b) => a.createdAtMs - b.createdAtMs),
   };
 }
-

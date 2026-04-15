@@ -24,5 +24,4 @@ export type {
   ChatSendAttachment,
   ChatStoreActions,
   ChatStoreState,
-  ChatState,
 } from './chat/types';

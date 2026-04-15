@@ -1,5 +1,6 @@
 import { hostApiFetch } from '@/lib/host-api';
-import { isToolResultRole } from './runtime-event-helpers';
+import { isToolResultRole } from './event-helpers';
+import { throwIfHistoryLoadAborted } from './history-abort';
 import { getMessageText, isToolOnlyMessage } from './message-helpers';
 import type { AttachedFileMeta, ChatSendAttachment, ContentBlock, RawMessage } from './types';
 
@@ -41,6 +42,13 @@ async function yieldToEventLoop(): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 0);
   });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal) {
+    return;
+  }
+  throwIfHistoryLoadAborted(signal);
 }
 
 /** Extract media file refs from [media attached: <path> (<mime>) | ...] patterns */
@@ -233,6 +241,46 @@ export function getToolCallFilePath(msg: RawMessage, toolCallId: string): string
   return undefined;
 }
 
+export function collectToolResultPendingFiles(
+  toolResultMessage: RawMessage,
+  streamForPath: RawMessage | null | undefined,
+): AttachedFileMeta[] {
+  const matchedPath = (streamForPath && toolResultMessage.toolCallId)
+    ? getToolCallFilePath(streamForPath, toolResultMessage.toolCallId)
+    : undefined;
+
+  const toolFiles: AttachedFileMeta[] = [
+    ...extractImagesAsAttachedFiles(toolResultMessage.content),
+  ];
+
+  if (matchedPath) {
+    for (const file of toolFiles) {
+      if (!file.filePath) {
+        file.filePath = matchedPath;
+        file.fileName = matchedPath.split(/[\\/]/).pop() || 'image';
+      }
+    }
+  }
+
+  const text = getMessageText(toolResultMessage.content);
+  if (!text) {
+    return toolFiles;
+  }
+
+  const mediaRefs = extractMediaRefs(text);
+  const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
+  for (const ref of mediaRefs) {
+    toolFiles.push(makeAttachedFile(ref));
+  }
+  for (const ref of extractRawFilePaths(text)) {
+    if (!mediaRefPaths.has(ref.filePath)) {
+      toolFiles.push(makeAttachedFile(ref));
+    }
+  }
+
+  return toolFiles;
+}
+
 function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void {
   const content = msg.content;
   if (Array.isArray(content)) {
@@ -331,7 +379,9 @@ export function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] 
 export async function enrichWithToolResultFilesIncremental(
   messages: RawMessage[],
   chunkSize = HISTORY_ENRICH_YIELD_INTERVAL,
+  abortSignal?: AbortSignal,
 ): Promise<RawMessage[]> {
+  throwIfAborted(abortSignal);
   if (messages.length === 0) {
     return messages;
   }
@@ -342,6 +392,7 @@ export async function enrichWithToolResultFilesIncremental(
   const normalizedChunkSize = Math.max(1, Math.floor(chunkSize));
 
   for (let index = 0; index < messages.length; index += 1) {
+    throwIfAborted(abortSignal);
     const msg = messages[index];
     let nextMessage = msg;
 
@@ -399,6 +450,7 @@ export async function enrichWithToolResultFilesIncremental(
     enriched[index] = nextMessage;
 
     if ((index + 1) % normalizedChunkSize === 0) {
+      throwIfAborted(abortSignal);
       await yieldToEventLoop();
     }
   }
@@ -467,7 +519,9 @@ export function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
 export async function enrichWithCachedImagesIncremental(
   messages: RawMessage[],
   chunkSize = HISTORY_ENRICH_YIELD_INTERVAL,
+  abortSignal?: AbortSignal,
 ): Promise<RawMessage[]> {
+  throwIfAborted(abortSignal);
   if (messages.length === 0) {
     return messages;
   }
@@ -475,8 +529,10 @@ export async function enrichWithCachedImagesIncremental(
   const normalizedChunkSize = Math.max(1, Math.floor(chunkSize));
   const enriched = new Array<RawMessage>(messages.length);
   for (let index = 0; index < messages.length; index += 1) {
+    throwIfAborted(abortSignal);
     enriched[index] = enrichMessageWithCachedImages(messages, index, messages[index]);
     if ((index + 1) % normalizedChunkSize === 0) {
+      throwIfAborted(abortSignal);
       await yieldToEventLoop();
     }
   }
@@ -624,8 +680,7 @@ export async function loadMissingPreviews(messages: RawMessage[]): Promise<boole
     }
     if (updated) saveImageCache(imageCache);
     return updated;
-  } catch (err) {
-    console.warn('[loadMissingPreviews] Failed:', err);
+  } catch {
     return false;
   }
 }
@@ -662,3 +717,5 @@ export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {
   }
   saveImageCache(imageCache);
 }
+
+

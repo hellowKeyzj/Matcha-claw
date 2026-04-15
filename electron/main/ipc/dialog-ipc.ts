@@ -1,7 +1,12 @@
 import { dialog, ipcMain } from 'electron';
+import { getE2EDialogOpenResult } from './e2e-chat';
 
 export function registerDialogHandlers(): void {
   ipcMain.handle('dialog:open', async (_, options: Electron.OpenDialogOptions) => {
+    const e2eResult = getE2EDialogOpenResult();
+    if (e2eResult) {
+      return e2eResult;
+    }
     return await dialog.showOpenDialog(options);
   });
 
