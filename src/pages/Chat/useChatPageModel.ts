@@ -11,13 +11,6 @@ function parseAgentIdFromSessionKey(sessionKey: string): string {
   return matched?.[1] ?? 'main';
 }
 
-function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
-  if (explicitEmoji && explicitEmoji.trim()) {
-    return explicitEmoji;
-  }
-  return isDefault ? '⚙️' : '🤖';
-}
-
 export function useChatPageModel() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayRpc = useGatewayStore((s) => s.rpc);
@@ -35,10 +28,6 @@ export function useChatPageModel() {
 
   const currentAgentId = parseAgentIdFromSessionKey(chatState.currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
-  const assistantAvatarEmoji = resolveAgentEmoji(
-    currentAgent?.identityEmoji ?? currentAgent?.identity?.emoji,
-    Boolean(currentAgent?.isDefault),
-  );
   const waitingApproval = chatState.approvalStatus === 'awaiting_approval';
 
   return {
@@ -54,9 +43,7 @@ export function useChatPageModel() {
     userAvatarDataUrl,
     currentAgentId,
     currentAgent,
-    assistantAvatarEmoji,
     waitingApproval,
     ...chatState,
   };
 }
-

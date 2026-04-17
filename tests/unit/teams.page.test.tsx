@@ -32,7 +32,8 @@ describe('teams page', () => {
           name: 'Alpha',
           workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
           model: 'gpt-4o-mini',
-          identityEmoji: '🤖',
+          avatarSeed: 'agent:agent-alpha',
+          avatarStyle: 'pixelArt',
           isDefault: false,
         },
         {
@@ -40,7 +41,8 @@ describe('teams page', () => {
           name: 'Beta',
           workspace: '/home/dev/.openclaw/workspace-subagents/beta',
           model: 'gpt-4o-mini',
-          identityEmoji: '🧠',
+          avatarSeed: 'agent:agent-beta',
+          avatarStyle: 'bottts',
           isDefault: false,
         },
       ],
@@ -62,14 +64,14 @@ describe('teams page', () => {
     } as never);
   });
 
-  it('gateway 恢复到 running 后会自动刷新智能体列表', async () => {
+  it('gateway 恢复到 running 后才会刷新智能体列表', async () => {
     render(
       <MemoryRouter>
         <TeamsPage />
       </MemoryRouter>,
     );
 
-    expect(loadAgentsMock).toHaveBeenCalledTimes(1);
+    expect(loadAgentsMock).not.toHaveBeenCalled();
 
     act(() => {
       useGatewayStore.setState({
@@ -81,8 +83,34 @@ describe('teams page', () => {
     });
 
     await waitFor(() => {
-      expect(loadAgentsMock).toHaveBeenCalledTimes(2);
+      expect(loadAgentsMock).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('启动阶段且无本地 agent 时显示等待提示', async () => {
+    useGatewayStore.setState({
+      status: {
+        state: 'starting',
+        port: 18789,
+      },
+      health: null,
+      isInitialized: false,
+      lastError: null,
+    });
+    useSubagentsStore.setState({
+      agents: [],
+      loadAgents: loadAgentsMock,
+      managedAgentId: null,
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <TeamsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Waiting for the gateway to load agents...')).toBeInTheDocument();
+    expect(loadAgentsMock).not.toHaveBeenCalled();
   });
 
   it('renders create form and team list', async () => {

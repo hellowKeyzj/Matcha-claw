@@ -156,8 +156,8 @@ export function SubAgents() {
     () => import.meta.env.MODE === 'test' || agents.length > 0 || snapshotReady,
   );
   const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const gatewayState = useGatewayStore((state) => state.status.state);
-  const wasGatewayRunningRef = useRef(gatewayState === 'running');
   const templateLoadRequestIdRef = useRef(0);
   const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
   const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
@@ -172,22 +172,23 @@ export function SubAgents() {
   const hasAvailableModels = availableModels.length > 0;
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
-  const showSubagentGridSkeleton = !hasAgentCards && !snapshotReady && (initialLoading || !subagentsHeavyContentReady);
+  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'reconnecting';
+  const showSubagentGridSkeleton = !hasAgentCards && !snapshotReady && (
+    initialLoading
+    || !subagentsHeavyContentReady
+    || gatewayPending
+  );
   const showRefreshingHint = useDelayedFlag(refreshing, 180);
 
   useEffect(() => {
-    void loadAgents({ silent: true });
     void loadAvailableModels();
-  }, [loadAgents, loadAvailableModels]);
+  }, [loadAvailableModels]);
 
   useEffect(() => {
-    const isGatewayRunning = gatewayState === 'running';
-    if (isGatewayRunning && !wasGatewayRunningRef.current) {
+    if (gatewayState === 'running') {
       void loadAgents({ silent: true });
-      void loadAvailableModels();
     }
-    wasGatewayRunningRef.current = isGatewayRunning;
-  }, [gatewayState, loadAgents, loadAvailableModels]);
+  }, [gatewayState, loadAgents]);
 
   useEffect(() => {
     if (!managedAgentId) {

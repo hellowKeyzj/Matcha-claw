@@ -1,6 +1,7 @@
 import type { RefObject } from 'react';
 import type { VirtualItem } from '@tanstack/react-virtual';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import type { ChatRow } from '../chat-row-model';
 import { WelcomeScreen } from './ChatStates';
@@ -24,7 +25,10 @@ interface ChatListProps {
   virtualItems: VirtualItem[];
   rows: ChatRow[];
   showThinking: boolean;
-  assistantAvatarEmoji: string;
+  assistantAgentId: string;
+  assistantAgentName: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
   onJumpToRowKey: (rowKey?: string) => void;
@@ -43,7 +47,10 @@ export function ChatList({
   virtualItems,
   rows,
   showThinking,
-  assistantAvatarEmoji,
+  assistantAgentId,
+  assistantAgentName,
+  assistantAvatarSeed,
+  assistantAvatarStyle,
   userAvatarImageUrl,
   suppressedToolCardRowKeys,
   onJumpToRowKey,
@@ -92,7 +99,10 @@ export function ChatList({
                     <ChatRowItem
                       row={row}
                       showThinking={showThinking}
-                      assistantAvatarEmoji={assistantAvatarEmoji}
+                      assistantAgentId={assistantAgentId}
+                      assistantAgentName={assistantAgentName}
+                      assistantAvatarSeed={assistantAvatarSeed}
+                      assistantAvatarStyle={assistantAvatarStyle}
                       userAvatarImageUrl={userAvatarImageUrl}
                       suppressedToolCardRowKeys={suppressedToolCardRowKeys}
                       onJumpToRowKey={onJumpToRowKey}
@@ -107,4 +117,3 @@ export function ChatList({
     </div>
   );
 }
-

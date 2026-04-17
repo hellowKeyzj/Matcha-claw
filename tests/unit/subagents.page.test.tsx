@@ -100,7 +100,8 @@ describe('subagents page', () => {
           name: 'Main',
           workspace: '/home/dev/.openclaw/workspace',
           model: 'gpt-main',
-          identityEmoji: '⚙️',
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
           isDefault: true,
         },
         {
@@ -108,7 +109,8 @@ describe('subagents page', () => {
           name: 'Alpha',
           workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
           model: 'gpt-4o-mini',
-          identityEmoji: '📊',
+          avatarSeed: 'agent:agent-alpha',
+          avatarStyle: 'bottts',
           isDefault: false,
         },
       ],
@@ -163,19 +165,19 @@ describe('subagents page', () => {
     expect(screen.getByTestId('agent-avatar-agent-alpha')).toBeInTheDocument();
   });
 
-  it('挂载时触发初始化加载', () => {
+  it('挂载时先加载模型选项，等待网关 ready 后再加载 agents', () => {
     useSubagentsStore.setState({
       agents: [],
       availableModels: [],
     });
     renderSubagentsPage();
-    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadAgents).not.toHaveBeenCalled();
     expect(loadAvailableModels).toHaveBeenCalledTimes(1);
   });
 
   it('网关恢复到 running 后会自动重载数据', async () => {
     renderSubagentsPage();
-    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(loadAgents).not.toHaveBeenCalled();
     expect(loadAvailableModels).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -188,9 +190,9 @@ describe('subagents page', () => {
     });
 
     await waitFor(() => {
-      expect(loadAgents).toHaveBeenCalledTimes(2);
+      expect(loadAgents).toHaveBeenCalledTimes(1);
     });
-    expect(loadAvailableModels).toHaveBeenCalledTimes(2);
+    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
   });
 
   it('shows top guide when there is no available model', () => {
@@ -402,7 +404,8 @@ describe('subagents page', () => {
           name: 'Main',
           workspace: '/home/dev/.openclaw/workspace',
           model: 'gpt-main',
-          identityEmoji: '⚙️',
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
           isDefault: true,
         },
         {
@@ -410,7 +413,8 @@ describe('subagents page', () => {
           name: 'Alpha',
           workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
           model: 'legacy/removed-model',
-          identityEmoji: '📊',
+          avatarSeed: 'agent:agent-alpha',
+          avatarStyle: 'bottts',
           isDefault: false,
         },
       ],
@@ -463,7 +467,8 @@ describe('subagents page', () => {
           name: 'Main',
           workspace: '/home/dev/.openclaw/workspace',
           model: 'gpt-main',
-          identityEmoji: '⚙️',
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
           isDefault: true,
         },
         {
@@ -471,7 +476,8 @@ describe('subagents page', () => {
           name: 'NoModel',
           workspace: '/home/dev/.openclaw/workspace-subagents/no-model',
           model: undefined,
-          identityEmoji: '📉',
+          avatarSeed: 'agent:agent-no-model',
+          avatarStyle: 'botttsNeutral',
           isDefault: false,
         },
       ],
@@ -559,7 +565,6 @@ describe('subagents page', () => {
                 {
                   id: 'brand-guardian',
                   name: 'Brand Guardian',
-                  emoji: '🎨',
                   summary: 'Brand guard template',
                   files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
                 },
@@ -579,7 +584,6 @@ describe('subagents page', () => {
               template: {
                 id: 'brand-guardian',
                 name: 'Brand Guardian',
-                emoji: '🎨',
                 summary: 'Brand guard template',
                 files: ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md'],
                 fileContents: {
@@ -622,7 +626,6 @@ describe('subagents page', () => {
           template: expect.objectContaining({
             id: 'brand-guardian',
             name: 'Brand Guardian',
-            emoji: '🎨',
           }),
         }),
       );
@@ -644,7 +647,6 @@ describe('subagents page', () => {
               templates: Array.from({ length: 30 }, (_, index) => ({
                 id: `template-${index + 1}`,
                 name: `Template ${index + 1}`,
-                emoji: '🤖',
                 summary: `Template summary ${index + 1}`,
                 files: ['AGENTS.md'],
               })),

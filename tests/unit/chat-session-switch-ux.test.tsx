@@ -13,15 +13,21 @@ const scrollToIndexMock = vi.fn();
 const VIRTUAL_WINDOW_SIZE = 10;
 let virtualWindowStartIndex = 0;
 let triggerResizeObserver: (() => void) | null = null;
+let resizeObserverCallbacks: Array<() => void> = [];
 
 class ResizeObserverStub {
-  private readonly callback: ResizeObserverCallback;
+  private readonly trigger: () => void;
 
   constructor(callback: ResizeObserverCallback) {
-    this.callback = callback;
+    this.trigger = () => {
+      callback([], this as unknown as ResizeObserver);
+    };
+    resizeObserverCallbacks.push(this.trigger);
     triggerResizeObserver = () => {
       act(() => {
-        this.callback([], this as unknown as ResizeObserver);
+        for (const observerCallback of [...resizeObserverCallbacks]) {
+          observerCallback();
+        }
       });
     };
   }
@@ -30,7 +36,9 @@ class ResizeObserverStub {
 
   unobserve() {}
 
-  disconnect() {}
+  disconnect() {
+    resizeObserverCallbacks = resizeObserverCallbacks.filter((callback) => callback !== this.trigger);
+  }
 }
 
 vi.mock('@tanstack/react-virtual', () => ({
@@ -101,6 +109,7 @@ describe('chat 会话切换 UI 回归', () => {
     scrollToIndexMock.mockReset();
     virtualWindowStartIndex = 0;
     triggerResizeObserver = null;
+    resizeObserverCallbacks = [];
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
     scrollIntoViewMock = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -725,6 +734,59 @@ describe('chat 会话切换 UI 回归', () => {
     secondMount.unmount();
   });
 
+  it('窗口放大后如果首屏消息不足以撑出滚动条，应自动补出更早消息', async () => {
+    const nowTs = Date.now() / 1000;
+    const longMessages = Array.from({ length: 12 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `resize-history-message-${index}`,
+      timestamp: nowTs + index,
+      id: `resize-history-${index}`,
+    }));
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main', displayName: 'agent:test:main' }],
+      messages: longMessages,
+      snapshotReady: true,
+      sessionReadyByKey: { 'agent:test:main': true },
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('resize-history-message-11')).toBeInTheDocument();
+    expect(screen.queryByText('resize-history-message-3')).not.toBeInTheDocument();
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 960 });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    fireEvent.scroll(viewport);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 1800 });
+    triggerResizeObserver?.();
+
+    await waitFor(() => {
+      expect(screen.getByText('resize-history-message-3')).toBeInTheDocument();
+    });
+  });
+
   it('从其他页面通过 session 参数进入未就绪会话时，不应先闪 Welcome 空态', async () => {
     const pendingLoad = new Promise<void>(() => {
       // keep pending on purpose, we only care about the transition frame
@@ -857,4 +919,3 @@ describe('chat 会话切换 UI 回归', () => {
     expect(loadAgents).not.toHaveBeenCalled();
   });
 });
-

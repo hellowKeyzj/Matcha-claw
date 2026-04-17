@@ -4,11 +4,13 @@
  * with markdown, thinking sections, images, and tool cards.
  */
 import { useState, useCallback, useEffect, useMemo, useRef, memo, type ReactNode } from 'react';
-import { User, Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { createPortal } from 'react-dom';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
@@ -35,7 +37,10 @@ interface ChatMessageProps {
   message: RawMessage;
   showThinking: boolean;
   suppressToolCards?: boolean;
-  assistantAvatarEmoji?: string;
+  assistantAgentId?: string;
+  assistantAgentName?: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
   preferPlainText?: boolean;
@@ -63,7 +68,10 @@ export const ChatMessage = memo(function ChatMessage({
   message,
   showThinking,
   suppressToolCards = false,
-  assistantAvatarEmoji,
+  assistantAgentId,
+  assistantAgentName,
+  assistantAvatarSeed,
+  assistantAvatarStyle,
   userAvatarImageUrl,
   isStreaming = false,
   preferPlainText = false,
@@ -136,7 +144,14 @@ export const ChatMessage = memo(function ChatMessage({
             <User className="h-4 w-4" />
           )
         ) : (
-          assistantAvatarEmoji ? <span className="text-base leading-none">{assistantAvatarEmoji}</span> : <Sparkles className="h-4 w-4" />
+          <AgentAvatar
+            agentId={assistantAgentId}
+            agentName={assistantAgentName}
+            avatarSeed={assistantAvatarSeed}
+            avatarStyle={assistantAvatarStyle}
+            className="h-full w-full"
+            dataTestId="assistant-message-avatar"
+          />
         )}
       </div>
 

@@ -1,12 +1,10 @@
 import { saveOAuthTokenToOpenClaw } from '../openclaw/openclaw-auth-profile-store';
-import { setOpenClawDefaultModelWithOverride } from '../openclaw/openclaw-provider-config-service';
 import { buildBrowserOAuthAccount, buildDeviceOAuthAccount } from './provider-oauth-account-service';
 import { getProviderDefaultModel } from './provider-registry';
 import {
-  getOAuthApiKeyEnv,
-  getOAuthProviderTargetKey,
   normalizeOAuthBaseUrl,
 } from './provider-runtime-rules';
+import { syncProviderStoreToOpenClaw } from './store-sync';
 import { readProviderStoreLocal, writeProviderStoreLocal } from '../../api/storage/provider-store';
 
 type BrowserOAuthInput = {
@@ -82,6 +80,10 @@ export async function completeBrowserOAuthLocal(input: BrowserOAuthInput) {
     email: oauthTokenEmail,
     projectId: oauthTokenSubject,
   });
+  const syncResult = await syncProviderStoreToOpenClaw(store);
+  if (syncResult.storeModified) {
+    await writeProviderStoreLocal(store);
+  }
 
   return nextAccount;
 }
@@ -96,30 +98,6 @@ export async function completeDeviceOAuthLocal(input: DeviceOAuthInput) {
     refresh: input.token.refresh,
     expires: input.token.expires,
   });
-
-  const targetProviderKey = getOAuthProviderTargetKey(input.providerType);
-  if (targetProviderKey) {
-    const normalizedBaseUrl = normalizeOAuthBaseUrl(
-      input.providerType,
-      input.token.resourceUrl || (input.providerType === 'minimax-portal'
-        ? 'https://api.minimax.io/anthropic'
-        : input.providerType === 'minimax-portal-cn'
-          ? 'https://api.minimaxi.com/anthropic'
-          : 'https://portal.qwen.ai/v1'),
-    );
-    const baseUrl = normalizedBaseUrl
-      && !normalizedBaseUrl.startsWith('http://')
-      && !normalizedBaseUrl.startsWith('https://')
-      ? `https://${normalizedBaseUrl}`
-      : normalizedBaseUrl;
-
-    await setOpenClawDefaultModelWithOverride(targetProviderKey, undefined, {
-      baseUrl,
-      api: input.token.api,
-      authHeader: input.providerType.startsWith('minimax-portal') ? true : undefined,
-      apiKeyEnv: getOAuthApiKeyEnv(targetProviderKey),
-    });
-  }
 
   const store = await readProviderStoreLocal();
   const existing = asRecord(store.accounts[input.accountId]);
@@ -147,6 +125,10 @@ export async function completeDeviceOAuthLocal(input: DeviceOAuthInput) {
   store.accounts[nextAccount.id] = nextAccount;
   ensureDefaultAccountFlag(store, nextAccount.id);
   await writeProviderStoreLocal(store);
+  const syncResult = await syncProviderStoreToOpenClaw(store);
+  if (syncResult.storeModified) {
+    await writeProviderStoreLocal(store);
+  }
 
   return nextAccount;
 }

@@ -8,6 +8,7 @@ const SESSION_RENDER_WINDOW_EXPAND_STEP = 24;
 const SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX = 12;
 const SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX = 180;
 const SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS = 140;
+const SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX = 1;
 
 const globalSessionRenderableWindowLimit = new Map<string, number>();
 const globalRenderWindowSliceCache = new WeakMap<RawMessage[], Map<number, RenderWindowSliceResult>>();
@@ -229,6 +230,7 @@ export function useChatWindowExpand(
   const expandWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prependWindowTxnRef = useRef<PrependWindowTxn>({ phase: 'idle' });
   const prependWindowTxnSeqRef = useRef(0);
+  const lastUnderfillExpandRef = useRef<{ sessionKey: string; rowCount: number } | null>(null);
 
   useEffect(() => {
     return () => {
@@ -238,6 +240,7 @@ export function useChatWindowExpand(
       }
       expandWindowArmedRef.current = true;
       prependWindowTxnRef.current = { phase: 'idle' };
+      lastUnderfillExpandRef.current = null;
     };
   }, []);
 
@@ -248,7 +251,36 @@ export function useChatWindowExpand(
       expandWindowTimerRef.current = null;
     }
     prependWindowTxnRef.current = { phase: 'idle' };
+    lastUnderfillExpandRef.current = null;
   }, [currentSessionKey]);
+
+  const schedulePrependWindowTxn = useCallback((viewport: HTMLDivElement) => {
+    const visibleItems = messageVirtualizer.getVirtualItems();
+    let anchorItem = visibleItems.find((item) => (
+      item.start <= viewport.scrollTop
+      && (item.start + item.size) > viewport.scrollTop
+    ));
+    if (!anchorItem) {
+      anchorItem = visibleItems[0];
+    }
+    const anchorRow = anchorItem ? chatRows[anchorItem.index] : undefined;
+    const anchorRowKey = anchorRow?.key ?? null;
+    if (!anchorRowKey) {
+      prependWindowTxnRef.current = { phase: 'idle' };
+      return false;
+    }
+    prependWindowTxnSeqRef.current += 1;
+    prependWindowTxnRef.current = {
+      phase: 'scheduled',
+      id: prependWindowTxnSeqRef.current,
+      sessionKey: currentSessionKey,
+      rowKey: anchorRowKey,
+      rowOffsetPx: Math.max(0, viewport.scrollTop - (anchorItem?.start ?? viewport.scrollTop)),
+      previousScrollTop: viewport.scrollTop,
+      previousScrollHeight: viewport.scrollHeight,
+    };
+    return true;
+  }, [chatRows, currentSessionKey, messageVirtualizer]);
 
   useLayoutEffect(() => {
     const txn = prependWindowTxnRef.current;
@@ -298,7 +330,7 @@ export function useChatWindowExpand(
   }, [chatRows, currentSessionKey, messageVirtualizer, messagesViewportRef, scrollCommandType, scrollMode]);
 
   const maybeExpandRenderableWindow = useCallback(() => {
-    if (scrollMode !== 'detached' || scrollCommandType !== 'none') {
+    if (scrollCommandType !== 'none') {
       return;
     }
     if (!hasOlderRenderableRows) {
@@ -306,6 +338,9 @@ export function useChatWindowExpand(
     }
     const viewport = messagesViewportRef.current;
     if (!viewport) {
+      return;
+    }
+    if (scrollMode !== 'detached') {
       return;
     }
     if (viewport.scrollTop > SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX) {
@@ -335,43 +370,84 @@ export function useChatWindowExpand(
       if (useChatStore.getState().currentSessionKey !== sessionKeyAtSchedule || !expandWindowArmedRef.current) {
         return;
       }
-      const visibleItems = messageVirtualizer.getVirtualItems();
-      let anchorItem = visibleItems.find((item) => (
-        item.start <= activeViewport.scrollTop
-        && (item.start + item.size) > activeViewport.scrollTop
-      ));
-      if (!anchorItem) {
-        anchorItem = visibleItems[0];
-      }
-      const anchorRow = anchorItem ? chatRows[anchorItem.index] : undefined;
-      const anchorRowKey = anchorRow?.key ?? null;
-      if (anchorRowKey) {
-        prependWindowTxnSeqRef.current += 1;
-        prependWindowTxnRef.current = {
-          phase: 'scheduled',
-          id: prependWindowTxnSeqRef.current,
-          sessionKey: sessionKeyAtSchedule,
-          rowKey: anchorRowKey,
-          rowOffsetPx: Math.max(0, activeViewport.scrollTop - (anchorItem?.start ?? activeViewport.scrollTop)),
-          previousScrollTop: activeViewport.scrollTop,
-          previousScrollHeight: activeViewport.scrollHeight,
-        };
-      } else {
+      if (!schedulePrependWindowTxn(activeViewport)) {
         prependWindowTxnRef.current = { phase: 'idle' };
       }
       increaseRenderableWindowLimit(sessionKeyAtSchedule);
       expandWindowArmedRef.current = false;
     }, SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS);
   }, [
-    chatRows,
     currentSessionKey,
     hasOlderRenderableRows,
     increaseRenderableWindowLimit,
-    messageVirtualizer,
     messagesViewportRef,
+    schedulePrependWindowTxn,
     scrollCommandType,
     scrollMode,
   ]);
+
+  const maybeExpandRenderableWindowForUnderfill = useCallback(() => {
+    if (scrollCommandType !== 'none' || !hasOlderRenderableRows) {
+      return;
+    }
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (
+      viewport.clientHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
+      || viewport.scrollHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
+    ) {
+      return;
+    }
+    if (viewport.scrollHeight > viewport.clientHeight + SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX) {
+      return;
+    }
+    const alreadyExpandedForCurrentRows = (
+      lastUnderfillExpandRef.current?.sessionKey === currentSessionKey
+      && lastUnderfillExpandRef.current.rowCount === chatRows.length
+    );
+    if (alreadyExpandedForCurrentRows) {
+      return;
+    }
+
+    if (scrollMode === 'detached') {
+      schedulePrependWindowTxn(viewport);
+    } else {
+      prependWindowTxnRef.current = { phase: 'idle' };
+    }
+
+    lastUnderfillExpandRef.current = {
+      sessionKey: currentSessionKey,
+      rowCount: chatRows.length,
+    };
+    increaseRenderableWindowLimit(currentSessionKey);
+  }, [
+    chatRows.length,
+    currentSessionKey,
+    hasOlderRenderableRows,
+    increaseRenderableWindowLimit,
+    messagesViewportRef,
+    schedulePrependWindowTxn,
+    scrollCommandType,
+    scrollMode,
+  ]);
+
+  useLayoutEffect(() => {
+    maybeExpandRenderableWindowForUnderfill();
+  }, [maybeExpandRenderableWindowForUnderfill]);
+
+  useLayoutEffect(() => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport || typeof ResizeObserver !== 'function') {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      maybeExpandRenderableWindowForUnderfill();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [maybeExpandRenderableWindowForUnderfill, messagesViewportRef]);
 
   const handleViewportScrollWithWindowing = useCallback(() => {
     handleViewportScroll();

@@ -58,8 +58,8 @@ describe('task inbox store', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       messages: [],
-      loadHistory: vi.fn(),
-      sendMessage: sendMessageMock,
+      refreshHistory: vi.fn(),
+      send: sendMessageMock,
       sending: false,
       pendingFinal: false,
       activeRunId: null,

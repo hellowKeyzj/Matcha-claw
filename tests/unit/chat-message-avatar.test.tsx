@@ -4,7 +4,7 @@ import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import type { RawMessage } from '@/stores/chat';
 
 describe('chat message avatar', () => {
-  it('assistant message renders custom emoji avatar', () => {
+  it('assistant message renders generated agent avatar', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: 'hello',
@@ -14,11 +14,17 @@ describe('chat message avatar', () => {
       <ChatMessage
         message={message}
         showThinking={false}
-        assistantAvatarEmoji="🧠"
+        assistantAgentId="writer"
+        assistantAgentName="Writer"
+        assistantAvatarSeed="agent:writer"
+        assistantAvatarStyle="bottts"
       />,
     );
 
-    expect(screen.getByText('🧠')).toBeInTheDocument();
+    const img = screen.getByTestId('assistant-message-avatar').querySelector('img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('alt')).toBe('Writer avatar');
+    expect(img?.src.startsWith('data:image/svg+xml')).toBe(true);
   });
 
   it('user message renders custom avatar image when provided', () => {

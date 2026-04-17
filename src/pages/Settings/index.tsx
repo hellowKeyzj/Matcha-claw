@@ -34,7 +34,6 @@ import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 import { useUpdateStore } from '@/stores/update';
-import { resolveHistoryLoadPipelineStrategyKey } from '@/stores/chat/history-pipeline-strategies';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   getGatewayWsDiagnosticEnabled,
@@ -105,12 +104,6 @@ interface DiagnosticsBundleResponse {
   fileCount: number;
 }
 
-const HISTORY_PIPELINE_PRESET_KEYS = [
-  'default',
-  'active_only',
-  'quiet_only',
-  'probe_only',
-] as const;
 const TELEMETRY_WINDOW_MINUTES_OPTIONS = [0, 5, 15, 60] as const;
 const HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN = 5;
 const HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN_MAX = 999;
@@ -235,8 +228,6 @@ export function Settings() {
   const setAutoDownloadUpdate = useSettingsStore((state) => state.setAutoDownloadUpdate);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const setDevModeUnlocked = useSettingsStore((state) => state.setDevModeUnlocked);
-  const chatHistoryPipelineStrategyKey = useSettingsStore((state) => state.chatHistoryPipelineStrategyKey);
-  const setChatHistoryPipelineStrategyKey = useSettingsStore((state) => state.setChatHistoryPipelineStrategyKey);
 
   const gatewayStatus = useGatewayStore((state) => state.status);
   const restartGateway = useGatewayStore((state) => state.restart);
@@ -250,7 +241,6 @@ export function Settings() {
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
-  const [historyPipelineStrategyDraft, setHistoryPipelineStrategyDraft] = useState('');
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
   const [telemetryWindowMinutes, setTelemetryWindowMinutes] = useState<number>(15);
@@ -620,10 +610,6 @@ export function Settings() {
     setProxyBypassRulesDraft(proxyBypassRules);
   }, [proxyBypassRules]);
 
-  useEffect(() => {
-    setHistoryPipelineStrategyDraft(chatHistoryPipelineStrategyKey || '');
-  }, [chatHistoryPipelineStrategyKey]);
-
   const proxySettingsDirty = useMemo(() => (
     proxyEnabledDraft !== proxyEnabled
     || proxyServerDraft.trim() !== proxyServer
@@ -636,22 +622,6 @@ export function Settings() {
     proxyServer,
     proxyServerDraft,
   ]);
-  const normalizedHistoryPipelineStrategyDraft = useMemo(
-    () => historyPipelineStrategyDraft.trim(),
-    [historyPipelineStrategyDraft],
-  );
-  const effectiveHistoryPipelineStrategyKey = useMemo(
-    () => resolveHistoryLoadPipelineStrategyKey(
-      normalizedHistoryPipelineStrategyDraft || null,
-    ),
-    [normalizedHistoryPipelineStrategyDraft],
-  );
-  const historyPipelineStrategyDirty = normalizedHistoryPipelineStrategyDraft !== (chatHistoryPipelineStrategyKey || '');
-  const historyPipelineFallsBackToDefault = (
-    normalizedHistoryPipelineStrategyDraft.length > 0
-    && effectiveHistoryPipelineStrategyKey === 'default'
-    && normalizedHistoryPipelineStrategyDraft.toLowerCase() !== 'default'
-  );
   const historyStrategySampleMin = useMemo(() => {
     const parsed = Number.parseInt(historyStrategySampleMinDraft, 10);
     if (!Number.isFinite(parsed) || parsed < HISTORY_STRATEGY_RELIABLE_SAMPLE_MIN) {
@@ -901,31 +871,6 @@ export function Settings() {
         : t('developer.wsDiagnosticDisabled'),
     );
   };
-
-  const handleSaveHistoryPipelineStrategy = useCallback(() => {
-    setChatHistoryPipelineStrategyKey(normalizedHistoryPipelineStrategyDraft);
-    trackUiEvent('settings.history_pipeline_strategy_updated', {
-      strategy: effectiveHistoryPipelineStrategyKey,
-      raw: normalizedHistoryPipelineStrategyDraft || null,
-    });
-    toast.success(t('developer.historyPipelineSaved'));
-  }, [
-    effectiveHistoryPipelineStrategyKey,
-    normalizedHistoryPipelineStrategyDraft,
-    setChatHistoryPipelineStrategyKey,
-    t,
-  ]);
-
-  const handleResetHistoryPipelineStrategy = useCallback(() => {
-    setHistoryPipelineStrategyDraft('');
-    setChatHistoryPipelineStrategyKey('');
-    trackUiEvent('settings.history_pipeline_strategy_updated', {
-      strategy: 'default',
-      raw: null,
-      reset: true,
-    });
-    toast.success(t('developer.historyPipelineSaved'));
-  }, [setChatHistoryPipelineStrategyKey, t]);
 
   const sectionItems: Array<{ key: SettingsSectionKey; label: string }> = [
     { key: 'gateway', label: t('gateway.title') },
@@ -1583,57 +1528,6 @@ export function Settings() {
             )}
 
             <Separator />
-            <div className="space-y-2 rounded-md border border-border/60 p-3">
-              <Label>{t('developer.historyPipeline')}</Label>
-              <p className="text-sm text-muted-foreground">
-                {t('developer.historyPipelineDesc')}
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {HISTORY_PIPELINE_PRESET_KEYS.map((key) => (
-                  <Button
-                    key={key}
-                    type="button"
-                    variant={normalizedHistoryPipelineStrategyDraft === key ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => setHistoryPipelineStrategyDraft(key)}
-                  >
-                    {key}
-                  </Button>
-                ))}
-              </div>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <Input
-                  value={historyPipelineStrategyDraft}
-                  onChange={(event) => setHistoryPipelineStrategyDraft(event.target.value)}
-                  placeholder={t('developer.historyPipelineInputPlaceholder')}
-                  className="font-mono"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleSaveHistoryPipelineStrategy}
-                  disabled={!historyPipelineStrategyDirty}
-                >
-                  {t('common:actions.save')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleResetHistoryPipelineStrategy}
-                >
-                  {t('common:actions.clear')}
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span>{t('developer.historyPipelineEffective')}: </span>
-                <Badge variant="secondary" className="font-mono">{effectiveHistoryPipelineStrategyKey}</Badge>
-                {historyPipelineFallsBackToDefault && (
-                  <span>{t('developer.historyPipelineFallbackWarning')}</span>
-                )}
-              </div>
-            </div>
-
-            <Separator />
             <div className="space-y-2">
               <div className="flex items-center justify-between rounded-md border border-border/60 p-3">
                 <div>
@@ -1864,4 +1758,3 @@ export function Settings() {
 }
 
 export default Settings;
-

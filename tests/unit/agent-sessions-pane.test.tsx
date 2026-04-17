@@ -15,8 +15,8 @@ function setupBaseState() {
 
   useSubagentsStore.setState({
     agents: [
-      { id: 'main', name: 'main', isDefault: true, identity: { emoji: '🐱' } },
-      { id: 'test', name: 'test', isDefault: false, identity: { emoji: '🤖' } },
+      { id: 'main', name: 'main', isDefault: true, avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+      { id: 'test', name: 'test', isDefault: false, avatarSeed: 'agent:test', avatarStyle: 'bottts' },
     ],
     loadAgents: vi.fn().mockResolvedValue(undefined),
   } as never);
@@ -65,6 +65,8 @@ describe('agent sessions pane', () => {
 
     expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
     expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-session-avatar-main')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-session-avatar-test')).toBeInTheDocument();
     expect(screen.getByText('主Agent会话')).toBeInTheDocument();
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
   });
@@ -155,7 +157,8 @@ describe('agent sessions pane', () => {
         id: `agent-${index + 1}`,
         name: `Agent ${index + 1}`,
         isDefault: false,
-        identity: { emoji: '🤖' },
+        avatarSeed: `agent:agent-${index + 1}`,
+        avatarStyle: 'pixelArt',
       })),
       loadAgents: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -196,7 +199,7 @@ describe('agent sessions pane', () => {
     expect(sessionScrollArea.className).toContain('overflow-y-auto');
   });
 
-  it('agents 数据未就绪时，不应先渲染默认 emoji 的 agent 行', () => {
+  it('agents 数据未就绪时，不应先渲染占位 avatar 的 agent 行', () => {
     useSubagentsStore.setState({
       agents: [],
       snapshotReady: false,

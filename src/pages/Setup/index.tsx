@@ -27,6 +27,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
+import { useProviderStore } from '@/stores/providers';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
@@ -130,21 +131,14 @@ import {
 } from '@/lib/providers';
 import {
   buildProviderAccountId,
-  fetchProviderSnapshot,
   hasConfiguredCredentials,
   pickPreferredAccount,
 } from '@/lib/provider-accounts';
 import {
   buildProviderAccountPayload,
   hostProviderCancelOAuth,
-  hostProviderCreateAccount,
-  hostProviderReadAccount,
-  hostProviderReadApiKey,
-  hostProviderSetDefaultAccount,
   hostProviderStartOAuth,
   hostProviderSubmitOAuthCode,
-  hostProviderUpdateAccount,
-  hostProviderValidate,
 } from '@/lib/provider-runtime';
 import matchaClawIcon from '@/assets/logo.svg';
 
@@ -908,6 +902,17 @@ function ProviderContent({
 }: ProviderContentProps) {
   const { t, i18n } = useTranslation(['setup', 'settings']);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const providerSnapshot = useProviderStore((state) => state.providerSnapshot);
+  const providerSnapshotReady = useProviderStore((state) => state.snapshotReady);
+  const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
+  const createAccount = useProviderStore((state) => state.createAccount);
+  const updateAccount = useProviderStore((state) => state.updateAccount);
+  const setDefaultAccount = useProviderStore((state) => state.setDefaultAccount);
+  const validateAccountApiKey = useProviderStore((state) => state.validateAccountApiKey);
+  const getAccountApiKey = useProviderStore((state) => state.getAccountApiKey);
+  const snapshotAccounts = providerSnapshot.accounts;
+  const snapshotStatuses = providerSnapshot.statuses;
+  const snapshotDefaultAccountId = providerSnapshot.defaultAccountId;
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [keyValid, setKeyValid] = useState<boolean | null>(null);
@@ -936,6 +941,14 @@ function ProviderContent({
   const [manualCodeInput, setManualCodeInput] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
   const pendingOAuthRef = useRef<{ accountId: string; label: string } | null>(null);
+  const providerBootstrapDoneRef = useRef(false);
+
+  useEffect(() => {
+    void refreshProviderSnapshot({
+      trigger: 'background',
+      reason: 'setup_provider_mount',
+    });
+  }, [refreshProviderSnapshot]);
 
   // Manage OAuth events
   useEffect(() => {
@@ -967,13 +980,18 @@ function ProviderContent({
       const payload = (data as { accountId?: string } | undefined) || undefined;
       const accountId = payload?.accountId || pendingOAuthRef.current?.accountId;
 
-      if (accountId) {
-        try {
-          await hostProviderSetDefaultAccount(accountId);
+      try {
+        const store = useProviderStore.getState();
+        await store.refreshProviderSnapshot({
+          trigger: 'reconcile',
+          reason: 'setup_oauth_success_reconcile',
+        });
+        if (accountId) {
+          await store.setDefaultAccount(accountId);
           setSelectedAccountId(accountId);
-        } catch (error) {
-          console.error('Failed to set default provider account:', error);
         }
+      } catch (error) {
+        console.error('Failed to reconcile provider snapshot after OAuth success:', error);
       }
 
       pendingOAuthRef.current = null;
@@ -1002,8 +1020,12 @@ function ProviderContent({
     if (!selectedProvider) return;
 
     try {
-      const snapshot = await fetchProviderSnapshot();
-      const existingVendorIds = new Set(snapshot.accounts.map((account) => account.vendorId));
+      await refreshProviderSnapshot({
+        trigger: 'background',
+        reason: 'setup_oauth_start_refresh',
+      });
+      const latestSnapshot = useProviderStore.getState().providerSnapshot;
+      const existingVendorIds = new Set(latestSnapshot.accounts.map((account) => account.vendorId));
       const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
       if ((selectedProvider === 'minimax-portal' || selectedProvider === 'minimax-portal-cn') && hasMinimax) {
         toast.error(t('settings:aiProviders.toast.minimaxConflict'));
@@ -1019,11 +1041,10 @@ function ProviderContent({
     setOauthError(null);
 
     try {
-      const snapshot = await fetchProviderSnapshot();
       const accountId = buildProviderAccountId(
         selectedProvider as ProviderType,
         selectedAccountId,
-        snapshot.vendors,
+        useProviderStore.getState().providerSnapshot.vendors,
       );
       const label = selectedProviderData?.name || selectedProvider;
       pendingOAuthRef.current = { accountId, label };
@@ -1057,16 +1078,18 @@ function ProviderContent({
 
   // On mount, try to restore previously configured provider
   useEffect(() => {
+    if (!providerSnapshotReady || providerBootstrapDoneRef.current) {
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
-        const snapshot = await fetchProviderSnapshot();
-        const statusMap = new Map(snapshot.statuses.map((status) => [status.id, status]));
+        const statusMap = new Map(snapshotStatuses.map((status) => [status.id, status]));
         const setupProviderTypes = new Set<string>(providers.map((p) => p.id));
-        const setupCandidates = snapshot.accounts.filter((account) => setupProviderTypes.has(account.vendorId));
+        const setupCandidates = snapshotAccounts.filter((account) => setupProviderTypes.has(account.vendorId));
         const preferred =
-          (snapshot.defaultAccountId
-            && setupCandidates.find((account) => account.id === snapshot.defaultAccountId))
+          (snapshotDefaultAccountId
+            && setupCandidates.find((account) => account.id === snapshotDefaultAccountId))
           || setupCandidates.find((account) => hasConfiguredCredentials(account, statusMap.get(account.id)))
           || setupCandidates[0];
         if (preferred && !cancelled) {
@@ -1075,11 +1098,14 @@ function ProviderContent({
           const typeInfo = providers.find((p) => p.id === preferred.vendorId);
           const requiresKey = typeInfo?.requiresApiKey ?? false;
           onConfiguredChange(!requiresKey || hasConfiguredCredentials(preferred, statusMap.get(preferred.id)));
-          const storedKey = (await hostProviderReadApiKey(preferred.id)).apiKey;
+          const storedKey = await getAccountApiKey(preferred.id);
           onApiKeyChange(storedKey || '');
         } else if (!cancelled) {
           onConfiguredChange(false);
           onApiKeyChange('');
+        }
+        if (!cancelled) {
+          providerBootstrapDoneRef.current = true;
         }
       } catch (error) {
         if (!cancelled) {
@@ -1088,7 +1114,17 @@ function ProviderContent({
       }
     })();
     return () => { cancelled = true; };
-  }, [onApiKeyChange, onConfiguredChange, onSelectProvider, providers]);
+  }, [
+    getAccountApiKey,
+    onApiKeyChange,
+    onConfiguredChange,
+    onSelectProvider,
+    providers,
+    snapshotAccounts,
+    snapshotDefaultAccountId,
+    snapshotStatuses,
+    providerSnapshotReady,
+  ]);
 
   // When provider changes, load stored key + reset base URL
   useEffect(() => {
@@ -1097,27 +1133,25 @@ function ProviderContent({
       if (!selectedProvider) return;
       try {
         setApiProtocol('openai-completions');
-        const snapshot = await fetchProviderSnapshot();
-        const statusMap = new Map(snapshot.statuses.map((status) => [status.id, status]));
+        const statusMap = new Map(snapshotStatuses.map((status) => [status.id, status]));
         const preferredAccount = pickPreferredAccount(
-          snapshot.accounts,
-          snapshot.defaultAccountId,
+          snapshotAccounts,
+          snapshotDefaultAccountId,
           selectedProvider,
           statusMap,
         );
-        const accountIdForLoad = preferredAccount?.id || selectedProvider;
         setSelectedAccountId(preferredAccount?.id || null);
-
-        const savedProvider = await hostProviderReadAccount(accountIdForLoad);
-        const storedKey = (await hostProviderReadApiKey(accountIdForLoad)).apiKey;
+        const storedKey = preferredAccount
+          ? await getAccountApiKey(preferredAccount.id)
+          : null;
         if (!cancelled) {
           onApiKeyChange(storedKey || '');
 
           const info = providers.find((p) => p.id === selectedProvider);
-          const nextBaseUrl = savedProvider?.baseUrl || info?.defaultBaseUrl || '';
-          const nextModelId = savedProvider?.model || info?.defaultModelId || '';
+          const nextBaseUrl = preferredAccount?.baseUrl || info?.defaultBaseUrl || '';
+          const nextModelId = preferredAccount?.model || info?.defaultModelId || '';
           setBaseUrl(nextBaseUrl);
-          setApiProtocol(savedProvider?.apiProtocol || 'openai-completions');
+          setApiProtocol(preferredAccount?.apiProtocol || 'openai-completions');
           setModelId(nextModelId);
           if (
             selectedProvider === 'ark'
@@ -1133,12 +1167,20 @@ function ProviderContent({
         }
       } catch (error) {
         if (!cancelled) {
-          console.error('Failed to load provider key:', error);
+          console.error('Failed to load provider configuration from store:', error);
         }
       }
     })();
     return () => { cancelled = true; };
-  }, [onApiKeyChange, selectedProvider, providers]);
+  }, [
+    getAccountApiKey,
+    onApiKeyChange,
+    providers,
+    selectedProvider,
+    snapshotAccounts,
+    snapshotDefaultAccountId,
+    snapshotStatuses,
+  ]);
 
   useEffect(() => {
     if (!providerMenuOpen) return;
@@ -1188,8 +1230,12 @@ function ProviderContent({
     if (!selectedProvider) return;
 
     try {
-      const snapshot = await fetchProviderSnapshot();
-      const existingVendorIds = new Set(snapshot.accounts.map((account) => account.vendorId));
+      await refreshProviderSnapshot({
+        trigger: 'background',
+        reason: 'setup_validate_save_refresh',
+      });
+      const latestSnapshot = useProviderStore.getState().providerSnapshot;
+      const existingVendorIds = new Set(latestSnapshot.accounts.map((account) => account.vendorId));
       const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
       if ((selectedProvider === 'minimax-portal' || selectedProvider === 'minimax-portal-cn') && hasMinimax) {
         toast.error(t('settings:aiProviders.toast.minimaxConflict'));
@@ -1206,17 +1252,16 @@ function ProviderContent({
       // Validate key if the provider requires one and a key was entered
       const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
       if (isApiKeyRequired && apiKey) {
-        const result = await hostProviderValidate({
-          accountId: selectedAccountId || undefined,
-          vendorId: selectedProvider,
+        const result = await validateAccountApiKey(
+          selectedAccountId || selectedProvider,
           apiKey,
-          options: {
+          {
             baseUrl: baseUrl.trim() || undefined,
             apiProtocol: (selectedProvider === 'custom' || selectedProvider === 'ollama')
               ? apiProtocol
               : undefined,
           },
-        });
+        );
 
         setKeyValid(result.valid);
 
@@ -1234,7 +1279,7 @@ function ProviderContent({
         modelId,
         devModeUnlocked
       );
-      const snapshot = await fetchProviderSnapshot();
+      const snapshot = useProviderStore.getState().providerSnapshot;
       const accountIdForSave = buildProviderAccountId(
         selectedProvider as ProviderType,
         selectedAccountId,
@@ -1258,8 +1303,8 @@ function ProviderContent({
         model: effectiveModelId,
       });
 
-      const saveResult = selectedAccountId
-        ? await hostProviderUpdateAccount(
+      if (selectedAccountId) {
+        await updateAccount(
           accountIdForSave,
           {
             label: accountPayload.label,
@@ -1270,18 +1315,11 @@ function ProviderContent({
             enabled: accountPayload.enabled,
           },
           effectiveApiKey,
-        )
-        : await hostProviderCreateAccount(accountPayload, effectiveApiKey);
-
-      if (!saveResult.success) {
-        throw new Error(saveResult.error || 'Failed to save provider config');
+        );
+      } else {
+        await createAccount(accountPayload, effectiveApiKey);
       }
-
-      const defaultResult = await hostProviderSetDefaultAccount(accountIdForSave);
-
-      if (!defaultResult.success) {
-        throw new Error(defaultResult.error || 'Failed to set default provider');
-      }
+      await setDefaultAccount(accountIdForSave);
 
       setSelectedAccountId(accountIdForSave);
       onConfiguredChange(true);

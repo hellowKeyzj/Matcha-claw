@@ -101,6 +101,7 @@ export function useChatScroll({
   const viewportReadyRef = useRef<boolean | null>(null);
   const lastResizeMetricsRef = useRef<ChatViewportSizeMetrics | null>(null);
   const lastSessionKeyRef = useRef(currentSessionKey);
+  const commandExecutionReentryGuardRef = useRef(false);
   const maybeCompleteBottomCommandRef = useRef<() => void>(() => {});
   const maybeExecutePendingCommandRef = useRef<() => void>(() => {});
 
@@ -128,6 +129,9 @@ export function useChatScroll({
     if (!shouldExecuteChatScrollCommand(current)) {
       return;
     }
+    if (commandExecutionReentryGuardRef.current) {
+      return;
+    }
     if (current.programmaticScrollInFlight) {
       return;
     }
@@ -136,6 +140,7 @@ export function useChatScroll({
     if (!targetVirtualizer) {
       return;
     }
+    commandExecutionReentryGuardRef.current = true;
     dispatch({ type: 'COMMAND_EXECUTION_STARTED' });
     const targetRowCount = current.command.targetRowCount;
     const targetRowKey = current.command.targetRowKey;
@@ -148,6 +153,7 @@ export function useChatScroll({
         || latest.command.targetRowCount !== targetRowCount
         || latest.command.targetRowKey !== targetRowKey
       ) {
+        commandExecutionReentryGuardRef.current = false;
         return;
       }
       targetVirtualizer.scrollToIndex(targetIndex, { align: 'end' });
@@ -157,10 +163,12 @@ export function useChatScroll({
         viewport.scrollTop = viewport.scrollHeight;
       }
       if (viewport && readViewportNearBottom(viewport, stickyBottomThresholdPx)) {
+        commandExecutionReentryGuardRef.current = false;
         dispatch({ type: 'BOTTOM_REACHED' });
         return;
       }
       if (attempt >= CHAT_SCROLL_COMMAND_MAX_ATTEMPTS) {
+        commandExecutionReentryGuardRef.current = false;
         dispatch({ type: 'BOTTOM_REACHED' });
         return;
       }

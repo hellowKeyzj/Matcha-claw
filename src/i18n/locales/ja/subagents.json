@@ -98,11 +98,7 @@
     "useDefaultModel": "グローバル既定モデルを継承",
     "modelUnavailable": "利用可能な設定済みモデルがありません。",
     "initialPrompt": "システムプロンプト",
-    "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力",
-    "emoji": "絵文字",
-    "emojiPlaceholder": "任意の絵文字を入力するか、下から選択",
-    "emojiPanelShow": "絵文字候補を表示",
-    "emojiPanelHide": "絵文字候補を非表示"
+    "initialPromptPlaceholder": "任意: このサブAgentのシステムプロンプトを入力"
   },
   "card": {
     "default": "デフォルト",

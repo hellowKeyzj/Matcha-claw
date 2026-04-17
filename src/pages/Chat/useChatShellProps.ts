@@ -1,4 +1,5 @@
 import { useCallback, useMemo, type ComponentProps, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
 import { ChatShell } from './components/ChatShell';
 import type { ChatRow } from './chat-row-model';
@@ -29,7 +30,10 @@ interface UseChatShellPropsInput {
   virtualMessageItems: ComponentProps<typeof ChatShell>['listProps']['virtualItems'];
   chatRows: ChatRow[];
   showThinking: boolean;
-  assistantAvatarEmoji: string;
+  assistantAgentId: string;
+  assistantAgentName: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarDataUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
   scrollToRowKey: (rowKey?: string) => void;
@@ -79,7 +83,10 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     virtualMessageItems,
     chatRows,
     showThinking,
-    assistantAvatarEmoji,
+    assistantAgentId,
+    assistantAgentName,
+    assistantAvatarSeed,
+    assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
     scrollToRowKey,
@@ -139,7 +146,10 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     virtualItems: virtualMessageItems,
     rows: chatRows,
     showThinking,
-    assistantAvatarEmoji,
+    assistantAgentId,
+    assistantAgentName,
+    assistantAvatarSeed,
+    assistantAvatarStyle,
     userAvatarImageUrl: userAvatarDataUrl,
     suppressedToolCardRowKeys,
     onJumpToRowKey: scrollToRowKey,
@@ -156,7 +166,10 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     virtualMessageItems,
     chatRows,
     showThinking,
-    assistantAvatarEmoji,
+    assistantAgentId,
+    assistantAgentName,
+    assistantAvatarSeed,
+    assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
     scrollToRowKey,

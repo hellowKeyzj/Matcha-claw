@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -16,8 +16,8 @@ export function TeamsPage() {
   const navigate = useNavigate();
   const agents = useSubagentsStore((state) => state.agents);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const gatewayState = useGatewayStore((state) => state.status.state);
-  const wasGatewayRunningRef = useRef(gatewayState === 'running');
 
   const teams = useTeamsStore((state) => state.teams);
   const createTeam = useTeamsStore((state) => state.createTeam);
@@ -31,16 +31,12 @@ export function TeamsPage() {
   const [memberIds, setMemberIds] = useState<string[]>([]);
 
   useEffect(() => {
-    void loadAgents();
-  }, [loadAgents]);
-
-  useEffect(() => {
-    const isGatewayRunning = gatewayState === 'running';
-    if (isGatewayRunning && !wasGatewayRunningRef.current) {
+    if (gatewayState === 'running') {
       void loadAgents();
     }
-    wasGatewayRunningRef.current = isGatewayRunning;
   }, [gatewayState, loadAgents]);
+
+  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'reconnecting';
 
   const effectiveLeadAgentId = useMemo(() => {
     if (!leadAgentId) {
@@ -110,6 +106,11 @@ export function TeamsPage() {
           <CardTitle className="text-base">{t('create.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          {gatewayPending && agents.length === 0 ? (
+            <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+              {t('create.loadingAgents')}
+            </div>
+          ) : null}
           <div className="space-y-1">
             <Label htmlFor="team-name">{t('create.teamName')}</Label>
             <Input

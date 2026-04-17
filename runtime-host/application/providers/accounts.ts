@@ -1,16 +1,15 @@
 import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
-import { BUILTIN_PROVIDER_TYPES } from './provider-types';
 import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
 import {
   removeProviderKeyFromOpenClaw,
-  saveProviderKeyToOpenClaw,
 } from '../openclaw/openclaw-auth-profile-store';
 import {
-  getOpenClawProvidersSnapshot,
   removeProviderFromOpenClaw,
-  setOpenClawDefaultModel,
-  setOpenClawDefaultModelWithOverride,
 } from '../openclaw/openclaw-provider-config-service';
+import {
+  normalizeProviderStoreForRuntime,
+  syncProviderStoreToOpenClaw,
+} from './store-sync';
 
 type LocalDispatchResponse = {
   status: number;
@@ -66,96 +65,6 @@ function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function toStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-}
-
-function normalizeFallbackModelRefs(providerKey: string, fallbackModels: unknown): string[] {
-  return toStringArray(fallbackModels).map((model) => (
-    model.startsWith(`${providerKey}/`) ? model : `${providerKey}/${model}`
-  ));
-}
-
-function normalizeProviderProtocol(
-  protocol: unknown,
-): 'openai-completions' | 'openai-responses' | 'anthropic-messages' {
-  if (protocol === 'openai-responses') {
-    return 'openai-responses';
-  }
-  if (protocol === 'anthropic-messages') {
-    return 'anthropic-messages';
-  }
-  return 'openai-completions';
-}
-
-function normalizeProviderHeaders(headers: unknown): Record<string, string> | undefined {
-  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) {
-    return undefined;
-  }
-  const normalized = Object.fromEntries(
-    Object.entries(headers as Record<string, unknown>)
-      .filter(
-        ([key, value]): value is string =>
-          typeof key === 'string'
-          && key.trim().length > 0
-          && typeof value === 'string'
-          && value.trim().length > 0,
-      )
-      .map(([key, value]) => [key, value.trim()]),
-  );
-  return Object.keys(normalized).length > 0 ? normalized : undefined;
-}
-
-function normalizeProviderBaseUrl(
-  vendorId: string,
-  baseUrl: unknown,
-  apiProtocol: 'openai-completions' | 'openai-responses' | 'anthropic-messages',
-): string | undefined {
-  if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) {
-    return undefined;
-  }
-
-  const normalized = baseUrl.trim().replace(/\/+$/, '');
-  if (vendorId !== 'custom' && vendorId !== 'ollama') {
-    return normalized;
-  }
-
-  if (apiProtocol === 'openai-responses') {
-    return normalized.replace(/\/responses?$/i, '');
-  }
-  if (apiProtocol === 'anthropic-messages') {
-    return normalized.replace(/\/v1\/messages$/i, '').replace(/\/messages$/i, '');
-  }
-  return normalized.replace(/\/chat\/completions$/i, '');
-}
-
-function normalizeIsoTimestamp(value: unknown): string {
-  return typeof value === 'string' && value.trim().length > 0
-    ? value
-    : new Date(0).toISOString();
-}
-
-function normalizeHeaders(input: unknown): Record<string, string> | undefined {
-  if (!isRecord(input)) {
-    return undefined;
-  }
-  const headers = Object.fromEntries(
-    Object.entries(input)
-      .filter(
-        ([key, value]): value is string =>
-          typeof key === 'string'
-          && key.trim().length > 0
-          && typeof value === 'string'
-          && value.trim().length > 0,
-      )
-      .map(([key, value]) => [key, value.trim()]),
-  );
-  return Object.keys(headers).length > 0 ? headers : undefined;
-}
-
 function resolveProviderCleanupKeys(accountId: string, account: Record<string, any> | null): string[] {
   const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
   const runtimeProviderKey = providerType
@@ -168,178 +77,23 @@ export class ProviderAccountsService {
   constructor(private readonly deps: ProviderAccountsServiceDeps) {}
 
   private async syncStoreToOpenClaw(store: ProviderStore): Promise<void> {
-    for (const [accountId, rawAccount] of Object.entries(store.accounts)) {
-      if (!isRecord(rawAccount)) {
-        continue;
-      }
-      const vendorId = typeof rawAccount.vendorId === 'string' ? rawAccount.vendorId : '';
-      if (!vendorId) {
-        continue;
-      }
-
-      const providerKey = getOpenClawProviderKeyForType(vendorId, accountId);
-      const apiKey = typeof store.apiKeys[accountId] === 'string' ? store.apiKeys[accountId].trim() : '';
-      if (apiKey) {
-        await saveProviderKeyToOpenClaw(providerKey, apiKey);
-      } else {
-        await removeProviderKeyFromOpenClaw(providerKey);
-        if (providerKey !== accountId) {
-          await removeProviderKeyFromOpenClaw(accountId);
-        }
-      }
+    const result = await syncProviderStoreToOpenClaw(store);
+    if (result.storeModified) {
+      await this.deps.writeProviderStore(store);
     }
-
-    const defaultAccountId = typeof store.defaultAccountId === 'string' ? store.defaultAccountId : '';
-    const defaultAccountRaw = defaultAccountId ? store.accounts[defaultAccountId] : null;
-    if (!defaultAccountId || !isRecord(defaultAccountRaw)) {
-      return;
-    }
-
-    const vendorId = typeof defaultAccountRaw.vendorId === 'string' ? defaultAccountRaw.vendorId : '';
-    if (!vendorId) {
-      return;
-    }
-
-    const providerKey = getOpenClawProviderKeyForType(vendorId, defaultAccountId);
-    const model = typeof defaultAccountRaw.model === 'string' ? defaultAccountRaw.model : undefined;
-    const fallbackModels = normalizeFallbackModelRefs(providerKey, defaultAccountRaw.fallbackModels);
-
-    if (vendorId === 'custom' || vendorId === 'ollama') {
-      const protocol = normalizeProviderProtocol(defaultAccountRaw.apiProtocol);
-      await setOpenClawDefaultModelWithOverride(providerKey, model, {
-        baseUrl: normalizeProviderBaseUrl(vendorId, defaultAccountRaw.baseUrl, protocol),
-        api: protocol,
-        headers: normalizeProviderHeaders(defaultAccountRaw.headers),
-      }, fallbackModels);
-      return;
-    }
-
-    await setOpenClawDefaultModel(providerKey, model, fallbackModels);
   }
 
   async list() {
     const store = await this.deps.readProviderStore();
-    const builtinProviderTypes = new Set<string>(BUILTIN_PROVIDER_TYPES);
-    const { providers, defaultModel, activeProviders } = await getOpenClawProvidersSnapshot();
-
-    if (activeProviders.size === 0) {
-      return {
-        accounts: [],
-        statuses: [],
-        vendors: this.deps.providerVendorDefinitions,
-        defaultAccountId: null,
-      };
-    }
-
-    const allStoreAccounts = Object.values(store.accounts).filter((entry) => isRecord(entry));
-    const groupedByOpenClawKey = new Map<string, Record<string, any>[]>();
-    for (const account of allStoreAccounts) {
-      const accountId = typeof account.id === 'string' ? account.id : '';
-      const vendorId = typeof account.vendorId === 'string' ? account.vendorId : '';
-      if (!accountId || !vendorId) {
-        continue;
-      }
-      const openClawKey = getOpenClawProviderKeyForType(vendorId, accountId);
-      const group = groupedByOpenClawKey.get(openClawKey) ?? [];
-      group.push(account);
-      groupedByOpenClawKey.set(openClawKey, group);
-    }
-
-    const defaultModelProvider = typeof defaultModel === 'string' && defaultModel.includes('/')
-      ? defaultModel.split('/')[0]
-      : undefined;
-
-    const resultAccounts: Record<string, any>[] = [];
-    let storeModified = false;
-    const nowIso = new Date().toISOString();
-
-    for (const providerKey of activeProviders) {
-      const group = groupedByOpenClawKey.get(providerKey) ?? [];
-      if (group.length > 0) {
-        const sortedGroup = [...group].sort((left, right) => {
-          const leftAlias = typeof left.vendorId === 'string' && left.vendorId !== providerKey ? 1 : 0;
-          const rightAlias = typeof right.vendorId === 'string' && right.vendorId !== providerKey ? 1 : 0;
-          if (leftAlias !== rightAlias) {
-            return rightAlias - leftAlias;
-          }
-          const byUpdatedAt = normalizeIsoTimestamp(right.updatedAt).localeCompare(normalizeIsoTimestamp(left.updatedAt));
-          if (byUpdatedAt !== 0) {
-            return byUpdatedAt;
-          }
-          return String(left.id).localeCompare(String(right.id));
-        });
-
-        const keep = sortedGroup[0];
-        resultAccounts.push(keep);
-
-        for (const duplicated of sortedGroup.slice(1)) {
-          const duplicatedId = typeof duplicated.id === 'string' ? duplicated.id : '';
-          if (!duplicatedId) {
-            continue;
-          }
-          delete store.accounts[duplicatedId];
-          delete store.apiKeys[duplicatedId];
-          storeModified = true;
-        }
-        continue;
-      }
-
-      const providerEntry = providers[providerKey];
-      if (!isRecord(providerEntry)) {
-        continue;
-      }
-
-      const vendorId = builtinProviderTypes.has(providerKey) ? providerKey : 'custom';
-      const seededAccount = {
-        id: providerKey,
-        vendorId,
-        label: providerKey,
-        authMode: vendorId === 'ollama' ? 'local' : 'api_key',
-        baseUrl: typeof providerEntry.baseUrl === 'string' ? providerEntry.baseUrl : undefined,
-        headers: normalizeHeaders(providerEntry.headers),
-        model: defaultModelProvider === providerKey ? defaultModel : undefined,
-        enabled: true,
-        isDefault: false,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-      store.accounts[providerKey] = seededAccount;
-      resultAccounts.push(seededAccount);
-      storeModified = true;
-    }
-
-    const resultIds = new Set(resultAccounts.map((account) => account.id));
-    const nextDefaultAccountId = (
-      store.defaultAccountId
-      && resultIds.has(store.defaultAccountId)
-    )
-      ? store.defaultAccountId
-      : (() => {
-          const sorted = this.deps.sortAccounts(resultAccounts, null);
-          return typeof sorted[0]?.id === 'string' ? sorted[0].id : null;
-        })();
-
-    if (store.defaultAccountId !== nextDefaultAccountId) {
-      store.defaultAccountId = nextDefaultAccountId;
-      storeModified = true;
-    }
-
-    for (const account of Object.values(store.accounts)) {
-      if (!isRecord(account) || typeof account.id !== 'string') {
-        continue;
-      }
-      const shouldBeDefault = Boolean(store.defaultAccountId) && account.id === store.defaultAccountId;
-      if (account.isDefault !== shouldBeDefault) {
-        account.isDefault = shouldBeDefault;
-        storeModified = true;
-      }
-    }
-
+    const { accounts: normalizedAccounts, storeModified } = normalizeProviderStoreForRuntime(store);
     if (storeModified) {
       await this.deps.writeProviderStore(store);
     }
 
-    const sortedAccounts = this.deps.sortAccounts(resultAccounts, store.defaultAccountId);
+    const sortedAccounts = this.deps.sortAccounts(
+      normalizedAccounts.map((account) => account.account),
+      store.defaultAccountId,
+    );
     const statuses = sortedAccounts.map((account) => this.deps.accountToStatus(account, store.apiKeys[account.id]));
     return {
       accounts: sortedAccounts,

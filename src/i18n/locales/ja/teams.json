@@ -6,6 +6,7 @@
   },
   "create": {
     "title": "チーム作成",
+    "loadingAgents": "Gateway が Agent を読み込むのを待っています...",
     "teamName": "チーム名",
     "teamNamePlaceholder": "チーム名を入力",
     "leadAgent": "リード Agent",

@@ -61,7 +61,6 @@ export function Chat() {
     userAvatarDataUrl,
     currentAgentId,
     currentAgent,
-    assistantAvatarEmoji,
     waitingApproval,
   } = useChatPageModel();
 
@@ -211,7 +210,10 @@ export function Chat() {
     virtualMessageItems,
     chatRows,
     showThinking,
-    assistantAvatarEmoji,
+    assistantAgentId: currentAgentId,
+    assistantAgentName: currentAgent?.name || currentAgentId,
+    assistantAvatarSeed: currentAgent?.avatarSeed,
+    assistantAvatarStyle: currentAgent?.avatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
     scrollToRowKey,
@@ -252,4 +254,3 @@ export function Chat() {
 }
 
 export default Chat;
-

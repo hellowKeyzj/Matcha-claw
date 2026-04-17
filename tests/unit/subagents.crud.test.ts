@@ -160,7 +160,7 @@ describe('subagents crud', () => {
     );
   });
 
-  it('passes emoji to agents.create when provided and persists chosen avatar config', async () => {
+  it('persists chosen avatar config when creating agent', async () => {
     const rpc = gatewayClientRpcMock;
     rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
@@ -203,14 +203,13 @@ describe('subagents crud', () => {
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
-      emoji: '🤖',
       avatarSeed: 'picker:writer:page:0:option:3',
       avatarStyle: 'bottts',
     });
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
-      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer', emoji: '🤖' },
+      { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
       undefined,
     );
   });

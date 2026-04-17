@@ -8,6 +8,8 @@ import {
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
 import { hostGatewayRpc, hostOpenClawGetConfigDir } from '@/lib/host-api';
+import { fetchProviderSnapshot } from '@/lib/provider-accounts';
+import { buildSelectableProviderModels } from '@/lib/provider-models';
 import {
   waitAgentRunWithProgress,
 } from '@/services/openclaw/agent-runtime';
@@ -27,6 +29,7 @@ import {
   extractChatSendOutput,
   parseDraftPayload,
 } from '@/features/subagents/domain/prompt';
+import { useProviderStore } from '@/stores/providers';
 import type {
   AgentsListResult,
   ConfigGetResult,
@@ -45,7 +48,6 @@ const DRAFT_CHAT_SEND_RPC_TIMEOUT_MS = 30000;
 const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
-const IDENTITY_EMOJI_CACHE_TTL_MS = 5 * 60 * 1000;
 const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
@@ -70,26 +72,10 @@ interface AgentFileGetResult {
   content?: unknown;
 }
 
-interface AgentIdentityGetResult {
-  agentId?: unknown;
-  name?: unknown;
-  avatar?: unknown;
-  emoji?: unknown;
-}
-
 interface AgentsCreateResult {
   agentId?: unknown;
   name?: unknown;
   workspace?: unknown;
-}
-
-interface ModelsListResult {
-  models?: Array<{
-    id?: unknown;
-    name?: unknown;
-    provider?: unknown;
-    contextWindow?: unknown;
-  }>;
 }
 
 interface ConfigAgentDisplaySnapshot {
@@ -104,7 +90,6 @@ interface ConfigDisplaySnapshot {
   byAgentId: Map<string, ConfigAgentDisplaySnapshot>;
   defaultWorkspace?: string;
   defaultModel?: string;
-  configuredModelIds: string[];
 }
 
 interface ReadConfigForDisplayOptions {
@@ -148,7 +133,6 @@ interface SubagentsState {
     name: string;
     workspace: string;
     model?: string;
-    emoji?: string;
     avatarSeed?: string;
     avatarStyle?: AgentAvatarStyle;
   }) => Promise<string>;
@@ -252,25 +236,6 @@ function extractModelId(value: unknown): string | undefined {
   return getOptionalString((value as { primary?: unknown }).primary);
 }
 
-function parseProviderFromModelId(modelId: string): string | undefined {
-  const idx = modelId.indexOf('/');
-  if (idx <= 0) {
-    return undefined;
-  }
-  return modelId.slice(0, idx);
-}
-
-function normalizeProviderModelId(providerKey: string, rawModelId: unknown): string | undefined {
-  const modelId = getOptionalString(rawModelId);
-  if (!modelId) {
-    return undefined;
-  }
-  if (modelId.includes('/')) {
-    return modelId;
-  }
-  return `${providerKey}/${modelId}`;
-}
-
 function collectModelIdsFromAgentModelValue(value: unknown): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
@@ -299,14 +264,9 @@ function collectModelIdsFromAgentModelValue(value: unknown): string[] {
 
 function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined): ConfigDisplaySnapshot {
   const byAgentId = new Map<string, ConfigAgentDisplaySnapshot>();
-  const configuredModelIds: string[] = [];
-  const configuredModelSet = new Set<string>();
   const config = configGetResult?.config;
   const agents = (config && typeof config === 'object')
     ? (config as { agents?: unknown }).agents
-    : undefined;
-  const models = (config && typeof config === 'object')
-    ? (config as { models?: unknown }).models
     : undefined;
   const defaults = (agents && typeof agents === 'object')
     ? (agents as { defaults?: unknown }).defaults
@@ -320,10 +280,6 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
     for (const modelId of collectModelIdsFromAgentModelValue((defaults as { model?: unknown }).model)) {
       if (!defaultModel) {
         defaultModel = modelId;
-      }
-      if (!configuredModelSet.has(modelId)) {
-        configuredModelSet.add(modelId);
-        configuredModelIds.push(modelId);
       }
     }
   }
@@ -353,10 +309,6 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
         if (!model) {
           model = modelId;
         }
-        if (!configuredModelSet.has(modelId)) {
-          configuredModelSet.add(modelId);
-          configuredModelIds.push(modelId);
-        }
       }
       byAgentId.set(normalizedAgentId, {
         workspace,
@@ -368,43 +320,16 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
     }
   }
 
-  const providers = (models && typeof models === 'object')
-    ? (models as { providers?: unknown }).providers
-    : undefined;
-  if (providers && typeof providers === 'object') {
-    for (const [providerKey, providerValue] of Object.entries(providers as Record<string, unknown>)) {
-      if (!providerValue || typeof providerValue !== 'object') {
-        continue;
-      }
-      const providerModels = (providerValue as { models?: unknown }).models;
-      if (!Array.isArray(providerModels)) {
-        continue;
-      }
-      for (const providerModel of providerModels) {
-        const modelId = typeof providerModel === 'string'
-          ? normalizeProviderModelId(providerKey, providerModel)
-          : normalizeProviderModelId(providerKey, (providerModel as { id?: unknown }).id);
-        if (!modelId || configuredModelSet.has(modelId)) {
-          continue;
-        }
-        configuredModelSet.add(modelId);
-        configuredModelIds.push(modelId);
-      }
-    }
-  }
-
   return {
     byAgentId,
     defaultWorkspace,
     defaultModel,
-    configuredModelIds,
   };
 }
 
 function createEmptyConfigDisplaySnapshot(): ConfigDisplaySnapshot {
   return {
     byAgentId: new Map(),
-    configuredModelIds: [],
   };
 }
 
@@ -485,79 +410,6 @@ async function resolveWorkspaceFallbackRoot(): Promise<string | undefined> {
   return workspaceFallbackRootTask;
 }
 
-function normalizeModelsListResult(result: ModelsListResult): ModelCatalogEntry[] {
-  const normalizedModels: ModelCatalogEntry[] = [];
-  const seenModelIds = new Set<string>();
-  const list = Array.isArray(result.models) ? result.models : [];
-  for (const item of list) {
-    const id = getOptionalString(item?.id);
-    if (!id || seenModelIds.has(id)) {
-      continue;
-    }
-    seenModelIds.add(id);
-    const name = getOptionalString(item?.name);
-    const provider = getOptionalString(item?.provider) ?? parseProviderFromModelId(id);
-    const contextWindow = typeof item?.contextWindow === 'number' && Number.isFinite(item.contextWindow)
-      ? item.contextWindow
-      : undefined;
-    normalizedModels.push({
-      id,
-      name,
-      provider,
-      contextWindow,
-    });
-  }
-  return normalizedModels;
-}
-
-function buildVisibleModels(params: {
-  models: ModelCatalogEntry[];
-  configuredModelIds: string[];
-  currentAgents: SubagentSummary[];
-}): ModelCatalogEntry[] {
-  const preferredOrder: string[] = [];
-  const preferredSet = new Set<string>();
-
-  const pushPreferred = (modelId: string | undefined) => {
-    const normalized = getOptionalString(modelId);
-    if (!normalized || preferredSet.has(normalized)) {
-      return;
-    }
-    preferredSet.add(normalized);
-    preferredOrder.push(normalized);
-  };
-
-  for (const configuredModelId of params.configuredModelIds) {
-    pushPreferred(configuredModelId);
-  }
-  for (const agent of params.currentAgents) {
-    pushPreferred(agent.model);
-  }
-
-  const visible: ModelCatalogEntry[] = [];
-  const seen = new Set<string>();
-
-  for (const model of params.models) {
-    if (!preferredSet.has(model.id)) {
-      continue;
-    }
-    visible.push(model);
-    seen.add(model.id);
-  }
-
-  for (const modelId of preferredOrder) {
-    if (seen.has(modelId)) {
-      continue;
-    }
-    visible.push({
-      id: modelId,
-      provider: parseProviderFromModelId(modelId),
-    });
-  }
-
-  return visible;
-}
-
 function resolveDefaultAgentId(result: AgentsListResult): string {
   const fromResult = getOptionalString(result.defaultId);
   if (fromResult) {
@@ -617,39 +469,6 @@ function normalizeAgents(
       avatarSeed,
       avatarStyle,
       isDefault: agentId === defaultId,
-    };
-  });
-}
-
-function mergeKnownIdentityEmoji(
-  agents: SubagentSummary[],
-  previousAgents: SubagentSummary[],
-): SubagentSummary[] {
-  if (agents.length === 0) {
-    return agents;
-  }
-
-  const previousEmojiById = new Map<string, string>();
-  for (const agent of previousAgents) {
-    const emoji = getOptionalString(agent.identityEmoji) ?? resolveIdentityEmojiFromAgentMeta(agent);
-    if (!emoji) {
-      continue;
-    }
-    previousEmojiById.set(agent.id, emoji);
-  }
-
-  return agents.map((agent) => {
-    const fromRuntimeMeta = resolveIdentityEmojiFromAgentMeta(agent);
-    const fromSelf = getOptionalString(agent.identityEmoji);
-    const fromPrevious = previousEmojiById.get(agent.id);
-    const fromCache = readIdentityEmojiFromCache(agent.id);
-    const nextEmoji = fromRuntimeMeta ?? fromSelf ?? fromPrevious ?? (fromCache ?? undefined);
-    if (!nextEmoji || nextEmoji === agent.identityEmoji) {
-      return agent;
-    }
-    return {
-      ...agent,
-      identityEmoji: nextEmoji,
     };
   });
 }
@@ -956,168 +775,6 @@ async function updateAgentWithCreateBarrier(params: {
   await rpc('agents.update', params);
 }
 
-function isLikelyEmojiToken(value: string): boolean {
-  const text = value.trim();
-  if (!text || text.length > 16) {
-    return false;
-  }
-  let hasNonAscii = false;
-  for (let i = 0; i < text.length; i += 1) {
-    if (text.charCodeAt(i) > 127) {
-      hasNonAscii = true;
-      break;
-    }
-  }
-  if (!hasNonAscii) {
-    return false;
-  }
-  if (text.includes('://') || text.includes('/') || text.includes('.')) {
-    return false;
-  }
-  return true;
-}
-
-function extractHeadingEmojiFromIdentityMarkdown(content: string): string | undefined {
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('#')) {
-      continue;
-    }
-    const heading = trimmed.replace(/^#+\s*/, '').trim();
-    if (!heading) {
-      return undefined;
-    }
-    const firstToken = heading.split(/\s+/)[0];
-    if (firstToken && isLikelyEmojiToken(firstToken)) {
-      return firstToken;
-    }
-    return undefined;
-  }
-  return undefined;
-}
-
-function resolveIdentityEmojiFromAgentMeta(agent: SubagentSummary): string | undefined {
-  const directEmoji = getOptionalString((agent as { emoji?: unknown }).emoji);
-  if (directEmoji && isLikelyEmojiToken(directEmoji)) {
-    return directEmoji;
-  }
-  const nestedEmoji = getOptionalString((agent as { identity?: { emoji?: unknown } }).identity?.emoji);
-  if (nestedEmoji && isLikelyEmojiToken(nestedEmoji)) {
-    return nestedEmoji;
-  }
-  const directAvatar = getOptionalString((agent as { avatar?: unknown }).avatar);
-  if (directAvatar && isLikelyEmojiToken(directAvatar)) {
-    return directAvatar;
-  }
-  const nestedAvatar = getOptionalString((agent as { identity?: { avatar?: unknown } }).identity?.avatar);
-  if (nestedAvatar && isLikelyEmojiToken(nestedAvatar)) {
-    return nestedAvatar;
-  }
-  return undefined;
-}
-
-async function fetchIdentityEmojiFromAgentIdentity(agentId: string): Promise<string | undefined> {
-  try {
-    const result = await rpc<AgentIdentityGetResult>('agent.identity.get', {
-      agentId,
-    });
-    const emoji = getOptionalString(result?.emoji);
-    if (emoji && isLikelyEmojiToken(emoji)) {
-      return emoji;
-    }
-    const avatar = getOptionalString(result?.avatar);
-    if (avatar && isLikelyEmojiToken(avatar)) {
-      return avatar;
-    }
-    try {
-      const identityFile = await rpc<AgentFileGetResult>('agents.files.get', {
-        agentId,
-        name: 'IDENTITY.md',
-      });
-      const content = normalizeAgentFileContent(identityFile);
-      const fromIdentityMarkdown = extractHeadingEmojiFromIdentityMarkdown(content);
-      if (fromIdentityMarkdown) {
-        return fromIdentityMarkdown;
-      }
-    } catch {
-      // ignore file-read fallback failures
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-interface IdentityEmojiCacheEntry {
-  checkedAt: number;
-  emoji?: string;
-}
-
-const identityEmojiCache = new Map<string, IdentityEmojiCacheEntry>();
-const identityEmojiLoadTasks = new Map<string, Promise<string | undefined>>();
-
-function readIdentityEmojiFromCache(agentId: string): string | undefined | null {
-  const entry = identityEmojiCache.get(agentId);
-  if (!entry) {
-    return null;
-  }
-  if ((Date.now() - entry.checkedAt) > IDENTITY_EMOJI_CACHE_TTL_MS) {
-    identityEmojiCache.delete(agentId);
-    return null;
-  }
-  return entry.emoji;
-}
-
-async function resolveIdentityEmojiWithCache(agentId: string): Promise<string | undefined> {
-  const cached = readIdentityEmojiFromCache(agentId);
-  if (cached !== null) {
-    return cached;
-  }
-  const existingTask = identityEmojiLoadTasks.get(agentId);
-  if (existingTask) {
-    return existingTask;
-  }
-  const task = fetchIdentityEmojiFromAgentIdentity(agentId)
-    .then((emoji) => {
-      identityEmojiCache.set(agentId, {
-        checkedAt: Date.now(),
-        emoji,
-      });
-      return emoji;
-    })
-    .finally(() => {
-      identityEmojiLoadTasks.delete(agentId);
-    });
-  identityEmojiLoadTasks.set(agentId, task);
-  return task;
-}
-
-async function hydrateAgentIdentityEmoji(agents: SubagentSummary[]): Promise<SubagentSummary[]> {
-  const hydrated = await Promise.all(agents.map(async (agent) => {
-    const fromMeta = resolveIdentityEmojiFromAgentMeta(agent);
-    if (fromMeta) {
-      identityEmojiCache.set(agent.id, {
-        checkedAt: Date.now(),
-        emoji: fromMeta,
-      });
-      return {
-        ...agent,
-        identityEmoji: fromMeta,
-      };
-    }
-    const fromIdentity = await resolveIdentityEmojiWithCache(agent.id);
-    if (!fromIdentity) {
-      return agent;
-    }
-    return {
-      ...agent,
-      identityEmoji: fromIdentity,
-    };
-  }));
-  return hydrated;
-}
-
 async function waitForDraftOutputFromHistory(sessionKey: string): Promise<string> {
   return waitForDraftOutputFromHistoryWithTimeout(sessionKey, DRAFT_HISTORY_READ_TIMEOUT_MS);
 }
@@ -1186,7 +843,6 @@ async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Rec
 
 const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentTargetFile, string>>>>();
 let latestLoadAgentsRequestId = 0;
-let agentsStateMutationVersion = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
 let activeMutatingOperationCount = 0;
 const pendingDeletedAgentIds = new Set<string>();
@@ -1199,20 +855,12 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   configDisplayReadTask = null;
   configDisplayReadTaskSeq = 0;
   configDisplayReadSeq = 0;
-  identityEmojiCache.clear();
-  identityEmojiLoadTasks.clear();
   persistedFilesLoadTasks.clear();
   pendingDeletedAgentIds.clear();
   latestLoadAgentsRequestId = 0;
-  agentsStateMutationVersion = 0;
   agentMutationChain = Promise.resolve();
   activeMutatingOperationCount = 0;
   inflightLoadAgentsTask = null;
-}
-
-function bumpAgentsStateMutationVersion(): number {
-  agentsStateMutationVersion += 1;
-  return agentsStateMutationVersion;
 }
 
 function normalizeAgentIdForComparison(agentId: string): string {
@@ -1309,8 +957,6 @@ function areSubagentSummariesEqual(left: SubagentSummary, right: SubagentSummary
     && (left.avatarSeed ?? '') === (right.avatarSeed ?? '')
     && (left.avatarStyle ?? '') === (right.avatarStyle ?? '')
     && areStringArraysEqual(left.skills, right.skills)
-    && (left.identityEmoji ?? '') === (right.identityEmoji ?? '')
-    && (left.identity?.emoji ?? '') === (right.identity?.emoji ?? '')
     && (left.identity?.name ?? '') === (right.identity?.name ?? '')
     && (left.identity?.theme ?? '') === (right.identity?.theme ?? '')
     && Boolean(left.isDefault) === Boolean(right.isDefault)
@@ -1386,15 +1032,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         const stateSnapshot = get();
-        const stableAgents = mergeKnownIdentityEmoji(normalizedAgents, stateSnapshot.agents);
         const selectedAgentId = stateSnapshot.selectedAgentId;
-        const hasSelected = selectedAgentId && stableAgents.some((agent) => agent.id === selectedAgentId);
+        const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
-        const hasManaged = managedAgentId && stableAgents.some((agent) => agent.id === managedAgentId);
-        const nextSelectedAgentId = hasSelected ? selectedAgentId : (stableAgents[0]?.id ?? null);
+        const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
+        const nextSelectedAgentId = hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null);
         const nextManagedAgentId = hasManaged ? managedAgentId : null;
         const shouldPatchAgents = (
-          !areAgentListsEquivalent(stateSnapshot.agents, stableAgents)
+          !areAgentListsEquivalent(stateSnapshot.agents, normalizedAgents)
           || stateSnapshot.selectedAgentId !== nextSelectedAgentId
           || stateSnapshot.managedAgentId !== nextManagedAgentId
           || stateSnapshot.error !== null
@@ -1402,13 +1047,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           || stateSnapshot.refreshing
           || !stateSnapshot.snapshotReady
         );
-        const hydrationSourceVersion = shouldPatchAgents
-          ? bumpAgentsStateMutationVersion()
-          : agentsStateMutationVersion;
 
         if (shouldPatchAgents) {
           set({
-            agents: stableAgents,
+            agents: normalizedAgents,
             lastLoadedAt: Date.now(),
             selectedAgentId: nextSelectedAgentId,
             managedAgentId: nextManagedAgentId,
@@ -1425,51 +1067,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             error: null,
           });
         }
-
-        void hydrateAgentIdentityEmoji(stableAgents)
-          .then((hydratedAgents) => {
-            if (requestId !== latestLoadAgentsRequestId) {
-              return;
-            }
-            const emojiByAgentId = new Map<string, string>();
-            for (const agent of hydratedAgents) {
-              const emoji = getOptionalString(agent.identityEmoji);
-              if (!emoji) {
-                continue;
-              }
-              emojiByAgentId.set(agent.id, emoji);
-            }
-            set((state) => {
-              if (requestId !== latestLoadAgentsRequestId) {
-                return {};
-              }
-              if (agentsStateMutationVersion !== hydrationSourceVersion) {
-                return {};
-              }
-              let changed = false;
-              const nextAgents = state.agents.map((agent) => {
-                const nextEmoji = emojiByAgentId.get(agent.id);
-                if (!nextEmoji || nextEmoji === agent.identityEmoji || isAgentPendingDeletion(agent.id)) {
-                  return agent;
-                }
-                changed = true;
-                return {
-                  ...agent,
-                  identityEmoji: nextEmoji,
-                };
-              });
-              if (!changed) {
-                return {};
-              }
-              bumpAgentsStateMutationVersion();
-              return {
-                agents: nextAgents,
-              };
-            });
-          })
-          .catch(() => {
-            // identity hydration is best-effort; keep core list path deterministic.
-          });
       } catch (error) {
         if (requestId !== latestLoadAgentsRequestId) {
           return;
@@ -1491,23 +1088,19 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   loadAvailableModels: async () => {
     set({ modelsLoading: true });
     try {
-      const [modelsResult, configSnapshot] = await Promise.all([
-        rpc<ModelsListResult>('models.list', {}),
-        readConfigForDisplay(),
-      ]);
-      const normalizedModels = normalizeModelsListResult(modelsResult);
-      const visibleModels = buildVisibleModels({
-        models: normalizedModels,
-        configuredModelIds: configSnapshot.configuredModelIds,
-        currentAgents: get().agents,
-      });
+      const providerState = useProviderStore.getState();
+      const snapshot = providerState.snapshotReady
+        ? providerState.providerSnapshot
+        : await fetchProviderSnapshot();
+      const normalizedModels = buildSelectableProviderModels(snapshot);
       set({
-        availableModels: visibleModels,
+        availableModels: normalizedModels,
         modelsLoading: false,
         error: null,
       });
     } catch (error) {
       set({
+        availableModels: [],
         modelsLoading: false,
         error: getErrorMessage(error) || 'Failed to load models',
       });
@@ -1578,7 +1171,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  createAgent: async ({ name, workspace, model, emoji, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
+  createAgent: async ({ name, workspace, model, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
     beginGlobalMutating(set);
     try {
       void workspace;
@@ -1596,7 +1189,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (predictedAgentId) {
         pendingDeletedAgentIds.delete(predictedAgentId);
       }
-      const emojiValue = getOptionalString(emoji);
       if (hasSubagentNameConflict(trimmedName, get().agents)) {
         throw new Error('Invalid subagent name: duplicate');
       }
@@ -1609,7 +1201,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       const createResult = await rpc<AgentsCreateResult>('agents.create', {
         name: trimmedName,
         workspace: resolvedWorkspace,
-        ...(emojiValue ? { emoji: emojiValue } : {}),
       });
       const createdAgentId = getOptionalString(createResult?.agentId);
       if (!createdAgentId) {
@@ -1822,7 +1413,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (normalizedAgentId) {
         pendingDeletedAgentIds.add(normalizedAgentId);
       }
-      bumpAgentsStateMutationVersion();
       set((state) => {
         const nextAgents = state.agents.filter((entry) => entry.id !== agentId);
         const selectedAgentId = state.selectedAgentId === agentId
@@ -1843,7 +1433,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (normalizedAgentId) {
         pendingDeletedAgentIds.delete(normalizedAgentId);
       }
-      bumpAgentsStateMutationVersion();
       set({
         agents: agentsSnapshot,
         selectedAgentId: selectedAgentIdSnapshot,
