@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { buildLineDiff } from '@/lib/line-diff';
+import {
+  buildTemplateAvatarSeed,
+  DEFAULT_AGENT_AVATAR_STYLE,
+  resolveAgentAvatarStyle,
+  type AgentAvatarStyle,
+} from '@/lib/agent-avatar';
 import { hostGatewayRpc, hostOpenClawGetConfigDir } from '@/lib/host-api';
 import {
   waitAgentRunWithProgress,
@@ -90,6 +96,8 @@ interface ConfigAgentDisplaySnapshot {
   workspace?: string;
   model?: string;
   skills?: string[];
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
 }
 
 interface ConfigDisplaySnapshot {
@@ -141,6 +149,8 @@ interface SubagentsState {
     workspace: string;
     model?: string;
     emoji?: string;
+    avatarSeed?: string;
+    avatarStyle?: AgentAvatarStyle;
   }) => Promise<string>;
   createAgentFromTemplate: (input: {
     template: SubagentTemplateDetail;
@@ -153,6 +163,8 @@ interface SubagentsState {
     workspace: string;
     model?: string;
     skills?: string[] | null;
+    avatarSeed?: string | null;
+    avatarStyle?: AgentAvatarStyle | null;
   }) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
   generateDraftFromPrompt: (agentId: string, prompt: string) => Promise<void>;
@@ -170,6 +182,14 @@ function getOptionalString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function getOptionalAgentAvatarStyle(value: unknown): AgentAvatarStyle | undefined {
+  const normalized = getOptionalString(value);
+  if (!normalized) {
+    return undefined;
+  }
+  return resolveAgentAvatarStyle(normalized);
 }
 
 function getOptionalStringArray(value: unknown): string[] {
@@ -326,6 +346,8 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
       }
       const workspace = getOptionalString((item as { workspace?: unknown }).workspace);
       const skills = normalizeSkillAllowlist((item as { skills?: unknown }).skills);
+      const avatarSeed = getOptionalString((item as { avatarSeed?: unknown }).avatarSeed);
+      const avatarStyle = getOptionalAgentAvatarStyle((item as { avatarStyle?: unknown }).avatarStyle);
       let model: string | undefined;
       for (const modelId of collectModelIdsFromAgentModelValue((item as { model?: unknown }).model)) {
         if (!model) {
@@ -340,6 +362,8 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
         workspace,
         model,
         skills,
+        avatarSeed,
+        avatarStyle,
       });
     }
   }
@@ -581,6 +605,8 @@ function normalizeAgents(
       ?? configSnapshot?.defaultModel;
     const skills = configAgent?.skills
       ?? normalizeSkillAllowlist(runtimeAgent?.skills);
+    const avatarSeed = configAgent?.avatarSeed;
+    const avatarStyle = configAgent?.avatarStyle;
     return {
       ...(runtimeAgent ?? { id: agentId }),
       id: agentId,
@@ -588,6 +614,8 @@ function normalizeAgents(
       workspace,
       model,
       skills,
+      avatarSeed,
+      avatarStyle,
       isDefault: agentId === defaultId,
     };
   });
@@ -748,6 +776,62 @@ function upsertAgentModelInConfig(params: {
   return nextConfig;
 }
 
+function upsertAgentAvatarConfigInConfig(params: {
+  config: ConfigGetResult['config'];
+  agentId: string;
+  avatarSeed: string | undefined;
+  avatarStyle: AgentAvatarStyle | undefined;
+}): ConfigGetResult['config'] {
+  const nextConfig = cloneConfigForWrite(params.config);
+  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
+    ? { ...nextConfig.agents }
+    : {};
+  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
+  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
+  if (!normalizedTargetId) {
+    return nextConfig;
+  }
+
+  const targetIndex = list.findIndex((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return false;
+    }
+    const id = getOptionalString((entry as { id?: unknown }).id);
+    if (!id) {
+      return false;
+    }
+    return normalizeAgentIdForComparison(id) === normalizedTargetId;
+  });
+
+  const current = targetIndex >= 0
+    ? list[targetIndex]
+    : { id: normalizedTargetId };
+  const nextEntry = (current && typeof current === 'object')
+    ? { ...current } as Record<string, unknown>
+    : ({ id: normalizedTargetId } as Record<string, unknown>);
+
+  if (params.avatarSeed === undefined) {
+    delete nextEntry.avatarSeed;
+  } else {
+    nextEntry.avatarSeed = params.avatarSeed;
+  }
+  if (params.avatarStyle === undefined) {
+    delete nextEntry.avatarStyle;
+  } else {
+    nextEntry.avatarStyle = params.avatarStyle;
+  }
+
+  if (targetIndex >= 0) {
+    list[targetIndex] = nextEntry as typeof list[number];
+  } else {
+    list.push(nextEntry as typeof list[number]);
+  }
+
+  nextAgents.list = list;
+  nextConfig.agents = nextAgents;
+  return nextConfig;
+}
+
 async function updateAgentSkillsConfig(agentId: string, skills: string[] | undefined): Promise<void> {
   const configGetResult = await rpc<ConfigGetResult>('config.get', {});
   const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
@@ -775,6 +859,27 @@ async function updateAgentModelConfig(agentId: string, model: string | undefined
     config: configGetResult.config,
     agentId,
     model,
+  });
+  await rpc('config.set', {
+    raw: JSON.stringify(nextConfig),
+    baseHash: hash,
+  });
+}
+
+async function updateAgentAvatarConfig(
+  agentId: string,
+  input: { avatarSeed: string | undefined; avatarStyle: AgentAvatarStyle | undefined },
+): Promise<void> {
+  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
+  if (!hash) {
+    throw new Error('Missing config hash for avatar seed update');
+  }
+  const nextConfig = upsertAgentAvatarConfigInConfig({
+    config: configGetResult.config,
+    agentId,
+    avatarSeed: input.avatarSeed,
+    avatarStyle: input.avatarStyle,
   });
   await rpc('config.set', {
     raw: JSON.stringify(nextConfig),
@@ -1201,6 +1306,8 @@ function areSubagentSummariesEqual(left: SubagentSummary, right: SubagentSummary
     && (left.name ?? '') === (right.name ?? '')
     && (left.workspace ?? '') === (right.workspace ?? '')
     && (left.model ?? '') === (right.model ?? '')
+    && (left.avatarSeed ?? '') === (right.avatarSeed ?? '')
+    && (left.avatarStyle ?? '') === (right.avatarStyle ?? '')
     && areStringArraysEqual(left.skills, right.skills)
     && (left.identityEmoji ?? '') === (right.identityEmoji ?? '')
     && (left.identity?.emoji ?? '') === (right.identity?.emoji ?? '')
@@ -1471,7 +1578,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  createAgent: async ({ name, workspace, model, emoji }) => runSerializedAgentMutation(async () => {
+  createAgent: async ({ name, workspace, model, emoji, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
     beginGlobalMutating(set);
     try {
       void workspace;
@@ -1483,6 +1590,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (!modelId) {
         throw new Error('Model is required');
       }
+      const avatarSeedValue = getOptionalString(avatarSeed);
+      const avatarStyleValue = resolveAgentAvatarStyle(avatarStyle);
       const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
       if (predictedAgentId) {
         pendingDeletedAgentIds.delete(predictedAgentId);
@@ -1515,6 +1624,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         await updateAgentWithCreateBarrier({
           agentId: createdAgentId,
           model: modelId,
+        });
+        await updateAgentAvatarConfig(createdAgentId, {
+          avatarSeed: avatarSeedValue ?? `agent:${normalizeAgentIdForComparison(createdAgentId) || createdAgentId}`,
+          avatarStyle: avatarStyleValue,
         });
       } catch {
         partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
@@ -1554,6 +1667,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       workspace: '',
       model: modelId,
       emoji: getOptionalString(template.emoji),
+      avatarSeed: buildTemplateAvatarSeed(template.id),
+      avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
     });
     if (localizedTemplateName && localizedTemplateName !== templateName) {
       const createdAgent = get().agents.find((agent) => agent.id === createdAgentId);
@@ -1623,7 +1738,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  updateAgent: async ({ agentId, name, workspace, model, skills }) => runSerializedAgentMutation(async () => {
+  updateAgent: async ({ agentId, name, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
     const current = get().agents.find((agent) => agent.id === agentId);
     const skillChangeRequested = skills !== undefined;
     const nextSkills = skills === null
@@ -1631,6 +1746,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       : normalizeSkillAllowlist(skills);
     const currentSkills = normalizeSkillAllowlist(current?.skills);
     const skillsChanged = skillChangeRequested && !equalSkillAllowlist(currentSkills, nextSkills);
+    const avatarSeedChangeRequested = avatarSeed !== undefined;
+    const nextAvatarSeed = avatarSeed == null ? undefined : getOptionalString(avatarSeed);
+    const avatarSeedChanged = avatarSeedChangeRequested && !equalOptionalTrimmedString(current?.avatarSeed, nextAvatarSeed);
+    const avatarStyleChangeRequested = avatarStyle !== undefined;
+    const nextAvatarStyle = avatarStyle == null ? undefined : resolveAgentAvatarStyle(avatarStyle);
+    const avatarStyleChanged = avatarStyleChangeRequested && (current?.avatarStyle ?? '') !== (nextAvatarStyle ?? '');
     const identityChanged = !(
       current
       && equalOptionalTrimmedString(current.name, name)
@@ -1645,6 +1766,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       !identityChanged
       && !modelChanged
       && !skillsChanged
+      && !avatarSeedChanged
+      && !avatarStyleChanged
     ) {
       return;
     }
@@ -1673,6 +1796,12 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
       if (skillsChanged) {
         await updateAgentSkillsConfig(agentId, nextSkills);
+      }
+      if (avatarSeedChanged || avatarStyleChanged) {
+        await updateAgentAvatarConfig(agentId, {
+          avatarSeed: avatarSeedChanged ? nextAvatarSeed : (current?.avatarSeed ?? undefined),
+          avatarStyle: avatarStyleChanged ? nextAvatarStyle : current?.avatarStyle,
+        });
       }
       invalidateConfigDisplayCache();
       await get().loadAgents({ silent: true });

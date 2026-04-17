@@ -23,9 +23,9 @@ describe('subagents crud', () => {
     });
   });
 
-  it('calls agents.create and agents.update with model', async () => {
+  it('calls agents.create, agents.update, and persists avatar config', async () => {
     const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method) => {
+    rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer-v2' } };
       }
@@ -39,6 +39,30 @@ describe('subagents crud', () => {
       }
       if (method === 'agents.update') {
         return { success: true, result: {} };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash-create-1',
+            config: {
+              agents: {
+                list: [],
+              },
+            },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string; baseHash?: string };
+        expect(payload.baseHash).toBe('cfg-hash-create-1');
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
+        };
+        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer-v2');
+        expect(writer?.avatarSeed).toBe('agent:writer-v2');
+        expect(writer?.avatarStyle).toBe('pixelArt');
+        return { success: true, result: { ok: true } };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
@@ -60,6 +84,7 @@ describe('subagents crud', () => {
       { agentId: 'writer-v2', model: 'gpt-4.1-mini' },
       undefined,
     );
+    expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
   });
 
   it('create 在缺少主工作区时，优先用 openclaw:getConfigDir 生成 fallback 工作区', async () => {
@@ -81,7 +106,7 @@ describe('subagents crud', () => {
       }
       throw new Error(`Unexpected invoke call: ${String(channel)}`);
     });
-    rpc.mockImplementation(async (method) => {
+    rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
@@ -95,6 +120,25 @@ describe('subagents crud', () => {
       }
       if (method === 'agents.update') {
         return { success: true, result: {} };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash-create-2',
+            config: { agents: { list: [] } },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string };
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
+        };
+        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
+        expect(writer?.avatarSeed).toBe('agent:writer');
+        expect(writer?.avatarStyle).toBe('pixelArt');
+        return { success: true, result: { ok: true } };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
@@ -116,9 +160,9 @@ describe('subagents crud', () => {
     );
   });
 
-  it('passes emoji to agents.create when provided', async () => {
+  it('passes emoji to agents.create when provided and persists chosen avatar config', async () => {
     const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method) => {
+    rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
@@ -133,6 +177,25 @@ describe('subagents crud', () => {
       if (method === 'agents.update') {
         return { success: true, result: {} };
       }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash-create-3',
+            config: { agents: { list: [] } },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string };
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
+        };
+        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
+        expect(writer?.avatarSeed).toBe('picker:writer:page:0:option:3');
+        expect(writer?.avatarStyle).toBe('bottts');
+        return { success: true, result: { ok: true } };
+      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
@@ -141,6 +204,8 @@ describe('subagents crud', () => {
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
       emoji: '🤖',
+      avatarSeed: 'picker:writer:page:0:option:3',
+      avatarStyle: 'bottts',
     });
 
     expect(rpc).toHaveBeenCalledWith(
@@ -156,7 +221,7 @@ describe('subagents crud', () => {
     useSubagentsStore.setState({ loadAgents });
     let updateCallCount = 0;
     let listCallCount = 0;
-    rpc.mockImplementation(async (method) => {
+    rpc.mockImplementation(async (method, params) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'test4' } };
       }
@@ -174,6 +239,25 @@ describe('subagents crud', () => {
         if (updateCallCount === 1) {
           return { success: false, error: 'Error: agent "test4" not found' };
         }
+        return { success: true, result: { ok: true } };
+      }
+      if (method === 'config.get') {
+        return {
+          success: true,
+          result: {
+            hash: 'cfg-hash-create-4',
+            config: { agents: { list: [] } },
+          },
+        };
+      }
+      if (method === 'config.set') {
+        const payload = params as { raw?: string };
+        const parsed = JSON.parse(payload.raw || '{}') as {
+          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
+        };
+        const test4 = parsed.agents?.list?.find((entry) => entry.id === 'test4');
+        expect(test4?.avatarSeed).toBe('agent:test4');
+        expect(test4?.avatarStyle).toBe('pixelArt');
         return { success: true, result: { ok: true } };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
@@ -212,6 +296,7 @@ describe('subagents crud', () => {
     })).rejects.toThrow('agents.create returned missing agentId');
 
     expect(rpc).not.toHaveBeenCalledWith('agents.update', expect.anything());
+    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
   });
 
   it('calls agents.update with model payload', async () => {

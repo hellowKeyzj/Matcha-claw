@@ -1,4 +1,5 @@
-﻿import { Button } from '@/components/ui/button';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { Button } from '@/components/ui/button';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 
@@ -26,19 +27,19 @@ export function SubagentCard({
   onChat,
 }: SubagentCardProps) {
   const { t } = useTranslation('subagents');
-  const displayEmoji = agent.identityEmoji || (agent.isDefault ? '\u2699\uFE0F' : '\uD83E\uDD16');
   const runDisabled = !modelReady;
 
   return (
     <article className="rounded-lg border bg-card p-4 text-card-foreground shadow-sm">
       <div className="flex items-start gap-3">
-        <div
-          aria-hidden
-          data-testid={`agent-emoji-${agent.id}`}
-          className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base"
-        >
-          {displayEmoji}
-        </div>
+        <AgentAvatar
+          avatarSeed={agent.avatarSeed}
+          avatarStyle={agent.avatarStyle}
+          agentId={agent.id}
+          agentName={agent.name}
+          className="mt-0.5 h-8 w-8"
+          dataTestId={`agent-avatar-${agent.id}`}
+        />
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold">{agent.name ?? agent.id}</h2>
