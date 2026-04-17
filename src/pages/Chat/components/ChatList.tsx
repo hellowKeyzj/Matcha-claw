@@ -92,6 +92,7 @@ export function ChatList({
                     key={virtualItem.key}
                     data-index={virtualItem.index}
                     data-chat-row-key={row.key}
+                    data-chat-row-kind={row.kind}
                     ref={virtualizer.measureElement}
                     className="absolute left-0 top-0 w-full pb-4"
                     style={{ transform: `translateY(${virtualItem.start}px)` }}

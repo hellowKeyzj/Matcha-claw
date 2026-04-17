@@ -31,6 +31,13 @@ vi.mock('@tanstack/react-virtual', () => ({
       getTotalSize: () => count * 120,
       measureElement: vi.fn(),
       scrollToIndex: scrollToIndexMock,
+      getOffsetForIndex: (index: number) => {
+        if (index < 0 || index >= count) {
+          return undefined;
+        }
+        return [index * 120, 'start'] as const;
+      },
+      scrollToOffset: () => {},
     };
 
     // 模拟更接近真实 virtualizer 的行为：

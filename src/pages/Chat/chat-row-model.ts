@@ -147,6 +147,22 @@ export function canAppendMessageList(
   return true;
 }
 
+export function canPrependMessageList(
+  previous: RawMessage[],
+  next: RawMessage[],
+): boolean {
+  if (previous.length > next.length) {
+    return false;
+  }
+  const offset = next.length - previous.length;
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index] !== next[offset + index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function appendMessageRows(
   sessionKey: string,
   baseRows: ChatRow[],
@@ -165,14 +181,23 @@ export function appendMessageRows(
   }
 
   const rows = [...baseRows];
+  const usedRowKeys = new Set(rows.map((row) => row.key));
   let renderableIndex = startRenderableIndex;
   for (let index = fromIndex; index < messages.length; index += 1) {
     const message = messages[index];
     if (!isRenderableChatMessage(message)) {
       continue;
     }
+    const baseKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
+    let messageRowKey = baseKey;
+    let duplicateOrdinal = 1;
+    while (usedRowKeys.has(messageRowKey)) {
+      messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+      duplicateOrdinal += 1;
+    }
+    usedRowKeys.add(messageRowKey);
     rows.push({
-      key: resolveMessageRowKey(sessionKey, message, renderableIndex),
+      key: messageRowKey,
       kind: 'message',
       message,
     });
@@ -182,6 +207,53 @@ export function appendMessageRows(
   return {
     rows,
     renderableCount: renderableIndex,
+  };
+}
+
+export function prependMessageRows(
+  sessionKey: string,
+  baseRows: ChatRow[],
+  messages: RawMessage[],
+  toIndexExclusive: number,
+  startRenderableCount: number,
+): {
+  rows: ChatRow[];
+  renderableCount: number;
+} {
+  if (toIndexExclusive <= 0) {
+    return {
+      rows: baseRows,
+      renderableCount: startRenderableCount,
+    };
+  }
+
+  const prependedRows: ChatRow[] = [];
+  const usedRowKeys = new Set(baseRows.map((row) => row.key));
+  let prependedRenderableCount = 0;
+  for (let index = 0; index < toIndexExclusive; index += 1) {
+    const message = messages[index];
+    if (!isRenderableChatMessage(message)) {
+      continue;
+    }
+    const baseKey = resolveMessageRowKey(sessionKey, message, prependedRenderableCount);
+    let messageRowKey = baseKey;
+    let duplicateOrdinal = 1;
+    while (usedRowKeys.has(messageRowKey)) {
+      messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+      duplicateOrdinal += 1;
+    }
+    usedRowKeys.add(messageRowKey);
+    prependedRows.push({
+      key: messageRowKey,
+      kind: 'message',
+      message,
+    });
+    prependedRenderableCount += 1;
+  }
+
+  return {
+    rows: prependedRows.length > 0 ? [...prependedRows, ...baseRows] : baseRows,
+    renderableCount: startRenderableCount + prependedRenderableCount,
   };
 }
 
@@ -229,13 +301,22 @@ export function buildStaticChatRowsWithMeta({
 }: BuildStaticChatRowsInput): BuildStaticChatRowsResult {
   if (executionGraphs.length === 0) {
     const rows: ChatRow[] = [];
+    const usedRowKeys = new Set<string>();
     let renderableCount = 0;
     for (const message of messages) {
       if (!isRenderableChatMessage(message)) {
         continue;
       }
+      const baseKey = resolveMessageRowKey(sessionKey, message, renderableCount);
+      let messageRowKey = baseKey;
+      let duplicateOrdinal = 1;
+      while (usedRowKeys.has(messageRowKey)) {
+        messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+        duplicateOrdinal += 1;
+      }
+      usedRowKeys.add(messageRowKey);
       rows.push({
-        key: resolveMessageRowKey(sessionKey, message, renderableCount),
+        key: messageRowKey,
         kind: 'message',
         message,
       });
@@ -261,12 +342,20 @@ export function buildStaticChatRowsWithMeta({
 
   const insertedGraphIds = new Set<string>();
   const rows: ChatRow[] = [];
+  const usedRowKeys = new Set<string>();
   let renderableIndex = 0;
   for (const message of messages) {
     if (!isRenderableChatMessage(message)) {
       continue;
     }
-    const messageKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
+    const baseKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
+    let messageKey = baseKey;
+    let duplicateOrdinal = 1;
+    while (usedRowKeys.has(messageKey)) {
+      messageKey = `${baseKey}|dup:${duplicateOrdinal}`;
+      duplicateOrdinal += 1;
+    }
+    usedRowKeys.add(messageKey);
     renderableIndex += 1;
     rows.push({
       key: messageKey,
@@ -405,4 +494,3 @@ export function buildChatRows({
     streamingTimestamp,
   });
 }
-

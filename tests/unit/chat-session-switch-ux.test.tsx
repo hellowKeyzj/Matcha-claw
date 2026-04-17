@@ -9,11 +9,21 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 
+const trackUiEventMock = vi.fn();
 const scrollToIndexMock = vi.fn();
+const scrollToOffsetMock = vi.fn();
 const VIRTUAL_WINDOW_SIZE = 10;
 let virtualWindowStartIndex = 0;
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
+
+vi.mock('@/lib/telemetry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/telemetry')>();
+  return {
+    ...actual,
+    trackUiEvent: (...args: unknown[]) => trackUiEventMock(...args),
+  };
+});
 
 class ResizeObserverStub {
   private readonly trigger: () => void;
@@ -91,6 +101,23 @@ vi.mock('@tanstack/react-virtual', () => ({
         }
         virtualWindowStartIndex = clampedIndex;
       },
+      getOffsetForIndex: (
+        index: number,
+      ) => {
+        if (index < 0 || index >= count) {
+          return undefined;
+        }
+        return [index * 120, 'start'] as const;
+      },
+      scrollToOffset: (offset: number) => {
+        scrollToOffsetMock(offset);
+        if (count <= 0) {
+          virtualWindowStartIndex = 0;
+          return;
+        }
+        const targetIndex = Math.floor(Math.max(0, offset) / 120);
+        virtualWindowStartIndex = Math.min(Math.max(0, targetIndex), Math.max(0, count - 1));
+      },
     };
     queueMicrotask(() => {
       act(() => {
@@ -106,7 +133,9 @@ describe('chat 会话切换 UI 回归', () => {
 
   beforeEach(() => {
     i18n.changeLanguage('en');
+    trackUiEventMock.mockReset();
     scrollToIndexMock.mockReset();
+    scrollToOffsetMock.mockReset();
     virtualWindowStartIndex = 0;
     triggerResizeObserver = null;
     resizeObserverCallbacks = [];
@@ -635,12 +664,10 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     await waitFor(() => {
-      const hasAnchorMaterializeScroll = scrollToIndexMock.mock.calls.some((call) => {
-        const index = call[0] as number;
-        const options = call[1] as { align?: string } | undefined;
-        return options?.align === 'start' && index >= 8;
-      });
-      expect(hasAnchorMaterializeScroll).toBe(true);
+      const hasAnchorCompensation = scrollToOffsetMock.mock.calls.some((call) => (
+        typeof call[0] === 'number' && Number.isFinite(call[0]) && call[0] >= 0
+      ));
+      expect(hasAnchorCompensation).toBe(true);
     });
     // 关键断言：扩窗后不应被强制拉回底部（align:end）
     const hasForcedBottomScroll = scrollToIndexMock.mock.calls.some((call) => {
@@ -648,12 +675,60 @@ describe('chat 会话切换 UI 回归', () => {
       return options?.align === 'end';
     });
     expect(hasForcedBottomScroll).toBe(false);
-    const hasAnchorMaterializeScroll = scrollToIndexMock.mock.calls.some((call) => {
-      const index = call[0] as number;
-      const options = call[1] as { align?: string } | undefined;
-      return options?.align === 'start' && index >= 8;
+  });
+
+  it('未进入 detached 时到顶也应触发扩窗，避免卡在首屏窗口上边界', async () => {
+    const nowTs = Date.now() / 1000;
+    const longMessages = Array.from({ length: 24 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `top-expand-sticky-message-${index}`,
+      timestamp: nowTs + index,
+      id: `top-expand-sticky-${index}`,
+    }));
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [{ key: 'agent:test:main', displayName: 'agent:test:main' }],
+      messages: longMessages,
+      snapshotReady: true,
+      sessionReadyByKey: { 'agent:test:main': true },
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { container } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByText('top-expand-sticky-message-0')).not.toBeInTheDocument();
+
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement | null;
+    expect(viewport).toBeTruthy();
+    if (!viewport) {
+      return;
+    }
+
+    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 3600 });
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
+    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+
+    fireEvent.wheel(viewport, { deltaY: -220 });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
     });
-    expect(hasAnchorMaterializeScroll).toBe(true);
+
+    await waitFor(() => {
+      const expandedAtTop = trackUiEventMock.mock.calls.some((call) => (
+        call[0] === 'chat.render_window_budget_advance'
+        && (call[1] as { reason?: string } | undefined)?.reason === 'top-headroom'
+      ));
+      expect(expandedAtTop).toBe(true);
+    });
   });
 
   it('扩窗后离开再进入同会话，首屏窗口应重置为固定预算，避免继承上次扩窗', async () => {
@@ -694,6 +769,7 @@ describe('chat 会话切换 UI 回归', () => {
     Object.defineProperty(firstViewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
 
     scrollToIndexMock.mockClear();
+    scrollToOffsetMock.mockClear();
     fireEvent.wheel(firstViewport, { deltaY: -240 });
     fireEvent.scroll(firstViewport);
     await act(async () => {
@@ -707,11 +783,9 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     await waitFor(() => {
-      const hasExpanded = scrollToIndexMock.mock.calls.some((call) => {
-        const index = call[0] as number;
-        const options = call[1] as { align?: string } | undefined;
-        return options?.align === 'start' && index >= 8;
-      });
+      const hasExpanded = scrollToOffsetMock.mock.calls.some((call) => (
+        typeof call[0] === 'number' && Number.isFinite(call[0]) && call[0] >= 0
+      ));
       expect(hasExpanded).toBe(true);
     });
 

@@ -4,6 +4,8 @@ import {
   appendRuntimeChatRows,
   buildChatRows,
   buildStaticChatRows,
+  canPrependMessageList,
+  prependMessageRows,
   type ExecutionGraphData,
 } from '@/pages/Chat/chat-row-model';
 import {
@@ -175,6 +177,66 @@ describe('chat 行模型', () => {
     });
 
     expect(firstRows[0]?.key).toBe(secondRows[0]?.key);
+  });
+
+  it('匿名重复消息也必须生成唯一 row key，避免扩窗锚点命中旧消息', () => {
+    const rows = buildChatRows({
+      sessionKey: 'agent:main:main',
+      messages: [
+        {
+          role: 'assistant',
+          content: '重复内容',
+          timestamp: 123,
+        } satisfies RawMessage,
+        {
+          role: 'assistant',
+          content: '重复内容',
+          timestamp: 123,
+        } satisfies RawMessage,
+      ],
+      sending: false,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: true,
+      streamingMessage: null,
+      streamingTools: [],
+      streamingTimestamp: 0,
+    });
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.key).not.toBe(rows[1]?.key);
+  });
+
+  it('扩窗 prepend 场景应识别为前缀增量并仅拼接新增历史行', () => {
+    const previousMessages: RawMessage[] = [
+      { id: 'm-2', role: 'assistant', content: 'm2', timestamp: 2 },
+      { id: 'm-3', role: 'assistant', content: 'm3', timestamp: 3 },
+    ];
+    const nextMessages: RawMessage[] = [
+      { id: 'm-1', role: 'assistant', content: 'm1', timestamp: 1 },
+      ...previousMessages,
+    ];
+    expect(canPrependMessageList(previousMessages, nextMessages)).toBe(true);
+
+    const previousRows = buildStaticChatRows({
+      sessionKey: 'agent:main:main',
+      messages: previousMessages,
+      executionGraphs: [],
+    });
+
+    const prepended = prependMessageRows(
+      'agent:main:main',
+      previousRows,
+      nextMessages,
+      1,
+      2,
+    );
+
+    expect(prepended.rows).toHaveLength(3);
+    expect(prepended.rows[0]).toMatchObject({ key: 'session:agent:main:main|id:m-1' });
+    expect(prepended.rows[1]).toBe(previousRows[0]);
+    expect(prepended.rows[2]).toBe(previousRows[1]);
+    expect(prepended.renderableCount).toBe(3);
   });
 
   it('只有处理中提示时，应把它作为 activity 行加入虚拟列表', () => {
@@ -462,4 +524,3 @@ describe('chat resize 底部锚点补偿', () => {
     expect(nextTop).toBeNull();
   });
 });
-

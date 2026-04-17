@@ -3,7 +3,7 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, useMemo, useRef, memo, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useMemo, memo, type ReactNode } from 'react';
 import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -24,13 +24,7 @@ import {
 } from './md-link';
 import {
   buildMarkdownCacheKey,
-  estimateMarkdownRenderScore,
   getOrBuildProcessedMarkdown,
-  hasRichReadyCache,
-  markRichReadyCache,
-  MARKDOWN_DEFER_SCORE_THRESHOLD,
-  MARKDOWN_VISIBILITY_ROOT_MARGIN,
-  requestMarkdownRichRender,
 } from './md-pipeline';
 
 interface ChatMessageProps {
@@ -43,7 +37,6 @@ interface ChatMessageProps {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
-  preferPlainText?: boolean;
   streamingTools?: Array<{
     id?: string;
     toolCallId?: string;
@@ -74,7 +67,6 @@ export const ChatMessage = memo(function ChatMessage({
   assistantAvatarStyle,
   userAvatarImageUrl,
   isStreaming = false,
-  preferPlainText = false,
   streamingTools = [],
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
@@ -105,10 +97,6 @@ export const ChatMessage = memo(function ChatMessage({
       attachedFiles,
     });
   }, [attachedFiles, message.id, message.role, message.timestamp, text]);
-  const shouldDeferRichMarkdown = useMemo(
-    () => estimateMarkdownRenderScore(text) >= MARKDOWN_DEFER_SCORE_THRESHOLD,
-    [text],
-  );
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
 
   // Never render tool result messages in chat UI
@@ -239,10 +227,8 @@ export const ChatMessage = memo(function ChatMessage({
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
-            preferPlainText={preferPlainText}
             resolveFileHintPath={resolveFileHintPath}
             markdownCacheKey={markdownCacheKey}
-            deferRichMarkdown={shouldDeferRichMarkdown}
           />
         )}
 
@@ -408,20 +394,15 @@ const MessageBubble = memo(function MessageBubble({
   text,
   isUser,
   isStreaming,
-  preferPlainText,
   resolveFileHintPath,
   markdownCacheKey,
-  deferRichMarkdown,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
-  preferPlainText: boolean;
   resolveFileHintPath?: FileHintPathResolver;
   markdownCacheKey: string;
-  deferRichMarkdown: boolean;
 }) {
-  const bubbleRef = useRef<HTMLDivElement>(null);
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
       return;
@@ -433,89 +414,7 @@ const MessageBubble = memo(function MessageBubble({
     }
   }, []);
 
-  const renderPlainText = !isUser && (isStreaming || preferPlainText);
-  const shouldTrackRichRender = !isUser && !renderPlainText;
-  const shouldDeferRichRender = shouldTrackRichRender && deferRichMarkdown;
-  const [deferredRichRenderState, setDeferredRichRenderState] = useState(() => ({
-    key: markdownCacheKey,
-    ready: hasRichReadyCache(markdownCacheKey),
-  }));
-  const richRenderReadyFromCache = hasRichReadyCache(markdownCacheKey);
-  const richRenderReady = (
-    !shouldTrackRichRender
-    || !shouldDeferRichRender
-    || richRenderReadyFromCache
-    || (deferredRichRenderState.key === markdownCacheKey && deferredRichRenderState.ready)
-  );
-
-  useEffect(() => {
-    if (!shouldTrackRichRender) {
-      return;
-    }
-    if (!shouldDeferRichRender) {
-      markRichReadyCache(markdownCacheKey);
-      return;
-    }
-    if (richRenderReadyFromCache) {
-      return;
-    }
-    let cancelled = false;
-    let releaseRichRenderRequest: (() => void) | null = null;
-    let observer: IntersectionObserver | null = null;
-
-    const scheduleRichRender = () => {
-      if (releaseRichRenderRequest) {
-        return;
-      }
-      releaseRichRenderRequest = requestMarkdownRichRender(markdownCacheKey, () => {
-        if (cancelled) {
-          return;
-        }
-        setDeferredRichRenderState((previous) => {
-          if (previous.key === markdownCacheKey && previous.ready) {
-            return previous;
-          }
-          return {
-            key: markdownCacheKey,
-            ready: true,
-          };
-        });
-      });
-    };
-
-    const canObserve = typeof window !== 'undefined' && typeof window.IntersectionObserver === 'function';
-    const target = bubbleRef.current;
-    if (canObserve && target) {
-      observer = new window.IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) {
-            continue;
-          }
-          observer?.disconnect();
-          observer = null;
-          scheduleRichRender();
-          break;
-        }
-      }, {
-        root: null,
-        rootMargin: MARKDOWN_VISIBILITY_ROOT_MARGIN,
-        threshold: 0,
-      });
-      observer.observe(target);
-    } else {
-      scheduleRichRender();
-    }
-
-    return () => {
-      cancelled = true;
-      if (observer) {
-        observer.disconnect();
-      }
-      releaseRichRenderRequest?.();
-    };
-  }, [markdownCacheKey, richRenderReadyFromCache, shouldDeferRichRender, shouldTrackRichRender]);
-
-  const shouldRenderRichMarkdown = shouldTrackRichRender && richRenderReady;
+  const shouldRenderRichMarkdown = !isUser;
   const markdownContent = useMemo(
     () => {
       if (!shouldRenderRichMarkdown) {
@@ -579,7 +478,6 @@ const MessageBubble = memo(function MessageBubble({
 
   return (
     <div
-      ref={bubbleRef}
       className={cn(
         'relative',
         isUser ? 'rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground' : 'w-full bg-transparent px-0 py-0',
@@ -590,12 +488,7 @@ const MessageBubble = memo(function MessageBubble({
     >
       {isUser ? (
         <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
-      ) : renderPlainText ? (
-        <div className="whitespace-pre-wrap break-words break-all text-sm leading-6">
-          {text}
-          {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
-        </div>
-      ) : shouldRenderRichMarkdown ? (
+      ) : (
         <div className="prose prose-sm dark:prose-invert max-w-none break-words break-all">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -609,9 +502,8 @@ const MessageBubble = memo(function MessageBubble({
           >
             {markdownContent}
           </ReactMarkdown>
+          {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
         </div>
-      ) : (
-        <p className="whitespace-pre-wrap break-words break-all text-sm leading-6">{text}</p>
       )}
 
     </div>

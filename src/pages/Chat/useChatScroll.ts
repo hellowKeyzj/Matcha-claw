@@ -30,6 +30,16 @@ interface ChatViewportSizeMetrics {
   clientHeight: number;
 }
 
+interface ResizeCompensationState {
+  didResize: boolean;
+  emitResizeEvent: boolean;
+  nextScrollTop: number | null;
+}
+
+type ScheduledFrameHandle =
+  | { kind: 'raf'; id: number }
+  | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
+
 export function isChatViewportNearBottom(
   metrics: ChatViewportMetrics,
   thresholdPx: number,
@@ -78,6 +88,21 @@ function scheduleNextFrame(task: () => void): void {
   setTimeout(task, 16);
 }
 
+function scheduleFrame(task: () => void): ScheduledFrameHandle {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    return { kind: 'raf', id: window.requestAnimationFrame(() => task()) };
+  }
+  return { kind: 'timeout', id: setTimeout(task, 16) };
+}
+
+function cancelScheduledFrame(handle: ScheduledFrameHandle): void {
+  if (handle.kind === 'raf' && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+    window.cancelAnimationFrame(handle.id);
+    return;
+  }
+  clearTimeout(handle.id);
+}
+
 const CHAT_SCROLL_COMMAND_MAX_ATTEMPTS = 4;
 
 export function useChatScroll({
@@ -104,6 +129,8 @@ export function useChatScroll({
   const commandExecutionReentryGuardRef = useRef(false);
   const maybeCompleteBottomCommandRef = useRef<() => void>(() => {});
   const maybeExecutePendingCommandRef = useRef<() => void>(() => {});
+  const resizeCompensationStateRef = useRef<ResizeCompensationState | null>(null);
+  const resizeCompensationFrameRef = useRef<ScheduledFrameHandle | null>(null);
 
   useLayoutEffect(() => {
     scrollStateRef.current = scrollState;
@@ -188,6 +215,49 @@ export function useChatScroll({
     };
   }, [maybeExecutePendingCommand]);
 
+  const flushResizeCompensation = useCallback(() => {
+    const compensation = resizeCompensationStateRef.current;
+    resizeCompensationStateRef.current = null;
+    if (!compensation) {
+      maybeCompleteBottomCommandRef.current();
+      return;
+    }
+
+    const activeViewport = viewportRef.current;
+    if (activeViewport && compensation.nextScrollTop != null) {
+      activeViewport.scrollTop = compensation.nextScrollTop;
+    }
+
+    if (compensation.emitResizeEvent) {
+      dispatch({ type: 'CONTENT_RESIZED' });
+    }
+    if (compensation.didResize) {
+      maybeExecutePendingCommandRef.current();
+    }
+    maybeCompleteBottomCommandRef.current();
+  }, [viewportRef]);
+
+  const scheduleResizeCompensation = useCallback(() => {
+    if (resizeCompensationFrameRef.current != null) {
+      return;
+    }
+    resizeCompensationFrameRef.current = scheduleFrame(() => {
+      resizeCompensationFrameRef.current = null;
+      flushResizeCompensation();
+    });
+  }, [flushResizeCompensation]);
+
+  useLayoutEffect(() => {
+    return () => {
+      const frame = resizeCompensationFrameRef.current;
+      if (frame != null) {
+        cancelScheduledFrame(frame);
+        resizeCompensationFrameRef.current = null;
+      }
+      resizeCompensationStateRef.current = null;
+    };
+  }, []);
+
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     const content = contentRef.current;
@@ -210,6 +280,7 @@ export function useChatScroll({
         if (changed) {
           const currentScrollState = scrollStateRef.current;
           let shouldEmitResizeEvent = true;
+          let nextScrollTop: number | null = null;
           if (currentScrollState.mode !== 'detached') {
             const wasNearBottomBeforeResize = prevMetrics
               ? isChatViewportNearBottom({
@@ -224,6 +295,7 @@ export function useChatScroll({
               || currentScrollState.mode === 'opening'
             );
             if (shouldLockBottom) {
+              let compensatedBottomScrollTop = activeViewport.scrollTop;
               if (prevMetrics) {
                 const compensatedScrollTop = computeBottomLockedScrollTopOnResize(
                   prevMetrics,
@@ -231,26 +303,26 @@ export function useChatScroll({
                   activeViewport.scrollTop,
                 );
                 if (compensatedScrollTop != null) {
-                  activeViewport.scrollTop = compensatedScrollTop;
+                  compensatedBottomScrollTop = compensatedScrollTop;
                 }
               }
-              // In real browsers this clamps to the true max scrollTop.
-              // In jsdom tests this preserves explicit "bottom = scrollHeight".
-              activeViewport.scrollTop = nextMetrics.scrollHeight;
-              if (readViewportNearBottom(activeViewport, stickyBottomThresholdPx)) {
-                shouldEmitResizeEvent = false;
-              }
+              // Keep writes centralized: apply once in a frame instead of inside ResizeObserver.
+              nextScrollTop = Math.max(nextMetrics.scrollHeight, compensatedBottomScrollTop);
+              shouldEmitResizeEvent = false;
             }
           }
           lastResizeMetricsRef.current = nextMetrics;
           didResize = true;
-          if (shouldEmitResizeEvent) {
-            dispatch({ type: 'CONTENT_RESIZED' });
-          }
+          resizeCompensationStateRef.current = {
+            didResize: true,
+            emitResizeEvent: shouldEmitResizeEvent,
+            nextScrollTop,
+          };
         }
       }
       if (didResize) {
-        maybeExecutePendingCommandRef.current();
+        scheduleResizeCompensation();
+        return;
       }
       maybeCompleteBottomCommandRef.current();
     });
@@ -269,7 +341,7 @@ export function useChatScroll({
     }
 
     return () => observer.disconnect();
-  }, [contentRef, stickyBottomThresholdPx, viewportRef]);
+  }, [contentRef, scheduleResizeCompensation, stickyBottomThresholdPx, viewportRef]);
 
   useLayoutEffect(() => {
     if (lastSessionKeyRef.current === currentSessionKey) {
@@ -277,6 +349,12 @@ export function useChatScroll({
     }
     lastSessionKeyRef.current = currentSessionKey;
     lastResizeMetricsRef.current = null;
+    resizeCompensationStateRef.current = null;
+    const frame = resizeCompensationFrameRef.current;
+    if (frame != null) {
+      cancelScheduledFrame(frame);
+      resizeCompensationFrameRef.current = null;
+    }
     dispatch({
       type: 'SESSION_SWITCHED',
       sessionKey: currentSessionKey,
@@ -312,10 +390,10 @@ export function useChatScroll({
     scrollState.viewportReady,
   ]);
 
-  const markUserScrollIntent = useCallback(() => {
+  const markUserScrollIntent = useCallback((atMs: number) => {
     dispatch({
       type: 'USER_SCROLL_INTENT',
-      atMs: Date.now(),
+      atMs,
     });
   }, []);
 
@@ -341,11 +419,39 @@ export function useChatScroll({
     maybeExecutePendingCommand(instance);
   }, [maybeExecutePendingCommand]);
 
+  const handleViewportPointerDown = useCallback(() => {
+    markUserScrollIntent(Date.now());
+  }, [markUserScrollIntent]);
+
+  const handleViewportTouchMove = useCallback(() => {
+    markUserScrollIntent(Date.now());
+  }, [markUserScrollIntent]);
+
+  const handleViewportWheel = useCallback(() => {
+    const atMs = Date.now();
+    markUserScrollIntent(atMs);
+
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const isNearBottom = readViewportNearBottom(viewport, stickyBottomThresholdPx);
+    dispatch({
+      type: 'VIEWPORT_POSITION_CHANGED',
+      isNearBottom,
+      atMs,
+    });
+    if (isNearBottom) {
+      maybeCompleteBottomCommand();
+    }
+  }, [markUserScrollIntent, maybeCompleteBottomCommand, stickyBottomThresholdPx, viewportRef]);
+
   return {
     handleViewportScroll,
-    handleViewportPointerDown: markUserScrollIntent,
-    handleViewportTouchMove: markUserScrollIntent,
-    handleViewportWheel: markUserScrollIntent,
+    handleViewportPointerDown,
+    handleViewportTouchMove,
+    handleViewportWheel,
     handleVirtualizerChange,
     scrollState,
   };
