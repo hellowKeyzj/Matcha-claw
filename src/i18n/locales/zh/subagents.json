@@ -95,6 +95,13 @@
     "modelUnavailable": "未找到可用的已配置模型。",
     "initialPrompt": "系统提示词",
     "initialPromptPlaceholder": "可选：先写一段该 Agent 的系统提示词",
+    "avatar": "头像",
+    "avatarStyles": {
+      "pixelArt": "像素风",
+      "bottts": "Bottts",
+      "botttsNeutral": "Bottts Neutral"
+    },
+    "avatarRefresh": "换一批",
     "emoji": "表情",
     "emojiPlaceholder": "可手动输入任意 emoji，或从下方选择",
     "emojiPanelShow": "显示快捷表情",

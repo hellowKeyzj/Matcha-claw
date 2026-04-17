@@ -83,6 +83,13 @@
     "name": "名前",
     "workspace": "ワークスペース",
     "model": "モデル",
+    "avatar": "アバター",
+    "avatarStyles": {
+      "pixelArt": "ピクセル",
+      "bottts": "Bottts",
+      "botttsNeutral": "Bottts Neutral"
+    },
+    "avatarRefresh": "別の候補",
     "create": "作成",
     "save": "保存",
     "nameDuplicate": "Agent名が重複しています。",

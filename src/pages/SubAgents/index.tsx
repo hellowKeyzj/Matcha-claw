@@ -2,6 +2,8 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
 import { hostOpenClawGetWorkspaceDir } from '@/lib/host-api';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
@@ -57,9 +59,13 @@ const TemplateCatalogCard = memo(function TemplateCatalogCard({
       onFocus={() => onPrefetch(template.id)}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-base">
-          {template.emoji || '\uD83E\uDD16'}
-        </div>
+        <AgentAvatar
+          avatarSeed={buildTemplateAvatarSeed(template.id)}
+          agentId={template.id}
+          agentName={localizedTemplateName}
+          className="mt-0.5 h-8 w-8"
+          alt={`${localizedTemplateName} avatar`}
+        />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <h3 className="min-w-0 flex-1 truncate text-sm font-semibold">
@@ -783,7 +789,8 @@ export function SubAgents() {
                 name: values.name,
                 workspace: values.workspace,
                 model: values.model,
-                ...(values.emoji ? { emoji: values.emoji } : {}),
+                avatarSeed: values.avatarSeed,
+                avatarStyle: values.avatarStyle,
               });
               const resolvedAgentId = createdAgentId || normalizeSubagentNameToSlug(values.name);
               setManagedAgentId(resolvedAgentId);
