@@ -159,8 +159,8 @@ describe('subagents page', () => {
     expect(screen.getByTestId('subagent-card-grid')).toBeInTheDocument();
     expect(screen.getByText('Alpha')).toBeInTheDocument();
     expect(screen.getByText('agent-alpha')).toBeInTheDocument();
-    expect(screen.getByTestId('agent-emoji-main')).toHaveTextContent('⚙️');
-    expect(screen.getByTestId('agent-emoji-agent-alpha')).toHaveTextContent('📊');
+    expect(screen.getByTestId('agent-avatar-main')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-avatar-agent-alpha')).toBeInTheDocument();
   });
 
   it('挂载时触发初始化加载', () => {
@@ -226,11 +226,13 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith({
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
         model: 'gpt-4.1-mini',
-      });
+        avatarSeed: expect.any(String),
+        avatarStyle: 'pixelArt',
+      }));
     });
   });
 
@@ -243,50 +245,50 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith({
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
         model: 'gpt-4.1-mini',
-      });
+        avatarSeed: expect.any(String),
+        avatarStyle: 'pixelArt',
+      }));
     });
 
     expect(screen.getByRole('dialog', { name: 'Create Subagent' })).toBeInTheDocument();
     expect(screen.queryByText('Managing: writer')).toBeNull();
   });
 
-  it('passes selected emoji when creating subagent', async () => {
+  it('create dialog no longer renders emoji input', () => {
     renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
-    fireEvent.change(screen.getByLabelText('Emoji'), { target: { value: '🤖' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-    await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith({
-        name: 'writer',
-        workspace: '/home/dev/.openclaw/workspace-subagents/writer',
-        model: 'gpt-4.1-mini',
-        emoji: '🤖',
-      });
-    });
+    expect(screen.queryByLabelText('Emoji')).toBeNull();
+    expect(screen.getByText('Avatar')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'avatar-style-pixelArt' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'avatar-style-bottts' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'avatar-style-botttsNeutral' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument();
   });
 
-  it('supports emoji quick-pick grid selection', async () => {
+  it('supports selecting an avatar option and avatar style when creating subagent', async () => {
     renderSubagentsPage();
 
     fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
-    fireEvent.click(screen.getByRole('button', { name: 'pick-emoji-🔥' }));
+    fireEvent.click(screen.getByRole('button', { name: 'avatar-style-bottts' }));
+    const avatarButtons = screen.getAllByRole('button', { name: /pick-avatar-/ });
+    fireEvent.click(avatarButtons[3]);
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith({
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
         model: 'gpt-4.1-mini',
-        emoji: '🔥',
-      });
+        avatarSeed: expect.stringContaining('picker:writer'),
+        avatarStyle: 'bottts',
+      }));
     });
   });
 
@@ -301,11 +303,13 @@ describe('subagents page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
-      expect(createAgent).toHaveBeenCalledWith({
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'writer',
         workspace: '/home/dev/.openclaw/workspace-subagents/writer',
         model: 'gpt-4.1-mini',
-      });
+        avatarSeed: expect.any(String),
+        avatarStyle: 'pixelArt',
+      }));
     });
 
     expect(screen.getByText('Managing: writer')).toBeInTheDocument();

@@ -86,6 +86,13 @@
     "name": "Name",
     "workspace": "Workspace",
     "model": "Model",
+    "avatar": "Avatar",
+    "avatarStyles": {
+      "pixelArt": "Pixel Art",
+      "bottts": "Bottts",
+      "botttsNeutral": "Bottts Neutral"
+    },
+    "avatarRefresh": "Refresh",
     "emoji": "Emoji",
     "emojiPlaceholder": "Type any emoji, or pick one below",
     "emojiPanelShow": "Show emoji quick picks",
