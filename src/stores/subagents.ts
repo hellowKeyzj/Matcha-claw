@@ -1630,7 +1630,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           avatarStyle: avatarStyleValue,
         });
       } catch {
-        partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型配置写入失败，请在编辑中重新选择模型`;
+        partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型或头像配置写入失败，请在编辑中重新确认`;
       }
       invalidateConfigDisplayCache();
       await get().loadAgents({ silent: true });
@@ -1666,7 +1666,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       name: templateName,
       workspace: '',
       model: modelId,
-      emoji: getOptionalString(template.emoji),
       avatarSeed: buildTemplateAvatarSeed(template.id),
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
     });
@@ -1682,8 +1681,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
       }
     }
-    const templateEmoji = getOptionalString(template.emoji);
-
     const fileEntries = SUBAGENT_TARGET_FILES
       .map((fileName) => {
         const content = template.fileContents[fileName];
@@ -1705,14 +1702,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           agentId: createdAgentId,
           name,
           content,
-        });
-      }
-      identityEmojiCache.delete(createdAgentId);
-      identityEmojiLoadTasks.delete(createdAgentId);
-      if (templateEmoji && isLikelyEmojiToken(templateEmoji)) {
-        identityEmojiCache.set(createdAgentId, {
-          checkedAt: Date.now(),
-          emoji: templateEmoji,
         });
       }
       await rpc('agents.files.list', { agentId: createdAgentId });
