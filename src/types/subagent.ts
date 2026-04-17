@@ -1,3 +1,4 @@
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import type { LineDiffEntry } from '@/lib/line-diff';
 
@@ -17,6 +18,8 @@ export interface SubagentSummary {
   workspace?: string;
   model?: string;
   skills?: string[];
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
   identity?: AgentIdentitySummary;
   identityEmoji?: string;
   isDefault?: boolean;
@@ -76,6 +79,8 @@ export interface AgentConfigEntry {
   default?: boolean;
   model?: AgentModelValue;
   skills?: string[];
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
   [key: string]: unknown;
 }
 
