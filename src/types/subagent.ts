@@ -7,7 +7,6 @@ export type SubagentTargetFile = (typeof SUBAGENT_TARGET_FILES)[number];
 export interface AgentIdentitySummary {
   name?: string;
   theme?: string;
-  emoji?: string;
   avatar?: string;
   avatarUrl?: string;
 }
@@ -21,14 +20,12 @@ export interface SubagentSummary {
   avatarSeed?: string;
   avatarStyle?: AgentAvatarStyle;
   identity?: AgentIdentitySummary;
-  identityEmoji?: string;
   isDefault?: boolean;
 }
 
 export interface SubagentTemplateSummary {
   id: string;
   name: string;
-  emoji?: string;
   summary?: string;
   categoryId?: string;
   subcategoryId?: string;

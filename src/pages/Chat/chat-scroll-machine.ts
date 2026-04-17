@@ -210,17 +210,9 @@ export function reduceChatScrollState(
       if (!event.isNearBottom) {
         const hasFreshUserScrollIntent = state.userScrollIntentAtMs != null
           && (event.atMs - state.userScrollIntentAtMs) <= USER_SCROLL_INTENT_MAX_AGE_MS;
-        if (hasFreshUserScrollIntent) {
-          const shouldIgnoreIntent = (
-            state.programmaticScrollInFlight
-            && state.command.type === 'follow-append'
-          );
-          if (shouldIgnoreIntent) {
-            return {
-              ...state,
-              isNearBottom: false,
-            };
-          }
+        const shouldDetachPendingOpenCommand = hasFreshUserScrollIntent
+          && state.command.type === 'open-to-latest';
+        if (shouldDetachPendingOpenCommand) {
           return {
             ...state,
             mode: 'detached',
@@ -245,6 +237,16 @@ export function reduceChatScrollState(
             ...(hasStaleUserScrollIntent
               ? { userScrollIntentAtMs: null }
               : {}),
+          };
+        }
+        if (hasFreshUserScrollIntent) {
+          return {
+            ...state,
+            mode: 'detached',
+            command: createNoneCommand(),
+            isNearBottom: false,
+            userScrollIntentAtMs: null,
+            programmaticScrollInFlight: false,
           };
         }
         const hasStaleUserScrollIntent = state.userScrollIntentAtMs != null && !hasFreshUserScrollIntent;

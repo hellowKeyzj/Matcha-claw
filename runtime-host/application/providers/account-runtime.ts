@@ -1,4 +1,4 @@
-import { PROVIDER_VENDOR_DEFINITIONS } from '../../api/provider-definitions';
+import { PROVIDER_VENDOR_DEFINITIONS } from './provider-registry';
 import { validateApiKeyWithProvider } from './provider-validation';
 
 function isRecord(value: unknown): value is Record<string, any> {

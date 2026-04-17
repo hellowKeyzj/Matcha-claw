@@ -72,7 +72,10 @@ export function buildProviderAccountId(
   }
 
   const vendor = vendors.find((candidate) => candidate.id === vendorId);
-  return vendor?.supportsMultipleAccounts ? `${vendorId}-${crypto.randomUUID()}` : vendorId;
+  if (vendor?.supportsMultipleAccounts === false) {
+    return vendorId;
+  }
+  return `${vendorId}-${crypto.randomUUID()}`;
 }
 
 export function buildProviderListItems(

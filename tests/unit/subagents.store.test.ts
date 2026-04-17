@@ -1,11 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import {
+  gatewayClientRpcMock,
+  hostApiFetchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
+import { useProviderStore } from '@/stores/providers';
 import { useSubagentsStore } from '@/stores/subagents';
 
 describe('subagents store', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
+    useProviderStore.setState({
+      providerSnapshot: {
+        accounts: [],
+        statuses: [],
+        vendors: [],
+        defaultAccountId: null,
+      },
+      snapshotReady: false,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
+      mutatingActionsByAccountId: {},
+      error: null,
+    });
     useSubagentsStore.setState(useSubagentsStore.getInitialState(), true);
   });
 
@@ -30,27 +49,46 @@ describe('subagents store', () => {
     );
   });
 
-  it('loadAgents 与 loadAvailableModels 并发时，config.get 只请求一次', async () => {
+  it('loadAgents 与 loadAvailableModels 并发时，只有 loadAgents 会读取 config.get', async () => {
     const rpc = gatewayClientRpcMock;
     let resolveConfigGet: ((value: unknown) => void) | null = null;
     const configGetTask = new Promise((resolve) => {
       resolveConfigGet = resolve;
+    });
+    hostApiFetchMock.mockResolvedValue({
+      accounts: [
+        {
+          id: 'openai-main',
+          vendorId: 'openai',
+          label: 'OpenAI',
+          authMode: 'api_key',
+          model: 'gpt-4.1-mini',
+          enabled: true,
+          isDefault: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      statuses: [],
+      vendors: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          defaultModelId: 'gpt-5.4',
+          supportedAuthModes: ['api_key', 'oauth_browser'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: true,
+        },
+      ],
+      defaultAccountId: 'openai-main',
     });
     rpc.mockImplementation(async (method) => {
       if (method === 'agents.list') {
         return {
           success: true,
           result: {
-            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            agents: [{ id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' }],
             defaultId: 'main',
-          },
-        };
-      }
-      if (method === 'models.list') {
-        return {
-          success: true,
-          result: {
-            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
           },
         };
       }
@@ -69,11 +107,6 @@ describe('subagents store', () => {
           agents: {
             list: [{ id: 'main', model: 'openai/gpt-4.1-mini' }],
           },
-          models: {
-            providers: {
-              openai: { models: ['gpt-4.1-mini'] },
-            },
-          },
         },
       },
     });
@@ -84,6 +117,8 @@ describe('subagents store', () => {
       ([method]) => method === 'config.get'
     );
     expect(configGetCalls).toHaveLength(1);
+    expect(rpc).not.toHaveBeenCalledWith('models.list', {}, undefined);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/provider-accounts', undefined);
   });
 
   it('短 TTL 内重复 loadAgents 复用 config.get 结果', async () => {
@@ -93,7 +128,7 @@ describe('subagents store', () => {
         return {
           success: true,
           result: {
-            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            agents: [{ id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' }],
             defaultId: 'main',
           },
         };
@@ -144,10 +179,10 @@ describe('subagents store', () => {
       .mockResolvedValueOnce({
         success: true,
         result: {
-          agents: [
-            { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer', identity: { emoji: '📊' } },
-          ],
+            agents: [
+              { id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+              { id: 'writer', name: 'Writer', avatarSeed: 'agent:writer', avatarStyle: 'bottts' },
+            ],
           defaultId: 'main',
           mainKey: 'main',
           scope: 'per-sender',
@@ -195,36 +230,70 @@ describe('subagents store', () => {
     ]);
   });
 
-  it('loadAvailableModels 只显示 config.get 中已配置的模型', async () => {
-    gatewayClientRpcMock.mockImplementation(async (method) => {
-      if (method === 'models.list') {
-        return {
-          success: true,
-          result: {
-            models: [
-              { id: 'custom-12345678/gpt-4o-mini', provider: 'custom-12345678' },
-              { id: 'ollama-87654321/qwen3:latest', provider: 'ollama-87654321' },
-              { id: 'openai/gpt-4.1-mini', provider: 'openai' },
-            ],
-          },
-        };
-      }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            config: {
-              models: {
-                providers: {
-                  'custom-12345678': { models: [{ id: 'gpt-4o-mini' }] },
-                  'ollama-87654321': { models: ['qwen3:latest'] },
-                },
-              },
-            },
-          },
-        };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+  it('loadAvailableModels 从 provider snapshot 生成已配置模型选项', async () => {
+    hostApiFetchMock.mockResolvedValue({
+      accounts: [
+        {
+          id: 'custom-12345678',
+          vendorId: 'custom',
+          label: 'Custom A',
+          authMode: 'api_key',
+          model: 'gpt-4o-mini',
+          enabled: true,
+          isDefault: false,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+        {
+          id: 'ollama-87654321',
+          vendorId: 'ollama',
+          label: 'Local Ollama',
+          authMode: 'local',
+          model: 'qwen3:latest',
+          fallbackModels: ['llama3.1:8b'],
+          enabled: true,
+          isDefault: false,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          id: 'openai-main',
+          vendorId: 'openai',
+          label: 'OpenAI',
+          authMode: 'api_key',
+          model: 'gpt-4.1-mini',
+          enabled: true,
+          isDefault: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-04T00:00:00.000Z',
+        },
+      ],
+      statuses: [],
+      vendors: [
+        {
+          id: 'custom',
+          name: 'Custom',
+          supportedAuthModes: ['api_key'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: true,
+        },
+        {
+          id: 'ollama',
+          name: 'Ollama',
+          supportedAuthModes: ['local'],
+          defaultAuthMode: 'local',
+          supportsMultipleAccounts: true,
+        },
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          defaultModelId: 'gpt-5.4',
+          supportedAuthModes: ['api_key', 'oauth_browser'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: true,
+        },
+      ],
+      defaultAccountId: 'openai-main',
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
@@ -232,35 +301,41 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toEqual([
       { id: 'custom-12345678/gpt-4o-mini', provider: 'custom-12345678' },
       { id: 'ollama-87654321/qwen3:latest', provider: 'ollama-87654321' },
+      { id: 'ollama-87654321/llama3.1:8b', provider: 'ollama-87654321' },
+      { id: 'openai/gpt-4.1-mini', provider: 'openai' },
     ]);
   });
 
-  it('loadAvailableModels 在无配置模型时保留当前 agent 已选模型', async () => {
-    useSubagentsStore.setState({
-      agents: [
-        { id: 'writer', model: 'openai/gpt-4.1-mini' },
-      ],
-    });
-    gatewayClientRpcMock.mockImplementation(async (method) => {
-      if (method === 'models.list') {
-        return {
-          success: true,
-          result: {
-            models: [
-              { id: 'openai/gpt-4.1-mini', provider: 'openai' },
-            ],
+  it('loadAvailableModels 优先复用 provider store 已就绪 snapshot', async () => {
+    useProviderStore.setState({
+      providerSnapshot: {
+        accounts: [
+          {
+            id: 'openai-main',
+            vendorId: 'openai',
+            label: 'OpenAI',
+            authMode: 'api_key',
+            model: 'gpt-4.1-mini',
+            enabled: true,
+            isDefault: true,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
           },
-        };
-      }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            config: {},
+        ],
+        statuses: [],
+        vendors: [
+          {
+            id: 'openai',
+            name: 'OpenAI',
+            defaultModelId: 'gpt-5.4',
+            supportedAuthModes: ['api_key', 'oauth_browser'],
+            defaultAuthMode: 'api_key',
+            supportsMultipleAccounts: true,
           },
-        };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+        ],
+        defaultAccountId: 'openai-main',
+      },
+      snapshotReady: true,
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
@@ -268,27 +343,51 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toEqual([
       { id: 'openai/gpt-4.1-mini', provider: 'openai' },
     ]);
+    expect(hostApiFetchMock).not.toHaveBeenCalled();
   });
 
-  it('returns empty model options when config.get 和当前 agents 都没有可见模型', async () => {
-    gatewayClientRpcMock.mockImplementation(async (method) => {
-      if (method === 'models.list') {
-        return {
-          success: true,
-          result: {
-            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
-          },
-        };
-      }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            config: {},
-          },
-        };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+  it('loadAvailableModels 会映射 browser oauth runtime provider key', async () => {
+    hostApiFetchMock.mockResolvedValue({
+      accounts: [
+        {
+          id: 'openai-browser',
+          vendorId: 'openai',
+          label: 'OpenAI Browser',
+          authMode: 'oauth_browser',
+          model: 'gpt-5.4',
+          enabled: true,
+          isDefault: true,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      statuses: [],
+      vendors: [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          defaultModelId: 'gpt-5.4',
+          supportedAuthModes: ['api_key', 'oauth_browser'],
+          defaultAuthMode: 'api_key',
+          supportsMultipleAccounts: true,
+        },
+      ],
+      defaultAccountId: 'openai-browser',
+    });
+
+    await useSubagentsStore.getState().loadAvailableModels();
+
+    expect(useSubagentsStore.getState().availableModels).toEqual([
+      { id: 'openai-codex/gpt-5.4', provider: 'openai-codex' },
+    ]);
+  });
+
+  it('provider snapshot 为空时，loadAvailableModels 返回空列表', async () => {
+    hostApiFetchMock.mockResolvedValue({
+      accounts: [],
+      statuses: [],
+      vendors: [],
+      defaultAccountId: null,
     });
 
     await useSubagentsStore.getState().loadAvailableModels();
@@ -296,21 +395,8 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().availableModels).toEqual([]);
   });
 
-  it('loadAvailableModels 在 config.get 失败时安全降级为空', async () => {
-    gatewayClientRpcMock.mockImplementation(async (method) => {
-      if (method === 'models.list') {
-        return {
-          success: true,
-          result: {
-            models: [{ id: 'openai/gpt-4.1-mini', provider: 'openai' }],
-          },
-        };
-      }
-      if (method === 'config.get') {
-        throw new Error('config.get failed');
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
+  it('loadAvailableModels 在 provider snapshot 失败时安全降级为空', async () => {
+    hostApiFetchMock.mockRejectedValueOnce(new Error('provider snapshot failed'));
 
     await useSubagentsStore.getState().loadAvailableModels();
 
@@ -324,8 +410,8 @@ describe('subagents store', () => {
         success: true,
         result: {
           agents: [
-            { id: 'main', name: 'Main', model: 'custom/removed-main-model', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', identity: { emoji: '📊' } },
+            { id: 'main', name: 'Main', model: 'custom/removed-main-model', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', avatarSeed: 'agent:writer', avatarStyle: 'bottts' },
           ],
           defaultId: 'main',
           mainKey: 'main',
@@ -381,8 +467,8 @@ describe('subagents store', () => {
         success: true,
         result: {
           agents: [
-            { id: 'main', name: 'Main', model: 'custom/removed-main-model', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', identity: { emoji: '📊' } },
+            { id: 'main', name: 'Main', model: 'custom/removed-main-model', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', avatarSeed: 'agent:writer', avatarStyle: 'bottts' },
           ],
           defaultId: 'main',
           mainKey: 'main',
@@ -445,8 +531,8 @@ describe('subagents store', () => {
         success: true,
         result: {
           agents: [
-            { id: 'main', name: 'Main', model: 'custom/removed-main-model', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', identity: { emoji: '📊' } },
+            { id: 'main', name: 'Main', model: 'custom/removed-main-model', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+            { id: 'writer', name: 'Writer', model: 'openai/gpt-4.1-mini', avatarSeed: 'agent:writer', avatarStyle: 'bottts' },
           ],
           defaultId: 'main',
           mainKey: 'main',
@@ -495,8 +581,8 @@ describe('subagents store', () => {
         success: true,
         result: {
           agents: [
-            { id: 'main', name: 'Main', model: 'openai/gpt-4.1-mini', identity: { emoji: '⚙️' } },
-            { id: 'writer', name: 'Writer', model: 'anthropic/claude-3-7-sonnet', identity: { emoji: '📊' } },
+            { id: 'main', name: 'Main', model: 'openai/gpt-4.1-mini', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+            { id: 'writer', name: 'Writer', model: 'anthropic/claude-3-7-sonnet', avatarSeed: 'agent:writer', avatarStyle: 'bottts' },
           ],
           defaultId: 'main',
           mainKey: 'main',
@@ -580,7 +666,7 @@ describe('subagents store', () => {
         success: true,
         result: {
           agents: [
-            { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
+            { id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
             { id: 'test4', name: 'test4', model: 'local/claude-sonnet-4.5' },
           ],
           defaultId: 'main',
@@ -643,7 +729,7 @@ describe('subagents store', () => {
       .mockResolvedValueOnce({
         success: true,
         result: {
-          agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+          agents: [{ id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' }],
           defaultId: 'main',
           mainKey: 'main',
           scope: 'per-sender',
@@ -676,7 +762,7 @@ describe('subagents store', () => {
         return {
           success: true,
           result: {
-            agents: [{ id: 'main', name: 'Main', identity: { emoji: '⚙️' } }],
+            agents: [{ id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' }],
             defaultId: 'main',
             mainKey: 'main',
             scope: 'per-sender',
@@ -771,168 +857,6 @@ describe('subagents store', () => {
     expect(useSubagentsStore.getState().refreshing).toBe(false);
   });
 
-  it('loadAgents 会先用 agents.list.identity，再回退 agent.identity.get 补齐 emoji', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [
-              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-              { id: 'writer', name: 'Writer' },
-            ],
-            defaultId: 'main',
-          },
-        };
-      }
-      if (method === 'agent.identity.get') {
-        const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
-        return {
-          success: true,
-          result: agentId === 'writer' ? { agentId, emoji: '📊' } : { agentId },
-        };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
-
-    await useSubagentsStore.getState().loadAgents();
-
-    await vi.waitFor(() => {
-      const agents = useSubagentsStore.getState().agents;
-      expect(agents).toHaveLength(2);
-      expect(agents[0]).toMatchObject({
-        id: 'main',
-        name: 'Main',
-        isDefault: true,
-        identityEmoji: '⚙️',
-      });
-      expect(agents[1]).toMatchObject({
-        id: 'writer',
-        name: 'Writer',
-        isDefault: false,
-        identityEmoji: '📊',
-      });
-    });
-  });
-
-  it('loadAgents 刷新时保留已有 identityEmoji，避免回退默认头像', async () => {
-    const rpc = gatewayClientRpcMock;
-    let agentsListCallCount = 0;
-    let resolveSecondIdentity: ((value: unknown) => void) | null = null;
-    const secondIdentityTask = new Promise((resolve) => {
-      resolveSecondIdentity = resolve;
-    });
-
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'agents.list') {
-        agentsListCallCount += 1;
-        return {
-          success: true,
-          result: {
-            agents: [
-              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-              { id: 'writer', name: 'Writer' },
-            ],
-            defaultId: 'main',
-          },
-        };
-      }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            config: {},
-          },
-        };
-      }
-      if (method === 'agent.identity.get') {
-        const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
-        if (agentId !== 'writer') {
-          return { success: true, result: { agentId } };
-        }
-        if (agentsListCallCount === 1) {
-          return { success: true, result: { agentId, emoji: '📊' } };
-        }
-        return secondIdentityTask;
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
-
-    await useSubagentsStore.getState().loadAgents();
-    await vi.waitFor(() => {
-      const writer = useSubagentsStore.getState().agents.find((agent) => agent.id === 'writer');
-      expect(writer?.identityEmoji).toBe('📊');
-    });
-
-    await useSubagentsStore.getState().loadAgents();
-
-    const writerAfterSecondLoad = useSubagentsStore.getState().agents.find((agent) => agent.id === 'writer');
-    expect(writerAfterSecondLoad?.identityEmoji).toBe('📊');
-
-    resolveSecondIdentity?.({
-      success: true,
-      result: {
-        agentId: 'writer',
-        emoji: '📊',
-      },
-    });
-  });
-
-  it('deleteAgent 后，晚到的 identity hydrate 不会把已删 agent 回写到列表', async () => {
-    const rpc = gatewayClientRpcMock;
-    let resolveGhostIdentity: ((value: unknown) => void) | null = null;
-    const ghostIdentityPromise = new Promise((resolve) => {
-      resolveGhostIdentity = resolve;
-    });
-
-    rpc.mockImplementation(async (method, params) => {
-      if (method === 'agents.list') {
-        return {
-          success: true,
-          result: {
-            agents: [
-              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-              { id: 'ghost-delete-002', name: 'ghost-delete-002' },
-            ],
-            defaultId: 'main',
-            mainKey: 'main',
-            scope: 'per-sender',
-          },
-        };
-      }
-      if (method === 'agent.identity.get') {
-        const agentId = (params as { agentId?: string } | undefined)?.agentId ?? '';
-        if (agentId === 'ghost-delete-002') {
-          return ghostIdentityPromise;
-        }
-        return { success: true, result: { agentId } };
-      }
-      if (method === 'agents.delete') {
-        return { success: true, result: { ok: true } };
-      }
-      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
-    });
-
-    await useSubagentsStore.getState().loadAgents();
-    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main', 'ghost-delete-002']);
-
-    await useSubagentsStore.getState().deleteAgent('ghost-delete-002');
-    expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
-
-    resolveGhostIdentity?.({
-      success: true,
-      result: {
-        agentId: 'ghost-delete-002',
-        emoji: '🏁',
-      },
-    });
-
-    await vi.waitFor(() => {
-      expect(useSubagentsStore.getState().agents.map((agent) => agent.id)).toEqual(['main']);
-    });
-  });
-
   it('deleteAgent 后，旧的 agents.list 结果不会把待删 agent 回显', async () => {
     useSubagentsStore.setState({
       agents: [
@@ -942,7 +866,8 @@ describe('subagents store', () => {
           workspace: '/workspace/main',
           model: 'openai/gpt-4.1-mini',
           isDefault: true,
-          identity: { emoji: '⚙️' },
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
         },
         {
           id: 'ghost-delete-003',
@@ -950,7 +875,8 @@ describe('subagents store', () => {
           workspace: '/workspace/ghost-delete-003',
           model: 'local/claude-sonnet-4.5',
           isDefault: false,
-          identity: { emoji: '🏁' },
+          avatarSeed: 'agent:ghost-delete-003',
+          avatarStyle: 'botttsNeutral',
         },
       ],
     });
@@ -966,8 +892,8 @@ describe('subagents store', () => {
           success: true,
           result: {
             agents: [
-              { id: 'main', name: 'Main', identity: { emoji: '⚙️' } },
-              { id: 'ghost-delete-003', name: 'ghost-delete-003', identity: { emoji: '🏁' } },
+              { id: 'main', name: 'Main', avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
+              { id: 'ghost-delete-003', name: 'ghost-delete-003', avatarSeed: 'agent:ghost-delete-003', avatarStyle: 'botttsNeutral' },
             ],
             defaultId: 'main',
             mainKey: 'main',
@@ -995,7 +921,8 @@ describe('subagents store', () => {
           workspace: '/workspace/main',
           model: 'openai/gpt-4.1-mini',
           isDefault: true,
-          identity: { emoji: '⚙️' },
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
         },
         {
           id: 'ghost-delete-001',
@@ -1003,7 +930,8 @@ describe('subagents store', () => {
           workspace: '/workspace/ghost-delete-001',
           model: 'local/claude-sonnet-4.5',
           isDefault: false,
-          identity: { emoji: '🏁' },
+          avatarSeed: 'agent:ghost-delete-001',
+          avatarStyle: 'botttsNeutral',
         },
       ],
     });
@@ -1024,5 +952,3 @@ describe('subagents store', () => {
     expect(rpc).not.toHaveBeenCalledWith('agents.list', {});
   });
 });
-
-

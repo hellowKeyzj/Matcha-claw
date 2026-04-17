@@ -93,10 +93,6 @@
       "botttsNeutral": "Bottts Neutral"
     },
     "avatarRefresh": "Refresh",
-    "emoji": "Emoji",
-    "emojiPlaceholder": "Type any emoji, or pick one below",
-    "emojiPanelShow": "Show emoji quick picks",
-    "emojiPanelHide": "Hide emoji quick picks",
     "initialPrompt": "System Prompt",
     "initialPromptPlaceholder": "Optional: set a system prompt for this subagent",
     "create": "Create",

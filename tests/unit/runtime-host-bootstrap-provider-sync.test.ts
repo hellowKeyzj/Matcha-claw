@@ -2,24 +2,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   readProviderStoreLocalMock: vi.fn(),
+  writeProviderStoreLocalMock: vi.fn(async () => {}),
   saveProviderKeyToOpenClawMock: vi.fn(async () => {}),
+  removeProviderKeyFromOpenClawMock: vi.fn(async () => {}),
   setOpenClawDefaultModelMock: vi.fn(async () => {}),
   setOpenClawDefaultModelWithOverrideMock: vi.fn(async () => {}),
-  getOpenClawProviderKeyMock: vi.fn((type: string, id: string) => `${type}-${id}`),
+  syncProviderConfigToOpenClawMock: vi.fn(async () => {}),
+  getOpenClawProviderKeyForTypeMock: vi.fn((type: string, id: string) => `${type}-${id}`),
 }));
 
 vi.mock('../../runtime-host/api/storage/provider-store', () => ({
   readProviderStoreLocal: (...args: unknown[]) => hoisted.readProviderStoreLocalMock(...args),
+  writeProviderStoreLocal: (...args: unknown[]) => hoisted.writeProviderStoreLocalMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', () => ({
   saveProviderKeyToOpenClaw: (...args: unknown[]) => hoisted.saveProviderKeyToOpenClawMock(...args),
+  removeProviderKeyFromOpenClaw: (...args: unknown[]) => hoisted.removeProviderKeyFromOpenClawMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
   sanitizeOpenClawConfig: vi.fn(async () => {}),
   setOpenClawDefaultModel: (...args: unknown[]) => hoisted.setOpenClawDefaultModelMock(...args),
   setOpenClawDefaultModelWithOverride: (...args: unknown[]) => hoisted.setOpenClawDefaultModelWithOverrideMock(...args),
+  syncProviderConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProviderConfigToOpenClawMock(...args),
   syncBrowserConfigToOpenClaw: vi.fn(async () => {}),
   syncGatewayTokenToConfig: vi.fn(async () => {}),
   syncSessionIdleMinutesToOpenClaw: vi.fn(async () => {}),
@@ -39,7 +45,11 @@ vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
 }));
 
 vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () => ({
-  getOpenClawProviderKey: (...args: unknown[]) => hoisted.getOpenClawProviderKeyMock(...args),
+  getOpenClawProviderKeyForType: (...args: unknown[]) => hoisted.getOpenClawProviderKeyForTypeMock(...args),
+  getOAuthProviderApi: vi.fn(() => undefined),
+  getOAuthApiKeyEnv: vi.fn(() => undefined),
+  normalizeOAuthBaseUrl: vi.fn((_providerType: string, baseUrl?: string) => baseUrl),
+  usesOAuthAuthHeader: vi.fn(() => false),
 }));
 
 describe('runtime-host bootstrap provider sync', () => {
@@ -67,6 +77,14 @@ describe('runtime-host bootstrap provider sync', () => {
     await syncProviderAuthBootstrapLocal();
 
     expect(hoisted.saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
+    expect(hoisted.syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
+      'ollama-ollama-main',
+      'qwen3:30b',
+      expect.objectContaining({
+        baseUrl: 'http://localhost:11434/v1',
+        api: 'openai-completions',
+      }),
+    );
     expect(hoisted.setOpenClawDefaultModelWithOverrideMock).toHaveBeenCalledWith(
       'ollama-ollama-main',
       'qwen3:30b',
@@ -103,6 +121,6 @@ describe('runtime-host bootstrap provider sync', () => {
       [],
     );
     expect(hoisted.setOpenClawDefaultModelWithOverrideMock).not.toHaveBeenCalled();
+    expect(hoisted.syncProviderConfigToOpenClawMock).not.toHaveBeenCalled();
   });
 });
-

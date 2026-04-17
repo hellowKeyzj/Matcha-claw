@@ -6,6 +6,7 @@
   },
   "create": {
     "title": "Create Team",
+    "loadingAgents": "Waiting for the gateway to load agents...",
     "teamName": "Team Name",
     "teamNamePlaceholder": "Enter team name",
     "leadAgent": "Lead Agent",

@@ -27,7 +27,6 @@ function normalizeTemplateEntry(value: unknown): SubagentTemplateSummary | null 
   const raw = value as {
     id?: unknown;
     name?: unknown;
-    emoji?: unknown;
     summary?: unknown;
     categoryId?: unknown;
     subcategoryId?: unknown;
@@ -49,7 +48,6 @@ function normalizeTemplateEntry(value: unknown): SubagentTemplateSummary | null 
   if (files.length === 0) {
     return null;
   }
-  const emoji = typeof raw.emoji === 'string' ? raw.emoji.trim() : '';
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
   const categoryId = typeof raw.categoryId === 'string' ? raw.categoryId.trim() : '';
   const subcategoryId = typeof raw.subcategoryId === 'string' ? raw.subcategoryId.trim() : '';
@@ -58,7 +56,6 @@ function normalizeTemplateEntry(value: unknown): SubagentTemplateSummary | null 
   return {
     id,
     name,
-    ...(emoji ? { emoji } : {}),
     ...(summary ? { summary } : {}),
     ...(categoryId ? { categoryId } : {}),
     ...(subcategoryId ? { subcategoryId } : {}),

@@ -1,6 +1,7 @@
 import { ChatMessage } from '../ChatMessage';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import type { ChatRow } from '../chat-row-model';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { ActivityIndicator, TypingIndicator } from './ChatStates';
 
 const EMPTY_SUPPRESSED_KEYS = new Set<string>();
@@ -8,14 +9,20 @@ const EMPTY_SUPPRESSED_KEYS = new Set<string>();
 export function ChatRowItem({
   row,
   showThinking,
-  assistantAvatarEmoji,
+  assistantAgentId,
+  assistantAgentName,
+  assistantAvatarSeed,
+  assistantAvatarStyle,
   userAvatarImageUrl,
   suppressedToolCardRowKeys = EMPTY_SUPPRESSED_KEYS,
   onJumpToRowKey,
 }: {
   row: ChatRow;
   showThinking: boolean;
-  assistantAvatarEmoji?: string;
+  assistantAgentId?: string;
+  assistantAgentName?: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   suppressedToolCardRowKeys?: Set<string>;
   onJumpToRowKey?: (rowKey?: string) => void;
@@ -26,7 +33,10 @@ export function ChatRowItem({
         message={row.message}
         showThinking={showThinking}
         suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
-        assistantAvatarEmoji={assistantAvatarEmoji}
+        assistantAgentId={assistantAgentId}
+        assistantAgentName={assistantAgentName}
+        assistantAvatarSeed={assistantAvatarSeed}
+        assistantAvatarStyle={assistantAvatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       />
     );
@@ -52,7 +62,10 @@ export function ChatRowItem({
         showThinking={showThinking}
         isStreaming
         streamingTools={row.streamingTools}
-        assistantAvatarEmoji={assistantAvatarEmoji}
+        assistantAgentId={assistantAgentId}
+        assistantAgentName={assistantAgentName}
+        assistantAvatarSeed={assistantAvatarSeed}
+        assistantAvatarStyle={assistantAvatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       />
     );

@@ -1,4 +1,4 @@
-import { PROVIDER_VENDOR_DEFINITIONS } from '../provider-definitions';
+import { PROVIDER_VENDOR_DEFINITIONS } from '../../application/providers/provider-registry';
 import { handleChannelRoute } from '../routes/channel-routes';
 import { handleCronAndUsageRoute } from '../routes/cron-routes';
 import { handleLicenseRoute } from '../routes/license-routes';

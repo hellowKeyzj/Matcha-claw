@@ -278,6 +278,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   },
 ];
 
+export const PROVIDER_VENDOR_DEFINITIONS = PROVIDER_DEFINITIONS;
+
 const PROVIDER_DEFINITION_MAP = new Map(
   PROVIDER_DEFINITIONS.map((definition) => [definition.id, definition]),
 );
@@ -320,7 +322,7 @@ export function getProviderEnvVars(type: string): string[] {
 }
 
 export function getProviderUiInfoList(): ProviderTypeInfo[] {
-  return PROVIDER_DEFINITIONS;
+  return PROVIDER_VENDOR_DEFINITIONS;
 }
 
 export function getKeyableProviderTypes(): string[] {

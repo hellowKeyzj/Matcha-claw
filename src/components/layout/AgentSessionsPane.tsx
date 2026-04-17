@@ -1,6 +1,8 @@
 import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-react';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useChatStore, type ChatSession } from '@/stores/chat';
@@ -21,7 +23,8 @@ interface AgentSessionsPaneProps {
 interface AgentSessionNode {
   agentId: string;
   agentName: string;
-  identityEmoji?: string;
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
   sessions: ChatSession[];
 }
 
@@ -29,7 +32,8 @@ interface SessionListNode {
   session: ChatSession;
   agentId: string;
   agentName: string;
-  identityEmoji?: string;
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
 }
 
 interface SessionSortEntry {
@@ -141,13 +145,6 @@ function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): s
     return sessions[0].key;
   }
   return null;
-}
-
-function resolveAgentEmoji(explicitEmoji: string | undefined, isDefault: boolean): string {
-  if (explicitEmoji && explicitEmoji.trim()) {
-    return explicitEmoji;
-  }
-  return isDefault ? '⚙️' : '🤖';
 }
 
 function createSessionBucketStateKey(bucketId: SessionBucketSpec['id']): string {
@@ -412,12 +409,14 @@ const AgentListItem = memo(function AgentListItem({
         className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left text-sm font-medium"
         onClick={() => onOpenAgent(node.agentId)}
       >
-        <span
-          aria-hidden
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-card/20 text-xs leading-none"
-        >
-          {node.identityEmoji}
-        </span>
+        <AgentAvatar
+          agentId={node.agentId}
+          agentName={node.agentName}
+          avatarSeed={node.avatarSeed}
+          avatarStyle={node.avatarStyle}
+          className="h-5 w-5"
+          dataTestId={`agent-session-avatar-${node.agentId}`}
+        />
         <span className="truncate">{node.agentName}</span>
       </button>
       <button
@@ -442,7 +441,10 @@ interface SessionListItemProps {
   session: ChatSession;
   sessionTitle: string;
   sessionMeta: string;
-  identityEmoji: string;
+  agentId: string;
+  agentName: string;
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
   isCurrent: boolean;
   deleting: boolean;
   deleteLabel: string;
@@ -454,7 +456,10 @@ const SessionListItem = memo(function SessionListItem({
   session,
   sessionTitle,
   sessionMeta,
-  identityEmoji,
+  agentId,
+  agentName,
+  avatarSeed,
+  avatarStyle,
   isCurrent,
   deleting,
   deleteLabel,
@@ -476,12 +481,14 @@ const SessionListItem = memo(function SessionListItem({
         className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm"
         onClick={() => onSwitchSession(session.key)}
       >
-        <span
-          aria-hidden
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-card/20 text-[10px] leading-none"
-        >
-          {identityEmoji}
-        </span>
+        <AgentAvatar
+          agentId={agentId}
+          agentName={agentName}
+          avatarSeed={avatarSeed}
+          avatarStyle={avatarStyle}
+          className="h-4 w-4"
+          dataTestId={`session-avatar-${session.key}`}
+        />
         <span className="min-w-0 flex-1">
           <span className="block truncate">{sessionTitle}</span>
           <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">{sessionMeta}</span>
@@ -584,7 +591,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
         return {
           agentId,
           agentName: agent?.name?.trim() || agentId,
-          identityEmoji: resolveAgentEmoji(agent?.identityEmoji ?? agent?.identity?.emoji, Boolean(agent?.isDefault)),
+          avatarSeed: agent?.avatarSeed,
+          avatarStyle: agent?.avatarStyle,
           sessions: sessionsByAgent.get(agentId) ?? [],
         };
       });
@@ -623,7 +631,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
         session: entry.session,
         agentId: entry.agentId,
         agentName: owner?.agentName ?? entry.agentId,
-        identityEmoji: owner?.identityEmoji ?? '🤖',
+        avatarSeed: owner?.avatarSeed,
+        avatarStyle: owner?.avatarStyle,
       });
     }
     return nodes;
@@ -699,7 +708,15 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   );
 
   const sessionViewModelByKey = useMemo(() => {
-    const map = new Map<string, { title: string; meta: string; emoji: string; deleteLabel: string }>();
+    const map = new Map<string, {
+      title: string;
+      meta: string;
+      agentId: string;
+      agentName: string;
+      avatarSeed?: string;
+      avatarStyle?: AgentAvatarStyle;
+      deleteLabel: string;
+    }>();
     for (const session of globalSessions) {
       const sessionTitle = resolveSessionTitle(session);
       const sessionOwner = globalSessionOwnerByKey.get(session.key);
@@ -710,7 +727,10 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
       map.set(session.key, {
         title: sessionTitle,
         meta: sessionMeta,
-        emoji: sessionOwner?.identityEmoji ?? '🤖',
+        agentId: sessionOwner?.agentId ?? parseAgentIdFromSessionKey(session.key) ?? 'main',
+        agentName: sessionOwner?.agentName ?? parseAgentIdFromSessionKey(session.key) ?? 'main',
+        avatarSeed: sessionOwner?.avatarSeed,
+        avatarStyle: sessionOwner?.avatarStyle,
         deleteLabel: t('sidebar.deleteSessionAria', { title: sessionTitle }),
       });
     }
@@ -868,7 +888,10 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
                                     session={session}
                                     sessionTitle={viewModel?.title ?? inferUntitledSessionLabel(session, t)}
                                     sessionMeta={viewModel?.meta ?? readSessionSuffix(session.key)}
-                                    identityEmoji={viewModel?.emoji ?? '🤖'}
+                                    agentId={viewModel?.agentId ?? parseAgentIdFromSessionKey(session.key) ?? 'main'}
+                                    agentName={viewModel?.agentName ?? parseAgentIdFromSessionKey(session.key) ?? 'main'}
+                                    avatarSeed={viewModel?.avatarSeed}
+                                    avatarStyle={viewModel?.avatarStyle}
                                     isCurrent={currentSessionKey === session.key}
                                     deleting={deleting}
                                     deleteLabel={viewModel?.deleteLabel ?? t('sidebar.deleteSessionAria', { title: session.key })}

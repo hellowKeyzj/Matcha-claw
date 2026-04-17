@@ -101,11 +101,7 @@
       "bottts": "Bottts",
       "botttsNeutral": "Bottts Neutral"
     },
-    "avatarRefresh": "换一批",
-    "emoji": "表情",
-    "emojiPlaceholder": "可手动输入任意 emoji，或从下方选择",
-    "emojiPanelShow": "显示快捷表情",
-    "emojiPanelHide": "隐藏快捷表情"
+    "avatarRefresh": "换一批"
   },
   "card": {
     "default": "默认",

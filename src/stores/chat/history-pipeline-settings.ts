@@ -10,7 +10,9 @@ export function readHistoryLoadPipelineStrategyKeyFromSettings(
   input: ReadHistoryLoadPipelineStrategyKeyFromSettingsInput = {},
 ): string | null {
   const {
-    getSettings = () => useSettingsStore.getState(),
+    getSettings = () => useSettingsStore.getState() as {
+      chatHistoryPipelineStrategyKey?: unknown;
+    },
   } = input;
 
   const settings = getSettings();
