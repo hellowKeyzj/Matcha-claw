@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
+import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -101,9 +103,13 @@ export function SubagentTemplateLoadDialog({
         <div className="mt-4 space-y-4">
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-lg">
-                {template.emoji || '\uD83E\uDD16'}
-              </div>
+              <AgentAvatar
+                avatarSeed={buildTemplateAvatarSeed(template.id)}
+                agentId={template.id}
+                agentName={localizedTemplateName}
+                className="h-9 w-9"
+                alt={`${localizedTemplateName} avatar`}
+              />
               <div>
                 <p className="text-sm font-semibold">{localizedTemplateName}</p>
                 <p className="text-xs text-muted-foreground">{template.id}</p>
