@@ -1,6 +1,11 @@
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '@/stores/chat';
-import { selectChatPageState } from '@/stores/chat/selectors';
+import {
+  selectChatPageActions,
+  selectChatPageRuntimeState,
+  selectChatPageSessionState,
+  selectChatPageViewState,
+} from '@/stores/chat/selectors';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
@@ -16,7 +21,10 @@ export function useChatPageModel() {
   const gatewayRpc = useGatewayStore((s) => s.rpc);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
-  const chatState = useChatStore(useShallow(selectChatPageState));
+  const sessionState = useChatStore(useShallow(selectChatPageSessionState));
+  const viewState = useChatStore(useShallow(selectChatPageViewState));
+  const runtimeState = useChatStore(useShallow(selectChatPageRuntimeState));
+  const actions = useChatStore(useShallow(selectChatPageActions));
   const agents = useSubagentsStore((s) => s.agents);
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
   const updateAgent = useSubagentsStore((s) => s.updateAgent);
@@ -26,13 +34,17 @@ export function useChatPageModel() {
   const fetchSkills = useSkillsStore((s) => s.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((s) => s.userAvatarDataUrl);
 
-  const currentAgentId = parseAgentIdFromSessionKey(chatState.currentSessionKey);
+  const currentAgentId = parseAgentIdFromSessionKey(sessionState.currentSessionKey);
   const currentAgent = agents.find((item) => item.id === currentAgentId);
-  const waitingApproval = chatState.approvalStatus === 'awaiting_approval';
+  const waitingApproval = runtimeState.approvalStatus === 'awaiting_approval';
 
   return {
     isGatewayRunning,
     gatewayRpc,
+    sessionState,
+    viewState,
+    runtimeState,
+    actions,
     agents,
     loadAgents,
     updateAgent,
@@ -44,6 +56,5 @@ export function useChatPageModel() {
     currentAgentId,
     currentAgent,
     waitingApproval,
-    ...chatState,
   };
 }

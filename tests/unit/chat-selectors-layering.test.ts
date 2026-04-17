@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   selectAgentSessionsPaneState,
   selectChatInputSessionKey,
-  selectChatPageState,
+  selectChatPageActions,
+  selectChatPageRuntimeState,
+  selectChatPageSessionState,
+  selectChatPageViewState,
   selectRuntimeLayerState,
   selectSidebarPendingBlockersState,
   selectSnapshotLayerState,
@@ -70,7 +73,7 @@ describe('chat selectors layering', () => {
     expect(view.refreshing).toBe(true);
   });
 
-  it('selectChatPageState resolves approvals by current session only', () => {
+  it('chat page selectors split into session/runtime/view/actions surfaces', () => {
     const state = makeState({
       currentSessionKey: 'agent:a:main',
       pendingApprovalsBySession: {
@@ -80,10 +83,16 @@ describe('chat selectors layering', () => {
       sessionReadyByKey: { 'agent:a:main': true },
     });
 
-    const page = selectChatPageState(state);
-    expect(page.currentPendingApprovals).toHaveLength(1);
-    expect(page.currentPendingApprovals[0]?.id).toBe('ap-1');
-    expect(page.currentSessionReady).toBe(true);
+    const session = selectChatPageSessionState(state);
+    const runtime = selectChatPageRuntimeState(state);
+    const view = selectChatPageViewState(state);
+    const actions = selectChatPageActions(state);
+
+    expect(session.currentSessionReady).toBe(true);
+    expect(runtime.currentPendingApprovals).toHaveLength(1);
+    expect(runtime.currentPendingApprovals[0]?.id).toBe('ap-1');
+    expect(view.showThinking).toBe(true);
+    expect(actions.sendMessage).toBe(state.sendMessage);
   });
 
   it('sidebar and session pane selectors read stable snapshot/runtime surfaces', () => {

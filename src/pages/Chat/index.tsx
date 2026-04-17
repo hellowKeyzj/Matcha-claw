@@ -27,30 +27,10 @@ export function Chat() {
   const {
     isGatewayRunning,
     gatewayRpc,
-    messages,
-    initialLoading,
-    refreshing,
-    mutating,
-    sending,
-    error,
-    showThinking,
-    streamingMessage,
-    streamingTools,
-    pendingFinal,
-    lastUserMessageAt,
-    currentPendingApprovals,
-    resolveApproval,
-    loadHistory,
-    loadSessions,
-    switchSession,
-    openAgentConversation,
-    currentSessionKey,
-    currentSessionReady,
-    currentSessionHasActivity,
-    sendMessage,
-    abortRun,
-    clearError,
-    cleanupEmptySession,
+    sessionState,
+    viewState,
+    runtimeState,
+    actions,
     agents,
     loadAgents,
     updateAgent,
@@ -63,6 +43,38 @@ export function Chat() {
     currentAgent,
     waitingApproval,
   } = useChatPageModel();
+  const {
+    messages,
+    currentSessionKey,
+    currentSessionReady,
+    currentSessionHasActivity,
+  } = sessionState;
+  const {
+    initialLoading,
+    refreshing,
+    mutating,
+    error,
+    showThinking,
+  } = viewState;
+  const {
+    sending,
+    streamingMessage,
+    streamingTools,
+    pendingFinal,
+    lastUserMessageAt,
+    currentPendingApprovals,
+  } = runtimeState;
+  const {
+    resolveApproval,
+    loadHistory,
+    loadSessions,
+    switchSession,
+    openAgentConversation,
+    sendMessage,
+    abortRun,
+    clearError,
+    cleanupEmptySession,
+  } = actions;
 
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
@@ -163,6 +175,7 @@ export function Chat() {
     currentSessionKey,
     chatRows,
     hasOlderRenderableRows,
+    runtimeRowsCostMs,
     messagesViewportRef,
     messageContentRef,
     markScrollActivity,

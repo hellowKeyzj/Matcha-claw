@@ -5,6 +5,8 @@ import {
   appendMessageRows,
   buildStaticChatRowsWithMeta,
   canAppendMessageList,
+  canPrependMessageList,
+  prependMessageRows,
   type ChatRow,
   type ExecutionGraphData,
 } from './chat-row-model';
@@ -98,6 +100,11 @@ export function useChatRows(
         && previousCache.executionGraphsRef === executionGraphs
         && canAppendMessageList(previousCache.messagesRef, rowSourceMessages),
       );
+      const canIncrementalPrepend = Boolean(
+        previousCache
+        && previousCache.executionGraphsRef === executionGraphs
+        && canPrependMessageList(previousCache.messagesRef, rowSourceMessages),
+      );
       if (canIncrementalAppend && previousCache) {
         const appended = appendMessageRows(
           currentSessionKey,
@@ -108,6 +115,16 @@ export function useChatRows(
         );
         rows = appended.rows;
         renderableCount = appended.renderableCount;
+      } else if (canIncrementalPrepend && previousCache) {
+        const prepended = prependMessageRows(
+          currentSessionKey,
+          previousCache.rows,
+          rowSourceMessages,
+          rowSourceMessages.length - previousCache.messagesRef.length,
+          previousCache.renderableCount,
+        );
+        rows = prepended.rows;
+        renderableCount = prepended.renderableCount;
       } else {
         const built = buildStaticChatRowsWithMeta({
           sessionKey: currentSessionKey,

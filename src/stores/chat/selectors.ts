@@ -42,36 +42,48 @@ export function selectViewLayerState(state: ChatStoreState) {
   };
 }
 
-export function selectChatPageState(state: ChatStoreState) {
+export function selectChatPageSessionState(state: ChatStoreState) {
   const snapshot = selectSnapshotLayerState(state);
-  const runtime = selectRuntimeLayerState(state);
-  const view = selectViewLayerState(state);
   const currentSessionKey = snapshot.currentSessionKey;
-  const currentSessionHasActivity = typeof snapshot.sessionLastActivity[currentSessionKey] === 'number';
-
   return {
     messages: snapshot.messages,
+    currentSessionKey,
+    currentSessionReady: Boolean(snapshot.sessionReadyByKey[currentSessionKey]),
+    currentSessionHasActivity: typeof snapshot.sessionLastActivity[currentSessionKey] === 'number',
+  };
+}
+
+export function selectChatPageViewState(state: ChatStoreState) {
+  const view = selectViewLayerState(state);
+  return {
     initialLoading: view.initialLoading,
     refreshing: view.refreshing,
     mutating: view.mutating,
-    sending: runtime.sending,
-    runPhase: runtime.runPhase,
     error: view.error,
     showThinking: view.showThinking,
+  };
+}
+
+export function selectChatPageRuntimeState(state: ChatStoreState) {
+  const runtime = selectRuntimeLayerState(state);
+  return {
+    sending: runtime.sending,
     streamingMessage: runtime.streamingMessage,
     streamingTools: runtime.streamingTools,
     pendingFinal: runtime.pendingFinal,
     lastUserMessageAt: runtime.lastUserMessageAt,
     approvalStatus: runtime.approvalStatus,
-    currentPendingApprovals: runtime.pendingApprovalsBySession[currentSessionKey] ?? EMPTY_APPROVAL_ITEMS,
+    currentPendingApprovals: runtime.pendingApprovalsBySession[state.currentSessionKey] ?? EMPTY_APPROVAL_ITEMS,
+  };
+}
+
+export function selectChatPageActions(state: ChatStoreState) {
+  return {
     resolveApproval: state.resolveApproval,
     loadHistory: state.loadHistory,
     loadSessions: state.loadSessions,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
-    currentSessionKey,
-    currentSessionReady: Boolean(snapshot.sessionReadyByKey[currentSessionKey]),
-    currentSessionHasActivity,
     sendMessage: state.sendMessage,
     abortRun: state.abortRun,
     clearError: state.clearError,

@@ -4,14 +4,8 @@ import type { AttachedFileMeta } from '@/stores/chat';
 const MARKDOWN_RENDER_CACHE_TTL_MS = 10 * 60_000;
 const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 240;
 const MARKDOWN_RENDER_CACHE_MAX_BYTES = 3 * 1024 * 1024;
-const MARKDOWN_RICH_READY_TTL_MS = 10 * 60_000;
-const MARKDOWN_RICH_READY_MAX_ENTRIES = 400;
-const MARKDOWN_RICH_RENDER_BATCH_SIZE = 1;
 const MARKDOWN_PROCESS_METRIC_MIN_CHARS = 256;
 const MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS = 2;
-
-export const MARKDOWN_DEFER_SCORE_THRESHOLD = 220;
-export const MARKDOWN_VISIBILITY_ROOT_MARGIN = '320px 0px';
 
 interface MarkdownCacheEntry {
   value: string;
@@ -19,22 +13,8 @@ interface MarkdownCacheEntry {
   expiresAt: number;
 }
 
-interface IdleDeadlineLike {
-  readonly didTimeout: boolean;
-  timeRemaining: () => number;
-}
-
-type IdleCallbackHandle = number | ReturnType<typeof setTimeout>;
-type IdleCallback = (deadline: IdleDeadlineLike) => void;
-
 const markdownRenderCache = new Map<string, MarkdownCacheEntry>();
 let markdownRenderCacheBytes = 0;
-const markdownRichReadyCache = new Map<string, number>();
-const markdownRichRenderQueue: string[] = [];
-const markdownRichRenderQueuedSet = new Set<string>();
-const markdownRichRenderQueuedAt = new Map<string, number>();
-const markdownRichRenderListeners = new Map<string, Set<() => void>>();
-let markdownRichRenderDrainHandle: IdleCallbackHandle | null = null;
 
 export function hashStringDjb2(input: string): string {
   let hash = 5381;
@@ -82,42 +62,6 @@ export function buildMarkdownCacheKey(input: {
     hashStringDjb2(input.text),
     buildAttachedFilesSignature(input.attachedFiles),
   ].join('|');
-}
-
-export function estimateMarkdownRenderScore(text: string): number {
-  if (!text) {
-    return 0;
-  }
-  const lineBreaks = text.match(/\n/g)?.length ?? 0;
-  const codeFenceCount = text.match(/```/g)?.length ?? 0;
-  const linkCount = text.match(/\[[^\]\n]+\]\([^)]+\)/g)?.length ?? 0;
-  const headingCount = text.match(/^#{1,6}\s/mg)?.length ?? 0;
-  const tableHint = text.includes('|') && text.includes('\n') ? 1 : 0;
-  return (
-    Math.ceil(text.length / 80)
-    + lineBreaks * 2
-    + codeFenceCount * 36
-    + linkCount * 6
-    + headingCount * 4
-    + tableHint * 20
-  );
-}
-
-function scheduleIdleCallback(callback: IdleCallback): IdleCallbackHandle {
-  if (typeof window !== 'undefined') {
-    const win = window as Window & {
-      requestIdleCallback?: (cb: IdleCallback, options?: { timeout?: number }) => number;
-    };
-    if (typeof win.requestIdleCallback === 'function') {
-      return win.requestIdleCallback(callback, { timeout: 120 });
-    }
-  }
-  return setTimeout(() => {
-    callback({
-      didTimeout: true,
-      timeRemaining: () => 0,
-    });
-  }, 0);
 }
 
 function pruneMarkdownRenderCache(now = Date.now()): void {
@@ -199,116 +143,4 @@ export function getOrBuildProcessedMarkdown(cacheKey: string, builder: () => str
     });
   }
   return built;
-}
-
-export function hasRichReadyCache(cacheKey: string): boolean {
-  const expiresAt = markdownRichReadyCache.get(cacheKey);
-  if (!expiresAt) {
-    return false;
-  }
-  if (expiresAt <= Date.now()) {
-    markdownRichReadyCache.delete(cacheKey);
-    return false;
-  }
-  return true;
-}
-
-export function markRichReadyCache(cacheKey: string): void {
-  const now = Date.now();
-  markdownRichReadyCache.set(cacheKey, now + MARKDOWN_RICH_READY_TTL_MS);
-  while (markdownRichReadyCache.size > MARKDOWN_RICH_READY_MAX_ENTRIES) {
-    const oldestKey = markdownRichReadyCache.keys().next().value;
-    if (typeof oldestKey !== 'string') {
-      break;
-    }
-    markdownRichReadyCache.delete(oldestKey);
-  }
-}
-
-function removeQueuedMarkdownRichRender(cacheKey: string): void {
-  markdownRichRenderQueuedSet.delete(cacheKey);
-  markdownRichRenderQueuedAt.delete(cacheKey);
-  const index = markdownRichRenderQueue.indexOf(cacheKey);
-  if (index >= 0) {
-    markdownRichRenderQueue.splice(index, 1);
-  }
-}
-
-function scheduleMarkdownRichRenderDrain(): void {
-  if (markdownRichRenderDrainHandle != null) {
-    return;
-  }
-  markdownRichRenderDrainHandle = scheduleIdleCallback((deadline) => {
-    const batchStartedAt = nowMonotonicMs();
-    markdownRichRenderDrainHandle = null;
-    let processed = 0;
-    while (markdownRichRenderQueue.length > 0 && processed < MARKDOWN_RICH_RENDER_BATCH_SIZE) {
-      const cacheKey = markdownRichRenderQueue.shift();
-      if (!cacheKey) {
-        continue;
-      }
-      markdownRichRenderQueuedSet.delete(cacheKey);
-      const queuedAt = markdownRichRenderQueuedAt.get(cacheKey);
-      markdownRichRenderQueuedAt.delete(cacheKey);
-      if (typeof queuedAt === 'number') {
-        trackUiTiming('chat.md_rich_wait', Math.max(0, nowMonotonicMs() - queuedAt), {
-          remaining: markdownRichRenderQueue.length,
-        });
-      }
-      markRichReadyCache(cacheKey);
-      const listeners = markdownRichRenderListeners.get(cacheKey);
-      if (listeners && listeners.size > 0) {
-        markdownRichRenderListeners.delete(cacheKey);
-        for (const listener of listeners) {
-          listener();
-        }
-      }
-      processed += 1;
-      if (!deadline.didTimeout && deadline.timeRemaining() <= 2) {
-        break;
-      }
-    }
-    if (processed > 0) {
-      trackUiTiming('chat.md_rich_batch_cost', Math.max(0, nowMonotonicMs() - batchStartedAt), {
-        processed,
-        remaining: markdownRichRenderQueue.length,
-      });
-    }
-    if (markdownRichRenderQueue.length > 0) {
-      scheduleMarkdownRichRenderDrain();
-    }
-  });
-}
-
-export function requestMarkdownRichRender(cacheKey: string, onReady: () => void): () => void {
-  if (hasRichReadyCache(cacheKey)) {
-    onReady();
-    return () => {};
-  }
-
-  let listeners = markdownRichRenderListeners.get(cacheKey);
-  if (!listeners) {
-    listeners = new Set();
-    markdownRichRenderListeners.set(cacheKey, listeners);
-  }
-  listeners.add(onReady);
-
-  if (!markdownRichRenderQueuedSet.has(cacheKey)) {
-    markdownRichRenderQueuedSet.add(cacheKey);
-    markdownRichRenderQueuedAt.set(cacheKey, nowMonotonicMs());
-    markdownRichRenderQueue.push(cacheKey);
-    scheduleMarkdownRichRenderDrain();
-  }
-
-  return () => {
-    const current = markdownRichRenderListeners.get(cacheKey);
-    if (!current) {
-      return;
-    }
-    current.delete(onReady);
-    if (current.size === 0) {
-      markdownRichRenderListeners.delete(cacheKey);
-      removeQueuedMarkdownRichRender(cacheKey);
-    }
-  };
 }

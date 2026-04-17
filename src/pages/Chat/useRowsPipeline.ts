@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, type MutableRefObject } from 'react';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import { useExecutionGraphs } from './useExecutionGraphs';
-import { useChatWindowSlice } from './useWindowing';
+import { useChatWindowSlice, type RenderWindowExpandCommand } from './useWindowing';
 import { useChatRows } from './useRows';
 
 const EMPTY_MESSAGES: RawMessage[] = [];
@@ -40,7 +40,7 @@ interface UseRowsPipelineResult {
   rowSliceCostMs: number;
   runtimeRowsCostMs: number;
   hasOlderRenderableRows: boolean;
-  increaseRenderableWindowLimit: (sessionKey: string, step?: number) => void;
+  increaseRenderableWindowLimit: (sessionKey: string, command: RenderWindowExpandCommand) => void;
 }
 
 export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineResult {

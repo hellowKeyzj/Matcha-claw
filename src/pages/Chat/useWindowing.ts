@@ -1,17 +1,73 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useChatStore, type RawMessage } from '@/stores/chat';
+import { trackUiEvent } from '@/lib/telemetry';
 import { isRenderableChatMessage, type ChatRow } from './chat-row-model';
 
 const CHAT_FIRST_PAINT_RENDERABLE_LIMIT = 8;
+const CHAT_FIRST_PAINT_CONTENT_BUDGET = 7600;
+const CHAT_RENDER_WINDOW_CONTENT_DENSITY_PER_ROW = CHAT_FIRST_PAINT_CONTENT_BUDGET / CHAT_FIRST_PAINT_RENDERABLE_LIMIT;
 const SESSION_RENDER_WINDOW_MAX_SESSIONS = 40;
-const SESSION_RENDER_WINDOW_EXPAND_STEP = 24;
-const SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX = 12;
-const SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX = 180;
-const SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS = 140;
-const SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX = 1;
+const SESSION_RENDER_WINDOW_EXPAND_STEP = 40;
+const SESSION_RENDER_WINDOW_EXPAND_CONTENT_BUDGET_STEP = 5200;
+const SESSION_RENDER_WINDOW_PREHEADROOM_BASE_PX = 320;
+const SESSION_RENDER_WINDOW_PREHEADROOM_MIN_PX = 280;
+const SESSION_RENDER_WINDOW_PREHEADROOM_MAX_PX = 1400;
+const SESSION_RENDER_WINDOW_PREHEADROOM_LOOKAHEAD_MS = 260;
+const SESSION_RENDER_WINDOW_PREHEADROOM_MIN_ROWS = 3.2;
+const SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_ALPHA = 0.4;
+const SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_IDLE_MS = 240;
+const SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX = 2;
+const SESSION_RENDER_WINDOW_UNDERFILL_MIN_GAP_PX = 56;
+const SESSION_RENDER_WINDOW_TOP_EXPAND_STEP_MIN = 6;
+const SESSION_RENDER_WINDOW_TOP_EXPAND_STEP_MAX = 48;
+const SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_STEP_MIN = 4;
+const SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_STEP_MAX = 28;
+const SESSION_RENDER_WINDOW_TOP_EXPAND_VIEWPORT_RESERVE = 0.85;
+const SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_VIEWPORT_RESERVE = 0.35;
+const SESSION_RENDER_WINDOW_BUDGET_MIN_CONTENT_STEP = 900;
+const SESSION_RENDER_WINDOW_BUDGET_MAX_CONTENT_STEP = 7600;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_BASE_MS = 6;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_MIN_MS = 3.5;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_MAX_MS = 11;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_HIGH = 1.05;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_LOW = 0.55;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_EMA_ALPHA = 0.32;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MAX = 1.4;
+const SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MIN = 0.45;
+const SESSION_RENDER_WINDOW_MESSAGE_BASE_COST = 180;
+const SESSION_RENDER_WINDOW_MESSAGE_TEXT_LINE_COST = 26;
+const SESSION_RENDER_WINDOW_MESSAGE_TEXT_CHAR_COST = 5;
+const SESSION_RENDER_WINDOW_MESSAGE_TEXT_CHAR_UNIT = 18;
+const SESSION_RENDER_WINDOW_MESSAGE_IMAGE_BLOCK_COST = 980;
+const SESSION_RENDER_WINDOW_MESSAGE_TOOL_BLOCK_COST = 520;
+const SESSION_RENDER_WINDOW_MESSAGE_ATTACHMENT_COST = 320;
+const SESSION_RENDER_WINDOW_MESSAGE_COST_MIN = 120;
+const SESSION_RENDER_WINDOW_MESSAGE_COST_MAX = 3600;
+const PREPEND_COMPENSATION_MAX_FRAME_ATTEMPTS = 3;
 
-const globalSessionRenderableWindowLimit = new Map<string, number>();
-const globalRenderWindowSliceCache = new WeakMap<RawMessage[], Map<number, RenderWindowSliceResult>>();
+type RenderWindowBudgetPhase = 'cold' | 'primed' | 'expanded' | 'steady';
+export type RenderWindowExpandReason = 'top-headroom' | 'underfill';
+
+export interface RenderWindowExpandCommand {
+  requestedStep: number;
+  reason: RenderWindowExpandReason;
+  observedRenderCostMs: number;
+}
+
+interface RenderWindowSliceBudget {
+  renderableLimit: number;
+  contentBudget: number;
+}
+
+interface SessionRenderWindowBudgetState {
+  phase: RenderWindowBudgetPhase;
+  budget: RenderWindowSliceBudget;
+  frameBudgetMs: number;
+  emaRenderCostMs: number;
+}
+
+const globalSessionRenderWindowBudgetState = new Map<string, SessionRenderWindowBudgetState>();
+const globalRenderWindowSliceCache = new WeakMap<RawMessage[], Map<string, RenderWindowSliceResult>>();
 
 interface RenderWindowSliceResult {
   messages: RawMessage[];
@@ -30,6 +86,27 @@ type PrependWindowTxn =
     previousScrollHeight: number;
   };
 
+interface PreparedPrependWindowTxn {
+  sessionKey: string;
+  rowKey: string;
+  rowOffsetPx: number;
+  previousScrollTop: number;
+  previousScrollHeight: number;
+}
+
+interface ExpandWindowWritePlan {
+  reason: RenderWindowExpandReason;
+  sessionKey: string;
+  averageRowPx: number;
+  topBudgetPx: number;
+  rowsAboveViewport: number;
+  viewportClientHeight: number;
+  viewportScrollHeight: number;
+  shouldExpand: boolean;
+  shouldRequeueTopHeadroom: boolean;
+  preparedPrependWindowTxn: PreparedPrependWindowTxn | null;
+}
+
 interface UseChatWindowSliceInput {
   currentSessionKey: string;
   messages: RawMessage[];
@@ -39,7 +116,7 @@ interface UseChatWindowSliceResult {
   rowSourceMessages: RawMessage[];
   hasOlderRenderableRows: boolean;
   rowSliceCostMs: number;
-  increaseRenderableWindowLimit: (sessionKey: string, step?: number) => void;
+  increaseRenderableWindowLimit: (sessionKey: string, command: RenderWindowExpandCommand) => void;
 }
 
 interface ChatVirtualItemLike {
@@ -50,7 +127,11 @@ interface ChatVirtualItemLike {
 
 interface ChatVirtualizerLike {
   getVirtualItems: () => ChatVirtualItemLike[];
-  scrollToIndex: (index: number, options?: { align?: 'start' | 'center' | 'end' | 'auto' }) => void;
+  getOffsetForIndex: (
+    index: number,
+    align?: 'start' | 'center' | 'end' | 'auto',
+  ) => readonly [number, 'auto' | 'start' | 'center' | 'end'] | undefined;
+  scrollToOffset: (toOffset: number, options?: { align?: 'start' | 'center' | 'end' | 'auto'; behavior?: 'auto' | 'smooth' | 'instant' }) => void;
 }
 
 interface UseChatWindowExpandInput {
@@ -61,14 +142,20 @@ interface UseChatWindowExpandInput {
   messagesViewportRef: RefObject<HTMLDivElement | null>;
   scrollMode: string;
   scrollCommandType: string;
+  runtimeRowsCostMs: number;
   handleViewportScroll: () => void;
   markScrollActivity: () => void;
-  increaseRenderableWindowLimit: (sessionKey: string, step?: number) => void;
+  increaseRenderableWindowLimit: (sessionKey: string, command: RenderWindowExpandCommand) => void;
 }
 
 interface UseChatWindowExpandResult {
   handleViewportScrollWithWindowing: () => void;
+  handleViewportWheelWithWindowing: () => void;
 }
+
+type ScheduledFrameHandle =
+  | { kind: 'raf'; id: number }
+  | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
 
 function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -77,49 +164,354 @@ function nowMs(): number {
   return Date.now();
 }
 
-function getSessionRenderableWindowLimit(sessionKey: string): number {
-  const cached = globalSessionRenderableWindowLimit.get(sessionKey);
-  if (typeof cached === 'number' && Number.isFinite(cached) && cached >= CHAT_FIRST_PAINT_RENDERABLE_LIMIT) {
-    return cached;
-  }
-  return CHAT_FIRST_PAINT_RENDERABLE_LIMIT;
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
-function updateSessionRenderableWindowLimit(sessionKey: string, nextLimit: number): void {
-  const normalized = Math.max(CHAT_FIRST_PAINT_RENDERABLE_LIMIT, Math.floor(nextLimit));
-  if (globalSessionRenderableWindowLimit.has(sessionKey)) {
-    globalSessionRenderableWindowLimit.delete(sessionKey);
+function roundMetric(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
   }
-  globalSessionRenderableWindowLimit.set(sessionKey, normalized);
-  while (globalSessionRenderableWindowLimit.size > SESSION_RENDER_WINDOW_MAX_SESSIONS) {
-    const oldestKey = globalSessionRenderableWindowLimit.keys().next().value;
+  return Math.round(value * 100) / 100;
+}
+
+function scheduleFrame(task: () => void): ScheduledFrameHandle {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    return { kind: 'raf', id: window.requestAnimationFrame(() => task()) };
+  }
+  return { kind: 'timeout', id: setTimeout(task, 16) };
+}
+
+function measureAverageVisibleRowPx(visibleItems: ChatVirtualItemLike[]): number {
+  if (visibleItems.length === 0) {
+    return 140;
+  }
+  let total = 0;
+  for (const item of visibleItems) {
+    total += item.size;
+  }
+  const average = total / visibleItems.length;
+  return clampNumber(average, 72, 420);
+}
+
+interface ResolveExpandStepInput {
+  reason: RenderWindowExpandReason;
+  averageRowPx: number;
+  topBudgetPx: number;
+  rowsAboveViewport?: number;
+  viewportClientHeight: number;
+  viewportScrollHeight: number;
+}
+
+function resolveTopHeadroomTargetRows(input: {
+  topBudgetPx: number;
+  viewportClientHeight: number;
+  normalizedRowPx: number;
+}): number {
+  const targetHeadroomPx = input.topBudgetPx + Math.max(
+    input.viewportClientHeight * SESSION_RENDER_WINDOW_TOP_EXPAND_VIEWPORT_RESERVE,
+    input.normalizedRowPx * 2,
+  );
+  return Math.ceil(targetHeadroomPx / input.normalizedRowPx);
+}
+
+function resolveViewportTopRowIndex(
+  visibleItems: ChatVirtualItemLike[],
+  viewportScrollTop: number,
+): number {
+  if (visibleItems.length === 0) {
+    return 0;
+  }
+  const topItem = visibleItems.find((item) => (
+    item.start <= viewportScrollTop
+    && (item.start + item.size) > viewportScrollTop
+  ));
+  if (topItem) {
+    return Math.max(0, topItem.index);
+  }
+  return Math.max(0, visibleItems[0].index);
+}
+
+export function resolveRenderableWindowExpandStep(input: ResolveExpandStepInput): number {
+  const {
+    reason,
+    averageRowPx,
+    topBudgetPx,
+    rowsAboveViewport,
+    viewportClientHeight,
+    viewportScrollHeight,
+  } = input;
+  const normalizedRowPx = clampNumber(averageRowPx, 72, 420);
+  if (reason === 'top-headroom') {
+    const targetHeadroomRows = resolveTopHeadroomTargetRows({
+      topBudgetPx,
+      viewportClientHeight,
+      normalizedRowPx,
+    });
+    const currentRowsAboveViewport = Math.max(0, Math.floor(rowsAboveViewport ?? 0));
+    const missingRows = Math.max(0, targetHeadroomRows - currentRowsAboveViewport);
+    const prewarmRows = Math.max(
+      SESSION_RENDER_WINDOW_TOP_EXPAND_STEP_MIN,
+      Math.ceil(targetHeadroomRows * 0.25),
+    );
+    const requestedRows = missingRows + prewarmRows;
+    return Math.floor(clampNumber(
+      requestedRows,
+      SESSION_RENDER_WINDOW_TOP_EXPAND_STEP_MIN,
+      SESSION_RENDER_WINDOW_TOP_EXPAND_STEP_MAX,
+    ));
+  }
+
+  const underfillGapPx = Math.max(0, viewportClientHeight - viewportScrollHeight);
+  const targetFillPx = underfillGapPx + Math.max(
+    viewportClientHeight * SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_VIEWPORT_RESERVE,
+    normalizedRowPx * 2,
+  );
+  return Math.floor(clampNumber(
+    Math.ceil(targetFillPx / normalizedRowPx),
+    SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_STEP_MIN,
+    SESSION_RENDER_WINDOW_UNDERFILL_EXPAND_STEP_MAX,
+  ));
+}
+
+function cancelScheduledFrame(handle: ScheduledFrameHandle): void {
+  if (handle.kind === 'raf' && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+    window.cancelAnimationFrame(handle.id);
+    return;
+  }
+  clearTimeout(handle.id);
+}
+
+function createSessionRenderWindowBudgetState(
+  phase: RenderWindowBudgetPhase = 'cold',
+): SessionRenderWindowBudgetState {
+  return {
+    phase,
+    budget: {
+      renderableLimit: CHAT_FIRST_PAINT_RENDERABLE_LIMIT,
+      contentBudget: CHAT_FIRST_PAINT_CONTENT_BUDGET,
+    },
+    frameBudgetMs: SESSION_RENDER_WINDOW_FRAME_BUDGET_BASE_MS,
+    emaRenderCostMs: 0,
+  };
+}
+
+function normalizeRenderWindowSliceBudget(
+  input: RenderWindowSliceBudget,
+): RenderWindowSliceBudget {
+  const normalizedRenderableLimit = Math.max(1, Math.floor(input.renderableLimit));
+  const normalizedContentBudget = Math.max(1, Math.floor(input.contentBudget));
+  const contentBudgetFloorByRenderableLimit = Math.floor(
+    normalizedRenderableLimit * CHAT_RENDER_WINDOW_CONTENT_DENSITY_PER_ROW,
+  );
+  return {
+    renderableLimit: normalizedRenderableLimit,
+    contentBudget: Math.max(normalizedContentBudget, contentBudgetFloorByRenderableLimit),
+  };
+}
+
+function getSessionRenderWindowBudgetState(sessionKey: string): SessionRenderWindowBudgetState {
+  const cached = globalSessionRenderWindowBudgetState.get(sessionKey);
+  if (cached) {
+    return cached;
+  }
+  return createSessionRenderWindowBudgetState('cold');
+}
+
+function updateSessionRenderWindowBudgetState(
+  sessionKey: string,
+  nextState: SessionRenderWindowBudgetState,
+): void {
+  if (globalSessionRenderWindowBudgetState.has(sessionKey)) {
+    globalSessionRenderWindowBudgetState.delete(sessionKey);
+  }
+  globalSessionRenderWindowBudgetState.set(sessionKey, nextState);
+  while (globalSessionRenderWindowBudgetState.size > SESSION_RENDER_WINDOW_MAX_SESSIONS) {
+    const oldestKey = globalSessionRenderWindowBudgetState.keys().next().value;
     if (typeof oldestKey !== 'string') {
       break;
     }
-    globalSessionRenderableWindowLimit.delete(oldestKey);
+    globalSessionRenderWindowBudgetState.delete(oldestKey);
   }
+}
+
+function estimateRenderableTextCost(text: string): number {
+  if (!text) {
+    return 0;
+  }
+  const logicalLines = Math.max(1, text.split(/\r?\n/).length);
+  const wrappedLines = Math.max(1, Math.ceil(text.length / 72));
+  const effectiveLines = Math.max(logicalLines, wrappedLines);
+  return (
+    (effectiveLines * SESSION_RENDER_WINDOW_MESSAGE_TEXT_LINE_COST)
+    + (Math.ceil(text.length / SESSION_RENDER_WINDOW_MESSAGE_TEXT_CHAR_UNIT) * SESSION_RENDER_WINDOW_MESSAGE_TEXT_CHAR_COST)
+  );
+}
+
+function estimateRenderableMessageCost(message: RawMessage): number {
+  let textCost = 0;
+  let imageBlockCount = 0;
+  let toolBlockCount = 0;
+  const { content } = message;
+  if (typeof content === 'string') {
+    textCost += estimateRenderableTextCost(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content as Array<Record<string, unknown>>) {
+      if (!block || typeof block !== 'object') {
+        continue;
+      }
+      const type = typeof block.type === 'string' ? block.type : '';
+      if (type === 'text' && typeof block.text === 'string') {
+        textCost += estimateRenderableTextCost(block.text);
+        continue;
+      }
+      if (type === 'thinking' && typeof block.thinking === 'string') {
+        textCost += Math.floor(estimateRenderableTextCost(block.thinking) * 0.7);
+        continue;
+      }
+      if (type === 'image') {
+        imageBlockCount += 1;
+        continue;
+      }
+      if (type === 'tool_use' || type === 'toolCall' || type === 'tool_result' || type === 'toolResult') {
+        toolBlockCount += 1;
+        continue;
+      }
+      if (typeof block.text === 'string') {
+        textCost += estimateRenderableTextCost(block.text);
+      }
+    }
+  }
+  const attachmentCount = Array.isArray(message._attachedFiles)
+    ? message._attachedFiles.length
+    : 0;
+  return Math.floor(clampNumber(
+    SESSION_RENDER_WINDOW_MESSAGE_BASE_COST
+      + textCost
+      + (imageBlockCount * SESSION_RENDER_WINDOW_MESSAGE_IMAGE_BLOCK_COST)
+      + (toolBlockCount * SESSION_RENDER_WINDOW_MESSAGE_TOOL_BLOCK_COST)
+      + (attachmentCount * SESSION_RENDER_WINDOW_MESSAGE_ATTACHMENT_COST),
+    SESSION_RENDER_WINDOW_MESSAGE_COST_MIN,
+    SESSION_RENDER_WINDOW_MESSAGE_COST_MAX,
+  ));
+}
+
+export function advanceSessionRenderWindowBudgetState(
+  previous: SessionRenderWindowBudgetState,
+  command: RenderWindowExpandCommand,
+): SessionRenderWindowBudgetState {
+  const normalizedStep = Math.max(1, Math.floor(command.requestedStep));
+  const observedCostMs = Number.isFinite(command.observedRenderCostMs) && command.observedRenderCostMs > 0
+    ? Math.max(0.1, command.observedRenderCostMs)
+    : 0;
+  const nextEmaRenderCostMs = observedCostMs > 0
+    ? (
+      previous.emaRenderCostMs > 0
+        ? (
+          (previous.emaRenderCostMs * (1 - SESSION_RENDER_WINDOW_FRAME_BUDGET_EMA_ALPHA))
+          + (observedCostMs * SESSION_RENDER_WINDOW_FRAME_BUDGET_EMA_ALPHA)
+        )
+        : observedCostMs
+    )
+    : previous.emaRenderCostMs;
+  const pressureCostMs = nextEmaRenderCostMs > 0
+    ? nextEmaRenderCostMs
+    : (observedCostMs > 0 ? observedCostMs : previous.frameBudgetMs);
+  const pressureRatio = pressureCostMs / Math.max(0.1, previous.frameBudgetMs);
+
+  const normalizedPressure = clampNumber(
+    (pressureRatio - SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_LOW)
+    / Math.max(0.01, SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_HIGH - SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_LOW),
+    0,
+    1,
+  );
+  const stepMultiplier = clampNumber(
+    SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MAX
+      - (normalizedPressure * (SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MAX - SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MIN)),
+    SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MIN,
+    SESSION_RENDER_WINDOW_FRAME_BUDGET_STEP_MULTIPLIER_MAX,
+  );
+  const adjustedStep = Math.max(1, Math.floor(normalizedStep * stepMultiplier));
+
+  let nextFrameBudgetMs = previous.frameBudgetMs;
+  if (pressureRatio >= SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_HIGH) {
+    nextFrameBudgetMs = Math.max(
+      SESSION_RENDER_WINDOW_FRAME_BUDGET_MIN_MS,
+      previous.frameBudgetMs * 0.92,
+    );
+  } else if (pressureRatio <= SESSION_RENDER_WINDOW_FRAME_BUDGET_PRESSURE_LOW) {
+    nextFrameBudgetMs = Math.min(
+      SESSION_RENDER_WINDOW_FRAME_BUDGET_MAX_MS,
+      previous.frameBudgetMs * 1.06,
+    );
+  }
+
+  const contentStep = Math.floor(clampNumber(
+    (adjustedStep / SESSION_RENDER_WINDOW_EXPAND_STEP) * SESSION_RENDER_WINDOW_EXPAND_CONTENT_BUDGET_STEP,
+    SESSION_RENDER_WINDOW_BUDGET_MIN_CONTENT_STEP,
+    SESSION_RENDER_WINDOW_BUDGET_MAX_CONTENT_STEP,
+  ));
+
+  const nextPhase: RenderWindowBudgetPhase = previous.phase === 'cold'
+    ? 'primed'
+    : (previous.phase === 'primed' ? 'expanded' : 'steady');
+
+  return {
+    phase: nextPhase,
+    budget: {
+      renderableLimit: Math.max(
+        CHAT_FIRST_PAINT_RENDERABLE_LIMIT,
+        previous.budget.renderableLimit + adjustedStep,
+      ),
+      contentBudget: Math.max(
+        CHAT_FIRST_PAINT_CONTENT_BUDGET,
+        previous.budget.contentBudget + contentStep,
+      ),
+    },
+    frameBudgetMs: clampNumber(
+      nextFrameBudgetMs,
+      SESSION_RENDER_WINDOW_FRAME_BUDGET_MIN_MS,
+      SESSION_RENDER_WINDOW_FRAME_BUDGET_MAX_MS,
+    ),
+    emaRenderCostMs: nextEmaRenderCostMs,
+  };
 }
 
 export function sliceMessagesForFirstPaint(
   messages: RawMessage[],
-  renderableLimit: number,
+  renderWindowBudgetInput: RenderWindowSliceBudget,
 ): RenderWindowSliceResult {
   if (messages.length === 0) {
     return { messages, hasOlderRenderableMessages: false };
   }
+  const renderWindowBudget = normalizeRenderWindowSliceBudget(renderWindowBudgetInput);
   let renderableCount = 0;
-  let startIndex = 0;
+  let renderableCost = 0;
+  let startIndex = messages.length;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (!isRenderableChatMessage(messages[index])) {
+    const message = messages[index];
+    if (!isRenderableChatMessage(message)) {
       continue;
     }
-    renderableCount += 1;
-    if (renderableCount >= renderableLimit) {
-      startIndex = index;
+    const nextCost = estimateRenderableMessageCost(message);
+    const nextRenderableCount = renderableCount + 1;
+    const nextRenderableCost = renderableCost + nextCost;
+    const overCountBudget = nextRenderableCount > renderWindowBudget.renderableLimit;
+    const overContentBudget = nextRenderableCost > renderWindowBudget.contentBudget && renderableCount > 0;
+    if (overCountBudget || overContentBudget) {
+      break;
+    }
+    startIndex = index;
+    renderableCount = nextRenderableCount;
+    renderableCost = nextRenderableCost;
+    if (
+      renderableCount >= renderWindowBudget.renderableLimit
+      || renderableCost >= renderWindowBudget.contentBudget
+    ) {
       break;
     }
   }
-  if (startIndex <= 0) {
+  if (startIndex <= 0 || startIndex === messages.length) {
     return { messages, hasOlderRenderableMessages: false };
   }
   let hasOlderRenderableMessages = false;
@@ -138,22 +530,23 @@ export function sliceMessagesForFirstPaint(
 
 function getCachedRenderWindowSlice(
   messages: RawMessage[],
-  renderableLimit: number,
+  renderWindowBudgetInput: RenderWindowSliceBudget,
 ): RenderWindowSliceResult {
   if (messages.length === 0) {
     return { messages, hasOlderRenderableMessages: false };
   }
-  const normalizedLimit = Math.max(1, Math.floor(renderableLimit));
+  const normalizedBudget = normalizeRenderWindowSliceBudget(renderWindowBudgetInput);
+  const cacheKey = `${normalizedBudget.renderableLimit}:${normalizedBudget.contentBudget}`;
   const byLimit = globalRenderWindowSliceCache.get(messages);
-  const cached = byLimit?.get(normalizedLimit);
+  const cached = byLimit?.get(cacheKey);
   if (cached) {
     return cached;
   }
-  const computed = sliceMessagesForFirstPaint(messages, normalizedLimit);
+  const computed = sliceMessagesForFirstPaint(messages, normalizedBudget);
   if (byLimit) {
-    byLimit.set(normalizedLimit, computed);
+    byLimit.set(cacheKey, computed);
   } else {
-    globalRenderWindowSliceCache.set(messages, new Map([[normalizedLimit, computed]]));
+    globalRenderWindowSliceCache.set(messages, new Map([[cacheKey, computed]]));
   }
   return computed;
 }
@@ -169,36 +562,55 @@ export function useChatWindowSlice(
   const [initializedSessionKey, setInitializedSessionKey] = useState<string | null>(null);
 
   const isSessionWindowBudgetFirstPass = initializedSessionKey !== currentSessionKey;
-  const sessionRenderableWindowLimit = isSessionWindowBudgetFirstPass
-    ? CHAT_FIRST_PAINT_RENDERABLE_LIMIT
-    : getSessionRenderableWindowLimit(currentSessionKey);
+  const sessionRenderWindowBudget = isSessionWindowBudgetFirstPass
+    ? createSessionRenderWindowBudgetState('cold')
+    : getSessionRenderWindowBudgetState(currentSessionKey);
 
   const renderWindowResult = useMemo(
     () => {
       const startedAt = nowMs();
-      const slice = getCachedRenderWindowSlice(messages, sessionRenderableWindowLimit);
+      const slice = getCachedRenderWindowSlice(messages, sessionRenderWindowBudget.budget);
       return {
         slice,
         rowSliceCostMs: Math.max(0, nowMs() - startedAt),
       };
     },
-    [messages, sessionRenderableWindowLimit],
+    [messages, sessionRenderWindowBudget.budget.contentBudget, sessionRenderWindowBudget.budget.renderableLimit],
   );
 
   useEffect(() => {
     setInitializedSessionKey(currentSessionKey);
-    updateSessionRenderableWindowLimit(currentSessionKey, CHAT_FIRST_PAINT_RENDERABLE_LIMIT);
+    updateSessionRenderWindowBudgetState(
+      currentSessionKey,
+      createSessionRenderWindowBudgetState('primed'),
+    );
   }, [currentSessionKey]);
 
   useEffect(() => {
     return () => {
-      globalSessionRenderableWindowLimit.clear();
+      globalSessionRenderWindowBudgetState.clear();
     };
   }, []);
 
-  const increaseRenderableWindowLimit = useCallback((sessionKey: string, step = SESSION_RENDER_WINDOW_EXPAND_STEP) => {
-    const currentLimit = getSessionRenderableWindowLimit(sessionKey);
-    updateSessionRenderableWindowLimit(sessionKey, currentLimit + Math.max(1, Math.floor(step)));
+  const increaseRenderableWindowLimit = useCallback((sessionKey: string, command: RenderWindowExpandCommand) => {
+    const currentBudgetState = getSessionRenderWindowBudgetState(sessionKey);
+    const nextBudgetState = advanceSessionRenderWindowBudgetState(currentBudgetState, command);
+    updateSessionRenderWindowBudgetState(sessionKey, nextBudgetState);
+    trackUiEvent('chat.render_window_budget_advance', {
+      sessionKey,
+      reason: command.reason,
+      phaseBefore: currentBudgetState.phase,
+      phaseAfter: nextBudgetState.phase,
+      requestedStep: Math.max(1, Math.floor(command.requestedStep)),
+      observedRenderCostMs: roundMetric(command.observedRenderCostMs),
+      frameBudgetMsBefore: roundMetric(currentBudgetState.frameBudgetMs),
+      frameBudgetMsAfter: roundMetric(nextBudgetState.frameBudgetMs),
+      emaRenderCostMsAfter: roundMetric(nextBudgetState.emaRenderCostMs),
+      renderableLimitBefore: currentBudgetState.budget.renderableLimit,
+      renderableLimitAfter: nextBudgetState.budget.renderableLimit,
+      contentBudgetBefore: currentBudgetState.budget.contentBudget,
+      contentBudgetAfter: nextBudgetState.budget.contentBudget,
+    });
     setRenderWindowVersion((value) => value + 1);
   }, []);
 
@@ -221,40 +633,109 @@ export function useChatWindowExpand(
     messagesViewportRef,
     scrollMode,
     scrollCommandType,
+    runtimeRowsCostMs,
     handleViewportScroll,
     markScrollActivity,
     increaseRenderableWindowLimit,
   } = input;
 
-  const expandWindowArmedRef = useRef(true);
-  const expandWindowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const expandReadFrameRef = useRef<ScheduledFrameHandle | null>(null);
+  const expandWriteFrameRef = useRef<ScheduledFrameHandle | null>(null);
+  const pendingExpandWritePlanRef = useRef<ExpandWindowWritePlan | null>(null);
+  const expandRequestReasonRef = useRef<RenderWindowExpandReason | null>(null);
+  const underfillRequestQueuedRef = useRef(false);
+  const flushExpandReadPhaseRef = useRef<() => void>(() => {});
+  const flushExpandWritePhaseRef = useRef<() => void>(() => {});
   const prependWindowTxnRef = useRef<PrependWindowTxn>({ phase: 'idle' });
   const prependWindowTxnSeqRef = useRef(0);
+  const prependCompensationFrameRef = useRef<ScheduledFrameHandle | null>(null);
   const lastUnderfillExpandRef = useRef<{ sessionKey: string; rowCount: number } | null>(null);
+  const topPreheadroomBudgetRef = useRef(SESSION_RENDER_WINDOW_PREHEADROOM_BASE_PX);
+  const upwardScrollVelocityRef = useRef(0);
+  const lastScrollSampleRef = useRef<{ atMs: number; scrollTop: number } | null>(null);
+  const currentSessionKeyRef = useRef(currentSessionKey);
+  const chatRowsRef = useRef(chatRows);
+  const hasOlderRenderableRowsRef = useRef(hasOlderRenderableRows);
+  const scrollModeRef = useRef(scrollMode);
+  const scrollCommandTypeRef = useRef(scrollCommandType);
+  const runtimeRowsCostMsRef = useRef(runtimeRowsCostMs);
 
-  useEffect(() => {
-    return () => {
-      if (expandWindowTimerRef.current != null) {
-        clearTimeout(expandWindowTimerRef.current);
-        expandWindowTimerRef.current = null;
-      }
-      expandWindowArmedRef.current = true;
-      prependWindowTxnRef.current = { phase: 'idle' };
-      lastUnderfillExpandRef.current = null;
-    };
+  useLayoutEffect(() => {
+    currentSessionKeyRef.current = currentSessionKey;
+    chatRowsRef.current = chatRows;
+    hasOlderRenderableRowsRef.current = hasOlderRenderableRows;
+    scrollModeRef.current = scrollMode;
+    scrollCommandTypeRef.current = scrollCommandType;
+    runtimeRowsCostMsRef.current = runtimeRowsCostMs;
+  }, [
+    chatRows,
+    currentSessionKey,
+    hasOlderRenderableRows,
+    runtimeRowsCostMs,
+    scrollCommandType,
+    scrollMode,
+  ]);
+
+  const cancelExpandReadFrame = useCallback(() => {
+    const frame = expandReadFrameRef.current;
+    if (frame == null) {
+      return;
+    }
+    cancelScheduledFrame(frame);
+    expandReadFrameRef.current = null;
+  }, []);
+
+  const cancelExpandWriteFrame = useCallback(() => {
+    const frame = expandWriteFrameRef.current;
+    if (frame == null) {
+      return;
+    }
+    cancelScheduledFrame(frame);
+    expandWriteFrameRef.current = null;
+  }, []);
+
+  const cancelPrependCompensationFrame = useCallback(() => {
+    const frame = prependCompensationFrameRef.current;
+    if (frame == null) {
+      return;
+    }
+    cancelScheduledFrame(frame);
+    prependCompensationFrameRef.current = null;
   }, []);
 
   useEffect(() => {
-    expandWindowArmedRef.current = true;
-    if (expandWindowTimerRef.current != null) {
-      clearTimeout(expandWindowTimerRef.current);
-      expandWindowTimerRef.current = null;
-    }
+    return () => {
+      cancelExpandReadFrame();
+      cancelExpandWriteFrame();
+      cancelPrependCompensationFrame();
+      expandRequestReasonRef.current = null;
+      underfillRequestQueuedRef.current = false;
+      pendingExpandWritePlanRef.current = null;
+      prependWindowTxnRef.current = { phase: 'idle' };
+      lastUnderfillExpandRef.current = null;
+      topPreheadroomBudgetRef.current = SESSION_RENDER_WINDOW_PREHEADROOM_BASE_PX;
+      upwardScrollVelocityRef.current = 0;
+      lastScrollSampleRef.current = null;
+    };
+  }, [cancelExpandReadFrame, cancelExpandWriteFrame, cancelPrependCompensationFrame]);
+
+  useEffect(() => {
+    cancelExpandReadFrame();
+    cancelExpandWriteFrame();
+    cancelPrependCompensationFrame();
+    expandRequestReasonRef.current = null;
+    underfillRequestQueuedRef.current = false;
+    pendingExpandWritePlanRef.current = null;
     prependWindowTxnRef.current = { phase: 'idle' };
     lastUnderfillExpandRef.current = null;
-  }, [currentSessionKey]);
+    topPreheadroomBudgetRef.current = SESSION_RENDER_WINDOW_PREHEADROOM_BASE_PX;
+    upwardScrollVelocityRef.current = 0;
+    lastScrollSampleRef.current = null;
+  }, [cancelExpandReadFrame, cancelExpandWriteFrame, cancelPrependCompensationFrame, currentSessionKey]);
 
-  const schedulePrependWindowTxn = useCallback((viewport: HTMLDivElement) => {
+  const resolvePrependWindowTxn = useCallback((viewport: HTMLDivElement): PreparedPrependWindowTxn | null => {
+    const activeChatRows = chatRowsRef.current;
+    const activeSessionKey = currentSessionKeyRef.current;
     const visibleItems = messageVirtualizer.getVirtualItems();
     let anchorItem = visibleItems.find((item) => (
       item.start <= viewport.scrollTop
@@ -263,24 +744,289 @@ export function useChatWindowExpand(
     if (!anchorItem) {
       anchorItem = visibleItems[0];
     }
-    const anchorRow = anchorItem ? chatRows[anchorItem.index] : undefined;
+    const anchorRow = anchorItem ? activeChatRows[anchorItem.index] : activeChatRows[0];
     const anchorRowKey = anchorRow?.key ?? null;
     if (!anchorRowKey) {
+      return null;
+    }
+    return {
+      sessionKey: activeSessionKey,
+      rowKey: anchorRowKey,
+      rowOffsetPx: Math.max(0, viewport.scrollTop - (anchorItem?.start ?? 0)),
+      previousScrollTop: viewport.scrollTop,
+      previousScrollHeight: viewport.scrollHeight,
+    };
+  }, [messageVirtualizer]);
+
+  const armPrependWindowTxn = useCallback((preparedTxn: PreparedPrependWindowTxn | null) => {
+    if (!preparedTxn) {
       prependWindowTxnRef.current = { phase: 'idle' };
-      return false;
+      return;
     }
     prependWindowTxnSeqRef.current += 1;
     prependWindowTxnRef.current = {
       phase: 'scheduled',
       id: prependWindowTxnSeqRef.current,
-      sessionKey: currentSessionKey,
-      rowKey: anchorRowKey,
-      rowOffsetPx: Math.max(0, viewport.scrollTop - (anchorItem?.start ?? viewport.scrollTop)),
-      previousScrollTop: viewport.scrollTop,
-      previousScrollHeight: viewport.scrollHeight,
+      sessionKey: preparedTxn.sessionKey,
+      rowKey: preparedTxn.rowKey,
+      rowOffsetPx: preparedTxn.rowOffsetPx,
+      previousScrollTop: preparedTxn.previousScrollTop,
+      previousScrollHeight: preparedTxn.previousScrollHeight,
     };
-    return true;
-  }, [chatRows, currentSessionKey, messageVirtualizer]);
+  }, []);
+
+  const resolveTopPreheadroomBudgetPx = useCallback((viewport: HTMLDivElement, sampleScrollVelocity: boolean): number => {
+    const visibleItems = messageVirtualizer.getVirtualItems();
+    const averageRowPx = measureAverageVisibleRowPx(visibleItems);
+    const now = nowMs();
+
+    if (sampleScrollVelocity) {
+      const previousSample = lastScrollSampleRef.current;
+      if (previousSample) {
+        const deltaMs = now - previousSample.atMs;
+        if (deltaMs > 0) {
+          const deltaUpPx = previousSample.scrollTop - viewport.scrollTop;
+          if (deltaMs > SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_IDLE_MS) {
+            upwardScrollVelocityRef.current = 0;
+          } else if (deltaUpPx > 0) {
+            const sampledVelocity = deltaUpPx / deltaMs;
+            const currentVelocity = upwardScrollVelocityRef.current;
+            upwardScrollVelocityRef.current = currentVelocity <= 0
+              ? sampledVelocity
+              : (
+                (currentVelocity * (1 - SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_ALPHA))
+                + (sampledVelocity * SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_ALPHA)
+              );
+          } else {
+            upwardScrollVelocityRef.current *= 0.7;
+          }
+        }
+      }
+      lastScrollSampleRef.current = {
+        atMs: now,
+        scrollTop: viewport.scrollTop,
+      };
+    } else if (lastScrollSampleRef.current && (now - lastScrollSampleRef.current.atMs) > SESSION_RENDER_WINDOW_PREHEADROOM_VELOCITY_IDLE_MS) {
+      upwardScrollVelocityRef.current = 0;
+    }
+
+    const velocityLookaheadPx = upwardScrollVelocityRef.current * SESSION_RENDER_WINDOW_PREHEADROOM_LOOKAHEAD_MS;
+    const rowWarmupPx = averageRowPx * SESSION_RENDER_WINDOW_PREHEADROOM_MIN_ROWS;
+    const nextBudgetPx = clampNumber(
+      Math.max(
+        SESSION_RENDER_WINDOW_PREHEADROOM_BASE_PX,
+        rowWarmupPx,
+        velocityLookaheadPx + averageRowPx,
+      ),
+      SESSION_RENDER_WINDOW_PREHEADROOM_MIN_PX,
+      SESSION_RENDER_WINDOW_PREHEADROOM_MAX_PX,
+    );
+    topPreheadroomBudgetRef.current = nextBudgetPx;
+    return nextBudgetPx;
+  }, [messageVirtualizer]);
+
+  const shouldExpandForUnderfill = useCallback((viewport: HTMLDivElement): boolean => {
+    if (!hasOlderRenderableRowsRef.current) {
+      return false;
+    }
+    if (
+      viewport.clientHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
+      || viewport.scrollHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
+    ) {
+      return false;
+    }
+    const underfillGapPx = viewport.clientHeight - viewport.scrollHeight;
+    if (underfillGapPx <= SESSION_RENDER_WINDOW_UNDERFILL_MIN_GAP_PX) {
+      return false;
+    }
+    if (viewport.scrollHeight > viewport.clientHeight + SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX) {
+      return false;
+    }
+    const alreadyExpandedForCurrentRows = (
+      lastUnderfillExpandRef.current?.sessionKey === currentSessionKeyRef.current
+      && lastUnderfillExpandRef.current.rowCount === chatRowsRef.current.length
+    );
+    return !alreadyExpandedForCurrentRows;
+  }, []);
+
+  const queueNextExpandReadPhase = useCallback(() => {
+    if (expandReadFrameRef.current != null || expandWriteFrameRef.current != null) {
+      return;
+    }
+    if (expandRequestReasonRef.current == null && underfillRequestQueuedRef.current) {
+      underfillRequestQueuedRef.current = false;
+      expandRequestReasonRef.current = 'underfill';
+    }
+    if (expandRequestReasonRef.current == null) {
+      return;
+    }
+    expandReadFrameRef.current = scheduleFrame(() => {
+      flushExpandReadPhaseRef.current();
+    });
+  }, []);
+
+  const flushExpandWritePhase = useCallback(() => {
+    expandWriteFrameRef.current = null;
+
+    const writePlan = pendingExpandWritePlanRef.current;
+    pendingExpandWritePlanRef.current = null;
+
+    if (writePlan && useChatStore.getState().currentSessionKey === writePlan.sessionKey) {
+      if (writePlan.shouldExpand) {
+        if (writePlan.reason === 'underfill') {
+          lastUnderfillExpandRef.current = {
+            sessionKey: writePlan.sessionKey,
+            rowCount: chatRowsRef.current.length,
+          };
+        }
+
+        armPrependWindowTxn(writePlan.preparedPrependWindowTxn);
+        const expandStep = resolveRenderableWindowExpandStep({
+          reason: writePlan.reason,
+          averageRowPx: writePlan.averageRowPx,
+          topBudgetPx: writePlan.topBudgetPx,
+          rowsAboveViewport: writePlan.rowsAboveViewport,
+          viewportClientHeight: writePlan.viewportClientHeight,
+          viewportScrollHeight: writePlan.viewportScrollHeight,
+        });
+        increaseRenderableWindowLimit(writePlan.sessionKey, {
+          requestedStep: expandStep,
+          reason: writePlan.reason,
+          observedRenderCostMs: runtimeRowsCostMsRef.current,
+        });
+        if (writePlan.shouldRequeueTopHeadroom) {
+          expandRequestReasonRef.current = 'top-headroom';
+        }
+      } else if (writePlan.shouldRequeueTopHeadroom) {
+        expandRequestReasonRef.current = 'top-headroom';
+      }
+    }
+
+    queueNextExpandReadPhase();
+  }, [
+    armPrependWindowTxn,
+    increaseRenderableWindowLimit,
+    queueNextExpandReadPhase,
+  ]);
+
+  const flushExpandReadPhase = useCallback(() => {
+    expandReadFrameRef.current = null;
+    const requestReason = expandRequestReasonRef.current;
+    if (!requestReason) {
+      queueNextExpandReadPhase();
+      return;
+    }
+    expandRequestReasonRef.current = null;
+
+    const activeSessionKey = currentSessionKeyRef.current;
+    if (useChatStore.getState().currentSessionKey !== activeSessionKey) {
+      queueNextExpandReadPhase();
+      return;
+    }
+
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      queueNextExpandReadPhase();
+      return;
+    }
+
+    if (prependWindowTxnRef.current.phase === 'scheduled') {
+      expandRequestReasonRef.current = requestReason;
+      queueNextExpandReadPhase();
+      return;
+    }
+
+    const hasOlderRows = hasOlderRenderableRowsRef.current;
+    const visibleItems = messageVirtualizer.getVirtualItems();
+    const averageRowPx = measureAverageVisibleRowPx(visibleItems);
+    const viewportTopRowIndex = resolveViewportTopRowIndex(visibleItems, viewport.scrollTop);
+    const topBudgetPx = requestReason === 'top-headroom'
+      ? resolveTopPreheadroomBudgetPx(viewport, false)
+      : 0;
+    const topHeadroomTargetRows = requestReason === 'top-headroom'
+      ? resolveTopHeadroomTargetRows({
+        topBudgetPx,
+        viewportClientHeight: viewport.clientHeight,
+        normalizedRowPx: clampNumber(averageRowPx, 72, 420),
+      })
+      : 0;
+    const topHeadroomMissingRows = requestReason === 'top-headroom'
+      ? Math.max(0, topHeadroomTargetRows - viewportTopRowIndex)
+      : 0;
+    const shouldExpand = requestReason === 'top-headroom'
+      ? (viewport.scrollTop <= topBudgetPx
+        && hasOlderRows
+        && topHeadroomMissingRows > 0)
+      : shouldExpandForUnderfill(viewport);
+    const preparedPrependWindowTxn = shouldExpand
+      ? resolvePrependWindowTxn(viewport)
+      : null;
+    const shouldRequeueTopHeadroom = requestReason === 'top-headroom'
+      && shouldExpand
+      && preparedPrependWindowTxn == null
+      && hasOlderRows;
+
+    pendingExpandWritePlanRef.current = {
+      reason: requestReason,
+      sessionKey: activeSessionKey,
+      averageRowPx,
+      topBudgetPx,
+      rowsAboveViewport: viewportTopRowIndex,
+      viewportClientHeight: viewport.clientHeight,
+      viewportScrollHeight: viewport.scrollHeight,
+      shouldExpand,
+      shouldRequeueTopHeadroom,
+      preparedPrependWindowTxn,
+    };
+
+    if (expandWriteFrameRef.current == null) {
+      expandWriteFrameRef.current = scheduleFrame(() => {
+        flushExpandWritePhaseRef.current();
+      });
+    }
+  }, [
+    messageVirtualizer,
+    messagesViewportRef,
+    queueNextExpandReadPhase,
+    resolvePrependWindowTxn,
+    resolveTopPreheadroomBudgetPx,
+    shouldExpandForUnderfill,
+  ]);
+
+  useLayoutEffect(() => {
+    flushExpandReadPhaseRef.current = flushExpandReadPhase;
+    flushExpandWritePhaseRef.current = flushExpandWritePhase;
+  }, [flushExpandReadPhase, flushExpandWritePhase]);
+
+  const queueExpandRequest = useCallback((reason: RenderWindowExpandReason) => {
+    const currentReason = expandRequestReasonRef.current;
+    if (reason === 'underfill' && currentReason === 'top-headroom') {
+      underfillRequestQueuedRef.current = true;
+    } else if (currentReason !== 'top-headroom' || reason === 'top-headroom') {
+      expandRequestReasonRef.current = reason;
+    }
+    queueNextExpandReadPhase();
+  }, [queueNextExpandReadPhase]);
+
+  const maybeQueueTopHeadroomExpand = useCallback(() => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const hasOlderRows = hasOlderRenderableRowsRef.current;
+    if (!hasOlderRows) {
+      return;
+    }
+    const topBudgetPx = resolveTopPreheadroomBudgetPx(viewport, true);
+    if (viewport.scrollTop > topBudgetPx) {
+      return;
+    }
+    queueExpandRequest('top-headroom');
+  }, [
+    messagesViewportRef,
+    queueExpandRequest,
+    resolveTopPreheadroomBudgetPx,
+  ]);
 
   useLayoutEffect(() => {
     const txn = prependWindowTxnRef.current;
@@ -291,151 +1037,97 @@ export function useChatWindowExpand(
     if (!viewport) {
       return;
     }
-    if (scrollMode !== 'detached' || scrollCommandType !== 'none') {
-      prependWindowTxnRef.current = { phase: 'idle' };
-      return;
-    }
 
+    cancelPrependCompensationFrame();
     const targetIndex = chatRows.findIndex((row) => row.key === txn.rowKey);
-    if (targetIndex >= 0) {
-      messageVirtualizer.scrollToIndex(targetIndex, { align: 'start' });
-    }
-
-    let anchorElement: HTMLDivElement | null = null;
-    const rowElements = viewport.querySelectorAll<HTMLDivElement>('[data-chat-row-key]');
-    for (const element of rowElements) {
-      if (element.dataset.chatRowKey === txn.rowKey) {
-        anchorElement = element;
-        break;
-      }
-    }
-
-    if (anchorElement) {
-      const viewportTop = viewport.getBoundingClientRect().top;
-      const currentRowTop = anchorElement.getBoundingClientRect().top - viewportTop;
-      const desiredRowTop = -txn.rowOffsetPx;
-      const delta = currentRowTop - desiredRowTop;
-      if (Math.abs(delta) > 0.5) {
-        viewport.scrollTop += delta;
-      }
+    if (targetIndex < 0) {
       prependWindowTxnRef.current = { phase: 'idle' };
       return;
     }
 
-    const totalHeightDelta = viewport.scrollHeight - txn.previousScrollHeight;
-    if (Number.isFinite(totalHeightDelta) && Math.abs(totalHeightDelta) > 0.5) {
-      viewport.scrollTop = Math.max(0, txn.previousScrollTop + totalHeightDelta);
-    }
-    prependWindowTxnRef.current = { phase: 'idle' };
-  }, [chatRows, currentSessionKey, messageVirtualizer, messagesViewportRef, scrollCommandType, scrollMode]);
-
-  const maybeExpandRenderableWindow = useCallback(() => {
-    if (scrollCommandType !== 'none') {
-      return;
-    }
-    if (!hasOlderRenderableRows) {
-      return;
-    }
-    const viewport = messagesViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-    if (scrollMode !== 'detached') {
-      return;
-    }
-    if (viewport.scrollTop > SESSION_RENDER_WINDOW_REARM_THRESHOLD_PX) {
-      expandWindowArmedRef.current = true;
-      if (expandWindowTimerRef.current != null) {
-        clearTimeout(expandWindowTimerRef.current);
-        expandWindowTimerRef.current = null;
+    const tryCompensateToAnchor = (activeViewport: HTMLDivElement): boolean => {
+      const offsetInfo = messageVirtualizer.getOffsetForIndex(targetIndex, 'start');
+      if (!offsetInfo) {
+        return false;
       }
-      return;
-    }
-    if (viewport.scrollTop > SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX) {
-      return;
-    }
-    if (!expandWindowArmedRef.current) {
-      return;
-    }
-    if (expandWindowTimerRef.current != null) {
-      clearTimeout(expandWindowTimerRef.current);
-    }
-    const sessionKeyAtSchedule = currentSessionKey;
-    expandWindowTimerRef.current = setTimeout(() => {
-      expandWindowTimerRef.current = null;
-      const activeViewport = messagesViewportRef.current;
-      if (!activeViewport || activeViewport.scrollTop > SESSION_RENDER_WINDOW_TOP_THRESHOLD_PX) {
-        return;
+      const desiredScrollTop = Math.max(0, offsetInfo[0] + txn.rowOffsetPx);
+      messageVirtualizer.scrollToOffset(desiredScrollTop, { align: 'start', behavior: 'auto' });
+      if (Math.abs(activeViewport.scrollTop - desiredScrollTop) > 0.5) {
+        activeViewport.scrollTop = desiredScrollTop;
       }
-      if (useChatStore.getState().currentSessionKey !== sessionKeyAtSchedule || !expandWindowArmedRef.current) {
-        return;
-      }
-      if (!schedulePrependWindowTxn(activeViewport)) {
-        prependWindowTxnRef.current = { phase: 'idle' };
-      }
-      increaseRenderableWindowLimit(sessionKeyAtSchedule);
-      expandWindowArmedRef.current = false;
-    }, SESSION_RENDER_WINDOW_EXPAND_DEBOUNCE_MS);
-  }, [
-    currentSessionKey,
-    hasOlderRenderableRows,
-    increaseRenderableWindowLimit,
-    messagesViewportRef,
-    schedulePrependWindowTxn,
-    scrollCommandType,
-    scrollMode,
-  ]);
-
-  const maybeExpandRenderableWindowForUnderfill = useCallback(() => {
-    if (scrollCommandType !== 'none' || !hasOlderRenderableRows) {
-      return;
-    }
-    const viewport = messagesViewportRef.current;
-    if (!viewport) {
-      return;
-    }
-    if (
-      viewport.clientHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
-      || viewport.scrollHeight <= SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX
-    ) {
-      return;
-    }
-    if (viewport.scrollHeight > viewport.clientHeight + SESSION_RENDER_WINDOW_UNDERFILL_EPSILON_PX) {
-      return;
-    }
-    const alreadyExpandedForCurrentRows = (
-      lastUnderfillExpandRef.current?.sessionKey === currentSessionKey
-      && lastUnderfillExpandRef.current.rowCount === chatRows.length
-    );
-    if (alreadyExpandedForCurrentRows) {
-      return;
-    }
-
-    if (scrollMode === 'detached') {
-      schedulePrependWindowTxn(viewport);
-    } else {
       prependWindowTxnRef.current = { phase: 'idle' };
-    }
-
-    lastUnderfillExpandRef.current = {
-      sessionKey: currentSessionKey,
-      rowCount: chatRows.length,
+      queueExpandRequest('top-headroom');
+      return true;
     };
-    increaseRenderableWindowLimit(currentSessionKey);
+
+    // If virtualizer has already materialized target row in this layout pass, complete immediately.
+    if (tryCompensateToAnchor(viewport)) {
+      return;
+    }
+
+    let attempts = 0;
+    const retryAnchorCompensation = () => {
+      const latestTxn = prependWindowTxnRef.current;
+      if (
+        latestTxn.phase !== 'scheduled'
+        || latestTxn.id !== txn.id
+        || latestTxn.sessionKey !== currentSessionKey
+      ) {
+        prependCompensationFrameRef.current = null;
+        return;
+      }
+
+      const activeViewport = messagesViewportRef.current;
+      if (!activeViewport) {
+        prependCompensationFrameRef.current = null;
+        prependWindowTxnRef.current = { phase: 'idle' };
+        return;
+      }
+
+      if (tryCompensateToAnchor(activeViewport)) {
+        prependCompensationFrameRef.current = null;
+        return;
+      }
+
+      attempts += 1;
+      if (attempts <= PREPEND_COMPENSATION_MAX_FRAME_ATTEMPTS) {
+        prependCompensationFrameRef.current = scheduleFrame(retryAnchorCompensation);
+        return;
+      }
+
+      const totalHeightDelta = activeViewport.scrollHeight - txn.previousScrollHeight;
+      if (Number.isFinite(totalHeightDelta) && Math.abs(totalHeightDelta) > 0.5) {
+        activeViewport.scrollTop = Math.max(0, txn.previousScrollTop + totalHeightDelta);
+      }
+      prependCompensationFrameRef.current = null;
+      prependWindowTxnRef.current = { phase: 'idle' };
+      queueExpandRequest('top-headroom');
+    };
+
+    prependCompensationFrameRef.current = scheduleFrame(retryAnchorCompensation);
+    return () => {
+      cancelPrependCompensationFrame();
+    };
   }, [
-    chatRows.length,
+    cancelPrependCompensationFrame,
+    chatRows,
     currentSessionKey,
-    hasOlderRenderableRows,
-    increaseRenderableWindowLimit,
+    messageVirtualizer,
     messagesViewportRef,
-    schedulePrependWindowTxn,
+    queueExpandRequest,
     scrollCommandType,
     scrollMode,
   ]);
 
   useLayoutEffect(() => {
-    maybeExpandRenderableWindowForUnderfill();
-  }, [maybeExpandRenderableWindowForUnderfill]);
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (shouldExpandForUnderfill(viewport)) {
+      queueExpandRequest('underfill');
+    }
+  }, [messagesViewportRef, queueExpandRequest, shouldExpandForUnderfill]);
 
   useLayoutEffect(() => {
     const viewport = messagesViewportRef.current;
@@ -443,19 +1135,31 @@ export function useChatWindowExpand(
       return;
     }
     const observer = new ResizeObserver(() => {
-      maybeExpandRenderableWindowForUnderfill();
+      const activeViewport = messagesViewportRef.current;
+      if (!activeViewport) {
+        return;
+      }
+      if (shouldExpandForUnderfill(activeViewport)) {
+        queueExpandRequest('underfill');
+      }
     });
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [maybeExpandRenderableWindowForUnderfill, messagesViewportRef]);
+  }, [messagesViewportRef, queueExpandRequest, shouldExpandForUnderfill]);
 
   const handleViewportScrollWithWindowing = useCallback(() => {
     handleViewportScroll();
-    maybeExpandRenderableWindow();
+    maybeQueueTopHeadroomExpand();
     markScrollActivity();
-  }, [handleViewportScroll, markScrollActivity, maybeExpandRenderableWindow]);
+  }, [handleViewportScroll, markScrollActivity, maybeQueueTopHeadroomExpand]);
+
+  const handleViewportWheelWithWindowing = useCallback(() => {
+    maybeQueueTopHeadroomExpand();
+    markScrollActivity();
+  }, [markScrollActivity, maybeQueueTopHeadroomExpand]);
 
   return {
     handleViewportScrollWithWindowing,
+    handleViewportWheelWithWindowing,
   };
 }
