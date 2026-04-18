@@ -1,5 +1,5 @@
 import { useEffect, useRef, type MutableRefObject } from 'react';
-import { trackUiTiming } from '@/lib/telemetry';
+import { trackUiEvent, trackUiTiming } from '@/lib/telemetry';
 
 interface SessionPipelineCost {
   sessionKey: string;
@@ -31,6 +31,21 @@ function roundTiming(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function emitBlockingLoadingDuration(payload: {
+  sessionKey: string;
+  startedAt: number;
+  source: 'initial' | 'switch';
+  fromSessionKey: string | null;
+}): void {
+  const durationMs = Math.max(0, nowMs() - payload.startedAt);
+  trackUiEvent('chat.session_blocking_loading_duration', {
+    sessionKey: payload.sessionKey,
+    durationMs: Math.round(durationMs),
+    source: payload.source,
+    ...(payload.fromSessionKey ? { fromSessionKey: payload.fromSessionKey } : {}),
+  });
+}
+
 export function useChatFirstPaint(
   input: UseChatFirstPaintInput,
 ): void {
@@ -47,14 +62,32 @@ export function useChatFirstPaint(
     sessionKey: string;
     startedAt: number;
     reported: boolean;
+    source: 'initial' | 'switch';
+    fromSessionKey: string | null;
   } | null>(null);
+  const blockingLoadingRef = useRef<{
+    sessionKey: string;
+    startedAt: number;
+    source: 'initial' | 'switch';
+    fromSessionKey: string | null;
+  } | null>(null);
+  const previousSessionKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (blockingLoadingRef.current) {
+      emitBlockingLoadingDuration(blockingLoadingRef.current);
+      blockingLoadingRef.current = null;
+    }
     const now = nowMs();
+    const previousSessionKey = previousSessionKeyRef.current;
+    const source: 'initial' | 'switch' = previousSessionKey == null ? 'initial' : 'switch';
     sessionFirstPaintRef.current = {
       sessionKey: currentSessionKey,
       startedAt: now,
       reported: false,
+      source,
+      fromSessionKey: source === 'switch' ? previousSessionKey : null,
     };
+    previousSessionKeyRef.current = currentSessionKey;
     sessionPipelineCostRef.current = {
       sessionKey: currentSessionKey,
       rowSliceMs: 0,
@@ -73,6 +106,42 @@ export function useChatFirstPaint(
     }
     cost.rowSliceMs += rowSliceCostMs;
   }, [currentSessionKey, rowSliceCostMs, sessionPipelineCostRef]);
+
+  useEffect(() => {
+    const activeBlockingTracker = blockingLoadingRef.current;
+    if (showBlockingLoading) {
+      if (activeBlockingTracker?.sessionKey === currentSessionKey) {
+        return;
+      }
+      if (activeBlockingTracker && activeBlockingTracker.sessionKey !== currentSessionKey) {
+        emitBlockingLoadingDuration(activeBlockingTracker);
+      }
+      const firstPaintTracker = sessionFirstPaintRef.current;
+      const source = firstPaintTracker?.sessionKey === currentSessionKey
+        ? firstPaintTracker.source
+        : 'switch';
+      const fromSessionKey = firstPaintTracker?.sessionKey === currentSessionKey
+        ? firstPaintTracker.fromSessionKey
+        : null;
+      blockingLoadingRef.current = {
+        sessionKey: currentSessionKey,
+        startedAt: nowMs(),
+        source,
+        fromSessionKey,
+      };
+      trackUiEvent('chat.session_blocking_loading_shown', {
+        sessionKey: currentSessionKey,
+        source,
+        ...(fromSessionKey ? { fromSessionKey } : {}),
+      });
+      return;
+    }
+
+    if (activeBlockingTracker?.sessionKey === currentSessionKey) {
+      emitBlockingLoadingDuration(activeBlockingTracker);
+      blockingLoadingRef.current = null;
+    }
+  }, [currentSessionKey, showBlockingLoading]);
 
   useEffect(() => {
     const tracker = sessionFirstPaintRef.current;
@@ -94,6 +163,15 @@ export function useChatFirstPaint(
       staticRowsMs: pipelineCost.sessionKey === currentSessionKey ? roundTiming(pipelineCost.staticRowsMs) : 0,
       runtimeRowsMs: pipelineCost.sessionKey === currentSessionKey ? roundTiming(pipelineCost.runtimeRowsMs) : 0,
       richRenderDeferred: false,
+      source: tracker.source,
+      ...(tracker.fromSessionKey ? { fromSessionKey: tracker.fromSessionKey } : {}),
     });
   }, [currentSessionKey, isEmptyState, rowCount, sessionPipelineCostRef, showBlockingLoading]);
+
+  useEffect(() => () => {
+    if (blockingLoadingRef.current) {
+      emitBlockingLoadingDuration(blockingLoadingRef.current);
+      blockingLoadingRef.current = null;
+    }
+  }, []);
 }

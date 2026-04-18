@@ -24,20 +24,21 @@ type HistoryLoadPipelineStrategyRegistry = Record<HistoryLoadPipelineStrategyKey
 async function runProbeOnlyHistoryPipeline(context: HistoryLoadPipelineContext): Promise<void> {
   const {
     get,
+    scope,
+    mode,
     requestedSessionKey,
     historyRuntime,
     fetchHistoryWindow,
     applyLoadedMessages,
-    quiet,
     abortSignal,
     isAborted,
   } = context;
 
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  const probeLimit = quiet ? CHAT_HISTORY_QUIET_PROBE_LIMIT : CHAT_HISTORY_ACTIVE_PROBE_LIMIT;
+  const probeLimit = mode === 'quiet' ? CHAT_HISTORY_QUIET_PROBE_LIMIT : CHAT_HISTORY_ACTIVE_PROBE_LIMIT;
   const probe = await fetchHistoryWindow(probeLimit);
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (get().currentSessionKey !== requestedSessionKey) {
+  if (scope === 'foreground' && get().currentSessionKey !== requestedSessionKey) {
     return;
   }
 
@@ -55,15 +56,17 @@ export const defaultHistoryLoadPipelineStrategy: HistoryLoadPipelineStrategy = a
     historyRuntime,
     fetchHistoryWindow,
     applyLoadedMessages,
-    quiet,
+    mode,
+    scope,
     abortSignal,
     isAborted,
   } = context;
 
-  if (quiet) {
+  if (mode === 'quiet') {
     await runQuietHistoryPipeline({
       set,
       getState: get,
+      scope,
       requestedSessionKey,
       historyRuntime,
       abortSignal,
@@ -77,6 +80,7 @@ export const defaultHistoryLoadPipelineStrategy: HistoryLoadPipelineStrategy = a
   await runActiveHistoryPipeline({
     set,
     getState: get,
+    scope,
     requestedSessionKey,
     historyRuntime,
     abortSignal,
@@ -101,6 +105,7 @@ const activeOnlyHistoryLoadPipelineStrategy: HistoryLoadPipelineStrategy = async
   await runActiveHistoryPipeline({
     set,
     getState: get,
+    scope: context.scope,
     requestedSessionKey,
     historyRuntime,
     abortSignal,
@@ -125,6 +130,7 @@ const quietOnlyHistoryLoadPipelineStrategy: HistoryLoadPipelineStrategy = async 
   await runQuietHistoryPipeline({
     set,
     getState: get,
+    scope: context.scope,
     requestedSessionKey,
     historyRuntime,
     abortSignal,
@@ -198,4 +204,3 @@ export function readHistoryLoadPipelineStrategyKey(
     return null;
   }
 }
-

@@ -49,6 +49,9 @@ describe('chat history apply pipeline', () => {
       refreshing: false,
       snapshotReady: false,
       sessionReadyByKey: {},
+      sessionRuntimeByKey: {},
+      sessionLabels: {},
+      sessionLastActivity: {},
     } as ChatStoreState;
 
     const set = (
@@ -64,7 +67,8 @@ describe('chat history apply pipeline', () => {
       get,
       historyRuntime,
       requestedSessionKey,
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
       optimisticUserReconcileWindowMs: 15_000,
@@ -100,6 +104,9 @@ describe('chat history apply pipeline', () => {
       refreshing: false,
       snapshotReady: true,
       sessionReadyByKey: { [requestedSessionKey]: true },
+      sessionRuntimeByKey: {},
+      sessionLabels: {},
+      sessionLastActivity: {},
     } as ChatStoreState;
 
     const set = (
@@ -115,7 +122,8 @@ describe('chat history apply pipeline', () => {
       get,
       historyRuntime,
       requestedSessionKey,
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
       optimisticUserReconcileWindowMs: 15_000,
@@ -131,5 +139,61 @@ describe('chat history apply pipeline', () => {
     const metricEvents = trackUiTimingMock.mock.calls.map((call) => call[0]);
     expect(metricEvents).not.toContain('chat.history_apply_normalize');
   });
-});
 
+  it('background apply updates target session runtime without overwriting current foreground messages', async () => {
+    trackUiTimingMock.mockReset();
+    const requestedSessionKey = 'agent:another:main';
+    const rawMessages: RawMessage[] = [
+      { role: 'assistant', content: 'another session content', timestamp: 2 },
+    ];
+    const currentMessages: RawMessage[] = [
+      { role: 'assistant', content: 'current session content', timestamp: 1 },
+    ];
+    const historyRuntime = createHistoryRuntimeHarness();
+
+    let state = {
+      currentSessionKey: 'agent:main:main',
+      messages: currentMessages,
+      thinkingLevel: null,
+      initialLoading: false,
+      refreshing: false,
+      snapshotReady: true,
+      sessionReadyByKey: {},
+      sessionRuntimeByKey: {},
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingFinal: false,
+      activeRunId: null,
+      lastUserMessageAt: null,
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set,
+      get,
+      historyRuntime,
+      requestedSessionKey,
+      mode: 'quiet',
+      scope: 'background',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+      optimisticUserReconcileWindowMs: 15_000,
+    });
+
+    await applyLoadedMessages(rawMessages, null);
+
+    expect(state.currentSessionKey).toBe('agent:main:main');
+    expect(state.messages).toBe(currentMessages);
+    expect(state.sessionReadyByKey[requestedSessionKey]).toBe(true);
+    expect(state.sessionRuntimeByKey[requestedSessionKey]?.messages.length).toBe(1);
+    expect(state.sessionRuntimeByKey[requestedSessionKey]?.messages[0]?.content).toBe('another session content');
+  });
+});

@@ -1,5 +1,9 @@
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatStoreState } from './types';
+import type {
+  ChatHistoryLoadMode,
+  ChatHistoryLoadScope,
+  ChatStoreState,
+} from './types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -11,7 +15,8 @@ type ChatStoreGetFn = () => ChatStoreState;
 interface CreateHistoryLoadAbortGuardInput {
   get: ChatStoreGetFn;
   requestedSessionKey: string;
-  quiet: boolean;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
   historyLoadRunId: number;
   historyRuntime: StoreHistoryCache;
   abortSignal?: AbortSignal;
@@ -21,7 +26,8 @@ interface BeginHistoryLoadUiStateInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   requestedSessionKey: string;
-  quiet: boolean;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
   historyLoadRunId: number;
   historyRuntime: StoreHistoryCache;
   timeoutMs: number;
@@ -29,7 +35,7 @@ interface BeginHistoryLoadUiStateInput {
 
 interface FinalizeHistoryLoadUiStateInput {
   set: ChatStoreSetFn;
-  quiet: boolean;
+  scope: ChatHistoryLoadScope;
   historyLoadRunId: number;
   historyRuntime: StoreHistoryCache;
   loadingSafetyTimer: ReturnType<typeof setTimeout> | null;
@@ -41,7 +47,7 @@ export function createHistoryLoadAbortGuard(
   const {
     get,
     requestedSessionKey,
-    quiet,
+    scope,
     historyLoadRunId,
     historyRuntime,
     abortSignal,
@@ -49,8 +55,8 @@ export function createHistoryLoadAbortGuard(
   return () => (
     Boolean(abortSignal?.aborted)
     ||
-    get().currentSessionKey !== requestedSessionKey
-    || (!quiet && historyLoadRunId !== historyRuntime.getHistoryLoadRunId())
+    (scope === 'foreground' && get().currentSessionKey !== requestedSessionKey)
+    || (scope === 'foreground' && historyLoadRunId !== historyRuntime.getHistoryLoadRunId())
   );
 }
 
@@ -61,13 +67,13 @@ export function beginHistoryLoadUiState(
     set,
     get,
     requestedSessionKey,
-    quiet,
+    scope,
     historyLoadRunId,
     historyRuntime,
     timeoutMs,
   } = input;
 
-  if (quiet) {
+  if (scope === 'background') {
     return null;
   }
 
@@ -92,7 +98,7 @@ export function beginHistoryLoadUiState(
 export function finalizeHistoryLoadUiState(input: FinalizeHistoryLoadUiStateInput): void {
   const {
     set,
-    quiet,
+    scope,
     historyLoadRunId,
     historyRuntime,
     loadingSafetyTimer,
@@ -101,7 +107,7 @@ export function finalizeHistoryLoadUiState(input: FinalizeHistoryLoadUiStateInpu
   if (loadingSafetyTimer) {
     clearTimeout(loadingSafetyTimer);
   }
-  if (!quiet) {
+  if (scope === 'foreground') {
     set((state) => {
       if (historyLoadRunId !== historyRuntime.getHistoryLoadRunId() || (!state.initialLoading && !state.refreshing)) {
         return state;
@@ -110,4 +116,3 @@ export function finalizeHistoryLoadUiState(input: FinalizeHistoryLoadUiStateInpu
     });
   }
 }
-

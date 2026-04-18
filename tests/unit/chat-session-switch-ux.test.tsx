@@ -17,6 +17,19 @@ let virtualWindowStartIndex = 0;
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
 
+function hasTelemetryEvent(
+  event: string,
+  matcher?: (payload: Record<string, unknown>) => boolean,
+): boolean {
+  return trackUiEventMock.mock.calls.some((call) => {
+    if (call[0] !== event) {
+      return false;
+    }
+    const payload = (call[1] ?? {}) as Record<string, unknown>;
+    return matcher ? matcher(payload) : true;
+  });
+}
+
 vi.mock('@/lib/telemetry', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/telemetry')>();
   return {
@@ -289,6 +302,31 @@ describe('chat 会话切换 UI 回归', () => {
     expect(after.currentSessionKey).toBe('agent:test:main');
     expect(after.messages).toBe(beforeMessagesRef);
     expect(after.sessionRuntimeByKey).toBe(beforeSessionRuntimeRef);
+  });
+
+  it('切换会话时应上报 switch_start 诊断事件', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    trackUiEventMock.mockClear();
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:another:main');
+    });
+
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.session_switch_start', (payload) => (
+        payload.fromSessionKey === 'agent:test:main'
+        && payload.toSessionKey === 'agent:another:main'
+        && payload.hasTargetRuntimeSnapshot === true
+        && payload.targetSessionReady === true
+      ))).toBe(true);
+    });
   });
 
   it('切换会话时即使当前未吸底也应滚到最新消息', async () => {
@@ -900,6 +938,11 @@ describe('chat 会话切换 UI 回归', () => {
     });
 
     expect(screen.queryByText('MatchaClaw Chat')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.session_blocking_loading_shown', (payload) => (
+        payload.sessionKey === 'agent:fresh:main'
+      ))).toBe(true);
+    });
   });
 
   it('从其他页面进入全新会话时，应直接显示 Welcome，不阻塞转圈', async () => {
@@ -948,6 +991,60 @@ describe('chat 会话切换 UI 回归', () => {
     expect(screen.getByText('MatchaClaw Chat')).toBeInTheDocument();
   });
 
+  it('阻塞加载结束时应上报 blocking_loading_duration', async () => {
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:fresh:main', displayName: 'agent:fresh:main' },
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'main session message',
+          timestamp: Date.now() / 1000,
+          id: 'main-message',
+        },
+      ],
+      snapshotReady: true,
+      sessionReadyByKey: {
+        'agent:test:main': true,
+      },
+      sessionRuntimeByKey: {},
+      loadHistory,
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:fresh:main');
+    });
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.session_blocking_loading_shown', (payload) => (
+        payload.sessionKey === 'agent:fresh:main'
+      ))).toBe(true);
+    });
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:test:main');
+    });
+
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.session_blocking_loading_duration', (payload) => (
+        payload.sessionKey === 'agent:fresh:main'
+        && typeof payload.durationMs === 'number'
+      ))).toBe(true);
+    });
+  });
+
   it('已有新鲜 agent 快照时，进入 Chat 不应重复调用 loadAgents', async () => {
     const loadAgents = vi.fn().mockResolvedValue(undefined);
     const loadSessions = vi.fn().mockResolvedValue(undefined);
@@ -991,5 +1088,89 @@ describe('chat 会话切换 UI 回归', () => {
       expect(loadSessions).toHaveBeenCalledTimes(1);
     });
     expect(loadAgents).not.toHaveBeenCalled();
+  });
+
+  it('启动后应先加载当前会话，再静默预热其它未就绪会话', async () => {
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    const loadSessions = vi.fn().mockResolvedValue(undefined);
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+        { id: 'another', name: 'Another Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+      ],
+      snapshotReady: true,
+      lastLoadedAt: Date.now(),
+      loadAgents,
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:another:main', displayName: 'agent:another:main' },
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: 'already-hydrated-current-session',
+          timestamp: Date.now() / 1000,
+          id: 'hydrated-current',
+        },
+      ],
+      snapshotReady: true,
+      sessionReadyByKey: {
+        'agent:test:main': true,
+      },
+      sessionRuntimeByKey: {},
+      sessionLastActivity: {
+        'agent:another:main': Date.now() - 1_000,
+      },
+      loadSessions,
+      loadHistory,
+    } as never);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <TooltipProvider>
+          <Chat />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(loadHistory).toHaveBeenCalledWith(expect.objectContaining({
+        sessionKey: 'agent:test:main',
+        mode: 'quiet',
+        scope: 'foreground',
+      }));
+    });
+
+    await waitFor(() => {
+      expect(loadHistory).toHaveBeenCalledWith(expect.objectContaining({
+        sessionKey: 'agent:another:main',
+        mode: 'quiet',
+        scope: 'background',
+      }));
+    });
+
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.history_prewarm_plan', (payload) => (
+        payload.targetCount === 1
+        && Array.isArray(payload.targets)
+        && payload.targets.includes('agent:another:main')
+      ))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.history_prewarm_dispatch', (payload) => (
+        payload.sessionKey === 'agent:another:main'
+      ))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(hasTelemetryEvent('chat.history_prewarm_done', (payload) => (
+        payload.sessionKey === 'agent:another:main'
+      ))).toBe(true);
+    });
   });
 });

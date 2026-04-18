@@ -22,6 +22,7 @@ import type {
   HistoryLoadPipelineStrategy,
 } from './history-pipeline-types';
 import type { StoreHistoryCache } from './history-cache';
+import type { ChatHistoryLoadRequest } from './types';
 
 export interface HistoryLoadExecutionDeps {
   set: ChatStoreSetFn;
@@ -35,7 +36,7 @@ export interface HistoryLoadExecutionDeps {
 
 interface CreateHistoryLoadExecutionContextInput {
   deps: HistoryLoadExecutionDeps;
-  quiet: boolean;
+  request: ChatHistoryLoadRequest;
 }
 
 interface HistoryLoadExecutionContext extends HistoryLoadPipelineContext {
@@ -50,7 +51,7 @@ function createHistoryLoadExecutionContext(
 ): HistoryLoadExecutionContext {
   const {
     deps,
-    quiet,
+    request,
   } = input;
   const {
     set,
@@ -61,7 +62,9 @@ function createHistoryLoadExecutionContext(
     pipelineStrategy = defaultHistoryLoadPipelineStrategy,
   } = deps;
 
-  const requestedSessionKey = get().currentSessionKey;
+  const requestedSessionKey = request.sessionKey;
+  const mode = request.mode;
+  const scope = request.scope;
   const abortController = new AbortController();
   const previousAbortController = historyRuntime.replaceHistoryLoadAbortController(
     requestedSessionKey,
@@ -71,12 +74,13 @@ function createHistoryLoadExecutionContext(
     previousAbortController.abort('history_load_superseded');
   }
 
-  const historyLoadRunId = quiet ? 0 : historyRuntime.nextHistoryLoadRunId();
+  const historyLoadRunId = scope === 'foreground' ? historyRuntime.nextHistoryLoadRunId() : 0;
   const loadingSafetyTimer = beginHistoryLoadUiState({
     set,
     get,
     requestedSessionKey,
-    quiet,
+    mode,
+    scope,
     historyLoadRunId,
     historyRuntime,
     timeoutMs: loadingTimeoutMs,
@@ -85,7 +89,8 @@ function createHistoryLoadExecutionContext(
   const shouldAbortHistoryProcessing = createHistoryLoadAbortGuard({
     get,
     requestedSessionKey,
-    quiet,
+    mode,
+    scope,
     historyLoadRunId,
     historyRuntime,
     abortSignal: abortController.signal,
@@ -108,7 +113,8 @@ function createHistoryLoadExecutionContext(
     get,
     historyRuntime,
     requestedSessionKey,
-    quiet,
+    mode,
+    scope,
     abortSignal: abortController.signal,
     shouldAbortHistoryProcessing,
     optimisticUserReconcileWindowMs,
@@ -118,7 +124,8 @@ function createHistoryLoadExecutionContext(
     set,
     get,
     historyRuntime,
-    quiet,
+    mode,
+    scope,
     requestedSessionKey,
     abortSignal: abortController.signal,
     isAborted,
@@ -151,7 +158,8 @@ async function recoverHistoryLoadExecution(
       set: context.set,
       get: context.get,
       requestedSessionKey: context.requestedSessionKey,
-      quiet: context.quiet,
+      mode: context.mode,
+      scope: context.scope,
       historyRuntime: context.historyRuntime,
       error,
       applyLoadedMessages: context.applyLoadedMessages,
@@ -171,7 +179,7 @@ function finalizeHistoryLoadExecution(context: HistoryLoadExecutionContext): voi
   );
   finalizeHistoryLoadUiState({
     set: context.set,
-    quiet: context.quiet,
+    scope: context.scope,
     historyLoadRunId: context.historyLoadRunId,
     historyRuntime: context.historyRuntime,
     loadingSafetyTimer: context.loadingSafetyTimer,
@@ -179,19 +187,19 @@ function finalizeHistoryLoadExecution(context: HistoryLoadExecutionContext): voi
 }
 
 export interface HistoryLoadExecutor {
-  execute: (quiet?: boolean) => Promise<void>;
+  execute: (request: ChatHistoryLoadRequest) => Promise<void>;
 }
 
 export function createHistoryLoadExecutor(deps: HistoryLoadExecutionDeps): HistoryLoadExecutor {
   return {
-    execute: async (quiet = false) => {
+    execute: async (request: ChatHistoryLoadRequest) => {
       const startedAt = nowMs();
       let failed = false;
       let recovered = false;
       let aborted = false;
       const executionContext = createHistoryLoadExecutionContext({
         deps,
-        quiet,
+        request,
       });
 
       try {
@@ -211,7 +219,8 @@ export function createHistoryLoadExecutor(deps: HistoryLoadExecutionDeps): Histo
         finalizeHistoryLoadExecution(executionContext);
         trackUiTiming('chat.history_load_total', Math.max(0, nowMs() - startedAt), {
           sessionKey: executionContext.requestedSessionKey,
-          quiet,
+          mode: executionContext.mode,
+          scope: executionContext.scope,
           outcome,
           strategy: deps.pipelineStrategyLabel ?? 'default',
         });
@@ -221,4 +230,3 @@ export function createHistoryLoadExecutor(deps: HistoryLoadExecutionDeps): Histo
 }
 
 export type { HistoryLoadPipelineContext, HistoryLoadPipelineStrategy } from './history-pipeline-types';
-

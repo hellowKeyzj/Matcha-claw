@@ -62,7 +62,8 @@ describe('chat history loading helpers', () => {
     const guard = createHistoryLoadAbortGuard({
       get,
       requestedSessionKey: 'agent:main:main',
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       historyLoadRunId: 1,
       historyRuntime,
       abortSignal: abortController.signal,
@@ -74,7 +75,8 @@ describe('chat history loading helpers', () => {
     const guardBySession = createHistoryLoadAbortGuard({
       get: changedSession.get,
       requestedSessionKey: 'agent:main:main',
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       historyLoadRunId: 1,
       historyRuntime,
     });
@@ -84,6 +86,30 @@ describe('chat history loading helpers', () => {
     expect(guard()).toBe(true);
 
     abortController.abort('test_abort');
+    expect(guard()).toBe(true);
+  });
+
+  it('background guard ignores current session changes and only follows explicit abort signal', () => {
+    const historyRuntime = createHistoryRuntimeHarness();
+    historyRuntime.nextHistoryLoadRunId();
+    const { get } = createStateHarness({ currentSessionKey: 'agent:foo:main' });
+    const abortController = new AbortController();
+
+    const guard = createHistoryLoadAbortGuard({
+      get,
+      requestedSessionKey: 'agent:main:main',
+      mode: 'quiet',
+      scope: 'background',
+      historyLoadRunId: 1,
+      historyRuntime,
+      abortSignal: abortController.signal,
+    });
+
+    expect(guard()).toBe(false);
+    historyRuntime.nextHistoryLoadRunId();
+    expect(guard()).toBe(false);
+
+    abortController.abort('background_cancelled');
     expect(guard()).toBe(true);
   });
 
@@ -104,7 +130,8 @@ describe('chat history loading helpers', () => {
       set: harness.set,
       get: harness.get,
       requestedSessionKey,
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       historyLoadRunId,
       historyRuntime,
       timeoutMs: 20,
@@ -121,7 +148,7 @@ describe('chat history loading helpers', () => {
     harness.set({ initialLoading: true, refreshing: true });
     finalizeHistoryLoadUiState({
       set: harness.set,
-      quiet: false,
+      scope: 'foreground',
       historyLoadRunId,
       historyRuntime,
       loadingSafetyTimer: timer,
@@ -130,4 +157,3 @@ describe('chat history loading helpers', () => {
     expect(harness.get().refreshing).toBe(false);
   });
 });
-

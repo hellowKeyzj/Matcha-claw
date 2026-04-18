@@ -22,11 +22,18 @@ export function createStoreUiActions(input: CreateStoreUiActionsInput): StoreUiA
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
 
     refresh: async () => {
-      const { loadHistory, loadSessions } = get();
-      await Promise.all([loadHistory(), loadSessions()]);
+      const { loadHistory, loadSessions, currentSessionKey } = get();
+      await Promise.all([
+        loadHistory({
+          sessionKey: currentSessionKey,
+          mode: 'active',
+          scope: 'foreground',
+          reason: 'manual_refresh',
+        }),
+        loadSessions(),
+      ]);
     },
 
     clearError: () => set((state) => reduceRuntimeOverlay(state, { type: 'clear_error' })),
   };
 }
-

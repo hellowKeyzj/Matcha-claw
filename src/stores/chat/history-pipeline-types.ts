@@ -1,5 +1,10 @@
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatStoreState, RawMessage } from './types';
+import type {
+  ChatHistoryLoadMode,
+  ChatHistoryLoadScope,
+  ChatStoreState,
+  RawMessage,
+} from './types';
 import type { HistoryWindowResult } from './history-fetch-helpers';
 
 export type ChatStoreSetFn = (
@@ -13,7 +18,8 @@ export interface HistoryLoadPipelineContext {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
-  quiet: boolean;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
   requestedSessionKey: string;
   abortSignal: AbortSignal;
   isAborted: () => boolean;
@@ -22,4 +28,3 @@ export interface HistoryLoadPipelineContext {
 }
 
 export type HistoryLoadPipelineStrategy = (context: HistoryLoadPipelineContext) => Promise<void>;
-

@@ -82,7 +82,11 @@ describe('chat history store actions', () => {
       readPipelineStrategyKey: () => null,
     });
 
-    await actions.loadHistory(true);
+    await actions.loadHistory({
+      sessionKey: 'agent:main:main',
+      mode: 'quiet',
+      scope: 'foreground',
+    });
 
     expect(resolveHistoryLoadPipelineStrategyMock).toHaveBeenCalledTimes(1);
     expect(createHistoryLoadExecutorMock).toHaveBeenCalledTimes(1);
@@ -100,7 +104,11 @@ describe('chat history store actions', () => {
       historyRuntime,
       pipelineStrategy: explicitStrategy,
     });
-    await actions.loadHistory(false);
+    await actions.loadHistory({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(resolveHistoryLoadPipelineStrategyMock).not.toHaveBeenCalled();
     expect(readHistoryLoadPipelineStrategyKeyMock).not.toHaveBeenCalled();
@@ -124,7 +132,11 @@ describe('chat history store actions', () => {
       historyRuntime,
       pipelineStrategyKey: 'probe_only',
     });
-    await actions.loadHistory(false);
+    await actions.loadHistory({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(resolveHistoryLoadPipelineStrategyMock).toHaveBeenCalledWith('probe_only');
     expect(readHistoryLoadPipelineStrategyKeyMock).not.toHaveBeenCalled();
@@ -147,7 +159,11 @@ describe('chat history store actions', () => {
       historyRuntime,
       readPipelineStrategyKey: () => 'active_only',
     });
-    await actions.loadHistory(false);
+    await actions.loadHistory({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(resolveHistoryLoadPipelineStrategyMock).toHaveBeenCalledWith('active_only');
     expect(readHistoryLoadPipelineStrategyKeyMock).not.toHaveBeenCalled();
@@ -158,4 +174,3 @@ describe('chat history store actions', () => {
     );
   });
 });
-
