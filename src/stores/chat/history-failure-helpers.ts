@@ -8,7 +8,12 @@ import {
   buildRenderMessagesFingerprint,
 } from './store-state-helpers';
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatStoreState, RawMessage } from './types';
+import type {
+  ChatHistoryLoadMode,
+  ChatHistoryLoadScope,
+  ChatStoreState,
+  RawMessage,
+} from './types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -21,7 +26,8 @@ interface HandleHistoryLoadFailureInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   requestedSessionKey: string;
-  quiet: boolean;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
   historyRuntime: StoreHistoryCache;
   error: unknown;
   applyLoadedMessages: (rawMessages: RawMessage[], thinkingLevel: string | null) => Promise<void>;
@@ -34,14 +40,16 @@ export async function handleHistoryLoadFailure(
     set,
     get,
     requestedSessionKey,
-    quiet,
+    mode,
+    scope,
     historyRuntime,
     error,
     applyLoadedMessages,
   } = input;
+  const quiet = mode === 'quiet';
 
   const fallbackMessages = await loadCronFallbackMessages(requestedSessionKey, CHAT_HISTORY_FULL_LIMIT);
-  if (get().currentSessionKey !== requestedSessionKey) {
+  if (scope === 'foreground' && get().currentSessionKey !== requestedSessionKey) {
     return;
   }
   if (fallbackMessages.length > 0) {
@@ -61,6 +69,9 @@ export async function handleHistoryLoadFailure(
   historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
   historyRuntime.historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
   historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, buildRenderMessagesFingerprint([]));
+  if (scope === 'background') {
+    return;
+  }
   set({
     snapshotReady: true,
     initialLoading: false,
@@ -72,4 +83,3 @@ export async function handleHistoryLoadFailure(
     error: error instanceof Error ? error.message : String(error),
   });
 }
-

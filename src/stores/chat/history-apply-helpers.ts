@@ -1,9 +1,15 @@
 import { hasNonToolAssistantContent } from './event-helpers';
 import { reduceRuntimeOverlay } from './overlay-reducer';
-import { toMs } from './store-state-helpers';
+import {
+  resolveSessionRuntime,
+  snapshotCurrentSessionRuntime,
+  toMs,
+} from './store-state-helpers';
 import type {
+  ChatHistoryLoadScope,
   ChatStoreState,
   RawMessage,
+  SessionRuntimeSnapshot,
 } from './types';
 
 interface ResolveHistoryActivityFlagsInput {
@@ -63,6 +69,7 @@ export function resolveHistoryActivityFlags(input: ResolveHistoryActivityFlagsIn
 
 interface BuildHistoryApplyPatchInput {
   requestedSessionKey: string;
+  scope: ChatHistoryLoadScope;
   finalMessages: RawMessage[];
   thinkingLevel: string | null;
   resolvedLabel: string | null;
@@ -81,16 +88,11 @@ export function buildHistoryApplyPatch(
   state: ChatStoreState,
   input: BuildHistoryApplyPatchInput,
 ): BuildHistoryApplyPatchOutput {
-  if (state.currentSessionKey !== input.requestedSessionKey) {
-    return {
-      patch: null,
-      didMessageListChange: false,
-    };
-  }
-
   const patch: Partial<ChatStoreState> = {};
   let changed = false;
   let didMessageListChange = false;
+  const isCurrentSession = state.currentSessionKey === input.requestedSessionKey;
+  const shouldUpdateForeground = isCurrentSession && input.scope === 'foreground';
 
   if (!state.snapshotReady) {
     patch.snapshotReady = true;
@@ -103,18 +105,36 @@ export function buildHistoryApplyPatch(
     };
     changed = true;
   }
-  if (state.initialLoading || state.refreshing) {
+  if (shouldUpdateForeground && (state.initialLoading || state.refreshing)) {
     patch.initialLoading = false;
     patch.refreshing = false;
     changed = true;
   }
-  if (input.previousRenderFingerprint !== input.renderFingerprint && state.messages !== input.finalMessages) {
+  if (
+    shouldUpdateForeground
+    && input.previousRenderFingerprint !== input.renderFingerprint
+    && state.messages !== input.finalMessages
+  ) {
     patch.messages = input.finalMessages;
     didMessageListChange = true;
     changed = true;
   }
-  if (state.thinkingLevel !== input.thinkingLevel) {
+  if (shouldUpdateForeground && state.thinkingLevel !== input.thinkingLevel) {
     patch.thinkingLevel = input.thinkingLevel;
+    changed = true;
+  }
+  const currentRuntimeSnapshot: SessionRuntimeSnapshot = isCurrentSession
+    ? snapshotCurrentSessionRuntime(state)
+    : resolveSessionRuntime(state.sessionRuntimeByKey[input.requestedSessionKey]);
+  const hasRuntimeEntry = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, input.requestedSessionKey);
+  if (!hasRuntimeEntry || currentRuntimeSnapshot.messages !== input.finalMessages) {
+    patch.sessionRuntimeByKey = {
+      ...state.sessionRuntimeByKey,
+      [input.requestedSessionKey]: {
+        ...currentRuntimeSnapshot,
+        messages: input.finalMessages,
+      },
+    };
     changed = true;
   }
   if (input.resolvedLabel && state.sessionLabels[input.requestedSessionKey] !== input.resolvedLabel) {
@@ -132,7 +152,7 @@ export function buildHistoryApplyPatch(
     changed = true;
   }
 
-  const shouldCheckRuntimeOverlay = (
+  const shouldCheckRuntimeOverlay = shouldUpdateForeground && (
     state.sending
     || state.pendingFinal
     || state.activeRunId != null
@@ -162,19 +182,31 @@ export function buildHistoryPreviewHydrationPatch(
   requestedSessionKey: string,
   finalMessages: RawMessage[],
 ): Partial<ChatStoreState> | ChatStoreState {
-  if (state.currentSessionKey !== requestedSessionKey) {
-    return state;
-  }
-  if (state.messages !== finalMessages) {
-    return state;
-  }
-  return {
-    messages: finalMessages.map((message) => (
-      message._attachedFiles
-        ? { ...message, _attachedFiles: message._attachedFiles.map((file) => ({ ...file })) }
-        : message
-    )),
-  };
-}
+  const hydratedMessages = finalMessages.map((message) => (
+    message._attachedFiles
+      ? { ...message, _attachedFiles: message._attachedFiles.map((file) => ({ ...file })) }
+      : message
+  ));
+  const patch: Partial<ChatStoreState> = {};
+  let changed = false;
 
+  const currentRuntime = state.sessionRuntimeByKey[requestedSessionKey];
+  if (currentRuntime && currentRuntime.messages === finalMessages) {
+    patch.sessionRuntimeByKey = {
+      ...state.sessionRuntimeByKey,
+      [requestedSessionKey]: {
+        ...currentRuntime,
+        messages: hydratedMessages,
+      },
+    };
+    changed = true;
+  }
+
+  if (state.currentSessionKey === requestedSessionKey && state.messages === finalMessages) {
+    patch.messages = hydratedMessages;
+    changed = true;
+  }
+
+  return changed ? patch : state;
+}
 

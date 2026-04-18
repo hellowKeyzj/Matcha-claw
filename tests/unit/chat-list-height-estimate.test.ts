@@ -31,5 +31,22 @@ describe('chat virtual row height estimate', () => {
     const fencedHeight = estimateMessageRowHeight(withFence);
     expect(fencedHeight).toBeGreaterThan(plainHeight);
   });
-});
 
+  it('uses wider line budget for CJK text to avoid under-estimation', () => {
+    const latin = 'a'.repeat(300);
+    const cjk = '你'.repeat(300);
+
+    const latinHeight = estimateMessageRowHeight(latin);
+    const cjkHeight = estimateMessageRowHeight(cjk);
+    expect(cjkHeight).toBeGreaterThan(latinHeight);
+  });
+
+  it('allows very long markdown rows to estimate beyond legacy hard cap', () => {
+    const longList = Array.from({ length: 40 }, (_, index) => (
+      `${index + 1}. 这是一个很长的中文列表项，用来模拟真实聊天里的大段结构化内容和换行开销`
+    )).join('\n');
+
+    const height = estimateMessageRowHeight(longList);
+    expect(height).toBeGreaterThan(1000);
+  });
+});

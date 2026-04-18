@@ -34,7 +34,12 @@ import {
   throwIfHistoryLoadAborted,
 } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatStoreState, RawMessage } from './types';
+import type {
+  ChatHistoryLoadMode,
+  ChatHistoryLoadScope,
+  ChatStoreState,
+  RawMessage,
+} from './types';
 
 const HISTORY_STAGE_FIRST_PAINT_THRESHOLD = 120;
 const HISTORY_STAGE_FIRST_PAINT_LIMIT = 48;
@@ -52,7 +57,8 @@ interface CreateApplyLoadedMessagesInput {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   requestedSessionKey: string;
-  quiet: boolean;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
   optimisticUserReconcileWindowMs: number;
@@ -66,11 +72,14 @@ export function createApplyLoadedMessagesPipeline(
     get,
     historyRuntime,
     requestedSessionKey,
-    quiet,
+    mode,
+    scope,
     abortSignal,
     shouldAbortHistoryProcessing,
     optimisticUserReconcileWindowMs,
   } = input;
+  const isQuiet = mode === 'quiet';
+  const isForeground = scope === 'foreground';
 
   return async (rawMessages: RawMessage[], thinkingLevel: string | null) => {
     const applyStartedAt = nowMs();
@@ -87,25 +96,28 @@ export function createApplyLoadedMessagesPipeline(
       const quickFingerprint = buildQuickRawHistoryFingerprint(rawMessages, thinkingLevel);
       const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
       const currentStateForQuickPath = get();
+      const isCurrentSession = currentStateForQuickPath.currentSessionKey === requestedSessionKey;
+      const currentRenderableMessages = isCurrentSession
+        ? currentStateForQuickPath.messages
+        : (currentStateForQuickPath.sessionRuntimeByKey[requestedSessionKey]?.messages ?? []);
       const hasReadySnapshot = (
         Boolean(currentStateForQuickPath.sessionReadyByKey[requestedSessionKey])
-        || currentStateForQuickPath.snapshotReady
+        || (isCurrentSession && currentStateForQuickPath.snapshotReady)
       );
       const canSkipWithQuickFingerprint = (
         previousQuickFingerprint === quickFingerprint
-        && currentStateForQuickPath.currentSessionKey === requestedSessionKey
-        && (currentStateForQuickPath.messages.length > 0 || hasReadySnapshot)
-        && currentStateForQuickPath.thinkingLevel === thinkingLevel
+        && (currentRenderableMessages.length > 0 || hasReadySnapshot)
+        && (!isCurrentSession || currentStateForQuickPath.thinkingLevel === thinkingLevel)
       );
       if (canSkipWithQuickFingerprint) {
         outcome = 'quick_skip';
         if (!historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)) {
           historyRuntime.historyRenderFingerprintBySession.set(
             requestedSessionKey,
-            buildRenderMessagesFingerprint(currentStateForQuickPath.messages),
+            buildRenderMessagesFingerprint(currentRenderableMessages),
           );
         }
-        if (!quiet && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
+        if (isForeground && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
           set((state) => {
             const alreadyReady = Boolean(state.sessionReadyByKey[requestedSessionKey]);
             if (alreadyReady) {
@@ -146,7 +158,7 @@ export function createApplyLoadedMessagesPipeline(
         if (abortSignal.aborted || shouldAbortHistoryProcessing()) {
           return;
         }
-        if (get().currentSessionKey !== requestedSessionKey) {
+        if (isForeground && get().currentSessionKey !== requestedSessionKey) {
           return;
         }
         const provisionalTail: RawMessage[] = [];
@@ -209,7 +221,8 @@ export function createApplyLoadedMessagesPipeline(
         });
       };
       const shouldStageFirstPaint = (
-        !quiet
+        isForeground && !isQuiet
+        && get().currentSessionKey === requestedSessionKey
         &&
         get().messages.length === 0
         && rawMessages.length > HISTORY_STAGE_FIRST_PAINT_THRESHOLD
@@ -226,7 +239,8 @@ export function createApplyLoadedMessagesPipeline(
       clearStageFirstPaintTimer();
       trackUiTiming('chat.history_apply_normalize', Math.max(0, nowMs() - normalizeStartedAt), {
         sessionKey: requestedSessionKey,
-        quiet,
+        mode,
+        scope,
         rows: rawMessages.length,
       });
       if (shouldAbortHistoryProcessing()) {
@@ -244,7 +258,7 @@ export function createApplyLoadedMessagesPipeline(
       let finalMessages = enrichedMessages;
       const runtimeState = get();
       const userMsgAt = runtimeState.lastUserMessageAt;
-      if (runtimeState.sending && userMsgAt) {
+      if (runtimeState.currentSessionKey === requestedSessionKey && runtimeState.sending && userMsgAt) {
         finalMessages = reconcileOptimisticUserInHistory({
           historyMessages: enrichedMessages,
           currentMessages: runtimeState.messages,
@@ -267,19 +281,29 @@ export function createApplyLoadedMessagesPipeline(
       const renderFingerprint = buildRenderMessagesFingerprint(finalMessages);
       const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
 
-      const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
-      const historyActivityFlags = resolveHistoryActivityFlags({
-        normalizedMessages,
-        isSendingNow,
-        pendingFinal,
-        lastUserMessageAt,
-      });
+      const activityRuntimeState = get();
+      const shouldResolveHistoryActivity = (
+        isForeground
+        && activityRuntimeState.currentSessionKey === requestedSessionKey
+      );
+      const historyActivityFlags = shouldResolveHistoryActivity
+        ? resolveHistoryActivityFlags({
+            normalizedMessages,
+            isSendingNow: activityRuntimeState.sending,
+            pendingFinal: activityRuntimeState.pendingFinal,
+            lastUserMessageAt: activityRuntimeState.lastUserMessageAt,
+          })
+        : {
+            hasRecentAssistantActivity: false,
+            hasRecentFinalAssistantMessage: false,
+          };
 
       const patchStartedAt = nowMs();
       let didMessageListChange = false;
       set((state) => {
         const applyPatchResult = buildHistoryApplyPatch(state, {
           requestedSessionKey,
+          scope,
           finalMessages,
           thinkingLevel,
           resolvedLabel,
@@ -293,13 +317,14 @@ export function createApplyLoadedMessagesPipeline(
       });
       trackUiTiming('chat.history_apply_patch', Math.max(0, nowMs() - patchStartedAt), {
         sessionKey: requestedSessionKey,
-        quiet,
+        mode,
+        scope,
         rows: finalMessages.length,
         changed: didMessageListChange,
       });
       historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
 
-      if (historyActivityFlags.hasRecentFinalAssistantMessage) {
+      if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
         maybeTrackFinalToHistoryVisible(requestedSessionKey, {
           rowCount: finalMessages.length,
           changed: didMessageListChange,
@@ -308,7 +333,7 @@ export function createApplyLoadedMessagesPipeline(
         clearHistoryPoll();
       }
 
-      if (didMessageListChange && hasPendingPreviewLoads(finalMessages)) {
+      if ((didMessageListChange || scope === 'background') && hasPendingPreviewLoads(finalMessages)) {
         void loadMissingPreviews(finalMessages).then((updated) => {
           if (!updated) {
             return;
@@ -335,13 +360,11 @@ export function createApplyLoadedMessagesPipeline(
       clearStageFirstPaintTimer();
       trackUiTiming('chat.history_apply_total', Math.max(0, nowMs() - applyStartedAt), {
         sessionKey: requestedSessionKey,
-        quiet,
+        mode,
+        scope,
         outcome,
         rawRows: rawMessages.length,
       });
     }
   };
 }
-
-
-

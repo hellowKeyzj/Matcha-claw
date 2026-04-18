@@ -96,7 +96,12 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
       setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL));
       return;
     }
-    void state.loadHistory(true);
+    void state.loadHistory({
+      sessionKey: state.currentSessionKey,
+      mode: 'quiet',
+      scope: 'foreground',
+      reason: 'send_poll',
+    });
     void state.syncPendingApprovals(state.currentSessionKey);
     setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL));
   };
@@ -185,4 +190,3 @@ export function commitStoreRunIdBound(params: CommitStoreRunIdBoundParams): void
   const { set, runId } = params;
   set((state) => reduceRuntimeOverlay(state, { type: 'send_run_bound', runId }));
 }
-

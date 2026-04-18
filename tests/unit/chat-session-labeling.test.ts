@@ -46,6 +46,15 @@ function setupGatewayRpc(messages: RawMessage[]): RpcMock {
   return rpcMock;
 }
 
+function loadCurrentHistory(mode: 'active' | 'quiet' = 'active') {
+  const state = useChatStore.getState();
+  return state.loadHistory({
+    sessionKey: state.currentSessionKey,
+    mode,
+    scope: 'foreground',
+  });
+}
+
 describe('chat session labeling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,7 +70,7 @@ describe('chat session labeling', () => {
       },
     ]);
 
-    await useChatStore.getState().loadHistory();
+    await loadCurrentHistory();
 
     const state = useChatStore.getState();
     expect(state.sessionLabels['agent:alpha:session-1']).toBe('本次讨论聚焦任务拆解与风险清单');
@@ -76,7 +85,7 @@ describe('chat session labeling', () => {
       },
     ]);
 
-    await useChatStore.getState().loadHistory();
+    await loadCurrentHistory();
 
     const state = useChatStore.getState();
     expect(state.sessionLabels['agent:alpha:session-1']).toBeUndefined();
@@ -98,7 +107,7 @@ describe('chat session labeling', () => {
       rpc: rpcMock,
     } as never);
 
-    const loadPromise = useChatStore.getState().loadHistory();
+    const loadPromise = loadCurrentHistory();
     useChatStore.setState({
       currentSessionKey: 'agent:beta:session-2',
       messages: [{ role: 'assistant', content: 'beta session content' }],
@@ -153,7 +162,7 @@ describe('chat session labeling', () => {
       rpc: rpcMock,
     } as never);
 
-    await useChatStore.getState().loadHistory(false);
+    await loadCurrentHistory('active');
 
     const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
     expect(userMessages).toHaveLength(1);
@@ -292,7 +301,7 @@ describe('chat session labeling', () => {
         rpc: rpcMock,
       } as never);
 
-      const loadPromise = useChatStore.getState().loadHistory(false);
+      const loadPromise = loadCurrentHistory('active');
       expect(useChatStore.getState().initialLoading || useChatStore.getState().refreshing).toBe(true);
 
       // 模拟加载中被其它入口改写当前会话（首屏并发常见路径）
@@ -354,7 +363,7 @@ describe('chat session labeling', () => {
       rpc: rpcMock,
     } as never);
 
-    await useChatStore.getState().loadHistory(false);
+    await loadCurrentHistory('active');
 
     expect(rpcMock).toHaveBeenCalledWith('sessions.get', {
       key: 'agent:alpha:session-1',

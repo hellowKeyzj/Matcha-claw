@@ -68,7 +68,12 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       type: 'final_without_message',
       completedSignal: Boolean(eventRunId),
     }));
-    get().loadHistory();
+    void get().loadHistory({
+      sessionKey: get().currentSessionKey,
+      mode: 'active',
+      scope: 'foreground',
+      reason: 'final_event_without_message',
+    });
     return;
   }
 
@@ -120,7 +125,12 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       type: 'final_history_refresh_requested',
       hasPendingApprovals,
     }));
-    void get().loadHistory(true);
+    void get().loadHistory({
+      sessionKey: get().currentSessionKey,
+      mode: 'quiet',
+      scope: 'foreground',
+      reason: 'final_event_reconcile',
+    });
   }
 }
 
@@ -168,7 +178,12 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
       if (state.sending && !state.streamingMessage) {
         clearHistoryPoll();
         set((current) => reduceRuntimeOverlay(current, { type: 'error_recovery_timeout' }));
-        state.loadHistory(true);
+        void state.loadHistory({
+          sessionKey: state.currentSessionKey,
+          mode: 'quiet',
+          scope: 'foreground',
+          reason: 'error_recovery_timeout',
+        });
       }
     }, ERROR_RECOVERY_GRACE_MS));
     return;
@@ -177,5 +192,4 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   clearHistoryPoll();
   set((state) => reduceRuntimeOverlay(state, { type: 'error_recovery_timeout' }));
 }
-
 

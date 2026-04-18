@@ -13,7 +13,12 @@ import {
   throwIfHistoryLoadAborted,
 } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatSession, ChatStoreState, RawMessage } from './types';
+import type {
+  ChatHistoryLoadScope,
+  ChatSession,
+  ChatStoreState,
+  RawMessage,
+} from './types';
 
 export const CHAT_HISTORY_FULL_LIMIT = 200;
 export const CHAT_HISTORY_ACTIVE_PROBE_LIMIT = 10;
@@ -39,6 +44,7 @@ interface CreateFetchHistoryWindowInput {
 interface RunHistoryPipelineInput {
   set: ChatStoreSetFn;
   getState: () => ChatStoreState;
+  scope: ChatHistoryLoadScope;
   requestedSessionKey: string;
   historyRuntime: StoreHistoryCache;
   abortSignal: AbortSignal;
@@ -68,7 +74,9 @@ function canShortCircuitByProbe(input: ProbeShortCircuitInput): boolean {
 
   const state = getState();
   const hasKnownFullSnapshot = historyRuntime.historyFingerprintBySession.has(requestedSessionKey);
-  const hasRenderableMessages = state.messages.length > 0;
+  const hasRenderableMessages = state.currentSessionKey === requestedSessionKey
+    ? state.messages.length > 0
+    : (state.sessionRuntimeByKey[requestedSessionKey]?.messages.length ?? 0) > 0;
   const canShortCircuit = (
     previousProbeFingerprint === probeFingerprint
     && hasKnownFullSnapshot
@@ -86,6 +94,14 @@ function canShortCircuitByProbe(input: ProbeShortCircuitInput): boolean {
     }));
   }
   return true;
+}
+
+function shouldSkipByForegroundSessionMismatch(
+  scope: ChatHistoryLoadScope,
+  state: ChatStoreState,
+  requestedSessionKey: string,
+): boolean {
+  return scope === 'foreground' && state.currentSessionKey !== requestedSessionKey;
 }
 
 async function measureHistoryStep<T>(
@@ -161,6 +177,7 @@ export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): P
   const {
     set,
     getState,
+    scope,
     requestedSessionKey,
     historyRuntime,
     abortSignal,
@@ -176,7 +193,7 @@ export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): P
     limit: CHAT_HISTORY_QUIET_PROBE_LIMIT,
   }, async () => fetchHistoryWindow(CHAT_HISTORY_QUIET_PROBE_LIMIT));
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (getState().currentSessionKey !== requestedSessionKey) {
+  if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
     return;
   }
   const probeFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
@@ -211,7 +228,7 @@ export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): P
     limit: CHAT_HISTORY_QUIET_FULL_LIMIT,
   }, async () => fetchHistoryWindow(CHAT_HISTORY_QUIET_FULL_LIMIT));
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (getState().currentSessionKey !== requestedSessionKey) {
+  if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
     return;
   }
   const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
@@ -234,6 +251,7 @@ export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): P
 
 export async function runActiveHistoryPipeline(input: RunHistoryPipelineInput): Promise<void> {
   const {
+    scope,
     requestedSessionKey,
     historyRuntime,
     abortSignal,
@@ -250,7 +268,7 @@ export async function runActiveHistoryPipeline(input: RunHistoryPipelineInput): 
     limit: CHAT_HISTORY_ACTIVE_PROBE_LIMIT,
   }, async () => fetchHistoryWindow(CHAT_HISTORY_ACTIVE_PROBE_LIMIT));
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (getState().currentSessionKey !== requestedSessionKey) {
+  if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
     return;
   }
   const probeFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
@@ -285,7 +303,7 @@ export async function runActiveHistoryPipeline(input: RunHistoryPipelineInput): 
       limit: CHAT_HISTORY_FULL_LIMIT,
     }, async () => fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT));
     throwIfHistoryLoadAborted(abortSignal, isAborted);
-    if (getState().currentSessionKey !== requestedSessionKey) {
+    if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
       return;
     }
     const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
@@ -310,4 +328,3 @@ export async function runActiveHistoryPipeline(input: RunHistoryPipelineInput): 
     }
   }
 }
-

@@ -1,4 +1,5 @@
 import { hostApiFetch } from '@/lib/host-api';
+import { trackUiEvent } from '@/lib/telemetry';
 import { useGatewayStore } from '../gateway';
 import {
   getCanonicalPrefixFromSessions,
@@ -327,6 +328,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       trimSessionRuntimeSnapshots(nextSessionRuntimeByKey, [currentSessionKey, key]);
       const hasTargetRuntimeSnapshot = Object.prototype.hasOwnProperty.call(nextSessionRuntimeByKey, key);
       const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
+      const hasHistoryFingerprint = historyRuntime.historyFingerprintBySession.has(key);
       const targetPendingApprovals = state.pendingApprovalsBySession[key] ?? [];
       const targetRuntimePatch = reduceRuntimeOverlay(state, {
         type: 'session_runtime_restored',
@@ -335,7 +337,15 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       });
       const targetSessionReady = Boolean(state.sessionReadyByKey[key])
         || hasTargetRuntimeSnapshot
-        || historyRuntime.historyFingerprintBySession.has(key);
+        || hasHistoryFingerprint;
+      trackUiEvent('chat.session_switch_start', {
+        fromSessionKey: currentSessionKey,
+        toSessionKey: key,
+        targetSessionReady,
+        hasTargetRuntimeSnapshot,
+        hasHistoryFingerprint,
+        targetSending: targetRuntime.sending,
+      });
       const nextSessionReadyByKey = (() => {
         const next = { ...state.sessionReadyByKey };
         if (leavingEmpty) {
@@ -376,7 +386,12 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             return;
           }
           if (!current.streamingMessage) {
-            void current.loadHistory(true);
+            void current.loadHistory({
+              sessionKey: current.currentSessionKey,
+              mode: 'quiet',
+              scope: 'foreground',
+              reason: 'switch_session_poll',
+            });
           }
           setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL));
         };
@@ -387,11 +402,21 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       scheduleNextFrame(() => {
         if (shouldDeferQuietReload) {
           scheduleIdleTask(() => {
-            void get().loadHistory(true);
+            void get().loadHistory({
+              sessionKey: key,
+              mode: 'quiet',
+              scope: 'foreground',
+              reason: 'switch_session_idle_reconcile',
+            });
           });
           return;
         }
-        void get().loadHistory(shouldQuietReload);
+        void get().loadHistory({
+          sessionKey: key,
+          mode: shouldQuietReload ? 'quiet' : 'active',
+          scope: 'foreground',
+          reason: 'switch_session_reconcile',
+        });
       });
     },
 
@@ -451,7 +476,12 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             currentSessionKey: next?.key ?? defaultSessionKey,
           }));
           if (next) {
-            get().loadHistory();
+            void get().loadHistory({
+              sessionKey: next.key,
+              mode: 'active',
+              scope: 'foreground',
+              reason: 'delete_session_promote_next',
+            });
           }
         } else {
           set((state) => ({
@@ -557,5 +587,3 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     },
   };
 }
-
-

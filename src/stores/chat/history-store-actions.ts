@@ -12,7 +12,10 @@ import {
 } from './history-pipeline-strategies';
 import type { HistoryLoadPipelineStrategy } from './history-pipeline-types';
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatStoreState } from './types';
+import type {
+  ChatHistoryLoadRequest,
+  ChatStoreState,
+} from './types';
 
 const OPTIMISTIC_USER_RECONCILE_WINDOW_MS = 15_000;
 
@@ -83,11 +86,21 @@ export function createStoreHistoryActions(
   }
 
   return {
-    loadHistory: (quiet = false) => {
+    loadHistory: (request: ChatHistoryLoadRequest) => {
+      const normalizedSessionKey = request.sessionKey.trim();
+      if (!normalizedSessionKey) {
+        return Promise.resolve();
+      }
+      const normalizedRequest: ChatHistoryLoadRequest = {
+        ...request,
+        sessionKey: normalizedSessionKey,
+      };
       const selection = resolvePipelineStrategySelection();
       trackUiEvent('chat.history_load_strategy_selected', {
-        sessionKey: get().currentSessionKey,
-        quiet,
+        sessionKey: normalizedRequest.sessionKey,
+        mode: normalizedRequest.mode,
+        scope: normalizedRequest.scope,
+        reason: normalizedRequest.reason ?? '',
         strategy: selection.strategyKey,
         source: selection.source,
       });
@@ -99,8 +112,7 @@ export function createStoreHistoryActions(
         optimisticUserReconcileWindowMs: OPTIMISTIC_USER_RECONCILE_WINDOW_MS,
         pipelineStrategy: selection.strategy,
         pipelineStrategyLabel: selection.strategyKey,
-      }).execute(quiet);
+      }).execute(normalizedRequest);
     },
   };
 }
-

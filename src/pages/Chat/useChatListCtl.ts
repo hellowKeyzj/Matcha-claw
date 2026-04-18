@@ -7,25 +7,38 @@ import { useChatWindowExpand, type RenderWindowExpandCommand } from './useWindow
 const CHAT_STICKY_BOTTOM_THRESHOLD_PX = 120;
 const CHAT_VIRTUAL_ESTIMATE_HEIGHT_PX = 156;
 const CHAT_VIRTUAL_OVERSCAN = 16;
-const CHAT_VIRTUAL_TEXT_CHARS_PER_LINE = 56;
+const CHAT_VIRTUAL_TEXT_UNITS_PER_LINE = 30;
 const CHAT_VIRTUAL_TEXT_LINE_HEIGHT_PX = 22;
 const CHAT_VIRTUAL_MESSAGE_BASE_HEIGHT_PX = 94;
 const CHAT_VIRTUAL_ROW_MIN_HEIGHT_PX = 88;
-const CHAT_VIRTUAL_ROW_MAX_HEIGHT_PX = 760;
+const CHAT_VIRTUAL_ROW_MAX_HEIGHT_PX = 3_200;
 const CHAT_VIRTUAL_IMAGE_BLOCK_HEIGHT_PX = 184;
 const CHAT_VIRTUAL_TOOL_BLOCK_HEIGHT_PX = 78;
-const CHAT_VIRTUAL_TEXT_LINE_CLAMP = 22;
+const CHAT_VIRTUAL_TEXT_LINE_CLAMP = 38;
 const CHAT_VIRTUAL_MARKDOWN_LIST_LINE_BONUS_PX = 7;
 const CHAT_VIRTUAL_MARKDOWN_CODE_FENCE_BONUS_PX = 46;
 const CHAT_VIRTUAL_MARKDOWN_QUOTE_LINE_BONUS_PX = 4;
 const CHAT_VIRTUAL_MARKDOWN_TABLE_LINE_BONUS_PX = 6;
+const CHAT_VIRTUAL_CJK_OR_FULLWIDTH_RE = /[\p{Unified_Ideograph}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF00-\uFFEF]/u;
 
 function clampHeight(value: number): number {
   return Math.min(CHAT_VIRTUAL_ROW_MAX_HEIGHT_PX, Math.max(CHAT_VIRTUAL_ROW_MIN_HEIGHT_PX, value));
 }
 
+function estimateTextDisplayUnits(text: string): number {
+  if (!text) {
+    return 0;
+  }
+  let units = 0;
+  for (const char of text) {
+    // CJK/full-width glyphs consume visibly wider inline space than latin chars.
+    units += CHAT_VIRTUAL_CJK_OR_FULLWIDTH_RE.test(char) ? 1.9 : 1;
+  }
+  return units;
+}
+
 function inspectMessageContent(content: unknown): {
-  textLength: number;
+  textDisplayUnits: number;
   logicalLineCount: number;
   markdownListLineCount: number;
   markdownCodeFenceCount: number;
@@ -41,7 +54,7 @@ function inspectMessageContent(content: unknown): {
     const markdownQuoteLineCount = (text.match(/^\s*>\s+/gm) ?? []).length;
     const markdownTableLineCount = (text.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
     return {
-      textLength: text.length,
+      textDisplayUnits: estimateTextDisplayUnits(text),
       logicalLineCount,
       markdownListLineCount,
       markdownCodeFenceCount,
@@ -60,7 +73,7 @@ function inspectMessageContent(content: unknown): {
   }
   if (!Array.isArray(content)) {
     return {
-      textLength: 0,
+      textDisplayUnits: 0,
       logicalLineCount: 1,
       markdownListLineCount: 0,
       markdownCodeFenceCount: 0,
@@ -71,7 +84,7 @@ function inspectMessageContent(content: unknown): {
     };
   }
 
-  let textLength = 0;
+  let textDisplayUnits = 0;
   let logicalLineCount = 0;
   let markdownListLineCount = 0;
   let markdownCodeFenceCount = 0;
@@ -87,7 +100,7 @@ function inspectMessageContent(content: unknown): {
     const type = typeof item.type === 'string' ? item.type : '';
     if (type === 'text' && typeof item.text === 'string') {
       const textMetrics = inspectText(item.text);
-      textLength += textMetrics.textLength;
+      textDisplayUnits += textMetrics.textDisplayUnits;
       logicalLineCount += textMetrics.logicalLineCount;
       markdownListLineCount += textMetrics.markdownListLineCount;
       markdownCodeFenceCount += textMetrics.markdownCodeFenceCount;
@@ -97,7 +110,7 @@ function inspectMessageContent(content: unknown): {
     }
     if (type === 'thinking' && typeof item.thinking === 'string') {
       const textMetrics = inspectText(item.thinking);
-      textLength += textMetrics.textLength;
+      textDisplayUnits += textMetrics.textDisplayUnits;
       logicalLineCount += textMetrics.logicalLineCount;
       markdownListLineCount += textMetrics.markdownListLineCount;
       markdownCodeFenceCount += textMetrics.markdownCodeFenceCount;
@@ -115,7 +128,7 @@ function inspectMessageContent(content: unknown): {
     }
     if (typeof item.text === 'string') {
       const textMetrics = inspectText(item.text);
-      textLength += textMetrics.textLength;
+      textDisplayUnits += textMetrics.textDisplayUnits;
       logicalLineCount += textMetrics.logicalLineCount;
       markdownListLineCount += textMetrics.markdownListLineCount;
       markdownCodeFenceCount += textMetrics.markdownCodeFenceCount;
@@ -125,7 +138,7 @@ function inspectMessageContent(content: unknown): {
   }
 
   return {
-    textLength,
+    textDisplayUnits,
     logicalLineCount: Math.max(1, logicalLineCount),
     markdownListLineCount,
     markdownCodeFenceCount,
@@ -138,7 +151,7 @@ function inspectMessageContent(content: unknown): {
 
 export function estimateMessageRowHeight(content: unknown, extraBaseHeight = 0): number {
   const {
-    textLength,
+    textDisplayUnits,
     logicalLineCount,
     markdownListLineCount,
     markdownCodeFenceCount,
@@ -147,7 +160,7 @@ export function estimateMessageRowHeight(content: unknown, extraBaseHeight = 0):
     imageBlocks,
     toolBlocks,
   } = inspectMessageContent(content);
-  const textLinesByWidth = Math.ceil(textLength / CHAT_VIRTUAL_TEXT_CHARS_PER_LINE);
+  const textLinesByWidth = Math.ceil(textDisplayUnits / CHAT_VIRTUAL_TEXT_UNITS_PER_LINE);
   const textLines = Math.max(1, textLinesByWidth, logicalLineCount);
   const textHeight = Math.min(CHAT_VIRTUAL_TEXT_LINE_CLAMP, textLines) * CHAT_VIRTUAL_TEXT_LINE_HEIGHT_PX;
   const markdownStructureBonus = (

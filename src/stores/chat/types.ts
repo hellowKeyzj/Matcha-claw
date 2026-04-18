@@ -169,6 +169,16 @@ export interface ChatSendAttachment {
   preview: string | null;
 }
 
+export type ChatHistoryLoadMode = 'active' | 'quiet';
+export type ChatHistoryLoadScope = 'foreground' | 'background';
+
+export interface ChatHistoryLoadRequest {
+  sessionKey: string;
+  mode: ChatHistoryLoadMode;
+  scope: ChatHistoryLoadScope;
+  reason?: string;
+}
+
 export interface ChatStoreActions {
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
@@ -176,7 +186,7 @@ export interface ChatStoreActions {
   newSession: (agentId?: string) => void;
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
-  loadHistory: (quiet?: boolean) => Promise<void>;
+  loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
   handleApprovalRequested: (payload: Record<string, unknown>) => void;

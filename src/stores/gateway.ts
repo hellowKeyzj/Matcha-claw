@@ -215,7 +215,12 @@ function maybeRefreshChatHistoryFromRuntimeEvent(
   if (!matchesCurrentSession && !matchesActiveRun && event.sessionKey != null) {
     return;
   }
-  void state.loadHistory(true);
+  void state.loadHistory({
+    sessionKey: state.currentSessionKey,
+    mode: 'quiet',
+    scope: 'foreground',
+    reason: 'gateway_runtime_phase_refresh',
+  });
 }
 
 function handleChatDomainEvent(event: ChatDomainEvent): void {

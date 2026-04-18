@@ -101,7 +101,11 @@ describe('chat history load execution', () => {
       optimisticUserReconcileWindowMs: 15_000,
     });
 
-    await executor.execute(false);
+    await executor.execute({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(runActiveHistoryPipelineMock).toHaveBeenCalledTimes(1);
     expect(runQuietHistoryPipelineMock).not.toHaveBeenCalled();
@@ -121,7 +125,11 @@ describe('chat history load execution', () => {
       optimisticUserReconcileWindowMs: 15_000,
     });
 
-    await executor.execute(true);
+    await executor.execute({
+      sessionKey: 'agent:main:main',
+      mode: 'quiet',
+      scope: 'foreground',
+    });
 
     expect(runQuietHistoryPipelineMock).toHaveBeenCalledTimes(1);
     expect(runActiveHistoryPipelineMock).not.toHaveBeenCalled();
@@ -142,7 +150,11 @@ describe('chat history load execution', () => {
       optimisticUserReconcileWindowMs: 15_000,
     });
 
-    await executor.execute(false);
+    await executor.execute({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(handleHistoryLoadFailureMock).toHaveBeenCalledTimes(1);
     expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
@@ -163,7 +175,11 @@ describe('chat history load execution', () => {
       pipelineStrategy: strategySpy,
     });
 
-    await executor.execute(false);
+    await executor.execute({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(strategySpy).toHaveBeenCalledTimes(1);
     expect(runActiveHistoryPipelineMock).not.toHaveBeenCalled();
@@ -190,10 +206,13 @@ describe('chat history load execution', () => {
       pipelineStrategy: strategySpy,
     });
 
-    await executor.execute(false);
+    await executor.execute({
+      sessionKey: 'agent:main:main',
+      mode: 'active',
+      scope: 'foreground',
+    });
 
     expect(handleHistoryLoadFailureMock).not.toHaveBeenCalled();
     expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
   });
 });
-
