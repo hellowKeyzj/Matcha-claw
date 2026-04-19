@@ -7,7 +7,7 @@ interface SyncExecutionStateMutations {
 
 interface ExecutionSyncActionSuccess {
   ok: true;
-  action: 'set_execution_enabled' | 'set_enabled_plugin_ids' | 'restart_runtime_host';
+  action: 'set_execution_enabled' | 'restart_runtime_host';
   payload?: unknown;
 }
 
@@ -39,7 +39,6 @@ function asStringArray(value: unknown): string[] | null {
 export function isExecutionSyncRoute(method: string, route: string): boolean {
   const routePath = normalizeRoutePath(route);
   if (method === 'PUT' && routePath === '/api/plugins/runtime/execution') return true;
-  if (method === 'PUT' && routePath === '/api/plugins/runtime/enabled-plugins') return true;
   if (method === 'POST' && routePath === '/api/plugins/runtime/restart') return true;
   return false;
 }
@@ -62,21 +61,6 @@ export function buildExecutionSyncAction(
       ok: true,
       action: 'set_execution_enabled',
       payload: { enabled: payload.enabled },
-    };
-  }
-  if (method === 'PUT' && routePath === '/api/plugins/runtime/enabled-plugins') {
-    const pluginIds = isRecord(payload) ? asStringArray(payload.pluginIds) : null;
-    if (!pluginIds) {
-      return {
-        ok: false,
-        status: 400,
-        error: { code: 'BAD_REQUEST', message: 'pluginIds 必须是 string[]' },
-      };
-    }
-    return {
-      ok: true,
-      action: 'set_enabled_plugin_ids',
-      payload: { pluginIds },
     };
   }
   if (method === 'POST' && routePath === '/api/plugins/runtime/restart') {
@@ -105,9 +89,5 @@ export function syncExecutionStateFromPayload(
   }
   if (typeof execution.pluginExecutionEnabled === 'boolean') {
     mutations.setPluginExecutionEnabled(execution.pluginExecutionEnabled);
-  }
-  const pluginIds = asStringArray(execution.enabledPluginIds);
-  if (pluginIds) {
-    mutations.setEnabledPluginIds(pluginIds);
   }
 }

@@ -309,63 +309,6 @@ describe('runtime-host internal routes', () => {
     });
   });
 
-  it('execution-sync set_enabled_plugin_ids 会调用 setEnabledPluginIds', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({
-      version: 1,
-      action: 'set_enabled_plugin_ids',
-      payload: { pluginIds: ['task-manager'] },
-    });
-    const setExecutionEnabled = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
-    }));
-    const setEnabledPluginIds = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['task-manager'],
-    }));
-    const restart = vi.fn(async () => {});
-
-    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
-    const handled = await handleRuntimeHostInternalRoutes(
-      {
-        method: 'POST',
-        headers: {
-          'x-runtime-host-dispatch-token': 'test-token',
-        },
-      } as unknown as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
-      {
-        runtimeHost: {
-          getInternalDispatchToken: () => 'test-token',
-          setExecutionEnabled,
-          setEnabledPluginIds,
-          restart,
-          getExecutionState: () => ({
-            pluginExecutionEnabled: true,
-            enabledPluginIds: ['task-manager'],
-          }),
-        },
-      } as never,
-    );
-
-    expect(handled).toBe(true);
-    expect(setExecutionEnabled).not.toHaveBeenCalled();
-    expect(setEnabledPluginIds).toHaveBeenCalledWith(['task-manager']);
-    expect(restart).not.toHaveBeenCalled();
-    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {
-      version: 1,
-      success: true,
-      status: 200,
-      data: {
-        execution: {
-          pluginExecutionEnabled: true,
-          enabledPluginIds: ['task-manager'],
-        },
-      },
-    });
-  });
-
   it('execution-sync restart_runtime_host 会调用 restart', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       version: 1,

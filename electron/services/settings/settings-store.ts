@@ -56,7 +56,6 @@ export interface AppSettings {
 
   // Plugin Center
   pluginExecutionEnabled: boolean;
-  runtimeHostEnabledPluginIds: string[];
 
   // Security
   securityPreset: 'strict' | 'balanced' | 'relaxed';
@@ -115,7 +114,6 @@ const defaults: AppSettings = {
 
   // Plugin Center
   pluginExecutionEnabled: true,
-  runtimeHostEnabledPluginIds: [],
 
   // Security
   securityPreset: 'balanced',

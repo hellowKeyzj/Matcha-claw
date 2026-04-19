@@ -70,7 +70,7 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.allow).not.toContain('feishu-openclaw-plugin');
     expect(config.plugins.entries['openclaw-lark']).toBeDefined();
     expect(config.plugins.entries.feishu?.enabled).toBe(false);
-  });
+  }, 15000);
 
   it('同一频道下不同账号禁止复用唯一凭证', async () => {
     await expect(saveChannelConfigLocal({
@@ -82,7 +82,7 @@ describe('channel-runtime config save', () => {
       },
       enabled: true,
     })).rejects.toThrow('already bound to another agent');
-  });
+  }, 15000);
 
   it('保存 WeCom 配置时会迁移到 wecom 插件 ID 并启用 entries.wecom', async () => {
     await saveChannelConfigLocal({

@@ -84,9 +84,11 @@ export function createTailLocalBusinessHandlers(
     },
     {
       key: 'plugin_runtime',
-      handle: (request) => handlePluginRuntimeRoute(request.method, request.routePath, {
+      handle: (request) => handlePluginRuntimeRoute(request.method, request.routePath, request.payload, {
         buildLocalPluginsRuntimePayload: context.buildLocalPluginsRuntimePayload,
         refreshPluginCatalog: context.refreshPluginCatalog,
+        setEnabledPluginIds: context.setEnabledPluginIds,
+        requestParentShellAction: context.requestParentShellAction,
         pluginExecutionEnabled: context.getPluginExecutionEnabled(),
         enabledPluginIds: context.getEnabledPluginIds(),
         getPluginCatalog: context.getPluginCatalog,

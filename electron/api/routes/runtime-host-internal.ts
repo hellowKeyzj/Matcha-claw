@@ -11,11 +11,11 @@ const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
 
 type RuntimeHostExecutionSyncAction =
   | 'set_execution_enabled'
-  | 'set_enabled_plugin_ids'
   | 'restart_runtime_host';
 
 type RuntimeHostShellAction =
   | 'shell_open_path'
+  | 'gateway_restart'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
@@ -89,24 +89,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function asStringArray(value: unknown): string[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-  if (!value.every((item) => typeof item === 'string')) {
-    return null;
-  }
-  return value;
-}
-
 function isExecutionSyncAction(value: unknown): value is RuntimeHostExecutionSyncAction {
   return value === 'set_execution_enabled'
-    || value === 'set_enabled_plugin_ids'
     || value === 'restart_runtime_host';
 }
 
 function isShellAction(value: unknown): value is RuntimeHostShellAction {
   return value === 'shell_open_path'
+    || value === 'gateway_restart'
     || value === 'provider_oauth_start'
     || value === 'provider_oauth_cancel'
     || value === 'provider_oauth_submit'
@@ -188,14 +178,6 @@ async function handleExecutionSyncRoute(
         return true;
       }
       await ctx.runtimeHost.setExecutionEnabled(payload.enabled);
-    } else if (record.action === 'set_enabled_plugin_ids') {
-      const payload = asRecord(record.payload);
-      const pluginIds = payload ? asStringArray(payload.pluginIds) : null;
-      if (!pluginIds) {
-        sendTransportError(res, 400, 'BAD_REQUEST', 'pluginIds 必须是 string[]');
-        return true;
-      }
-      await ctx.runtimeHost.setEnabledPluginIds(pluginIds);
     } else {
       await ctx.runtimeHost.restart();
     }

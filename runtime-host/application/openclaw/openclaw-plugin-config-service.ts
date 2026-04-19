@@ -1,9 +1,23 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { access, readdir, readFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
-import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+import {
+  getOpenClawConfigDir,
+  getOpenClawDirPath,
+  readOpenClawConfigJson,
+  writeOpenClawConfigJson,
+} from '../../api/storage/paths';
 import { normalizePluginIds } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
+import { getDefaultPluginDiscoveryRoots, PLUGIN_MANIFEST_NAMES } from '../../plugin-engine/plugin-location-rules';
+import { normalizePluginId } from '../../plugin-engine/plugin-id';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
+
+const LEGACY_PLUGIN_ID_MAP: Record<string, string> = {
+  'feishu-openclaw-plugin': 'openclaw-lark',
+  'wecom-openclaw-plugin': 'wecom',
+  qqbot: 'openclaw-qqbot',
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -21,75 +35,186 @@ async function pathExists(pathname: string): Promise<boolean> {
 function readPluginAllowlist(config: Record<string, unknown>): string[] {
   const plugins = isRecord(config.plugins) ? config.plugins : {};
   const allow = Array.isArray(plugins.allow) ? plugins.allow : [];
-  return normalizePluginIds(
+  return normalizeCanonicalPluginIds(
     allow.filter((item): item is string => typeof item === 'string'),
   );
 }
 
-function readPluginLoadPaths(config: Record<string, unknown>): string[] {
+function normalizeCanonicalPluginIds(pluginIds: readonly string[]): string[] {
+  const normalized = normalizePluginIds(
+    pluginIds.map((pluginId) => LEGACY_PLUGIN_ID_MAP[pluginId] ?? pluginId),
+  );
+  if (!normalized.includes('openclaw-lark')) {
+    return normalized;
+  }
+  return normalized.filter((pluginId) => pluginId !== 'feishu');
+}
+
+function readPluginDenylist(config: Record<string, unknown>): string[] {
   const plugins = isRecord(config.plugins) ? config.plugins : {};
-  const load = isRecord(plugins.load) ? plugins.load : {};
-  const rawPaths = Array.isArray(load.paths) ? load.paths : [];
-  const next: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of rawPaths) {
-    if (typeof entry !== 'string') {
-      continue;
-    }
-    const normalized = entry.trim();
-    if (!normalized || seen.has(normalized)) {
-      continue;
-    }
-    seen.add(normalized);
-    next.push(normalized);
-  }
-  return next;
+  const deny = Array.isArray(plugins.deny) ? plugins.deny : [];
+  return normalizeCanonicalPluginIds(
+    deny.filter((item): item is string => typeof item === 'string'),
+  );
 }
 
-function normalizePathForCompare(pathname: string): string {
-  return resolve(pathname).replace(/\\/g, '/').toLowerCase();
-}
+function cloneNormalizedPluginEntries(config: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const plugins = isRecord(config.plugins) ? config.plugins : {};
+  const currentEntries = isRecord(plugins.entries) ? plugins.entries : {};
+  const nextEntries: Record<string, Record<string, unknown>> = {};
 
-function isBundledPluginLoadPath(pathname: string): boolean {
-  if (!isAbsolute(pathname)) {
-    return false;
-  }
-  const normalized = normalizePathForCompare(pathname);
-  if (normalized.includes('/node_modules/openclaw/extensions')) {
-    return true;
-  }
-  const localBuildPluginsRoot = normalizePathForCompare(join(process.cwd(), 'build', 'openclaw-plugins'));
-  return normalized === localBuildPluginsRoot || normalized.startsWith(`${localBuildPluginsRoot}/`);
-}
-
-function sanitizePluginLoadPaths(paths: readonly string[]): string[] {
-  const next: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of paths) {
-    const trimmed = entry.trim();
-    if (!trimmed || isBundledPluginLoadPath(trimmed)) {
+  for (const [pluginId, rawEntry] of Object.entries(currentEntries)) {
+    if (!isRecord(rawEntry)) {
       continue;
     }
-    const key = isAbsolute(trimmed) ? normalizePathForCompare(trimmed) : trimmed;
-    if (seen.has(key)) {
+    nextEntries[pluginId] = { ...rawEntry };
+  }
+
+  for (const [legacyPluginId, canonicalPluginId] of Object.entries(LEGACY_PLUGIN_ID_MAP)) {
+    const legacyEntry = nextEntries[legacyPluginId];
+    if (!legacyEntry) {
       continue;
     }
-    seen.add(key);
-    next.push(trimmed);
+    if (!nextEntries[canonicalPluginId]) {
+      nextEntries[canonicalPluginId] = { ...legacyEntry };
+    }
+    delete nextEntries[legacyPluginId];
   }
-  return next;
+
+  return nextEntries;
+}
+
+type DiscoveredPluginEnableState = {
+  readonly id: string;
+  readonly source: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
+  readonly enabledByDefault: boolean;
+};
+
+function resolveManifestPathSync(pluginDir: string): string | null {
+  for (const fileName of PLUGIN_MANIFEST_NAMES) {
+    const manifestPath = join(pluginDir, fileName);
+    if (existsSync(manifestPath)) {
+      return manifestPath;
+    }
+  }
+  return null;
+}
+
+function resolveDiscoverySourceForRoot(root: string): DiscoveredPluginEnableState['source'] {
+  const normalizedRoot = resolve(root);
+  if (normalizedRoot === resolve(join(getOpenClawDirPath(), 'dist', 'extensions'))) {
+    return 'bundled';
+  }
+  if (normalizedRoot === resolve(join(getOpenClawConfigDir(), 'extensions'))) {
+    return 'openclaw-extension';
+  }
+  if (normalizedRoot === resolve(join(process.env.USERPROFILE || process.env.HOME || '', '.matchaclaw', 'plugins'))) {
+    return 'matchaclaw-extension';
+  }
+  return 'workspace';
+}
+
+function readDiscoveredPluginStateSync(): DiscoveredPluginEnableState[] {
+  const discovered = new Map<string, DiscoveredPluginEnableState>();
+
+  for (const root of getDefaultPluginDiscoveryRoots()) {
+    let entries: Array<import('node:fs').Dirent>;
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    const source = resolveDiscoverySourceForRoot(root);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const pluginDir = join(root, entry.name);
+      const manifestPath = resolveManifestPathSync(pluginDir);
+      if (!manifestPath) {
+        continue;
+      }
+
+      let manifest: Record<string, unknown> | null = null;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        manifest = null;
+      }
+
+      const pluginId = normalizePluginId(manifest?.id)
+        ?? normalizePluginId(manifest?.name)
+        ?? entry.name;
+      if (discovered.has(pluginId)) {
+        continue;
+      }
+
+      discovered.set(pluginId, {
+        id: pluginId,
+        source,
+        enabledByDefault: manifest?.enabledByDefault === true,
+      });
+    }
+  }
+
+  return [...discovered.values()];
+}
+
+export function resolveEnabledPluginIdsFromDiscoveredState(
+  config: Record<string, unknown>,
+  discoveredPlugins: readonly DiscoveredPluginEnableState[],
+): string[] {
+  const plugins = isRecord(config.plugins) ? config.plugins : {};
+  if (plugins.enabled === false) {
+    return [];
+  }
+
+  const allow = readPluginAllowlist(config);
+  const allowSet = new Set(allow);
+  const denySet = new Set(readPluginDenylist(config));
+  const entries = cloneNormalizedPluginEntries(config);
+  const enabledPluginIds: string[] = [];
+
+  for (const plugin of discoveredPlugins) {
+    if (denySet.has(plugin.id)) {
+      continue;
+    }
+
+    const entry = entries[plugin.id];
+    if (entry?.enabled === false) {
+      continue;
+    }
+
+    const explicitlyAllowed = allowSet.has(plugin.id);
+    if (plugin.source === 'workspace' && !explicitlyAllowed && entry?.enabled !== true) {
+      continue;
+    }
+    if (allow.length > 0 && !explicitlyAllowed) {
+      continue;
+    }
+    if (entry?.enabled === true) {
+      enabledPluginIds.push(plugin.id);
+      continue;
+    }
+    if (plugin.source === 'bundled') {
+      if (plugin.enabledByDefault) {
+        enabledPluginIds.push(plugin.id);
+      }
+      continue;
+    }
+
+    enabledPluginIds.push(plugin.id);
+  }
+
+  return normalizePluginIds(enabledPluginIds);
 }
 
 export function readEnabledPluginIdsFromOpenClawConfig(): string[] {
-  const config = readOpenClawConfigJson();
-  const allow = readPluginAllowlist(config);
-  const plugins = isRecord(config.plugins) ? config.plugins : {};
-  const entries = isRecord(plugins.entries) ? plugins.entries : {};
-
-  return allow.filter((pluginId) => {
-    const entry = isRecord(entries[pluginId]) ? entries[pluginId] : null;
-    return !entry || entry.enabled !== false;
-  });
+  return resolveEnabledPluginIdsFromDiscoveredState(
+    readOpenClawConfigJson(),
+    readDiscoveredPluginStateSync(),
+  );
 }
 
 function cloneConfig(config: Record<string, unknown>): Record<string, unknown> {
@@ -160,27 +285,6 @@ async function discoverPluginSkillIdsByPluginId(): Promise<Map<string, string[]>
   return result;
 }
 
-async function discoverOpenClawLoadPathByPluginId(): Promise<Map<string, string>> {
-  const discovery = createPluginDiscovery();
-  const discoveredPlugins = await discovery.discover();
-  const result = new Map<string, string>();
-
-  for (const plugin of discoveredPlugins) {
-    if (plugin.platform !== 'openclaw') {
-      continue;
-    }
-    if (plugin.source === 'openclaw-extension') {
-      continue;
-    }
-    if (!plugin.rootDir.trim()) {
-      continue;
-    }
-    result.set(plugin.id, plugin.rootDir);
-  }
-
-  return result;
-}
-
 function cloneSkillEntries(config: Record<string, unknown>): Record<string, Record<string, unknown>> {
   const skills = isRecord(config.skills) ? config.skills : {};
   const currentSkillEntries = isRecord(skills.entries) ? skills.entries : {};
@@ -228,18 +332,17 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
   currentConfig: Record<string, unknown>,
   pluginIds: readonly string[],
 ): Promise<Record<string, unknown>> {
-  const normalizedPluginIds = normalizePluginIds(pluginIds);
+  const normalizedPluginIds = normalizeCanonicalPluginIds(pluginIds);
   const enabledSet = new Set(normalizedPluginIds);
   const config = cloneConfig(currentConfig);
   const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
-  const currentEntries = isRecord(plugins.entries) ? plugins.entries : {};
-  const nextEntries: Record<string, Record<string, unknown>> = {};
+  const nextEntries = cloneNormalizedPluginEntries(config);
 
-  for (const [pluginId, rawEntry] of Object.entries(currentEntries)) {
-    if (!isRecord(rawEntry)) {
-      continue;
-    }
-    nextEntries[pluginId] = { ...rawEntry };
+  if (enabledSet.has('openclaw-lark') && isRecord(nextEntries.feishu) && nextEntries.feishu.enabled !== false) {
+    nextEntries.feishu = {
+      ...nextEntries.feishu,
+      enabled: false,
+    };
   }
 
   for (const pluginId of normalizedPluginIds) {
@@ -265,34 +368,6 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
 
   plugins.allow = normalizedPluginIds;
   plugins.entries = nextEntries;
-  const nextLoadPaths = sanitizePluginLoadPaths(readPluginLoadPaths(config));
-  const loadPathByPluginId = await discoverOpenClawLoadPathByPluginId();
-  const seenLoadPaths = new Set(
-    nextLoadPaths.map((entry) => isAbsolute(entry) ? normalizePathForCompare(entry) : entry),
-  );
-  for (const pluginId of normalizedPluginIds) {
-    const loadPath = loadPathByPluginId.get(pluginId);
-    if (!loadPath) {
-      continue;
-    }
-    const normalizedPath = loadPath.trim();
-    if (!normalizedPath || isBundledPluginLoadPath(normalizedPath)) {
-      continue;
-    }
-    const dedupeKey = isAbsolute(normalizedPath)
-      ? normalizePathForCompare(normalizedPath)
-      : normalizedPath;
-    if (seenLoadPaths.has(dedupeKey)) {
-      continue;
-    }
-    seenLoadPaths.add(dedupeKey);
-    nextLoadPaths.push(normalizedPath);
-  }
-  if (nextLoadPaths.length > 0) {
-    const load = isRecord(plugins.load) ? { ...plugins.load } : {};
-    load.paths = nextLoadPaths;
-    plugins.load = load;
-  }
 
   const skills = isRecord(config.skills) ? { ...config.skills } : {};
   const nextSkillEntries = cloneSkillEntries(config);

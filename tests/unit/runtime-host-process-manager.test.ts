@@ -1,8 +1,8 @@
 import { join } from 'node:path';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 
@@ -32,7 +32,7 @@ async function startParentDispatchServer(
   token: string,
   options?: {
     onExecutionSync?: (body: {
-      action: 'set_execution_enabled' | 'set_enabled_plugin_ids' | 'restart_runtime_host';
+      action: 'set_execution_enabled' | 'restart_runtime_host';
       payload?: unknown;
     }) => {
       status: number;
@@ -40,6 +40,7 @@ async function startParentDispatchServer(
     };
     onShellAction?: (body: {
       action:
+        | 'gateway_restart'
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
         | 'provider_oauth_submit'
@@ -100,6 +101,7 @@ async function startParentDispatchServer(
     if (req.url === '/internal/runtime-host/shell-actions') {
       const shellActionBody = parsedBody as {
         action:
+          | 'gateway_restart'
           | 'provider_oauth_start'
           | 'provider_oauth_cancel'
           | 'provider_oauth_submit'
@@ -141,7 +143,7 @@ async function startParentDispatchServer(
     }
 
     const executionSyncBody = parsedBody as {
-      action: 'set_execution_enabled' | 'set_enabled_plugin_ids' | 'restart_runtime_host';
+      action: 'set_execution_enabled' | 'restart_runtime_host';
       payload?: unknown;
     };
     executionSyncRequestCount += 1;
@@ -420,6 +422,26 @@ async function startGatewayRpcServer(
 }
 
 describe('runtime-host process manager', () => {
+  let openClawConfigDir = '';
+  let previousOpenClawConfigDir: string | undefined;
+
+  beforeEach(() => {
+    previousOpenClawConfigDir = process.env.OPENCLAW_CONFIG_DIR;
+    openClawConfigDir = mkdtempSync(join(tmpdir(), 'runtime-host-process-config-'));
+    process.env.OPENCLAW_CONFIG_DIR = openClawConfigDir;
+  });
+
+  afterEach(() => {
+    if (previousOpenClawConfigDir === undefined) {
+      delete process.env.OPENCLAW_CONFIG_DIR;
+    } else {
+      process.env.OPENCLAW_CONFIG_DIR = previousOpenClawConfigDir;
+    }
+    if (openClawConfigDir) {
+      rmSync(openClawConfigDir, { recursive: true, force: true });
+    }
+  });
+
   it('enabled mode can start, restart and stop child process', async () => {
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -581,6 +603,14 @@ describe('runtime-host process manager', () => {
   });
 
   it('workbench/bootstrap 在子进程本地返回按 catalog+execution 计算的插件状态', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['security-core'],
+        entries: {
+          'security-core': { enabled: true },
+        },
+      },
+    }, null, 2));
     const port = createPort(12);
     const parentApiPort = createPort(39);
     const token = 'test-runtime-host-dispatch-token-bootstrap-local-state';
@@ -714,8 +744,7 @@ describe('runtime-host process manager', () => {
 
       expect(configDirResponse.status).toBe(200);
       expect(configDirPayload.success).toBe(true);
-      expect(typeof configDirPayload.data).toBe('string');
-      expect(configDirPayload.data?.toLowerCase()).toContain('.openclaw');
+      expect(configDirPayload.data).toBe(openClawConfigDir);
 
       expect(statusResponse.status).toBe(200);
       expect(statusPayload).toMatchObject({
@@ -3031,6 +3060,15 @@ describe('runtime-host process manager', () => {
   });
 
   it('plugins/runtime GET is handled in child and reflects injected execution state', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['security-core', 'task-manager'],
+        entries: {
+          'security-core': { enabled: true },
+          'task-manager': { enabled: true },
+        },
+      },
+    }, null, 2));
     const port = createPort(6);
     const parentApiPort = createPort(33);
     const token = 'test-runtime-host-dispatch-token-plugins-runtime';
@@ -3091,6 +3129,14 @@ describe('runtime-host process manager', () => {
   });
 
   it('plugins/catalog GET is handled in child and returns enabled projection', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['security-core'],
+        entries: {
+          'security-core': { enabled: true },
+        },
+      },
+    }, null, 2));
     const port = createPort(7);
     const parentApiPort = createPort(34);
     const token = 'test-runtime-host-dispatch-token-plugins-catalog';
@@ -3163,7 +3209,78 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('local write routes use execution-sync endpoint and update local runtime state', async () => {
+  it('启动时会把配置里已启用的 managed 插件安装到 extensions', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['task-manager', 'security-core'],
+        entries: {
+          'task-manager': { enabled: true },
+          'security-core': { enabled: true },
+        },
+      },
+    }, null, 2));
+    const port = createPort(41);
+    const parentApiPort = createPort(42);
+    const token = 'test-runtime-host-dispatch-token-managed-plugin-install-on-startup';
+    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
+
+    const manager = createRuntimeHostProcessManager({
+      scriptPath,
+      port,
+      startTimeoutMs: 8000,
+      parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
+      parentDispatchToken: token,
+    });
+
+    try {
+      await manager.start();
+
+      expect(existsSync(join(openClawConfigDir, 'extensions', 'task-manager', 'openclaw.plugin.json'))).toBe(true);
+      expect(existsSync(join(openClawConfigDir, 'extensions', 'security-core', 'openclaw.plugin.json'))).toBe(true);
+
+      const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: 1,
+          method: 'GET',
+          route: '/api/plugins/catalog',
+        }),
+      });
+      const payload = await response.json() as {
+        success: boolean;
+        status: number;
+        data?: {
+          success?: boolean;
+          plugins?: Array<{ id: string; enabled: boolean }>;
+        };
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.data?.plugins?.find((plugin) => plugin.id === 'task-manager')).toMatchObject({
+        id: 'task-manager',
+        enabled: true,
+      });
+      expect(payload.data?.plugins?.find((plugin) => plugin.id === 'security-core')).toMatchObject({
+        id: 'security-core',
+        enabled: true,
+      });
+      expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
+    } finally {
+      await manager.stop();
+      await parentDispatchServer.close();
+    }
+  });
+
+  it('execution 路由仍走 execution-sync，且不会改写本地 enabled plugin 列表', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['security-core'],
+        entries: {
+          'security-core': { enabled: true },
+        },
+      },
+    }, null, 2));
     const port = createPort(8);
     const parentApiPort = createPort(35);
     const token = 'test-runtime-host-dispatch-token-execution-sync';
@@ -3252,7 +3369,7 @@ describe('runtime-host process manager', () => {
         data: {
           execution: {
             pluginExecutionEnabled: false,
-            enabledPluginIds: [],
+            enabledPluginIds: ['security-core'],
           },
         },
       });
@@ -3284,7 +3401,7 @@ describe('runtime-host process manager', () => {
         data: {
           execution: {
             pluginExecutionEnabled: false,
-            enabledPluginIds: [],
+            enabledPluginIds: ['security-core'],
           },
         },
       });
@@ -3296,33 +3413,30 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('enabled-plugins 与 restart 写路径走 execution-sync 并同步本地状态', async () => {
+  it('enabled-plugins 在子进程本地改写 OpenClaw 配置后会触发 gateway_restart', async () => {
     const port = createPort(9);
     const parentApiPort = createPort(36);
     const token = 'test-runtime-host-dispatch-token-enabled-plugins-restart';
-    const executionSyncBodies: Array<{
-      action: 'set_execution_enabled' | 'set_enabled_plugin_ids' | 'restart_runtime_host';
+    const shellActionBodies: Array<{
+      action:
+        | 'gateway_restart'
+        | 'provider_oauth_start'
+        | 'provider_oauth_cancel'
+        | 'provider_oauth_submit'
+        | 'channel_whatsapp_start'
+        | 'channel_whatsapp_cancel'
+        | 'channel_openclaw_weixin_start'
+        | 'channel_openclaw_weixin_cancel'
+        | 'license_get_gate'
+        | 'license_get_stored_key'
+        | 'license_validate'
+        | 'license_revalidate'
+        | 'license_clear';
       payload?: unknown;
     }> = [];
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
-      onExecutionSync: (body) => {
-        executionSyncBodies.push(body);
-        if (body.action === 'set_enabled_plugin_ids') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                execution: {
-                  pluginExecutionEnabled: true,
-                  enabledPluginIds: ['task-manager'],
-                },
-              },
-            },
-          };
-        }
+      onShellAction: (body) => {
+        shellActionBodies.push(body);
         return {
           status: 200,
           payload: {
@@ -3382,17 +3496,6 @@ describe('runtime-host process manager', () => {
       });
       expect(setEnabledPluginsResponse.status).toBe(200);
 
-      const restartResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          method: 'POST',
-          route: '/api/plugins/runtime/restart',
-        }),
-      });
-      expect(restartResponse.status).toBe(200);
-
       const runtimeResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3423,21 +3526,18 @@ describe('runtime-host process manager', () => {
           },
         },
       });
-      expect(executionSyncBodies.map((item) => ({
+      expect(shellActionBodies.map((item) => ({
         action: item.action,
         payload: item.payload,
       }))).toEqual([
         {
-          action: 'set_enabled_plugin_ids',
-          payload: { pluginIds: ['task-manager'] },
-        },
-        {
-          action: 'restart_runtime_host',
+          action: 'gateway_restart',
           payload: undefined,
         },
       ]);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
-      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(2);
+      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
+      expect(parentDispatchServer.getShellActionRequestCount()).toBe(1);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
@@ -3482,10 +3582,10 @@ describe('runtime-host process manager', () => {
 
       expect(response.status).toBe(400);
       expect(payload).toMatchObject({
-        success: false,
+        success: true,
         status: 400,
-        error: {
-          code: 'BAD_REQUEST',
+        data: {
+          success: false,
         },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);

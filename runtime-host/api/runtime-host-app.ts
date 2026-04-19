@@ -18,9 +18,14 @@ import { createParentTransportClient } from './dispatch/parent-transport';
 import { createOpenClawBridge, createGatewayClient } from '../openclaw-bridge';
 import { createRuntimeHostPlatformRoot } from './platform/runtime-root';
 import {
-  discoverPluginCatalogLocal,
   mergePluginCatalogSnapshots,
 } from '../application/plugins/catalog';
+import {
+  ensureConfiguredManagedPluginsInstalled,
+  listEnabledPluginIdsFromConfig,
+  listRuntimePluginCatalog,
+  setRuntimeEnabledPluginIds,
+} from '../application/plugins/runtime-plugin-service';
 import { createRuntimeLogger } from '../shared/logger';
 
 const logger = createRuntimeLogger('runtime-host-app');
@@ -36,9 +41,26 @@ function readRequiredEnv(name: string): string {
 const parentApiBaseUrl = readRequiredEnv('MATCHACLAW_RUNTIME_HOST_PARENT_API_BASE_URL').replace(/\/+$/, '');
 const parentDispatchToken = readRequiredEnv('MATCHACLAW_RUNTIME_HOST_PARENT_DISPATCH_TOKEN');
 const startedAtMs = Date.now();
+const fallbackEnabledPluginIds = (() => {
+  try {
+    const rawEnabledPluginIds = process.env.MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS;
+    if (!rawEnabledPluginIds) {
+      return [] as string[];
+    }
+    const parsed = JSON.parse(rawEnabledPluginIds);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [] as string[];
+  }
+})();
 let lifecycle = 'running';
 let pluginExecutionEnabled = process.env.MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED !== '0';
-let enabledPluginIds: string[] = [];
+let enabledPluginIds: string[] = listEnabledPluginIdsFromConfig();
+if (enabledPluginIds.length === 0 && fallbackEnabledPluginIds.length > 0) {
+  enabledPluginIds = [...fallbackEnabledPluginIds];
+}
 let pluginCatalog: Array<Record<string, any>> = [];
 const transportStats = {
   totalDispatchRequests: 0,
@@ -90,18 +112,6 @@ const gatewayClient = createGatewayClient({
 const openclawBridge = createOpenClawBridge(gatewayClient);
 const platformRuntime = createRuntimeHostPlatformRoot(openclawBridge);
 
-try {
-  const rawEnabledPluginIds = process.env.MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS;
-  if (rawEnabledPluginIds) {
-    const parsed = JSON.parse(rawEnabledPluginIds);
-    if (Array.isArray(parsed)) {
-      enabledPluginIds = parsed.filter((item) => typeof item === 'string');
-    }
-  }
-} catch {
-  enabledPluginIds = [];
-}
-
 let injectedPluginCatalog: Array<Record<string, any>> = [];
 try {
   const rawPluginCatalog = process.env.MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG;
@@ -128,11 +138,14 @@ try {
 pluginCatalog = [...injectedPluginCatalog];
 
 async function refreshPluginCatalog() {
+  const enabledFromConfig = listEnabledPluginIdsFromConfig();
   try {
-    const discoveredCatalog = await discoverPluginCatalogLocal();
+    const discoveredCatalog = await listRuntimePluginCatalog();
     pluginCatalog = mergePluginCatalogSnapshots(discoveredCatalog, injectedPluginCatalog);
+    enabledPluginIds = enabledFromConfig.length > 0 ? enabledFromConfig : [...fallbackEnabledPluginIds];
   } catch (error) {
     pluginCatalog = [...injectedPluginCatalog];
+    enabledPluginIds = enabledFromConfig.length > 0 ? enabledFromConfig : [...fallbackEnabledPluginIds];
     logger.warn('failed to refresh plugin catalog', error);
   }
 }
@@ -179,6 +192,10 @@ const tryHandleLocalBusinessDispatch = createLocalBusinessDispatcher({
   platformRuntime: platformRuntime.facade,
   requestParentShellAction,
   mapParentTransportResponse,
+  setEnabledPluginIds: async (pluginIds) => {
+    enabledPluginIds = await setRuntimeEnabledPluginIds(pluginIds);
+    return enabledPluginIds;
+  },
 });
 
 const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -214,8 +231,8 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       setPluginExecutionEnabled: (enabled) => {
         pluginExecutionEnabled = enabled;
       },
-      setEnabledPluginIds: (pluginIds) => {
-        enabledPluginIds = pluginIds;
+      setEnabledPluginIds: async (pluginIds) => {
+        enabledPluginIds = await setRuntimeEnabledPluginIds(pluginIds);
       },
     });
     return;
@@ -247,11 +264,16 @@ export function startRuntimeHostProcess() {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  void refreshPluginCatalog()
-    .finally(() => {
+  void ensureConfiguredManagedPluginsInstalled()
+    .then(async () => {
+      await refreshPluginCatalog();
       server.listen(port, '127.0.0.1', () => {
         logger.info(`listening on http://127.0.0.1:${port}`);
       });
+    })
+    .catch((error) => {
+      logger.error('failed to initialize runtime plugins', error);
+      process.exit(1);
     });
 
   return server;
