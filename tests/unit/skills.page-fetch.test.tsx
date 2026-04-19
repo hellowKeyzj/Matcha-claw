@@ -143,4 +143,27 @@ describe('skills page fetch behavior', () => {
     const clippedViewport = container.querySelector('.max-h-\\[56vh\\].overflow-y-auto');
     expect(clippedViewport).toBeNull();
   });
+
+  it('已安装列表只展示可用技能，并移除冗余的可用筛选', async () => {
+    skillsState.skills = [
+      { id: 'available-skill', name: 'Available Skill', description: 'ready', enabled: true, isBundled: true, eligible: true },
+      { id: 'missing-skill', name: 'Missing Skill', description: 'missing deps', enabled: true, isBundled: true, eligible: false },
+      { id: 'unknown-skill', name: 'Unknown Skill', description: 'unknown eligibility', enabled: true, isBundled: false },
+    ];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Available Skill')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Missing Skill')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unknown Skill')).not.toBeInTheDocument();
+    expect(screen.queryByText('filter.eligible')).not.toBeInTheDocument();
+  });
 });

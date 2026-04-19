@@ -695,8 +695,6 @@ interface SkillGridCardViewModel {
   blockedLabel?: string;
   missingSummaryLabel?: string;
   configurableLabel: string;
-  sourceLabel: string;
-  baseDirText: string;
 }
 
 interface SkillGridCardProps extends SkillGridCardViewModel {
@@ -704,6 +702,8 @@ interface SkillGridCardProps extends SkillGridCardViewModel {
   onToggleSkill: (skillId: string, enabled: boolean) => void;
   onUninstallSkill: (skillId: string) => void;
 }
+
+type InstalledSkillSourceFilter = 'all' | 'built-in' | 'marketplace';
 
 const SkillGridCard = memo(function SkillGridCard({
   skillId,
@@ -721,8 +721,6 @@ const SkillGridCard = memo(function SkillGridCard({
   blockedLabel,
   missingSummaryLabel,
   configurableLabel,
-  sourceLabel,
-  baseDirText,
   onOpenDetail,
   onToggleSkill,
   onUninstallSkill
@@ -789,12 +787,6 @@ const SkillGridCard = memo(function SkillGridCard({
         <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
           {skillDescription}
         </p>
-        <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
-          <Badge variant="secondary" className="px-1.5 py-0 h-5 text-[10px] font-medium bg-black/5 dark:bg-white/10 border-0 shadow-none">
-            {sourceLabel}
-          </Badge>
-          <span className="truncate font-mono">{baseDirText}</span>
-        </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {version && (
             <Badge variant="outline" className="text-xs">
@@ -851,7 +843,7 @@ export function Skills() {
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
   const isAllTabActive = activeTab === 'all';
-  const [selectedSource, setSelectedSource] = useState<'all' | 'eligible' | 'built-in' | 'marketplace'>('eligible');
+  const [selectedSource, setSelectedSource] = useState<InstalledSkillSourceFilter>('all');
   const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(
     () => import.meta.env.MODE === 'test' || skills.length > 0 || snapshotReady,
   );
@@ -907,15 +899,19 @@ export function Skills() {
 
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
+  const visibleInstalledSkills = useMemo(
+    () => safeSkills.filter((skill) => skill.eligible === true),
+    [safeSkills],
+  );
   const skillById = useMemo(() => {
     return new Map(safeSkills.map((skill) => [skill.id, skill] as const));
   }, [safeSkills]);
-  const deferredSkills = useDeferredValue(safeSkills);
+  const deferredVisibleInstalledSkills = useDeferredValue(visibleInstalledSkills);
   const deferredSearchQuery = useDeferredValue(isAllTabActive ? searchQuery : '');
   const deferredSelectedSource = useDeferredValue(isAllTabActive ? selectedSource : 'all');
   const skillsForView = useMemo(
-    () => (isAllTabActive && skillsHeavyContentReady ? deferredSkills : []),
-    [deferredSkills, isAllTabActive, skillsHeavyContentReady],
+    () => (isAllTabActive && skillsHeavyContentReady ? deferredVisibleInstalledSkills : []),
+    [deferredVisibleInstalledSkills, isAllTabActive, skillsHeavyContentReady],
   );
 
   const filteredSkills = useMemo(() => {
@@ -930,9 +926,7 @@ export function Skills() {
         || (skill.author || '').toLowerCase().includes(q);
 
       let matchesSource = true;
-      if (deferredSelectedSource === 'eligible') {
-        matchesSource = skill.eligible === true;
-      } else if (deferredSelectedSource === 'built-in') {
+      if (deferredSelectedSource === 'built-in') {
         matchesSource = !!skill.isBundled;
       } else if (deferredSelectedSource === 'marketplace') {
         matchesSource = !skill.isBundled;
@@ -981,23 +975,20 @@ export function Skills() {
           ? t('availability.missingPrefix', { items: missingSummary })
           : undefined,
         configurableLabel,
-        sourceLabel: resolveSkillSourceLabel(skill, t),
-        baseDirText: skill.baseDir || t('detail.pathUnavailable'),
       };
     });
   }, [filteredSkills, t]);
 
   const sourceStats = useMemo(() => {
     if (!isAllTabActive) {
-      return { all: 0, eligible: 0, builtIn: 0, marketplace: 0 };
+      return { all: 0, builtIn: 0, marketplace: 0 };
     }
     return {
-      all: safeSkills.length,
-      eligible: safeSkills.filter((s) => s.eligible === true).length,
-      builtIn: safeSkills.filter((s) => s.isBundled).length,
-      marketplace: safeSkills.filter((s) => !s.isBundled).length,
+      all: visibleInstalledSkills.length,
+      builtIn: visibleInstalledSkills.filter((skill) => skill.isBundled).length,
+      marketplace: visibleInstalledSkills.filter((skill) => !skill.isBundled).length,
     };
-  }, [isAllTabActive, safeSkills]);
+  }, [isAllTabActive, visibleInstalledSkills]);
 
   const bulkToggleVisible = useCallback(async (enable: boolean) => {
     const candidates = filteredSkills.filter((skill) => !skill.isCore && skill.enabled !== enable);
@@ -1279,7 +1270,7 @@ export function Skills() {
                 size="sm"
                 onClick={() => setSelectedSource('all')}
               >
-                All ({sourceStats.all})
+                {t('filter.all', { count: sourceStats.all })}
               </Button>
               <Button
                 variant={selectedSource === 'built-in' ? 'default' : 'outline'}
@@ -1289,15 +1280,6 @@ export function Skills() {
               >
                 <Puzzle className="h-3 w-3" />
                 {t('filter.builtIn', { count: sourceStats.builtIn })}
-              </Button>
-              <Button
-                variant={selectedSource === 'eligible' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setSelectedSource('eligible')}
-                className="gap-2"
-              >
-                <CheckCircle2 className="h-3 w-3" />
-                {t('filter.eligible', { count: sourceStats.eligible })}
               </Button>
               <Button
                 variant={selectedSource === 'marketplace' ? 'default' : 'outline'}
