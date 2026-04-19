@@ -18,6 +18,7 @@ export interface LocalBusinessDispatchContext {
   buildTransportStatsSnapshot: () => Record<string, number>;
   buildLocalPluginsRuntimePayload: () => unknown;
   refreshPluginCatalog: () => Promise<void>;
+  setEnabledPluginIds: (pluginIds: string[]) => Promise<string[]>;
   getPluginExecutionEnabled: () => boolean;
   getEnabledPluginIds: () => string[];
   getPluginCatalog: () => Array<Record<string, any>>;

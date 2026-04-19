@@ -23,7 +23,6 @@ export const SETTINGS_DEFAULTS = {
   enabledSkills: [],
   disabledSkills: [],
   pluginExecutionEnabled: true,
-  runtimeHostEnabledPluginIds: [],
   securityPreset: 'balanced',
   securityPolicyVersion: 1,
   securityPolicyByAgent: {},

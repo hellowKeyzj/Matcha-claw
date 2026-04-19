@@ -1,5 +1,6 @@
 import { DEFAULT_ACCOUNT_ID } from '../../api/common/constants';
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
+import { ensureRuntimePluginEnabled } from '../plugins/runtime-plugin-service';
 import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 
 const FEISHU_PLUGIN_ID = 'openclaw-lark';
@@ -231,73 +232,6 @@ export async function listConfiguredChannelsLocal() {
   return [...new Set(channels)];
 }
 
-function ensurePluginAllowlistLocal(config: Record<string, any>, channelType: string) {
-  const pluginId = EXTERNAL_PLUGIN_CHANNEL_ID_BY_TYPE[channelType];
-  if (!pluginId) {
-    return;
-  }
-
-  if (!isRecord(config.plugins)) {
-    config.plugins = {};
-  }
-  if (!Array.isArray(config.plugins.allow)) {
-    config.plugins.allow = [];
-  }
-  const allowSet = new Set(config.plugins.allow.filter((item: unknown) => typeof item === 'string'));
-  if (channelType === 'feishu') {
-    allowSet.delete('feishu');
-    allowSet.delete(LEGACY_FEISHU_PLUGIN_ID);
-  }
-  if (channelType === 'wecom') {
-    allowSet.delete(LEGACY_WECOM_PLUGIN_ID);
-  }
-  if (channelType === 'qqbot') {
-    allowSet.delete(LEGACY_QQBOT_PLUGIN_ID);
-  }
-  allowSet.add(pluginId);
-  config.plugins.allow = [...allowSet];
-
-  if (!isRecord(config.plugins.entries)) {
-    config.plugins.entries = {};
-  }
-  const entries = config.plugins.entries as Record<string, Record<string, unknown>>;
-  if (channelType === 'feishu') {
-    if (isRecord(entries[LEGACY_FEISHU_PLUGIN_ID])) {
-      entries[pluginId] = isRecord(entries[pluginId]) ? entries[pluginId] : { ...entries[LEGACY_FEISHU_PLUGIN_ID] };
-      delete entries[LEGACY_FEISHU_PLUGIN_ID];
-    }
-    if (isRecord(entries.feishu) && entries.feishu.enabled !== false) {
-      entries.feishu = {
-        ...entries.feishu,
-        enabled: false,
-      };
-    }
-    if (!isRecord(entries[pluginId])) {
-      entries[pluginId] = {};
-    }
-  }
-  if (channelType === 'wecom') {
-    if (isRecord(entries[LEGACY_WECOM_PLUGIN_ID])) {
-      entries[pluginId] = isRecord(entries[pluginId]) ? entries[pluginId] : { ...entries[LEGACY_WECOM_PLUGIN_ID] };
-      delete entries[LEGACY_WECOM_PLUGIN_ID];
-    }
-    if (!isRecord(entries[pluginId])) {
-      entries[pluginId] = {};
-    }
-    entries[pluginId].enabled = true;
-  }
-  if (channelType === 'qqbot') {
-    if (isRecord(entries[LEGACY_QQBOT_PLUGIN_ID])) {
-      entries[pluginId] = isRecord(entries[pluginId]) ? entries[pluginId] : { ...entries[LEGACY_QQBOT_PLUGIN_ID] };
-      delete entries[LEGACY_QQBOT_PLUGIN_ID];
-    }
-  }
-  if (!isRecord(entries[pluginId])) {
-    entries[pluginId] = {};
-  }
-  entries[pluginId].enabled = true;
-}
-
 function normalizeCredentialString(value: unknown): string {
   if (typeof value !== 'string') {
     return '';
@@ -348,20 +282,24 @@ function getChannelAccountConfigLocal(channelSection: Record<string, any>, accou
 }
 
 export async function saveChannelConfigLocal(input: unknown) {
+  if (!isRecord(input)) {
+    throw new Error('Invalid channel config payload');
+  }
+  const channelType = typeof input.channelType === 'string' ? input.channelType.trim() : '';
+  if (!channelType) {
+    throw new Error('channelType is required');
+  }
+  const externalPluginId = EXTERNAL_PLUGIN_CHANNEL_ID_BY_TYPE[channelType];
+  if (externalPluginId) {
+    await ensureRuntimePluginEnabled(externalPluginId);
+  }
+
   await withOpenClawConfigLock(async () => {
-    if (!isRecord(input)) {
-      throw new Error('Invalid channel config payload');
-    }
-    const channelType = typeof input.channelType === 'string' ? input.channelType.trim() : '';
-    if (!channelType) {
-      throw new Error('channelType is required');
-    }
     const accountId = typeof input.accountId === 'string' && input.accountId.trim()
       ? input.accountId.trim()
       : DEFAULT_ACCOUNT_ID;
     const config = readOpenClawConfigJson();
     cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
-    ensurePluginAllowlistLocal(config, channelType);
     syncBuiltinChannelsWithPluginAllowlistLocal(config, [channelType]);
     if (!isRecord(config.channels)) {
       config.channels = {};

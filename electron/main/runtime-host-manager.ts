@@ -27,12 +27,17 @@ import { getPort } from '../utils/config';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { shell } from 'electron';
+import {
+  readEnabledPluginIdsFromOpenClawConfig,
+  syncEnabledPluginIdsToOpenClawConfig,
+} from '../../runtime-host/application/openclaw/openclaw-plugin-config-service';
 
 type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 type RuntimeHealthLifecycle = 'idle' | 'booting' | 'running' | 'stopped' | 'error';
 export type RuntimeHostShellAction =
   | 'shell_open_path'
+  | 'gateway_restart'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
@@ -214,7 +219,6 @@ export function createRuntimeHostManager(
   const gatewayEventBus = new EventEmitter();
   const hostApiPort = getPort('MATCHACLAW_HOST_API');
   const packagedOpenClawDir = resolvePackagedResourcePath('openclaw');
-  const packagedTaskManagerPluginSourceDir = resolvePackagedResourcePath('openclaw-plugins', 'task-manager');
   const runtimeHostProcess = createRuntimeHostProcessManager({
     parentApiBaseUrl: `http://127.0.0.1:${hostApiPort}`,
     parentDispatchToken: internalDispatchToken,
@@ -225,9 +229,6 @@ export function createRuntimeHostManager(
       MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(childGatewayBridgeSnapshot.port),
       MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: childGatewayBridgeSnapshot.token,
       ...(packagedOpenClawDir ? { MATCHACLAW_OPENCLAW_DIR: packagedOpenClawDir } : {}),
-      ...(packagedTaskManagerPluginSourceDir
-        ? { MATCHACLAW_RUNTIME_HOST_TASK_PLUGIN_SOURCE_DIR: packagedTaskManagerPluginSourceDir }
-        : {}),
     }),
     logger,
   });
@@ -246,18 +247,15 @@ export function createRuntimeHostManager(
   } as const;
 
   async function hydrateExecutionStateFromSources(): Promise<void> {
-    const [pluginExecutionEnabled, runtimeHostEnabledPluginIds, gatewayToken] = await Promise.all([
+    const [pluginExecutionEnabled, gatewayToken] = await Promise.all([
       infrastructure.settingsStore.get('pluginExecutionEnabled').catch(() => DEFAULT_PLUGIN_EXECUTION_ENABLED),
-      infrastructure.settingsStore.get('runtimeHostEnabledPluginIds').catch(() => [] as string[]),
       infrastructure.settingsStore.get('gatewayToken').catch(() => ''),
     ]);
     executionState = {
       pluginExecutionEnabled: typeof pluginExecutionEnabled === 'boolean'
         ? pluginExecutionEnabled
         : DEFAULT_PLUGIN_EXECUTION_ENABLED,
-      enabledPluginIds: Array.isArray(runtimeHostEnabledPluginIds)
-        ? Array.from(new Set(runtimeHostEnabledPluginIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)))
-        : [],
+      enabledPluginIds: readEnabledPluginIdsFromOpenClawConfig(),
     };
     const gatewayStatusPort = infrastructure.gatewayManager.getStatus().port;
     if (!Number.isFinite(gatewayStatusPort) || gatewayStatusPort <= 0) {
@@ -278,33 +276,15 @@ export function createRuntimeHostManager(
       pluginExecutionEnabled: enabled,
     };
     await infrastructure.settingsStore.set('pluginExecutionEnabled', enabled);
-    if (lifecycle === 'running' || lifecycle === 'starting') {
-      await infrastructure.processManager.restart();
-    }
     return executionState;
   }
 
   async function setEnabledPluginIdsInternal(pluginIds: readonly string[]): Promise<RuntimeHostExecutionState> {
-    const normalizedPluginIds = Array.from(new Set(
-      pluginIds
-        .filter((id): id is string => typeof id === 'string')
-        .map((id) => id.trim())
-        .filter((id) => id.length > 0),
-    ));
-    const hasSameLength = normalizedPluginIds.length === executionState.enabledPluginIds.length;
-    const isSame = hasSameLength
-      && normalizedPluginIds.every((pluginId, index) => pluginId === executionState.enabledPluginIds[index]);
-    if (isSame) {
-      return executionState;
-    }
+    const normalizedPluginIds = await syncEnabledPluginIdsToOpenClawConfig(pluginIds);
     executionState = {
       ...executionState,
       enabledPluginIds: normalizedPluginIds,
     };
-    await infrastructure.settingsStore.set('runtimeHostEnabledPluginIds', normalizedPluginIds);
-    if (lifecycle === 'running' || lifecycle === 'starting') {
-      await infrastructure.processManager.restart();
-    }
     return executionState;
   }
 
@@ -416,6 +396,13 @@ export function createRuntimeHostManager(
         const openError = await shell.openPath(targetPath);
         if (openError) {
           return { status: 500, data: { success: false, error: openError } };
+        }
+        return { status: 200, data: { success: true } };
+      }
+
+      if (action === 'gateway_restart') {
+        if (infrastructure.gatewayManager.getStatus().state !== 'stopped') {
+          infrastructure.gatewayManager.debouncedRestart();
         }
         return { status: 200, data: { success: true } };
       }
@@ -624,6 +611,10 @@ export function createRuntimeHostManager(
     },
 
     getState() {
+      executionState = {
+        ...executionState,
+        enabledPluginIds: readEnabledPluginIdsFromOpenClawConfig(),
+      };
       const processState = infrastructure.processManager.getState();
       const runtimeLifecycle = mapProcessLifecycleToRuntimeLifecycle(processState.lifecycle);
       return {
@@ -663,7 +654,7 @@ export function createRuntimeHostManager(
       return plugins;
     },
 
-    async request<TResponse>(method, route, payload) {
+    async request<TResponse>(method: RequestMethod, route: string, payload?: unknown) {
       return await infrastructure.httpClient.request<TResponse>(method, route, payload);
     },
 

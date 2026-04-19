@@ -67,7 +67,7 @@ async function runDispatch(
       payload: unknown,
     ) => Promise<{ status: number; data: unknown } | null>;
     requestParentExecutionSync: (
-      action: 'set_execution_enabled' | 'set_enabled_plugin_ids' | 'restart_runtime_host',
+      action: 'set_execution_enabled' | 'restart_runtime_host',
       payload?: unknown,
     ) => Promise<ParentTransportUpstreamPayload>;
     buildLocalPluginsRuntimePayload: () => unknown;
@@ -167,7 +167,7 @@ describe('runtime-host process dispatch route handler', () => {
     expect(result.statusCode).toBe(200);
     expect(result.transportStats.executionSyncHandled).toBe(1);
     expect(setPluginExecutionEnabled).toHaveBeenCalledWith(true);
-    expect(setEnabledPluginIds).toHaveBeenCalledWith(['security-core']);
+    expect(setEnabledPluginIds).not.toHaveBeenCalled();
     expect(buildLocalPluginsRuntimePayload).toHaveBeenCalledTimes(1);
     expect(result.body.data).toEqual({ success: true, runtime: { execution: 'synced' } });
   });

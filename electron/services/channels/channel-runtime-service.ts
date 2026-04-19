@@ -1,25 +1,7 @@
-import { app } from 'electron';
-import { existsSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { createDefaultRuntimeHostHttpClient } from '../../main/runtime-host-client';
-import { fsPath } from '../../utils/fs-path';
-import { copyDirectorySyncSafe } from '../../utils/copy-safe';
 import { whatsAppLoginManager } from './whatsapp-login-manager';
 import { weixinLoginManager } from './weixin-login-manager';
-
-type ManagedPluginInstallResult = {
-  installed: boolean;
-  warning?: string;
-  installedPath?: string;
-  sourcePath?: string;
-  version?: string;
-};
-
-type PendingWeixinPersist = {
-  config: Record<string, unknown>;
-  installResult: ManagedPluginInstallResult;
-};
+type PendingWeixinPersist = Record<string, unknown>;
 
 export interface ChannelRuntimeService {
   readonly startWhatsApp: (accountId: string) => Promise<void>;
@@ -37,76 +19,6 @@ function normalizeSessionKey(value: unknown): string | undefined {
   }
   const normalized = value.trim();
   return normalized || undefined;
-}
-
-function getInstalledPluginVersion(pluginId: string): string | undefined {
-  const pkgPath = join(homedir(), '.openclaw', 'extensions', pluginId, 'package.json');
-  if (!existsSync(fsPath(pkgPath))) {
-    return undefined;
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(fsPath(pkgPath), 'utf8')) as { version?: unknown };
-    return typeof parsed.version === 'string' ? parsed.version : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveBundledPluginSources(pluginId: string): string[] {
-  if (app.isPackaged) {
-    return [
-      join(process.resourcesPath, 'openclaw-plugins', pluginId),
-      join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginId),
-      join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginId),
-    ];
-  }
-  return [
-    join(app.getAppPath(), 'build', 'openclaw-plugins', pluginId),
-    join(process.cwd(), 'build', 'openclaw-plugins', pluginId),
-    join(__dirname, `../../../build/openclaw-plugins/${pluginId}`),
-  ];
-}
-
-async function ensureBundledPluginInstalled(
-  pluginId: string,
-  displayName: string,
-): Promise<ManagedPluginInstallResult> {
-  const targetDir = join(homedir(), '.openclaw', 'extensions', pluginId);
-  const targetManifest = join(targetDir, 'openclaw.plugin.json');
-
-  if (existsSync(fsPath(targetManifest))) {
-    return {
-      installed: true,
-      installedPath: targetDir,
-      version: getInstalledPluginVersion(pluginId),
-    };
-  }
-
-  const candidateSources = resolveBundledPluginSources(pluginId);
-  const sourceDir = candidateSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
-  if (!sourceDir) {
-    return {
-      installed: false,
-      warning: `Bundled ${displayName} plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
-    };
-  }
-
-  try {
-    mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
-    rmSync(fsPath(targetDir), { recursive: true, force: true });
-    copyDirectorySyncSafe(sourceDir, targetDir);
-    if (!existsSync(fsPath(targetManifest))) {
-      return { installed: false, warning: `Failed to install ${displayName} plugin mirror (manifest missing).` };
-    }
-    return {
-      installed: true,
-      installedPath: targetDir,
-      sourcePath: sourceDir,
-      version: getInstalledPluginVersion(pluginId),
-    };
-  } catch {
-    return { installed: false, warning: `Failed to install bundled ${displayName} plugin mirror` };
-  }
 }
 
 export function createChannelRuntimeService(
@@ -146,13 +58,9 @@ export function createChannelRuntimeService(
 
     const resolvedAccountId = normalizeSessionKey(payload.accountId);
     const persistedConfig = {
-      ...pending.config,
+      ...pending,
       enabled: true,
     };
-
-    if (!pending.installResult.installed) {
-      throw new Error('openclaw-weixin plugin is not installed');
-    }
     await runtimeHostClient.request('POST', '/api/channels/config', {
       channelType: 'openclaw-weixin',
       ...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
@@ -232,20 +140,12 @@ export function createChannelRuntimeService(
       await whatsAppLoginManager.stop();
     },
     async startOpenClawWeixin(input: { accountId?: string; config?: Record<string, unknown> }) {
-      const pluginId = 'openclaw-weixin';
-      const installResult = await ensureBundledPluginInstalled(pluginId, 'Weixin');
-      if (!installResult.installed) {
-        throw new Error(installResult.warning || 'Weixin plugin install failed');
-      }
       const sessionKey = normalizeSessionKey(input.accountId) ?? 'default';
-      const config = {
+      const config: Record<string, unknown> = {
         ...(input.config && typeof input.config === 'object' ? input.config : {}),
         enabled: true,
       };
-      pendingWeixinPersists.set(sessionKey, {
-        config,
-        installResult,
-      });
+      pendingWeixinPersists.set(sessionKey, config);
 
       const routeTag = typeof config.routeTag === 'string' ? config.routeTag : undefined;
       const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : undefined;

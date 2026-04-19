@@ -32,7 +32,7 @@ interface DispatchRouteDeps {
   ) => Promise<ParentTransportUpstreamPayload>;
   buildLocalPluginsRuntimePayload: () => unknown;
   setPluginExecutionEnabled: (enabled: boolean) => void;
-  setEnabledPluginIds: (pluginIds: string[]) => void;
+  setEnabledPluginIds: (pluginIds: string[]) => Promise<void>;
 }
 
 function readRequestBody(req: any): Promise<string> {
@@ -105,7 +105,9 @@ export function handleDispatchRoute(req: any, res: any, deps: DispatchRouteDeps)
 
         syncExecutionStateFromPayload(syncResponse.data, {
           setPluginExecutionEnabled: deps.setPluginExecutionEnabled,
-          setEnabledPluginIds: deps.setEnabledPluginIds,
+          setEnabledPluginIds: (pluginIds) => {
+            void deps.setEnabledPluginIds(pluginIds);
+          },
         });
         sendJson(res, syncResponse.status, {
           version: TRANSPORT_VERSION,

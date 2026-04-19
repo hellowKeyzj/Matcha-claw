@@ -7,11 +7,11 @@ interface ParentTransportClientOptions {
 
 export type ParentExecutionSyncAction =
   | 'set_execution_enabled'
-  | 'set_enabled_plugin_ids'
   | 'restart_runtime_host';
 
 export type ParentShellAction =
   | 'shell_open_path'
+  | 'gateway_restart'
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
