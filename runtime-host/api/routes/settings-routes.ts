@@ -1,4 +1,8 @@
 import { SettingsService } from '../../application/settings/service';
+import {
+  normalizeBrowserMode,
+  type BrowserMode,
+} from '../../application/openclaw/openclaw-provider-config-service';
 
 interface SettingsRouteDeps {
   getAllSettingsLocal: () => Promise<Record<string, unknown>>;
@@ -15,6 +19,13 @@ interface SettingsRouteDeps {
       preserveExistingWhenDisabled?: boolean;
     },
   ) => Promise<void>;
+  syncBrowserModeToOpenClaw?: (mode: BrowserMode) => Promise<void>;
+  requestParentShellAction?: (action: 'gateway_restart', payload?: unknown) => Promise<{
+    success: boolean;
+    status: number;
+    data?: unknown;
+    error?: { code: string; message: string };
+  }>;
 }
 
 interface LocalDispatchResponse {
@@ -35,6 +46,10 @@ function hasExplicitProxyPatch(payload: unknown): boolean {
     || Object.prototype.hasOwnProperty.call(payload, 'proxyBypassRules');
 }
 
+function hasExplicitBrowserModePatch(payload: unknown): boolean {
+  return isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, 'browserMode');
+}
+
 function toProxySettings(settings: Record<string, unknown>): {
   proxyEnabled: boolean;
   proxyServer: string;
@@ -45,6 +60,10 @@ function toProxySettings(settings: Record<string, unknown>): {
     proxyServer: typeof settings.proxyServer === 'string' ? settings.proxyServer : '',
     proxyBypassRules: typeof settings.proxyBypassRules === 'string' ? settings.proxyBypassRules : '',
   };
+}
+
+function toBrowserMode(settings: Record<string, unknown>): BrowserMode {
+  return normalizeBrowserMode(settings.browserMode);
 }
 
 export async function handleSettingsRoute(
@@ -70,13 +89,28 @@ export async function handleSettingsRoute(
   if (routePath === '/api/settings' && method === 'PUT') {
     try {
       const shouldSyncProxy = hasExplicitProxyPatch(payload);
+      const shouldSyncBrowserMode = hasExplicitBrowserModePatch(payload);
       const patchResult = await service.patch(payload);
+      const latestSettings = shouldSyncProxy || shouldSyncBrowserMode
+        ? await service.getAll()
+        : null;
       if (shouldSyncProxy && deps.syncProxyConfigToOpenClaw) {
-        const latestSettings = await service.getAll();
         await deps.syncProxyConfigToOpenClaw(
-          toProxySettings(latestSettings),
+          toProxySettings(latestSettings ?? {}),
           { preserveExistingWhenDisabled: false },
         );
+      }
+      if (shouldSyncBrowserMode && deps.syncBrowserModeToOpenClaw) {
+        await deps.syncBrowserModeToOpenClaw(toBrowserMode(latestSettings ?? {}));
+        if (deps.requestParentShellAction) {
+          const restartResponse = await deps.requestParentShellAction('gateway_restart');
+          if (!restartResponse.success) {
+            return {
+              status: restartResponse.status,
+              data: { success: false, error: restartResponse.error?.message ?? 'gateway restart failed' },
+            };
+          }
+        }
       }
       return {
         status: 200,
@@ -127,10 +161,24 @@ export async function handleSettingsRoute(
     }
     if (method === 'PUT') {
       try {
-        return {
+        const response = {
           status: 200,
           data: await service.setValue(key, payload),
         };
+        if (key === 'browserMode' && deps.syncBrowserModeToOpenClaw) {
+          const latestSettings = await service.getAll();
+          await deps.syncBrowserModeToOpenClaw(toBrowserMode(latestSettings));
+          if (deps.requestParentShellAction) {
+            const restartResponse = await deps.requestParentShellAction('gateway_restart');
+            if (!restartResponse.success) {
+              return {
+                status: restartResponse.status,
+                data: { success: false, error: restartResponse.error?.message ?? 'gateway restart failed' },
+              };
+            }
+          }
+        }
+        return response;
       } catch (error) {
         return {
           status: 500,

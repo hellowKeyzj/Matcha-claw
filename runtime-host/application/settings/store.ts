@@ -23,10 +23,20 @@ async function writeSettingsStore(settings: Record<string, unknown>) {
   await fsPromises.writeFile(filePath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
 }
 
+function normalizeBrowserMode(value: unknown): 'off' | 'relay' | 'native' {
+  if (value === 'off' || value === 'native') {
+    return value;
+  }
+  return 'relay';
+}
+
 function normalizeSettingsValueForKey(key: string, value: unknown) {
   const defaultValue = (SETTINGS_DEFAULTS as Record<string, any>)[key];
   if (defaultValue === undefined) {
     return value;
+  }
+  if (key === 'browserMode') {
+    return normalizeBrowserMode(value);
   }
   if (typeof defaultValue === 'boolean') {
     return value === true;

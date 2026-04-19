@@ -63,12 +63,19 @@ export function createMainWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL);
-    win.webContents.openDevTools();
-  } else {
-    win.loadFile(join(__dirname, '../../dist/index.html'));
+  return win;
+}
+
+export function loadMainWindowContent(win: BrowserWindow): void {
+  if (win.isDestroyed() || win.webContents.getURL()) {
+    return;
   }
 
-  return win;
+  if (process.env.VITE_DEV_SERVER_URL) {
+    void win.loadURL(process.env.VITE_DEV_SERVER_URL);
+    win.webContents.openDevTools();
+    return;
+  }
+
+  void win.loadFile(join(__dirname, '../../dist/index.html'));
 }

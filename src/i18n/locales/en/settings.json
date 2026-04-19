@@ -193,6 +193,10 @@
   "gateway": {
     "title": "Gateway",
     "description": "OpenClaw Gateway settings",
+    "tabs": {
+      "general": "General",
+      "browser": "Browser"
+    },
     "status": "Status",
     "port": "Port",
     "logs": "Logs",
@@ -208,7 +212,49 @@
     "proxyBypassHelp": "Semicolon, comma, or newline separated hosts that should connect directly.",
     "proxyRestartNote": "Saving reapplies Electron networking and restarts the Gateway immediately.",
     "proxySaved": "Proxy settings saved",
-    "proxySaveFailed": "Failed to save proxy settings"
+    "proxySaveFailed": "Failed to save proxy settings",
+    "browser": {
+      "title": "Browser",
+      "description": "Choose which browser runtime path MatchaClaw should use",
+      "modeLabel": "Browser Mode",
+      "modeDescription": "Choose the active browser runtime path.",
+      "currentMode": "Current",
+      "modeSaving": "Applying browser mode and restarting Gateway...",
+      "modeSaved": "Browser mode saved",
+      "modeSaveFailed": "Failed to save browser mode",
+      "modes": {
+        "relay": {
+          "title": "Browser Relay",
+          "description": "Use the MatchaClaw Browser Relay plugin and browser extension."
+        },
+        "native": {
+          "title": "Native Browser",
+          "description": "Use OpenClaw's built-in browser plugin without the extension."
+        },
+        "off": {
+          "title": "Off",
+          "description": "Disable all browser capability."
+        }
+      },
+      "nativeModeTitle": "Native Browser is active",
+      "nativeModeBody": "MatchaClaw uses OpenClaw's built-in browser plugin and does not rely on the Browser Relay extension path.",
+      "offModeTitle": "Browser capability is disabled",
+      "offModeBody": "Neither the native Browser plugin nor Browser Relay will be enabled.",
+      "copyChromeExtensions": "Copy chrome://extensions",
+      "openChromeExtensions": "Open chrome://extensions",
+      "revealExtensionDir": "Reveal extension directory",
+      "copyExtensionPath": "Copy extension path",
+      "absolutePathLabel": "Absolute path",
+      "steps": {
+        "enableDevModeTitle": "Open Chrome Extensions and enable Developer mode",
+        "enableDevModeBody": "Open the Chrome extensions management page, then turn on the Developer mode toggle in the top-right corner.",
+        "openFolderTitle": "Open the extension folder",
+        "openFolderBody": "Find the directory that contains the browser extension files. In development you can use the repository path below; in packaged builds you can use Reveal extension directory.",
+        "installTitle": "Drag the extension folder into Chrome",
+        "installBody": "Drag the accio-browser-relay folder onto the chrome://extensions page and Chrome will install it immediately.",
+        "installHint": "If drag and drop is inconvenient, click Load unpacked and select this extension directory instead."
+      }
+    }
   },
   "updates": {
     "title": "Updates",

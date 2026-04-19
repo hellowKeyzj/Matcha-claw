@@ -24,7 +24,16 @@ import {
 import { removeProfilesForProvider } from './openclaw-auth-profile-store';
 import { createRuntimeLogger } from '../../shared/logger';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
-import { getOpenClawDirPath } from '../../api/storage/paths';
+import {
+  getOpenClawDirPath,
+  readOpenClawConfigJson,
+  writeOpenClawConfigJson,
+} from '../../api/storage/paths';
+import {
+  applyEnabledPluginIdsToOpenClawConfig,
+  readEnabledPluginIdsFromOpenClawConfig,
+} from './openclaw-plugin-config-service';
+import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
 
 const logger = createRuntimeLogger('openclaw-provider-config-service');
 const BUILTIN_CHANNEL_IDS = new Set([
@@ -61,6 +70,15 @@ type BundledPluginDiscovery = {
 };
 
 let bundledPluginDiscoveryCache: BundledPluginDiscovery | null = null;
+
+export type BrowserMode = 'off' | 'relay' | 'native';
+
+export function normalizeBrowserMode(value: unknown): BrowserMode {
+  if (value === 'off' || value === 'native') {
+    return value;
+  }
+  return 'relay';
+}
 
 function discoverBundledPlugins(): BundledPluginDiscovery {
   const extensionsDir = join(getOpenClawDirPath(), 'dist', 'extensions');
@@ -873,6 +891,46 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
     config.browser = browser;
     await writeOpenClawJson(config);
     logger.info('Synced browser config to openclaw.json');
+  });
+}
+
+export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<void> {
+  const browserMode = normalizeBrowserMode(modeInput);
+  if (browserMode === 'relay') {
+    await ensureManagedPluginInstalled('browser-relay', { force: true });
+  }
+
+  await withOpenClawConfigLock(async () => {
+    const config = readOpenClawConfigJson();
+
+    const browser = (
+      config.browser && typeof config.browser === 'object'
+        ? { ...(config.browser as Record<string, unknown>) }
+        : {}
+    ) as Record<string, unknown>;
+
+    browser.enabled = browserMode === 'native';
+    if (browserMode === 'native') {
+      browser.defaultProfile = 'openclaw';
+    } else {
+      delete browser.defaultProfile;
+    }
+
+    const currentEnabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
+    const nextEnabledPluginIds = currentEnabledPluginIds.filter(
+      (pluginId) => pluginId !== 'browser' && pluginId !== 'browser-relay',
+    );
+    if (browserMode === 'native') {
+      nextEnabledPluginIds.push('browser');
+    }
+    if (browserMode === 'relay') {
+      nextEnabledPluginIds.push('browser-relay');
+    }
+
+    const nextConfig = await applyEnabledPluginIdsToOpenClawConfig(config, nextEnabledPluginIds);
+    nextConfig.browser = browser;
+    await writeOpenClawConfigJson(nextConfig);
+    logger.info(`Synced browser mode "${browserMode}" to openclaw.json`);
   });
 }
 

@@ -127,3 +127,29 @@ export function startHostApiServer(ctx: HostApiContext, port = PORTS.MATCHACLAW_
 
   return server;
 }
+
+export async function waitForHostApiServerListening(server: Server): Promise<Server> {
+  if (server.listening) {
+    return server;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const handleListening = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      server.off('listening', handleListening);
+      server.off('error', handleError);
+    };
+
+    server.once('listening', handleListening);
+    server.once('error', handleError);
+  });
+
+  return server;
+}

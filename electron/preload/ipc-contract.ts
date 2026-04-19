@@ -16,6 +16,7 @@ export const SHELL_INVOKE_CHANNELS = [
   'window:close',
   'window:isMaximized',
   'shell:openExternal',
+  'shell:openChromeExtensions',
   'shell:showItemInFolder',
   'shell:openPath',
   'dialog:open',

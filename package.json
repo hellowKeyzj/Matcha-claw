@@ -75,6 +75,7 @@
     "@dicebear/collection": "^9.4.2",
     "@dicebear/core": "^9.4.2",
     "@matchaclaw/plugins-sdk": "workspace:*",
+    "@slack/bolt": "^4.6.0",
     "clawhub": "^0.5.0",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",

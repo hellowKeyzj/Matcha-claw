@@ -191,6 +191,11 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     socket = null;
   }
 
+  function resetConnectionHandshakeState(): void {
+    connectRequestId = null;
+    isConnected = false;
+  }
+
   function rejectAllPending(error: Error): void {
     for (const [requestId, pending] of pendingRequests.entries()) {
       clearTimeout(pending.timer);
@@ -215,6 +220,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     const gatewayPort = getGatewayPort();
     const wsUrl = `ws://127.0.0.1:${gatewayPort}/ws`;
     emitConnectionState('reconnecting');
+    resetConnectionHandshakeState();
 
     connectPromise = new Promise<void>((resolve, reject) => {
       let connectSettled = false;
@@ -238,6 +244,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         if (connectSettled) {
           return;
         }
+        if (socket !== ws) {
+          return;
+        }
         connectSettled = true;
         clearTimeout(connectTimer);
         emitConnectionState('connected');
@@ -246,6 +255,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
 
       const settleConnectFailure = (error: unknown) => {
         if (connectSettled) {
+          return;
+        }
+        if (socket !== ws) {
           return;
         }
         connectSettled = true;
@@ -261,6 +273,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
       };
 
       ws.on('message', (rawData: unknown) => {
+        if (socket !== ws) {
+          return;
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(String(rawData));
@@ -336,6 +351,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
       });
 
       ws.on('error', (error: unknown) => {
+        if (socket !== ws) {
+          return;
+        }
         if (!isConnected) {
           settleConnectFailure(error);
           return;
@@ -344,6 +362,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
       });
 
       ws.on('close', (code: number, reason: unknown) => {
+        if (socket !== ws) {
+          return;
+        }
         const closeError = new Error(
           `Gateway socket closed: code=${String(code)} reason=${String(reason ?? '') || 'unknown'}`,
         );

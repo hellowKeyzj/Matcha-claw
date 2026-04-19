@@ -2,7 +2,7 @@
  * IPC Handlers
  * Registers all IPC handlers for main-renderer communication
  */
-import { BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
 import { GatewayManager } from '../gateway/manager';
 import type { RuntimeHostManager } from './runtime-host-manager';
 import { registerHostApiProxyHandlers } from './ipc/hostapi-proxy-ipc';
@@ -18,7 +18,7 @@ import { registerGatewayHandlers } from './ipc/gateway-ipc';
  */
 export function registerIpcHandlers(
   gatewayManager: GatewayManager,
-  mainWindow: BrowserWindow,
+  getMainWindow: () => BrowserWindow | null,
   runtimeHost: RuntimeHostManager,
 ): void {
   // Host API proxy handlers
@@ -40,5 +40,5 @@ export function registerIpcHandlers(
   registerUsageHandlers(runtimeHost);
 
   // Window control handlers (for custom title bar on Windows)
-  registerWindowHandlers(mainWindow);
+  registerWindowHandlers(getMainWindow);
 }

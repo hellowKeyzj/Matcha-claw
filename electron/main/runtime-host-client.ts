@@ -27,6 +27,9 @@ export interface RuntimeHostHttpClient {
     method: RequestMethod,
     route: string,
     payload?: unknown,
+    options?: {
+      timeoutMs?: number;
+    },
   ) => Promise<RuntimeHostRouteResult<TResponse>>;
   readonly checkHealth: () => Promise<RuntimeHostTransportHealth>;
 }
@@ -133,6 +136,9 @@ export function createRuntimeHostHttpClient(options: RuntimeHostHttpClientOption
     method: RequestMethod,
     route: string,
     payload?: unknown,
+    requestOptions?: {
+      timeoutMs?: number;
+    },
   ): Promise<RuntimeHostRouteResult<TResponse>> {
     const transportPayload: RuntimeHostTransportRequest = {
       version: RUNTIME_HOST_TRANSPORT_VERSION,
@@ -141,7 +147,10 @@ export function createRuntimeHostHttpClient(options: RuntimeHostHttpClientOption
       ...(payload !== undefined ? { payload } : {}),
     };
 
-    const { signal, cleanup } = withTimeout(timeoutMs);
+    const resolvedTimeoutMs = Number.isFinite(requestOptions?.timeoutMs) && (requestOptions?.timeoutMs ?? 0) > 0
+      ? Number(requestOptions?.timeoutMs)
+      : timeoutMs;
+    const { signal, cleanup } = withTimeout(resolvedTimeoutMs);
     try {
       const response = await fetch(`${baseUrl}/dispatch`, {
         method: 'POST',

@@ -193,6 +193,10 @@
   "gateway": {
     "title": "网关",
     "description": "OpenClaw 网关设置",
+    "tabs": {
+      "general": "通用",
+      "browser": "浏览器"
+    },
     "status": "状态",
     "port": "端口",
     "logs": "日志",
@@ -208,7 +212,49 @@
     "proxyBypassHelp": "使用分号、逗号或换行分隔需要直连的主机。",
     "proxyRestartNote": "保存后会立即重新应用 Electron 网络代理，并自动重启 Gateway。",
     "proxySaved": "代理设置已保存",
-    "proxySaveFailed": "保存代理设置失败"
+    "proxySaveFailed": "保存代理设置失败",
+    "browser": {
+      "title": "浏览器",
+      "description": "选择 MatchaClaw 使用哪条浏览器能力链路",
+      "modeLabel": "浏览器模式",
+      "modeDescription": "选择当前使用的浏览器链路。",
+      "currentMode": "当前",
+      "modeSaving": "正在应用浏览器模式并重启 Gateway...",
+      "modeSaved": "浏览器模式已保存",
+      "modeSaveFailed": "浏览器模式保存失败",
+      "modes": {
+        "relay": {
+          "title": "Browser Relay",
+          "description": "使用 MatchaClaw Browser Relay 插件和浏览器扩展。"
+        },
+        "native": {
+          "title": "原生 Browser",
+          "description": "使用 OpenClaw 内置 browser 插件，不需要浏览器扩展。"
+        },
+        "off": {
+          "title": "关闭",
+          "description": "关闭全部浏览器能力。"
+        }
+      },
+      "nativeModeTitle": "当前使用原生 Browser",
+      "nativeModeBody": "MatchaClaw 会启用 OpenClaw 内置 browser 插件，不再使用 Browser Relay 扩展链路。",
+      "offModeTitle": "浏览器能力已关闭",
+      "offModeBody": "当前不会启用原生 Browser，也不会启用 Browser Relay。",
+      "copyChromeExtensions": "复制 chrome://extensions",
+      "openChromeExtensions": "打开 chrome://extensions",
+      "revealExtensionDir": "定位扩展目录",
+      "copyExtensionPath": "复制扩展路径",
+      "absolutePathLabel": "绝对路径",
+      "steps": {
+        "enableDevModeTitle": "打开 Chrome 扩展管理页面并启用开发者模式",
+        "enableDevModeBody": "在 Chrome 中打开扩展管理页面，然后开启右上角的“开发者模式”开关。",
+        "openFolderTitle": "打开扩展文件夹",
+        "openFolderBody": "找到包含浏览器扩展文件的目录。开发环境下可以直接使用下面这条仓库路径；打包后可用“定位扩展目录”直接打开。",
+        "installTitle": "把扩展文件夹拖入 Chrome",
+        "installBody": "将 accio-browser-relay 文件夹拖到 chrome://extensions 页面，Chrome 会立刻完成安装。",
+        "installHint": "如果无法拖拽，也可以点击“加载已解压的扩展程序”，然后选择这个扩展目录。"
+      }
+    }
   },
   "updates": {
     "title": "更新",

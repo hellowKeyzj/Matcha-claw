@@ -1,5 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AppApiContext } from '../context';
+import { getResourcesDir } from '../../utils/paths';
+import { sendJson } from '../route-utils';
 
 export async function handleAppRoutes(
   req: IncomingMessage,
@@ -7,6 +11,26 @@ export async function handleAppRoutes(
   url: URL,
   ctx: AppApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/app/browser-relay-info' && req.method === 'GET') {
+    const relativeDir = 'resources/tools/data/extension/chrome-extension/accio-browser-relay';
+    const extensionDir = join(
+      getResourcesDir(),
+      'tools',
+      'data',
+      'extension',
+      'chrome-extension',
+      'accio-browser-relay',
+    );
+
+    sendJson(res, 200, {
+      relativeDir,
+      extensionDir,
+      exists: existsSync(extensionDir),
+      chromeExtensionsUrl: 'chrome://extensions/',
+    });
+    return true;
+  }
+
   if (url.pathname === '/api/events' && req.method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
