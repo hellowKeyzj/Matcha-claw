@@ -26,7 +26,8 @@ vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-servic
   setOpenClawDefaultModel: (...args: unknown[]) => hoisted.setOpenClawDefaultModelMock(...args),
   setOpenClawDefaultModelWithOverride: (...args: unknown[]) => hoisted.setOpenClawDefaultModelWithOverrideMock(...args),
   syncProviderConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProviderConfigToOpenClawMock(...args),
-  syncBrowserConfigToOpenClaw: vi.fn(async () => {}),
+  normalizeBrowserMode: vi.fn((value: unknown) => value ?? 'relay'),
+  syncBrowserModeToOpenClaw: vi.fn(async () => {}),
   syncGatewayTokenToConfig: vi.fn(async () => {}),
   syncSessionIdleMinutesToOpenClaw: vi.fn(async () => {}),
 }));

@@ -1,6 +1,7 @@
 import {
   sanitizeOpenClawConfig,
-  syncBrowserConfigToOpenClaw,
+  normalizeBrowserMode,
+  syncBrowserModeToOpenClaw,
   syncGatewayTokenToConfig,
   syncSessionIdleMinutesToOpenClaw,
 } from '../openclaw/openclaw-provider-config-service';
@@ -12,6 +13,7 @@ import {
 } from '../providers/provider-registry';
 import { syncProviderStoreToOpenClaw } from '../providers/store-sync';
 import { readProviderStoreLocal, writeProviderStoreLocal } from '../../api/storage/provider-store';
+import { getAllSettingsLocal } from '../settings/store';
 
 type GatewaySyncInput = {
   gatewayToken?: string;
@@ -36,7 +38,8 @@ export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
   }
 
   await sanitizeOpenClawConfig();
-  await syncBrowserConfigToOpenClaw();
+  const settings = await getAllSettingsLocal();
+  await syncBrowserModeToOpenClaw(normalizeBrowserMode(settings.browserMode));
   await syncSessionIdleMinutesToOpenClaw();
 
   return {

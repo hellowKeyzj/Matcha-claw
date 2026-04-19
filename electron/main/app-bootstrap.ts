@@ -12,12 +12,12 @@ import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { getSetting } from '../services/settings/settings-store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../services/skills/skill-config-service';
-import { startHostApiServer } from '../api/server';
+import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
 import type { HostEventBus } from '../api/event-bus';
 import { ensureLicenseGateBootstrapped } from '../services/license/license-gate-service';
 import type { RuntimeHostManager } from './runtime-host-manager';
 import { emitHostEvent, registerHostEventBridge } from './host-event-bridge';
-import { createMainWindow } from './main-window';
+import { createMainWindow, loadMainWindowContent } from './main-window';
 import { isQuitting } from './app-state';
 
 const isE2EMode = process.env.CLAWX_E2E === '1';
@@ -107,6 +107,7 @@ export async function bootstrapMainApplication(deps: {
   runtimeHostManager: RuntimeHostManager;
   hostEventBus: HostEventBus;
   setMainWindow: (window: BrowserWindow | null) => void;
+  getMainWindow: () => BrowserWindow | null;
 }): Promise<{ mainWindow: BrowserWindow; hostApiServer: Server }> {
   logger.init();
   logger.info('=== MatchaClaw Application Starting ===');
@@ -143,17 +144,19 @@ export async function bootstrapMainApplication(deps: {
 
   registerIpcHandlers(
     deps.gatewayManager,
-    mainWindow,
+    deps.getMainWindow,
     deps.runtimeHostManager,
   );
   ensureLicenseGateBootstrapped();
 
-  const hostApiServer = startHostApiServer({
+  const hostApiServer = await waitForHostApiServerListening(startHostApiServer({
     gatewayManager: deps.gatewayManager,
     eventBus: deps.hostEventBus,
     mainWindow,
     runtimeHost: deps.runtimeHostManager,
-  });
+  }));
+
+  loadMainWindowContent(mainWindow);
 
   if (!isE2EMode) {
     registerUpdateHandlers(appUpdater, mainWindow);
@@ -167,7 +170,7 @@ export async function bootstrapMainApplication(deps: {
     gatewayManager: deps.gatewayManager,
     runtimeHostManager: deps.runtimeHostManager,
     hostEventBus: deps.hostEventBus,
-    getMainWindow: () => mainWindow,
+    getMainWindow: deps.getMainWindow,
   });
 
   if (!isE2EMode) {

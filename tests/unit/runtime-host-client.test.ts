@@ -135,4 +135,26 @@ describe('runtime-host http client', () => {
       expect.objectContaining({ method: 'POST' }),
     );
   });
+
+  it('单次 request 支持覆盖默认超时', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        version: 1,
+        success: true,
+        status: 200,
+        data: { ok: true },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const client = createRuntimeHostHttpClient({ baseUrl: 'http://127.0.0.1:3211', timeoutMs: 15000 });
+
+    await client.request('POST', '/api/gateway/rpc', { method: 'chat.send' }, { timeoutMs: 45000 });
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 45000);
+    setTimeoutSpy.mockRestore();
+  });
 });

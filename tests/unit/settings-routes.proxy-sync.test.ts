@@ -72,4 +72,70 @@ describe('settings route proxy sync', () => {
 
     expect(syncProxyConfigToOpenClaw).not.toHaveBeenCalled();
   });
+
+  it('PUT /api/settings 显式提交 browserMode 时会同步 OpenClaw 浏览器模式并重启 Gateway', async () => {
+    const syncBrowserModeToOpenClaw = vi.fn(async () => {});
+    const requestParentShellAction = vi.fn(async () => ({
+      success: true,
+      status: 200,
+    }));
+
+    const result = await handleSettingsRoute(
+      'PUT',
+      '/api/settings',
+      {
+        browserMode: 'native',
+      },
+      {
+        getAllSettingsLocal: async () => ({
+          browserMode: 'native',
+        }),
+        setSettingsPatchLocal: async () => ({}),
+        resetSettingsLocal: async () => ({}),
+        setSettingValueLocal: async () => ({}),
+        syncBrowserModeToOpenClaw,
+        requestParentShellAction,
+      },
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      data: { success: true },
+    });
+    expect(syncBrowserModeToOpenClaw).toHaveBeenCalledWith('native');
+    expect(requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+  });
+
+  it('PUT /api/settings/browserMode 也会同步 OpenClaw 浏览器模式并重启 Gateway', async () => {
+    const syncBrowserModeToOpenClaw = vi.fn(async () => {});
+    const requestParentShellAction = vi.fn(async () => ({
+      success: true,
+      status: 200,
+    }));
+
+    const result = await handleSettingsRoute(
+      'PUT',
+      '/api/settings/browserMode',
+      {
+        value: 'off',
+      },
+      {
+        getAllSettingsLocal: async () => ({
+          browserMode: 'off',
+        }),
+        setSettingsPatchLocal: async () => ({}),
+        resetSettingsLocal: async () => ({}),
+        setSettingValueLocal: async () => ({}),
+        syncBrowserModeToOpenClaw,
+        requestParentShellAction,
+      },
+    );
+
+    expect(result).toEqual({
+      status: 200,
+      data: { success: true },
+    });
+    expect(syncBrowserModeToOpenClaw).toHaveBeenCalledWith('off');
+    expect(requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+  });
 });

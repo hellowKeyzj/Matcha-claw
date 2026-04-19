@@ -1,0 +1,19 @@
+{
+  "id": "browser-relay",
+  "name": "Browser Relay",
+  "version": "0.1.0",
+  "category": "tools",
+  "description": "Local Chrome extension relay service for browser control.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "port": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 9236
+      }
+    }
+  }
+}

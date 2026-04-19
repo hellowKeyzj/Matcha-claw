@@ -92,6 +92,9 @@ export interface RuntimeHostManager {
     method: RequestMethod,
     route: string,
     payload?: unknown,
+    options?: {
+      timeoutMs?: number;
+    },
   ) => Promise<RuntimeHostRouteResult<TResponse>>;
   readonly executeShellAction: (
     action: RuntimeHostShellAction,
@@ -654,8 +657,15 @@ export function createRuntimeHostManager(
       return plugins;
     },
 
-    async request<TResponse>(method: RequestMethod, route: string, payload?: unknown) {
-      return await infrastructure.httpClient.request<TResponse>(method, route, payload);
+    async request<TResponse>(
+      method: RequestMethod,
+      route: string,
+      payload?: unknown,
+      options?: {
+        timeoutMs?: number;
+      },
+    ) {
+      return await infrastructure.httpClient.request<TResponse>(method, route, payload, options);
     },
 
     async executeShellAction(action, payload) {

@@ -17,10 +17,12 @@
  */
 
 import 'zx/globals';
+import { createRequire } from 'node:module';
 
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
+const requireFromRoot = createRequire(path.join(ROOT, 'package.json'));
 
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
 function normWin(p) {
@@ -120,6 +122,66 @@ function listPackages(nodeModulesDir) {
   return result;
 }
 
+function enqueuePackageDependency(pkgName) {
+  if (SKIP_PACKAGES.has(pkgName) || SKIP_SCOPES.some((s) => pkgName.startsWith(s))) {
+    skippedDevCount++;
+    return false;
+  }
+
+  let pkgJsonPath;
+  try {
+    pkgJsonPath = requireFromRoot.resolve(`${pkgName}/package.json`);
+  } catch {
+    return false;
+  }
+
+  const realPath = fs.realpathSync(path.dirname(pkgJsonPath));
+  if (collected.has(realPath)) {
+    return true;
+  }
+
+  collected.set(realPath, pkgName);
+  const depVirtualNM = getVirtualStoreNodeModules(realPath);
+  if (depVirtualNM) {
+    queue.push({ nodeModulesDir: depVirtualNM, skipPkg: pkgName });
+  }
+  return true;
+}
+
+function collectStagedBundledRuntimeDeps(openclawDir) {
+  const extensionsDir = path.join(openclawDir, 'dist', 'extensions');
+  if (!fs.existsSync(extensionsDir)) {
+    return [];
+  }
+
+  const runtimeDeps = new Set();
+  for (const entry of fs.readdirSync(extensionsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const packageJsonPath = path.join(extensionsDir, entry.name, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) continue;
+
+    let packageJson;
+    try {
+      packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+    } catch {
+      continue;
+    }
+
+    if (packageJson?.openclaw?.bundle?.stageRuntimeDependencies !== true) {
+      continue;
+    }
+
+    const dependencies = packageJson.dependencies && typeof packageJson.dependencies === 'object'
+      ? Object.keys(packageJson.dependencies)
+      : [];
+    for (const dependency of dependencies) {
+      runtimeDeps.add(dependency);
+    }
+  }
+
+  return [...runtimeDeps];
+}
+
 // Start BFS from openclaw's virtual store node_modules
 const openclawVirtualNM = getVirtualStoreNodeModules(openclawReal);
 if (!openclawVirtualNM) {
@@ -141,41 +203,58 @@ const SKIP_PACKAGES = new Set([
 const SKIP_SCOPES = ['@cloudflare/', '@types/'];
 let skippedDevCount = 0;
 
-while (queue.length > 0) {
-  const { nodeModulesDir, skipPkg } = queue.shift();
-  const packages = listPackages(nodeModulesDir);
+function drainDependencyQueue() {
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift();
+    const packages = listPackages(nodeModulesDir);
 
-  for (const { name, fullPath } of packages) {
-    // Skip the package that owns this virtual store entry (it's the package itself, not a dep)
-    if (name === skipPkg) continue;
+    for (const { name, fullPath } of packages) {
+      // Skip the package that owns this virtual store entry (it's the package itself, not a dep)
+      if (name === skipPkg) continue;
 
-    if (SKIP_PACKAGES.has(name) || SKIP_SCOPES.some(s => name.startsWith(s))) {
-      skippedDevCount++;
-      continue;
-    }
+      if (SKIP_PACKAGES.has(name) || SKIP_SCOPES.some((s) => name.startsWith(s))) {
+        skippedDevCount++;
+        continue;
+      }
 
-    let realPath;
-    try {
-      realPath = fs.realpathSync(fullPath);
-    } catch {
-      continue; // broken symlink, skip
-    }
+      let realPath;
+      try {
+        realPath = fs.realpathSync(fullPath);
+      } catch {
+        continue; // broken symlink, skip
+      }
 
-    if (collected.has(realPath)) continue; // already visited
-    collected.set(realPath, name);
+      if (collected.has(realPath)) continue; // already visited
+      collected.set(realPath, name);
 
-    // Find this package's own virtual store node_modules to discover ITS deps
-    const depVirtualNM = getVirtualStoreNodeModules(realPath);
-    if (depVirtualNM && depVirtualNM !== nodeModulesDir) {
-      // Determine the package's "self name" in its own virtual store
-      // For scoped: @clack/core -> skip "@clack/core" when scanning
-      queue.push({ nodeModulesDir: depVirtualNM, skipPkg: name });
+      // Find this package's own virtual store node_modules to discover ITS deps
+      const depVirtualNM = getVirtualStoreNodeModules(realPath);
+      if (depVirtualNM && depVirtualNM !== nodeModulesDir) {
+        // Determine the package's "self name" in its own virtual store
+        // For scoped: @clack/core -> skip "@clack/core" when scanning
+        queue.push({ nodeModulesDir: depVirtualNM, skipPkg: name });
+      }
     }
   }
 }
 
+drainDependencyQueue();
+
+const stagedBundledRuntimeDeps = collectStagedBundledRuntimeDeps(OUTPUT);
+let stagedBundledRuntimeDepCount = 0;
+for (const pkgName of stagedBundledRuntimeDeps) {
+  if (enqueuePackageDependency(pkgName)) {
+    stagedBundledRuntimeDepCount++;
+  }
+}
+
+drainDependencyQueue();
+
 echo`   Found ${collected.size} total packages (direct + transitive)`;
 echo`   Skipped ${skippedDevCount} dev-only package references`;
+if (stagedBundledRuntimeDepCount > 0) {
+  echo`   Staged ${stagedBundledRuntimeDepCount} bundled extension runtime deps`;
+}
 
 // 5. Copy all collected packages into OUTPUT/node_modules/ (flat structure)
 //

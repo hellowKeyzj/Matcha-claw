@@ -192,6 +192,10 @@
   "gateway": {
     "title": "ゲートウェイ",
     "description": "OpenClaw ゲートウェイ設定",
+    "tabs": {
+      "general": "一般",
+      "browser": "ブラウザ"
+    },
     "status": "ステータス",
     "port": "ポート",
     "logs": "ログ",
@@ -207,7 +211,49 @@
     "proxyBypassHelp": "直接接続するホストをセミコロン、カンマ、または改行で区切って指定します。",
     "proxyRestartNote": "保存すると Electron のネットワーク設定を再適用し、Gateway をすぐ再起動します。",
     "proxySaved": "プロキシ設定を保存しました",
-    "proxySaveFailed": "プロキシ設定の保存に失敗しました"
+    "proxySaveFailed": "プロキシ設定の保存に失敗しました",
+    "browser": {
+      "title": "ブラウザ",
+      "description": "MatchaClaw が使うブラウザ経路を選択します",
+      "modeLabel": "ブラウザモード",
+      "modeDescription": "現在使うブラウザ経路を選択します。",
+      "currentMode": "現在",
+      "modeSaving": "ブラウザモードを適用し、Gateway を再起動しています...",
+      "modeSaved": "ブラウザモードを保存しました",
+      "modeSaveFailed": "ブラウザモードの保存に失敗しました",
+      "modes": {
+        "relay": {
+          "title": "Browser Relay",
+          "description": "MatchaClaw Browser Relay プラグインとブラウザ拡張を使います。"
+        },
+        "native": {
+          "title": "Native Browser",
+          "description": "拡張なしで OpenClaw 内蔵の browser プラグインを使います。"
+        },
+        "off": {
+          "title": "オフ",
+          "description": "ブラウザ機能をすべて無効にします。"
+        }
+      },
+      "nativeModeTitle": "Native Browser を使用中",
+      "nativeModeBody": "MatchaClaw は OpenClaw 内蔵 browser プラグインを有効にし、Browser Relay 拡張経路は使いません。",
+      "offModeTitle": "ブラウザ機能は無効です",
+      "offModeBody": "Native Browser も Browser Relay も有効になりません。",
+      "copyChromeExtensions": "chrome://extensions をコピー",
+      "openChromeExtensions": "chrome://extensions を開く",
+      "revealExtensionDir": "拡張ディレクトリを表示",
+      "copyExtensionPath": "拡張パスをコピー",
+      "absolutePathLabel": "絶対パス",
+      "steps": {
+        "enableDevModeTitle": "Chrome 拡張機能ページを開き、デベロッパーモードを有効にする",
+        "enableDevModeBody": "Chrome の拡張機能管理ページを開き、右上のデベロッパーモードをオンにしてください。",
+        "openFolderTitle": "拡張機能フォルダーを開く",
+        "openFolderBody": "ブラウザ拡張機能ファイルを含むディレクトリを探します。開発環境では下のリポジトリパスを使えます。パッケージ版では「拡張ディレクトリを表示」を使ってください。",
+        "installTitle": "拡張機能フォルダーを Chrome にドラッグする",
+        "installBody": "accio-browser-relay フォルダーを chrome://extensions ページへドラッグすると、Chrome がすぐにインストールします。",
+        "installHint": "ドラッグしづらい場合は「パッケージ化されていない拡張機能を読み込む」をクリックして、この拡張ディレクトリを選択してください。"
+      }
+    }
   },
   "updates": {
     "title": "アップデート",

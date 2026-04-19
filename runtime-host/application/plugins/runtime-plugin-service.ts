@@ -164,8 +164,11 @@ async function patchInstalledPluginId(
   }
 }
 
-async function ensureManagedPluginInstalled(
+export async function ensureManagedPluginInstalled(
   pluginId: string,
+  options: {
+    force?: boolean;
+  } = {},
 ): Promise<void> {
   const definition = findManagedOpenClawPluginDefinition(pluginId);
   if (!definition) {
@@ -175,8 +178,7 @@ async function ensureManagedPluginInstalled(
   const extensionsRoot = join(getOpenClawConfigDir(), 'extensions');
   const targetDir = join(extensionsRoot, pluginId);
   const targetManifestPath = join(targetDir, 'openclaw.plugin.json');
-
-  if (await pathExists(targetManifestPath)) {
+  if (options.force !== true && await pathExists(targetManifestPath)) {
     return;
   }
 

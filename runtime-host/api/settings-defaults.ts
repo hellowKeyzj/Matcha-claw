@@ -8,6 +8,7 @@ export const SETTINGS_DEFAULTS = {
   gatewayAutoStart: true,
   gatewayPort: 18789,
   gatewayToken: '',
+  browserMode: 'relay',
   proxyEnabled: false,
   proxyServer: '',
   proxyBypassRules: '<local>;localhost;127.0.0.1;::1',

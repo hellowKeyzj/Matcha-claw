@@ -9,7 +9,7 @@ import { setQuitting } from './app-state';
 import { HostEventBus } from '../api/event-bus';
 import { createRuntimeHostManager, type RuntimeHostManager } from './runtime-host-manager';
 import { bootstrapMainApplication } from './app-bootstrap';
-import { createMainWindow } from './main-window';
+import { createMainWindow, loadMainWindowContent } from './main-window';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -188,6 +188,7 @@ if (gotTheLock) {
           bindPendingSecondInstanceFocus(window);
         }
       },
+      getMainWindow: () => mainWindow,
     }).then((result) => {
       mainWindow = result.mainWindow;
       bindPendingSecondInstanceFocus(result.mainWindow);
@@ -204,6 +205,7 @@ if (gotTheLock) {
         mainWindow = createMainWindow();
         if (mainWindow && !mainWindow.isDestroyed()) {
           bindPendingSecondInstanceFocus(mainWindow);
+          loadMainWindowContent(mainWindow);
         }
       } else if (mainWindow && !mainWindow.isDestroyed()) {
         // On macOS, clicking the dock icon should show the window if it's hidden

@@ -14,6 +14,7 @@ import {
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
+type BrowserMode = 'off' | 'relay' | 'native';
 
 interface SettingsState {
   // General
@@ -27,6 +28,7 @@ interface SettingsState {
   // Gateway
   gatewayAutoStart: boolean;
   gatewayPort: number;
+  browserMode: BrowserMode;
   proxyEnabled: boolean;
   proxyServer: string;
   proxyBypassRules: string;
@@ -76,6 +78,7 @@ const defaultSettings = {
   telemetryEnabled: true,
   gatewayAutoStart: true,
   gatewayPort: 18789,
+  browserMode: 'relay' as BrowserMode,
   proxyEnabled: false,
   proxyServer: '',
   proxyBypassRules: '<local>;localhost;127.0.0.1;::1',

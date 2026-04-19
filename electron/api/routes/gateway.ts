@@ -134,6 +134,8 @@ export async function handleGatewayRoutes(
         method: body.method,
         ...(body.params !== undefined ? { params: body.params } : {}),
         ...(typeof body.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
+      }, {
+        ...(typeof body.timeoutMs === 'number' ? { timeoutMs: body.timeoutMs } : {}),
       });
       sendJson(res, result.status, result.data);
     } catch (error) {

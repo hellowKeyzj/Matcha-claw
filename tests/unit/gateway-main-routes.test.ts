@@ -60,6 +60,8 @@ describe('main gateway routes', () => {
       method: 'chat.send',
       params: { message: 'hello' },
       timeoutMs: 10000,
+    }, {
+      timeoutMs: 10000,
     });
     expect(ctx.gatewayManager.rpc).not.toHaveBeenCalled();
     expect(sendJsonMock).toHaveBeenCalledWith(
