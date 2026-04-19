@@ -8,6 +8,7 @@
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
+ *   - memory-lancedb-pro -> build/openclaw-plugins/memory-lancedb-pro
  *
  * The output plugin directory contains:
  *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)
@@ -23,6 +24,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT_ROOT = path.join(ROOT, 'build', 'openclaw-plugins');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
+const LOCAL_MINILM_MODEL_ONNX = path.join(
+  ROOT,
+  'packages',
+  'memory-lancedb-pro',
+  'models',
+  'Xenova',
+  'all-MiniLM-L6-v2',
+  'onnx',
+  'model.onnx',
+);
 
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
 // Adding \\?\ prefix bypasses the limit for Win32 fs calls.
@@ -52,10 +63,118 @@ const PLUGINS = [
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
   { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
+  { localPath: path.join(ROOT, 'packages', 'memory-lancedb-pro'), pluginId: 'memory-lancedb-pro' },
   { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
   { localPath: path.join(ROOT, 'packages', 'openclaw-security-plugin'), pluginId: 'security-core' },
+  { localPath: path.join(ROOT, 'packages', 'openclaw-browser-relay-plugin'), pluginId: 'browser-relay' },
   { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
 ];
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function getRuntimeDependencyNames(packageJson) {
+  return Object.keys(packageJson?.dependencies ?? {});
+}
+
+function resolveInstalledPackagePath(packageName, nodeModulesDirs = [NODE_MODULES]) {
+  for (const nodeModulesDir of nodeModulesDirs) {
+    const packagePath = path.join(nodeModulesDir, ...packageName.split('/'));
+    if (fs.existsSync(packagePath)) {
+      return packagePath;
+    }
+  }
+  return null;
+}
+
+function createSkipPackages(packageJson) {
+  const skipPackages = new Set(['typescript', '@playwright/test']);
+  for (const peer of Object.keys(packageJson?.peerDependencies ?? {})) {
+    skipPackages.add(peer);
+  }
+  return skipPackages;
+}
+
+function collectTransitiveDepsFromPackageNames(packageNames, skipPackages, nodeModulesDirs = [NODE_MODULES]) {
+  const collected = new Map();
+  const queue = [];
+  const skipScopes = ['@types/'];
+
+  for (const packageName of packageNames) {
+    if (!packageName || skipPackages.has(packageName) || skipScopes.some((scope) => packageName.startsWith(scope))) {
+      continue;
+    }
+
+    const packagePath = resolveInstalledPackagePath(packageName, nodeModulesDirs);
+    if (!packagePath) {
+      throw new Error(`Missing dependency "${packageName}" in root node_modules.`);
+    }
+
+    const realPath = realpathSafe(packagePath);
+    if (collected.has(realPath)) {
+      continue;
+    }
+
+    collected.set(realPath, packageName);
+    const virtualNodeModules = getVirtualStoreNodeModules(realPath);
+    if (virtualNodeModules) {
+      queue.push({ nodeModulesDir: virtualNodeModules, skipPkg: packageName });
+    }
+  }
+
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift();
+    for (const { name, fullPath } of listPackages(nodeModulesDir)) {
+      if (name === skipPkg) continue;
+      if (skipPackages.has(name) || skipScopes.some((scope) => name.startsWith(scope))) continue;
+
+      let realPath;
+      try {
+        realPath = realpathSafe(fullPath);
+      } catch {
+        continue;
+      }
+      if (collected.has(realPath)) continue;
+      collected.set(realPath, name);
+
+      const depVirtualNM = getVirtualStoreNodeModules(realPath);
+      if (depVirtualNM && depVirtualNM !== nodeModulesDir) {
+        queue.push({ nodeModulesDir: depVirtualNM, skipPkg: name });
+      }
+    }
+  }
+
+  return collected;
+}
+
+function copyFlattenedDeps(outputDir, collected) {
+  const outputNodeModules = path.join(outputDir, 'node_modules');
+  fs.mkdirSync(outputNodeModules, { recursive: true });
+
+  let copiedCount = 0;
+  let skippedDupes = 0;
+  const copiedNames = new Set();
+
+  for (const [realPath, pkgName] of collected) {
+    if (copiedNames.has(pkgName)) {
+      skippedDupes++;
+      continue;
+    }
+    copiedNames.add(pkgName);
+
+    const dest = path.join(outputNodeModules, pkgName);
+    try {
+      fs.mkdirSync(normWin(path.dirname(dest)), { recursive: true });
+      fs.cpSync(normWin(realPath), normWin(dest), { recursive: true, dereference: true });
+      copiedCount++;
+    } catch (err) {
+      echo`   ⚠️  Skipped ${pkgName}: ${err.message}`;
+    }
+  }
+
+  return { copiedCount, skippedDupes };
+}
 
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;
@@ -125,15 +244,9 @@ function bundleOnePlugin({ npmName, pluginId }) {
   }
   queue.push({ nodeModulesDir: rootVirtualNM, skipPkg: npmName });
 
-  // Skip peerDependencies — they're provided by the host openclaw gateway.
-  const SKIP_PACKAGES = new Set(['typescript', '@playwright/test']);
+  const pluginPkg = readJson(path.join(outputDir, 'package.json'));
+  const SKIP_PACKAGES = createSkipPackages(pluginPkg);
   const SKIP_SCOPES = ['@types/'];
-  try {
-    const pluginPkg = JSON.parse(fs.readFileSync(path.join(outputDir, 'package.json'), 'utf8'));
-    for (const peer of Object.keys(pluginPkg.peerDependencies || {})) {
-      SKIP_PACKAGES.add(peer);
-    }
-  } catch { /* ignore */ }
 
   while (queue.length > 0) {
     const { nodeModulesDir, skipPkg } = queue.shift();
@@ -158,29 +271,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
   }
 
   // 3) Copy flattened deps into plugin/node_modules
-  const outputNodeModules = path.join(outputDir, 'node_modules');
-  fs.mkdirSync(outputNodeModules, { recursive: true });
-
-  let copiedCount = 0;
-  let skippedDupes = 0;
-  const copiedNames = new Set();
-
-  for (const [realPath, pkgName] of collected) {
-    if (copiedNames.has(pkgName)) {
-      skippedDupes++;
-      continue;
-    }
-    copiedNames.add(pkgName);
-
-    const dest = path.join(outputNodeModules, pkgName);
-    try {
-      fs.mkdirSync(normWin(path.dirname(dest)), { recursive: true });
-      fs.cpSync(normWin(realPath), normWin(dest), { recursive: true, dereference: true });
-      copiedCount++;
-    } catch (err) {
-      echo`   ⚠️  Skipped ${pkgName}: ${err.message}`;
-    }
-  }
+  const { copiedCount, skippedDupes } = copyFlattenedDeps(outputDir, collected);
 
   const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
   if (!fs.existsSync(manifestPath)) {
@@ -236,6 +327,21 @@ function patchPluginId(pluginDir, expectedId) {
   }
 }
 
+function ensureBundledLocalMiniLmModel() {
+  if (fs.existsSync(LOCAL_MINILM_MODEL_ONNX)) {
+    echo`📦 Bundled MiniLM model ready: ${LOCAL_MINILM_MODEL_ONNX}`;
+    return;
+  }
+
+  throw new Error(
+    [
+      'Bundled MiniLM model is missing for memory-lancedb-pro.',
+      'Run "pnpm run download:minilm-model" before bundling plugins.',
+      'If Hugging Face direct access is blocked, set HF_ENDPOINT=https://hf-mirror.com and retry.',
+    ].join(' '),
+  );
+}
+
 function bundleLocalPlugin({ localPath, pluginId }) {
   const sourceDir = normWin(localPath);
   if (!fs.existsSync(sourceDir)) {
@@ -255,8 +361,19 @@ function bundleLocalPlugin({ localPath, pluginId }) {
   if (!fs.existsSync(manifestPath)) {
     throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
   }
-  echo`   ✅ ${pluginId}: copied local source`;
+  const pluginPkg = readJson(path.join(outputDir, 'package.json'));
+  const dependencyNames = getRuntimeDependencyNames(pluginPkg);
+  const dependencyMap = collectTransitiveDepsFromPackageNames(
+    dependencyNames,
+    createSkipPackages(pluginPkg),
+    [path.join(localPath, 'node_modules'), NODE_MODULES],
+  );
+  const { copiedCount, skippedDupes } = copyFlattenedDeps(outputDir, dependencyMap);
+
+  echo`   ✅ ${pluginId}: copied local source + ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
+
+ensureBundledLocalMiniLmModel();
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });

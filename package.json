@@ -9,6 +9,7 @@
       "esbuild",
       "koffi",
       "node-llama-cpp",
+      "onnxruntime-node",
       "protobufjs",
       "sharp"
     ],
@@ -37,6 +38,7 @@
     "build:vite": "vite build",
     "build:runtime-host-process": "node scripts/build-runtime-host-process.mjs",
     "bundle:openclaw-plugins": "zx scripts/bundle-openclaw-plugins.mjs",
+    "download:minilm-model": "node packages/memory-lancedb-pro/scripts/download-local-minilm.mjs",
     "bundle:preinstalled-skills": "zx scripts/bundle-preinstalled-skills.mjs",
     "lint": "eslint . --fix",
     "typecheck": "tsc --noEmit",
@@ -84,6 +86,7 @@
     "@aws-sdk/client-bedrock": "3.1020.0",
     "@eslint/js": "^10.0.1",
     "@larksuite/openclaw-lark": "2026.3.29",
+    "memory-lancedb-pro": "workspace:*",
     "@playwright/test": "^1.58.2",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",

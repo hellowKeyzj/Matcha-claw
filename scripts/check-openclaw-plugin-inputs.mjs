@@ -8,6 +8,8 @@ const ROOT = process.cwd();
 const REQUIRED_LOCAL_PLUGINS = [
   { pluginId: 'task-manager', sourceDir: 'packages/openclaw-task-manager-plugin' },
   { pluginId: 'security-core', sourceDir: 'packages/openclaw-security-plugin' },
+  { pluginId: 'browser-relay', sourceDir: 'packages/openclaw-browser-relay-plugin' },
+  { pluginId: 'memory-lancedb-pro', sourceDir: 'packages/memory-lancedb-pro' },
 ];
 
 function fail(message, details = []) {
@@ -32,6 +34,16 @@ function isRecord(value) {
 async function readJson(filePath) {
   const raw = await readFile(filePath, 'utf8');
   return JSON.parse(raw);
+}
+
+async function dependencyExists(packageName, nodeModulesDirs) {
+  for (const nodeModulesDir of nodeModulesDirs) {
+    const dependencyPath = path.join(nodeModulesDir, ...packageName.split('/'));
+    if (await pathExists(dependencyPath)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function validatePluginSource(plugin) {
@@ -86,6 +98,19 @@ async function validatePluginSource(plugin) {
     const entryPath = path.resolve(sourceDir, entry);
     if (!(await pathExists(entryPath))) {
       issues.push(`openclaw.extensions 指向不存在文件: ${plugin.sourceDir} -> ${entry}`);
+    }
+  }
+
+  const runtimeDependencyNames = Object.keys(
+    isRecord(packageJson?.dependencies) ? packageJson.dependencies : {},
+  );
+  const nodeModulesDirs = [
+    path.join(sourceDir, 'node_modules'),
+    path.join(ROOT, 'node_modules'),
+  ];
+  for (const dependencyName of runtimeDependencyNames) {
+    if (!(await dependencyExists(dependencyName, nodeModulesDirs))) {
+      issues.push(`运行时依赖未安装，无法打包本地插件: ${plugin.sourceDir} -> ${dependencyName}`);
     }
   }
 
