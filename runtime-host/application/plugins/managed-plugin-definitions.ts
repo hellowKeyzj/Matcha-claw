@@ -32,6 +32,14 @@ export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPlugin
     id: 'security-core',
     sourceDirs: ['security-core'],
   },
+  {
+    id: 'browser-relay',
+    sourceDirs: ['browser-relay'],
+  },
+  {
+    id: 'memory-lancedb-pro',
+    sourceDirs: ['memory-lancedb-pro'],
+  },
 ] as const;
 
 export function findManagedOpenClawPluginDefinition(

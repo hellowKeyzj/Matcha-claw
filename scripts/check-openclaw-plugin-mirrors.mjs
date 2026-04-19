@@ -15,6 +15,20 @@ const REQUIRED_PLUGIN_MIRRORS = [
     pluginId: 'security-core',
     dir: 'security-core',
   },
+  {
+    pluginId: 'browser-relay',
+    dir: 'browser-relay',
+  },
+  {
+    pluginId: 'memory-lancedb-pro',
+    dir: 'memory-lancedb-pro',
+    requiredFiles: [
+      'models/Xenova/all-MiniLM-L6-v2/config.json',
+      'models/Xenova/all-MiniLM-L6-v2/tokenizer.json',
+      'models/Xenova/all-MiniLM-L6-v2/tokenizer_config.json',
+      'models/Xenova/all-MiniLM-L6-v2/onnx/model.onnx',
+    ],
+  },
 ];
 
 function fail(message, details = []) {
@@ -95,6 +109,24 @@ async function validateMirror(definition) {
     const entryPath = path.resolve(mirrorDir, entry);
     if (!(await pathExists(entryPath))) {
       issues.push(`build openclaw.extensions 入口不存在: ${definition.dir} -> ${entry}`);
+    }
+  }
+
+  const runtimeDependencyNames = Object.keys(
+    isRecord(packageJson?.dependencies) ? packageJson.dependencies : {},
+  );
+  for (const dependencyName of runtimeDependencyNames) {
+    const dependencyPackageJsonPath = path.join(mirrorDir, 'node_modules', ...dependencyName.split('/'), 'package.json');
+    if (!(await pathExists(dependencyPackageJsonPath))) {
+      issues.push(`build 运行时依赖缺失: ${definition.dir} -> node_modules/${dependencyName}`);
+    }
+  }
+
+  const requiredFiles = Array.isArray(definition.requiredFiles) ? definition.requiredFiles : [];
+  for (const relativeFile of requiredFiles) {
+    const targetPath = path.join(mirrorDir, relativeFile);
+    if (!(await pathExists(targetPath))) {
+      issues.push(`build 插件资源缺失: ${definition.dir} -> ${relativeFile}`);
     }
   }
 

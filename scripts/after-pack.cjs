@@ -515,6 +515,13 @@ exports.default = async function afterPack(context) {
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
     { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
     {
+      npmName: 'memory-lancedb-pro',
+      pluginId: 'memory-lancedb-pro',
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'memory-lancedb-pro'),
+      ],
+    },
+    {
       pluginId: 'task-manager',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'task-manager'),

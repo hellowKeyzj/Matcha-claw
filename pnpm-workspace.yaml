@@ -1,9 +1,9 @@
 packages:
   - '.'
+  - 'packages/memory-lancedb-pro'
   - 'runtime-host'
   - 'worktrees/plugins/sdk'
 
 ignoredBuiltDependencies:
   - electron
   - esbuild
-
