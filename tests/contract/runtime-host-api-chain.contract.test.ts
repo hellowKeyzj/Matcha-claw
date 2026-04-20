@@ -63,13 +63,14 @@ describe('runtime-host API 真实链路 contract', () => {
   it('channels 配置链路通过 /dispatch 生效并可读回', async () => {
     const saved = await harness.dispatchOk<{ success: boolean }>(
       'POST',
-      '/api/channels/config',
+      '/api/channels/activate',
       {
-        channelType: 'openclaw-weixin',
+        channelType: 'wecom',
         accountId: 'default',
         enabled: true,
         config: {
-          endpoint: 'https://example.invalid/weixin',
+          botId: 'wecom-bot-1',
+          secret: 'wecom-secret-1',
         },
       },
     );
@@ -80,14 +81,14 @@ describe('runtime-host API 真实链路 contract', () => {
       '/api/channels/configured',
     );
     expect(configured.success).toBe(true);
-    expect(configured.channels).toContain('openclaw-weixin');
+    expect(configured.channels).toContain('wecom');
 
     const values = await harness.dispatchOk<{ success: boolean; values: Record<string, string> }>(
       'GET',
-      '/api/channels/config/openclaw-weixin?accountId=default',
+      '/api/channels/config/wecom?accountId=default',
     );
     expect(values.success).toBe(true);
-    expect(values.values.endpoint).toBe('https://example.invalid/weixin');
+    expect(values.values.botId).toBe('wecom-bot-1');
   });
 
   it('plugins 运行态和目录均由 API 暴露，不依赖内部 import', async () => {

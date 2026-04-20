@@ -35,11 +35,10 @@ import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
 import {
+  hostChannelsActivate,
   hostChannelsCancelSession,
   hostChannelsFetchConfiguredTypes,
   hostChannelsReadConfig,
-  hostChannelsSaveConfig,
-  hostChannelsStartSession,
   hostChannelsValidateCredentials,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
@@ -59,10 +58,6 @@ import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 
 const CHANNELS_EVENT_REFRESH_COOLDOWN_MS = 400;
-const QR_API_BASE_BY_TYPE: Partial<Record<ChannelType, string>> = {
-  whatsapp: '/api/channels/whatsapp',
-  'openclaw-weixin': '/api/channels/openclaw-weixin',
-};
 const QR_EVENT_PREFIX_BY_TYPE: Partial<Record<ChannelType, string>> = {
   whatsapp: 'channel:whatsapp',
   'openclaw-weixin': 'channel:weixin',
@@ -377,7 +372,7 @@ export function Channels() {
                       <span className="text-3xl">{meta.icon}</span>
                       <p className="font-medium mt-2">{meta.name}</p>
                       <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                        {meta.description}
+                        {t(meta.description)}
                       </p>
                       {isConfigured && (
                         <Badge className="absolute top-2 right-2 text-xs bg-green-600 hover:bg-green-600">
@@ -541,9 +536,6 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
       setQrCode(null);
       setQrImageFailed(false);
       setShowAdvancedSettings(false);
-      // 清理可能存在的二维码会话
-      void hostChannelsCancelSession('whatsapp').catch(() => { });
-      void hostChannelsCancelSession('openclaw-weixin').catch(() => { });
       return;
     }
     setShowAdvancedSettings(false);
@@ -588,8 +580,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
   useEffect(() => {
     if (!selectedType || CHANNEL_META[selectedType].connectionType !== 'qr') return;
     const eventPrefix = QR_EVENT_PREFIX_BY_TYPE[selectedType];
-    const qrApiBase = QR_API_BASE_BY_TYPE[selectedType];
-    if (!eventPrefix || !qrApiBase) return;
+    if (!eventPrefix) return;
 
     const onQr = (data: { qr?: string; qrDataUrl?: string; raw?: string }) => {
       clearQrGenerateTimeout();
@@ -687,9 +678,6 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
     try {
       // For QR-based channels, request QR code
       if (meta.connectionType === 'qr') {
-        if (!QR_API_BASE_BY_TYPE[selectedType]) {
-          throw new Error(`Unsupported QR channel type: ${selectedType}`);
-        }
         clearQrGenerateTimeout();
         qrGenerateTimeoutRef.current = setTimeout(() => {
           setConnecting(false);
@@ -697,7 +685,7 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         }, QR_GENERATE_TIMEOUT_MS);
         const accountId = channelName.trim() || 'default';
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-        await hostChannelsStartSession(qrChannelType, { accountId, config: configValues });
+        await hostChannelsActivate({ channelType: qrChannelType, accountId, config: configValues });
         // The QR code will be set via event listener
         return;
       }
@@ -739,9 +727,9 @@ function AddChannelDialog({ selectedType, onSelectType, onClose, onChannelAdded 
         });
       }
 
-      // Step 2: Save channel configuration via IPC
+      // Step 2: Activate channel configuration
       const config: Record<string, unknown> = { ...configValues };
-      const saveResult = await hostChannelsSaveConfig({ channelType: selectedType, config });
+      const saveResult = await hostChannelsActivate({ channelType: selectedType, config });
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Failed to save channel config');
       }

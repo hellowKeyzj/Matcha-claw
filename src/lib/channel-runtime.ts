@@ -19,13 +19,13 @@ export async function hostChannelsReadConfig(
   );
 }
 
-export async function hostChannelsSaveConfig(input: {
+export async function hostChannelsActivate(input: {
   channelType: ChannelType;
   config: Record<string, unknown>;
   accountId?: string;
 }): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }> {
   return await hostApiFetch<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean }>(
-    '/api/channels/config',
+    '/api/channels/activate',
     {
       method: 'POST',
       body: JSON.stringify(input),
@@ -84,24 +84,11 @@ export async function hostChannelsRequestQrCode(
   });
 }
 
-export async function hostChannelsStartSession(
-  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
-  input: { accountId?: string; config?: Record<string, unknown> },
-): Promise<unknown> {
-  const route = channelType === 'whatsapp'
-    ? '/api/channels/whatsapp/start'
-    : '/api/channels/openclaw-weixin/start';
-  return await hostApiFetch(route, {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
-}
-
 export async function hostChannelsCancelSession(
   channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
 ): Promise<unknown> {
-  const route = channelType === 'whatsapp'
-    ? '/api/channels/whatsapp/cancel'
-    : '/api/channels/openclaw-weixin/cancel';
-  return await hostApiFetch(route, { method: 'POST' });
+  return await hostApiFetch('/api/channels/session/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ channelType }),
+  });
 }

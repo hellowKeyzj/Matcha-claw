@@ -183,7 +183,15 @@ export async function createRuntimeHostApiHarness(
   const runtimeHostDataDir = join(rootDir, 'runtime-host-data');
   mkdirSync(openclawConfigDir, { recursive: true });
   mkdirSync(runtimeHostDataDir, { recursive: true });
-  writeFileSync(join(openclawConfigDir, 'openclaw.json'), '{}\n', 'utf8');
+  const enabledPluginIds = options.enabledPluginIds ?? [];
+  writeFileSync(join(openclawConfigDir, 'openclaw.json'), `${JSON.stringify({
+    ...(enabledPluginIds.length > 0 ? {
+      plugins: {
+        allow: enabledPluginIds,
+        entries: Object.fromEntries(enabledPluginIds.map((pluginId) => [pluginId, { enabled: true }])),
+      },
+    } : {}),
+  }, null, 2)}\n`, 'utf8');
 
   const [runtimeHostPort, parentApiPort] = await Promise.all([findFreePort(), findFreePort()]);
   const parentDispatchToken = `runtime-host-test-token-${randomUUID()}`;
@@ -200,7 +208,7 @@ export async function createRuntimeHostApiHarness(
       OPENCLAW_CONFIG_DIR: openclawConfigDir,
       MATCHACLAW_RUNTIME_HOST_DATA_DIR: runtimeHostDataDir,
       MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: options.pluginExecutionEnabled === false ? '0' : '1',
-      MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(options.enabledPluginIds ?? []),
+      MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(enabledPluginIds),
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(options.pluginCatalog ?? []),
     }),
   });

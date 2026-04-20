@@ -86,10 +86,8 @@ vi.mock('electron', () => ({
 
 vi.mock('../../electron/services/channels/channel-runtime-service', () => ({
   createChannelRuntimeService: vi.fn(() => ({
-    startWhatsApp: vi.fn(async () => {}),
-    cancelWhatsApp: vi.fn(async () => {}),
-    startOpenClawWeixin: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
-    cancelOpenClawWeixin: vi.fn(async () => {}),
+    startChannelSession: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
+    cancelChannelSession: vi.fn(async () => {}),
   })),
 }));
 
@@ -184,7 +182,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const result = await manager.request<{ source: string }>('GET', '/api/workbench/bootstrap');
     expect(result).toEqual({ status: 200, data: { source: 'child' } });
-    expect(hoisted.childRequestMock).toHaveBeenCalledWith('GET', '/api/workbench/bootstrap', undefined);
+    expect(hoisted.childRequestMock).toHaveBeenCalledWith('GET', '/api/workbench/bootstrap', undefined, undefined);
   });
 
   it('默认总是走子进程 transport', async () => {
@@ -200,7 +198,7 @@ describe('runtime-host manager request transport policy', () => {
 
     const result = await manager.request<{ source: string }>('GET', '/api/workbench/bootstrap');
     expect(result).toEqual({ status: 200, data: { source: 'child-always-on' } });
-    expect(hoisted.childRequestMock).toHaveBeenCalledWith('GET', '/api/workbench/bootstrap', undefined);
+    expect(hoisted.childRequestMock).toHaveBeenCalledWith('GET', '/api/workbench/bootstrap', undefined, undefined);
   });
 
   it('child 返回 501 时直接抛错，不再回退', async () => {

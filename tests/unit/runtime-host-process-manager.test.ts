@@ -44,10 +44,8 @@ async function startParentDispatchServer(
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
         | 'provider_oauth_submit'
-        | 'channel_whatsapp_start'
-        | 'channel_whatsapp_cancel'
-        | 'channel_openclaw_weixin_start'
-        | 'channel_openclaw_weixin_cancel'
+        | 'channel_session_start'
+        | 'channel_session_cancel'
         | 'license_get_gate'
         | 'license_get_stored_key'
         | 'license_validate'
@@ -105,10 +103,8 @@ async function startParentDispatchServer(
           | 'provider_oauth_start'
           | 'provider_oauth_cancel'
           | 'provider_oauth_submit'
-          | 'channel_whatsapp_start'
-          | 'channel_whatsapp_cancel'
-          | 'channel_openclaw_weixin_start'
-          | 'channel_openclaw_weixin_cancel'
+          | 'channel_session_start'
+          | 'channel_session_cancel'
           | 'license_get_gate'
           | 'license_get_stored_key'
           | 'license_validate'
@@ -1837,7 +1833,7 @@ describe('runtime-host process manager', () => {
     const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
       onShellAction: (body) => {
         shellActions.push(body.action);
-        if (body.action === 'channel_openclaw_weixin_start') {
+        if (body.action === 'channel_session_start') {
           return {
             status: 200,
             payload: {
@@ -1881,8 +1877,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/whatsapp/start',
-          payload: { accountId: 'default' },
+          route: '/api/channels/activate',
+          payload: { channelType: 'whatsapp', accountId: 'default' },
         }),
       });
       expect(whatsAppStart.status).toBe(200);
@@ -1893,7 +1889,8 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/whatsapp/cancel',
+          route: '/api/channels/session/cancel',
+          payload: { channelType: 'whatsapp' },
         }),
       });
       expect(whatsAppCancel.status).toBe(200);
@@ -1904,8 +1901,9 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/openclaw-weixin/start',
+          route: '/api/channels/activate',
           payload: {
+            channelType: 'openclaw-weixin',
             accountId: 'wx-main',
             config: { routeTag: 'prod' },
           },
@@ -1933,16 +1931,17 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/openclaw-weixin/cancel',
+          route: '/api/channels/session/cancel',
+          payload: { channelType: 'openclaw-weixin' },
         }),
       });
       expect(weixinCancel.status).toBe(200);
 
       expect(shellActions).toEqual([
-        'channel_whatsapp_start',
-        'channel_whatsapp_cancel',
-        'channel_openclaw_weixin_start',
-        'channel_openclaw_weixin_cancel',
+        'channel_session_start',
+        'channel_session_cancel',
+        'channel_session_start',
+        'channel_session_cancel',
       ]);
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
@@ -2148,7 +2147,7 @@ describe('runtime-host process manager', () => {
         body: JSON.stringify({
           version: 1,
           method: 'POST',
-          route: '/api/channels/config',
+          route: '/api/channels/activate',
           payload: {
             channelType: 'discord',
             config: {
@@ -3423,10 +3422,8 @@ describe('runtime-host process manager', () => {
         | 'provider_oauth_start'
         | 'provider_oauth_cancel'
         | 'provider_oauth_submit'
-        | 'channel_whatsapp_start'
-        | 'channel_whatsapp_cancel'
-        | 'channel_openclaw_weixin_start'
-        | 'channel_openclaw_weixin_cancel'
+        | 'channel_session_start'
+        | 'channel_session_cancel'
         | 'license_get_gate'
         | 'license_get_stored_key'
         | 'license_validate'
@@ -3538,6 +3535,126 @@ describe('runtime-host process manager', () => {
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
       expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
       expect(parentDispatchServer.getShellActionRequestCount()).toBe(1);
+    } finally {
+      await manager.stop();
+      await parentDispatchServer.close();
+    }
+  });
+
+  it('enabled-plugins 写入口会忽略由频道配置派生的插件 ID', async () => {
+    writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['openclaw-lark'],
+        entries: {
+          'openclaw-lark': { enabled: true },
+        },
+      },
+      channels: {
+        feishu: {
+          enabled: true,
+          accounts: {
+            default: {
+              appId: 'cli_xxx',
+              appSecret: 'secret',
+              enabled: true,
+            },
+          },
+        },
+      },
+    }, null, 2));
+    const port = createPort(63);
+    const parentApiPort = createPort(64);
+    const token = 'test-runtime-host-dispatch-token-ignore-channel-managed-plugin-ids';
+    const shellActionBodies: Array<{
+      action:
+        | 'gateway_restart'
+        | 'provider_oauth_start'
+        | 'provider_oauth_cancel'
+        | 'provider_oauth_submit'
+        | 'channel_session_start'
+        | 'channel_session_cancel'
+        | 'license_get_gate'
+        | 'license_get_stored_key'
+        | 'license_validate'
+        | 'license_revalidate'
+        | 'license_clear';
+      payload?: unknown;
+    }> = [];
+    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
+      onShellAction: (body) => {
+        shellActionBodies.push(body);
+        return {
+          status: 200,
+          payload: {
+            version: 1,
+            success: true,
+            status: 200,
+            data: {
+              execution: {
+                pluginExecutionEnabled: true,
+                enabledPluginIds: ['openclaw-lark', 'task-manager'],
+              },
+            },
+          },
+        };
+      },
+    });
+
+    const manager = createRuntimeHostProcessManager({
+      scriptPath,
+      port,
+      startTimeoutMs: 8000,
+      parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
+      parentDispatchToken: token,
+      childEnv: () => ({
+        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
+        MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['openclaw-lark']),
+        MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
+          {
+            id: 'openclaw-lark',
+            name: 'OpenClaw Lark',
+            version: '1.0.0',
+            kind: 'builtin',
+            category: 'channel',
+          },
+          {
+            id: 'task-manager',
+            name: 'Task Manager',
+            version: '1.0.0',
+            kind: 'builtin',
+            category: 'automation',
+          },
+        ]),
+      }),
+    });
+
+    try {
+      await manager.start();
+      const response = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: 1,
+          method: 'PUT',
+          route: '/api/plugins/runtime/enabled-plugins',
+          payload: { pluginIds: ['task-manager'] },
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      const config = JSON.parse(
+        readFileSync(join(openClawConfigDir, 'openclaw.json'), 'utf8'),
+      ) as {
+        plugins?: {
+          allow?: string[];
+          entries?: Record<string, { enabled?: boolean }>;
+        };
+      };
+
+      expect(config.plugins?.allow).toEqual(expect.arrayContaining(['openclaw-lark', 'task-manager']));
+      expect(config.plugins?.entries?.['openclaw-lark']?.enabled).toBe(true);
+      expect(config.plugins?.entries?.['task-manager']?.enabled).toBe(true);
+      expect(shellActionBodies.map((item) => item.action)).toEqual(['gateway_restart']);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();

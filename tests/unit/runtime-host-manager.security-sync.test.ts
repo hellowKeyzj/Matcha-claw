@@ -50,10 +50,8 @@ vi.mock('../../electron/services/settings/settings-store', () => ({
 
 vi.mock('../../electron/services/channels/channel-runtime-service', () => ({
   createChannelRuntimeService: vi.fn(() => ({
-    startWhatsApp: vi.fn(async () => {}),
-    cancelWhatsApp: vi.fn(async () => {}),
-    startOpenClawWeixin: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
-    cancelOpenClawWeixin: vi.fn(async () => {}),
+    startChannelSession: vi.fn(async () => ({ queued: true, sessionKey: 'default' })),
+    cancelChannelSession: vi.fn(async () => {}),
   })),
 }));
 
