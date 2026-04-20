@@ -41,10 +41,8 @@ export type RuntimeHostShellAction =
   | 'provider_oauth_start'
   | 'provider_oauth_cancel'
   | 'provider_oauth_submit'
-  | 'channel_whatsapp_start'
-  | 'channel_whatsapp_cancel'
-  | 'channel_openclaw_weixin_start'
-  | 'channel_openclaw_weixin_cancel'
+  | 'channel_session_start'
+  | 'channel_session_cancel'
   | 'license_get_gate'
   | 'license_get_stored_key'
   | 'license_validate'
@@ -364,29 +362,27 @@ export function createRuntimeHostManager(
         return { status: 200, data: { success: true } };
       }
 
-      if (action === 'channel_whatsapp_start') {
+      if (action === 'channel_session_start') {
         const body = asRecord(payload);
-        const accountId = typeof body?.accountId === 'string' ? body.accountId : '';
-        await mainProcessCapabilities.channel.startWhatsApp(accountId);
-        return { status: 200, data: { success: true } };
-      }
-
-      if (action === 'channel_whatsapp_cancel') {
-        await mainProcessCapabilities.channel.cancelWhatsApp();
-        return { status: 200, data: { success: true } };
-      }
-
-      if (action === 'channel_openclaw_weixin_start') {
-        const body = asRecord(payload);
-        const result = await mainProcessCapabilities.channel.startOpenClawWeixin({
+        const channelType = typeof body?.channelType === 'string' ? body.channelType : '';
+        if (!channelType) {
+          return { status: 400, data: { success: false, error: 'channelType is required' } };
+        }
+        const result = await mainProcessCapabilities.channel.startChannelSession({
+          channelType,
           accountId: typeof body?.accountId === 'string' ? body.accountId : undefined,
           config: asRecord(body?.config) ?? undefined,
         });
         return { status: 200, data: { success: true, ...result } };
       }
 
-      if (action === 'channel_openclaw_weixin_cancel') {
-        await mainProcessCapabilities.channel.cancelOpenClawWeixin();
+      if (action === 'channel_session_cancel') {
+        const body = asRecord(payload);
+        const channelType = typeof body?.channelType === 'string' ? body.channelType : '';
+        if (!channelType) {
+          return { status: 400, data: { success: false, error: 'channelType is required' } };
+        }
+        await mainProcessCapabilities.channel.cancelChannelSession(channelType);
         return { status: 200, data: { success: true } };
       }
 

@@ -102,9 +102,9 @@ export async function handleChannelRoute(
     }
   }
 
-  if (method === 'POST' && routePath === '/api/channels/whatsapp/start') {
+  if (method === 'POST' && routePath === '/api/channels/activate') {
     try {
-      return await service.startWhatsApp(payload);
+      return await service.activate(payload);
     } catch (error) {
       return {
         status: 500,
@@ -113,45 +113,9 @@ export async function handleChannelRoute(
     }
   }
 
-  if (method === 'POST' && routePath === '/api/channels/whatsapp/cancel') {
+  if (method === 'POST' && routePath === '/api/channels/session/cancel') {
     try {
-      return await service.cancelWhatsApp();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/channels/openclaw-weixin/start') {
-    try {
-      return await service.startWeixin(payload);
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/channels/openclaw-weixin/cancel') {
-    try {
-      return await service.cancelWeixin();
-    } catch (error) {
-      return {
-        status: 500,
-        data: { success: false, error: String(error) },
-      };
-    }
-  }
-
-  if (method === 'POST' && routePath === '/api/channels/config') {
-    try {
-      return {
-        status: 200,
-        data: await service.saveConfig(payload),
-      };
+      return await service.cancelSession(payload);
     } catch (error) {
       return {
         status: 500,
@@ -223,10 +187,7 @@ export async function handleChannelRoute(
   if (method === 'DELETE' && routePath.startsWith('/api/channels/config/')) {
     try {
       const channelType = decodeURIComponent(routePath.slice('/api/channels/config/'.length));
-      return {
-        status: 200,
-        data: await service.deleteConfig(channelType),
-      };
+      return await service.deleteConfig(channelType);
     } catch (error) {
       return {
         status: 500,

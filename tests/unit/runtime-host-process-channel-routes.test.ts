@@ -67,5 +67,116 @@ describe('runtime-host process channel routes', () => {
     expect(disconnectResult).toEqual({ status: 200, data: { success: true } });
     expect(qrResult).toEqual({ status: 200, data: { success: true, qrCode: 'qr-code', sessionId: 'session-1' } });
   });
-});
 
+  it('直接提交型渠道激活后会保存配置并触发 gateway_restart', async () => {
+    const deps = createDeps();
+
+    const result = await handleChannelRoute(
+      'POST',
+      '/api/channels/activate',
+      new URL('http://127.0.0.1/api/channels/activate'),
+      { channelType: 'wecom', config: { botId: 'bot-1', secret: 'secret-1' } },
+      deps,
+    );
+
+    expect(deps.saveChannelConfigLocal).toHaveBeenCalledWith({
+      channelType: 'wecom',
+      config: { botId: 'bot-1', secret: 'secret-1' },
+    });
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+    expect(result).toEqual({ status: 200, data: { success: true } });
+  });
+
+  it('直接提交型渠道激活后若 gateway_restart 失败则接口直接失败', async () => {
+    const deps = createDeps();
+    deps.requestParentShellAction.mockResolvedValueOnce({
+      success: false,
+      status: 503,
+      error: { code: 'gateway_restart_failed', message: 'gateway restart failed' },
+    });
+
+    const result = await handleChannelRoute(
+      'POST',
+      '/api/channels/activate',
+      new URL('http://127.0.0.1/api/channels/activate'),
+      { channelType: 'wecom', config: { botId: 'bot-1', secret: 'secret-1' } },
+      deps,
+    );
+
+    expect(deps.saveChannelConfigLocal).toHaveBeenCalledOnce();
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+    expect(result).toEqual({
+      status: 503,
+      data: { success: false, error: 'gateway restart failed' },
+    });
+  });
+
+  it('登录会话型渠道激活时不会立即写配置或重启 gateway', async () => {
+    const deps = createDeps();
+
+    const result = await handleChannelRoute(
+      'POST',
+      '/api/channels/activate',
+      new URL('http://127.0.0.1/api/channels/activate'),
+      { channelType: 'openclaw-weixin', accountId: 'wx-main', config: { routeTag: 'prod' } },
+      deps,
+    );
+
+    expect(deps.saveChannelConfigLocal).not.toHaveBeenCalled();
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('channel_session_start', {
+      channelType: 'openclaw-weixin',
+      accountId: 'wx-main',
+      config: { routeTag: 'prod' },
+    });
+    expect(result).toEqual({ status: 200, data: { success: true, status: 200, data: { success: true } } });
+  });
+
+  it('登录会话型渠道取消时走统一 session cancel', async () => {
+    const deps = createDeps();
+
+    const result = await handleChannelRoute(
+      'POST',
+      '/api/channels/session/cancel',
+      new URL('http://127.0.0.1/api/channels/session/cancel'),
+      { channelType: 'whatsapp' },
+      deps,
+    );
+
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('channel_session_cancel', {
+      channelType: 'whatsapp',
+    });
+    expect(result).toEqual({ status: 200, data: { success: true, status: 200, data: { success: true } } });
+  });
+
+  it('启用状态变更后会触发 gateway_restart', async () => {
+    const deps = createDeps();
+
+    const result = await handleChannelRoute(
+      'PUT',
+      '/api/channels/config/enabled',
+      new URL('http://127.0.0.1/api/channels/config/enabled'),
+      { channelType: 'wecom', enabled: false },
+      deps,
+    );
+
+    expect(deps.setChannelEnabledLocal).toHaveBeenCalledWith('wecom', false);
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+    expect(result).toEqual({ status: 200, data: { success: true } });
+  });
+
+  it('删除渠道配置后会触发 gateway_restart', async () => {
+    const deps = createDeps();
+
+    const result = await handleChannelRoute(
+      'DELETE',
+      '/api/channels/config/wecom',
+      new URL('http://127.0.0.1/api/channels/config/wecom'),
+      undefined,
+      deps,
+    );
+
+    expect(deps.deleteChannelConfigLocal).toHaveBeenCalledWith('wecom');
+    expect(deps.requestParentShellAction).toHaveBeenCalledWith('gateway_restart');
+    expect(result).toEqual({ status: 200, data: { success: true } });
+  });
+});

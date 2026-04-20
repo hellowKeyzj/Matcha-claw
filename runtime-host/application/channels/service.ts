@@ -1,5 +1,6 @@
 import type { OpenClawBridge } from '../../openclaw-bridge';
 import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
+import { channelUsesLoginSession } from './channel-activation-strategy';
 
 type LocalDispatchResponse = {
   status: number;
@@ -28,6 +29,20 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 export class ChannelService {
   constructor(private readonly deps: ChannelServiceDeps) {}
+
+  private async restartGateway(): Promise<LocalDispatchResponse> {
+    const restartResponse = await this.deps.requestParentShellAction('gateway_restart');
+    if (!restartResponse.success) {
+      return {
+        status: restartResponse.status,
+        data: { success: false, error: restartResponse.error.message },
+      };
+    }
+    return {
+      status: restartResponse.status,
+      data: { success: true },
+    };
+  }
 
   async snapshot() {
     return {
@@ -62,36 +77,49 @@ export class ChannelService {
     };
   }
 
-  async startWhatsApp(payload: unknown) {
+  async activate(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
-    const shellResponse = await this.deps.requestParentShellAction('channel_whatsapp_start', {
-      accountId: typeof body.accountId === 'string' ? body.accountId : '',
-    });
-    return this.deps.mapParentTransportResponse(shellResponse);
-  }
+    const channelType = typeof body.channelType === 'string' ? body.channelType : '';
+    if (!channelType) {
+      return {
+        status: 400,
+        data: { success: false, error: 'channelType is required' },
+      } satisfies LocalDispatchResponse;
+    }
 
-  async cancelWhatsApp() {
-    const shellResponse = await this.deps.requestParentShellAction('channel_whatsapp_cancel');
-    return this.deps.mapParentTransportResponse(shellResponse);
-  }
+    if (!channelUsesLoginSession(channelType)) {
+      await this.deps.saveChannelConfig(payload);
+      return await this.restartGateway();
+    }
 
-  async startWeixin(payload: unknown) {
-    const body = isRecord(payload) ? payload : {};
-    const shellResponse = await this.deps.requestParentShellAction('channel_openclaw_weixin_start', {
+    const shellResponse = await this.deps.requestParentShellAction('channel_session_start', {
+      channelType,
       ...(typeof body.accountId === 'string' ? { accountId: body.accountId } : {}),
       ...(isRecord(body.config) ? { config: body.config } : {}),
     });
     return this.deps.mapParentTransportResponse(shellResponse);
   }
 
-  async cancelWeixin() {
-    const shellResponse = await this.deps.requestParentShellAction('channel_openclaw_weixin_cancel');
-    return this.deps.mapParentTransportResponse(shellResponse);
-  }
+  async cancelSession(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    const channelType = typeof body.channelType === 'string' ? body.channelType : '';
+    if (!channelType) {
+      return {
+        status: 400,
+        data: { success: false, error: 'channelType is required' },
+      } satisfies LocalDispatchResponse;
+    }
+    if (!channelUsesLoginSession(channelType)) {
+      return {
+        status: 400,
+        data: { success: false, error: `channel ${channelType} does not use login session` },
+      } satisfies LocalDispatchResponse;
+    }
 
-  async saveConfig(payload: unknown) {
-    await this.deps.saveChannelConfig(payload);
-    return { success: true };
+    const shellResponse = await this.deps.requestParentShellAction('channel_session_cancel', {
+      channelType,
+    });
+    return this.deps.mapParentTransportResponse(shellResponse);
   }
 
   async setEnabled(payload: unknown) {
@@ -104,10 +132,7 @@ export class ChannelService {
       } satisfies LocalDispatchResponse;
     }
     await this.deps.setChannelEnabled(channelType, body.enabled === true);
-    return {
-      status: 200,
-      data: { success: true },
-    } satisfies LocalDispatchResponse;
+    return await this.restartGateway();
   }
 
   async connect(payload: unknown) {
@@ -171,6 +196,6 @@ export class ChannelService {
 
   async deleteConfig(channelType: string) {
     await this.deps.deleteChannelConfig(channelType);
-    return { success: true };
+    return await this.restartGateway();
   }
 }

@@ -1,16 +1,15 @@
-import { createDefaultRuntimeHostHttpClient } from '../../main/runtime-host-client';
+import { saveChannelConfigLocal } from '../../../runtime-host/application/channels/channel-runtime';
 import { whatsAppLoginManager } from './whatsapp-login-manager';
 import { weixinLoginManager } from './weixin-login-manager';
 type PendingWeixinPersist = Record<string, unknown>;
 
 export interface ChannelRuntimeService {
-  readonly startWhatsApp: (accountId: string) => Promise<void>;
-  readonly cancelWhatsApp: () => Promise<void>;
-  readonly startOpenClawWeixin: (input: {
+  readonly startChannelSession: (input: {
+    channelType: string;
     accountId?: string;
     config?: Record<string, unknown>;
   }) => Promise<{ queued: true; sessionKey: string }>;
-  readonly cancelOpenClawWeixin: () => Promise<void>;
+  readonly cancelChannelSession: (channelType: string) => Promise<void>;
 }
 
 function normalizeSessionKey(value: unknown): string | undefined {
@@ -24,9 +23,6 @@ function normalizeSessionKey(value: unknown): string | undefined {
 export function createChannelRuntimeService(
   deps: { scheduleGatewayRestart: (reason: string) => void },
 ): ChannelRuntimeService {
-  const runtimeHostClient = createDefaultRuntimeHostHttpClient({
-    timeoutMs: 8000,
-  });
   const pendingWeixinPersists = new Map<string, PendingWeixinPersist>();
   const pendingWhatsAppAccounts = new Set<string>();
   let weixinPersistHooked = false;
@@ -61,7 +57,7 @@ export function createChannelRuntimeService(
       ...pending,
       enabled: true,
     };
-    await runtimeHostClient.request('POST', '/api/channels/config', {
+    await saveChannelConfigLocal({
       channelType: 'openclaw-weixin',
       ...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
       config: persistedConfig,
@@ -78,7 +74,7 @@ export function createChannelRuntimeService(
       return;
     }
     pendingWhatsAppAccounts.delete(accountId);
-    await runtimeHostClient.request('POST', '/api/channels/config', {
+    await saveChannelConfigLocal({
       channelType: 'whatsapp',
       accountId,
       config: { enabled: true },
@@ -131,34 +127,47 @@ export function createChannelRuntimeService(
   ensureWhatsAppPersistHooks();
 
   return {
-    async startWhatsApp(accountId: string) {
-      pendingWhatsAppAccounts.add(accountId);
-      await whatsAppLoginManager.start(accountId);
-    },
-    async cancelWhatsApp() {
-      pendingWhatsAppAccounts.clear();
-      await whatsAppLoginManager.stop();
-    },
-    async startOpenClawWeixin(input: { accountId?: string; config?: Record<string, unknown> }) {
-      const sessionKey = normalizeSessionKey(input.accountId) ?? 'default';
-      const config: Record<string, unknown> = {
-        ...(input.config && typeof input.config === 'object' ? input.config : {}),
-        enabled: true,
-      };
-      pendingWeixinPersists.set(sessionKey, config);
+    async startChannelSession(input: { channelType: string; accountId?: string; config?: Record<string, unknown> }) {
+      const accountId = normalizeSessionKey(input.accountId) ?? 'default';
+      if (input.channelType === 'whatsapp') {
+        pendingWhatsAppAccounts.add(accountId);
+        await whatsAppLoginManager.start(accountId);
+        return { queued: true as const, sessionKey: accountId };
+      }
 
-      const routeTag = typeof config.routeTag === 'string' ? config.routeTag : undefined;
-      const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : undefined;
-      weixinLoginManager.startInBackground({
-        accountId: sessionKey,
-        baseUrl,
-        routeTag,
-      });
-      return { queued: true as const, sessionKey };
+      if (input.channelType === 'openclaw-weixin') {
+        const config: Record<string, unknown> = {
+          ...(input.config && typeof input.config === 'object' ? input.config : {}),
+          enabled: true,
+        };
+        pendingWeixinPersists.set(accountId, config);
+
+        const routeTag = typeof config.routeTag === 'string' ? config.routeTag : undefined;
+        const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl : undefined;
+        weixinLoginManager.startInBackground({
+          accountId,
+          baseUrl,
+          routeTag,
+        });
+        return { queued: true as const, sessionKey: accountId };
+      }
+
+      throw new Error(`Unsupported channel session start: ${input.channelType}`);
     },
-    async cancelOpenClawWeixin() {
-      await weixinLoginManager.stop();
-      pendingWeixinPersists.clear();
+    async cancelChannelSession(channelType: string) {
+      if (channelType === 'whatsapp') {
+        pendingWhatsAppAccounts.clear();
+        await whatsAppLoginManager.stop();
+        return;
+      }
+
+      if (channelType === 'openclaw-weixin') {
+        await weixinLoginManager.stop();
+        pendingWeixinPersists.clear();
+        return;
+      }
+
+      throw new Error(`Unsupported channel session cancel: ${channelType}`);
     },
   };
 }
