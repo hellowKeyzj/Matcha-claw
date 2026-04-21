@@ -14,6 +14,7 @@ export interface RuntimeHostCatalogPlugin {
   readonly platform: 'openclaw' | 'matchaclaw';
   readonly category: string;
   readonly description?: string;
+  readonly controlMode?: 'manual' | 'channel-config';
 }
 
 export function normalizePluginIds(ids: readonly string[]): string[] {

@@ -126,5 +126,62 @@ describe('plugins page', () => {
     expect(await screen.findByText('Host degraded')).toBeInTheDocument();
     expect(screen.getByText('runtime-host health check failed')).toBeInTheDocument();
   });
-});
 
+  it('渠道托管插件在插件中心显示为只读', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/plugins/runtime') {
+        return {
+          success: true,
+          state: {
+            lifecycle: 'running',
+            runtimeLifecycle: 'ready',
+            activePluginCount: 1,
+            pluginExecutionEnabled: true,
+            enabledPluginIds: ['openclaw-lark'],
+          },
+          health: {
+            ok: true,
+            lifecycle: 'ready',
+            activePluginCount: 1,
+            degradedPlugins: [],
+          },
+          execution: {
+            pluginExecutionEnabled: true,
+            enabledPluginIds: ['openclaw-lark'],
+          },
+        };
+      }
+      if (path === '/api/plugins/catalog') {
+        return {
+          success: true,
+          execution: {
+            pluginExecutionEnabled: true,
+            enabledPluginIds: ['openclaw-lark'],
+          },
+          plugins: [
+            {
+              id: 'openclaw-lark',
+              name: 'OpenClaw Lark',
+              version: '1.0.0',
+              kind: 'builtin',
+              category: 'channel',
+              enabled: true,
+              controlMode: 'channel-config',
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <PluginsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Managed by channel configuration')).toBeInTheDocument();
+    const switches = screen.getAllByRole('switch');
+    expect(switches[switches.length - 1]).toBeDisabled();
+  });
+});

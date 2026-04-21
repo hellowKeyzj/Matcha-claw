@@ -1,46 +1,15 @@
 import { DEFAULT_ACCOUNT_ID } from '../../api/common/constants';
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
-import { ensureRuntimePluginEnabled } from '../plugins/runtime-plugin-service';
+import {
+  applyManuallyManagedPluginIdsToOpenClawConfig,
+  readManuallyManagedPluginIdsFromConfig,
+} from '../openclaw/openclaw-plugin-config-service';
+import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
 import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
-
-const FEISHU_PLUGIN_ID = 'openclaw-lark';
-const LEGACY_FEISHU_PLUGIN_ID = 'feishu-openclaw-plugin';
-const WECOM_PLUGIN_ID = 'wecom';
-const LEGACY_WECOM_PLUGIN_ID = 'wecom-openclaw-plugin';
-const QQBOT_PLUGIN_ID = 'openclaw-qqbot';
-const LEGACY_QQBOT_PLUGIN_ID = 'qqbot';
-
-const EXTERNAL_PLUGIN_CHANNEL_ID_BY_TYPE: Record<string, string> = {
-  dingtalk: 'dingtalk',
-  feishu: FEISHU_PLUGIN_ID,
-  wecom: WECOM_PLUGIN_ID,
-  qqbot: QQBOT_PLUGIN_ID,
-  'openclaw-weixin': 'openclaw-weixin',
-};
-const EXTERNAL_CHANNEL_TYPE_BY_PLUGIN_ID: Record<string, string> = {
-  dingtalk: 'dingtalk',
-  [FEISHU_PLUGIN_ID]: 'feishu',
-  [LEGACY_FEISHU_PLUGIN_ID]: 'feishu',
-  [WECOM_PLUGIN_ID]: 'wecom',
-  [LEGACY_WECOM_PLUGIN_ID]: 'wecom',
-  [QQBOT_PLUGIN_ID]: 'qqbot',
-  [LEGACY_QQBOT_PLUGIN_ID]: 'qqbot',
-  'openclaw-weixin': 'openclaw-weixin',
-};
-const LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS = new Set(['whatsapp']);
-const BUILTIN_CHANNEL_IDS = new Set([
-  'discord',
-  'telegram',
-  'whatsapp',
-  'slack',
-  'signal',
-  'imessage',
-  'matrix',
-  'line',
-  'msteams',
-  'googlechat',
-  'mattermost',
-]);
+import {
+  LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS,
+  getExternalChannelPluginId,
+} from './channel-plugin-bindings';
 
 const CHANNEL_UNIQUE_CREDENTIAL_KEY: Record<string, string> = {
   feishu: 'appId',
@@ -124,10 +93,6 @@ function cleanupLegacyBuiltInChannelPluginRegistrationLocal(config: Record<strin
   return removePluginRegistration(config, channelType);
 }
 
-function isBuiltinChannelId(channelId: string): boolean {
-  return BUILTIN_CHANNEL_IDS.has(channelId);
-}
-
 function channelHasAnyAccount(channelSection: Record<string, any>): boolean {
   const accounts = isRecord(channelSection.accounts) ? channelSection.accounts : null;
   if (!accounts) {
@@ -136,58 +101,11 @@ function channelHasAnyAccount(channelSection: Record<string, any>): boolean {
   return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
 }
 
-function listConfiguredBuiltinChannelsLocal(
-  config: Record<string, any>,
-  additionalChannelIds: string[] = [],
-): string[] {
-  const configured = new Set<string>();
-  const channelsSection = isRecord(config.channels) ? config.channels : {};
-  for (const [channelType, sectionRaw] of Object.entries(channelsSection)) {
-    if (!isBuiltinChannelId(channelType) || !isRecord(sectionRaw)) {
-      continue;
-    }
-    if (sectionRaw.enabled === false) {
-      continue;
-    }
-    if (channelHasAnyAccount(sectionRaw) || Object.keys(sectionRaw).length > 0) {
-      configured.add(channelType);
-    }
-  }
-
-  for (const channelId of additionalChannelIds) {
-    if (isBuiltinChannelId(channelId)) {
-      configured.add(channelId);
-    }
-  }
-  return [...configured];
-}
-
-function syncBuiltinChannelsWithPluginAllowlistLocal(
-  config: Record<string, any>,
-  additionalBuiltinChannelIds: string[] = [],
-): void {
-  if (!isRecord(config.plugins) || !Array.isArray(config.plugins.allow)) {
-    return;
-  }
-  const plugins = config.plugins as Record<string, unknown>;
-  const allow = (plugins.allow as unknown[]).filter((item): item is string => typeof item === 'string');
-  const externalPluginIds = allow.filter((pluginId) => !isBuiltinChannelId(pluginId));
-  const nextAllow = [...new Set(externalPluginIds)];
-
-  if (externalPluginIds.length > 0) {
-    for (const channelId of listConfiguredBuiltinChannelsLocal(config, additionalBuiltinChannelIds)) {
-      if (!nextAllow.includes(channelId)) {
-        nextAllow.push(channelId);
-      }
-    }
-  }
-
-  if (nextAllow.length > 0) {
-    plugins.allow = nextAllow;
-  } else {
-    delete plugins.allow;
-  }
-  cleanupPluginContainer(config);
+async function reconcileChannelDerivedPluginStateLocal(config: Record<string, any>): Promise<Record<string, any>> {
+  return await applyManuallyManagedPluginIdsToOpenClawConfig(
+    config,
+    readManuallyManagedPluginIdsFromConfig(config),
+  ) as Record<string, any>;
 }
 
 export async function listConfiguredChannelsLocal() {
@@ -201,30 +119,7 @@ export async function listConfiguredChannelsLocal() {
     if (sectionRaw.enabled === false) {
       continue;
     }
-    const accounts = isRecord(sectionRaw.accounts) ? sectionRaw.accounts : null;
-    if (accounts) {
-      const hasEnabledAccount = Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
-      if (hasEnabledAccount) {
-        channels.push(channelType);
-        continue;
-      }
-    }
-    if (Object.keys(sectionRaw).length > 0) {
-      channels.push(channelType);
-    }
-  }
-
-  const plugins = isRecord(config.plugins) ? config.plugins : {};
-  const entries = isRecord(plugins.entries) ? plugins.entries : {};
-  const allowSet = new Set(
-    Array.isArray(plugins.allow)
-      ? plugins.allow.filter((item): item is string => typeof item === 'string')
-      : [],
-  );
-  for (const [pluginId, channelType] of Object.entries(EXTERNAL_CHANNEL_TYPE_BY_PLUGIN_ID)) {
-    const entry = isRecord(entries[pluginId]) ? entries[pluginId] : null;
-    const pluginEnabled = !entry || entry.enabled !== false;
-    if (pluginEnabled && (allowSet.has(pluginId) || entry) && !channels.includes(channelType)) {
+    if (channelHasAnyAccount(sectionRaw)) {
       channels.push(channelType);
     }
   }
@@ -289,18 +184,17 @@ export async function saveChannelConfigLocal(input: unknown) {
   if (!channelType) {
     throw new Error('channelType is required');
   }
-  const externalPluginId = EXTERNAL_PLUGIN_CHANNEL_ID_BY_TYPE[channelType];
-  if (externalPluginId) {
-    await ensureRuntimePluginEnabled(externalPluginId);
+  const externalPluginId = getExternalChannelPluginId(channelType);
+  if (externalPluginId && input.enabled !== false) {
+    await ensureManagedPluginInstalled(externalPluginId);
   }
 
   await withOpenClawConfigLock(async () => {
     const accountId = typeof input.accountId === 'string' && input.accountId.trim()
       ? input.accountId.trim()
       : DEFAULT_ACCOUNT_ID;
-    const config = readOpenClawConfigJson();
+    let config = readOpenClawConfigJson();
     cleanupLegacyBuiltInChannelPluginRegistrationLocal(config, channelType);
-    syncBuiltinChannelsWithPluginAllowlistLocal(config, [channelType]);
     if (!isRecord(config.channels)) {
       config.channels = {};
     }
@@ -325,16 +219,21 @@ export async function saveChannelConfigLocal(input: unknown) {
       updatedAt: new Date().toISOString(),
     };
     section.enabled = input.enabled !== false;
+    config = await reconcileChannelDerivedPluginStateLocal(config);
     await writeOpenClawConfigJson(config);
   });
 }
 
 export async function setChannelEnabledLocal(channelType: string, enabled: boolean) {
+  const externalPluginId = getExternalChannelPluginId(channelType);
+  if (enabled && externalPluginId) {
+    await ensureManagedPluginInstalled(externalPluginId);
+  }
   await withOpenClawConfigLock(async () => {
     if (!channelType) {
       throw new Error('channelType is required');
     }
-    const config = readOpenClawConfigJson();
+    let config = readOpenClawConfigJson();
     if (!isRecord(config.channels)) {
       config.channels = {};
     }
@@ -352,6 +251,7 @@ export async function setChannelEnabledLocal(channelType: string, enabled: boole
         account.updatedAt = new Date().toISOString();
       }
     }
+    config = await reconcileChannelDerivedPluginStateLocal(config);
     await writeOpenClawConfigJson(config);
   });
 }
@@ -382,11 +282,12 @@ export async function deleteChannelConfigLocal(channelType: string) {
     if (!channelType) {
       throw new Error('channelType is required');
     }
-    const config = readOpenClawConfigJson();
+    let config = readOpenClawConfigJson();
     if (isRecord(config.channels) && Object.prototype.hasOwnProperty.call(config.channels, channelType)) {
       delete config.channels[channelType];
-      await writeOpenClawConfigJson(config);
     }
+    config = await reconcileChannelDerivedPluginStateLocal(config);
+    await writeOpenClawConfigJson(config);
   });
 }
 

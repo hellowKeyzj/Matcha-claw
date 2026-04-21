@@ -32,7 +32,6 @@
         "whatsappFailed": "WhatsApp 连接失败: {{error}}",
         "channelSaved": "频道 {{name}} 已保存",
         "channelConnecting": "正在连接 {{name}}...",
-        "restartManual": "请手动重启网关",
         "configFailed": "配置失败: {{error}}",
         "qrGenerateTimeout": "二维码生成超时，请重试"
     },
@@ -185,9 +184,9 @@
             },
             "instructions": [
                 "保存后会自动启用并安装 openclaw-weixin 插件",
-                "点击“生成二维码”，在应用内完成扫码登录",
+                "点击“生成二维码”，应用会保存配置并自动重启网关",
                 "使用手机微信扫码并确认授权",
-                "扫码完成后重启网关（或在应用里重启网关）",
+                "等待网关重新连上后返回本页",
                 "返回本页点击刷新，确认渠道在线"
             ]
         },

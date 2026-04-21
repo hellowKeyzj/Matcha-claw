@@ -115,6 +115,7 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
         kind: inferPluginKind(plugin, packageJson),
         platform: plugin.platform,
         category: pickCatalogCategory(manifest.category, plugin),
+        controlMode: 'manual',
         ...(description ? { description } : {}),
       } satisfies RuntimeHostCatalogPlugin;
     }),

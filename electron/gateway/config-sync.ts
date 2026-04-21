@@ -12,6 +12,7 @@ import { fsPath } from '../utils/fs-path';
 import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
+import { syncGatewayConfigLocal as syncGatewayConfigLocalFallback } from '../../runtime-host/application/runtime-host/bootstrap';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -69,6 +70,17 @@ export async function syncGatewayConfigBeforeLaunch(
     });
   } catch (err) {
     logger.warn('Failed to sync gateway bootstrap config through runtime-host:', err);
+    try {
+      await syncGatewayConfigLocalFallback({
+        gatewayToken: appSettings.gatewayToken,
+        proxyEnabled: appSettings.proxyEnabled,
+        proxyServer: appSettings.proxyServer,
+        proxyBypassRules: appSettings.proxyBypassRules,
+      });
+      logger.info('Applied gateway bootstrap config through local fallback sync');
+    } catch (fallbackError) {
+      logger.warn('Failed to sync gateway bootstrap config through local fallback:', fallbackError);
+    }
   }
 }
 

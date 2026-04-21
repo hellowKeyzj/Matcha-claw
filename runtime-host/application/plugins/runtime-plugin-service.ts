@@ -115,6 +115,7 @@ async function discoverManagedRegistryPlugin(
         kind: pickKind(packageJson),
         platform: 'openclaw',
         category: manifest.category,
+        controlMode: 'manual',
         ...(description ? { description } : {}),
         sourceDir,
         manifestId,

@@ -19,6 +19,7 @@
     "title": "Plugin Catalog",
     "description": "Manage plugin enablement here; Settings does not include plugin management.",
     "empty": "No plugins available.",
+    "channelManaged": "Managed by channel configuration",
     "columns": {
       "plugin": "Plugin",
       "platform": "Platform",

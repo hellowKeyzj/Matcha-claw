@@ -2,7 +2,12 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { listConfiguredChannelsLocal, saveChannelConfigLocal } from '../../runtime-host/application/channels/channel-runtime';
+import {
+  deleteChannelConfigLocal,
+  listConfiguredChannelsLocal,
+  saveChannelConfigLocal,
+  setChannelEnabledLocal,
+} from '../../runtime-host/application/channels/channel-runtime';
 
 describe('channel-runtime config save', () => {
   let tempDir = '';
@@ -142,7 +147,7 @@ describe('channel-runtime config save', () => {
     expect(config.plugins.entries.qqbot).toBeUndefined();
   });
 
-  it('plugins.allow 仅配置 openclaw-qqbot 时仍识别为已配置频道', async () => {
+  it('仅插件启用但没有频道配置时不再识别为已配置频道', async () => {
     await writeFile(
       join(tempDir, 'openclaw.json'),
       `${JSON.stringify({
@@ -158,7 +163,7 @@ describe('channel-runtime config save', () => {
     );
 
     const channels = await listConfiguredChannelsLocal();
-    expect(channels).toContain('qqbot');
+    expect(channels).not.toContain('qqbot');
   });
 
   it('内置频道保存配置时会在存在外部插件时补齐 built-in allowlist', async () => {
@@ -208,5 +213,49 @@ describe('channel-runtime config save', () => {
     ) as Record<string, any>;
 
     expect(config.plugins).toBeUndefined();
+  });
+
+  it('禁用外部频道时会同步禁用对应插件', async () => {
+    await saveChannelConfigLocal({
+      channelType: 'wecom',
+      accountId: 'acc1',
+      config: {
+        botId: 'wecom-bot',
+        secret: 'secret-1',
+      },
+      enabled: true,
+    });
+
+    await setChannelEnabledLocal('wecom', false);
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels.wecom.enabled).toBe(false);
+    expect(config.plugins.entries.wecom.enabled).toBe(false);
+    expect(config.plugins.allow).not.toContain('wecom');
+  });
+
+  it('删除外部频道配置时会同步禁用对应插件', async () => {
+    await saveChannelConfigLocal({
+      channelType: 'qqbot',
+      accountId: 'acc1',
+      config: {
+        appId: 'qq-app-id',
+        clientSecret: 'qq-secret',
+      },
+      enabled: true,
+    });
+
+    await deleteChannelConfigLocal('qqbot');
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels?.qqbot).toBeUndefined();
+    expect(config.plugins.entries['openclaw-qqbot'].enabled).toBe(false);
+    expect(config.plugins.allow).not.toContain('openclaw-qqbot');
   });
 });

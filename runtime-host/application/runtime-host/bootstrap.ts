@@ -13,7 +13,7 @@ import {
 } from '../providers/provider-registry';
 import { syncProviderStoreToOpenClaw } from '../providers/store-sync';
 import { readProviderStoreLocal, writeProviderStoreLocal } from '../../api/storage/provider-store';
-import { getAllSettingsLocal } from '../settings/store';
+import { getAllSettingsLocal, setSettingValueLocal } from '../settings/store';
 
 type GatewaySyncInput = {
   gatewayToken?: string;
@@ -34,6 +34,7 @@ export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
   });
 
   if (typeof input.gatewayToken === 'string') {
+    await setSettingValueLocal('gatewayToken', input.gatewayToken);
     await syncGatewayTokenToConfig(input.gatewayToken);
   }
 

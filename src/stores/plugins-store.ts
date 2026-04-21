@@ -10,6 +10,7 @@ export type PluginCatalogItem = {
   category: string;
   description?: string;
   enabled: boolean;
+  controlMode?: 'manual' | 'channel-config';
 };
 
 export type RuntimePayload = {
@@ -242,10 +243,19 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     if (!runtime) {
       return;
     }
+    const pluginSnapshot = get().pluginSnapshot.plugins;
+    const targetPlugin = pluginSnapshot.find((plugin) => plugin.id === pluginId);
+    if (targetPlugin?.controlMode === 'channel-config') {
+      return;
+    }
     const enabledPluginIds = runtime.execution.enabledPluginIds ?? [];
+    const manuallyManagedEnabledPluginIds = enabledPluginIds.filter((enabledPluginId) => {
+      const plugin = pluginSnapshot.find((item) => item.id === enabledPluginId);
+      return plugin?.controlMode !== 'channel-config';
+    });
     const nextIds = nextEnabled
-      ? Array.from(new Set([...enabledPluginIds, pluginId]))
-      : enabledPluginIds.filter((id) => id !== pluginId);
+      ? Array.from(new Set([...manuallyManagedEnabledPluginIds, pluginId]))
+      : manuallyManagedEnabledPluginIds.filter((id) => id !== pluginId);
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
       const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/enabled-plugins', {
