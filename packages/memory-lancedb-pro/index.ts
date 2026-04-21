@@ -52,6 +52,7 @@ import { buildReflectionMappedMetadata } from "./src/reflection-mapped-metadata.
 import { createMemoryCLI } from "./cli.js";
 import { isNoise } from "./src/noise-filter.js";
 import { normalizeAutoCaptureText } from "./src/auto-capture-cleanup.js";
+import { readPluginPackageVersion } from "./src/runtime-paths.js";
 
 // Import smart extraction & lifecycle components
 import { SmartExtractor, createExtractionRateLimiter } from "./src/smart-extractor.js";
@@ -1641,15 +1642,7 @@ function createAdmissionRejectionAuditWriter(
 // ============================================================================
 
 function getPluginVersion(): string {
-  try {
-    const pkgUrl = new URL("./package.json", import.meta.url);
-    const pkg = JSON.parse(readFileSync(pkgUrl, "utf8")) as {
-      version?: string;
-    };
-    return pkg.version || "unknown";
-  } catch {
-    return "unknown";
-  }
+  return readPluginPackageVersion(import.meta.url);
 }
 
 const pluginVersion = getPluginVersion();

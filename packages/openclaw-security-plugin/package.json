@@ -4,9 +4,14 @@
   "private": true,
   "description": "Standalone security plugin based on SecureClaw original code with trimmed runtime guard.",
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs security-core"
+  },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "peerDependencies": {

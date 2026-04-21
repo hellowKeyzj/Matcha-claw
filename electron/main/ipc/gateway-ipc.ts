@@ -26,6 +26,10 @@ export function registerGatewayHandlers(
       const response = await runtimeHost.request<{
         status?: string;
         detail?: string;
+        portReachable?: boolean;
+        connectionState?: string;
+        lastError?: string;
+        updatedAt?: number;
       }>('GET', '/api/platform/runtime/health');
       if (typeof response.data?.status !== 'string') {
         return gatewayStatus;
@@ -35,6 +39,10 @@ export function registerGatewayHandlers(
         platformHealth: {
           status: response.data.status,
           ...(typeof response.data?.detail === 'string' ? { detail: response.data.detail } : {}),
+          ...(typeof response.data?.portReachable === 'boolean' ? { portReachable: response.data.portReachable } : {}),
+          ...(typeof response.data?.connectionState === 'string' ? { connectionState: response.data.connectionState } : {}),
+          ...(typeof response.data?.lastError === 'string' ? { lastError: response.data.lastError } : {}),
+          ...(typeof response.data?.updatedAt === 'number' ? { updatedAt: response.data.updatedAt } : {}),
         },
       };
     } catch {

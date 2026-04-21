@@ -1,6 +1,9 @@
+import type { GatewayConnectionStatePayload } from './client';
+
 interface OpenClawGatewayClient {
   gatewayRpc: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   isGatewayRunning: (timeoutMs?: number) => Promise<boolean>;
+  readGatewayConnectionState: (timeoutMs?: number) => Promise<GatewayConnectionStatePayload>;
   buildSecurityAuditQueryParams: (url: URL) => Record<string, string>;
 }
 
@@ -11,6 +14,7 @@ export interface OpenClawBridge {
   channelsConnect: (channelId: string) => Promise<unknown>;
   channelsDisconnect: (channelId: string) => Promise<unknown>;
   channelsRequestQr: (channelType: string) => Promise<unknown>;
+  readGatewayConnectionState: () => Promise<GatewayConnectionStatePayload>;
   isGatewayRunning: () => Promise<boolean>;
   platformInstallTool: (source: Record<string, unknown>) => Promise<{ toolId?: string; id?: string }>;
   platformUninstallTool: (toolId: string) => Promise<void>;
@@ -45,6 +49,7 @@ export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBri
     channelsConnect: (channelId) => client.gatewayRpc('channels.connect', { channelId }, 10000),
     channelsDisconnect: (channelId) => client.gatewayRpc('channels.disconnect', { channelId }, 10000),
     channelsRequestQr: (channelType) => client.gatewayRpc('channels.requestQr', { type: channelType }, 12000),
+    readGatewayConnectionState: () => client.readGatewayConnectionState(),
     isGatewayRunning: () => client.isGatewayRunning(),
     platformInstallTool: (source) => client.gatewayRpc('plugins.install', source) as Promise<{ toolId?: string; id?: string }>,
     platformUninstallTool: async (toolId) => {

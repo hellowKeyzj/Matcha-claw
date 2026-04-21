@@ -5,6 +5,11 @@ function createGatewayClientStub() {
   return {
     gatewayRpc: vi.fn(async () => ({ success: true })),
     isGatewayRunning: vi.fn(async () => true),
+    readGatewayConnectionState: vi.fn(async () => ({
+      state: 'connected',
+      portReachable: true,
+      updatedAt: 1,
+    })),
     buildSecurityAuditQueryParams: vi.fn(() => ({ page: '1', agentId: 'main' })),
   };
 }
@@ -103,5 +108,17 @@ describe('runtime-host openclaw bridge', () => {
 
     await expect(bridge.isGatewayRunning()).resolves.toBe(true);
     expect(client.isGatewayRunning).toHaveBeenCalledTimes(1);
+  });
+
+  it('gateway 连接状态查询走统一客户端快照接口', async () => {
+    const client = createGatewayClientStub();
+    const bridge = createOpenClawBridge(client);
+
+    await expect(bridge.readGatewayConnectionState()).resolves.toEqual({
+      state: 'connected',
+      portReachable: true,
+      updatedAt: 1,
+    });
+    expect(client.readGatewayConnectionState).toHaveBeenCalledTimes(1);
   });
 });

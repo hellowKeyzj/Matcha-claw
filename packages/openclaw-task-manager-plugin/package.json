@@ -4,9 +4,14 @@
   "private": true,
   "description": "Task manager plugin for OpenClaw",
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs task-manager"
+  },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "peerDependencies": {

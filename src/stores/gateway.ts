@@ -25,6 +25,12 @@ let taskNotificationFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 interface GatewayHealth {
   ok: boolean;
+  status?: string;
+  detail?: string;
+  portReachable?: boolean;
+  connectionState?: 'connected' | 'reconnecting' | 'disconnected' | string;
+  lastError?: string;
+  updatedAt?: number;
   error?: string;
   uptime?: number;
 }
@@ -302,7 +308,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
           }));
           unsubscribers.push(subscribeHostEvent<{
             state?: GatewayConnectionObservedStatus;
-            reason?: string;
+            portReachable?: boolean;
+            lastError?: string;
             updatedAt?: number;
           }>('gateway:connection', (payload) => {
             set((state) => {
@@ -321,7 +328,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
                   ...state.runtimeHost,
                   lifecycle,
                   gatewayConnectionState: connectionState,
-                  gatewayConnectionReason: payload.reason,
+                  gatewayConnectionReason: payload.lastError,
                   gatewayConnectionUpdatedAt: payload.updatedAt ?? Date.now(),
                   updatedAt: payload.updatedAt ?? Date.now(),
                 },

@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { DEFAULT_GATEWAY_RPC_TIMEOUT_MS } from '../api/common/constants';
+import {
+  DEFAULT_GATEWAY_RPC_TIMEOUT_MS,
+  GATEWAY_CONNECT_TIMEOUT_MS,
+} from '../api/common/constants';
 import { getRuntimeHostDataDir } from '../api/storage/paths';
 import { dispatchGatewayProtocolEvent } from './events';
 import {
@@ -30,7 +34,8 @@ export type GatewayConnectionState = 'connected' | 'reconnecting' | 'disconnecte
 
 export interface GatewayConnectionStatePayload {
   readonly state: GatewayConnectionState;
-  readonly reason?: string;
+  readonly portReachable: boolean;
+  readonly lastError?: string;
   readonly updatedAt: number;
 }
 
@@ -107,6 +112,30 @@ function getGatewayToken(): string {
   return typeof token === 'string' ? token.trim() : '';
 }
 
+async function probeGatewayPortReachable(port: number, timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const resolveOnce = (reachable: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(reachable);
+    };
+
+    socket.setTimeout(Math.max(250, timeoutMs));
+    socket.once('connect', () => resolveOnce(true));
+    socket.once('timeout', () => resolveOnce(false));
+    socket.once('error', () => resolveOnce(false));
+    socket.once('close', () => resolveOnce(false));
+    socket.connect(port, '127.0.0.1');
+  });
+}
+
 function loadGatewayDeviceIdentity(): DeviceIdentity {
   if (gatewayDeviceIdentityCache) {
     return gatewayDeviceIdentityCache;
@@ -169,19 +198,33 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
   let connectRequestId: string | null = null;
   let isConnected = false;
   let isClosingSocket = false;
-  let connectionState: GatewayConnectionState = 'disconnected';
+  let connectionSnapshot: GatewayConnectionStatePayload = {
+    state: 'disconnected',
+    portReachable: false,
+    updatedAt: Date.now(),
+  };
   const pendingRequests = new Map<string, PendingRequest>();
 
-  function emitConnectionState(state: GatewayConnectionState, reason?: string): void {
-    if (connectionState === state) {
-      return;
-    }
-    connectionState = state;
-    options.onGatewayConnectionState?.({
-      state,
-      ...(reason ? { reason } : {}),
+  function updateConnectionSnapshot(
+    patch: Partial<Omit<GatewayConnectionStatePayload, 'updatedAt'>>,
+  ): GatewayConnectionStatePayload {
+    const nextSnapshot: GatewayConnectionStatePayload = {
+      state: patch.state ?? connectionSnapshot.state,
+      portReachable: patch.portReachable ?? connectionSnapshot.portReachable,
+      ...(patch.lastError !== undefined
+        ? (patch.lastError ? { lastError: patch.lastError } : {})
+        : (connectionSnapshot.lastError ? { lastError: connectionSnapshot.lastError } : {})),
       updatedAt: Date.now(),
-    });
+    };
+    const unchanged = connectionSnapshot.state === nextSnapshot.state
+      && connectionSnapshot.portReachable === nextSnapshot.portReachable
+      && connectionSnapshot.lastError === nextSnapshot.lastError;
+    if (unchanged) {
+      return connectionSnapshot;
+    }
+    connectionSnapshot = nextSnapshot;
+    options.onGatewayConnectionState?.(connectionSnapshot);
+    return connectionSnapshot;
   }
 
   function clearConnectionState(): void {
@@ -209,7 +252,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     options.onGatewayError?.(normalized);
   }
 
-  async function ensureConnected(timeoutMs = 10000): Promise<void> {
+  async function ensureConnected(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<void> {
     if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
       return;
     }
@@ -219,7 +262,6 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
 
     const gatewayPort = getGatewayPort();
     const wsUrl = `ws://127.0.0.1:${gatewayPort}/ws`;
-    emitConnectionState('reconnecting');
     resetConnectionHandshakeState();
 
     connectPromise = new Promise<void>((resolve, reject) => {
@@ -249,7 +291,11 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         }
         connectSettled = true;
         clearTimeout(connectTimer);
-        emitConnectionState('connected');
+        updateConnectionSnapshot({
+          state: 'connected',
+          portReachable: true,
+          lastError: '',
+        });
         resolve();
       };
 
@@ -268,9 +314,23 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           // ignore
         }
         const failure = ensureError(error, 'Gateway connect failed');
-        emitConnectionState('disconnected', failure.message);
+        updateConnectionSnapshot({
+          state: 'disconnected',
+          lastError: failure.message,
+        });
         reject(failure);
       };
+
+      ws.on('open', () => {
+        if (socket !== ws) {
+          return;
+        }
+        updateConnectionSnapshot({
+          state: 'reconnecting',
+          portReachable: true,
+          lastError: '',
+        });
+      });
 
       ws.on('message', (rawData: unknown) => {
         if (socket !== ws) {
@@ -373,7 +433,10 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         isClosingSocket = false;
         clearConnectionState();
         rejectAllPending(closeError);
-        emitConnectionState('disconnected', closeError.message);
+        updateConnectionSnapshot({
+          state: 'disconnected',
+          lastError: closeError.message,
+        });
         if (closedDuringConnect) {
           settleConnectFailure(closeError);
           return;
@@ -382,6 +445,11 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           reportGatewayError(closeError);
         }
       });
+    });
+
+    updateConnectionSnapshot({
+      state: 'reconnecting',
+      lastError: '',
     });
 
     try {
@@ -394,23 +462,27 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     }
   }
 
-  async function isGatewayRunning(timeoutMs = 1500) {
+  async function readGatewayConnectionState(
+    timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS,
+  ): Promise<GatewayConnectionStatePayload> {
     if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
-      return true;
+      return updateConnectionSnapshot({
+        state: 'connected',
+        portReachable: true,
+        lastError: '',
+      });
     }
-    try {
-      await ensureConnected(timeoutMs);
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        message.includes('Missing required runtime-host env: MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT')
-        || message.includes('Invalid runtime-host gateway port')
-      ) {
-        throw error;
-      }
-      return false;
-    }
+    const gatewayPort = getGatewayPort();
+    const portReachable = await probeGatewayPortReachable(gatewayPort, timeoutMs);
+    return updateConnectionSnapshot({
+      state: portReachable ? connectionSnapshot.state : 'disconnected',
+      portReachable,
+    });
+  }
+
+  async function isGatewayRunning(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS) {
+    const snapshot = await readGatewayConnectionState(timeoutMs);
+    return snapshot.portReachable;
   }
 
   async function gatewayRpc(method: string, params: unknown, timeoutMs = DEFAULT_GATEWAY_RPC_TIMEOUT_MS) {
@@ -448,19 +520,21 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
   }
 
   function close() {
-    if (!socket) {
-      return;
+    if (socket) {
+      const current = socket;
+      clearConnectionState();
+      rejectAllPending(new Error('Gateway client closed'));
+      isClosingSocket = true;
+      try {
+        current.close(1000, 'runtime-host shutdown');
+      } catch {
+        isClosingSocket = false;
+      }
     }
-    const current = socket;
-    clearConnectionState();
-    rejectAllPending(new Error('Gateway client closed'));
-    isClosingSocket = true;
-    try {
-      current.close(1000, 'runtime-host shutdown');
-    } catch {
-      isClosingSocket = false;
-    }
-    emitConnectionState('disconnected');
+    updateConnectionSnapshot({
+      state: 'disconnected',
+      lastError: '',
+    });
   }
 
   function buildSecurityAuditQueryParams(url: URL) {
@@ -474,14 +548,12 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     return output;
   }
 
-  options.onGatewayConnectionState?.({
-    state: 'disconnected',
-    updatedAt: Date.now(),
-  });
+  options.onGatewayConnectionState?.(connectionSnapshot);
 
   return {
     gatewayRpc,
     isGatewayRunning,
+    readGatewayConnectionState,
     buildSecurityAuditQueryParams,
     close,
   };

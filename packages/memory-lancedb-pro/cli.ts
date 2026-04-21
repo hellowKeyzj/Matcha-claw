@@ -3,7 +3,7 @@
  */
 
 import type { Command } from "commander";
-import { readFileSync, type Dirent } from "node:fs";
+import { type Dirent } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ import {
   normalizeOAuthProviderId,
   performOAuthLogin,
 } from "./src/llm-oauth.js";
+import { readPluginPackageVersion } from "./src/runtime-paths.js";
 
 // ============================================================================
 // Types
@@ -53,13 +54,7 @@ interface CLIContext {
 // ============================================================================
 
 function getPluginVersion(): string {
-  try {
-    const pkgUrl = new URL("./package.json", import.meta.url);
-    const pkg = JSON.parse(readFileSync(pkgUrl, "utf8")) as { version?: string };
-    return pkg.version || "unknown";
-  } catch {
-    return "unknown";
-  }
+  return readPluginPackageVersion(import.meta.url);
 }
 
 function clampInt(value: number, min: number, max: number): number {

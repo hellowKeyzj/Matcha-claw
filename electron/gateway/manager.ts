@@ -15,7 +15,6 @@ import {
 import { GatewayStateController } from './state';
 import { prepareGatewayLaunchContext } from './config-sync';
 import { waitForGatewayPortReady } from './port-readiness';
-import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
 import {
   findExistingGatewayProcess,
   runOpenClawDoctorRepair,
@@ -67,7 +66,6 @@ export class GatewayManager extends EventEmitter {
   private restartInFlight: Promise<void> | null = null;
   private readonly lifecycleController = new GatewayLifecycleController();
   private readonly restartController = new GatewayRestartController();
-  private readonly runtimeHostClient = createDefaultRuntimeHostHttpClient({ timeoutMs: 3000 });
   private reloadDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor(config?: Partial<ReconnectConfig>) {
@@ -187,9 +185,6 @@ export class GatewayManager extends EventEmitter {
         waitForReady: async (port) => {
           await waitForGatewayPortReady({
             port,
-            getProcessExitCode: () => this.processExitCode,
-          });
-          await this.waitForRuntimeGatewayReady({
             getProcessExitCode: () => this.processExitCode,
           });
         },
@@ -418,55 +413,6 @@ export class GatewayManager extends EventEmitter {
     } catch (error) {
       return { ok: false, error: String(error) };
     }
-  }
-
-  private async waitForRuntimeGatewayReady(options: {
-    getProcessExitCode: () => number | null;
-    retries?: number;
-    intervalMs?: number;
-  }): Promise<void> {
-    const retries = options.retries ?? 150;
-    const intervalMs = options.intervalMs ?? 200;
-    const waitStartedAt = Date.now();
-    let lastDetail = 'runtime health unavailable';
-
-    for (let i = 0; i < retries; i++) {
-      const exitCode = options.getProcessExitCode();
-      if (exitCode !== null) {
-        logger.error(`Gateway process exited before runtime ready (code=${exitCode})`);
-        throw new Error(`Gateway process exited before runtime became ready (code=${exitCode})`);
-      }
-
-      try {
-        const result = await this.runtimeHostClient.request<{
-          success?: boolean;
-          status?: string;
-          detail?: string;
-        }>('GET', '/api/platform/runtime/health');
-        const status = typeof result.data?.status === 'string' ? result.data.status : 'unknown';
-        const detail = typeof result.data?.detail === 'string' ? result.data.detail : status;
-        lastDetail = detail;
-        if (status === 'running') {
-          logger.debug(
-            `Gateway runtime ready after ${i + 1} attempt(s), elapsedMs=${Date.now() - waitStartedAt}`,
-          );
-          return;
-        }
-      } catch (error) {
-        lastDetail = error instanceof Error ? error.message : String(error);
-      }
-
-      if (i > 0 && i % 10 === 0) {
-        logger.debug(
-          `Still waiting for Gateway runtime... (attempt ${i + 1}/${retries}, elapsedMs=${Date.now() - waitStartedAt}, detail=${lastDetail})`,
-        );
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-
-    logger.error(`Gateway runtime failed to become ready after ${retries} attempts (${lastDetail})`);
-    throw new Error(`Gateway runtime failed to become ready (${lastDetail})`);
   }
 
   private async startProcess(): Promise<void> {

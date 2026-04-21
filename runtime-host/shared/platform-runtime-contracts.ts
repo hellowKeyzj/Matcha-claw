@@ -10,6 +10,10 @@ export interface DriverConfig {
 export interface HealthStatus {
   status: 'running' | 'starting' | 'stopped' | 'error' | string;
   detail?: string;
+  portReachable?: boolean;
+  connectionState?: 'connected' | 'reconnecting' | 'disconnected' | string;
+  lastError?: string;
+  updatedAt?: number;
 }
 
 export interface ToolSource {
