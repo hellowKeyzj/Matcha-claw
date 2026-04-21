@@ -168,10 +168,16 @@ describe('openclaw browser relay plugin', () => {
     const baseUrl = `http://127.0.0.1:${server.port}`
     const headResponse = await fetch(baseUrl, { method: 'HEAD' })
     const getResponse = await fetch(baseUrl)
+    const jsonVersionResponse = await fetch(`${baseUrl}/json/version/`, {
+      headers: {
+        [RELAY_AUTH_HEADER]: server.authHeaders[RELAY_AUTH_HEADER],
+      },
+    })
     const diagnosticsResponse = await fetch(`${baseUrl}/diagnostics`)
 
     expect(headResponse.status).toBe(200)
     expect(await getResponse.text()).toBe('OK')
+    expect(jsonVersionResponse.status).toBe(200)
     expect(diagnosticsResponse.status).toBe(401)
   })
 
@@ -304,6 +310,186 @@ describe('openclaw browser relay plugin', () => {
       title: 'Example',
       url: 'https://example.com',
     })
+
+    extensionWs.close()
+  })
+
+  it('does not emit duplicate attachedToTarget events when auto-attach is configured repeatedly', async () => {
+    server = new BrowserRelayServer({ port: 0, logger })
+    await server.start()
+
+    const port = server.port
+    const sessionKey = randomBytes(32)
+    const extensionWs = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test' },
+    })
+    await waitForOpen(extensionWs)
+
+    extensionWs.send(
+      JSON.stringify({
+        method: 'Extension.hello',
+        params: {
+          protocolVersion: RELAY_PROTOCOL_VERSION,
+          encryptedSessionKey: encryptSessionKey(sessionKey),
+        },
+      }),
+    )
+    await waitForMessage(extensionWs)
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Target.attachedToTarget',
+            sessionId: 'session-1',
+            params: {
+              sessionId: 'session-1',
+              targetInfo: {
+                targetId: 'target-1',
+                type: 'page',
+                title: 'Example',
+                url: 'https://example.com',
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    const cdpWs = new WebSocket(`ws://127.0.0.1:${port}/cdp`, {
+      headers: server.authHeaders,
+    })
+    await waitForOpen(cdpWs)
+
+    const messages: Array<Record<string, unknown>> = []
+    cdpWs.on('message', (data) => {
+      messages.push(JSON.parse(data.toString()) as Record<string, unknown>)
+    })
+
+    cdpWs.send(JSON.stringify({
+      id: 1,
+      method: 'Target.setAutoAttach',
+      params: {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      },
+    }))
+
+    cdpWs.send(JSON.stringify({
+      id: 2,
+      method: 'Target.setAutoAttach',
+      params: {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      },
+    }))
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(messages.filter((entry) => entry.method === 'Target.attachedToTarget')).toHaveLength(1)
+    expect(messages.filter((entry) => entry.id === 1)).toHaveLength(1)
+    expect(messages.filter((entry) => entry.id === 2)).toHaveLength(1)
+
+    cdpWs.close()
+    extensionWs.close()
+  })
+
+  it('only exposes top-level page targets through relay tab discovery APIs', async () => {
+    server = new BrowserRelayServer({ port: 0, logger })
+    await server.start()
+
+    const port = server.port
+    const sessionKey = randomBytes(32)
+    const extensionWs = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test' },
+    })
+    await waitForOpen(extensionWs)
+
+    extensionWs.send(
+      JSON.stringify({
+        method: 'Extension.hello',
+        params: {
+          protocolVersion: RELAY_PROTOCOL_VERSION,
+          encryptedSessionKey: encryptSessionKey(sessionKey),
+        },
+      }),
+    )
+    await waitForMessage(extensionWs)
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Target.attachedToTarget',
+            sessionId: 'page-session',
+            params: {
+              sessionId: 'page-session',
+              targetInfo: {
+                targetId: 'page-target',
+                type: 'page',
+                title: 'Example',
+                url: 'https://example.com',
+                browserContextId: 'default',
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Target.attachedToTarget',
+            sessionId: 'iframe-session',
+            params: {
+              sessionId: 'iframe-session',
+              targetInfo: {
+                targetId: 'iframe-target',
+                type: 'iframe',
+                title: '',
+                url: 'https://example.com/frame',
+                browserContextId: 'default',
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(server.listAttachments()).toEqual([
+      {
+        sessionId: 'page-session',
+        targetId: 'page-target',
+        title: 'Example',
+        url: 'https://example.com',
+      },
+    ])
+
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+      headers: {
+        [RELAY_AUTH_HEADER]: server.authHeaders[RELAY_AUTH_HEADER],
+      },
+    })
+    const targets = await response.json() as Array<{ id: string; type: string }>
+
+    expect(targets).toEqual([
+      expect.objectContaining({
+        id: 'page-target',
+        type: 'page',
+      }),
+    ])
 
     extensionWs.close()
   })

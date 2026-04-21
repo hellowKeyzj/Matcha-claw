@@ -173,7 +173,46 @@ describe('openclaw plugin config service', () => {
     });
   });
 
-  it('同步 browserMode=relay 时会关闭原生 browser 并启用 browser-relay', async () => {
+  it('手动插件列表同步时会保留由渠道配置派生的插件启用状态', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      channels: {
+        feishu: {
+          enabled: true,
+          accounts: {
+            default: {
+              appId: 'cli_xxx',
+              appSecret: 'secret',
+              enabled: true,
+            },
+          },
+        },
+      },
+      plugins: {
+        allow: ['openclaw-lark'],
+        entries: {
+          'openclaw-lark': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+
+    const effectivePluginIds = await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        allow: string[];
+        entries: Record<string, { enabled?: boolean }>;
+      };
+    };
+
+    expect(effectivePluginIds).toEqual(['task-manager', 'openclaw-lark']);
+    expect(nextConfig.plugins.allow).toEqual(['task-manager', 'openclaw-lark']);
+    expect(nextConfig.plugins.entries['task-manager']).toMatchObject({ enabled: true });
+    expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
+  });
+
+  it('同步 browserMode=relay 时会关闭 bundled browser 并启用 browser-relay', async () => {
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
     const relaySourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
     mkdirSync(browserPluginDir, { recursive: true });
@@ -217,7 +256,7 @@ describe('openclaw plugin config service', () => {
       };
     };
 
-    expect(nextConfig.browser).toEqual({ enabled: false });
+    expect(nextConfig.browser).toEqual({ enabled: true });
     expect(nextConfig.plugins.allow).toContain('browser-relay');
     expect(nextConfig.plugins.allow).not.toContain('browser');
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });

@@ -44,6 +44,11 @@ type PendingExtensionRequest = {
   timer: NodeJS.Timeout
 }
 
+type CdpClientState = {
+  autoAttachPrimed: boolean
+  discoverPrimed: boolean
+}
+
 type RelayHelloParams = {
   protocolVersion?: number
   encryptedSessionKey?: string
@@ -147,6 +152,7 @@ export class BrowserRelayServer {
   private nextRequestId = 1
   private pendingExtensionRequests = new Map<number, PendingExtensionRequest>()
   private cdpClients = new Set<WebSocket>()
+  private cdpClientState = new WeakMap<WebSocket, CdpClientState>()
   private connectedTargets = new Map<string, ConnectedTarget>()
   private pendingTargetUrls = new Map<string, string>()
   private actualPort: number | null = null
@@ -194,7 +200,7 @@ export class BrowserRelayServer {
   }
 
   listAttachments(): Array<{ sessionId: string; targetId: string; title: string; url: string }> {
-    return this.getPhysicalTargets().map((target) => ({
+    return this.getInspectablePageTargets().map((target) => ({
       sessionId: target.sessionId,
       targetId: target.targetId,
       title: target.targetInfo.title ?? '',
@@ -497,7 +503,7 @@ export class BrowserRelayServer {
         res.end('Unauthorized')
         return
       }
-      const physicalTargets = this.getPhysicalTargets()
+      const physicalTargets = this.getInspectablePageTargets()
       writeJson(res, 200, {
         extensionConnected: this.handshakeOk,
         physicalTargets: physicalTargets.length,
@@ -521,7 +527,7 @@ export class BrowserRelayServer {
     }
 
     const cdpUrl = `ws://127.0.0.1:${this.actualPort}/cdp`
-    if (pathname === '/json/version' && (req.method === 'GET' || req.method === 'PUT')) {
+    if (new Set(['/json/version', '/json/version/']).has(pathname) && (req.method === 'GET' || req.method === 'PUT')) {
       writeJson(res, 200, {
         Browser: 'OpenClaw/browser-relay',
         'Protocol-Version': '1.3',
@@ -534,7 +540,7 @@ export class BrowserRelayServer {
       writeJson(
         res,
         200,
-        this.getPhysicalTargets().map((target) => ({
+        this.getInspectablePageTargets().map((target) => ({
           id: target.targetId,
           type: target.targetInfo.type,
           title: target.targetInfo.title ?? '',
@@ -689,6 +695,10 @@ export class BrowserRelayServer {
 
   private handleCdpConnection(ws: WebSocket): void {
     this.cdpClients.add(ws)
+    this.cdpClientState.set(ws, {
+      autoAttachPrimed: false,
+      discoverPrimed: false,
+    })
 
     ws.on('message', async (raw) => {
       let message: { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string } | null = null
@@ -727,9 +737,11 @@ export class BrowserRelayServer {
 
     ws.on('close', () => {
       this.cdpClients.delete(ws)
+      this.cdpClientState.delete(ws)
     })
     ws.on('error', () => {
       this.cdpClients.delete(ws)
+      this.cdpClientState.delete(ws)
     })
   }
 
@@ -761,7 +773,7 @@ export class BrowserRelayServer {
         return { browserContextIds: [] }
       case 'Target.getTargets':
         return {
-          targetInfos: this.getPhysicalTargets().map((target) => ({
+          targetInfos: this.getInspectablePageTargets().map((target) => ({
             ...normalizeTargetInfo(target.targetInfo),
             attached: true,
           })),
@@ -778,14 +790,14 @@ export class BrowserRelayServer {
           if (!target) throw new Error('target not found')
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
         }
-        const fallback = this.getPhysicalTargets()[0]
+        const fallback = this.getInspectablePageTargets()[0]
         if (!fallback) throw new Error('target not found')
         return { targetInfo: normalizeTargetInfo(fallback.targetInfo) }
       }
       case 'Target.attachToTarget': {
         const targetId = typeof input.params?.targetId === 'string' ? input.params.targetId : undefined
         if (!targetId) throw new Error('targetId required')
-        const target = this.getPhysicalTargets().find((entry) => entry.targetId === targetId)
+        const target = this.getInspectablePageTargets().find((entry) => entry.targetId === targetId)
         if (!target) throw new Error('target not found')
         return { sessionId: target.sessionId }
       }
@@ -899,12 +911,14 @@ export class BrowserRelayServer {
         if (eventParams.targetInfo && typeof eventParams.sessionId === 'string') {
           const attachedTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>
           const normalized = normalizeTargetInfo(attachedTargetInfo)
-          this.connectedTargets.set(eventParams.sessionId, {
-            sessionId: eventParams.sessionId,
-            targetId: normalized.targetId,
-            targetInfo: normalized,
-            physical: true,
-          })
+          if (normalized.type === 'page') {
+            this.connectedTargets.set(eventParams.sessionId, {
+              sessionId: eventParams.sessionId,
+              targetId: normalized.targetId,
+              targetInfo: normalized,
+              physical: true,
+            })
+          }
           this.broadcastToCdpClients({
             method: eventMethod,
             params: {
@@ -963,7 +977,22 @@ export class BrowserRelayServer {
   }
 
   private ensureTargetEventsForClient(client: WebSocket, mode: 'autoAttach' | 'discover'): void {
-    for (const target of this.getPhysicalTargets()) {
+    const state = this.cdpClientState.get(client)
+    if (state) {
+      if (mode === 'autoAttach' && state.autoAttachPrimed) {
+        return
+      }
+      if (mode === 'discover' && state.discoverPrimed) {
+        return
+      }
+      if (mode === 'autoAttach') {
+        state.autoAttachPrimed = true
+      } else {
+        state.discoverPrimed = true
+      }
+    }
+
+    for (const target of this.getInspectablePageTargets()) {
       const message =
         mode === 'autoAttach'
           ? {
@@ -994,11 +1023,15 @@ export class BrowserRelayServer {
     return Array.from(this.connectedTargets.values()).filter((target) => target.physical)
   }
 
+  private getInspectablePageTargets(): ConnectedTarget[] {
+    return this.getPhysicalTargets().filter((target) => target.targetInfo.type === 'page')
+  }
+
   private findSessionId(targetId?: string): string | undefined {
     if (targetId) {
       return Array.from(this.connectedTargets.values()).find((entry) => entry.targetId === targetId)?.sessionId
     }
-    return this.getPhysicalTargets()[0]?.sessionId ?? Array.from(this.connectedTargets.values())[0]?.sessionId
+    return this.getInspectablePageTargets()[0]?.sessionId ?? this.getPhysicalTargets()[0]?.sessionId
   }
 
   private sendToExtension(method: string, params: Record<string, unknown>, sessionId?: string): Promise<any> {

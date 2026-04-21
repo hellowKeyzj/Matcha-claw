@@ -1,9 +1,9 @@
 import type { OpenClawConfig, OpenClawPluginApi, PluginLogger } from 'openclaw/plugin-sdk'
 import { definePluginEntry } from 'openclaw/plugin-sdk/core'
-import { createBrowserTool } from 'openclaw/plugin-sdk/browser'
 import { BROWSER_RELAY_PLUGIN_DESCRIPTION, BROWSER_RELAY_PLUGIN_ID, BROWSER_RELAY_PLUGIN_NAME, DEFAULT_BROWSER_RELAY_PORT } from '../manifest.js'
 import { BrowserRelayServer } from '../relay/server.js'
 import { BrowserControlService } from '../service/browser-control-service.js'
+import { createBrowserRelayTool } from './browser-relay-tool.js'
 
 type GatewayOptions = {
   params: Record<string, unknown>
@@ -106,9 +106,7 @@ export function registerBrowserRelayRuntime(api: OpenClawPluginApi): void {
   })
 
   api.registerTool((toolCtx) =>
-    createBrowserTool({
-      agentSessionKey: toolCtx.sessionKey,
-    }),
+    createBrowserRelayTool(toolCtx, () => runtime.requireControl()),
   )
 
   api.logger.info('[browser-relay] plugin registered')

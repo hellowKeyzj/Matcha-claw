@@ -909,7 +909,7 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
         : {}
     ) as Record<string, unknown>;
 
-    browser.enabled = browserMode === 'native';
+    browser.enabled = browserMode !== 'off';
     if (browserMode === 'native') {
       browser.defaultProfile = 'openclaw';
     } else {

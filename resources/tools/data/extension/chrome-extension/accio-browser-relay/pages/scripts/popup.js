@@ -15,6 +15,7 @@ const ERROR_MESSAGES = {
   encryption_unsupported:
     'Desktop app does not support encrypted transport. Please update the desktop app to the latest version.',
 }
+let transientError = ''
 
 try {
   versionBadge.textContent = 'v' + chrome.runtime.getManifest().version
@@ -82,10 +83,32 @@ function renderTabs(tabs) {
   tabs.forEach((tab) => {
     const el = document.createElement('div')
     el.className = 'tab-item'
-    el.addEventListener('click', () => {
-      chrome.tabs.update(tab.tabId, { active: true })
-      if (tab.windowId) chrome.windows.update(tab.windowId, { focused: true })
-      window.close()
+    el.addEventListener('click', async () => {
+      transientError = ''
+
+      if (tab.state === 'connected') {
+        chrome.tabs.update(tab.tabId, { active: true })
+        if (tab.windowId) chrome.windows.update(tab.windowId, { focused: true })
+        window.close()
+        return
+      }
+
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'attachTab',
+          tabId: tab.tabId,
+        })
+        if (!response?.ok) {
+          transientError = response?.error || `attach failed for tab ${tab.tabId}`
+          await refresh()
+          return
+        }
+        await refresh()
+        window.close()
+      } catch (error) {
+        transientError = error?.message || String(error)
+        await refresh()
+      }
     })
 
     const displayTitle = tab.title || tab.url || `Tab ${tab.tabId}`
@@ -113,9 +136,14 @@ tabsHeader.addEventListener('click', () => {
 })
 
 function renderError(errorKey) {
-  if (errorKey && ERROR_MESSAGES[errorKey]) {
+  const message =
+    (errorKey && ERROR_MESSAGES[errorKey])
+    || (typeof errorKey === 'string' && errorKey.trim() ? errorKey.trim() : '')
+    || transientError
+
+  if (message) {
     errorBanner.dataset.visible = 'true'
-    errorText.textContent = ERROR_MESSAGES[errorKey]
+    errorText.textContent = message
   } else {
     errorBanner.dataset.visible = 'false'
     errorText.textContent = ''

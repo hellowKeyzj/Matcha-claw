@@ -8,6 +8,14 @@ const hoisted = vi.hoisted(() => ({
   setOpenClawDefaultModelMock: vi.fn(async () => {}),
   setOpenClawDefaultModelWithOverrideMock: vi.fn(async () => {}),
   syncProviderConfigToOpenClawMock: vi.fn(async () => {}),
+  sanitizeOpenClawConfigMock: vi.fn(async () => {}),
+  syncBrowserModeToOpenClawMock: vi.fn(async () => {}),
+  syncGatewayTokenToConfigMock: vi.fn(async () => {}),
+  syncSessionIdleMinutesToOpenClawMock: vi.fn(async () => {}),
+  syncProxyConfigToOpenClawMock: vi.fn(async () => {}),
+  listConfiguredChannelsLocalMock: vi.fn(async () => []),
+  getAllSettingsLocalMock: vi.fn(async () => ({ browserMode: 'relay', gatewayToken: '' })),
+  setSettingValueLocalMock: vi.fn(async () => {}),
   getOpenClawProviderKeyForTypeMock: vi.fn((type: string, id: string) => `${type}-${id}`),
 }));
 
@@ -22,22 +30,22 @@ vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', (
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-service', () => ({
-  sanitizeOpenClawConfig: vi.fn(async () => {}),
+  sanitizeOpenClawConfig: (...args: unknown[]) => hoisted.sanitizeOpenClawConfigMock(...args),
   setOpenClawDefaultModel: (...args: unknown[]) => hoisted.setOpenClawDefaultModelMock(...args),
   setOpenClawDefaultModelWithOverride: (...args: unknown[]) => hoisted.setOpenClawDefaultModelWithOverrideMock(...args),
   syncProviderConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProviderConfigToOpenClawMock(...args),
   normalizeBrowserMode: vi.fn((value: unknown) => value ?? 'relay'),
-  syncBrowserModeToOpenClaw: vi.fn(async () => {}),
-  syncGatewayTokenToConfig: vi.fn(async () => {}),
-  syncSessionIdleMinutesToOpenClaw: vi.fn(async () => {}),
+  syncBrowserModeToOpenClaw: (...args: unknown[]) => hoisted.syncBrowserModeToOpenClawMock(...args),
+  syncGatewayTokenToConfig: (...args: unknown[]) => hoisted.syncGatewayTokenToConfigMock(...args),
+  syncSessionIdleMinutesToOpenClaw: (...args: unknown[]) => hoisted.syncSessionIdleMinutesToOpenClawMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-proxy-sync', () => ({
-  syncProxyConfigToOpenClaw: vi.fn(async () => {}),
+  syncProxyConfigToOpenClaw: (...args: unknown[]) => hoisted.syncProxyConfigToOpenClawMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/channels/channel-runtime', () => ({
-  listConfiguredChannelsLocal: vi.fn(async () => []),
+  listConfiguredChannelsLocal: (...args: unknown[]) => hoisted.listConfiguredChannelsLocalMock(...args),
 }));
 
 vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
@@ -53,9 +61,44 @@ vi.mock('../../runtime-host/application/providers/provider-runtime-rules', () =>
   usesOAuthAuthHeader: vi.fn(() => false),
 }));
 
+vi.mock('../../runtime-host/application/settings/store', () => ({
+  getAllSettingsLocal: (...args: unknown[]) => hoisted.getAllSettingsLocalMock(...args),
+  setSettingValueLocal: (...args: unknown[]) => hoisted.setSettingValueLocalMock(...args),
+}));
+
 describe('runtime-host bootstrap provider sync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hoisted.getAllSettingsLocalMock.mockResolvedValue({ browserMode: 'relay', gatewayToken: '' });
+    hoisted.listConfiguredChannelsLocalMock.mockResolvedValue([]);
+  });
+
+  it('syncGatewayConfigLocal 会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
+    hoisted.listConfiguredChannelsLocalMock.mockResolvedValue(['openclaw-weixin']);
+
+    const { syncGatewayConfigLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const result = await syncGatewayConfigLocal({
+      gatewayToken: 'matchaclaw-token-1',
+      proxyEnabled: true,
+      proxyServer: 'http://127.0.0.1:7890',
+      proxyBypassRules: '<local>',
+    });
+
+    expect(hoisted.syncProxyConfigToOpenClawMock).toHaveBeenCalledWith({
+      proxyEnabled: true,
+      proxyServer: 'http://127.0.0.1:7890',
+      proxyBypassRules: '<local>',
+    }, {
+      preserveExistingWhenDisabled: true,
+    });
+    expect(hoisted.setSettingValueLocalMock).toHaveBeenCalledWith('gatewayToken', 'matchaclaw-token-1');
+    expect(hoisted.syncGatewayTokenToConfigMock).toHaveBeenCalledWith('matchaclaw-token-1');
+    expect(hoisted.sanitizeOpenClawConfigMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.syncBrowserModeToOpenClawMock).toHaveBeenCalledWith('relay');
+    expect(hoisted.syncSessionIdleMinutesToOpenClawMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      configuredChannels: ['openclaw-weixin'],
+    });
   });
 
   it('默认 Ollama 账号会按 openai-completions 协议写入 runtime 覆盖配置', async () => {
