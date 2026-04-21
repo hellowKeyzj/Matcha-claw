@@ -205,6 +205,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ tabs })
     return false
   }
+  if (msg?.type === 'attachTab') {
+    const tabId = Number(msg.tabId)
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      sendResponse({ ok: false, error: 'invalid tabId' })
+      return false
+    }
+
+    ;(async () => {
+      try {
+        log.info('attachTab request:', tabId)
+        const attached = await mgr.attach(tabId)
+        if (!attached) {
+          sendResponse({ ok: false, error: `attach failed for tab ${tabId}` })
+          return
+        }
+
+        try {
+          const tab = await chrome.tabs.get(tabId)
+          await chrome.tabs.update(tabId, { active: true })
+          if (tab.windowId) {
+            await chrome.windows.update(tab.windowId, { focused: true })
+          }
+        } catch (focusError) {
+          log.warn('attachTab focus failed:', tabId, focusError)
+        }
+
+        log.info('attachTab done:', tabId, attached.targetId)
+        sendResponse({ ok: true, attached })
+      } catch (error) {
+        log.error('attachTab failed:', tabId, error)
+        sendResponse({ ok: false, error: error?.message || String(error) })
+      }
+    })()
+
+    return true
+  }
   if (msg?.type === 'getLogs') {
     sendResponse({ logs: getLogBuffer(msg.limit || 100) })
     return false
