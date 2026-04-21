@@ -11,7 +11,7 @@
  *   - memory-lancedb-pro -> build/openclaw-plugins/memory-lancedb-pro
  *
  * The output plugin directory contains:
- *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)
+ *   - plugin runtime files (dist/, openclaw.plugin.json, package.json, ...)
  *   - plugin runtime node_modules/ (flattened direct + transitive deps)
  */
 
@@ -19,6 +19,7 @@ import 'zx/globals';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildManagedOpenClawPlugins } from './lib/openclaw-local-plugin-builder.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -63,10 +64,26 @@ const PLUGINS = [
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
   { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
-  { localPath: path.join(ROOT, 'packages', 'memory-lancedb-pro'), pluginId: 'memory-lancedb-pro' },
-  { localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'), pluginId: 'task-manager' },
-  { localPath: path.join(ROOT, 'packages', 'openclaw-security-plugin'), pluginId: 'security-core' },
-  { localPath: path.join(ROOT, 'packages', 'openclaw-browser-relay-plugin'), pluginId: 'browser-relay' },
+  {
+    localPath: path.join(ROOT, 'packages', 'memory-lancedb-pro'),
+    pluginId: 'memory-lancedb-pro',
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'models', 'skills'],
+  },
+  {
+    localPath: path.join(ROOT, 'packages', 'openclaw-task-manager-plugin'),
+    pluginId: 'task-manager',
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
+  },
+  {
+    localPath: path.join(ROOT, 'packages', 'openclaw-security-plugin'),
+    pluginId: 'security-core',
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
+  },
+  {
+    localPath: path.join(ROOT, 'packages', 'openclaw-browser-relay-plugin'),
+    pluginId: 'browser-relay',
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
+  },
   { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
 ];
 
@@ -342,7 +359,19 @@ function ensureBundledLocalMiniLmModel() {
   );
 }
 
-function bundleLocalPlugin({ localPath, pluginId }) {
+function copyLocalPluginRuntimeFiles(sourceDir, outputDir, runtimeFiles) {
+  for (const relativePath of runtimeFiles) {
+    const sourcePath = path.join(sourceDir, relativePath);
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(`Missing runtime file "${relativePath}" in local plugin "${sourceDir}".`);
+    }
+    const destPath = path.join(outputDir, relativePath);
+    fs.mkdirSync(normWin(path.dirname(destPath)), { recursive: true });
+    fs.cpSync(normWin(sourcePath), normWin(destPath), { recursive: true, dereference: true });
+  }
+}
+
+function bundleLocalPlugin({ localPath, pluginId, runtimeFiles }) {
   const sourceDir = normWin(localPath);
   if (!fs.existsSync(sourceDir)) {
     throw new Error(`Missing local plugin source "${localPath}".`);
@@ -355,7 +384,11 @@ function bundleLocalPlugin({ localPath, pluginId }) {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
   fs.mkdirSync(outputDir, { recursive: true });
-  fs.cpSync(sourceDir, outputDir, { recursive: true, dereference: true });
+  if (Array.isArray(runtimeFiles) && runtimeFiles.length > 0) {
+    copyLocalPluginRuntimeFiles(localPath, outputDir, runtimeFiles);
+  } else {
+    fs.cpSync(sourceDir, outputDir, { recursive: true, dereference: true });
+  }
 
   const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
   if (!fs.existsSync(manifestPath)) {
@@ -370,10 +403,11 @@ function bundleLocalPlugin({ localPath, pluginId }) {
   );
   const { copiedCount, skippedDupes } = copyFlattenedDeps(outputDir, dependencyMap);
 
-  echo`   ✅ ${pluginId}: copied local source + ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
+  echo`   ✅ ${pluginId}: copied local runtime + ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
 ensureBundledLocalMiniLmModel();
+await buildManagedOpenClawPlugins({ rootDir: ROOT });
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });

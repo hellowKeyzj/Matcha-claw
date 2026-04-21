@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createGatewayClient } from '../../runtime-host/openclaw-bridge';
@@ -35,6 +36,69 @@ describe('runtime-host process gateway rpc client', () => {
     await expect(client.isGatewayRunning()).rejects.toThrow(
       'Invalid runtime-host gateway port: abc',
     );
+  });
+
+  it('isGatewayRunning 只做轻量端口探活，不要求完成 websocket 握手', async () => {
+    const port = 47400 + Math.floor(Math.random() * 400);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+
+    const server = net.createServer((socket) => {
+      socket.end();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(port, '127.0.0.1', () => resolve());
+      server.once('error', reject);
+    });
+
+    try {
+      const client = createGatewayClient();
+      await expect(client.isGatewayRunning()).resolves.toBe(true);
+      client.close();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it('readGatewayConnectionState 只读端口与连接快照，不会偷偷发起 websocket 握手', async () => {
+    const port = 47500 + Math.floor(Math.random() * 400);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+
+    const server = net.createServer((socket) => {
+      socket.end();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(port, '127.0.0.1', () => resolve());
+      server.once('error', reject);
+    });
+
+    try {
+      const client = createGatewayClient();
+      await expect(client.readGatewayConnectionState()).resolves.toMatchObject({
+        state: 'disconnected',
+        portReachable: true,
+      });
+      client.close();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
   });
 
   it('gatewayRpc 复用长连接，不再每次请求新建 socket', async () => {
@@ -139,7 +203,7 @@ describe('runtime-host process gateway rpc client', () => {
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
     process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN = 'connection-state-token';
 
-    const states: string[] = [];
+    const snapshots: Array<{ state: string; portReachable: boolean; lastError?: string }> = [];
     const wss = new WebSocketServer({ host: '127.0.0.1', port });
     wss.on('connection', (socket) => {
       socket.send(JSON.stringify({
@@ -174,17 +238,24 @@ describe('runtime-host process gateway rpc client', () => {
     try {
       const client = createGatewayClient({
         onGatewayConnectionState: (payload) => {
-          states.push(payload.state);
+          snapshots.push({
+            state: payload.state,
+            portReachable: payload.portReachable,
+            lastError: payload.lastError,
+          });
         },
       });
       await client.gatewayRpc('channels.status', { probe: true });
       client.close();
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(states).toContain('disconnected');
-      expect(states).toContain('reconnecting');
-      expect(states).toContain('connected');
-      expect(states.at(-1)).toBe('disconnected');
+      expect(snapshots.map((item) => item.state)).toContain('disconnected');
+      expect(snapshots.map((item) => item.state)).toContain('reconnecting');
+      expect(snapshots.map((item) => item.state)).toContain('connected');
+      expect(snapshots.some((item) => item.state === 'connected' && item.portReachable)).toBe(true);
+      expect(snapshots.at(-1)).toEqual(expect.objectContaining({
+        state: 'disconnected',
+      }));
     } finally {
       await new Promise<void>((resolve, reject) => {
         wss.close((error) => {

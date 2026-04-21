@@ -37,6 +37,7 @@
     "build": "pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
     "build:vite": "vite build",
     "build:runtime-host-process": "node scripts/build-runtime-host-process.mjs",
+    "build:openclaw-local-plugins": "node scripts/build-local-openclaw-plugins.mjs",
     "bundle:openclaw-plugins": "zx scripts/bundle-openclaw-plugins.mjs",
     "download:minilm-model": "node packages/memory-lancedb-pro/scripts/download-local-minilm.mjs",
     "bundle:preinstalled-skills": "zx scripts/bundle-preinstalled-skills.mjs",

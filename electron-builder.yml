@@ -34,9 +34,9 @@ extraResources:
   # Preloaded subagent templates
   - from: src/features/subagents/templates/
     to: resources/subagent-templates/
-  # NOTE: OpenClaw plugin mirrors (dingtalk, etc.) are bundled by the
-  # afterPack hook (after-pack.cjs) directly from node_modules, so they
-  # don't need an extraResources entry here.
+  # NOTE: OpenClaw plugin mirrors are bundled by the afterPack hook
+  # (after-pack.cjs). Third-party plugins come from node_modules, while
+  # Matcha-managed plugins come from build/openclaw-plugins/.
 
 afterPack: ./scripts/after-pack.cjs
 

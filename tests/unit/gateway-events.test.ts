@@ -60,7 +60,7 @@ describe('gateway store event wiring', () => {
     });
     handlers.get('gateway:connection')?.({
       state: 'disconnected',
-      reason: 'socket closed',
+      lastError: 'socket closed',
       updatedAt: 2002,
     });
 

@@ -11,9 +11,9 @@
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { smartChunk } from "./chunker.js";
+import { getPluginPackageRoot } from "./runtime-paths.js";
 
 // ============================================================================
 // Embedding Cache (LRU with TTL)
@@ -199,7 +199,7 @@ const LOCAL_MINILM_ALIASES = new Set([
 ]);
 
 const LOCAL_MINILM_DTYPE = "fp32";
-const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const PLUGIN_ROOT = getPluginPackageRoot(import.meta.url);
 const BUNDLED_MODELS_ROOT = join(PLUGIN_ROOT, "models");
 
 // ============================================================================

@@ -6,10 +6,30 @@ import path from 'node:path';
 const ROOT = process.cwd();
 
 const REQUIRED_LOCAL_PLUGINS = [
-  { pluginId: 'task-manager', sourceDir: 'packages/openclaw-task-manager-plugin' },
-  { pluginId: 'security-core', sourceDir: 'packages/openclaw-security-plugin' },
-  { pluginId: 'browser-relay', sourceDir: 'packages/openclaw-browser-relay-plugin' },
-  { pluginId: 'memory-lancedb-pro', sourceDir: 'packages/memory-lancedb-pro' },
+  {
+    pluginId: 'task-manager',
+    sourceDir: 'packages/openclaw-task-manager-plugin',
+    expectedExtensions: ['./dist/index.js'],
+    sourceEntries: ['./src/index.ts'],
+  },
+  {
+    pluginId: 'security-core',
+    sourceDir: 'packages/openclaw-security-plugin',
+    expectedExtensions: ['./dist/index.js'],
+    sourceEntries: ['./src/index.ts'],
+  },
+  {
+    pluginId: 'browser-relay',
+    sourceDir: 'packages/openclaw-browser-relay-plugin',
+    expectedExtensions: ['./dist/index.js'],
+    sourceEntries: ['./src/index.ts'],
+  },
+  {
+    pluginId: 'memory-lancedb-pro',
+    sourceDir: 'packages/memory-lancedb-pro',
+    expectedExtensions: ['./dist/index.js'],
+    sourceEntries: ['./index.ts', './cli.ts', './src/embedder.ts'],
+  },
 ];
 
 function fail(message, details = []) {
@@ -29,6 +49,10 @@ async function pathExists(targetPath) {
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sameStringArray(left, right) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 async function readJson(filePath) {
@@ -94,10 +118,26 @@ async function validatePluginSource(plugin) {
     return issues;
   }
 
-  for (const entry of extensions) {
-    const entryPath = path.resolve(sourceDir, entry);
-    if (!(await pathExists(entryPath))) {
-      issues.push(`openclaw.extensions 指向不存在文件: ${plugin.sourceDir} -> ${entry}`);
+  if (Array.isArray(plugin.expectedExtensions) && plugin.expectedExtensions.length > 0) {
+    if (!sameStringArray(extensions, plugin.expectedExtensions)) {
+      issues.push(
+        `package.json openclaw.extensions 不符合预期: ${plugin.sourceDir} (expected=${plugin.expectedExtensions.join(', ')}, actual=${extensions.join(', ')})`,
+      );
+    }
+  } else {
+    for (const entry of extensions) {
+      const entryPath = path.resolve(sourceDir, entry);
+      if (!(await pathExists(entryPath))) {
+        issues.push(`openclaw.extensions 指向不存在文件: ${plugin.sourceDir} -> ${entry}`);
+      }
+    }
+  }
+
+  const sourceEntries = Array.isArray(plugin.sourceEntries) ? plugin.sourceEntries : [];
+  for (const sourceEntry of sourceEntries) {
+    const sourceEntryPath = path.resolve(sourceDir, sourceEntry);
+    if (!(await pathExists(sourceEntryPath))) {
+      issues.push(`插件源码入口不存在: ${plugin.sourceDir} -> ${sourceEntry}`);
     }
   }
 

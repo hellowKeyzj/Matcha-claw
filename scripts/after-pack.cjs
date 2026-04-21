@@ -337,9 +337,7 @@ function patchPluginIds(pluginDir, expectedId) {
 
 // ── Plugin bundler ───────────────────────────────────────────────────────────
 // Bundles a single OpenClaw plugin (and its transitive deps) from node_modules
-// directly into the packaged resources directory.  Mirrors the logic in
-// bundle-openclaw-plugins.mjs so the packaged app is self-contained even when
-// build/openclaw-plugins/ was not pre-generated.
+// directly into the packaged resources directory.
 
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;
@@ -458,7 +456,7 @@ function copyPluginFromLocalCandidates(pluginId, candidates, destDir) {
   if (existsSync(normWin(destDir))) rmSync(normWin(destDir), { recursive: true, force: true });
   mkdirSync(normWin(destDir), { recursive: true });
   cpSync(normWin(sourceDir), normWin(destDir), { recursive: true, dereference: true });
-  console.log(`[after-pack] ✅ Plugin ${pluginId}: copied local source from ${sourceDir}`);
+  console.log(`[after-pack] ✅ Plugin ${pluginId}: copied local mirror from ${sourceDir}`);
   return true;
 }
 
@@ -504,18 +502,15 @@ exports.default = async function afterPack(context) {
   // causing TypeError in Node.js 22+ ESM interop.
   patchBrokenModules(dest);
 
-  // 1.1 Bundle OpenClaw plugins directly from node_modules into packaged resources.
-  //     This is intentionally done in afterPack (not extraResources) because:
-  //     - electron-builder silently skips extraResources entries whose source
-  //       directory doesn't exist (build/openclaw-plugins/ may not be pre-generated)
-  //     - node_modules/ is excluded by .gitignore so the deps copy must be manual
+  // 1.1 Bundle OpenClaw plugins into packaged resources.
+  //     Third-party plugins come from node_modules; Matcha-managed local plugins
+  //     come from build/openclaw-plugins, which already contains precompiled dist/.
   const BUNDLED_PLUGINS = [
     { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
     { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
     { npmName: '@tencent-connect/openclaw-qqbot', pluginId: 'openclaw-qqbot' },
     {
-      npmName: 'memory-lancedb-pro',
       pluginId: 'memory-lancedb-pro',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'memory-lancedb-pro'),
@@ -525,14 +520,18 @@ exports.default = async function afterPack(context) {
       pluginId: 'task-manager',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'task-manager'),
-        join(__dirname, '..', 'packages', 'openclaw-task-manager-plugin'),
       ],
     },
     {
       pluginId: 'security-core',
       localSourceCandidates: [
         join(__dirname, '..', 'build', 'openclaw-plugins', 'security-core'),
-        join(__dirname, '..', 'packages', 'openclaw-security-plugin'),
+      ],
+    },
+    {
+      pluginId: 'browser-relay',
+      localSourceCandidates: [
+        join(__dirname, '..', 'build', 'openclaw-plugins', 'browser-relay'),
       ],
     },
   ];

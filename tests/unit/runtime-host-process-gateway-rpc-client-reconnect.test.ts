@@ -59,9 +59,10 @@ describe('runtime-host process gateway rpc client reconnect', () => {
 
     const client = createGatewayClient();
 
-    const firstConnect = client.isGatewayRunning();
+    const firstConnect = client.gatewayRpc('channels.status', { probe: true });
     const firstSocket = FakeWebSocket.instances[0];
     expect(firstSocket).toBeTruthy();
+    firstSocket.emit('open');
 
     firstSocket.emitJson({
       type: 'event',
@@ -79,15 +80,28 @@ describe('runtime-host process gateway rpc client reconnect', () => {
       payload: { hello: 'ok' },
     });
 
-    await expect(firstConnect).resolves.toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const firstRpcRequest = firstSocket.sentMessages.find((message) => message.method === 'channels.status');
+    expect(firstRpcRequest).toBeTruthy();
+
+    firstSocket.emitJson({
+      type: 'res',
+      id: firstRpcRequest?.id,
+      ok: true,
+      payload: { ok: true },
+    });
+
+    await expect(firstConnect).resolves.toEqual({ ok: true });
 
     // Simulate a stale socket state: the transport is no longer open,
     // but its close event has not yet reset the previous handshake flags.
     firstSocket.readyState = FakeWebSocket.CLOSED;
 
-    const reconnect = client.isGatewayRunning();
+    const reconnect = client.gatewayRpc('channels.status', { probe: true });
     const secondSocket = FakeWebSocket.instances[1];
     expect(secondSocket).toBeTruthy();
+    secondSocket.emit('open');
 
     secondSocket.emitJson({
       type: 'event',
@@ -105,7 +119,19 @@ describe('runtime-host process gateway rpc client reconnect', () => {
       payload: { hello: 'ok' },
     });
 
-    await expect(reconnect).resolves.toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const secondRpcRequest = secondSocket.sentMessages.find((message) => message.method === 'channels.status');
+    expect(secondRpcRequest).toBeTruthy();
+
+    secondSocket.emitJson({
+      type: 'res',
+      id: secondRpcRequest?.id,
+      ok: true,
+      payload: { ok: true },
+    });
+
+    await expect(reconnect).resolves.toEqual({ ok: true });
 
     client.close();
   });

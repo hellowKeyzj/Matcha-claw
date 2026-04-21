@@ -8,12 +8,20 @@ import { parseJsonBody, sendJson } from '../route-utils';
 async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
   status: string;
   detail?: string;
+  portReachable?: boolean;
+  connectionState?: string;
+  lastError?: string;
+  updatedAt?: number;
 } | null> {
   try {
     const result = await ctx.runtimeHost.request<{
       success?: boolean;
       status?: string;
       detail?: string;
+      portReachable?: boolean;
+      connectionState?: string;
+      lastError?: string;
+      updatedAt?: number;
     }>('GET', '/api/platform/runtime/health');
     const status = typeof result.data?.status === 'string' ? result.data.status : null;
     if (!status) {
@@ -22,6 +30,10 @@ async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
     return {
       status,
       ...(typeof result.data?.detail === 'string' ? { detail: result.data.detail } : {}),
+      ...(typeof result.data?.portReachable === 'boolean' ? { portReachable: result.data.portReachable } : {}),
+      ...(typeof result.data?.connectionState === 'string' ? { connectionState: result.data.connectionState } : {}),
+      ...(typeof result.data?.lastError === 'string' ? { lastError: result.data.lastError } : {}),
+      ...(typeof result.data?.updatedAt === 'number' ? { updatedAt: result.data.updatedAt } : {}),
     };
   } catch {
     return null;
@@ -61,9 +73,13 @@ export async function handleGatewayRoutes(
     const health = await readPlatformHealth(ctx);
     if (health) {
       sendJson(res, 200, {
-        ok: health.status === 'running',
+        ok: health.portReachable ?? health.status === 'running',
         status: health.status,
         detail: health.detail,
+        portReachable: health.portReachable,
+        connectionState: health.connectionState,
+        lastError: health.lastError,
+        updatedAt: health.updatedAt,
       });
       return true;
     }

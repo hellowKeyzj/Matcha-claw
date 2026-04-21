@@ -115,4 +115,42 @@ describe('main gateway routes', () => {
       }),
     );
   });
+
+  it('/api/gateway/health 直接透传 runtime health 的端口态和连接态', async () => {
+    const ctx = createContext();
+    ctx.runtimeHost.request.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        status: 'running',
+        detail: 'gateway control channel reconnecting',
+        portReachable: true,
+        connectionState: 'reconnecting',
+        lastError: 'connect timeout',
+        updatedAt: 1234,
+      },
+    });
+    const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
+
+    const handled = await handleGatewayRoutes(
+      { method: 'GET' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:3210/api/gateway/health'),
+      ctx as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      200,
+      {
+        ok: true,
+        status: 'running',
+        detail: 'gateway control channel reconnecting',
+        portReachable: true,
+        connectionState: 'reconnecting',
+        lastError: 'connect timeout',
+        updatedAt: 1234,
+      },
+    );
+  });
 });

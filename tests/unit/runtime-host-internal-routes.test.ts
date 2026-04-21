@@ -233,7 +233,8 @@ describe('runtime-host internal routes', () => {
       eventName: 'gateway:connection',
       payload: {
         state: 'reconnecting',
-        reason: 'connect timeout',
+        portReachable: true,
+        lastError: 'connect timeout',
       },
     });
     const emitGatewayEvent = vi.fn();
@@ -259,7 +260,8 @@ describe('runtime-host internal routes', () => {
     expect(handled).toBe(true);
     expect(emitGatewayEvent).toHaveBeenCalledWith('gateway:connection', {
       state: 'reconnecting',
-      reason: 'connect timeout',
+      portReachable: true,
+      lastError: 'connect timeout',
     });
   });
 

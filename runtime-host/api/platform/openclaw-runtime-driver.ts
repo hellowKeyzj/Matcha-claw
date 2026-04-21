@@ -10,6 +10,12 @@ import type {
 } from '../../shared/platform-runtime-contracts';
 
 export interface OpenClawRuntimeBridge {
+  readonly readGatewayConnectionState: () => Promise<{
+    state: 'connected' | 'reconnecting' | 'disconnected';
+    portReachable: boolean;
+    lastError?: string;
+    updatedAt: number;
+  }>;
   readonly isGatewayRunning: () => Promise<boolean>;
   readonly platformInstallTool: (source: ToolSource) => Promise<{ toolId?: string; id?: string }>;
   readonly platformUninstallTool: (toolId: ToolId) => Promise<void>;
@@ -144,10 +150,17 @@ export class OpenClawRuntimeDriver implements AgentRuntimeDriver {
   async initialize(_config: DriverConfig): Promise<void> {}
 
   async healthCheck(): Promise<HealthStatus> {
-    const running = await this.bridge.isGatewayRunning();
+    const snapshot = await this.bridge.readGatewayConnectionState();
+    const running = snapshot.portReachable;
     return {
       status: running ? 'running' : 'stopped',
-      detail: running ? undefined : 'gateway unavailable',
+      detail: running
+        ? (snapshot.state === 'connected' ? undefined : `gateway control channel ${snapshot.state}`)
+        : (snapshot.lastError || 'gateway unavailable'),
+      portReachable: snapshot.portReachable,
+      connectionState: snapshot.state,
+      lastError: snapshot.lastError,
+      updatedAt: snapshot.updatedAt,
     };
   }
 

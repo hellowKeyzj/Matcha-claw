@@ -4,9 +4,14 @@
   "private": true,
   "description": "Browser relay plugin for OpenClaw",
   "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs browser-relay"
+  },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "dependencies": {

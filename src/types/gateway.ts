@@ -31,6 +31,12 @@ export interface GatewayRpcResponse<T = unknown> {
  */
 export interface GatewayHealth {
   ok: boolean;
+  status?: string;
+  detail?: string;
+  portReachable?: boolean;
+  connectionState?: 'connected' | 'reconnecting' | 'disconnected' | string;
+  lastError?: string;
+  updatedAt?: number;
   error?: string;
   uptime?: number;
   version?: string;
