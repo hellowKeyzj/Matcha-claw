@@ -19,6 +19,7 @@
     "title": "插件目录",
     "description": "在此管理插件启用状态；设置页不提供插件管理入口。",
     "empty": "暂无可管理插件。",
+    "channelManaged": "由渠道配置管理",
     "columns": {
       "plugin": "插件",
       "platform": "平台",

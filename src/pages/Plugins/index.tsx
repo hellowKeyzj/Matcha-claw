@@ -269,40 +269,55 @@ export function PluginsPage() {
                 <span>{t('plugins:catalog.columns.version')}</span>
                 <span className="text-right">{t('plugins:catalog.columns.enabled')}</span>
               </div>
-              {plugins.map((plugin) => (
-                <div
-                  key={plugin.id}
-                  className="grid grid-cols-[1.5fr_0.9fr_0.8fr_1fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{plugin.name}</div>
-                    <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
-                    {plugin.description && (
-                      <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
-                    )}
+              {plugins.map((plugin) => {
+                const channelManaged = plugin.controlMode === 'channel-config';
+                return (
+                  <div
+                    key={plugin.id}
+                    className="grid grid-cols-[1.5fr_0.9fr_0.8fr_1fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{plugin.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
+                      {plugin.description && (
+                        <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
+                      )}
+                      {channelManaged && (
+                        <div className="truncate text-xs text-muted-foreground">
+                          {t('plugins:catalog.channelManaged')}
+                        </div>
+                      )}
+                    </div>
+                    <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
+                      {t(`plugins:catalog.platform.${plugin.platform}`)}
+                    </Badge>
+                    <Badge variant="outline" className="justify-self-start">
+                      {t(`plugins:catalog.kind.${plugin.kind}`)}
+                    </Badge>
+                    <span className="truncate text-sm">{plugin.category}</span>
+                    <span className="truncate text-sm">{plugin.version}</span>
+                    <div className="justify-self-end">
+                      {mutatingPluginId === plugin.id && (
+                        <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      )}
+                      <Switch
+                        checked={enabledPluginIdSet.has(plugin.id)}
+                        disabled={
+                          !snapshotReady
+                          || initialLoading
+                          || manualRefreshing
+                          || mutatingAction !== null
+                          || mutatingPluginId !== null
+                          || channelManaged
+                        }
+                        onCheckedChange={(checked) => {
+                          void togglePluginEnabled(plugin.id, checked);
+                        }}
+                      />
+                    </div>
                   </div>
-                  <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
-                    {t(`plugins:catalog.platform.${plugin.platform}`)}
-                  </Badge>
-                  <Badge variant="outline" className="justify-self-start">
-                    {t(`plugins:catalog.kind.${plugin.kind}`)}
-                  </Badge>
-                  <span className="truncate text-sm">{plugin.category}</span>
-                  <span className="truncate text-sm">{plugin.version}</span>
-                  <div className="justify-self-end">
-                    {mutatingPluginId === plugin.id && (
-                      <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                    )}
-                    <Switch
-                      checked={enabledPluginIdSet.has(plugin.id)}
-                      disabled={!snapshotReady || initialLoading || manualRefreshing || mutatingAction !== null || mutatingPluginId !== null}
-                      onCheckedChange={(checked) => {
-                        void togglePluginEnabled(plugin.id, checked);
-                      }}
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>

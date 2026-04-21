@@ -11,6 +11,11 @@ import { normalizePluginIds } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
 import { getDefaultPluginDiscoveryRoots, PLUGIN_MANIFEST_NAMES } from '../../plugin-engine/plugin-location-rules';
 import { normalizePluginId } from '../../plugin-engine/plugin-id';
+import {
+  EXTERNAL_CHANNEL_PLUGIN_BINDINGS,
+  isBuiltinChannelId,
+  isChannelDerivedPluginId,
+} from '../channels/channel-plugin-bindings';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
 
 const LEGACY_PLUGIN_ID_MAP: Record<string, string> = {
@@ -82,6 +87,23 @@ function cloneNormalizedPluginEntries(config: Record<string, unknown>): Record<s
   }
 
   return nextEntries;
+}
+
+function cleanupPluginContainer(config: Record<string, unknown>): void {
+  if (!isRecord(config.plugins)) {
+    return;
+  }
+
+  const plugins = config.plugins as Record<string, unknown>;
+  if (Array.isArray(plugins.allow) && plugins.allow.length === 0) {
+    delete plugins.allow;
+  }
+  if (isRecord(plugins.entries) && Object.keys(plugins.entries).length === 0) {
+    delete plugins.entries;
+  }
+  if (Object.keys(plugins).length === 0) {
+    delete config.plugins;
+  }
 }
 
 type DiscoveredPluginEnableState = {
@@ -215,6 +237,66 @@ export function readEnabledPluginIdsFromOpenClawConfig(): string[] {
     readOpenClawConfigJson(),
     readDiscoveredPluginStateSync(),
   );
+}
+
+function channelSectionHasEnabledAccount(sectionRaw: unknown): boolean {
+  if (!isRecord(sectionRaw) || sectionRaw.enabled === false) {
+    return false;
+  }
+  const accounts = isRecord(sectionRaw.accounts) ? sectionRaw.accounts : null;
+  if (!accounts) {
+    return false;
+  }
+  return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
+}
+
+function listConfiguredBuiltinChannelIdsFromConfig(config: Record<string, unknown>): string[] {
+  const channels = isRecord(config.channels) ? config.channels : {};
+  const configured: string[] = [];
+
+  for (const [channelType, sectionRaw] of Object.entries(channels)) {
+    if (!isBuiltinChannelId(channelType)) {
+      continue;
+    }
+    if (channelSectionHasEnabledAccount(sectionRaw)) {
+      configured.push(channelType);
+    }
+  }
+
+  return configured.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
+function listConfiguredExternalChannelPluginIdsFromConfig(config: Record<string, unknown>): string[] {
+  const channels = isRecord(config.channels) ? config.channels : {};
+  const configured: string[] = [];
+
+  for (const binding of EXTERNAL_CHANNEL_PLUGIN_BINDINGS) {
+    if (channelSectionHasEnabledAccount(channels[binding.channelType])) {
+      configured.push(binding.pluginId);
+    }
+  }
+
+  return configured.sort((left, right) => left.localeCompare(right, 'en'));
+}
+
+export function readManuallyManagedPluginIdsFromConfig(config: Record<string, unknown>): string[] {
+  return readPluginAllowlist(config).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+}
+
+export function resolveEffectivePluginIdsForConfig(
+  config: Record<string, unknown>,
+  manualPluginIds: readonly string[],
+): string[] {
+  const manualIds = normalizeCanonicalPluginIds(manualPluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+  const externalChannelPluginIds = listConfiguredExternalChannelPluginIdsFromConfig(config);
+  const corePluginIds = normalizePluginIds([...manualIds, ...externalChannelPluginIds]);
+
+  if (corePluginIds.length === 0) {
+    return [];
+  }
+
+  const builtinChannelIds = listConfiguredBuiltinChannelIdsFromConfig(config);
+  return normalizePluginIds([...corePluginIds, ...builtinChannelIds]);
 }
 
 function cloneConfig(config: Record<string, unknown>): Record<string, unknown> {
@@ -368,6 +450,8 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
 
   plugins.allow = normalizedPluginIds;
   plugins.entries = nextEntries;
+  config.plugins = plugins;
+  cleanupPluginContainer(config);
 
   const skills = isRecord(config.skills) ? { ...config.skills } : {};
   const nextSkillEntries = cloneSkillEntries(config);
@@ -389,16 +473,31 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
 
   return {
     ...config,
-    plugins,
+    ...(isRecord(config.plugins) ? { plugins } : {}),
     ...(Object.keys(skills).length > 0 ? { skills } : {}),
   };
 }
 
+export async function applyManuallyManagedPluginIdsToOpenClawConfig(
+  currentConfig: Record<string, unknown>,
+  manualPluginIds: readonly string[],
+): Promise<Record<string, unknown>> {
+  return await applyEnabledPluginIdsToOpenClawConfig(
+    currentConfig,
+    resolveEffectivePluginIdsForConfig(currentConfig, manualPluginIds),
+  );
+}
+
 export async function syncEnabledPluginIdsToOpenClawConfig(pluginIds: readonly string[]): Promise<string[]> {
-  const normalizedPluginIds = normalizePluginIds(pluginIds);
+  const normalizedManualPluginIds = normalizePluginIds(pluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+  let effectivePluginIds: string[] = [];
   await withOpenClawConfigLock(async () => {
-    const nextConfig = await applyEnabledPluginIdsToOpenClawConfig(readOpenClawConfigJson(), normalizedPluginIds);
+    const nextConfig = await applyManuallyManagedPluginIdsToOpenClawConfig(
+      readOpenClawConfigJson(),
+      normalizedManualPluginIds,
+    );
+    effectivePluginIds = resolveEffectivePluginIdsForConfig(nextConfig, normalizedManualPluginIds);
     await writeOpenClawConfigJson(nextConfig);
   });
-  return normalizedPluginIds;
+  return effectivePluginIds;
 }

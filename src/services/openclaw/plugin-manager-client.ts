@@ -9,6 +9,7 @@ export type RuntimePluginCatalogItem = {
   category: string;
   description?: string;
   enabled: boolean;
+  controlMode?: 'manual' | 'channel-config';
   skillIds?: string[];
 };
 

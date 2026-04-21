@@ -1,3 +1,5 @@
+import { isChannelDerivedPluginId } from '../../application/channels/channel-plugin-bindings';
+
 interface LocalDispatchResponse {
   status: number;
   data: unknown;
@@ -53,6 +55,7 @@ export async function handlePluginRuntimeRoute(
         plugins: deps.getPluginCatalog().map((plugin) => ({
           ...plugin,
           enabled: enabledSet.has(plugin.id),
+          controlMode: isChannelDerivedPluginId(plugin.id) ? 'channel-config' : (plugin.controlMode ?? 'manual'),
         })),
       },
     };

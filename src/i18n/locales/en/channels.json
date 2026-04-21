@@ -32,7 +32,6 @@
         "whatsappFailed": "WhatsApp connection failed: {{error}}",
         "channelSaved": "Channel {{name}} saved",
         "channelConnecting": "Connecting to {{name}}...",
-        "restartManual": "Please restart the gateway manually",
         "configFailed": "Configuration failed: {{error}}",
         "qrGenerateTimeout": "QR code generation timed out, please retry"
     },
@@ -185,9 +184,9 @@
             },
             "instructions": [
                 "Save this form to auto-enable and install openclaw-weixin plugin",
-                "Click \"Generate QR Code\" to start login in-app",
+                "Click \"Generate QR Code\" to save config and restart the gateway automatically",
                 "Scan the QR code with WeChat and confirm authorization",
-                "Restart gateway after login (or restart from this app)",
+                "Wait for the gateway to reconnect, then come back to this page",
                 "Return to this page and click Refresh to verify channel status"
             ]
         },
