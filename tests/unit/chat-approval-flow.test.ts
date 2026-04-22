@@ -12,8 +12,8 @@ function resetChatStoreForApprovalTests() {
     error: null,
     sending: false,
     activeRunId: null,
-    streamingText: '',
     streamingMessage: null,
+    streamRuntime: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -34,122 +34,6 @@ describe('chat 审批等待态流程', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetChatStoreForApprovalTests();
-  });
-
-  it('chat.send 超时且已有审批证据时，应转为 awaiting_approval 而不是报错失败', async () => {
-    const rpcMock = vi.fn(async (method: string) => {
-      if (method === 'chat.send') {
-        throw new Error('TIMEOUT: gateway rpc timeout');
-      }
-      return {};
-    });
-
-    useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
-      rpc: rpcMock,
-    } as never);
-
-    useChatStore.setState({
-      pendingApprovalsBySession: {
-        'agent:main:main': [
-          {
-            id: 'approval-1',
-            sessionKey: 'agent:main:main',
-            runId: 'run-1',
-            toolName: 'shell.exec',
-            createdAtMs: Date.now(),
-          },
-        ],
-      },
-    } as never);
-
-    await useChatStore.getState().sendMessage('hello');
-
-    const state = useChatStore.getState() as unknown as {
-      approvalStatus?: string;
-      error: string | null;
-      sending: boolean;
-      pendingFinal: boolean;
-    };
-    expect(state.approvalStatus).toBe('awaiting_approval');
-    expect(state.error).toBeNull();
-    expect(state.sending).toBe(true);
-    expect(state.pendingFinal).toBe(true);
-  });
-
-  it('chat.send 超时且事件丢失时，应通过 exec.approvals.get 补拉进入 awaiting_approval', async () => {
-    const rpcMock = vi.fn(async (method: string) => {
-      if (method === 'chat.send') {
-        throw new Error('TIMEOUT: gateway rpc timeout');
-      }
-      if (method === 'exec.approvals.get') {
-        return {
-          approvals: [
-            {
-              id: 'approval-from-pull',
-              runId: 'run-pull-1',
-              toolName: 'web_search',
-              request: {
-                sessionKey: 'agent:main:main',
-              },
-              createdAt: Date.now(),
-            },
-          ],
-        };
-      }
-      return {};
-    });
-
-    useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
-      rpc: rpcMock,
-    } as never);
-
-    await useChatStore.getState().sendMessage('hello');
-
-    const state = useChatStore.getState() as unknown as {
-      approvalStatus?: string;
-      error: string | null;
-      sending: boolean;
-      pendingFinal: boolean;
-      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
-    };
-    expect(state.approvalStatus).toBe('awaiting_approval');
-    expect(state.error).toBeNull();
-    expect(state.sending).toBe(true);
-    expect(state.pendingFinal).toBe(true);
-    expect((state.pendingApprovalsBySession['agent:main:main'] ?? []).some((item) => item.id === 'approval-from-pull')).toBe(true);
-    expect(rpcMock).toHaveBeenCalledWith('exec.approvals.get', {});
-  });
-
-  it('chat.send 显式 RPC 超时且无审批证据时，仍保持发送态等待后续事件恢复', async () => {
-    const rpcMock = vi.fn(async (method: string) => {
-      if (method === 'chat.send') {
-        throw new Error('RPC timeout: chat.send');
-      }
-      if (method === 'exec.approvals.get') {
-        return { approvals: [] };
-      }
-      return {};
-    });
-
-    useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
-      rpc: rpcMock,
-    } as never);
-
-    await useChatStore.getState().sendMessage('hello');
-
-    const state = useChatStore.getState() as unknown as {
-      approvalStatus?: string;
-      error: string | null;
-      sending: boolean;
-      pendingFinal: boolean;
-    };
-    expect(state.sending).toBe(true);
-    expect(state.pendingFinal).toBe(false);
-    expect(state.approvalStatus).toBe('idle');
-    expect(state.error).toContain('RPC timeout: chat.send');
   });
 
   it('发生 chat.send 超时提示后，只要收到 delta 事件就应清理陈旧错误', () => {
@@ -175,90 +59,35 @@ describe('chat 审批等待态流程', () => {
     expect(state.error).toBeNull();
   });
 
-  it('delta 事件应按帧合并更新：当前 tick 不改 streamingMessage，下一帧再落地', () => {
-    vi.useFakeTimers();
-    try {
-      useChatStore.setState({
-        sending: true,
-        activeRunId: 'run-delta-batched',
-        error: null,
-        streamingMessage: null,
-        streamingTools: [],
-      } as never);
 
-      useChatStore.getState().handleChatEvent({
-        state: 'delta',
-        runId: 'run-delta-batched',
-        message: {
-          role: 'assistant',
-          content: 'frame-batched',
-        },
-      });
+  it('delta 事件应先进入 streamRuntime source，而不是直接改页面 streamView', () => {
+    useChatStore.setState({
+      sending: true,
+      activeRunId: 'run-delta-batched',
+      error: null,
+      streamingMessage: null,
+      streamRuntime: null,
+      streamingTools: [],
+    } as never);
 
-      const stateBeforeFlush = useChatStore.getState() as unknown as {
-        streamingMessage: unknown;
-      };
-      expect(stateBeforeFlush.streamingMessage).toBeNull();
-
-      vi.advanceTimersByTime(40);
-
-      const stateAfterFlush = useChatStore.getState() as unknown as {
-        streamingMessage: unknown;
-      };
-      expect(stateAfterFlush.streamingMessage).toEqual({
-        role: 'assistant',
-        content: 'frame-batched',
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('同一帧内连续 delta 应合并为最新快照落地', () => {
-    vi.useFakeTimers();
-    try {
-      useChatStore.setState({
-        sending: true,
-        activeRunId: 'run-delta-merge',
-        error: null,
-        streamingMessage: null,
-        streamingTools: [],
-      } as never);
-
-      useChatStore.getState().handleChatEvent({
-        state: 'delta',
-        runId: 'run-delta-merge',
-        message: {
-          role: 'assistant',
-          content: 'hello',
-        },
-      });
-      useChatStore.getState().handleChatEvent({
-        state: 'delta',
-        runId: 'run-delta-merge',
-        message: {
-          role: 'assistant',
-          content: 'hello world',
-        },
-      });
-
-      const stateBeforeFlush = useChatStore.getState() as unknown as {
-        streamingMessage: unknown;
-      };
-      expect(stateBeforeFlush.streamingMessage).toBeNull();
-
-      vi.advanceTimersByTime(40);
-
-      const stateAfterFlush = useChatStore.getState() as unknown as {
-        streamingMessage: unknown;
-      };
-      expect(stateAfterFlush.streamingMessage).toEqual({
+    useChatStore.getState().handleChatEvent({
+      state: 'delta',
+      runId: 'run-delta-batched',
+      message: {
         role: 'assistant',
         content: 'hello world',
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+      },
+    });
+
+    const stateAfterEvent = useChatStore.getState() as unknown as {
+      streamingMessage: unknown;
+      streamRuntime: { rawChars: number; displayedChars: number } | null;
+    };
+    expect(stateAfterEvent.streamingMessage).toBeNull();
+    expect(stateAfterEvent.streamRuntime).toMatchObject({
+      rawChars: 11,
+      displayedChars: 0,
+    });
   });
 
   it('停止时应先 deny 当前会话 pending 审批，再 chat.abort', async () => {

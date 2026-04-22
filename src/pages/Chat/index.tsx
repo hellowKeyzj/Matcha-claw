@@ -4,7 +4,8 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useRef } from 'react';
+import { useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChatShell } from './components/ChatShell';
@@ -12,6 +13,7 @@ import { ChatOffline } from './components/ChatOffline';
 import { useInboxLayout } from './useInboxLayout';
 import { useChatRealtimePerfMetrics } from './useChatPerf';
 import { useChatFirstPaint } from './useFirstPaint';
+import { useChatRenderItems } from './chat-render-items';
 import { useRowsPipeline } from './useRowsPipeline';
 import { useChatInit } from './useChatInit';
 import { useSkillConfig } from './useSkillConfig';
@@ -19,6 +21,7 @@ import { useChatView } from './useChatView';
 import { useChatPageModel } from './useChatPageModel';
 import { useChatListCtl } from './useChatListCtl';
 import { useChatShellProps } from './useChatShellProps';
+import { useChatProjection } from './useChatProjection';
 
 export function Chat() {
   const { t } = useTranslation('chat');
@@ -79,7 +82,19 @@ export function Chat() {
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
+  const markScrollActivityRef = useRef<() => void>(() => {});
   const streamingTimestamp = lastUserMessageAt != null ? (lastUserMessageAt / 1000) : 0;
+  const projection = useChatProjection({
+    currentSessionKey,
+    gatewayRpc,
+  });
+  const projectionScopeKey = projection.projectionScopeKey;
+  const rowSourceMessages = projection.isHistoryProjection ? projection.messages : messages;
+  const runtimeSending = projection.isHistoryProjection ? false : sending;
+  const runtimePendingFinal = projection.isHistoryProjection ? false : pendingFinal;
+  const runtimeWaitingApproval = projection.isHistoryProjection ? false : waitingApproval;
+  const runtimeStreamingMessage = projection.isHistoryProjection ? null : streamingMessage;
+  const runtimeStreamingTools = projection.isHistoryProjection ? [] : streamingTools;
   const {
     taskInboxCollapsed,
     setTaskInboxCollapsed,
@@ -112,41 +127,91 @@ export function Chat() {
   });
 
   const {
+    handleViewportPointerDown,
+    handleViewportTouchMove,
+    handleViewportWheel,
+    handleViewportScroll,
+    isUserScrolling,
+    scrollDirection,
+    scrollEventSeq,
+    scrollToRowKey,
+    prepareScopeAnchorRestore,
+    prepareScopeBottomAlign,
+  } = useChatListCtl({
+    scrollScopeKey: projectionScopeKey,
+    scrollResetKey: currentSessionKey,
+    messagesViewportRef,
+    messageContentRef,
+    markScrollActivity: () => markScrollActivityRef.current(),
+  });
+  const {
     chatRows,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    requestFullRender,
+    hiddenHistoryCount,
     rowSliceCostMs,
     runtimeRowsCostMs,
-    hasOlderRenderableRows,
-    increaseRenderableWindowLimit,
   } = useRowsPipeline({
-    currentSessionKey,
-    messages,
+    projectionScopeKey,
+    rowSessionKey: currentSessionKey,
+    messages: rowSourceMessages,
+    isHistoryProjection: projection.isHistoryProjection,
+    viewportRef: messagesViewportRef,
+    contentRef: messageContentRef,
+    isUserScrolling,
+    scrollDirection,
+    scrollEventSeq,
     agents,
     isGatewayRunning,
     gatewayRpc,
-    sending,
-    pendingFinal,
-    waitingApproval,
+    sending: runtimeSending,
+    pendingFinal: runtimePendingFinal,
+    waitingApproval: runtimeWaitingApproval,
     showThinking,
-    streamingMessage,
-    streamingTools,
+    streamingMessage: runtimeStreamingMessage,
+    streamingTools: runtimeStreamingTools,
     streamingTimestamp,
     sessionPipelineCostRef,
   });
+  const chatItems = useChatRenderItems(projectionScopeKey, chatRows);
 
-  const { showBlockingLoading, showBackgroundStatus, isEmptyState } = useChatView({
+  const handleOpenHistoryProjection = useCallback(() => {
+    prepareScopeAnchorRestore(`${currentSessionKey}::history`);
+    projection.enterHistory();
+  }, [currentSessionKey, prepareScopeAnchorRestore, projection]);
+
+  const handleSendMessage = useCallback(async (
+    text: string,
+    attachments?: Parameters<typeof sendMessage>[1],
+  ) => {
+    if (projection.isHistoryProjection) {
+      prepareScopeBottomAlign(`${currentSessionKey}::live`);
+      flushSync(() => {
+        projection.returnToLive();
+      });
+    }
+    await sendMessage(text, attachments);
+  }, [currentSessionKey, prepareScopeBottomAlign, projection, sendMessage]);
+
+  const liveView = useChatView({
     currentSessionKey,
     currentSessionReady,
     currentSessionHasActivity,
     rowCount: chatRows.length,
-    sending,
+    sending: runtimeSending,
     initialLoading,
     refreshing,
     mutating,
   });
+  const showBlockingLoading = projection.isHistoryProjection ? projection.loading : liveView.showBlockingLoading;
+  const showBackgroundStatus = projection.isHistoryProjection ? false : liveView.showBackgroundStatus;
+  const isEmptyState = projection.isHistoryProjection
+    ? !projection.loading && chatRows.length === 0
+    : liveView.isEmptyState;
 
   useChatFirstPaint({
-    currentSessionKey,
+    currentSessionKey: projectionScopeKey,
     rowCount: chatRows.length,
     isEmptyState,
     showBlockingLoading,
@@ -155,32 +220,14 @@ export function Chat() {
   });
 
   const { markScrollActivity } = useChatRealtimePerfMetrics({
-    currentSessionKey,
-    sending,
-    streamingMessage,
-    streamingTools,
+    currentSessionKey: projectionScopeKey,
+    sending: runtimeSending,
+    streamingMessage: runtimeStreamingMessage,
+    streamingTools: runtimeStreamingTools,
     runtimeRowsCostMs,
     chatRowRenderSignal: chatRows,
   });
-
-  const {
-    handleViewportPointerDown,
-    handleViewportTouchMove,
-    handleViewportWheel,
-    handleViewportScrollWithWindowing,
-    messageVirtualizer,
-    virtualMessageItems,
-    scrollToRowKey,
-  } = useChatListCtl({
-    currentSessionKey,
-    chatRows,
-    hasOlderRenderableRows,
-    runtimeRowsCostMs,
-    messagesViewportRef,
-    messageContentRef,
-    markScrollActivity,
-    increaseRenderableWindowLimit,
-  });
+  markScrollActivityRef.current = markScrollActivity;
   const {
     open: skillConfigOpen,
     saving: skillConfigSaving,
@@ -216,12 +263,13 @@ export function Chat() {
     isEmptyState,
     showBlockingLoading,
     handleViewportPointerDown,
-    handleViewportScrollWithWindowing,
+    handleViewportScroll,
     handleViewportTouchMove,
     handleViewportWheel,
-    messageVirtualizer,
-    virtualMessageItems,
-    chatRows,
+    chatItems,
+    hiddenHistoryCount,
+    isHistoryProjection: projection.isHistoryProjection,
+    onViewHistory: handleOpenHistoryProjection,
     showThinking,
     assistantAgentId: currentAgentId,
     assistantAgentName: currentAgent?.name || currentAgentId,
@@ -229,13 +277,15 @@ export function Chat() {
     assistantAvatarStyle: currentAgent?.avatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    requestFullRender,
     scrollToRowKey,
-    error,
+    error: projection.error ?? error,
     clearError,
-    waitingApproval,
+    waitingApproval: runtimeWaitingApproval,
     currentPendingApprovals,
     resolveApproval,
-    sendMessage,
+    sendMessage: handleSendMessage,
     abortRun,
     isGatewayRunning,
     sending,

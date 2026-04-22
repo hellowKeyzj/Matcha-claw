@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { clearUiTelemetry, getUiTelemetrySnapshot } from '@/lib/telemetry';
 import type { RawMessage } from '@/stores/chat';
 
 const invokeIpcMock = vi.fn();
@@ -349,6 +350,65 @@ describe('chat message links', () => {
     expect(link).toHaveAttribute('href', 'https://openai.com');
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
     expect(invokeIpcMock).not.toHaveBeenCalled();
+  });
+
+  it('extremely long assistant markdown should start in lite mode and upgrade on demand', () => {
+    const hugeMarkdown = Array.from(
+      { length: 320 },
+      (_, index) => `section-${index}: [OpenAI](https://openai.com) with **bold** text and \`code\``,
+    ).join('\n\n');
+    const message: RawMessage = {
+      role: 'assistant',
+      content: hugeMarkdown,
+      id: 'huge-markdown-1',
+      timestamp: 1,
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+      />,
+    );
+
+    expect(screen.getByText('Large message preview')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Render full formatting' })).toBeInTheDocument();
+    expect(screen.getAllByText('OpenAI').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Render full formatting' }));
+
+    expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
+  });
+
+  it('extremely long assistant markdown can stay in shell mode until explicitly expanded', () => {
+    clearUiTelemetry();
+    const hugeMarkdown = Array.from(
+      { length: 320 },
+      (_, index) => `section-${index}: [OpenAI](https://openai.com) with **bold** text and \`code\``,
+    ).join('\n\n');
+    const message: RawMessage = {
+      role: 'assistant',
+      content: hugeMarkdown,
+      id: 'huge-shell-1',
+      timestamp: 1,
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+        bodyRenderMode="shell"
+      />,
+    );
+
+    expect(screen.getByText('Full markdown formatting is deferred until this message becomes active.')).toBeInTheDocument();
+    expect(screen.getByText(/section-0:/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'OpenAI' })).toBeNull();
+    expect(getUiTelemetrySnapshot(20).find((entry) => entry.event === 'chat.md_process_cost')).toBeUndefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Render full formatting' }));
+
+    expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
   });
 
 });

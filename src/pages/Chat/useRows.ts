@@ -10,8 +10,7 @@ import {
   type ChatRow,
   type ExecutionGraphData,
 } from './chat-row-model';
-
-const STATIC_ROWS_CACHE_MAX_SESSIONS = 20;
+import { getSessionCacheValue, rememberSessionCacheValue } from './chat-session-cache';
 
 interface SessionStaticRowsCache {
   messagesRef: RawMessage[];
@@ -48,20 +47,6 @@ function nowMs(): number {
   return Date.now();
 }
 
-function rememberSessionStaticRowsCache(sessionKey: string, cache: SessionStaticRowsCache): void {
-  if (globalStaticRowsCache.has(sessionKey)) {
-    globalStaticRowsCache.delete(sessionKey);
-  }
-  globalStaticRowsCache.set(sessionKey, cache);
-  while (globalStaticRowsCache.size > STATIC_ROWS_CACHE_MAX_SESSIONS) {
-    const oldestKey = globalStaticRowsCache.keys().next().value;
-    if (typeof oldestKey !== 'string') {
-      break;
-    }
-    globalStaticRowsCache.delete(oldestKey);
-  }
-}
-
 export function useChatRows(
   input: UseChatRowsInput,
 ): UseChatRowsResult {
@@ -81,7 +66,7 @@ export function useChatRows(
   const staticRowsResult = useMemo(
     () => {
       const startedAt = nowMs();
-      const previousCache = globalStaticRowsCache.get(currentSessionKey);
+      const previousCache = getSessionCacheValue(globalStaticRowsCache, currentSessionKey);
       if (
         previousCache
         && previousCache.messagesRef === rowSourceMessages
@@ -135,7 +120,7 @@ export function useChatRows(
         renderableCount = built.renderableCount;
       }
 
-      rememberSessionStaticRowsCache(currentSessionKey, {
+      rememberSessionCacheValue(globalStaticRowsCache, currentSessionKey, {
         messagesRef: rowSourceMessages,
         executionGraphsRef: executionGraphs,
         rows,

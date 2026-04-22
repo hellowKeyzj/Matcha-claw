@@ -2,6 +2,13 @@ import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import { buildLineDiff } from '@/lib/line-diff';
 import {
+  createErrorResourceState,
+  createIdleResourceState,
+  createLoadingResourceState,
+  createReadyResourceState,
+  type ResourceStateMeta,
+} from '@/lib/resource-state';
+import {
   buildTemplateAvatarSeed,
   DEFAULT_AGENT_AVATAR_STYLE,
   resolveAgentAvatarStyle,
@@ -102,12 +109,9 @@ interface LoadAgentsOptions {
 
 interface SubagentsState {
   agents: SubagentSummary[];
-  lastLoadedAt: number | null;
+  agentsResource: ResourceStateMeta<SubagentSummary[]>;
   availableModels: ModelCatalogEntry[];
   modelsLoading: boolean;
-  snapshotReady: boolean;
-  initialLoading: boolean;
-  refreshing: boolean;
   mutating: boolean;
   error: string | null;
   managedAgentId: string | null;
@@ -475,6 +479,15 @@ function normalizeAgents(
 
 function resolveDefaultAgentFromState(agents: SubagentSummary[]): SubagentSummary | undefined {
   return agents.find((agent) => agent.isDefault);
+}
+
+function readAgentsFromState(
+  state: Pick<SubagentsState, 'agentsResource'> & { agents?: SubagentSummary[] },
+): SubagentSummary[] {
+  if (Array.isArray(state.agentsResource.data)) {
+    return state.agentsResource.data;
+  }
+  return Array.isArray(state.agents) ? state.agents : [];
 }
 
 function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void {
@@ -976,13 +989,12 @@ function areAgentListsEquivalent(left: SubagentSummary[], right: SubagentSummary
 }
 
 export const useSubagentsStore = create<SubagentsState>((set, get) => ({
-  agents: [],
-  lastLoadedAt: null,
+  get agents(): SubagentSummary[] {
+    return readAgentsFromState(this);
+  },
+  agentsResource: createIdleResourceState<SubagentSummary[]>([]),
   availableModels: [],
   modelsLoading: false,
-  snapshotReady: false,
-  initialLoading: false,
-  refreshing: false,
   mutating: false,
   error: null,
   managedAgentId: null,
@@ -1013,10 +1025,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     const requestId = ++latestLoadAgentsRequestId;
     const stateBeforeLoad = get();
-    const hasSnapshot = stateBeforeLoad.snapshotReady || stateBeforeLoad.agents.length > 0;
+    const previousResource = stateBeforeLoad.agentsResource;
     set({
-      initialLoading: !hasSnapshot,
-      refreshing: hasSnapshot && !silent,
+      agentsResource: silent && previousResource.hasLoadedOnce
+        ? previousResource
+        : createLoadingResourceState({
+          ...previousResource,
+          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
+        }),
       error: null,
     });
 
@@ -1032,6 +1048,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           return;
         }
         const stateSnapshot = get();
+        const currentAgents = readAgentsFromState(stateSnapshot);
         const selectedAgentId = stateSnapshot.selectedAgentId;
         const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
@@ -1039,31 +1056,25 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const nextSelectedAgentId = hasSelected ? selectedAgentId : (normalizedAgents[0]?.id ?? null);
         const nextManagedAgentId = hasManaged ? managedAgentId : null;
         const shouldPatchAgents = (
-          !areAgentListsEquivalent(stateSnapshot.agents, normalizedAgents)
+          !areAgentListsEquivalent(currentAgents, normalizedAgents)
           || stateSnapshot.selectedAgentId !== nextSelectedAgentId
           || stateSnapshot.managedAgentId !== nextManagedAgentId
           || stateSnapshot.error !== null
-          || stateSnapshot.initialLoading
-          || stateSnapshot.refreshing
-          || !stateSnapshot.snapshotReady
+          || stateSnapshot.agentsResource.status !== 'ready'
+          || stateSnapshot.agentsResource.error !== null
         );
+        const loadedAt = Date.now();
 
         if (shouldPatchAgents) {
           set({
-            agents: normalizedAgents,
-            lastLoadedAt: Date.now(),
             selectedAgentId: nextSelectedAgentId,
             managedAgentId: nextManagedAgentId,
-            snapshotReady: true,
-            initialLoading: false,
-            refreshing: false,
+            agentsResource: createReadyResourceState(normalizedAgents, loadedAt),
             error: null,
           });
         } else {
           set({
-            lastLoadedAt: Date.now(),
-            initialLoading: false,
-            refreshing: false,
+            agentsResource: createReadyResourceState(stateSnapshot.agentsResource.data, loadedAt),
             error: null,
           });
         }
@@ -1071,10 +1082,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         if (requestId !== latestLoadAgentsRequestId) {
           return;
         }
+        const stateSnapshot = get();
+        const message = error instanceof Error ? error.message : 'Failed to load subagents';
         set({
-          initialLoading: false,
-          refreshing: false,
-          error: error instanceof Error ? error.message : 'Failed to load subagents',
+          agentsResource: createErrorResourceState({
+            ...stateSnapshot.agentsResource,
+            hasLoadedOnce: stateSnapshot.agentsResource.hasLoadedOnce || stateSnapshot.agentsResource.data.length > 0,
+          }, message),
+          error: message,
         });
       } finally {
         inflightLoadAgentsTask = null;
@@ -1189,13 +1204,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (predictedAgentId) {
         pendingDeletedAgentIds.delete(predictedAgentId);
       }
-      if (hasSubagentNameConflict(trimmedName, get().agents)) {
+      const agents = readAgentsFromState(get());
+      if (hasSubagentNameConflict(trimmedName, agents)) {
         throw new Error('Invalid subagent name: duplicate');
       }
       const fallbackRoot = await resolveWorkspaceFallbackRoot();
       const resolvedWorkspace = buildSubagentWorkspacePath({
         name: trimmedName,
-        agents: get().agents,
+        agents,
         fallbackRoot,
       });
       const createResult = await rpc<AgentsCreateResult>('agents.create', {
@@ -1261,7 +1277,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
     });
     if (localizedTemplateName && localizedTemplateName !== templateName) {
-      const createdAgent = get().agents.find((agent) => agent.id === createdAgentId);
+      const createdAgent = readAgentsFromState(get()).find((agent) => agent.id === createdAgentId);
       const workspace = getOptionalString(createdAgent?.workspace);
       if (workspace) {
         await get().updateAgent({
@@ -1319,7 +1335,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   updateAgent: async ({ agentId, name, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
-    const current = get().agents.find((agent) => agent.id === agentId);
+    const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
     const skillChangeRequested = skills !== undefined;
     const nextSkills = skills === null
       ? undefined
@@ -1396,7 +1412,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   deleteAgent: async (agentId) => runSerializedAgentMutation(async () => {
     try {
-      assertDeletableAgent(agentId, get().agents);
+      assertDeletableAgent(agentId, readAgentsFromState(get()));
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to delete subagent',
@@ -1405,7 +1421,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     beginGlobalMutating(set);
-    const agentsSnapshot = get().agents;
+    const agentsSnapshot = readAgentsFromState(get());
     const selectedAgentIdSnapshot = get().selectedAgentId;
     const managedAgentIdSnapshot = get().managedAgentId;
     try {
@@ -1414,7 +1430,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         pendingDeletedAgentIds.add(normalizedAgentId);
       }
       set((state) => {
-        const nextAgents = state.agents.filter((entry) => entry.id !== agentId);
+        const nextAgents = state.agentsResource.data.filter((entry) => entry.id !== agentId);
         const selectedAgentId = state.selectedAgentId === agentId
           ? (nextAgents[0]?.id ?? null)
           : state.selectedAgentId;
@@ -1422,7 +1438,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           ? null
           : state.managedAgentId;
         return {
-          agents: nextAgents,
+          agentsResource: {
+            ...state.agentsResource,
+            data: nextAgents,
+          },
           selectedAgentId,
           managedAgentId,
         };
@@ -1434,7 +1453,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         pendingDeletedAgentIds.delete(normalizedAgentId);
       }
       set({
-        agents: agentsSnapshot,
+        agentsResource: {
+          ...get().agentsResource,
+          data: agentsSnapshot,
+        },
         selectedAgentId: selectedAgentIdSnapshot,
         managedAgentId: managedAgentIdSnapshot,
         error: getErrorMessage(error) || 'Failed to delete subagent',
@@ -1648,3 +1670,46 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 }));
+
+function normalizeSubagentsStatePatch<T extends Partial<SubagentsState> | SubagentsState>(patch: T): T {
+  if (!patch || typeof patch !== 'object' || !('agents' in patch)) {
+    return patch;
+  }
+  const next = { ...patch } as Partial<SubagentsState> & { agents?: SubagentSummary[] };
+  const nextAgents = Array.isArray(next.agents) ? next.agents : [];
+  delete next.agents;
+  next.agentsResource = {
+    ...(next.agentsResource ?? useSubagentsStore.getState().agentsResource),
+    data: nextAgents,
+  };
+  return next as T;
+}
+
+const rawSubagentsSetState = useSubagentsStore.setState;
+useSubagentsStore.setState = ((partial, replace) => {
+  if (typeof partial === 'function') {
+    if (replace === true) {
+      return rawSubagentsSetState(
+        (state) => normalizeSubagentsStatePatch(partial(state)) as SubagentsState,
+        true,
+      );
+    }
+    return rawSubagentsSetState(
+      (state) => normalizeSubagentsStatePatch(partial(state)) as Partial<SubagentsState>,
+      false,
+    );
+  }
+  if (replace === true) {
+    return rawSubagentsSetState(normalizeSubagentsStatePatch(partial) as SubagentsState, true);
+  }
+  return rawSubagentsSetState(normalizeSubagentsStatePatch(partial) as Partial<SubagentsState>, false);
+}) as typeof useSubagentsStore.setState;
+
+const rawSubagentsGetState = useSubagentsStore.getState;
+useSubagentsStore.getState = (() => {
+  const state = rawSubagentsGetState();
+  return {
+    ...state,
+    agents: readAgentsFromState(state),
+  };
+}) as typeof useSubagentsStore.getState;

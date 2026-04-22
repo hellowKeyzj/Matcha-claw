@@ -51,6 +51,7 @@ export interface GatewayManagerEvents {
 }
 
 export class GatewayManager extends EventEmitter {
+  private controlReadyProbe: ((timeoutMs: number, port: number, externalToken?: string) => Promise<void>) | null = null;
   private process: Electron.UtilityProcess | null = null;
   private processExitCode: number | null = null;
   private ownsProcess = false;
@@ -107,6 +108,12 @@ export class GatewayManager extends EventEmitter {
     return this.stateController.getStatus();
   }
 
+  setControlReadyProbe(
+    probe: (timeoutMs: number, port: number, externalToken?: string) => Promise<void>,
+  ): void {
+    this.controlReadyProbe = probe;
+  }
+
   isConnected(): boolean {
     return this.status.state === 'running';
   }
@@ -158,15 +165,24 @@ export class GatewayManager extends EventEmitter {
             ownedPid: this.process?.pid,
           });
         },
-        connect: async (port) => {
+        waitForControlReady: async (port, externalToken) => {
+          if (!this.controlReadyProbe) {
+            throw new Error('Gateway control ready probe is not configured');
+          }
+          try {
+            await this.controlReadyProbe(10000, port, externalToken);
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            throw new Error(`Gateway control ready check failed: ${reason}`);
+          }
+        },
+        onConnectedToExistingGateway: () => {
           this.setStatus({
             state: 'running',
-            port,
+            port: this.status.port,
             connectedAt: Date.now(),
             error: undefined,
           });
-        },
-        onConnectedToExistingGateway: () => {
           // If the existing gateway is actually our own spawned process
           // (for example after self-restart), keep ownership so stop()/restart()
           // can still terminate it deterministically.
@@ -182,13 +198,26 @@ export class GatewayManager extends EventEmitter {
         startProcess: async () => {
           await this.startProcess();
         },
-        waitForReady: async (port) => {
+        waitForPortReady: async (port) => {
           await waitForGatewayPortReady({
             port,
             getProcessExitCode: () => this.processExitCode,
           });
         },
+        onManagedGatewayPortReady: () => {
+          this.setStatus({
+            state: 'control_connecting',
+            port: this.status.port,
+            error: undefined,
+          });
+        },
         onConnectedToManagedGateway: () => {
+          this.setStatus({
+            state: 'running',
+            port: this.status.port,
+            connectedAt: Date.now(),
+            error: undefined,
+          });
           logger.debug('Gateway started successfully');
         },
         runDoctorRepair: async () => await runOpenClawDoctorRepair(),
@@ -456,7 +485,12 @@ export class GatewayManager extends EventEmitter {
         this.emit('exit', code);
 
         const previousState = this.status.state;
-        if (previousState === 'running' || previousState === 'starting' || previousState === 'reconnecting') {
+        if (
+          previousState === 'running'
+          || previousState === 'starting'
+          || previousState === 'control_connecting'
+          || previousState === 'reconnecting'
+        ) {
           this.setStatus({ state: 'stopped' });
           this.scheduleReconnect();
         }

@@ -7,7 +7,7 @@
  * Gateway connection status
  */
 export interface GatewayStatus {
-  state: 'stopped' | 'starting' | 'running' | 'error' | 'reconnecting';
+  state: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
   port: number;
   pid?: number;
   uptime?: number;

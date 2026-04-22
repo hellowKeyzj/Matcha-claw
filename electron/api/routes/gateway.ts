@@ -46,18 +46,6 @@ export async function handleGatewayRoutes(
   url: URL,
   ctx: GatewayApiContext,
 ): Promise<boolean> {
-  if (url.pathname === '/api/app/gateway-info' && req.method === 'GET') {
-    const status = ctx.gatewayManager.getStatus();
-    const token = await getSetting('gatewayToken');
-    const port = status.port || PORTS.OPENCLAW_GATEWAY;
-    sendJson(res, 200, {
-      wsUrl: `ws://127.0.0.1:${port}/ws`,
-      token,
-      port,
-    });
-    return true;
-  }
-
   if (url.pathname === '/api/gateway/status' && req.method === 'GET') {
     const status = ctx.gatewayManager.getStatus();
     const platformHealth = await readPlatformHealth(ctx);

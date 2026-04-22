@@ -4,6 +4,7 @@ import {
   buildFinalMessageCommitPatch,
   buildToolResultFinalPatch,
 } from './finalize-helpers';
+import { requestFinalHistoryRefresh } from './final-history-refresh';
 import {
   reduceRuntimeOverlay,
 } from './overlay-reducer';
@@ -17,7 +18,11 @@ import {
   hasNonToolAssistantContent,
   isToolResultRole,
 } from './event-helpers';
-import { isToolOnlyMessage } from './message-helpers';
+import { getMessageText, isToolOnlyMessage } from './message-helpers';
+import {
+  clearPendingStreamFinalCommit,
+  queuePendingStreamFinalCommit,
+} from './stream-pacer';
 import type { ChatStoreState, RawMessage } from './types';
 
 export type ChatStoreSetFn = (
@@ -30,7 +35,7 @@ export type ChatStoreGetFn = () => ChatStoreState;
 interface StoreToolSnapshotAdapter {
   reset: () => void;
   armIfIdle: (sessionKey: string, runId: string, message: unknown) => void;
-  consume: (sessionKey: string, runId: string, currentStream: RawMessage | null) => boolean;
+  consume: (sessionKey: string, runId: string) => RawMessage | null;
 }
 
 interface HandleStoreFinalEventParams {
@@ -79,19 +84,16 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
 
   const updates = collectToolUpdates(finalMsg, resolvedState);
   if (isToolResultRole(finalMsg.role)) {
+    clearPendingStreamFinalCommit(currentSessionKey, eventRunId);
     const currentStreamForPath = get().streamingMessage as RawMessage | null;
     const toolFiles = collectToolResultPendingFiles(finalMsg, currentStreamForPath);
     const currentStreamForSnapshot = get().streamingMessage as RawMessage | null;
     snapshot.armIfIdle(currentSessionKey, eventRunId, currentStreamForSnapshot);
-    const shouldCommitToolSnapshot = snapshot.consume(
-      currentSessionKey,
-      eventRunId,
-      currentStreamForSnapshot,
-    );
+    const toolSnapshot = snapshot.consume(currentSessionKey, eventRunId);
     set((state) => buildToolResultFinalPatch({
       state,
       runId: eventRunId || 'run',
-      shouldCommitToolSnapshot,
+      toolSnapshot,
       updates,
       toolFiles,
     }));
@@ -99,6 +101,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   }
 
   snapshot.reset();
+  clearPendingStreamFinalCommit(currentSessionKey, eventRunId);
   const toolOnly = isToolOnlyMessage(finalMsg);
   const hasOutput = hasNonToolAssistantContent(finalMsg);
   if (hasOutput) {
@@ -108,6 +111,27 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   const msgId = finalMsg.id || (toolOnly
     ? `run-${eventRunId}-tool-${Date.now()}`
     : `run-${eventRunId}-${fallbackRole}`);
+  const finalText = getMessageText(finalMsg.content);
+  const currentDisplayedTextChars = get().streamRuntime?.displayedChars
+    ?? getMessageText((get().streamingMessage as RawMessage | null)?.content).length;
+
+  if (hasOutput && !toolOnly && finalText.length > currentDisplayedTextChars) {
+    queuePendingStreamFinalCommit(currentSessionKey, eventRunId, {
+      finalMessage: finalMsg,
+      messageId: msgId,
+      updates,
+      onBeginFinalToHistory,
+    });
+    set((state) => reduceRuntimeOverlay(state, {
+      type: 'stream_final_queued',
+      sessionKey: currentSessionKey,
+      runId: eventRunId,
+      text: finalText,
+      updates,
+    }));
+    return;
+  }
+
   set((state) => buildFinalMessageCommitPatch({
     state,
     finalMessage: finalMsg,
@@ -118,19 +142,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   }));
 
   if (hasOutput && !toolOnly) {
-    onBeginFinalToHistory();
-    clearHistoryPoll();
-    const hasPendingApprovals = (get().pendingApprovalsBySession[get().currentSessionKey] ?? []).length > 0;
-    set((state) => reduceRuntimeOverlay(state, {
-      type: 'final_history_refresh_requested',
-      hasPendingApprovals,
-    }));
-    void get().loadHistory({
-      sessionKey: get().currentSessionKey,
-      mode: 'quiet',
-      scope: 'foreground',
-      reason: 'final_event_reconcile',
-    });
+    requestFinalHistoryRefresh(set, get, onBeginFinalToHistory);
   }
 }
 
@@ -170,12 +182,13 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   set((state) => reduceRuntimeOverlay(state, { type: 'event_error', error: errorMsg }));
 
   if (wasSending) {
+    clearPendingStreamFinalCommit(get().currentSessionKey, get().activeRunId);
     clearErrorRecoveryTimer();
     const ERROR_RECOVERY_GRACE_MS = 15_000;
     setErrorRecoveryTimer(setTimeout(() => {
       setErrorRecoveryTimer(null);
       const state = get();
-      if (state.sending && !state.streamingMessage) {
+      if (state.sending && !state.streamingMessage && !state.streamRuntime) {
         clearHistoryPoll();
         set((current) => reduceRuntimeOverlay(current, { type: 'error_recovery_timeout' }));
         void state.loadHistory({
@@ -192,4 +205,3 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   clearHistoryPoll();
   set((state) => reduceRuntimeOverlay(state, { type: 'error_recovery_timeout' }));
 }
-

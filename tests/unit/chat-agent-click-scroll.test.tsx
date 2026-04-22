@@ -10,46 +10,6 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 
-const scrollToIndexMock = vi.fn();
-let lastNotifiedCount: number | null = null;
-
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: ({
-    count,
-    onChange,
-  }: {
-    count: number;
-    onChange?: (instance: { scrollToIndex: typeof scrollToIndexMock }, sync: boolean) => void;
-  }) => {
-    const instance = {
-      getVirtualItems: () => Array.from({ length: count }, (_, index) => ({
-        index,
-        key: `virtual-item-${index}`,
-        start: index * 120,
-        size: 120,
-      })),
-      getTotalSize: () => count * 120,
-      measureElement: vi.fn(),
-      scrollToIndex: scrollToIndexMock,
-      getOffsetForIndex: (index: number) => {
-        if (index < 0 || index >= count) {
-          return undefined;
-        }
-        return [index * 120, 'start'] as const;
-      },
-      scrollToOffset: () => {},
-    };
-
-    // 模拟更接近真实 virtualizer 的行为：
-    // 如果切会话前后可视范围没有变化，就不会“每次 render 都触发 onChange”。
-    if (lastNotifiedCount !== count) {
-      lastNotifiedCount = count;
-      onChange?.(instance, false);
-    }
-    return instance;
-  },
-}));
-
 function findClosestScrollViewport(node: HTMLElement | null): HTMLDivElement | null {
   let current = node?.parentElement ?? null;
   while (current) {
@@ -61,11 +21,30 @@ function findClosestScrollViewport(node: HTMLElement | null): HTMLDivElement | n
   return null;
 }
 
+function installViewportMetrics(
+  viewport: HTMLDivElement,
+  metrics: { scrollHeight: number; clientHeight: number; scrollTop: number },
+) {
+  Object.defineProperty(viewport, 'scrollHeight', {
+    configurable: true,
+    get: () => metrics.scrollHeight,
+  });
+  Object.defineProperty(viewport, 'clientHeight', {
+    configurable: true,
+    get: () => metrics.clientHeight,
+  });
+  Object.defineProperty(viewport, 'scrollTop', {
+    configurable: true,
+    get: () => metrics.scrollTop,
+    set: (value: number) => {
+      metrics.scrollTop = value;
+    },
+  });
+}
+
 describe('chat 左侧点击链路回归', () => {
   beforeEach(() => {
     i18n.changeLanguage('en');
-    scrollToIndexMock.mockReset();
-    lastNotifiedCount = null;
 
     useGatewayStore.setState({
       status: { state: 'running', port: 18789 },
@@ -124,13 +103,14 @@ describe('chat 左侧点击链路回归', () => {
       error: null,
       sending: false,
       activeRunId: null,
-      streamingText: '',
       streamingMessage: null,
+      streamRuntime: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle',
+      pendingApprovalsBySession: {},
       sessions: [
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:another:main', displayName: 'agent:another:main' },
@@ -141,6 +121,10 @@ describe('chat 左侧点击链路回归', () => {
       },
       sessionLastActivity: {
         'agent:another:main': 3,
+      },
+      sessionReadyByKey: {
+        'agent:main:main': true,
+        'agent:another:main': true,
       },
       sessionRuntimeByKey: {
         'agent:another:main': {
@@ -166,8 +150,9 @@ describe('chat 左侧点击链路回归', () => {
           ],
           sending: false,
           activeRunId: null,
-          streamingText: '',
+          runPhase: 'idle',
           streamingMessage: null,
+          streamRuntime: null,
           streamingTools: [],
           pendingFinal: false,
           lastUserMessageAt: null,
@@ -203,18 +188,24 @@ describe('chat 左侧点击链路回归', () => {
       return;
     }
 
-    Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 2200 });
-    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 320 });
-    Object.defineProperty(viewport, 'scrollTop', { configurable: true, writable: true, value: 0 });
+    const metrics = {
+      scrollHeight: 2200,
+      clientHeight: 320,
+      scrollTop: 0,
+    };
+    installViewportMetrics(viewport, metrics);
 
     fireEvent.scroll(viewport);
-    scrollToIndexMock.mockClear();
 
+    metrics.scrollHeight = 760;
     fireEvent.click(screen.getByTestId('agent-item-another'));
 
     await waitFor(() => {
       expect(screen.getByText('another assistant latest message')).toBeInTheDocument();
-      expect(scrollToIndexMock).toHaveBeenCalledWith(2, { align: 'end' });
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(440);
     });
   });
 });

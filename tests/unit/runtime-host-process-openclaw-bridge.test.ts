@@ -4,6 +4,7 @@ import { createOpenClawBridge } from '../../runtime-host/openclaw-bridge';
 function createGatewayClientStub() {
   return {
     gatewayRpc: vi.fn(async () => ({ success: true })),
+    ensureGatewayReady: vi.fn(async () => undefined),
     isGatewayRunning: vi.fn(async () => true),
     readGatewayConnectionState: vi.fn(async () => ({
       state: 'connected',
@@ -120,5 +121,13 @@ describe('runtime-host openclaw bridge', () => {
       updatedAt: 1,
     });
     expect(client.readGatewayConnectionState).toHaveBeenCalledTimes(1);
+  });
+
+  it('gateway ready 探测走统一客户端接口', async () => {
+    const client = createGatewayClientStub();
+    const bridge = createOpenClawBridge(client);
+
+    await expect(bridge.ensureGatewayReady(8000)).resolves.toBeUndefined();
+    expect(client.ensureGatewayReady).toHaveBeenCalledWith(8000);
   });
 });

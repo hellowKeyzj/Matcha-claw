@@ -1,11 +1,12 @@
 import { type ApprovalItem, type ChatStoreState } from '@/stores/chat';
+import { readSessionsFromState } from './session-helpers';
 
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 
 export function selectSnapshotLayerState(state: ChatStoreState) {
   return {
     messages: state.messages,
-    sessions: state.sessions,
+    sessions: readSessionsFromState(state),
     currentSessionKey: state.currentSessionKey,
     sessionLabels: state.sessionLabels,
     sessionLastActivity: state.sessionLastActivity,
@@ -18,8 +19,8 @@ export function selectRuntimeLayerState(state: ChatStoreState) {
     sending: state.sending,
     activeRunId: state.activeRunId,
     runPhase: state.runPhase,
-    streamingText: state.streamingText,
     streamingMessage: state.streamingMessage,
+    streamRuntime: state.streamRuntime,
     streamingTools: state.streamingTools,
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
@@ -35,6 +36,7 @@ export function selectViewLayerState(state: ChatStoreState) {
     snapshotReady: state.snapshotReady,
     initialLoading: state.initialLoading,
     refreshing: state.refreshing,
+    sessionsResource: state.sessionsResource,
     mutating: state.mutating,
     error: state.error,
     showThinking: state.showThinking,
@@ -58,6 +60,7 @@ export function selectChatPageViewState(state: ChatStoreState) {
   return {
     initialLoading: view.initialLoading,
     refreshing: view.refreshing,
+    sessionsResource: view.sessionsResource,
     mutating: view.mutating,
     error: view.error,
     showThinking: view.showThinking,
@@ -108,7 +111,7 @@ export function selectSidebarPendingBlockersState(state: ChatStoreState) {
   return {
     pendingApprovalsBySession: runtime.pendingApprovalsBySession,
     sessionLabels: snapshot.sessionLabels,
-    chatSessions: snapshot.sessions,
+    chatSessions: readSessionsFromState(state),
   };
 }
 
@@ -123,9 +126,10 @@ export function selectChatInputSessionKey(state: ChatStoreState) {
 export function selectAgentSessionsPaneState(state: ChatStoreState) {
   const snapshot = selectSnapshotLayerState(state);
   return {
-    sessions: snapshot.sessions,
+    sessions: readSessionsFromState(state),
     sessionLabels: snapshot.sessionLabels,
     sessionLastActivity: snapshot.sessionLastActivity,
+    sessionsResource: state.sessionsResource,
     currentSessionKey: snapshot.currentSessionKey,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,

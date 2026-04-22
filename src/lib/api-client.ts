@@ -28,6 +28,10 @@ export type ApiClientTransportConfig = {
 
 const customInvokers = new Map<Exclude<TransportKind, 'ipc'>, TransportInvoker>();
 const GATEWAY_WS_DIAG_FLAG = 'clawx:gateway-ws-diagnostic';
+const GATEWAY_RENDERER_DIAGNOSTIC_CLIENT_ID = 'webchat-ui';
+const GATEWAY_RENDERER_DIAGNOSTIC_DISPLAY_NAME = 'MatchaClaw Renderer Diagnostic';
+const GATEWAY_RENDERER_DIAGNOSTIC_VERSION = '1.0.0';
+const GATEWAY_RENDERER_DIAGNOSTIC_MODE = 'webchat';
 
 let transportConfig: ApiClientTransportConfig = {
   enabled: {
@@ -650,11 +654,11 @@ export function createGatewayWsTransportInvoker(options: GatewayWsTransportOptio
                 minProtocol: 3,
                 maxProtocol: 3,
                 client: {
-                  id: 'openclaw-control-ui',
-                  displayName: 'MatchaClaw UI',
-                  version: '1.0.0',
+                  id: GATEWAY_RENDERER_DIAGNOSTIC_CLIENT_ID,
+                  displayName: GATEWAY_RENDERER_DIAGNOSTIC_DISPLAY_NAME,
+                  version: GATEWAY_RENDERER_DIAGNOSTIC_VERSION,
                   platform: window.electron?.platform ?? 'unknown',
-                  mode: 'webchat',
+                  mode: GATEWAY_RENDERER_DIAGNOSTIC_MODE,
                 },
                 auth,
                 caps: ['tool-events'],

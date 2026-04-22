@@ -12,8 +12,8 @@ function buildRuntimeSnapshot(
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingText: '',
     streamingMessage: null,
+    streamRuntime: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -34,8 +34,8 @@ function buildRuntimeState(partial: Record<string, unknown> = {}): Record<string
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingText: '',
     streamingMessage: null,
+    streamRuntime: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -117,20 +117,28 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.streamingMessage).toBeNull();
   });
 
-  it('applies delta commit patch and preserves current stream on tool_result frames', () => {
-    const currentStream = { role: 'assistant', content: [{ type: 'text', text: 'hello' }] };
+  it('queues stream delta into runtime source and keeps tool-only delta from replacing current view', () => {
+    const currentStream = { id: 'assistant-1', role: 'assistant', content: [{ type: 'text', text: 'hello' }] };
     const state = buildRuntimeState({
       runPhase: 'submitted',
       error: 'stale',
       streamingMessage: currentStream,
+      streamRuntime: {
+        sessionKey: 'agent:main:main',
+        runId: 'run-1',
+        chunks: ['hello'],
+        rawChars: 5,
+        displayedChars: 5,
+        status: 'streaming',
+        rafId: null,
+      },
     });
 
     const patch = reduceRuntimeOverlay(state as never, {
-      type: 'delta_committed',
-      message: {
-        role: 'tool_result',
-        content: [{ type: 'text', text: 'tool output' }],
-      },
+      type: 'stream_delta_queued',
+      sessionKey: 'agent:main:main',
+      runId: 'run-1',
+      text: 'hello world',
       updates: [],
     });
     const next = patch === state ? state : { ...state, ...patch };
@@ -138,6 +146,10 @@ describe('chat runtime overlay reducer', () => {
     expect(next.runPhase).toBe('streaming');
     expect(next.error).toBeNull();
     expect(next.streamingMessage).toEqual(currentStream);
+    expect(next.streamRuntime).toMatchObject({
+      rawChars: 11,
+      displayedChars: 5,
+    });
   });
 
   it('clears event error and resets approval status after final refresh when no pending approvals', () => {
@@ -158,4 +170,3 @@ describe('chat runtime overlay reducer', () => {
     expect(afterApproval.approvalStatus).toBe('idle');
   });
 });
-

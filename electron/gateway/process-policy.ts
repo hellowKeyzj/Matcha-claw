@@ -81,7 +81,7 @@ export function getReconnectScheduleDecision(
   };
 }
 
-export type GatewayLifecycleState = 'stopped' | 'starting' | 'running' | 'error' | 'reconnecting';
+export type GatewayLifecycleState = 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
 
 export interface RestartDeferralContext {
   state: GatewayLifecycleState;
@@ -93,7 +93,10 @@ export interface RestartDeferralContext {
  * Doing so can kill a just-spawned process and leave the manager stopped.
  */
 export function shouldDeferRestart(context: RestartDeferralContext): boolean {
-  return context.startLock || context.state === 'starting' || context.state === 'reconnecting';
+  return context.startLock
+    || context.state === 'starting'
+    || context.state === 'control_connecting'
+    || context.state === 'reconnecting';
 }
 
 export interface DeferredRestartActionContext extends RestartDeferralContext {

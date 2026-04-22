@@ -9,7 +9,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface GatewayServiceDeps {
-  readonly openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc'>;
+  readonly openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady'>;
 }
 
 export class GatewayService {
@@ -36,6 +36,25 @@ export class GatewayService {
       return {
         status: 200,
         data: { success: true, result },
+      };
+    } catch (error) {
+      return {
+        status: 200,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
+
+  async ready(payload: unknown) {
+    const body = isRecord(payload) ? payload : {};
+    const timeoutMs = typeof body.timeoutMs === 'number' && body.timeoutMs > 0
+      ? body.timeoutMs
+      : undefined;
+    try {
+      await this.deps.openclawBridge.ensureGatewayReady(timeoutMs);
+      return {
+        status: 200,
+        data: { success: true },
       };
     } catch (error) {
       return {

@@ -175,6 +175,15 @@ if (gotTheLock) {
   runtimeHostManager = createRuntimeHostManager({
     gatewayManager,
   });
+  gatewayManager.setControlReadyProbe(async (timeoutMs) => {
+    const result = await runtimeHostManager.request<{
+      success?: boolean;
+      error?: string;
+    }>('POST', '/api/gateway/ready', { timeoutMs }, { timeoutMs: timeoutMs + 2000 });
+    if (result.data?.success !== true) {
+      throw new Error(result.data?.error || 'Gateway control ready probe failed');
+    }
+  });
 
   // Application lifecycle
   app.whenReady().then(() => {

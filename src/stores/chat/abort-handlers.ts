@@ -1,5 +1,5 @@
 import { useGatewayStore } from '../gateway';
-import { clearPendingDeltaBatch } from './delta-frame-helpers';
+import { disposeActiveStreamPacer } from './stream-pacer';
 import { reduceRuntimeOverlay } from './overlay-reducer';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
@@ -34,7 +34,7 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   const { set, get, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
   clearHistoryPoll();
   clearErrorRecoveryTimer();
-  clearPendingDeltaBatch();
+  disposeActiveStreamPacer(set, get);
 
   const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
   onAbortedTelemetry(sessionKey);
@@ -64,4 +64,3 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     onFinishMutating();
   }
 }
-

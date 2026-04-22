@@ -10,7 +10,6 @@
   ],
   "mainOwnedExactRoutes": [
     "/api/events",
-    "/api/app/gateway-info",
     "/api/gateway/status",
     "/api/gateway/health",
     "/api/gateway/start",

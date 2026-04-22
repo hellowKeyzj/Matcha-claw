@@ -3,6 +3,7 @@ import { trackUiTiming } from '@/lib/telemetry';
 import {
   createFetchHistoryWindow,
 } from './history-fetch-helpers';
+import { readSessionsFromState } from './session-helpers';
 import { handleHistoryLoadFailure } from './history-failure-helpers';
 import {
   isHistoryLoadAbortError,
@@ -99,7 +100,7 @@ function createHistoryLoadExecutionContext(
 
   const fetchHistoryWindowInternal = createFetchHistoryWindow({
     requestedSessionKey,
-    getSessions: () => get().sessions,
+    getSessions: () => readSessionsFromState(get()),
   });
   const fetchHistoryWindow = async (limit: number) => {
     throwIfHistoryLoadAborted(abortController.signal, isAborted);

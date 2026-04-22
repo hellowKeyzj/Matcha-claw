@@ -7,6 +7,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 
+const readyResource = {
+  status: 'ready' as const,
+  error: null,
+  hasLoadedOnce: true,
+  lastLoadedAt: 1,
+};
+
 function setupBaseState() {
   useGatewayStore.setState({
     status: { state: 'running', port: 18789 },
@@ -18,7 +25,11 @@ function setupBaseState() {
       { id: 'main', name: 'main', isDefault: true, avatarSeed: 'agent:main', avatarStyle: 'pixelArt' },
       { id: 'test', name: 'test', isDefault: false, avatarSeed: 'agent:test', avatarStyle: 'bottts' },
     ],
+    agentsResource: readyResource,
     loadAgents: vi.fn().mockResolvedValue(undefined),
+  } as never);
+  useChatStore.setState({
+    sessionsResource: readyResource,
   } as never);
 }
 
@@ -51,6 +62,7 @@ describe('agent sessions pane', () => {
         'agent:main:session-1': '主Agent会话',
         'agent:test:session-2': '测试Agent会话',
       },
+      sessionsResource: readyResource,
       sessionLastActivity: {
         'agent:main:session-1': now - 1 * 24 * 60 * 60 * 1000,
         'agent:test:session-2': now - 2 * 24 * 60 * 60 * 1000,
@@ -79,6 +91,7 @@ describe('agent sessions pane', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ],
+      sessionsResource: readyResource,
       sessionLabels: {},
       sessionLastActivity: {},
       switchSession: vi.fn(),
@@ -101,6 +114,7 @@ describe('agent sessions pane', () => {
       sessions: [
         { key: 'agent:main:main', displayName: 'agent:main:main' },
       ],
+      sessionsResource: readyResource,
       sessionLabels: {},
       sessionLastActivity: {},
       switchSession,
@@ -130,6 +144,7 @@ describe('agent sessions pane', () => {
       sessionLabels: {
         'agent:main:session-1': '需要删除的会话',
       },
+      sessionsResource: readyResource,
       sessionLastActivity: {
         'agent:main:session-1': now - 1 * 24 * 60 * 60 * 1000,
       },
@@ -175,6 +190,7 @@ describe('agent sessions pane', () => {
           `会话 ${index + 1}`,
         ]),
       ),
+      sessionsResource: readyResource,
       sessionLastActivity: Object.fromEntries(
         Array.from({ length: 13 }, (_, index) => [
           `agent:agent-1:session-${index + 1}`,
@@ -202,8 +218,12 @@ describe('agent sessions pane', () => {
   it('agents 数据未就绪时，不应先渲染占位 avatar 的 agent 行', () => {
     useSubagentsStore.setState({
       agents: [],
-      snapshotReady: false,
-      initialLoading: true,
+      agentsResource: {
+        status: 'loading',
+        error: null,
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
       loadAgents: vi.fn().mockResolvedValue(undefined),
     } as never);
 
@@ -213,6 +233,7 @@ describe('agent sessions pane', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ],
+      sessionsResource: readyResource,
       sessionLabels: {},
       sessionLastActivity: {},
       switchSession: vi.fn(),
@@ -226,5 +247,91 @@ describe('agent sessions pane', () => {
     expect(screen.queryByTestId('agent-item-main')).not.toBeInTheDocument();
     expect(screen.queryByTestId('agent-item-test')).not.toBeInTheDocument();
     expect(screen.getByTestId('agent-list-loading')).toBeInTheDocument();
+  });
+
+  it('agent 资源失败时，不应阻塞会话列表渲染', () => {
+    useSubagentsStore.setState({
+      agents: [],
+      agentsResource: {
+        status: 'error',
+        error: 'agents failed',
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+    } as never);
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+      ],
+      sessionsResource: readyResource,
+      sessionLabels: {
+        'agent:test:session-2': '测试Agent会话',
+      },
+      sessionLastActivity: {
+        'agent:test:session-2': Date.now(),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByTestId('agent-list-error')).toHaveTextContent('agents failed');
+    expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
+  });
+
+  it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [],
+      sessionsResource: {
+        status: 'loading',
+        error: null,
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+      sessionLabels: {},
+      sessionLastActivity: {},
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
+    expect(screen.getByTestId('session-list-loading')).toBeInTheDocument();
+  });
+
+  it('session 资源失败时，不应阻塞 agent 列表渲染', () => {
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [],
+      sessionsResource: {
+        status: 'error',
+        error: 'sessions failed',
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+      sessionLabels: {},
+      sessionLastActivity: {},
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByTestId('agent-item-main')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
+    expect(screen.getByTestId('session-list-error')).toHaveTextContent('sessions failed');
   });
 });

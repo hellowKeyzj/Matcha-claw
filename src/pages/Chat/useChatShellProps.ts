@@ -2,9 +2,12 @@ import { useCallback, useMemo, type ComponentProps, type Dispatch, type RefObjec
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
 import { ChatShell } from './components/ChatShell';
-import type { ChatRow } from './chat-row-model';
+import { ChatInput } from './ChatInput';
+import type { ChatRenderItem } from './chat-render-items';
+import type { MarkdownBodyRenderMode } from './md-pipeline';
 
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
+type ChatInputShellProps = ComponentProps<typeof ChatInput>;
 
 interface UseChatShellPropsInput {
   t: TranslateFn;
@@ -23,12 +26,13 @@ interface UseChatShellPropsInput {
   isEmptyState: boolean;
   showBlockingLoading: boolean;
   handleViewportPointerDown: () => void;
-  handleViewportScrollWithWindowing: () => void;
-  handleViewportTouchMove: () => void;
-  handleViewportWheel: () => void;
-  messageVirtualizer: ComponentProps<typeof ChatShell>['listProps']['virtualizer'];
-  virtualMessageItems: ComponentProps<typeof ChatShell>['listProps']['virtualItems'];
-  chatRows: ChatRow[];
+  handleViewportScroll: () => void;
+  handleViewportTouchMove: ComponentProps<typeof ChatShell>['listProps']['onTouchMove'];
+  handleViewportWheel: ComponentProps<typeof ChatShell>['listProps']['onWheel'];
+  chatItems: ChatRenderItem[];
+  hiddenHistoryCount: number;
+  isHistoryProjection: boolean;
+  onViewHistory: () => void;
   showThinking: boolean;
   assistantAgentId: string;
   assistantAgentName: string;
@@ -36,14 +40,16 @@ interface UseChatShellPropsInput {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarDataUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
+  bodyRenderModeByRowKey: ReadonlyMap<string, MarkdownBodyRenderMode>;
+  requestFullRender: (rowKey: string) => void;
   scrollToRowKey: (rowKey?: string) => void;
   error: string | null;
   clearError: () => void;
   waitingApproval: boolean;
   currentPendingApprovals: ApprovalItem[];
   resolveApproval: (id: string, decision: ApprovalDecision) => Promise<void>;
-  sendMessage: ComponentProps<typeof ChatShell>['inputProps']['onSend'];
-  abortRun: ComponentProps<typeof ChatShell>['inputProps']['onStop'];
+  sendMessage: ChatInputShellProps['onSend'];
+  abortRun: ChatInputShellProps['onStop'];
   isGatewayRunning: boolean;
   sending: boolean;
   skillConfigOpen: boolean;
@@ -76,12 +82,13 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     isEmptyState,
     showBlockingLoading,
     handleViewportPointerDown,
-    handleViewportScrollWithWindowing,
+    handleViewportScroll,
     handleViewportTouchMove,
     handleViewportWheel,
-    messageVirtualizer,
-    virtualMessageItems,
-    chatRows,
+    chatItems,
+    hiddenHistoryCount,
+    isHistoryProjection,
+    onViewHistory,
     showThinking,
     assistantAgentId,
     assistantAgentName,
@@ -89,6 +96,8 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    requestFullRender,
     scrollToRowKey,
     error,
     clearError,
@@ -131,7 +140,13 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     skillConfigLabel: t('toolbar.skillConfig'),
     statusRefreshingLabel: t('status.refreshing'),
     statusMutatingLabel: t('status.mutating'),
-  }), [showBackgroundStatus, refreshing, hasCurrentAgent, openSkillConfigDialog, t]);
+  }), [
+    showBackgroundStatus,
+    refreshing,
+    hasCurrentAgent,
+    openSkillConfigDialog,
+    t,
+  ]);
 
   const listProps = useMemo<ComponentProps<typeof ChatShell>['listProps']>(() => ({
     messagesViewportRef,
@@ -139,12 +154,13 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     isEmptyState,
     showBlockingLoading,
     onPointerDown: handleViewportPointerDown,
-    onScroll: handleViewportScrollWithWindowing,
+    onScroll: handleViewportScroll,
     onTouchMove: handleViewportTouchMove,
     onWheel: handleViewportWheel,
-    virtualizer: messageVirtualizer,
-    virtualItems: virtualMessageItems,
-    rows: chatRows,
+    items: chatItems,
+    showHistoryEntry: !isHistoryProjection && hiddenHistoryCount > 0,
+    onViewHistory,
+    viewFullHistoryLabel: t('liveThread.viewFullHistory'),
     showThinking,
     assistantAgentId,
     assistantAgentName,
@@ -152,6 +168,8 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarImageUrl: userAvatarDataUrl,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    onRequestFullRender: requestFullRender,
     onJumpToRowKey: scrollToRowKey,
   }), [
     messagesViewportRef,
@@ -159,12 +177,14 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     isEmptyState,
     showBlockingLoading,
     handleViewportPointerDown,
-    handleViewportScrollWithWindowing,
+    handleViewportScroll,
     handleViewportTouchMove,
     handleViewportWheel,
-    messageVirtualizer,
-    virtualMessageItems,
-    chatRows,
+    chatItems,
+    hiddenHistoryCount,
+    isHistoryProjection,
+    onViewHistory,
+    t,
     showThinking,
     assistantAgentId,
     assistantAgentName,
@@ -172,6 +192,8 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    requestFullRender,
     scrollToRowKey,
   ]);
 
@@ -184,12 +206,12 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
   ), [error, t, clearError]);
 
   const approvalDockProps = useMemo<ComponentProps<typeof ChatShell>['approvalDockProps']>(() => (
-    waitingApproval ? {
+    waitingApproval && !isHistoryProjection ? {
       waitingLabel: t('approval.waitingLabel'),
       approvals: currentPendingApprovals,
       onResolve: onResolveApproval,
     } : null
-  ), [waitingApproval, t, currentPendingApprovals, onResolveApproval]);
+  ), [isHistoryProjection, waitingApproval, t, currentPendingApprovals, onResolveApproval]);
 
   const inputProps = useMemo<ComponentProps<typeof ChatShell>['inputProps']>(() => ({
     layout: isEmptyState ? 'hero' : 'dock',

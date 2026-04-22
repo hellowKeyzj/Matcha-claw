@@ -113,7 +113,7 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
   const checkStuck = () => {
     const state = get();
     if (!state.sending) return;
-    if (state.streamingMessage || state.streamingText) return;
+    if (state.streamingMessage || state.streamRuntime) return;
     if (state.pendingFinal) {
       setTimeout(checkStuck, SAFETY_RETRY_INTERVAL_MS);
       return;

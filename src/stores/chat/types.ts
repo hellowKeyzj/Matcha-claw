@@ -1,3 +1,5 @@
+import type { ResourceStateMeta } from '@/lib/resource-state';
+
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
   fileName: string;
@@ -69,6 +71,17 @@ export type ChatRunPhase =
 
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+export type StreamRuntimeStatus = 'streaming' | 'draining' | 'finalizing';
+
+export interface ActiveStreamRuntime {
+  sessionKey: string;
+  runId: string;
+  chunks: string[];
+  rawChars: number;
+  displayedChars: number;
+  status: StreamRuntimeStatus;
+  rafId: number | null;
+}
 
 export interface ApprovalItem {
   id: string;
@@ -95,8 +108,8 @@ export interface SessionRuntimeSnapshot {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  streamingText: string;
   streamingMessage: unknown | null;
+  streamRuntime: ActiveStreamRuntime | null;
   streamingTools: ToolStatus[];
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
@@ -125,8 +138,8 @@ export interface ChatRuntimeOverlayLayerState {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  streamingText: string;
   streamingMessage: unknown | null;
+  streamRuntime: ActiveStreamRuntime | null;
   streamingTools: ToolStatus[];
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
@@ -144,6 +157,7 @@ export interface ChatViewDerivedLayerState {
   snapshotReady: boolean;
   initialLoading: boolean;
   refreshing: boolean;
+  sessionsResource: ResourceStateMeta<ChatSession[]>;
   mutating: boolean;
   error: string | null;
   showThinking: boolean;
@@ -217,8 +231,8 @@ export const CHAT_RUNTIME_LAYER_KEYS = [
   'sending',
   'activeRunId',
   'runPhase',
-  'streamingText',
   'streamingMessage',
+  'streamRuntime',
   'streamingTools',
   'pendingFinal',
   'lastUserMessageAt',
@@ -232,6 +246,7 @@ export const CHAT_VIEW_LAYER_KEYS = [
   'snapshotReady',
   'initialLoading',
   'refreshing',
+  'sessionsResource',
   'mutating',
   'error',
   'showThinking',

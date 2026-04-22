@@ -76,7 +76,10 @@ interface AppendRuntimeChatRowsInput {
   streamingTimestamp: number;
 }
 
-function resolveRuntimeRowKey(sessionKey: string): string {
+function resolveRuntimeRowKey(sessionKey: string, streamMessage?: RawMessage | null): string {
+  if (streamMessage?.id) {
+    return resolveMessageRowKey(sessionKey, streamMessage, 0);
+  }
   return `runtime:${sessionKey}`;
 }
 
@@ -429,21 +432,22 @@ export function appendRuntimeChatRows({
   const shouldRenderStreaming = sending && hasAnyStreamContent;
 
   if (shouldRenderStreaming) {
+    const streamingRowMessage = (streamMsg
+      ? {
+          ...(streamMsg as Record<string, unknown>),
+          role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
+          content: streamMsg.content ?? streamText,
+          timestamp: streamMsg.timestamp ?? streamingTimestamp,
+        }
+      : {
+          role: 'assistant',
+          content: streamText,
+          timestamp: streamingTimestamp,
+        }) as RawMessage;
     ensureMutableRows().push({
-      key: resolveRuntimeRowKey(sessionKey),
+      key: resolveRuntimeRowKey(sessionKey, streamingRowMessage),
       kind: 'streaming',
-      message: (streamMsg
-        ? {
-            ...(streamMsg as Record<string, unknown>),
-            role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-            content: streamMsg.content ?? streamText,
-            timestamp: streamMsg.timestamp ?? streamingTimestamp,
-          }
-        : {
-            role: 'assistant',
-            content: streamText,
-            timestamp: streamingTimestamp,
-          }) as RawMessage,
+      message: streamingRowMessage,
       streamingTools,
     });
   }

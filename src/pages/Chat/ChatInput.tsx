@@ -235,7 +235,9 @@ export const ChatInput = memo(function ChatInput({
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const currentSessionKey = useChatStore(selectChatInputSessionKey);
-  const agents = useSubagentsStore((state) => state.agents);
+  const agents = useSubagentsStore((state) => (
+    Array.isArray(state.agentsResource.data) ? state.agentsResource.data : []
+  ));
   const allowedSkillIdSet = useMemo(() => {
     const matched = currentSessionKey.match(/^agent:([^:]+):/i);
     const currentAgentId = matched?.[1] ?? 'main';

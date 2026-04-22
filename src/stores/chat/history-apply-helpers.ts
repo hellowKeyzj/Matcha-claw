@@ -123,20 +123,6 @@ export function buildHistoryApplyPatch(
     patch.thinkingLevel = input.thinkingLevel;
     changed = true;
   }
-  const currentRuntimeSnapshot: SessionRuntimeSnapshot = isCurrentSession
-    ? snapshotCurrentSessionRuntime(state)
-    : resolveSessionRuntime(state.sessionRuntimeByKey[input.requestedSessionKey]);
-  const hasRuntimeEntry = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, input.requestedSessionKey);
-  if (!hasRuntimeEntry || currentRuntimeSnapshot.messages !== input.finalMessages) {
-    patch.sessionRuntimeByKey = {
-      ...state.sessionRuntimeByKey,
-      [input.requestedSessionKey]: {
-        ...currentRuntimeSnapshot,
-        messages: input.finalMessages,
-      },
-    };
-    changed = true;
-  }
   if (input.resolvedLabel && state.sessionLabels[input.requestedSessionKey] !== input.resolvedLabel) {
     patch.sessionLabels = {
       ...state.sessionLabels,
@@ -169,6 +155,24 @@ export function buildHistoryApplyPatch(
       Object.assign(patch, runtimePatch);
       changed = true;
     }
+  }
+
+  const currentRuntimeSnapshot: SessionRuntimeSnapshot = isCurrentSession
+    ? snapshotCurrentSessionRuntime({
+        ...state,
+        ...patch,
+      } as ChatStoreState)
+    : resolveSessionRuntime(state.sessionRuntimeByKey[input.requestedSessionKey]);
+  const hasRuntimeEntry = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, input.requestedSessionKey);
+  if (!hasRuntimeEntry || currentRuntimeSnapshot.messages !== input.finalMessages) {
+    patch.sessionRuntimeByKey = {
+      ...state.sessionRuntimeByKey,
+      [input.requestedSessionKey]: {
+        ...currentRuntimeSnapshot,
+        messages: input.finalMessages,
+      },
+    };
+    changed = true;
   }
 
   return {
@@ -209,4 +213,3 @@ export function buildHistoryPreviewHydrationPatch(
 
   return changed ? patch : state;
 }
-

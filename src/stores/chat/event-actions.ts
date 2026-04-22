@@ -1,6 +1,6 @@
 import {
-  flushPendingDeltaBatch,
-} from './delta-frame-helpers';
+  syncActiveStreamPacer,
+} from './stream-pacer';
 import {
   reduceRuntimeOverlay,
 } from './overlay-reducer';
@@ -78,7 +78,7 @@ export function createStoreEventActions(
         // show loading/streaming in the app when this session has an active run.
         set((state) => reduceRuntimeOverlay(state, { type: 'run_started', runId }));
         if (kind !== 'delta') {
-          flushPendingDeltaBatch(set, get);
+          syncActiveStreamPacer(set, get);
         }
       }
       const eventRunId = runId || activeRunId || '';
@@ -161,8 +161,7 @@ export function createStoreEventActions(
           break;
         }
       }
+      syncActiveStreamPacer(set, get);
     },
   };
 }
-
-

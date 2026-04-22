@@ -17,6 +17,7 @@ const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
   /Gateway process exited before becoming ready/i,
   /Gateway failed to start after \d+ retries/i,
   /Port \d+ still occupied after \d+ms/i,
+  /Gateway control ready check failed/i,
 ];
 
 function normalizeLogLine(value: string): string {

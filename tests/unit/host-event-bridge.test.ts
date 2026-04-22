@@ -18,7 +18,7 @@ vi.mock('../../electron/services/channels/weixin-login-manager', () => ({
 }));
 
 class FakeGatewayManager extends EventEmitter {
-  private status: { state: 'stopped' | 'starting' | 'running' | 'error' | 'reconnecting'; port: number };
+  private status: { state: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting'; port: number };
 
   constructor() {
     super();

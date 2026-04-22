@@ -1,8 +1,10 @@
-import { useDeferredValue, useEffect, type MutableRefObject } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState, type MutableRefObject } from 'react';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
+import { scheduleIdleReady } from '@/lib/idle-ready';
+import { projectLiveThreadMessages } from './live-thread-projection';
 import { useExecutionGraphs } from './useExecutionGraphs';
-import { useChatWindowSlice, type RenderWindowExpandCommand } from './useWindowing';
 import { useChatRows } from './useRows';
+import { useBodyRenderProjection } from './useBodyRenderProjection';
 
 const EMPTY_MESSAGES: RawMessage[] = [];
 
@@ -19,8 +21,15 @@ interface SessionPipelineCost {
 }
 
 interface UseRowsPipelineInput {
-  currentSessionKey: string;
+  projectionScopeKey: string;
+  rowSessionKey: string;
   messages: RawMessage[];
+  isHistoryProjection: boolean;
+  viewportRef: React.RefObject<HTMLDivElement | null>;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  isUserScrolling: boolean;
+  scrollDirection: -1 | 0 | 1;
+  scrollEventSeq: number;
   agents: ExecutionGraphAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
@@ -37,16 +46,31 @@ interface UseRowsPipelineInput {
 interface UseRowsPipelineResult {
   chatRows: ReturnType<typeof useChatRows>['chatRows'];
   suppressedToolCardRowKeys: ReturnType<typeof useExecutionGraphs>['suppressedToolCardRowKeys'];
+  bodyRenderModeByRowKey: ReturnType<typeof useBodyRenderProjection>['bodyRenderModeByRowKey'];
+  requestFullRender: ReturnType<typeof useBodyRenderProjection>['requestFullRender'];
+  hiddenHistoryCount: number;
   rowSliceCostMs: number;
   runtimeRowsCostMs: number;
-  hasOlderRenderableRows: boolean;
-  increaseRenderableWindowLimit: (sessionKey: string, command: RenderWindowExpandCommand) => void;
+}
+
+function nowMs(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
 }
 
 export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineResult {
   const {
-    currentSessionKey,
+    projectionScopeKey,
+    rowSessionKey,
     messages,
+    isHistoryProjection,
+    viewportRef,
+    contentRef,
+    isUserScrolling,
+    scrollDirection,
+    scrollEventSeq,
     agents,
     isGatewayRunning,
     gatewayRpc,
@@ -60,22 +84,42 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     sessionPipelineCostRef,
   } = input;
 
-  const {
-    rowSourceMessages,
-    hasOlderRenderableRows,
-    rowSliceCostMs,
-    increaseRenderableWindowLimit,
-  } = useChatWindowSlice({
-    currentSessionKey,
-    messages,
-  });
+  const projectionResult = useMemo(() => {
+    const projectionStartedAt = nowMs();
+    const liveThreadProjection = isHistoryProjection
+      ? {
+        messages,
+        hiddenRenderableCount: 0,
+      }
+      : projectLiveThreadMessages(messages);
+    return {
+      liveThreadProjection,
+      rowSliceCostMs: Math.max(0, nowMs() - projectionStartedAt),
+    };
+  }, [isHistoryProjection, messages]);
+  const rowSourceMessages = projectionResult.liveThreadProjection.messages;
+  const rowSliceCostMs = projectionResult.rowSliceCostMs;
+
+  const [executionGraphsEnabled, setExecutionGraphsEnabled] = useState(false);
+
+  useEffect(() => {
+    setExecutionGraphsEnabled(false);
+    const cancel = scheduleIdleReady(() => {
+      setExecutionGraphsEnabled(true);
+    }, {
+      idleTimeoutMs: 240,
+      fallbackDelayMs: 90,
+    });
+    return cancel;
+  }, [projectionScopeKey]);
 
   const deferredMessages = useDeferredValue(messages);
-  const deferredSessionKey = useDeferredValue(currentSessionKey);
-  const executionGraphInputReady = deferredSessionKey === currentSessionKey && deferredMessages === messages;
+  const deferredSessionKey = useDeferredValue(projectionScopeKey);
+  const executionGraphInputReady = deferredSessionKey === projectionScopeKey && deferredMessages === messages;
   const { executionGraphs, suppressedToolCardRowKeys } = useExecutionGraphs({
+    enabled: !isHistoryProjection && executionGraphsEnabled && executionGraphInputReady,
     messages: executionGraphInputReady ? rowSourceMessages : EMPTY_MESSAGES,
-    currentSessionKey,
+    currentSessionKey: projectionScopeKey,
     agents,
     isGatewayRunning,
     gatewayRpc,
@@ -91,7 +135,7 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     staticRowsCostMs,
     runtimeRowsCostMs,
   } = useChatRows({
-    currentSessionKey,
+    currentSessionKey: rowSessionKey,
     rowSourceMessages,
     executionGraphs,
     sending,
@@ -102,33 +146,46 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     streamingTools,
     streamingTimestamp,
   });
+  const {
+    bodyRenderModeByRowKey,
+    requestFullRender,
+  } = useBodyRenderProjection({
+    currentSessionKey: projectionScopeKey,
+    rows: chatRows,
+    viewportRef,
+    contentRef,
+    isUserScrolling,
+    scrollDirection,
+    scrollEventSeq,
+  });
 
   useEffect(() => {
     if (staticRowsCostMs <= 0) {
       return;
     }
     const cost = sessionPipelineCostRef.current;
-    if (cost.sessionKey === currentSessionKey) {
+    if (cost.sessionKey === projectionScopeKey) {
       cost.staticRowsMs += staticRowsCostMs;
     }
-  }, [currentSessionKey, sessionPipelineCostRef, staticRowsCostMs]);
+  }, [projectionScopeKey, sessionPipelineCostRef, staticRowsCostMs]);
 
   useEffect(() => {
     if (runtimeRowsCostMs <= 0) {
       return;
     }
     const cost = sessionPipelineCostRef.current;
-    if (cost.sessionKey === currentSessionKey) {
+    if (cost.sessionKey === projectionScopeKey) {
       cost.runtimeRowsMs += runtimeRowsCostMs;
     }
-  }, [currentSessionKey, runtimeRowsCostMs, sessionPipelineCostRef]);
+  }, [projectionScopeKey, runtimeRowsCostMs, sessionPipelineCostRef]);
 
   return {
     chatRows,
     suppressedToolCardRowKeys,
+    bodyRenderModeByRowKey,
+    requestFullRender,
+    hiddenHistoryCount: projectionResult.liveThreadProjection.hiddenRenderableCount,
     rowSliceCostMs,
     runtimeRowsCostMs,
-    hasOlderRenderableRows,
-    increaseRenderableWindowLimit,
   };
 }

@@ -22,8 +22,8 @@ function makeState(overrides: Record<string, unknown> = {}) {
     sessionReadyByKey: { 'agent:main:main': true },
     sending: false,
     activeRunId: null,
-    streamingText: '',
     streamingMessage: null,
+    streamRuntime: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -34,6 +34,12 @@ function makeState(overrides: Record<string, unknown> = {}) {
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
+    sessionsResource: {
+      status: 'ready',
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
     mutating: false,
     error: null,
     showThinking: true,
@@ -71,6 +77,7 @@ describe('chat selectors layering', () => {
     expect(runtime.sending).toBe(true);
     expect(view.error).toBe('boom');
     expect(view.refreshing).toBe(true);
+    expect(view.sessionsResource.status).toBe('ready');
   });
 
   it('chat page selectors split into session/runtime/view/actions surfaces', () => {
@@ -112,6 +119,7 @@ describe('chat selectors layering', () => {
     expect(Object.keys(sidebar.pendingApprovalsBySession)).toEqual(['agent:main:main']);
     expect(sidebar.chatSessions).toHaveLength(2);
     expect(pane.sessions).toHaveLength(2);
+    expect(pane.sessionsResource.status).toBe('ready');
     expect(pane.currentSessionKey).toBe('agent:main:main');
   });
 

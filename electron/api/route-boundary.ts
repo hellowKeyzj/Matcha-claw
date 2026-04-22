@@ -10,7 +10,6 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
 
 export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/events',
-  '/api/app/gateway-info',
   '/api/gateway/status',
   '/api/gateway/health',
   '/api/gateway/start',

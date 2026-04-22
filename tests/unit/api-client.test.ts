@@ -272,6 +272,13 @@ describe('api-client', () => {
 
     const connectMessage = socket.sentMessages.find((message) => message.method === 'connect');
     expect(connectMessage).toBeTruthy();
+    expect(connectMessage?.params).toMatchObject({
+      client: {
+        id: 'webchat-ui',
+        displayName: 'MatchaClaw Renderer Diagnostic',
+        mode: 'webchat',
+      },
+    });
 
     socket.emit('message', {
       data: JSON.stringify({
@@ -349,6 +356,11 @@ describe('api-client', () => {
     const connectMessage = socket.sentMessages.find((message) => message.method === 'connect');
     expect(connectMessage).toBeTruthy();
     expect(connectMessage?.params).toMatchObject({
+      client: {
+        id: 'webchat-ui',
+        displayName: 'MatchaClaw Renderer Diagnostic',
+        mode: 'webchat',
+      },
       auth: { token: 'gw-token-from-settings' },
     });
 

@@ -1,7 +1,7 @@
 import { getMessageText } from './message-helpers';
 import {
-  queueDeltaForFrame,
-} from './delta-frame-helpers';
+  clearPendingStreamFinalCommit,
+} from './stream-pacer';
 import {
   reduceRuntimeOverlay,
 } from './overlay-reducer';
@@ -72,7 +72,6 @@ export function handleRuntimeStartedEvent(input: RuntimeEventDispatchBaseInput):
 export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): void {
   const {
     set,
-    get,
     message,
     currentSessionKey,
     eventRunId,
@@ -86,14 +85,13 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
     maybeTrackSendToFirstToken(currentSessionKey, 'delta');
   }
   const updates = collectToolUpdates(message, 'delta');
-  queueDeltaForFrame(
-    set,
-    get,
-    currentSessionKey,
-    eventRunId,
-    message,
+  set((state) => reduceRuntimeOverlay(state, {
+    type: 'stream_delta_queued',
+    sessionKey: currentSessionKey,
+    runId: eventRunId,
+    text: getMessageText((message as RawMessage | undefined)?.content),
     updates,
-  );
+  }));
   armToolSnapshotTxnState(
     currentSessionKey,
     eventRunId,
@@ -153,11 +151,12 @@ export function handleRuntimeErrorEvent(input: RuntimeEventErrorDispatchInput): 
 }
 
 export function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInput): void {
-  const { set, onFinishAbortedTelemetry } = input;
+  const { set, get, onFinishAbortedTelemetry } = input;
   resetToolSnapshotTxnState();
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   onFinishAbortedTelemetry();
+  clearPendingStreamFinalCommit(get().currentSessionKey, get().activeRunId);
   set((state) => reduceRuntimeOverlay(state, { type: 'run_aborted' }));
 }
 
@@ -167,11 +166,11 @@ export function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInpu
   if (sending && message && typeof message === 'object') {
     const updates = collectToolUpdates(message, 'delta');
     set((state) => reduceRuntimeOverlay(state, {
-      type: 'delta_committed',
-      message,
+      type: 'stream_delta_queued',
+      sessionKey: get().currentSessionKey,
+      runId: get().activeRunId ?? '',
+      text: getMessageText((message as RawMessage).content),
       updates,
     }));
   }
 }
-
-
