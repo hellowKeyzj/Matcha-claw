@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -14,7 +14,8 @@ export function TeamsPage() {
   const { t } = useTranslation('teams');
   const subtitle = t('subtitle');
   const navigate = useNavigate();
-  const agents = useSubagentsStore((state) => state.agents);
+  const agentsResource = useSubagentsStore((state) => state.agentsResource);
+  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
   const gatewayState = useGatewayStore((state) => state.status.state);
@@ -29,14 +30,25 @@ export function TeamsPage() {
   const [teamName, setTeamName] = useState('');
   const [leadAgentId, setLeadAgentId] = useState('');
   const [memberIds, setMemberIds] = useState<string[]>([]);
+  const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
 
   useEffect(() => {
-    if (gatewayState === 'running') {
+    if (gatewayState !== 'running') {
+      hasRequestedAgentsForCurrentGatewayRunRef.current = false;
+      return;
+    }
+    if (hasRequestedAgentsForCurrentGatewayRunRef.current) {
+      return;
+    }
+    hasRequestedAgentsForCurrentGatewayRunRef.current = true;
+    if (agentsResource.status !== 'loading') {
       void loadAgents();
     }
-  }, [gatewayState, loadAgents]);
+  }, [agentsResource.status, gatewayState, loadAgents]);
 
-  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'reconnecting';
+  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'control_connecting' || gatewayState === 'reconnecting';
+  const showAgentsLoading = !agentsResource.hasLoadedOnce
+    && (agentsResource.status === 'idle' || agentsResource.status === 'loading' || gatewayPending);
 
   const effectiveLeadAgentId = useMemo(() => {
     if (!leadAgentId) {
@@ -106,7 +118,7 @@ export function TeamsPage() {
           <CardTitle className="text-base">{t('create.title')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          {gatewayPending && agents.length === 0 ? (
+          {showAgentsLoading && agents.length === 0 ? (
             <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
               {t('create.loadingAgents')}
             </div>

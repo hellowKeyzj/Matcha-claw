@@ -495,6 +495,17 @@ export function handleE2EChatHostApiFetch(request: HostApiFetchRequest): HostApi
     }
   }
 
+  if (path === '/api/license/gate' && method === 'GET') {
+    return toSuccessEnvelope({
+      state: 'granted',
+      reason: 'e2e',
+      checkedAtMs: Date.now(),
+      hasStoredKey: true,
+      hasUsableCache: true,
+      nextRevalidateAtMs: null,
+    });
+  }
+
   if (path === '/api/gateway/rpc' && method === 'POST') {
     const payload = parseJsonBody(request.body);
     const rpcMethod = typeof payload.method === 'string' ? payload.method : '';

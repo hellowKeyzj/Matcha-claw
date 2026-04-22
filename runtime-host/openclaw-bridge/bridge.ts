@@ -1,6 +1,7 @@
 import type { GatewayConnectionStatePayload } from './client';
 
 interface OpenClawGatewayClient {
+  ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
   gatewayRpc: (method: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   isGatewayRunning: (timeoutMs?: number) => Promise<boolean>;
   readGatewayConnectionState: (timeoutMs?: number) => Promise<GatewayConnectionStatePayload>;
@@ -8,6 +9,7 @@ interface OpenClawGatewayClient {
 }
 
 export interface OpenClawBridge {
+  ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
   gatewayRpc: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
   chatSend: (params: Record<string, unknown>) => Promise<unknown>;
   channelsStatus: (probe?: boolean) => Promise<unknown>;
@@ -43,6 +45,7 @@ export interface OpenClawBridge {
 
 export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBridge {
   return {
+    ensureGatewayReady: (timeoutMs) => client.ensureGatewayReady(timeoutMs),
     gatewayRpc: (method, params = {}, timeoutMs) => client.gatewayRpc(method, params, timeoutMs),
     chatSend: (params) => client.gatewayRpc('chat.send', params, 120000),
     channelsStatus: (probe = true) => client.gatewayRpc('channels.status', { probe }, 10000),

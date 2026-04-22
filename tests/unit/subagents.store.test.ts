@@ -49,6 +49,19 @@ describe('subagents store', () => {
     );
   });
 
+  it('首次 loadAgents 失败后也应收口 not-ready，避免侧栏永久停在 Loading', async () => {
+    gatewayClientRpcMock.mockRejectedValueOnce(new Error('agents list failed'));
+
+    await useSubagentsStore.getState().loadAgents();
+
+    const state = useSubagentsStore.getState();
+    expect(state.agentsResource.status).toBe('error');
+    expect(state.agentsResource.hasLoadedOnce).toBe(false);
+    expect(state.agentsResource.error).toBe('agents list failed');
+    expect(state.error).toBe('agents list failed');
+    expect(state.agents).toEqual([]);
+  });
+
   it('loadAgents 与 loadAvailableModels 并发时，只有 loadAgents 会读取 config.get', async () => {
     const rpc = gatewayClientRpcMock;
     let resolveConfigGet: ((value: unknown) => void) | null = null;
@@ -853,8 +866,7 @@ describe('subagents store', () => {
 
     const agents = useSubagentsStore.getState().agents;
     expect(agents).toMatchObject([{ id: 'main', name: 'Main-new' }]);
-    expect(useSubagentsStore.getState().initialLoading).toBe(false);
-    expect(useSubagentsStore.getState().refreshing).toBe(false);
+    expect(useSubagentsStore.getState().agentsResource.status).toBe('ready');
   });
 
   it('deleteAgent 后，旧的 agents.list 结果不会把待删 agent 回显', async () => {

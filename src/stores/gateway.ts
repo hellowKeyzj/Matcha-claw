@@ -13,6 +13,7 @@ import {
 } from './chat/event-normalizer';
 import { subscribeChatConversationEvents } from './chat/transport-adapter';
 import { useChatStore } from './chat';
+import { readSessionsFromState } from './chat/session-helpers';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
 
@@ -199,7 +200,7 @@ function maybeRefreshChatSessionsFromRuntimeEvent(
   }
   const shouldRefreshSessions =
     event.sessionKey !== state.currentSessionKey
-    || !state.sessions.some((session) => session.key === event.sessionKey);
+    || !readSessionsFromState(state).some((session) => session.key === event.sessionKey);
   if (!shouldRefreshSessions) {
     return;
   }

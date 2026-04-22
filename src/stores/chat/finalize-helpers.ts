@@ -258,7 +258,7 @@ export function reconcileOptimisticUserInHistory(
 interface BuildToolResultFinalPatchInput {
   state: RuntimeStateLike;
   runId: string;
-  shouldCommitToolSnapshot: boolean;
+  toolSnapshot: RawMessage | null;
   updates: ToolStatus[];
   toolFiles: AttachedFileMeta[];
 }
@@ -269,11 +269,10 @@ export function buildToolResultFinalPatch(
   const {
     state,
     runId,
-    shouldCommitToolSnapshot,
+    toolSnapshot,
     updates,
     toolFiles,
   } = input;
-  const currentStream = state.streamingMessage as RawMessage | null;
   const snapshotMessages: RawMessage[] = [];
   const nextPendingToolImages = toolFiles.length > 0
     ? [...state.pendingToolImages, ...toolFiles]
@@ -282,16 +281,16 @@ export function buildToolResultFinalPatch(
     ? upsertToolStatuses(state.streamingTools, updates)
     : state.streamingTools;
 
-  if (shouldCommitToolSnapshot && currentStream) {
-    const streamRole = currentStream.role;
+  if (toolSnapshot) {
+    const streamRole = toolSnapshot.role;
     const shouldSnapshotIntermediateToolTurn = (
       (streamRole === 'assistant' || streamRole === undefined)
-      && hasAssistantToolCall(currentStream)
+      && hasAssistantToolCall(toolSnapshot)
     );
     if (shouldSnapshotIntermediateToolTurn) {
-      const snapshotId = currentStream.id || `${runId || 'run'}-turn-${state.messages.length}`;
+      const snapshotId = toolSnapshot.id || `${runId || 'run'}-turn-${state.messages.length}`;
       const snapshot = buildSanitizedIntermediateSnapshot(
-        currentStream,
+        toolSnapshot,
         state.messages,
         snapshotId,
       );
@@ -332,5 +331,4 @@ export function buildErrorStreamSnapshot(
     : fallbackSnapshotId;
   return buildSanitizedIntermediateSnapshot(currentStream, currentMessages, snapshotId);
 }
-
 

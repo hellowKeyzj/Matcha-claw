@@ -37,21 +37,22 @@ describe('gateway manager start', () => {
     vi.clearAllMocks();
   });
 
-  it('启动成功只依赖端口 ready，不再额外阻塞 runtime health 握手', async () => {
+  it('启动成功需要等待控制面 ready，端口 ready 后才切 control_connecting', async () => {
     const { GatewayManager } = await import('../../electron/gateway/manager');
 
     const manager = new GatewayManager();
-    const runtimeHealthRequestMock = vi.fn(async () => {
-      throw new Error('runtime health should not be awaited during start');
+    const controlReadyProbeMock = vi.fn(async () => {
+      expect(manager.getStatus()).toEqual(expect.objectContaining({
+        state: 'control_connecting',
+        pid: 4242,
+      }));
     });
-    (manager as unknown as { runtimeHostClient: { request: typeof runtimeHealthRequestMock } }).runtimeHostClient = {
-      request: runtimeHealthRequestMock,
-    };
+    manager.setControlReadyProbe(controlReadyProbeMock);
 
     await expect(manager.start()).resolves.toBeUndefined();
 
     expect(waitForGatewayPortReadyMock).toHaveBeenCalledTimes(1);
-    expect(runtimeHealthRequestMock).not.toHaveBeenCalled();
+    expect(controlReadyProbeMock).toHaveBeenCalledTimes(1);
     expect(manager.getStatus()).toEqual(expect.objectContaining({
       state: 'running',
       pid: 4242,

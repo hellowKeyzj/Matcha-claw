@@ -21,6 +21,9 @@
         "showThinking": "思考を表示",
         "hideThinking": "思考を非表示"
     },
+    "liveThread": {
+        "viewFullHistory": "履歴を見る"
+    },
     "status": {
         "refreshing": "更新中...",
         "mutating": "変更を反映中..."

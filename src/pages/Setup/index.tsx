@@ -647,13 +647,15 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         gateway: { status: 'error', message: currentGateway.error || t('runtime.status.error') },
       }));
     } else {
-      // Gateway is 'stopped', 'starting', or 'reconnecting'
+      // Gateway is 'stopped', 'starting', 'control_connecting', or 'reconnecting'
       // Keep as 'checking' — the dedicated useEffect will update when status changes
       setChecks((prev) => ({
         ...prev,
         gateway: {
           status: 'checking',
-          message: currentGateway.state === 'starting' ? t('runtime.status.checking') : 'Waiting for gateway...'
+          message: currentGateway.state === 'starting' || currentGateway.state === 'control_connecting'
+            ? t('runtime.status.checking')
+            : 'Waiting for gateway...'
         },
       }));
     }
@@ -683,7 +685,11 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         ...prev,
         gateway: { status: 'error', message: gatewayStatus.error || 'Failed to start' },
       }));
-    } else if (gatewayStatus.state === 'starting' || gatewayStatus.state === 'reconnecting') {
+    } else if (
+      gatewayStatus.state === 'starting'
+      || gatewayStatus.state === 'control_connecting'
+      || gatewayStatus.state === 'reconnecting'
+    ) {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'checking', message: 'Starting...' },
@@ -704,7 +710,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
       return;
     }
 
-    // Set timeout for non-terminal states (stopped, starting, reconnecting)
+    // Set timeout for non-terminal states (stopped, starting, control_connecting, reconnecting)
     gatewayTimeoutRef.current = setTimeout(() => {
       setChecks((prev) => {
         if (prev.gateway.status === 'checking') {

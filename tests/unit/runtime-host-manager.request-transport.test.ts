@@ -37,6 +37,7 @@ const hoisted = vi.hoisted(() => {
     if (key === 'pluginExecutionEnabled') return true;
     return undefined;
   });
+  const getOpenClawDirMock = vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw');
   return {
     childRequestMock,
     childHealthMock,
@@ -45,6 +46,7 @@ const hoisted = vi.hoisted(() => {
     setSettingMock,
     shellOpenPathMock,
     getSettingMock,
+    getOpenClawDirMock,
     processStateRef,
   };
 });
@@ -76,6 +78,10 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
 vi.mock('../../electron/services/settings/settings-store', () => ({
   getSetting: hoisted.getSettingMock,
   setSetting: hoisted.setSettingMock,
+}));
+
+vi.mock('../../electron/utils/paths', () => ({
+  getOpenClawDir: hoisted.getOpenClawDirMock,
 }));
 
 vi.mock('electron', () => ({
@@ -295,6 +301,7 @@ describe('runtime-host manager request transport policy', () => {
     const childEnv = processManagerOptions?.childEnv?.() ?? {};
     expect(childEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT).toBe('19876');
     expect(childEnv.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN).toBe('');
+    expect(childEnv.MATCHACLAW_OPENCLAW_DIR).toBe('E:\\code\\Matcha-claw\\node_modules\\openclaw');
     expect(hoisted.getSettingMock.mock.calls.some((args) => args[0] === 'gatewayPort')).toBe(false);
   });
 

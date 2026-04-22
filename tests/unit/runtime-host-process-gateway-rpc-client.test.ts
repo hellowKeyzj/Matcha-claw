@@ -177,7 +177,12 @@ describe('runtime-host process gateway rpc client', () => {
       expect(connectParamsSnapshot).toBeTruthy();
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.read');
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.write');
-      expect((connectParamsSnapshot as { client?: { mode?: string } }).client?.mode).toBe('backend');
+      expect((connectParamsSnapshot as { client?: { id?: string; displayName?: string; mode?: string } }).client)
+        .toMatchObject({
+          id: 'gateway-client',
+          displayName: 'MatchaClaw Runtime Host',
+          mode: 'backend',
+        });
       const device = (connectParamsSnapshot as { device?: Record<string, unknown> }).device;
       expect(device).toBeTruthy();
       expect(typeof device?.id).toBe('string');
@@ -256,6 +261,53 @@ describe('runtime-host process gateway rpc client', () => {
       expect(snapshots.at(-1)).toEqual(expect.objectContaining({
         state: 'disconnected',
       }));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it('ensureGatewayReady 会完成握手并验证轻量 RPC', async () => {
+    const port = 48300 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN = 'gateway-ready-token';
+
+    const methods: string[] = [];
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        methods.push(String(message.method));
+        socket.send(JSON.stringify({
+          type: 'res',
+          id: message.id,
+          ok: true,
+          payload: { ok: true },
+        }));
+      });
+    });
+
+    try {
+      const client = createGatewayClient();
+      await expect(client.ensureGatewayReady(8000)).resolves.toBeUndefined();
+      expect(methods).toEqual(['connect', 'status']);
+      client.close();
     } finally {
       await new Promise<void>((resolve, reject) => {
         wss.close((error) => {

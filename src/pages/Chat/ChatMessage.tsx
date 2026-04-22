@@ -5,8 +5,6 @@
  */
 import { useState, useCallback, useEffect, useMemo, memo, type ReactNode } from 'react';
 import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { createPortal } from 'react-dom';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
@@ -17,14 +15,16 @@ import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractThinking, extractImages, extractToolUse, formatTimestamp } from './message-utils';
 import {
   createFileHintPathResolver,
-  decodeMaybeEncodedPath,
   linkifyFileHintsInMarkdown,
   migrateLegacyMarkdownFileLinks,
   type FileHintPathResolver,
 } from './md-link';
 import {
   buildMarkdownCacheKey,
-  getOrBuildProcessedMarkdown,
+  decodeFileHintHref,
+  getOrBuildMarkdownBody,
+  shouldUseLiteMarkdown,
+  type MarkdownBodyRenderMode,
 } from './md-pipeline';
 
 interface ChatMessageProps {
@@ -37,6 +37,8 @@ interface ChatMessageProps {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
+  bodyRenderMode?: MarkdownBodyRenderMode;
+  onRequestFullRender?: () => void;
   streamingTools?: Array<{
     id?: string;
     toolCallId?: string;
@@ -67,6 +69,8 @@ export const ChatMessage = memo(function ChatMessage({
   assistantAvatarStyle,
   userAvatarImageUrl,
   isStreaming = false,
+  bodyRenderMode,
+  onRequestFullRender,
   streamingTools = [],
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
@@ -106,49 +110,14 @@ export const ChatMessage = memo(function ChatMessage({
   if (!hasText && !visibleThinking && images.length === 0 && visibleTools.length === 0 && attachedFiles.length === 0 && !hasStreamingToolStatus) return null;
 
   return (
-    <div
-      className={cn(
-        'flex gap-3 group',
-        isUser ? 'flex-row-reverse' : 'flex-row',
-      )}
-    >
-      {/* Avatar */}
-      <div
-        className={cn(
-          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1',
-          isUser
-            ? 'bg-primary text-primary-foreground'
-            : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
-        )}
-      >
-        {isUser ? (
-          userAvatarImageUrl ? (
-            <img
-              src={userAvatarImageUrl}
-              alt="user-avatar"
-              className="h-full w-full rounded-full object-cover"
-            />
-          ) : (
-            <User className="h-4 w-4" />
-          )
-        ) : (
-          <AgentAvatar
-            agentId={assistantAgentId}
-            agentName={assistantAgentName}
-            avatarSeed={assistantAvatarSeed}
-            avatarStyle={assistantAvatarStyle}
-            className="h-full w-full"
-            dataTestId="assistant-message-avatar"
-          />
-        )}
-      </div>
-
-      {/* Content */}
-      <div
-        className={cn(
-          'flex flex-col w-full min-w-0 max-w-[80%] space-y-2',
-          isUser ? 'items-end' : 'items-start',
-        )}
+    <>
+      <MessageShell
+        isUser={isUser}
+        assistantAgentId={assistantAgentId}
+        assistantAgentName={assistantAgentName}
+        assistantAvatarSeed={assistantAvatarSeed}
+        assistantAvatarStyle={assistantAvatarStyle}
+        userAvatarImageUrl={userAvatarImageUrl}
       >
         {isStreaming && !isUser && streamingTools.length > 0 && (
           <ToolStatusBar tools={streamingTools} />
@@ -223,10 +192,12 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Main text bubble */}
         {hasText && (
-          <MessageBubble
+          <MessageBody
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
+            bodyRenderMode={bodyRenderMode}
+            onRequestFullRender={onRequestFullRender}
             resolveFileHintPath={resolveFileHintPath}
             markdownCacheKey={markdownCacheKey}
           />
@@ -293,7 +264,7 @@ export const ChatMessage = memo(function ChatMessage({
         {!isUser && hasText && (
           <AssistantHoverBar text={text} timestamp={message.timestamp} />
         )}
-      </div>
+      </MessageShell>
 
       {/* Image lightbox portal */}
       {lightboxImg && (
@@ -306,9 +277,75 @@ export const ChatMessage = memo(function ChatMessage({
           onClose={() => setLightboxImg(null)}
         />
       )}
-    </div>
+    </>
   );
 });
+
+function MessageShell({
+  isUser,
+  assistantAgentId,
+  assistantAgentName,
+  assistantAvatarSeed,
+  assistantAvatarStyle,
+  userAvatarImageUrl,
+  children,
+}: {
+  isUser: boolean;
+  assistantAgentId?: string;
+  assistantAgentName?: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
+  userAvatarImageUrl?: string | null;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex gap-3 group',
+        isUser ? 'flex-row-reverse' : 'flex-row',
+      )}
+    >
+      <div
+        className={cn(
+          'mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
+          isUser
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
+        )}
+      >
+        {isUser ? (
+          userAvatarImageUrl ? (
+            <img
+              src={userAvatarImageUrl}
+              alt="user-avatar"
+              className="h-full w-full rounded-full object-cover"
+            />
+          ) : (
+            <User className="h-4 w-4" />
+          )
+        ) : (
+          <AgentAvatar
+            agentId={assistantAgentId}
+            agentName={assistantAgentName}
+            avatarSeed={assistantAvatarSeed}
+            avatarStyle={assistantAvatarStyle}
+            className="h-full w-full"
+            dataTestId="assistant-message-avatar"
+          />
+        )}
+      </div>
+
+      <div
+        className={cn(
+          'flex w-full min-w-0 max-w-[80%] flex-col space-y-2',
+          isUser ? 'items-end' : 'items-start',
+        )}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
 
 function formatDuration(durationMs?: number): string | null {
   if (!durationMs || !Number.isFinite(durationMs)) return null;
@@ -390,16 +427,57 @@ const AssistantHoverBar = memo(function AssistantHoverBar({ text, timestamp }: {
 
 // ── Message Bubble ──────────────────────────────────────────────
 
-const MessageBubble = memo(function MessageBubble({
+const MessageBody = memo(function MessageBody({
   text,
   isUser,
   isStreaming,
+  bodyRenderMode,
+  onRequestFullRender,
   resolveFileHintPath,
   markdownCacheKey,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
+  bodyRenderMode?: MarkdownBodyRenderMode;
+  onRequestFullRender?: () => void;
+  resolveFileHintPath?: FileHintPathResolver;
+  markdownCacheKey: string;
+}) {
+  if (isUser) {
+    return (
+      <div
+        className="relative rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground dark:border-border/70 dark:bg-secondary/85"
+      >
+        <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
+      </div>
+    );
+  }
+
+  return (
+    <AssistantMessageBody
+      text={text}
+      isStreaming={isStreaming}
+      bodyRenderMode={bodyRenderMode}
+      onRequestFullRender={onRequestFullRender}
+      resolveFileHintPath={resolveFileHintPath}
+      markdownCacheKey={markdownCacheKey}
+    />
+  );
+});
+
+const AssistantMessageBody = memo(function AssistantMessageBody({
+  text,
+  isStreaming,
+  bodyRenderMode,
+  onRequestFullRender,
+  resolveFileHintPath,
+  markdownCacheKey,
+}: {
+  text: string;
+  isStreaming: boolean;
+  bodyRenderMode?: MarkdownBodyRenderMode;
+  onRequestFullRender?: () => void;
   resolveFileHintPath?: FileHintPathResolver;
   markdownCacheKey: string;
 }) {
@@ -414,98 +492,124 @@ const MessageBubble = memo(function MessageBubble({
     }
   }, []);
 
-  const shouldRenderRichMarkdown = !isUser;
+  const [forceFullMarkdown, setForceFullMarkdown] = useState(false);
   const markdownContent = useMemo(
     () => {
-      if (!shouldRenderRichMarkdown) {
-        return '';
-      }
-      return getOrBuildProcessedMarkdown(
-        markdownCacheKey,
-        () => linkifyFileHintsInMarkdown(
-          migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
-          resolveFileHintPath,
-        ),
+      return linkifyFileHintsInMarkdown(
+        migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
+        resolveFileHintPath,
       );
     },
-    [markdownCacheKey, resolveFileHintPath, shouldRenderRichMarkdown, text],
+    [markdownCacheKey, resolveFileHintPath, text],
   );
+  const canDeferMarkdown = shouldUseLiteMarkdown(markdownContent, isStreaming);
+  const effectiveBodyRenderMode = forceFullMarkdown
+    ? 'full'
+    : (bodyRenderMode ?? (canDeferMarkdown ? 'lite' : 'full'));
+  const preferLiteMarkdown = canDeferMarkdown && effectiveBodyRenderMode === 'lite';
+  const markdownBody = useMemo(
+    () => {
+      return getOrBuildMarkdownBody(markdownCacheKey, {
+        markdown: markdownContent,
+        allowLite: canDeferMarkdown,
+        mode: effectiveBodyRenderMode === 'shell'
+          ? 'shell'
+          : (preferLiteMarkdown ? 'lite' : 'full'),
+      });
+    },
+    [canDeferMarkdown, effectiveBodyRenderMode, markdownCacheKey, markdownContent, preferLiteMarkdown],
+  );
+  const shellPreview = markdownBody.shellPreview;
+  const renderedHtml = effectiveBodyRenderMode === 'full'
+    ? (markdownBody.fullHtml ?? '')
+    : (markdownBody.liteHtml ?? '');
 
-  const markdownComponents = useMemo(
-    () => ({
-      code({ className, children, ...props }: { className?: string; children?: ReactNode }) {
-        const match = /language-(\w+)/.exec(className || '');
-        const isInline = !match && !className;
-        if (isInline) {
-          return (
-            <code className="bg-background/50 px-1.5 py-0.5 rounded text-sm font-mono break-words break-all" {...props}>
-              {children}
-            </code>
-          );
-        }
-        return (
-          <pre className="bg-background/50 rounded-lg p-4 overflow-x-auto">
-            <code className={cn('text-sm font-mono', className)} {...props}>
-              {children}
-            </code>
-          </pre>
-        );
-      },
-      a({ href, children }: { href?: string; children?: ReactNode }) {
-        const rawHref = typeof href === 'string' ? href : '';
-        if (rawHref.startsWith('filehint:')) {
-          const encodedHint = rawHref.slice('filehint:'.length);
-          const decodedHint = decodeMaybeEncodedPath(encodedHint);
-          return (
-            <button
-              type="button"
-              className="inline cursor-pointer rounded-sm text-primary underline underline-offset-2 hover:text-primary/80"
-              onClick={() => void handleOpenFileHint(decodedHint)}
-            >
-              {children}
-            </button>
-          );
-        }
-        return (
-          <a href={rawHref} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-words break-all">
-            {children}
-          </a>
-        );
-      },
-    }),
-    [handleOpenFileHint],
-  );
+  useEffect(() => {
+    setForceFullMarkdown(false);
+  }, [markdownCacheKey]);
+
+  const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const anchor = target.closest('a');
+    if (!(anchor instanceof HTMLAnchorElement)) {
+      return;
+    }
+    const decodedHint = decodeFileHintHref(anchor.href);
+    if (!decodedHint) {
+      return;
+    }
+    event.preventDefault();
+    void handleOpenFileHint(decodedHint);
+  }, [handleOpenFileHint]);
+
+  const handleRequestFullMarkdown = useCallback(() => {
+    setForceFullMarkdown(true);
+    onRequestFullRender?.();
+  }, [onRequestFullRender]);
 
   return (
     <div
+      data-chat-body-mode={effectiveBodyRenderMode}
       className={cn(
         'relative',
-        isUser ? 'rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground' : 'w-full bg-transparent px-0 py-0',
-        isUser
-          ? 'dark:border-border/70 dark:bg-secondary/85'
-          : '',
+        'w-full bg-transparent px-0 py-0',
       )}
     >
-      {isUser ? (
-        <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
+      {effectiveBodyRenderMode === 'shell' && shellPreview ? (
+        <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3 text-sm text-foreground">
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <p className="whitespace-pre-wrap break-words text-sm leading-6">
+                {shellPreview.text}
+                {shellPreview.truncated ? '…' : ''}
+              </p>
+              {(shellPreview.hasCodeBlock || shellPreview.hasLinks) ? (
+                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  {shellPreview.hasCodeBlock ? (
+                    <span className="rounded-full border border-border/60 px-2 py-0.5">Contains code block</span>
+                  ) : null}
+                  {shellPreview.hasLinks ? (
+                    <span className="rounded-full border border-border/60 px-2 py-0.5">Contains links</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                Full markdown formatting is deferred until this message becomes active.
+              </p>
+              <Button type="button" size="sm" variant="outline" onClick={handleRequestFullMarkdown}>
+                Render full formatting
+              </Button>
+            </div>
+          </div>
+        </div>
       ) : (
-        <div className="prose prose-sm dark:prose-invert max-w-none break-words break-all">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            urlTransform={(url) => {
-              if (url.startsWith('filehint:')) {
-                return url;
-              }
-              return defaultUrlTransform(url);
-            }}
-            components={markdownComponents}
-          >
-            {markdownContent}
-          </ReactMarkdown>
+        <div className="space-y-3">
+          {markdownBody.canUpgrade && effectiveBodyRenderMode !== 'full' ? (
+            <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-medium text-foreground">Large message preview</p>
+                <p className="text-xs text-muted-foreground">
+                  Full markdown formatting is deferred to keep session switching responsive.
+                </p>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={handleRequestFullMarkdown}>
+                Render full formatting
+              </Button>
+            </div>
+          ) : null}
+          <div
+            className="prose prose-sm dark:prose-invert max-w-none break-words break-all [&_.chat-md-lite-code]:overflow-hidden [&_.chat-md-lite-code]:rounded-xl [&_.chat-md-lite-code]:border [&_.chat-md-lite-code]:border-border/60 [&_.chat-md-lite-code]:bg-muted/20 [&_.chat-md-lite-code__header]:border-b [&_.chat-md-lite-code__header]:border-border/60 [&_.chat-md-lite-code__header]:px-3 [&_.chat-md-lite-code__header]:py-2 [&_.chat-md-lite-code__header]:text-xs [&_.chat-md-lite-code__header]:text-muted-foreground [&_.chat-md-lite-code__summary]:flex [&_.chat-md-lite-code__summary]:cursor-pointer [&_.chat-md-lite-code__summary]:items-center [&_.chat-md-lite-code__summary]:justify-between [&_.chat-md-lite-code__summary]:gap-3 [&_.chat-md-lite-code__summary]:border-b [&_.chat-md-lite-code__summary]:border-border/60 [&_.chat-md-lite-code__summary]:px-3 [&_.chat-md-lite-code__summary]:py-2 [&_.chat-md-lite-code__summary]:text-xs [&_.chat-md-lite-code__summary]:text-muted-foreground [&_.chat-md-lite-code_pre]:m-0 [&_.chat-md-lite-code_pre]:overflow-x-auto [&_.chat-md-lite-code_pre]:px-4 [&_.chat-md-lite-code_pre]:py-3"
+            onClick={handleMarkdownClick}
+            dangerouslySetInnerHTML={{ __html: renderedHtml }}
+          />
           {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
         </div>
       )}
-
     </div>
   );
 });
@@ -514,6 +618,16 @@ const MessageBubble = memo(function MessageBubble({
 
 function ThinkingBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
+  const thinkingCacheKey = useMemo(() => `thinking:${buildMarkdownCacheKey({
+    role: 'assistant',
+    text: content,
+    attachedFiles: [],
+  })}`, [content]);
+  const renderResult = useMemo(() => getOrBuildMarkdownBody(thinkingCacheKey, {
+    markdown: content,
+    allowLite: false,
+    mode: 'full',
+  }), [content, thinkingCacheKey]);
 
   return (
     <div className="w-full rounded-lg border border-border/50 bg-muted/30 text-sm">
@@ -526,9 +640,10 @@ function ThinkingBlock({ content }: { content: string }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 text-muted-foreground">
-          <div className="prose prose-sm dark:prose-invert max-w-none opacity-75">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-          </div>
+          <div
+            className="prose prose-sm dark:prose-invert max-w-none opacity-75"
+            dangerouslySetInnerHTML={{ __html: renderResult.fullHtml ?? '' }}
+          />
         </div>
       )}
     </div>

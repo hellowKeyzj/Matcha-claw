@@ -7,7 +7,7 @@ interface LocalDispatchResponse {
 }
 
 interface GatewayRouteDeps {
-  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc'>;
+  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady'>;
 }
 
 export async function handleGatewayRoute(
@@ -22,6 +22,10 @@ export async function handleGatewayRoute(
 
   if (method === 'POST' && routePath === '/api/gateway/rpc') {
     return await service.rpc(payload);
+  }
+
+  if (method === 'POST' && routePath === '/api/gateway/ready') {
+    return await service.ready(payload);
   }
 
   if (!(method === 'POST' && routePath === '/api/chat/send-with-media')) {

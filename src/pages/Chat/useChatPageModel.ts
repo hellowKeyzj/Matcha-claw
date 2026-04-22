@@ -25,7 +25,7 @@ export function useChatPageModel() {
   const viewState = useChatStore(useShallow(selectChatPageViewState));
   const runtimeState = useChatStore(useShallow(selectChatPageRuntimeState));
   const actions = useChatStore(useShallow(selectChatPageActions));
-  const agents = useSubagentsStore((s) => s.agents);
+  const agents = useSubagentsStore((s) => (Array.isArray(s.agentsResource.data) ? s.agentsResource.data : []));
   const loadAgents = useSubagentsStore((s) => s.loadAgents);
   const updateAgent = useSubagentsStore((s) => s.updateAgent);
   const skills = useSkillsStore((s) => s.skills);

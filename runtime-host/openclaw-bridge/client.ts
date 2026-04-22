@@ -57,6 +57,7 @@ const GATEWAY_CLIENT_ID = 'gateway-client';
 const GATEWAY_CLIENT_VERSION = '0.1.0';
 const GATEWAY_CLIENT_MODE = 'backend';
 const GATEWAY_CLIENT_DEVICE_FAMILY = 'desktop';
+const GATEWAY_CLIENT_DISPLAY_NAME = 'MatchaClaw Runtime Host';
 const GATEWAY_DEVICE_IDENTITY_PATH = join(getRuntimeHostDataDir(), 'identity', 'device.json');
 let gatewayDeviceIdentityCache: DeviceIdentity | null = null;
 
@@ -171,7 +172,7 @@ function buildGatewayConnectRequest(connectId: string, challengeNonce: string) {
       maxProtocol: 3,
       client: {
         id: GATEWAY_CLIENT_ID,
-        displayName: 'MatchaClaw',
+        displayName: GATEWAY_CLIENT_DISPLAY_NAME,
         version: GATEWAY_CLIENT_VERSION,
         platform: process.platform,
         mode: GATEWAY_CLIENT_MODE,
@@ -485,6 +486,12 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     return snapshot.portReachable;
   }
 
+  async function ensureGatewayReady(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<void> {
+    const readyTimeoutMs = Math.max(1000, timeoutMs);
+    await ensureConnected(readyTimeoutMs);
+    await gatewayRpc('status', {}, readyTimeoutMs);
+  }
+
   async function gatewayRpc(method: string, params: unknown, timeoutMs = DEFAULT_GATEWAY_RPC_TIMEOUT_MS) {
     await ensureConnected(Math.max(2000, timeoutMs));
     if (!socket || socket.readyState !== WebSocket.OPEN || !isConnected) {
@@ -551,6 +558,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
   options.onGatewayConnectionState?.(connectionSnapshot);
 
   return {
+    ensureGatewayReady,
     gatewayRpc,
     isGatewayRunning,
     readGatewayConnectionState,

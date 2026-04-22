@@ -106,10 +106,8 @@ export function SubAgents() {
   const { t } = useTranslation('subagents');
   const { t: tTemplate } = useTranslation('subagentTemplates');
   const navigate = useNavigate();
-  const agents = useSubagentsStore((state) => state.agents);
-  const snapshotReady = useSubagentsStore((state) => state.snapshotReady);
-  const initialLoading = useSubagentsStore((state) => state.initialLoading);
-  const refreshing = useSubagentsStore((state) => state.refreshing);
+  const agentsResource = useSubagentsStore((state) => state.agentsResource);
+  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const mutating = useSubagentsStore((state) => state.mutating);
   const error = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
@@ -153,7 +151,7 @@ export function SubAgents() {
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
   const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
-    () => import.meta.env.MODE === 'test' || agents.length > 0 || snapshotReady,
+    () => import.meta.env.MODE === 'test' || agents.length > 0 || agentsResource.hasLoadedOnce,
   );
   const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
@@ -161,6 +159,7 @@ export function SubAgents() {
   const templateLoadRequestIdRef = useRef(0);
   const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
   const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
+  const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
   const draftPrompt = managedAgentId ? (draftPromptByAgent[managedAgentId] ?? '') : '';
   const generatingDraft = managedAgentId ? Boolean(draftGeneratingByAgent[managedAgentId]) : false;
   const persistedContentByFile = managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
@@ -172,23 +171,35 @@ export function SubAgents() {
   const hasAvailableModels = availableModels.length > 0;
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
-  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'reconnecting';
-  const showSubagentGridSkeleton = !hasAgentCards && !snapshotReady && (
-    initialLoading
+  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'control_connecting' || gatewayState === 'reconnecting';
+  const showSubagentGridSkeleton = !hasAgentCards && !agentsResource.hasLoadedOnce && (
+    agentsResource.status === 'loading'
+    || agentsResource.status === 'idle'
     || !subagentsHeavyContentReady
     || gatewayPending
   );
-  const showRefreshingHint = useDelayedFlag(refreshing, 180);
+  const showRefreshingHint = useDelayedFlag(
+    agentsResource.hasLoadedOnce && agentsResource.status === 'loading',
+    180,
+  );
 
   useEffect(() => {
     void loadAvailableModels();
   }, [loadAvailableModels]);
 
   useEffect(() => {
-    if (gatewayState === 'running') {
+    if (gatewayState !== 'running') {
+      hasRequestedAgentsForCurrentGatewayRunRef.current = false;
+      return;
+    }
+    if (hasRequestedAgentsForCurrentGatewayRunRef.current) {
+      return;
+    }
+    hasRequestedAgentsForCurrentGatewayRunRef.current = true;
+    if (agentsResource.status !== 'loading') {
       void loadAgents({ silent: true });
     }
-  }, [gatewayState, loadAgents]);
+  }, [agentsResource.status, gatewayState, loadAgents]);
 
   useEffect(() => {
     if (!managedAgentId) {
@@ -707,7 +718,7 @@ export function SubAgents() {
         </div>
       )}
 
-      {!initialLoading && snapshotReady && agents.length === 0 && (
+      {!showSubagentGridSkeleton && agentsResource.hasLoadedOnce && agents.length === 0 && (
         <p className="text-sm text-muted-foreground">{t('empty')}</p>
       )}
       <SubagentDeleteDialog

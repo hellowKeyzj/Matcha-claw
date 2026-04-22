@@ -124,7 +124,7 @@ describe('host api server boundary guard', () => {
     const handler = createHostApiRequestHandler({} as never, 3210);
 
     await handler(
-      { method: 'GET', url: '/api/app/gateway-info' } as IncomingMessage,
+      { method: 'GET', url: '/api/gateway/status' } as IncomingMessage,
       {} as ServerResponse,
     );
 

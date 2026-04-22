@@ -21,6 +21,9 @@
         "showThinking": "Show thinking",
         "hideThinking": "Hide thinking"
     },
+    "liveThread": {
+        "viewFullHistory": "View history"
+    },
     "status": {
         "refreshing": "Refreshing...",
         "mutating": "Applying changes..."

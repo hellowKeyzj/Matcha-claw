@@ -24,9 +24,8 @@ import {
   createRuntimeHostHttpClient,
 } from './runtime-host-client';
 import { getPort } from '../utils/config';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { shell } from 'electron';
+import { getOpenClawDir } from '../utils/paths';
 import {
   readEnabledPluginIdsFromOpenClawConfig,
   syncEnabledPluginIdsToOpenClawConfig,
@@ -140,18 +139,6 @@ type RuntimeHostMainProcessCapabilities = {
 export function createRuntimeHostManager(
   deps: RuntimeHostManagerDeps,
 ): RuntimeHostManager {
-  function resolvePackagedResourcePath(...segments: string[]): string | null {
-    const resourcesPath = typeof process.resourcesPath === 'string' ? process.resourcesPath.trim() : '';
-    if (!resourcesPath) {
-      return null;
-    }
-    const appAsarPath = join(resourcesPath, 'app.asar');
-    if (!existsSync(appAsarPath)) {
-      return null;
-    }
-    return join(resourcesPath, ...segments);
-  }
-
   function asRecord(value: unknown): Record<string, unknown> | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       return null;
@@ -219,7 +206,7 @@ export function createRuntimeHostManager(
   const internalDispatchToken = `runtime-host-dispatch-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   const gatewayEventBus = new EventEmitter();
   const hostApiPort = getPort('MATCHACLAW_HOST_API');
-  const packagedOpenClawDir = resolvePackagedResourcePath('openclaw');
+  const openClawDir = getOpenClawDir();
   const runtimeHostProcess = createRuntimeHostProcessManager({
     parentApiBaseUrl: `http://127.0.0.1:${hostApiPort}`,
     parentDispatchToken: internalDispatchToken,
@@ -229,7 +216,7 @@ export function createRuntimeHostManager(
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(childPluginCatalogSnapshot),
       MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(childGatewayBridgeSnapshot.port),
       MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN: childGatewayBridgeSnapshot.token,
-      ...(packagedOpenClawDir ? { MATCHACLAW_OPENCLAW_DIR: packagedOpenClawDir } : {}),
+      MATCHACLAW_OPENCLAW_DIR: openClawDir,
     }),
     logger,
   });

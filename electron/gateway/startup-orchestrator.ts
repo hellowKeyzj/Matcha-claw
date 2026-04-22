@@ -15,11 +15,12 @@ type StartupHooks = {
   getStartupStderrLines: () => string[];
   assertLifecycle: (phase: string) => void;
   findExistingGateway: (port: number) => Promise<ExistingGatewayInfo | null>;
-  connect: (port: number, externalToken?: string) => Promise<void>;
+  waitForControlReady: (port: number, externalToken?: string) => Promise<void>;
   onConnectedToExistingGateway: () => void;
   waitForPortFree: (port: number) => Promise<void>;
   startProcess: () => Promise<void>;
-  waitForReady: (port: number) => Promise<void>;
+  waitForPortReady: (port: number) => Promise<void>;
+  onManagedGatewayPortReady: () => void;
   onConnectedToManagedGateway: () => void;
   runDoctorRepair: () => Promise<boolean>;
   onDoctorRepairSuccess: () => void;
@@ -55,10 +56,10 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       hooks.assertLifecycle('start/find-existing');
       if (existing) {
         logger.debug(`Found existing Gateway on port ${existing.port}`);
-        await measureStage('connect-existing', async () => {
-          await hooks.connect(existing.port, existing.externalToken);
+        await measureStage('wait-control-ready-existing', async () => {
+          await hooks.waitForControlReady(existing.port, existing.externalToken);
         });
-        hooks.assertLifecycle('start/connect-existing');
+        hooks.assertLifecycle('start/wait-control-ready-existing');
         hooks.onConnectedToExistingGateway();
         logger.info(
           `Gateway startup attempt ${startAttempts} completed via existing gateway (totalMs=${Date.now() - attemptStartedAt}, stages=${JSON.stringify(stageDurations)})`,
@@ -80,15 +81,16 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       });
       hooks.assertLifecycle('start/start-process');
 
-      await measureStage('wait-ready', async () => {
-        await hooks.waitForReady(hooks.port);
+      await measureStage('wait-port-ready', async () => {
+        await hooks.waitForPortReady(hooks.port);
       });
-      hooks.assertLifecycle('start/wait-ready');
+      hooks.assertLifecycle('start/wait-port-ready');
+      hooks.onManagedGatewayPortReady();
 
-      await measureStage('connect-managed', async () => {
-        await hooks.connect(hooks.port);
+      await measureStage('wait-control-ready', async () => {
+        await hooks.waitForControlReady(hooks.port);
       });
-      hooks.assertLifecycle('start/connect');
+      hooks.assertLifecycle('start/wait-control-ready');
 
       hooks.onConnectedToManagedGateway();
       logger.info(

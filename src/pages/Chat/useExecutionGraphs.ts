@@ -28,6 +28,7 @@ import {
   snapshotExecutionGraphs,
   snapshotSuppressedToolCardRowKeys,
 } from './exec-graph-cache';
+import { getIsChatScrollDraining } from './chat-scroll-drain';
 import { buildCompletionAnchors, buildMessageKeyIndex } from './exec-graph-index';
 import {
   buildGraphSignaturesByAnchor,
@@ -163,6 +164,7 @@ function isStreamingStateEquivalent(
 }
 
 interface UseExecutionGraphsInput {
+  enabled: boolean;
   messages: RawMessage[];
   currentSessionKey: string;
   agents: ExecutionGraphAgent[];
@@ -175,6 +177,7 @@ interface UseExecutionGraphsInput {
   streamingTools: ToolStatus[];
 }
 export function useExecutionGraphs({
+  enabled,
   messages,
   currentSessionKey,
   agents,
@@ -294,7 +297,7 @@ export function useExecutionGraphs({
       idleHandleRef.current = null;
     }
 
-    if (!isGatewayRunning) {
+    if (!enabled || !isGatewayRunning) {
       return;
     }
 
@@ -647,6 +650,10 @@ export function useExecutionGraphs({
           finalizePipelineMetric('aborted', { reason: 'superseded', graphCount: executionGraphs.length });
           return;
         }
+        if (getIsChatScrollDraining()) {
+          scheduleChunk();
+          return;
+        }
         const batchLimit = firstBatch ? EXECUTION_GRAPH_FIRST_BATCH_SIZE : EXECUTION_GRAPH_BATCH_SIZE;
         firstBatch = false;
         let processedAnchors = 0;
@@ -755,6 +762,7 @@ export function useExecutionGraphs({
   }, [
     agents,
     currentSessionKey,
+    enabled,
     fetchMissingSubagentHistories,
     isGatewayRunning,
     messages,
@@ -768,7 +776,7 @@ export function useExecutionGraphs({
     subagentHistoryRevision,
   ]);
 
-  if (!isGatewayRunning) {
+  if (!enabled || !isGatewayRunning) {
     return {
       executionGraphs: EMPTY_EXECUTION_GRAPHS,
       suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,

@@ -21,6 +21,9 @@
         "showThinking": "显示思考过程",
         "hideThinking": "隐藏思考过程"
     },
+    "liveThread": {
+        "viewFullHistory": "查看历史"
+    },
     "status": {
         "refreshing": "正在刷新...",
         "mutating": "正在应用变更..."

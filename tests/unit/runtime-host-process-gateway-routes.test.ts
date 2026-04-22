@@ -5,6 +5,7 @@ function createDeps() {
   return {
     openclawBridge: {
       gatewayRpc: vi.fn(async () => ({ ok: true })),
+      ensureGatewayReady: vi.fn(async () => undefined),
       chatSend: vi.fn(async () => ({ id: 'msg-1' })),
     },
   };
@@ -78,5 +79,23 @@ describe('runtime-host process gateway routes', () => {
       },
     });
   });
-});
 
+  it('POST /api/gateway/ready 会显式探测控制面 ready', async () => {
+    const deps = createDeps();
+
+    const result = await handleGatewayRoute(
+      'POST',
+      '/api/gateway/ready',
+      { timeoutMs: 8000 },
+      deps,
+    );
+
+    expect(deps.openclawBridge.ensureGatewayReady).toHaveBeenCalledWith(8000);
+    expect(result).toEqual({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+  });
+});

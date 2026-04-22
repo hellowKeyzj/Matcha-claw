@@ -1,6 +1,15 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
 import { toMs } from './store-state-helpers';
 
+export function readSessionsFromState(
+  state: Pick<ChatStoreState, 'sessionsResource'> & { sessions?: ChatSession[] },
+): ChatSession[] {
+  if (Array.isArray(state.sessionsResource.data)) {
+    return state.sessionsResource.data;
+  }
+  return Array.isArray(state.sessions) ? state.sessions : [];
+}
+
 export function resolveSessionThinkingLevelFromList(
   sessions: ChatSession[],
   sessionKey: string,

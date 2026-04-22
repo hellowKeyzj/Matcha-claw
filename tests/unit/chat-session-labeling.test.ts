@@ -10,12 +10,18 @@ function resetChatStoreState() {
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
+    sessionsResource: {
+      status: 'idle',
+      error: null,
+      hasLoadedOnce: false,
+      lastLoadedAt: null,
+    },
     mutating: false,
     error: null,
     sending: false,
     activeRunId: null,
-    streamingText: '',
     streamingMessage: null,
+    streamRuntime: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -200,6 +206,7 @@ describe('chat session labeling', () => {
     expect(rpcMock).toHaveBeenCalledTimes(1);
     expect(rpcMock).toHaveBeenCalledWith('sessions.list', {});
     const state = useChatStore.getState();
+    expect(state.sessionsResource.status).toBe('ready');
     expect(state.sessionLabels['agent:alpha:session-1']).toBe('Alpha 会话标题');
     expect(state.sessionLabels['agent:alpha:session-2']).toBe('Alpha Session 2');
     expect(state.sessionLastActivity['agent:alpha:session-1']).toBe(1_800_000_111_000);
@@ -238,8 +245,30 @@ describe('chat session labeling', () => {
     expect(rpcMock).toHaveBeenCalledTimes(1);
     expect(rpcMock).toHaveBeenCalledWith('sessions.list', {});
     const state = useChatStore.getState();
+    expect(state.sessionsResource.status).toBe('ready');
     expect(state.currentSessionKey).toBe('agent:alpha:session-1');
     expect(state.sessionLabels['agent:alpha:session-1']).toBe('Alpha 会话');
+  });
+
+  it('loadSessions 首次失败后应明确进入 error 状态，便于侧栏独立收口', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'sessions.list') {
+        throw new Error('sessions list failed');
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().loadSessions();
+
+    const state = useChatStore.getState();
+    expect(state.sessionsResource.status).toBe('error');
+    expect(state.sessionsResource.error).toBe('sessions list failed');
+    expect(state.sessionsResource.hasLoadedOnce).toBe(false);
   });
 
   it('loadSessions 不应保留无本地痕迹且后端不存在的 canonical main 会话 key', async () => {

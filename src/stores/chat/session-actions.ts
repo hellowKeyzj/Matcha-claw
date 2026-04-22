@@ -1,15 +1,21 @@
 import { hostApiFetch } from '@/lib/host-api';
+import {
+  createErrorResourceState,
+  createLoadingResourceState,
+  createReadyResourceState,
+} from '@/lib/resource-state';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useGatewayStore } from '../gateway';
 import {
   getCanonicalPrefixFromSessions,
   isTrulyEmptyNonMainSession,
   parseSessionUpdatedAtMs,
+  readSessionsFromState,
   resolveCanonicalPrefixForAgent,
   resolvePreferredSessionKeyForAgent,
   shouldKeepMissingCurrentSession,
 } from './session-helpers';
-import { clearPendingDeltaBatch } from './delta-frame-helpers';
+import { disposeActiveStreamPacer } from './stream-pacer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -161,6 +167,14 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
 
   return {
     loadSessions: async () => {
+      const stateBeforeLoad = get();
+      const previousResource = stateBeforeLoad.sessionsResource;
+      set({
+        sessionsResource: createLoadingResourceState({
+          ...previousResource,
+          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
+        }),
+      });
       try {
         const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
         if (data) {
@@ -240,7 +254,8 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           );
 
           const snapshot = get();
-          const sessionsChanged = !areSessionsEquivalent(snapshot.sessions, sessionsWithCurrent);
+          const currentSessions = readSessionsFromState(snapshot);
+          const sessionsChanged = !areSessionsEquivalent(currentSessions, sessionsWithCurrent);
           const sessionKeyChanged = snapshot.currentSessionKey !== nextSessionKey;
           const discoveredActivityChanged = Object.entries(discoveredActivity).some(
             ([sessionKey, updatedAt]) => snapshot.sessionLastActivity[sessionKey] !== updatedAt,
@@ -248,13 +263,14 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           const discoveredLabelsChanged = Object.entries(discoveredLabels).some(
             ([sessionKey, label]) => snapshot.sessionLabels[sessionKey] !== label,
           );
+          const loadedAt = Date.now();
 
           if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
             set((state) => {
               const next: Partial<ChatStoreState> = {};
 
               if (sessionsChanged) {
-                next.sessions = sessionsWithCurrent;
+                next.sessionsResource = createReadyResourceState(sessionsWithCurrent, loadedAt);
               }
               if (sessionKeyChanged) {
                 next.currentSessionKey = nextSessionKey;
@@ -271,13 +287,31 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
                   ...discoveredLabels,
                 };
               }
+              if (!next.sessionsResource) {
+                next.sessionsResource = createReadyResourceState(state.sessionsResource.data, loadedAt);
+              }
 
               return next;
             });
+          } else {
+            set({
+              sessionsResource: createReadyResourceState(get().sessionsResource.data, loadedAt),
+            });
           }
+          return;
         }
-      } catch {
-        void 0;
+        set({
+          sessionsResource: createReadyResourceState(previousResource.data),
+        });
+      } catch (error) {
+        const stateSnapshot = get();
+        const message = error instanceof Error ? error.message : 'Failed to load sessions';
+        set({
+          sessionsResource: createErrorResourceState({
+            ...stateSnapshot.sessionsResource,
+            hasLoadedOnce: stateSnapshot.sessionsResource.hasLoadedOnce || stateSnapshot.sessionsResource.data.length > 0,
+          }, message),
+        });
       }
     },
 
@@ -289,7 +323,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const state = get();
       const preferredSessionKey = resolvePreferredSessionKeyForAgent(
         normalized,
-        state.sessions,
+        readSessionsFromState(state),
         state.sessionLastActivity,
       );
       if (preferredSessionKey) {
@@ -305,7 +339,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       }
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      clearPendingDeltaBatch();
+      disposeActiveStreamPacer(set, get);
       resetToolSnapshotTxnState();
       const state = get();
       const { currentSessionKey } = state;
@@ -368,7 +402,10 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         sessionReadyByKey: nextSessionReadyByKey,
         sessionRuntimeByKey: nextSessionRuntimeByKey,
         ...(leavingEmpty ? {
-          sessions: stateValue.sessions.filter((session) => session.key !== currentSessionKey),
+          sessionsResource: {
+            ...stateValue.sessionsResource,
+            data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
+          },
           sessionLabels: Object.fromEntries(
             Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
           ),
@@ -385,7 +422,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             clearHistoryPoll();
             return;
           }
-          if (!current.streamingMessage) {
+          if (!current.streamingMessage && !current.streamRuntime) {
             void current.loadHistory({
               sessionKey: current.currentSessionKey,
               mode: 'quiet',
@@ -421,7 +458,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     },
 
     deleteSession: async (key: string) => {
-      clearPendingDeltaBatch();
+      disposeActiveStreamPacer(set, get);
       beginMutating();
       try {
         try {
@@ -435,7 +472,8 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         } catch {
           void 0;
         }
-        const { currentSessionKey, sessions } = get();
+        const { currentSessionKey } = get();
+        const sessions = readSessionsFromState(get());
         const remaining = sessions.filter((session) => session.key !== key);
         clearSessionHistoryFingerprints(historyRuntime, key);
 
@@ -463,7 +501,10 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
                 ...nextRuntimePatch,
               };
             })(),
-            sessions: remaining,
+            sessionsResource: {
+              ...state.sessionsResource,
+              data: remaining,
+            },
             sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
             sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
             sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
@@ -485,7 +526,10 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           }
         } else {
           set((state) => ({
-            sessions: remaining,
+            sessionsResource: {
+              ...state.sessionsResource,
+              data: remaining,
+            },
             sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
             sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
             sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
@@ -503,7 +547,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     newSession: (agentId?: string) => {
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      clearPendingDeltaBatch();
+      disposeActiveStreamPacer(set, get);
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
@@ -511,7 +555,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
       }
       const prefix = resolveCanonicalPrefixForAgent(agentId)
-        ?? getCanonicalPrefixFromSessions(get().sessions, currentSessionKey)
+        ?? getCanonicalPrefixFromSessions(readSessionsFromState(get()), currentSessionKey)
         ?? defaultCanonicalPrefix;
       const newKey = `${prefix}:session-${Date.now()}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
@@ -528,10 +572,15 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           return next;
         })(),
         currentSessionKey: newKey,
-        sessions: [
-          ...(leavingEmpty ? stateValue.sessions.filter((session) => session.key !== currentSessionKey) : stateValue.sessions),
-          newSessionEntry,
-        ],
+        sessionsResource: {
+          ...stateValue.sessionsResource,
+          data: [
+            ...(leavingEmpty
+              ? stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey)
+              : stateValue.sessionsResource.data),
+            newSessionEntry,
+          ],
+        },
         sessionLabels: leavingEmpty
           ? Object.fromEntries(Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey))
           : stateValue.sessionLabels,
@@ -567,7 +616,10 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       if (!isEmptyNonMain) return;
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
       set((stateValue) => ({
-        sessions: stateValue.sessions.filter((session) => session.key !== currentSessionKey),
+        sessionsResource: {
+          ...stateValue.sessionsResource,
+          data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
+        },
         sessionLabels: Object.fromEntries(
           Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
         ),

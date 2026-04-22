@@ -1,16 +1,12 @@
-import type { RefObject } from 'react';
-import type { VirtualItem } from '@tanstack/react-virtual';
+import type { RefObject, TouchEventHandler, WheelEventHandler } from 'react';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
-import type { ChatRow } from '../chat-row-model';
+import type { ChatRenderItem } from '../chat-render-items';
+import type { MarkdownBodyRenderMode } from '../md-pipeline';
 import { WelcomeScreen } from './ChatStates';
 import { ChatRowItem } from './ChatRowItem';
-
-interface ChatVirtualizerLike {
-  getTotalSize: () => number;
-  measureElement: (node: Element | null) => void;
-}
+import type { ChatRow } from '../chat-row-model';
 
 interface ChatListProps {
   messagesViewportRef: RefObject<HTMLDivElement | null>;
@@ -19,11 +15,12 @@ interface ChatListProps {
   showBlockingLoading: boolean;
   onPointerDown: () => void;
   onScroll: () => void;
-  onTouchMove: () => void;
-  onWheel: () => void;
-  virtualizer: ChatVirtualizerLike;
-  virtualItems: VirtualItem[];
-  rows: ChatRow[];
+  onTouchMove: TouchEventHandler<HTMLDivElement>;
+  onWheel: WheelEventHandler<HTMLDivElement>;
+  items: ChatRenderItem[];
+  showHistoryEntry: boolean;
+  onViewHistory: () => void;
+  viewFullHistoryLabel: string;
   showThinking: boolean;
   assistantAgentId: string;
   assistantAgentName: string;
@@ -31,6 +28,8 @@ interface ChatListProps {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
+  bodyRenderModeByRowKey: ReadonlyMap<string, MarkdownBodyRenderMode>;
+  onRequestFullRender: (rowKey: string) => void;
   onJumpToRowKey: (rowKey?: string) => void;
 }
 
@@ -43,9 +42,10 @@ export function ChatList({
   onScroll,
   onTouchMove,
   onWheel,
-  virtualizer,
-  virtualItems,
-  rows,
+  items,
+  showHistoryEntry,
+  onViewHistory,
+  viewFullHistoryLabel,
   showThinking,
   assistantAgentId,
   assistantAgentName,
@@ -53,8 +53,33 @@ export function ChatList({
   assistantAvatarStyle,
   userAvatarImageUrl,
   suppressedToolCardRowKeys,
+  bodyRenderModeByRowKey,
+  onRequestFullRender,
   onJumpToRowKey,
 }: ChatListProps) {
+  const getRowDataAttributes = (row: ChatRow) => {
+    if (row.kind !== 'message') {
+      return {
+        'data-chat-row-key': row.key,
+        'data-chat-row-kind': row.kind,
+      };
+    }
+
+    const messageId = typeof row.message.id === 'string' && row.message.id.trim()
+      ? row.message.id
+      : undefined;
+    const timestamp = typeof row.message.timestamp === 'number'
+      ? String(row.message.timestamp)
+      : undefined;
+
+    return {
+      'data-chat-row-key': row.key,
+      'data-chat-row-kind': row.kind,
+      'data-chat-message-id': messageId,
+      'data-chat-message-timestamp': timestamp,
+    };
+  };
+
   return (
     <div className="relative min-h-0 flex-1">
       <div
@@ -79,38 +104,72 @@ export function ChatList({
           ) : (
             <div
               ref={messageContentRef}
-              className="relative w-full"
-              style={{ height: virtualizer.getTotalSize(), overflowAnchor: 'none' }}
+              className="w-full"
+              style={{ overflowAnchor: 'none' }}
             >
-              {virtualItems.map((virtualItem) => {
-                const row = rows[virtualItem.index];
-                if (!row) {
-                  return null;
-                }
-                return (
-                  <div
-                    key={virtualItem.key}
-                    data-index={virtualItem.index}
-                    data-chat-row-key={row.key}
-                    data-chat-row-kind={row.kind}
-                    ref={virtualizer.measureElement}
-                    className="absolute left-0 top-0 w-full pb-4"
-                    style={{ transform: `translateY(${virtualItem.start}px)` }}
+              {showHistoryEntry ? (
+                <div className="mb-4 flex justify-center">
+                  <button
+                    type="button"
+                    className="text-sm font-medium text-foreground underline decoration-border underline-offset-4 transition-colors hover:text-primary"
+                    onClick={onViewHistory}
                   >
-                    <ChatRowItem
-                      row={row}
-                      showThinking={showThinking}
-                      assistantAgentId={assistantAgentId}
-                      assistantAgentName={assistantAgentName}
-                      assistantAvatarSeed={assistantAvatarSeed}
-                      assistantAvatarStyle={assistantAvatarStyle}
-                      userAvatarImageUrl={userAvatarImageUrl}
-                      suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                      onJumpToRowKey={onJumpToRowKey}
-                    />
-                  </div>
-                );
-              })}
+                    {viewFullHistoryLabel}
+                  </button>
+                </div>
+              ) : null}
+              {items.map((item, index) => (
+                <div
+                  key={item.key}
+                  data-index={index}
+                  className="w-full pb-4"
+                >
+                  {item.kind === 'group' ? (
+                    <div className="space-y-4">
+                      {item.rows.map((row) => (
+                        <div
+                          key={row.key}
+                          {...getRowDataAttributes(row)}
+                          className="w-full"
+                        >
+                          <ChatRowItem
+                            row={row}
+                            showThinking={showThinking}
+                            assistantAgentId={assistantAgentId}
+                            assistantAgentName={assistantAgentName}
+                            assistantAvatarSeed={assistantAvatarSeed}
+                            assistantAvatarStyle={assistantAvatarStyle}
+                            userAvatarImageUrl={userAvatarImageUrl}
+                            suppressedToolCardRowKeys={suppressedToolCardRowKeys}
+                            bodyRenderModeByRowKey={bodyRenderModeByRowKey}
+                            onRequestFullRender={onRequestFullRender}
+                            onJumpToRowKey={onJumpToRowKey}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div
+                      {...getRowDataAttributes(item.row)}
+                      className="w-full"
+                    >
+                      <ChatRowItem
+                        row={item.row}
+                        showThinking={showThinking}
+                        assistantAgentId={assistantAgentId}
+                        assistantAgentName={assistantAgentName}
+                        assistantAvatarSeed={assistantAvatarSeed}
+                        assistantAvatarStyle={assistantAvatarStyle}
+                        userAvatarImageUrl={userAvatarImageUrl}
+                        suppressedToolCardRowKeys={suppressedToolCardRowKeys}
+                        bodyRenderModeByRowKey={bodyRenderModeByRowKey}
+                        onRequestFullRender={onRequestFullRender}
+                        onJumpToRowKey={onJumpToRowKey}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>

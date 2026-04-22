@@ -7,6 +7,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function findWorkspaceRoot(startDir: string): string | null {
+  let currentDir = resolve(startDir);
+  while (true) {
+    if (existsSync(join(currentDir, 'pnpm-workspace.yaml'))) {
+      return currentDir;
+    }
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
+}
+
 export function expandHomePath(value: unknown): string {
   if (typeof value !== 'string') {
     return '';
@@ -28,7 +42,8 @@ export function getOpenClawDirPath(): string {
   if (packagedDir && existsSync(join(packagedDir, 'package.json'))) {
     return resolve(packagedDir);
   }
-  return resolve(join(__dirname, '../../../node_modules/openclaw'));
+  const workspaceRoot = findWorkspaceRoot(__dirname) || process.cwd();
+  return resolve(join(workspaceRoot, 'node_modules/openclaw'));
 }
 
 export function getOpenClawStatus() {
