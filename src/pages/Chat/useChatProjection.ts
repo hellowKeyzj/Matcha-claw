@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RawMessage } from '@/stores/chat';
 import { loadCronFallbackMessages } from '@/stores/chat/history-fetch-helpers';
+import { buildHistoryProjectionMessages } from './chat-projection-model';
 
 const CHAT_HISTORY_LIMIT = 1000;
 
@@ -18,8 +19,16 @@ interface HistoryCacheEntry {
   messages: RawMessage[];
 }
 
+interface HistoryProjectionCacheEntry {
+  sessionKey: string;
+  historyBaseFingerprint: string;
+  liveTailFingerprint: string;
+  mergedMessages: RawMessage[];
+}
+
 interface UseChatProjectionInput {
   currentSessionKey: string;
+  liveMessages: RawMessage[];
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
 }
 
@@ -78,8 +87,10 @@ async function fetchHistoryMessages(
 
 export function useChatProjection({
   currentSessionKey,
+  liveMessages,
   gatewayRpc,
 }: UseChatProjectionInput): UseChatProjectionResult {
+  const emptyMessagesRef = useRef<RawMessage[]>([]);
   const [readProjection, setReadProjection] = useState<ChatReadProjection>('live');
   const [historyState, setHistoryState] = useState<HistoryResourceState>({
     sessionKey: currentSessionKey,
@@ -88,6 +99,7 @@ export function useChatProjection({
     error: null,
   });
   const historyCacheRef = useRef<Map<string, HistoryCacheEntry>>(new Map());
+  const projectionCacheRef = useRef<HistoryProjectionCacheEntry | null>(null);
   const requestIdRef = useRef(0);
 
   useEffect(() => {
@@ -111,37 +123,18 @@ export function useChatProjection({
     ));
   }, [currentSessionKey]);
 
-  const enterHistory = useCallback(() => {
-    setReadProjection('history');
-
-    const cached = historyCacheRef.current.get(currentSessionKey);
-    if (cached) {
-      setHistoryState({
-        sessionKey: currentSessionKey,
-        status: 'ready',
-        messages: cached.messages,
-        error: null,
-      });
-      return;
-    }
-
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
-    setHistoryState({
-      sessionKey: currentSessionKey,
-      status: 'loading',
-      messages: [],
-      error: null,
-    });
-
-    void fetchHistoryMessages(gatewayRpc, currentSessionKey)
+  const refreshHistoryResource = useCallback((
+    sessionKey: string,
+    requestId: number,
+  ) => {
+    void fetchHistoryMessages(gatewayRpc, sessionKey)
       .then((messages) => {
+        historyCacheRef.current.set(sessionKey, { messages });
         if (requestIdRef.current !== requestId) {
           return;
         }
-        historyCacheRef.current.set(currentSessionKey, { messages });
         setHistoryState({
-          sessionKey: currentSessionKey,
+          sessionKey,
           status: 'ready',
           messages,
           error: null,
@@ -151,19 +144,66 @@ export function useChatProjection({
         if (requestIdRef.current !== requestId) {
           return;
         }
-        setHistoryState({
-          sessionKey: currentSessionKey,
-          status: 'error',
-          messages: [],
-          error: toErrorMessage(fetchError),
-        });
+        setHistoryState((previous) => ({
+          sessionKey,
+          status: previous.messages.length > 0 ? 'ready' : 'error',
+          messages: previous.sessionKey === sessionKey ? previous.messages : [],
+          error: previous.messages.length > 0 ? null : toErrorMessage(fetchError),
+        }));
       });
-  }, [currentSessionKey, gatewayRpc]);
+  }, [gatewayRpc]);
+
+  const enterHistory = useCallback(() => {
+    setReadProjection('history');
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+
+    const cached = historyCacheRef.current.get(currentSessionKey);
+    if (cached) {
+      setHistoryState({
+        sessionKey: currentSessionKey,
+        status: 'ready',
+        messages: cached.messages,
+        error: null,
+      });
+      refreshHistoryResource(currentSessionKey, requestId);
+      return;
+    }
+
+    setHistoryState({
+      sessionKey: currentSessionKey,
+      status: 'loading',
+      messages: [],
+      error: null,
+    });
+    refreshHistoryResource(currentSessionKey, requestId);
+  }, [currentSessionKey, refreshHistoryResource]);
 
   const isHistoryProjection = readProjection === 'history';
-  const projectionMessages = isHistoryProjection && historyState.sessionKey === currentSessionKey
-    ? historyState.messages
-    : [];
+  const projectionMessages = useMemo(() => {
+    if (!isHistoryProjection || historyState.sessionKey !== currentSessionKey) {
+      return emptyMessagesRef.current;
+    }
+
+    const projectionResult = buildHistoryProjectionMessages(historyState.messages, liveMessages);
+    const cachedProjection = projectionCacheRef.current;
+    if (
+      cachedProjection
+      && cachedProjection.sessionKey === currentSessionKey
+      && cachedProjection.historyBaseFingerprint === projectionResult.historyBaseFingerprint
+      && cachedProjection.liveTailFingerprint === projectionResult.liveTailFingerprint
+    ) {
+      return cachedProjection.mergedMessages;
+    }
+
+    projectionCacheRef.current = {
+      sessionKey: currentSessionKey,
+      historyBaseFingerprint: projectionResult.historyBaseFingerprint,
+      liveTailFingerprint: projectionResult.liveTailFingerprint,
+      mergedMessages: projectionResult.mergedMessages,
+    };
+    return projectionResult.mergedMessages;
+  }, [currentSessionKey, historyState.messages, historyState.sessionKey, isHistoryProjection, liveMessages]);
 
   return {
     readProjection,

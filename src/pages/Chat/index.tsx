@@ -86,6 +86,7 @@ export function Chat() {
   const streamingTimestamp = lastUserMessageAt != null ? (lastUserMessageAt / 1000) : 0;
   const projection = useChatProjection({
     currentSessionKey,
+    liveMessages: messages,
     gatewayRpc,
   });
   const projectionScopeKey = projection.projectionScopeKey;
