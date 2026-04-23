@@ -277,6 +277,124 @@ describe('chat 历史投影切换', () => {
     expect(screen.queryByRole('button', { name: 'Back to live' })).toBeNull();
   });
 
+  it('history 投影应并入 live 已有但远端历史还没返回的最新消息', async () => {
+    const currentMessages = buildSessionMessages(35);
+    const currentHistoryMessages = currentMessages.slice(0, 32);
+    setupStores({ currentMessages, currentHistoryMessages });
+    renderChat();
+
+    fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('session message 1')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('session message 35')).toBeInTheDocument();
+    expect(screen.getByText('session message 34')).toBeInTheDocument();
+    expect(screen.getByText('session message 33')).toBeInTheDocument();
+  });
+
+  it('history 投影不应混入 runtime streaming 内容', async () => {
+    setupStores();
+    useChatStore.setState({
+      sending: true,
+      streamingMessage: {
+        role: 'assistant',
+        content: 'live partial answer',
+        timestamp: Date.now() / 1000,
+        id: 'streaming-assistant',
+      },
+      streamRuntime: {
+        sessionKey: 'agent:test:main',
+        runId: 'run-current',
+        chunks: ['live partial answer'],
+        rawChars: 19,
+        displayedChars: 19,
+        status: 'streaming',
+        rafId: null,
+      },
+      pendingFinal: true,
+    } as never);
+
+    renderChat();
+
+    fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('session message 1')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('live partial answer')).toBeNull();
+  });
+
+  it('远端历史补齐后，history 投影应最终收敛到完整历史底稿', async () => {
+    const currentMessages = buildSessionMessages(35);
+    let remoteHistoryMessages = currentMessages.slice(0, 32);
+    const rpc = vi.fn(async (method: string, params?: unknown) => {
+      if (method === 'sessions.get') {
+        const key = (params as { key?: string } | undefined)?.key;
+        if (key === 'agent:test:main') {
+          return { messages: remoteHistoryMessages };
+        }
+        if (key === 'agent:another:main') {
+          return { messages: buildSessionMessages(12, 'another history') };
+        }
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      return {};
+    });
+
+    setupStores({ currentMessages, currentHistoryMessages: remoteHistoryMessages });
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc,
+    } as never);
+
+    renderChat();
+
+    fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+    await waitFor(() => {
+      expect(screen.getByText('session message 35')).toBeInTheDocument();
+    });
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:another:main');
+    });
+    await waitFor(() => {
+      expect(screen.getByText('another live message')).toBeInTheDocument();
+    });
+
+    remoteHistoryMessages = currentMessages;
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:test:main');
+    });
+    await waitFor(() => {
+      expect(screen.getByText('session message 35')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+    await waitFor(() => {
+      expect(rpc.mock.calls.filter(([method, params]) => (
+        method === 'sessions.get'
+        && (params as { key?: string } | undefined)?.key === 'agent:test:main'
+      )).length).toBeGreaterThanOrEqual(2);
+    });
+
+    act(() => {
+      useChatStore.setState({
+        messages: currentMessages.slice(0, 32),
+      } as never);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('session message 35')).toBeInTheDocument();
+    });
+    expect(screen.getAllByText('session message 35')).toHaveLength(1);
+  });
+
   it('在 history 里发送时应先回 live 再发送', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     setupStores({ sendMessage });
