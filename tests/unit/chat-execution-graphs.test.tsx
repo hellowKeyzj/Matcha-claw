@@ -82,6 +82,7 @@ const TWO_ANCHOR_MESSAGES: RawMessage[] = [
 
 function buildProps(messages: RawMessage[]) {
   return {
+    enabled: true,
     messages,
     currentSessionKey: 'agent:main:session-1',
     agents: [{ id: 'coder', name: 'Coder' }],

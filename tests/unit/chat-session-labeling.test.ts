@@ -1,12 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    transcript: overrides?.transcript ?? base.transcript,
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+  };
+}
 
 type RpcMock = ReturnType<typeof vi.fn<(method: string, params?: unknown) => Promise<unknown>>>;
 
 function resetChatStoreState() {
   useChatStore.setState({
-    messages: [],
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
@@ -18,20 +33,12 @@ function resetChatStoreState() {
     },
     mutating: false,
     error: null,
-    sending: false,
-    activeRunId: null,
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-    sessions: [],
     currentSessionKey: 'agent:alpha:session-1',
-    sessionLabels: {},
-    sessionLastActivity: {},
+    sessions: [{ key: 'agent:alpha:session-1', displayName: 'agent:alpha:session-1' }],
+    sessionsByKey: {
+      'agent:alpha:session-1': buildSessionRecord(),
+    },
     showThinking: true,
-    thinkingLevel: null,
   } as never);
 }
 
@@ -79,7 +86,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.sessionLabels['agent:alpha:session-1']).toBe('本次讨论聚焦任务拆解与风险清单');
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('本次讨论聚焦任务拆解与风险清单');
   });
 
   it('assistant 模板语句不应污染会话标题', async () => {
@@ -94,7 +101,7 @@ describe('chat session labeling', () => {
     await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.sessionLabels['agent:alpha:session-1']).toBeUndefined();
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBeNull();
   });
 
   it('loadHistory 返回时若会话已切换，应丢弃过期结果', async () => {
@@ -116,7 +123,12 @@ describe('chat session labeling', () => {
     const loadPromise = loadCurrentHistory();
     useChatStore.setState({
       currentSessionKey: 'agent:beta:session-2',
-      messages: [{ role: 'assistant', content: 'beta session content' }],
+      sessionsByKey: {
+        ...useChatStore.getState().sessionsByKey,
+        'agent:beta:session-2': buildSessionRecord({
+          transcript: [{ role: 'assistant', content: 'beta session content' }],
+        }),
+      },
     } as never);
 
     await Promise.resolve();
@@ -127,24 +139,33 @@ describe('chat session labeling', () => {
 
     const state = useChatStore.getState();
     expect(state.currentSessionKey).toBe('agent:beta:session-2');
-    expect(state.messages).toEqual([{ role: 'assistant', content: 'beta session content' }]);
+    expect(state.sessionsByKey['agent:beta:session-2']?.transcript).toEqual([{ role: 'assistant', content: 'beta session content' }]);
   });
 
   it('sending 期间 loadHistory 若已包含同语义用户消息，不应再追加 optimistic 用户消息', async () => {
     const sentAtMs = Date.now();
     resetChatStoreState();
+    const optimisticUserMessage = {
+      role: 'user' as const,
+      id: 'optimistic-user-1',
+      content: '你好',
+      timestamp: sentAtMs / 1000,
+    };
     useChatStore.setState({
       currentSessionKey: 'agent:alpha:session-1',
-      sending: true,
-      lastUserMessageAt: sentAtMs,
-      messages: [
-        {
-          role: 'user',
-          id: 'optimistic-user-1',
-          content: '你好',
-          timestamp: sentAtMs / 1000,
-        },
-      ],
+      sessionsByKey: {
+        'agent:alpha:session-1': buildSessionRecord({
+          runtime: {
+            sending: true,
+            lastUserMessageAt: sentAtMs,
+            pendingUserMessage: {
+              clientMessageId: 'optimistic-user-1',
+              createdAtMs: sentAtMs,
+              message: optimisticUserMessage,
+            },
+          },
+        }),
+      },
     } as never);
 
     const rpcMock = vi.fn(async (method: string) => {
@@ -170,9 +191,8 @@ describe('chat session labeling', () => {
 
     await loadCurrentHistory('active');
 
-    const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
+    const userMessages = useChatStore.getState().sessionsByKey['agent:alpha:session-1']?.transcript.filter((message) => message.role === 'user') ?? [];
     expect(userMessages).toHaveLength(1);
-    expect(userMessages[0]?.id).toBe('optimistic-user-1');
   });
 
   it('loadSessions 仅使用 sessions.list 元数据，不触发 chat.history 扇出请求', async () => {
@@ -207,17 +227,16 @@ describe('chat session labeling', () => {
     expect(rpcMock).toHaveBeenCalledWith('sessions.list', {});
     const state = useChatStore.getState();
     expect(state.sessionsResource.status).toBe('ready');
-    expect(state.sessionLabels['agent:alpha:session-1']).toBe('Alpha 会话标题');
-    expect(state.sessionLabels['agent:alpha:session-2']).toBe('Alpha Session 2');
-    expect(state.sessionLastActivity['agent:alpha:session-1']).toBe(1_800_000_111_000);
-    expect(state.sessionLastActivity['agent:alpha:session-2']).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话标题');
+    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.label).toBe('Alpha Session 2');
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.lastActivityAt).toBe(1_800_000_111_000);
+    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
   });
 
   it('loadSessions 即使改写 currentSessionKey，也不应触发 chat.history', async () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:missing:session-x',
-      messages: [{ role: 'assistant', content: 'stale message' }],
     } as never);
 
     const rpcMock = vi.fn(async (method: string) => {
@@ -247,10 +266,21 @@ describe('chat session labeling', () => {
     const state = useChatStore.getState();
     expect(state.sessionsResource.status).toBe('ready');
     expect(state.currentSessionKey).toBe('agent:alpha:session-1');
-    expect(state.sessionLabels['agent:alpha:session-1']).toBe('Alpha 会话');
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话');
   });
 
   it('loadSessions 首次失败后应明确进入 error 状态，便于侧栏独立收口', async () => {
+    useChatStore.setState({
+      sessions: [],
+      sessionsResource: {
+        status: 'idle',
+        data: [],
+        error: null,
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+    } as never);
+
     const rpcMock = vi.fn(async (method: string) => {
       if (method === 'sessions.list') {
         throw new Error('sessions list failed');
@@ -275,10 +305,8 @@ describe('chat session labeling', () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:feedback:main',
-      messages: [],
       sessions: [],
-      sessionLabels: {},
-      sessionLastActivity: {},
+      sessionsByKey: {},
     } as never);
 
     const rpcMock = vi.fn(async (method: string) => {
@@ -358,6 +386,13 @@ describe('chat session labeling', () => {
         },
       ],
       currentSessionKey: 'agent:alpha:session-1',
+      sessionsByKey: {
+        'agent:alpha:session-1': buildSessionRecord({
+          meta: {
+            thinkingLevel: 'high',
+          },
+        }),
+      },
     } as never);
 
     const rpcMock = vi.fn(async (method: string) => {
@@ -400,13 +435,13 @@ describe('chat session labeling', () => {
     });
     expect(rpcMock).not.toHaveBeenCalledWith('chat.history', expect.anything());
     const state = useChatStore.getState();
-    expect(state.messages).toEqual([
+    expect(state.sessionsByKey['agent:alpha:session-1']?.transcript).toEqual([
       {
         role: 'assistant',
         content: 'history from sessions.get',
         timestamp: 1_800_000_333,
       },
     ]);
-    expect(state.thinkingLevel).toBe('high');
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.thinkingLevel).toBe('high');
   });
 });

@@ -89,16 +89,16 @@ describe('chat session helpers', () => {
     );
     expect(keepMain).toBe(true);
 
-    const keepEmptyDraft = shouldKeepMissingCurrentSession(
+    const dropMissingDraft = shouldKeepMissingCurrentSession(
       'agent:foo:session-1',
       {
         sessionsByKey: {},
       } as never,
       2,
     );
-    expect(keepEmptyDraft).toBe(true);
+    expect(dropMissingDraft).toBe(false);
 
-    const dropDraftWithRuntime = shouldKeepMissingCurrentSession(
+    const keepLocalEmptyDraft = shouldKeepMissingCurrentSession(
       'agent:foo:session-2',
       {
         sessionsByKey: {
@@ -107,7 +107,7 @@ describe('chat session helpers', () => {
       } as never,
       2,
     );
-    expect(dropDraftWithRuntime).toBe(false);
+    expect(keepLocalEmptyDraft).toBe(true);
   });
 
   it('builds task inbox bridge state from current session runtime flags', () => {

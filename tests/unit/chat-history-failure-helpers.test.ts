@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 
 const loadCronFallbackMessagesMock = vi.fn();
 
@@ -36,7 +37,9 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionReadyByKey: {},
+    sessionsByKey: {
+      'agent:main:main': createEmptySessionRecord(),
+    },
     initialLoading: true,
     refreshing: true,
     snapshotReady: false,
@@ -75,7 +78,8 @@ describe('chat history failure helpers', () => {
       set,
       get,
       requestedSessionKey,
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       historyRuntime,
       error: new Error('boom'),
       applyLoadedMessages,
@@ -98,7 +102,8 @@ describe('chat history failure helpers', () => {
       set,
       get,
       requestedSessionKey,
-      quiet: false,
+      mode: 'active',
+      scope: 'foreground',
       historyRuntime,
       error: new Error('load failed'),
       applyLoadedMessages,
@@ -109,7 +114,7 @@ describe('chat history failure helpers', () => {
     expect(state.snapshotReady).toBe(true);
     expect(state.initialLoading).toBe(false);
     expect(state.refreshing).toBe(false);
-    expect(state.sessionReadyByKey[requestedSessionKey]).toBe(true);
+    expect(state.sessionsByKey[requestedSessionKey]?.meta.ready).toBe(true);
     expect(state.error).toBe('load failed');
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyProbeFingerprintBySession.has(requestedSessionKey)).toBe(true);
@@ -117,4 +122,3 @@ describe('chat history failure helpers', () => {
     expect(historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
 });
-
