@@ -190,6 +190,17 @@
 .prose pre {
   margin-top: 0.5em;
   margin-bottom: 0.5em;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.prose pre code {
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
 }
 
 .prose blockquote {
