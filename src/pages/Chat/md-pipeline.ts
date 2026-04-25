@@ -11,6 +11,7 @@ const MARKDOWN_PROCESS_METRIC_MIN_CHARS = 256;
 const MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS = 2;
 const FILEHINT_HOST = 'matchaclaw.local';
 const FILEHINT_PATH_PREFIX = '/__filehint__/';
+export type MarkdownRenderMode = 'streaming' | 'settled';
 
 export interface MarkdownBodyRenderResult {
   fullHtml: string;
@@ -43,27 +44,38 @@ interface MarkdownBodyRenderCacheEntry {
 const markdownBodyRenderCache = new Map<string, MarkdownBodyRenderCacheEntry>();
 let markdownBodyRenderCacheBytes = 0;
 
-const md = new MarkdownIt({
-  html: false,
-  breaks: true,
-  linkify: false,
-});
+function createMarkdownRenderer(mode: MarkdownRenderMode): MarkdownIt {
+  const renderer = new MarkdownIt({
+    html: false,
+    breaks: true,
+    linkify: false,
+  });
 
-const defaultLinkOpenRenderer = md.renderer.rules.link_open
-  ?? ((tokens: Token[], idx: number, options: any, _env: unknown, self: Renderer) => self.renderToken(tokens, idx, options));
+  if (mode === 'streaming') {
+    renderer.disable(['table']);
+  }
 
-md.renderer.rules.link_open = (
-  tokens: Token[],
-  idx: number,
-  options: any,
-  env: unknown,
-  self: Renderer,
-) => {
-  const token = tokens[idx];
-  token.attrSet('target', '_blank');
-  token.attrSet('rel', 'noopener noreferrer');
-  return defaultLinkOpenRenderer(tokens, idx, options, env, self);
-};
+  const defaultLinkOpenRenderer = renderer.renderer.rules.link_open
+    ?? ((tokens: Token[], idx: number, options: any, _env: unknown, self: Renderer) => self.renderToken(tokens, idx, options));
+
+  renderer.renderer.rules.link_open = (
+    tokens: Token[],
+    idx: number,
+    options: any,
+    env: unknown,
+    self: Renderer,
+  ) => {
+    const token = tokens[idx];
+    token.attrSet('target', '_blank');
+    token.attrSet('rel', 'noopener noreferrer');
+    return defaultLinkOpenRenderer(tokens, idx, options, env, self);
+  };
+
+  return renderer;
+}
+
+const settledMd = createMarkdownRenderer('settled');
+const streamingMd = createMarkdownRenderer('streaming');
 
 function nowMonotonicMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -195,8 +207,9 @@ function rememberRenderedMarkdown(cacheKey: string, value: MarkdownBodyRenderRes
   }
 }
 
-function renderFullMarkdownHtml(markdown: string): string {
-  return md.render(rewriteFileHintHrefs(markdown));
+function renderMarkdownHtml(markdown: string, mode: MarkdownRenderMode): string {
+  const renderer = mode === 'streaming' ? streamingMd : settledMd;
+  return renderer.render(rewriteFileHintHrefs(markdown));
 }
 
 const CSV_FENCE_RE = /```csv[^\n\r]*\r?\n([\s\S]*?)\r?\n```/gim;
@@ -308,7 +321,7 @@ function buildNodesFromPlainSegment(markdown: string, keyBase: number): Markdown
     nodes.push({
       kind: 'html',
       key: `html:${keyBase}:${lineIndex}`,
-      html: renderFullMarkdownHtml(htmlChunk),
+      html: renderMarkdownHtml(htmlChunk, 'settled'),
     });
   };
 
@@ -436,11 +449,19 @@ function buildMarkdownRenderNodes(markdown: string): MarkdownRenderNode[] {
     return [{
       kind: 'html',
       key: 'html:0',
-      html: renderFullMarkdownHtml(markdown),
+      html: renderMarkdownHtml(markdown, 'settled'),
     }];
   }
 
   return nodes;
+}
+
+function buildStreamingRenderNodes(markdown: string): MarkdownRenderNode[] {
+  return [{
+    kind: 'html',
+    key: 'html:0',
+    html: renderMarkdownHtml(markdown, 'streaming'),
+  }];
 }
 
 function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
@@ -459,7 +480,7 @@ function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
 
 export function getOrBuildMarkdownBody(
   cacheKey: string,
-  input: { markdown: string },
+  input: { markdown: string; mode?: MarkdownRenderMode },
 ): MarkdownBodyRenderResult {
   const cached = getRenderedMarkdownFromCache(cacheKey);
   if (cached) {
@@ -467,9 +488,12 @@ export function getOrBuildMarkdownBody(
   }
 
   const startedAt = nowMonotonicMs();
+  const renderMode = input.mode ?? 'settled';
   const next = {
-    fullHtml: renderFullMarkdownHtml(input.markdown),
-    nodes: buildMarkdownRenderNodes(input.markdown),
+    fullHtml: renderMarkdownHtml(input.markdown, renderMode),
+    nodes: renderMode === 'streaming'
+      ? buildStreamingRenderNodes(input.markdown)
+      : buildMarkdownRenderNodes(input.markdown),
   } satisfies MarkdownBodyRenderResult;
   rememberRenderedMarkdown(cacheKey, next);
   trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt));

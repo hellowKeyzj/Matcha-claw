@@ -89,14 +89,15 @@ export const ChatMessage = memo(function ChatMessage({
     [attachedFiles],
   );
   const markdownCacheKey = useMemo(() => {
-    return buildMarkdownCacheKey({
+    const baseKey = buildMarkdownCacheKey({
       messageId: typeof message.id === 'string' ? message.id : undefined,
       role: typeof message.role === 'string' ? message.role : undefined,
       timestamp: typeof message.timestamp === 'number' ? message.timestamp : undefined,
       text,
       attachedFiles,
     });
-  }, [attachedFiles, message.id, message.role, message.timestamp, text]);
+    return `${baseKey}|${isStreaming ? 'streaming' : 'settled'}`;
+  }, [attachedFiles, isStreaming, message.id, message.role, message.timestamp, text]);
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
 
   // Never render tool result messages in chat UI
@@ -478,8 +479,9 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   const markdownBody = useMemo(
     () => getOrBuildMarkdownBody(markdownCacheKey, {
       markdown: markdownContent,
+      mode: isStreaming ? 'streaming' : 'settled',
     }),
-    [markdownCacheKey, markdownContent],
+    [isStreaming, markdownCacheKey, markdownContent],
   );
   const renderNodes = markdownBody.nodes;
 
