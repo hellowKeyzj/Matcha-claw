@@ -335,6 +335,9 @@ pnpm package:mac          # 为 macOS 打包
 pnpm package:win          # 为 Windows 打包
 pnpm package:linux        # 为 Linux 打包
 ```
+
+发布流程里，GitHub Actions 会自动下载并打包 MiniLM 本地模型。如果你在本地执行 `pnpm build` 或 `pnpm package*`，又希望安装包里包含 `memory-lancedb-pro` 的离线 `local-minilm` 资源，请先运行 `pnpm run download:minilm-model`。
+
 ### 技术栈
 
 | 层级 | 技术 |

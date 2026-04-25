@@ -90,6 +90,9 @@ jobs:
       - name: Validate OpenClaw plugin source inputs
         run: pnpm run check:openclaw-plugin-inputs
 
+      - name: Download bundled MiniLM model
+        run: pnpm run download:minilm-model
+
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
         run: pnpm run uv:download:mac

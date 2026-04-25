@@ -335,6 +335,9 @@ pnpm package:mac          # Package for macOS
 pnpm package:win          # Package for Windows
 pnpm package:linux        # Package for Linux
 ```
+
+For release packaging, GitHub Actions downloads the bundled MiniLM model automatically. If you package locally and want the installer to include `memory-lancedb-pro`'s offline `local-minilm` assets, run `pnpm run download:minilm-model` before `pnpm build` or `pnpm package*`.
+
 ### Tech Stack
 
 | Layer | Technology |
