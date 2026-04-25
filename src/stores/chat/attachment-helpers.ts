@@ -1,7 +1,7 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { isToolResultRole } from './event-helpers';
 import { throwIfHistoryLoadAborted } from './history-abort';
-import { getMessageText, isToolOnlyMessage } from './message-helpers';
+import { getMessageText } from './message-helpers';
 import type { AttachedFileMeta, ChatSendAttachment, ContentBlock, RawMessage } from './types';
 
 // ── Local image cache ─────────────────────────────────────────
@@ -58,83 +58,6 @@ export function extractMediaRefs(text: string): Array<{ filePath: string; mimeTy
   let match;
   while ((match = regex.exec(text)) !== null) {
     refs.push({ filePath: match[1], mimeType: match[2] });
-  }
-  return refs;
-}
-
-/** Map common file extensions to MIME types */
-function mimeFromExtension(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase() || '';
-  const map: Record<string, string> = {
-    // Images
-    'png': 'image/png',
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'gif': 'image/gif',
-    'webp': 'image/webp',
-    'bmp': 'image/bmp',
-    'avif': 'image/avif',
-    'svg': 'image/svg+xml',
-    // Documents
-    'pdf': 'application/pdf',
-    'doc': 'application/msword',
-    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'xls': 'application/vnd.ms-excel',
-    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'ppt': 'application/vnd.ms-powerpoint',
-    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    'txt': 'text/plain',
-    'csv': 'text/csv',
-    'md': 'text/markdown',
-    'rtf': 'application/rtf',
-    'epub': 'application/epub+zip',
-    // Archives
-    'zip': 'application/zip',
-    'tar': 'application/x-tar',
-    'gz': 'application/gzip',
-    'rar': 'application/vnd.rar',
-    '7z': 'application/x-7z-compressed',
-    // Audio
-    'mp3': 'audio/mpeg',
-    'wav': 'audio/wav',
-    'ogg': 'audio/ogg',
-    'aac': 'audio/aac',
-    'flac': 'audio/flac',
-    'm4a': 'audio/mp4',
-    // Video
-    'mp4': 'video/mp4',
-    'mov': 'video/quicktime',
-    'avi': 'video/x-msvideo',
-    'mkv': 'video/x-matroska',
-    'webm': 'video/webm',
-    'm4v': 'video/mp4',
-  };
-  return map[ext] || 'application/octet-stream';
-}
-
-/**
- * Extract raw file paths from message text.
- * Detects absolute paths (Unix: / or ~/, Windows: C:\ etc.) ending with common file extensions.
- * Handles both image and non-image files, consistent with channel push message behavior.
- */
-export function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
-  const refs: Array<{ filePath: string; mimeType: string }> = [];
-  const seen = new Set<string>();
-  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
-  // Unix absolute paths (/... or ~/...) — lookbehind rejects mid-token slashes
-  // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
-  const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  // Windows absolute paths (C:\... D:\...) — lookbehind rejects drive letter glued to a word
-  const winRegex = new RegExp(`(?<![\\w])([A-Za-z]:\\\\[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  for (const regex of [unixRegex, winRegex]) {
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      const p = match[1];
-      if (p && !seen.has(p)) {
-        seen.add(p);
-        refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
-      }
-    }
   }
   return refs;
 }
@@ -268,14 +191,8 @@ export function collectToolResultPendingFiles(
   }
 
   const mediaRefs = extractMediaRefs(text);
-  const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
   for (const ref of mediaRefs) {
     toolFiles.push(makeAttachedFile(ref));
-  }
-  for (const ref of extractRawFilePaths(text)) {
-    if (!mediaRefPaths.has(ref.filePath)) {
-      toolFiles.push(makeAttachedFile(ref));
-    }
   }
 
   return toolFiles;
@@ -343,15 +260,8 @@ export function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] 
       const text = getMessageText(msg.content);
       if (text) {
         const mediaRefs = extractMediaRefs(text);
-        const mediaRefPaths = new Set(mediaRefs.map((r) => r.filePath));
         for (const ref of mediaRefs) {
           pending.push(makeAttachedFile(ref));
-        }
-        // 3. Raw file paths in tool result text (documents, audio, video, etc.)
-        for (const ref of extractRawFilePaths(text)) {
-          if (!mediaRefPaths.has(ref.filePath)) {
-            pending.push(makeAttachedFile(ref));
-          }
         }
       }
 
@@ -421,15 +331,8 @@ export async function enrichWithToolResultFilesIncremental(
       const text = getMessageText(msg.content);
       if (text) {
         const mediaRefs = extractMediaRefs(text);
-        const mediaRefPaths = new Set(mediaRefs.map((r) => r.filePath));
         for (const ref of mediaRefs) {
           pending.push(makeAttachedFile(ref));
-        }
-        // 3. Raw file paths in tool result text (documents, audio, video, etc.)
-        for (const ref of extractRawFilePaths(text)) {
-          if (!mediaRefPaths.has(ref.filePath)) {
-            pending.push(makeAttachedFile(ref));
-          }
         }
       }
     } else if (msg.role === 'assistant' && pending.length > 0) {
@@ -458,52 +361,16 @@ export async function enrichWithToolResultFilesIncremental(
   return enriched;
 }
 
-function enrichMessageWithCachedImages(
-  messages: RawMessage[],
-  idx: number,
-  msg: RawMessage,
-): RawMessage {
+function enrichMessageWithCachedImages(msg: RawMessage): RawMessage {
   // Only process user and assistant messages; skip if already enriched
   if ((msg.role !== 'user' && msg.role !== 'assistant') || msg._attachedFiles) return msg;
   const text = getMessageText(msg.content);
 
   // Path 1: [media attached: path (mime) | path] — guaranteed format from attachment button
   const mediaRefs = extractMediaRefs(text);
-  const mediaRefPaths = new Set(mediaRefs.map((r) => r.filePath));
+  if (mediaRefs.length === 0) return msg;
 
-  // Path 2: Raw file paths.
-  // For assistant messages: scan own text AND the nearest preceding user message text,
-  // but only for non-tool-only assistant messages (i.e. the final answer turn).
-  // Tool-only messages (thinking + tool calls) should not show file previews — those
-  // belong to the final answer message that comes after the tool results.
-  // User messages never get raw-path previews so the image is not shown twice.
-  let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
-  if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
-    // Own text
-    rawRefs = extractRawFilePaths(text).filter((r) => !mediaRefPaths.has(r.filePath));
-
-    // Nearest preceding user message text (look back up to 5 messages)
-    const seenPaths = new Set(rawRefs.map((r) => r.filePath));
-    for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
-      const prev = messages[i];
-      if (!prev) break;
-      if (prev.role === 'user') {
-        const prevText = getMessageText(prev.content);
-        for (const ref of extractRawFilePaths(prevText)) {
-          if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
-            seenPaths.add(ref.filePath);
-            rawRefs.push(ref);
-          }
-        }
-        break; // only use the nearest user message
-      }
-    }
-  }
-
-  const allRefs = [...mediaRefs, ...rawRefs];
-  if (allRefs.length === 0) return msg;
-
-  const files: AttachedFileMeta[] = allRefs.map((ref) => {
+  const files: AttachedFileMeta[] = mediaRefs.map((ref) => {
     const cached = imageCache.get(ref.filePath);
     if (cached) return { ...cached, filePath: ref.filePath };
     const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
@@ -513,7 +380,7 @@ function enrichMessageWithCachedImages(
 }
 
 export function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
-  return messages.map((msg, idx) => enrichMessageWithCachedImages(messages, idx, msg));
+  return messages.map((msg) => enrichMessageWithCachedImages(msg));
 }
 
 export async function enrichWithCachedImagesIncremental(
@@ -530,7 +397,7 @@ export async function enrichWithCachedImagesIncremental(
   const enriched = new Array<RawMessage>(messages.length);
   for (let index = 0; index < messages.length; index += 1) {
     throwIfAborted(abortSignal);
-    enriched[index] = enrichMessageWithCachedImages(messages, index, messages[index]);
+    enriched[index] = enrichMessageWithCachedImages(messages[index]);
     if ((index + 1) % normalizedChunkSize === 0) {
       throwIfAborted(abortSignal);
       await yieldToEventLoop();
@@ -717,5 +584,3 @@ export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {
   }
   saveImageCache(imageCache);
 }
-
-
