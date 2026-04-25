@@ -14,6 +14,7 @@ import {
 import { subscribeChatConversationEvents } from './chat/transport-adapter';
 import { useChatStore } from './chat';
 import { readSessionsFromState } from './chat/session-helpers';
+import { getSessionRuntime } from './chat/store-state-helpers';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
 
@@ -218,7 +219,12 @@ function maybeRefreshChatHistoryFromRuntimeEvent(
     return;
   }
   const matchesCurrentSession = event.sessionKey == null || event.sessionKey === state.currentSessionKey;
-  const matchesActiveRun = event.runId != null && state.activeRunId != null && event.runId === state.activeRunId;
+  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
+  const matchesActiveRun = (
+    event.runId != null
+    && currentRuntime.activeRunId != null
+    && event.runId === currentRuntime.activeRunId
+  );
   if (!matchesCurrentSession && !matchesActiveRun && event.sessionKey != null) {
     return;
   }
