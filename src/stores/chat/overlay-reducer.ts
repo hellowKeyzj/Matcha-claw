@@ -88,6 +88,7 @@ interface RuntimeStreamDeltaQueuedAction {
   type: 'stream_delta_queued';
   runId: string;
   text: string;
+  textMode: 'append' | 'snapshot' | 'keep';
   messageId?: string | null;
   message?: RawMessage | null;
   updates?: ToolStatus[];
@@ -175,11 +176,55 @@ function resolveOverlayMessageId(runId: string, messageId?: string | null, curre
   return candidate || `stream:${runId}`;
 }
 
+function appendMonotonicText(currentText: string, incomingText: string): string {
+  if (!incomingText) {
+    return currentText;
+  }
+  if (!currentText) {
+    return incomingText;
+  }
+  if (incomingText.startsWith(currentText)) {
+    return incomingText;
+  }
+  if (currentText.startsWith(incomingText)) {
+    return currentText;
+  }
+
+  const maxOverlap = Math.min(currentText.length, incomingText.length);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (currentText.endsWith(incomingText.slice(0, size))) {
+      return `${currentText}${incomingText.slice(size)}`;
+    }
+  }
+
+  return `${currentText}${incomingText}`;
+}
+
+function resolveNextOverlayTargetText(
+  currentOverlay: ChatSessionRuntimeState['assistantOverlay'],
+  input: Pick<RuntimeStreamDeltaQueuedAction, 'text' | 'textMode'>,
+): string {
+  const currentTargetText = currentOverlay?.targetText ?? '';
+  switch (input.textMode) {
+    case 'keep':
+      return currentTargetText;
+    case 'snapshot':
+      return input.text.length >= currentTargetText.length
+        ? input.text
+        : currentTargetText;
+    case 'append':
+      return appendMonotonicText(currentTargetText, input.text);
+    default:
+      return currentTargetText;
+  }
+}
+
 function upsertAssistantOverlay(
   state: RuntimeStateLike,
   input: {
     runId: string;
     text: string;
+    textMode: RuntimeStreamDeltaQueuedAction['textMode'];
     messageId?: string | null;
     message?: RawMessage | null;
     status: StreamRuntimeStatus;
@@ -196,7 +241,10 @@ function upsertAssistantOverlay(
     input.messageId,
     currentOverlay?.messageId ?? null,
   );
-  const targetText = input.text;
+  const targetText = resolveNextOverlayTargetText(currentOverlay, input);
+  if (!currentOverlay && targetText.length === 0) {
+    return null;
+  }
   const committedText = currentOverlay
     ? currentOverlay.committedText.slice(0, targetText.length)
     : '';
@@ -414,6 +462,7 @@ export function reduceRuntimeOverlay(
       const nextOverlay = upsertAssistantOverlay(state, {
         runId: normalizedRunId || (state.activeRunId ?? ''),
         text: action.text,
+        textMode: action.textMode,
         messageId: action.messageId,
         message: action.message,
         status: 'streaming',

@@ -1,116 +1,71 @@
 import { describe, expect, it } from 'vitest';
 import { buildChatAutoFollowSignal } from '@/pages/Chat/chat-auto-follow';
-import type { RawMessage } from '@/stores/chat';
+import type { ChatRow } from '@/pages/Chat/chat-row-model';
+
+function buildMessageRow(id: string, role: 'user' | 'assistant', content: string, timestamp = 1): ChatRow {
+  return {
+    key: `session:agent:test:main|id:${id}`,
+    kind: 'message',
+    message: {
+      id,
+      role,
+      content,
+      timestamp,
+    },
+  };
+}
 
 describe('chat auto follow signal', () => {
-  const sessionKey = 'agent:test:main';
-
-  it('keeps the same signal when assistant handoff keeps the same committed tail message', () => {
-    const streamingMessages: RawMessage[] = [
-      {
-        id: 'user-1',
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-      },
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'first chunk',
-        timestamp: 2,
-      },
+  it('keeps the same signal when assistant handoff keeps the same committed tail row', () => {
+    const streamingRows: ChatRow[] = [
+      buildMessageRow('user-1', 'user', 'hello'),
+      buildMessageRow('assistant-1', 'assistant', 'first chunk', 2),
     ];
+    const finalRows: ChatRow[] = [...streamingRows];
 
-    const finalMessages: RawMessage[] = [...streamingMessages];
-
-    expect(buildChatAutoFollowSignal(sessionKey, finalMessages)).toBe(
-      buildChatAutoFollowSignal(sessionKey, streamingMessages),
+    expect(buildChatAutoFollowSignal(finalRows)).toBe(
+      buildChatAutoFollowSignal(streamingRows),
     );
   });
 
-  it('keeps the same signal when the last assistant text grows within the same committed message', () => {
-    const previousMessages: RawMessage[] = [
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'hello',
-        timestamp: 1,
-      },
-    ];
-    const nextMessages: RawMessage[] = [
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'hello world',
-        timestamp: 1,
-      },
-    ];
+  it('keeps the same signal when the same tail message only grows in text length', () => {
+    const previousRows = [buildMessageRow('assistant-1', 'assistant', 'hello')];
+    const nextRows = [buildMessageRow('assistant-1', 'assistant', 'hello world')];
 
-    expect(buildChatAutoFollowSignal(sessionKey, nextMessages)).toBe(
-      buildChatAutoFollowSignal(sessionKey, previousMessages),
+    expect(buildChatAutoFollowSignal(nextRows)).toBe(
+      buildChatAutoFollowSignal(previousRows),
     );
   });
 
-  it('changes the signal when the last committed message transitions from empty to non-empty content', () => {
-    const previousMessages: RawMessage[] = [
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: '',
-        timestamp: 1,
-      },
-    ];
-    const nextMessages: RawMessage[] = [
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'hello world',
-        timestamp: 1,
-      },
-    ];
+  it('changes the signal when the tail message transitions from empty to non-empty', () => {
+    const previousRows = [buildMessageRow('assistant-1', 'assistant', '')];
+    const nextRows = [buildMessageRow('assistant-1', 'assistant', 'hello world')];
 
-    expect(buildChatAutoFollowSignal(sessionKey, nextMessages)).not.toBe(
-      buildChatAutoFollowSignal(sessionKey, previousMessages),
+    expect(buildChatAutoFollowSignal(nextRows)).not.toBe(
+      buildChatAutoFollowSignal(previousRows),
     );
   });
 
-  it('changes the signal when a new committed message is appended', () => {
-    const previousMessages: RawMessage[] = [
-      {
-        id: 'user-1',
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-      },
+  it('changes the signal when a new tail row is appended', () => {
+    const previousRows: ChatRow[] = [
+      buildMessageRow('user-1', 'user', 'hello'),
     ];
-    const nextMessages: RawMessage[] = [
-      ...previousMessages,
-      {
-        id: 'assistant-1',
-        role: 'assistant',
-        content: 'world',
-        timestamp: 2,
-      },
+    const nextRows: ChatRow[] = [
+      ...previousRows,
+      buildMessageRow('assistant-1', 'assistant', 'world', 2),
     ];
 
-    expect(buildChatAutoFollowSignal(sessionKey, nextMessages)).not.toBe(
-      buildChatAutoFollowSignal(sessionKey, previousMessages),
+    expect(buildChatAutoFollowSignal(nextRows)).not.toBe(
+      buildChatAutoFollowSignal(previousRows),
     );
   });
 
-  it('ignores runtime-only tail churn before the committed transcript changes', () => {
-    const previousMessages: RawMessage[] = [
-      {
-        id: 'user-1',
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-      },
-    ];
-    const nextMessages: RawMessage[] = [...previousMessages];
+  it('changes the signal when the tail row key changes even if row count stays the same', () => {
+    const previousRows = [buildMessageRow('assistant-1', 'assistant', 'hello')];
+    const nextRows = [buildMessageRow('assistant-2', 'assistant', 'hello')];
 
-    expect(buildChatAutoFollowSignal(sessionKey, nextMessages)).toBe(
-      buildChatAutoFollowSignal(sessionKey, previousMessages),
+    expect(buildChatAutoFollowSignal(nextRows)).not.toBe(
+      buildChatAutoFollowSignal(previousRows),
     );
   });
 });

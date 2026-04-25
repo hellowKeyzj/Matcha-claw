@@ -7,6 +7,7 @@ import {
   loadMissingPreviews,
 } from './attachment-helpers';
 import {
+  reconcileCommittedCurrentTurnWithHistory,
   reconcileLatestAssistantInHistory,
   reconcilePendingUserWithHistory,
 } from './finalize-helpers';
@@ -162,6 +163,12 @@ export function createApplyLoadedMessagesPipeline(
       }
       if (runtimeState.currentSessionKey === requestedSessionKey) {
         finalMessages = reconcileLatestAssistantInHistory({
+          historyMessages: finalMessages,
+          currentMessages: getSessionTranscript(runtimeState, requestedSessionKey),
+        });
+      }
+      if (runtimeState.currentSessionKey === requestedSessionKey) {
+        finalMessages = reconcileCommittedCurrentTurnWithHistory({
           historyMessages: finalMessages,
           currentMessages: getSessionTranscript(runtimeState, requestedSessionKey),
         });

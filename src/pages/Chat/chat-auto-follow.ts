@@ -1,35 +1,27 @@
-import type { RawMessage } from '@/stores/chat';
-import { isRenderableChatMessage, resolveMessageRowKey } from './chat-row-model';
+import type { ChatRow } from './chat-row-model';
 import { extractText } from './message-utils';
 
-function resolveLastMessageSignalPart(
-  sessionKey: string,
-  message: RawMessage | null,
-  renderableIndex: number,
+function resolveTailRowSignalPart(
+  row: ChatRow | null,
 ): string {
-  if (!message) {
+  if (!row) {
     return '0||';
   }
-
-  const hasContent = extractText(message).trim().length > 0 ? '1' : '0';
-  return [
-    resolveMessageRowKey(sessionKey, message, renderableIndex),
-    typeof message.id === 'string' ? message.id : '',
-    hasContent,
-  ].join('|');
+  if (row.kind !== 'message') {
+    return [row.key, row.kind, '1'].join('|');
+  }
+  const hasContent = extractText(row.message).trim().length > 0 ? '1' : '0';
+  return [row.key, typeof row.message.id === 'string' ? row.message.id : '', hasContent].join('|');
 }
 
-export function buildChatAutoFollowSignal(sessionKey: string, messages: RawMessage[]): string {
-  let messageCount = 0;
-  let lastMessage: RawMessage | null = null;
+export function buildChatAutoFollowSignal(chatRows: ChatRow[]): string {
+  let rowCount = 0;
+  let tailRow: ChatRow | null = null;
 
-  for (const message of messages) {
-    if (!isRenderableChatMessage(message)) {
-      continue;
-    }
-    messageCount += 1;
-    lastMessage = message;
+  for (const row of chatRows) {
+    rowCount += 1;
+    tailRow = row;
   }
 
-  return `${messageCount}|${resolveLastMessageSignalPart(sessionKey, lastMessage, Math.max(0, messageCount - 1))}`;
+  return `${rowCount}|${resolveTailRowSignalPart(tailRow)}`;
 }

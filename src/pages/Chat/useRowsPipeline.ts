@@ -4,10 +4,6 @@ import { scheduleIdleReady } from '@/lib/idle-ready';
 import { projectLiveThreadMessages } from './live-thread-projection';
 import { useExecutionGraphs } from './useExecutionGraphs';
 import { useChatRows } from './useRows';
-import {
-  countRenderableLiveMessages,
-  pickTailMessagesForFirstPaint,
-} from '@/stores/chat/history-first-paint-budget';
 
 const EMPTY_MESSAGES: RawMessage[] = [];
 
@@ -78,66 +74,6 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     streamingTimestamp,
     sessionPipelineCostRef,
   } = input;
-  const [liveProjectionState, setLiveProjectionState] = useState(() => ({
-    scopeKey: projectionScopeKey,
-    ready: isHistoryProjection,
-  }));
-  const liveFirstPaintMessages = useMemo(
-    () => (isHistoryProjection ? EMPTY_MESSAGES : pickTailMessagesForFirstPaint(canonicalMessages)),
-    [canonicalMessages, isHistoryProjection, projectionScopeKey],
-  );
-  const shouldUseLiveFirstPaint = !isHistoryProjection && (
-    liveProjectionState.scopeKey !== projectionScopeKey
-    || !liveProjectionState.ready
-  );
-
-  useEffect(() => {
-    if (isHistoryProjection) {
-      setLiveProjectionState((current) => (
-        current.scopeKey === projectionScopeKey && current.ready
-          ? current
-          : { scopeKey: projectionScopeKey, ready: true }
-      ));
-      return;
-    }
-
-    setLiveProjectionState((current) => (
-      current.scopeKey === projectionScopeKey && !current.ready
-        ? current
-        : { scopeKey: projectionScopeKey, ready: false }
-    ));
-
-    let cancelled = false;
-    const handle = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
-      ? window.requestAnimationFrame(() => {
-        if (!cancelled) {
-          setLiveProjectionState((current) => (
-            current.scopeKey === projectionScopeKey
-              ? { scopeKey: projectionScopeKey, ready: true }
-              : current
-          ));
-        }
-      })
-      : setTimeout(() => {
-        if (!cancelled) {
-          setLiveProjectionState((current) => (
-            current.scopeKey === projectionScopeKey
-              ? { scopeKey: projectionScopeKey, ready: true }
-              : current
-          ));
-        }
-      }, 16);
-
-    return () => {
-      cancelled = true;
-      if (typeof handle === 'number' && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
-        window.cancelAnimationFrame(handle);
-        return;
-      }
-      clearTimeout(handle as ReturnType<typeof setTimeout>);
-    };
-  }, [isHistoryProjection, projectionScopeKey]);
-
   const projectionResult = useMemo(() => {
     const projectionStartedAt = nowMs();
     const liveThreadProjection = (() => {
@@ -147,24 +83,7 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
           hiddenRenderableCount: 0,
         };
       }
-      if (shouldUseLiveFirstPaint) {
-        return {
-          messages: liveFirstPaintMessages,
-          hiddenRenderableCount: Math.max(
-            0,
-            countRenderableLiveMessages(canonicalMessages) - countRenderableLiveMessages(liveFirstPaintMessages),
-          ),
-        };
-      }
-      const displayedProjection = projectLiveThreadMessages(canonicalMessages);
-      const hiddenRenderableCount = Math.max(
-        0,
-        countRenderableLiveMessages(canonicalMessages) - countRenderableLiveMessages(displayedProjection.messages),
-      );
-      return {
-        messages: displayedProjection.messages,
-        hiddenRenderableCount,
-      };
+      return projectLiveThreadMessages(canonicalMessages);
     })();
     return {
       liveThreadProjection,
@@ -173,9 +92,7 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
   }, [
     canonicalMessages,
     isHistoryProjection,
-    liveFirstPaintMessages,
     projectionMessages,
-    shouldUseLiveFirstPaint,
   ]);
   const rowSourceMessages = projectionResult.liveThreadProjection.messages;
   const rowSliceCostMs = projectionResult.rowSliceCostMs;

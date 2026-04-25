@@ -534,6 +534,93 @@ describe('chat stream finalization identity', () => {
     expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage).toBeNull();
   });
 
+  it('commits pending user and assistant final together so the current turn never disappears', () => {
+    const sessionKey = 'agent:main:main';
+    const sentAtMs = Date.now();
+    let state = {
+      currentSessionKey: sessionKey,
+      sessionsByKey: {
+        [sessionKey]: createSessionRecord({
+          transcript: [{
+            id: 'assistant-prev-1',
+            role: 'assistant',
+            content: 'previous',
+            timestamp: (sentAtMs - 1000) / 1000,
+          }],
+          runtime: {
+            sending: true,
+            activeRunId: 'run-1',
+            runPhase: 'streaming',
+            lastUserMessageAt: sentAtMs,
+            pendingUserMessage: {
+              clientMessageId: 'user-local-1',
+              createdAtMs: sentAtMs,
+              message: {
+                id: 'user-local-1',
+                role: 'user',
+                content: 'hello world',
+                timestamp: sentAtMs / 1000,
+              },
+            },
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-1',
+              messageId: 'assistant-local-1',
+              sourceMessage: {
+                id: 'assistant-local-1',
+                role: 'assistant',
+                content: 'hello',
+                timestamp: sentAtMs / 1000,
+              },
+              committedText: 'hello',
+              targetText: 'hello',
+              status: 'streaming',
+            }),
+          },
+        }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    handleStoreFinalEvent({
+      set,
+      get,
+      event: {
+        message: {
+          id: 'gateway-final-1',
+          role: 'assistant',
+          content: 'hello world',
+        },
+      },
+      resolvedState: 'final',
+      currentSessionKey: sessionKey,
+      eventRunId: 'run-1',
+      snapshot: {
+        reset: () => {},
+        armIfIdle: () => {},
+        consume: () => null,
+      },
+      onMaybeTrackFirstTokenFinal: () => {},
+      onBeginFinalToHistory: () => {},
+    });
+
+    expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage).toBeNull();
+    expect(state.sessionsByKey[sessionKey]?.transcript.map((message) => message.id)).toEqual([
+      'assistant-prev-1',
+      'user-local-1',
+      'assistant-local-1',
+    ]);
+  });
+
   it('does not let an unbound final event terminate the active run', () => {
     const sessionKey = 'agent:main:main';
     const sentAtMs = Date.now();
@@ -769,5 +856,163 @@ describe('chat stream finalization identity', () => {
     expect(state.sessionsByKey[requestedSessionKey]?.runtime.runPhase).toBe('done');
     expect(state.sessionsByKey[requestedSessionKey]?.transcript).toHaveLength(1);
     expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?.id).toBe('assistant-final-1');
+  });
+
+  it('preserves the committed local user turn when history final arrives before canonical user writeback', async () => {
+    const requestedSessionKey = 'agent:main:main';
+    const historyRuntime = createHistoryRuntimeHarness();
+    let state = {
+      currentSessionKey: requestedSessionKey,
+      sessionsByKey: {
+        [requestedSessionKey]: createSessionRecord({
+          transcript: [
+            {
+              id: 'user-local-1',
+              role: 'user',
+              content: 'hello world',
+              timestamp: 1,
+              _attachedFiles: [{
+                fileName: 'a.png',
+                mimeType: 'image/png',
+                fileSize: 1,
+                preview: 'data:image/png;base64,abc',
+              }],
+            },
+            {
+              id: 'assistant-local-1',
+              role: 'assistant',
+              content: 'done',
+              timestamp: 2,
+            },
+          ],
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            pendingFinal: false,
+            runPhase: 'done',
+          },
+        }),
+      },
+      pendingApprovalsBySession: {},
+      initialLoading: false,
+      refreshing: false,
+      snapshotReady: true,
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set,
+      get,
+      historyRuntime,
+      requestedSessionKey,
+      mode: 'active',
+      scope: 'background',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+      optimisticUserReconcileWindowMs: 15_000,
+    });
+
+    await applyLoadedMessages([
+      {
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'done',
+        timestamp: 2,
+      },
+    ], null);
+
+    expect(state.sessionsByKey[requestedSessionKey]?.transcript.map((message) => message.id)).toEqual([
+      'user-local-1',
+      'assistant-local-1',
+    ]);
+    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?._attachedFiles).toEqual([{
+      fileName: 'a.png',
+      mimeType: 'image/png',
+      fileSize: 1,
+      preview: 'data:image/png;base64,abc',
+    }]);
+  });
+
+  it('preserves the committed local user id when canonical history user arrives later', async () => {
+    const requestedSessionKey = 'agent:main:main';
+    const historyRuntime = createHistoryRuntimeHarness();
+    let state = {
+      currentSessionKey: requestedSessionKey,
+      sessionsByKey: {
+        [requestedSessionKey]: createSessionRecord({
+          transcript: [
+            {
+              id: 'user-local-1',
+              role: 'user',
+              content: 'hello world',
+              timestamp: 1,
+            },
+            {
+              id: 'assistant-local-1',
+              role: 'assistant',
+              content: 'done',
+              timestamp: 2,
+            },
+          ],
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            pendingFinal: false,
+            runPhase: 'done',
+          },
+        }),
+      },
+      pendingApprovalsBySession: {},
+      initialLoading: false,
+      refreshing: false,
+      snapshotReady: true,
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set,
+      get,
+      historyRuntime,
+      requestedSessionKey,
+      mode: 'active',
+      scope: 'background',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+      optimisticUserReconcileWindowMs: 15_000,
+    });
+
+    await applyLoadedMessages([
+      {
+        id: 'gateway-user-1',
+        role: 'user',
+        content: 'hello world [message_id: user-local-1]',
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'done',
+        timestamp: 2,
+      },
+    ], null);
+
+    expect(state.sessionsByKey[requestedSessionKey]?.transcript.map((message) => message.id)).toEqual([
+      'user-local-1',
+      'assistant-local-1',
+    ]);
   });
 });

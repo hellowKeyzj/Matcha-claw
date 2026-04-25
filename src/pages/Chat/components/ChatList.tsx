@@ -119,46 +119,22 @@ export function ChatList({
                   data-index={index}
                   className="w-full pb-4"
                 >
-                  {item.kind === 'group' ? (
-                    <div className="space-y-4">
-                      {item.rows.map((row) => (
-                        <div
-                          key={row.key}
-                          {...getRowDataAttributes(row)}
-                          className="w-full"
-                        >
-                          <ChatRowItem
-                            row={row}
-                            showThinking={showThinking}
-                            assistantAgentId={assistantAgentId}
-                            assistantAgentName={assistantAgentName}
-                            assistantAvatarSeed={assistantAvatarSeed}
-                            assistantAvatarStyle={assistantAvatarStyle}
-                            userAvatarImageUrl={userAvatarImageUrl}
-                            suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                            onJumpToRowKey={onJumpToRowKey}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div
-                      {...getRowDataAttributes(item.row)}
-                      className="w-full"
-                    >
-                      <ChatRowItem
-                        row={item.row}
-                        showThinking={showThinking}
-                        assistantAgentId={assistantAgentId}
-                        assistantAgentName={assistantAgentName}
-                        assistantAvatarSeed={assistantAvatarSeed}
-                        assistantAvatarStyle={assistantAvatarStyle}
-                        userAvatarImageUrl={userAvatarImageUrl}
-                        suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                        onJumpToRowKey={onJumpToRowKey}
-                      />
-                    </div>
-                  )}
+                  <div
+                    {...getRowDataAttributes(item.row)}
+                    className="w-full"
+                  >
+                    <ChatRowItem
+                      row={item.row}
+                      showThinking={showThinking}
+                      assistantAgentId={assistantAgentId}
+                      assistantAgentName={assistantAgentName}
+                      assistantAvatarSeed={assistantAvatarSeed}
+                      assistantAvatarStyle={assistantAvatarStyle}
+                      userAvatarImageUrl={userAvatarImageUrl}
+                      suppressedToolCardRowKeys={suppressedToolCardRowKeys}
+                      onJumpToRowKey={onJumpToRowKey}
+                    />
+                  </div>
                 </div>
               ))}
             </div>
