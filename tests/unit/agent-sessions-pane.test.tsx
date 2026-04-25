@@ -6,6 +6,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
+import type { RawMessage } from '@/stores/chat';
 
 const readyResource = {
   status: 'ready' as const,
@@ -13,6 +14,35 @@ const readyResource = {
   hasLoadedOnce: true,
   lastLoadedAt: 1,
 };
+
+function createSessionRecord(input?: {
+  transcript?: RawMessage[];
+  label?: string | null;
+  lastActivityAt?: number | null;
+  ready?: boolean;
+}) {
+  return {
+    transcript: input?.transcript ?? [],
+    meta: {
+      label: input?.label ?? null,
+      lastActivityAt: input?.lastActivityAt ?? null,
+      ready: input?.ready ?? false,
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      streamingMessage: null,
+      streamRuntime: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle' as const,
+    },
+  };
+}
 
 function setupBaseState() {
   useGatewayStore.setState({
@@ -58,15 +88,13 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ],
-      sessionLabels: {
-        'agent:main:session-1': '主Agent会话',
-        'agent:test:session-2': '测试Agent会话',
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:main:session-1': createSessionRecord({ ready: true, label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({ ready: true, label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
       },
       sessionsResource: readyResource,
-      sessionLastActivity: {
-        'agent:main:session-1': now - 1 * 24 * 60 * 60 * 1000,
-        'agent:test:session-2': now - 2 * 24 * 60 * 60 * 1000,
-      },
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -91,9 +119,11 @@ describe('agent sessions pane', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ ready: true }),
+      },
       sessionsResource: readyResource,
-      sessionLabels: {},
-      sessionLastActivity: {},
       switchSession: vi.fn(),
       newSession,
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -114,9 +144,10 @@ describe('agent sessions pane', () => {
       sessions: [
         { key: 'agent:main:main', displayName: 'agent:main:main' },
       ],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+      },
       sessionsResource: readyResource,
-      sessionLabels: {},
-      sessionLastActivity: {},
       switchSession,
       newSession: vi.fn(),
       openAgentConversation,
@@ -141,13 +172,15 @@ describe('agent sessions pane', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
       ],
-      sessionLabels: {
-        'agent:main:session-1': '需要删除的会话',
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:main:session-1': createSessionRecord({
+          ready: true,
+          label: '需要删除的会话',
+          lastActivityAt: now - 1 * 24 * 60 * 60 * 1000,
+        }),
       },
       sessionsResource: readyResource,
-      sessionLastActivity: {
-        'agent:main:session-1': now - 1 * 24 * 60 * 60 * 1000,
-      },
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession,
@@ -184,19 +217,20 @@ describe('agent sessions pane', () => {
         key: index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`,
         displayName: `agent:agent-1:session-${index}`,
       })),
-      sessionLabels: Object.fromEntries(
-        Array.from({ length: 13 }, (_, index) => [
-          `agent:agent-1:session-${index + 1}`,
-          `会话 ${index + 1}`,
-        ]),
+      sessionsByKey: Object.fromEntries(
+        Array.from({ length: 14 }, (_, index) => {
+          const key = index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`;
+          return [
+            key,
+            createSessionRecord({
+              ready: true,
+              label: index === 0 ? null : `会话 ${index}`,
+              lastActivityAt: index === 0 ? now : now - index * 60_000,
+            }),
+          ] as const;
+        }),
       ),
       sessionsResource: readyResource,
-      sessionLastActivity: Object.fromEntries(
-        Array.from({ length: 13 }, (_, index) => [
-          `agent:agent-1:session-${index + 1}`,
-          now - (index + 1) * 60_000,
-        ]),
-      ),
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -233,9 +267,11 @@ describe('agent sessions pane', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ ready: true }),
+      },
       sessionsResource: readyResource,
-      sessionLabels: {},
-      sessionLastActivity: {},
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -266,13 +302,15 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ],
+      sessionsByKey: {
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({
+          ready: true,
+          label: '测试Agent会话',
+          lastActivityAt: Date.now(),
+        }),
+      },
       sessionsResource: readyResource,
-      sessionLabels: {
-        'agent:test:session-2': '测试Agent会话',
-      },
-      sessionLastActivity: {
-        'agent:test:session-2': Date.now(),
-      },
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -289,14 +327,13 @@ describe('agent sessions pane', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessions: [],
+      sessionsByKey: {},
       sessionsResource: {
         status: 'loading',
         error: null,
         hasLoadedOnce: false,
         lastLoadedAt: null,
       },
-      sessionLabels: {},
-      sessionLastActivity: {},
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -314,14 +351,13 @@ describe('agent sessions pane', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessions: [],
+      sessionsByKey: {},
       sessionsResource: {
         status: 'error',
         error: 'sessions failed',
         hasLoadedOnce: false,
         lastLoadedAt: null,
       },
-      sessionLabels: {},
-      sessionLastActivity: {},
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),

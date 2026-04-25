@@ -1,31 +1,49 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { createAssistantOverlay, selectStreamingRenderMessage } from '@/stores/chat/stream-overlay-message';
+import type { RawMessage } from '@/stores/chat';
+
+function createSessionRecord(input?: {
+  transcript?: RawMessage[];
+  runtime?: Partial<ReturnType<typeof useChatStore.getState>['sessionsByKey'][string]['runtime']>;
+}) {
+  return {
+    transcript: input?.transcript ?? [],
+    meta: {
+      label: null,
+      lastActivityAt: null,
+      ready: true,
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      assistantOverlay: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle' as const,
+      ...input?.runtime,
+    },
+  };
+}
 
 function resetChatStoreForApprovalTests() {
   useChatStore.setState({
-    messages: [],
+    sessionsByKey: {
+      'agent:main:main': createSessionRecord(),
+    },
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
     mutating: false,
     error: null,
-    sending: false,
-    activeRunId: null,
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
     sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
     currentSessionKey: 'agent:main:main',
-    sessionLabels: {},
-    sessionLastActivity: {},
-    sessionRuntimeByKey: {},
     showThinking: true,
-    thinkingLevel: null,
-    approvalStatus: 'idle',
     pendingApprovalsBySession: {},
   } as never);
 }
@@ -38,10 +56,14 @@ describe('chat 审批等待态流程', () => {
 
   it('发生 chat.send 超时提示后，只要收到 delta 事件就应清理陈旧错误', () => {
     useChatStore.setState({
-      sending: true,
       error: 'RPC timeout: chat.send',
-      streamingMessage: null,
-      streamingTools: [],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+          },
+        }),
+      },
     } as never);
 
     useChatStore.getState().handleChatEvent({
@@ -62,12 +84,16 @@ describe('chat 审批等待态流程', () => {
 
   it('delta 事件应先进入 streamRuntime source，而不是直接改页面 streamView', () => {
     useChatStore.setState({
-      sending: true,
-      activeRunId: 'run-delta-batched',
       error: null,
-      streamingMessage: null,
-      streamRuntime: null,
-      streamingTools: [],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-delta-batched',
+            lastUserMessageAt: 1_700_000_000_000,
+          },
+        }),
+      },
     } as never);
 
     useChatStore.getState().handleChatEvent({
@@ -79,14 +105,13 @@ describe('chat 审批等待态流程', () => {
       },
     });
 
-    const stateAfterEvent = useChatStore.getState() as unknown as {
-      streamingMessage: unknown;
-      streamRuntime: { rawChars: number; displayedChars: number } | null;
-    };
-    expect(stateAfterEvent.streamingMessage).toBeNull();
-    expect(stateAfterEvent.streamRuntime).toMatchObject({
-      rawChars: 11,
-      displayedChars: 0,
+    const runtime = useChatStore.getState().sessionsByKey['agent:main:main']?.runtime;
+    expect(selectStreamingRenderMessage(runtime!)).toBeNull();
+    expect(runtime?.assistantOverlay).toMatchObject({
+      runId: 'run-delta-batched',
+      committedText: '',
+      targetText: 'hello world',
+      status: 'streaming',
     });
   });
 
@@ -99,8 +124,6 @@ describe('chat 审批等待态流程', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sending: true,
-      pendingFinal: true,
       pendingApprovalsBySession: {
         'agent:main:main': [
           {
@@ -114,6 +137,14 @@ describe('chat 审批等待态流程', () => {
             createdAtMs: Date.now(),
           },
         ],
+      },
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            pendingFinal: true,
+          },
+        }),
       },
     } as never);
 
@@ -140,20 +171,35 @@ describe('chat 审批等待态流程', () => {
   it('收到当前会话审批请求时应清理流式占位，确保审批按钮可见', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sending: true,
-      pendingFinal: true,
-      approvalStatus: 'idle',
-      streamingMessage: {
-        role: 'assistant',
-        content: '正在调用工具...',
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            pendingFinal: true,
+            approvalStatus: 'idle',
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-visible',
+              messageId: 'assistant-visible',
+              sourceMessage: {
+                id: 'assistant-visible',
+                role: 'assistant',
+                content: '正在调用工具...',
+              },
+              committedText: '正在调用工具...',
+              targetText: '正在调用工具...',
+              status: 'streaming',
+            }),
+            streamingTools: [
+              {
+                id: 'tool-1',
+                name: 'web_search',
+                status: 'running',
+                updatedAt: Date.now(),
+              },
+            ],
+          },
+        }),
       },
-      streamingTools: [
-        {
-          id: 'tool-1',
-          name: 'web_search',
-          status: 'running',
-        },
-      ],
     } as never);
 
     useChatStore.getState().handleApprovalRequested({
@@ -164,15 +210,11 @@ describe('chat 审批等待态流程', () => {
       createdAt: Date.now(),
     });
 
-    const state = useChatStore.getState() as unknown as {
-      approvalStatus: string;
-      streamingMessage: unknown;
-      streamingTools: Array<unknown>;
-      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
-    };
-    expect(state.approvalStatus).toBe('awaiting_approval');
-    expect(state.streamingMessage).toBeNull();
-    expect(state.streamingTools).toEqual([]);
+    const state = useChatStore.getState();
+    const runtime = state.sessionsByKey['agent:main:main']?.runtime;
+    expect(runtime?.approvalStatus).toBe('awaiting_approval');
+    expect(runtime?.assistantOverlay).toBeNull();
+    expect(runtime?.streamingTools).toEqual([]);
     expect((state.pendingApprovalsBySession['agent:main:main'] ?? []).some((item) => item.id === 'approval-visible')).toBe(true);
   });
 
@@ -190,7 +232,6 @@ describe('chat 审批等待态流程', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      approvalStatus: 'awaiting_approval',
       pendingApprovalsBySession: {
         'agent:main:main': [
           {
@@ -200,15 +241,19 @@ describe('chat 审批等待态流程', () => {
           },
         ],
       },
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            approvalStatus: 'awaiting_approval',
+          },
+        }),
+      },
     } as never);
 
     await useChatStore.getState().syncPendingApprovals('agent:main:main');
 
-    const state = useChatStore.getState() as unknown as {
-      approvalStatus: string;
-      pendingApprovalsBySession: Record<string, Array<{ id: string }>>;
-    };
-    expect(state.approvalStatus).toBe('idle');
+    const state = useChatStore.getState();
+    expect(state.sessionsByKey['agent:main:main']?.runtime.approvalStatus).toBe('idle');
     expect(state.pendingApprovalsBySession['agent:main:main']).toEqual([]);
   });
 });

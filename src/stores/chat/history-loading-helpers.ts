@@ -78,7 +78,8 @@ export function beginHistoryLoadUiState(
   }
 
   const snapshot = get();
-  const hasSnapshot = Boolean(snapshot.sessionReadyByKey[requestedSessionKey]) || snapshot.messages.length > 0;
+  const session = snapshot.sessionsByKey[requestedSessionKey];
+  const hasSnapshot = Boolean(session?.meta.ready) || (session?.transcript.length ?? 0) > 0;
   set({
     initialLoading: !hasSnapshot,
     refreshing: hasSnapshot,

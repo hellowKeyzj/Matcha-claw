@@ -6,6 +6,7 @@ import {
   buildHistoryFingerprint,
   buildQuickRawHistoryFingerprint,
   buildRenderMessagesFingerprint,
+  patchSessionMeta,
 } from './store-state-helpers';
 import type { StoreHistoryCache } from './history-cache';
 import type {
@@ -76,10 +77,9 @@ export async function handleHistoryLoadFailure(
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
-    sessionReadyByKey: {
-      ...get().sessionReadyByKey,
-      [requestedSessionKey]: true,
-    },
+    sessionsByKey: patchSessionMeta(get(), requestedSessionKey, {
+      ready: true,
+    }),
     error: error instanceof Error ? error.message : String(error),
   });
 }

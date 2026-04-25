@@ -1,4 +1,3 @@
-import { reduceRuntimeOverlay } from './overlay-reducer';
 import type { ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
@@ -34,6 +33,6 @@ export function createStoreUiActions(input: CreateStoreUiActionsInput): StoreUiA
       ]);
     },
 
-    clearError: () => set((state) => reduceRuntimeOverlay(state, { type: 'clear_error' })),
+    clearError: () => set({ error: null }),
   };
 }

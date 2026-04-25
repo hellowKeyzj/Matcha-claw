@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+<<<<<<< ours
 import { clearUiTelemetry, getUiTelemetrySnapshot } from '@/lib/telemetry';
+=======
+<<<<<<< ours
+import { clearUiTelemetry, getUiTelemetrySnapshot } from '@/lib/telemetry';
+=======
+>>>>>>> theirs
+>>>>>>> theirs
 import type { RawMessage } from '@/stores/chat';
 
 const invokeIpcMock = vi.fn();
@@ -27,6 +34,10 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -36,6 +47,14 @@ describe('chat message links', () => {
 
     const linkText = screen.getAllByText('TOOLS.md')[0];
     fireEvent.click(linkText);
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
+>>>>>>> theirs
+>>>>>>> theirs
 
     expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
   });
@@ -56,6 +75,10 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -65,6 +88,14 @@ describe('chat message links', () => {
 
     const linkText = screen.getAllByText('TOOLS.md')[0];
     fireEvent.click(linkText);
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
+>>>>>>> theirs
+>>>>>>> theirs
 
     expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
   });
@@ -75,12 +106,22 @@ describe('chat message links', () => {
       content: '[TOOLS.md](TOOLS.md)',
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
         showThinking={false}
       />,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+>>>>>>> theirs
+>>>>>>> theirs
 
     expect(screen.queryByRole('button', { name: 'TOOLS.md' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'TOOLS.md' })).toBeNull();
@@ -102,6 +143,10 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -111,6 +156,14 @@ describe('chat message links', () => {
 
     const linkText = screen.getAllByText('SKILL.md')[0];
     fireEvent.click(linkText);
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    fireEvent.click(screen.getAllByText('SKILL.md')[0]);
+>>>>>>> theirs
+>>>>>>> theirs
 
     expect(invokeIpcMock).toHaveBeenCalledWith(
       'shell:showItemInFolder',
@@ -141,6 +194,10 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -155,6 +212,16 @@ describe('chat message links', () => {
       'shell:showItemInFolder',
       targetPath,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    fireEvent.click(screen.getAllByText('SKILL.md')[0]);
+
+    expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
+>>>>>>> theirs
+>>>>>>> theirs
   });
 
   it('same file name with multiple absolute paths should resolve by stable order (first path)', () => {
@@ -181,6 +248,10 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -195,6 +266,16 @@ describe('chat message links', () => {
       'shell:showItemInFolder',
       firstPath,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
+
+    expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', firstPath);
+>>>>>>> theirs
+>>>>>>> theirs
   });
 
   it('absolute path in text should not be clickable when path is not in attached files list', () => {
@@ -214,12 +295,22 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
         showThinking={false}
       />,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+>>>>>>> theirs
+>>>>>>> theirs
 
     expect(screen.queryByRole('button', { name: otherPath })).toBeNull();
     expect(screen.queryByRole('link', { name: otherPath })).toBeNull();
@@ -232,12 +323,22 @@ describe('chat message links', () => {
       content: '[OpenAI](https://openai.com)',
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
         showThinking={false}
       />,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+>>>>>>> theirs
+>>>>>>> theirs
 
     const link = screen.getByRole('link', { name: 'OpenAI' });
     expect(link).toHaveAttribute('href', 'https://openai.com');
@@ -261,12 +362,22 @@ describe('chat message links', () => {
       ],
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
         showThinking={false}
       />,
     );
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} />);
+>>>>>>> theirs
+>>>>>>> theirs
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
@@ -276,6 +387,10 @@ describe('chat message links', () => {
     );
   });
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
   it('heavy assistant markdown should render rich content immediately', () => {
     const longMarkdown = Array.from(
       { length: 80 },
@@ -333,11 +448,49 @@ describe('chat message links', () => {
   });
 
   it('assistant streaming message should render markdown links in real time', () => {
+<<<<<<< ours
+=======
+=======
+  it('heavy assistant markdown should render full content immediately and keep full mode across remount', () => {
+    const longMarkdown = Array.from(
+      { length: 320 },
+      (_, index) => `section-${index}: [OpenAI](https://openai.com) with **bold** text and \`code\``,
+    ).join('\n\n');
+    const message: RawMessage = {
+      role: 'assistant',
+      content: longMarkdown,
+      id: 'heavy-markdown-1',
+      timestamp: 1,
+    };
+
+    const firstMount = render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Large message preview')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Render full formatting' })).toBeNull();
+    expect(firstMount.container.querySelector('[data-chat-body-mode="full"]')).not.toBeNull();
+
+    firstMount.unmount();
+
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Large message preview')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Render full formatting' })).toBeNull();
+  });
+
+  it('assistant streaming message should keep markdown as plain text until settled', () => {
+>>>>>>> theirs
+>>>>>>> theirs
     const message: RawMessage = {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
 
+<<<<<<< ours
+=======
+<<<<<<< ours
+>>>>>>> theirs
     render(
       <ChatMessage
         message={message}
@@ -411,4 +564,131 @@ describe('chat message links', () => {
     expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
   });
 
+<<<<<<< ours
+=======
+=======
+    render(<ChatMessage message={message} showThinking={false} isStreaming />);
+
+    expect(screen.getByText('[OpenAI](https://openai.com)')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'OpenAI' })).toBeNull();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(invokeIpcMock).not.toHaveBeenCalled();
+  });
+
+  it('assistant streaming table markdown should not switch into structured preview before settle', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        '| Task | Owner | Status |',
+        '| --- | --- | --- |',
+        '| Build UI | Ada | Done |',
+        '| Fix scroll | Bob | Doing |',
+      ].join('\n'),
+    };
+
+    const view = render(<ChatMessage message={message} showThinking={false} isStreaming />);
+
+    expect(screen.getByText((_, element) => (
+      element?.textContent?.includes('| Task | Owner | Status |') ?? false
+    ))).toBeInTheDocument();
+    expect(screen.queryByRole('table')).toBeNull();
+
+    view.rerender(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+  });
+
+  it('renders fenced csv blocks as table preview while preserving surrounding markdown', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        '下面是可导入的 CSV：',
+        '```csv',
+        'Task,Owner,Status',
+        'Build UI,Ada,Done',
+        'Fix scroll,Bob,Doing',
+        '```',
+        '',
+        '[OpenAI](https://openai.com)',
+      ].join('\n'),
+    };
+
+    const { container } = render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByText('下面是可导入的 CSV：')).toBeInTheDocument();
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+    expect(screen.getByText('Build UI')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'OpenAI' })).toHaveAttribute('href', 'https://openai.com');
+    expect(container.querySelector('pre')).toBeNull();
+    expect(screen.queryByText('CSV Preview')).toBeNull();
+    expect(screen.getByRole('button', { name: '复制 CSV' })).toBeInTheDocument();
+  });
+
+  it('renders plain csv blocks as table preview for real chat output shape', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        '下面我直接给你一版 可直接复制进 Notion / Excel / 飞书多维表的 CSV 导入版。',
+        '',
+        'Task,Week,Owner,Status',
+        '梳理当前主转化与次转化,Week 1,Ada,未开始',
+        '补充导出60天搜索词趋势,Week 1,Bob,未开始',
+        '输出Week 2整改小结,Week 2,Cindy,进行中',
+      ].join('\n'),
+    };
+
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByText(/CSV 导入版/)).toBeInTheDocument();
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+    expect(screen.getByText('梳理当前主转化与次转化')).toBeInTheDocument();
+    expect(screen.queryByText('Task,Week,Owner,Status')).toBeNull();
+    expect(screen.queryByText('CSV Preview')).toBeNull();
+    expect(screen.getByRole('button', { name: '复制 CSV' })).toBeInTheDocument();
+  });
+
+  it('keeps non-csv fenced code blocks as regular preformatted code', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        '```ts',
+        'const answer = 42;',
+        '```',
+      ].join('\n'),
+    };
+
+    const { container } = render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(container.querySelector('pre')).not.toBeNull();
+    expect(screen.getByText('const answer = 42;')).toBeInTheDocument();
+  });
+
+  it('renders markdown pipe tables as structured table preview', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        'Week 4: 优化与复盘',
+        '',
+        '| Task | Week | Owner | Status |',
+        '| --- | --- | --- | --- |',
+        '| 对比新旧结构CPA/CVR/CTR | Week 4 | 分析负责人 | 未开始 |',
+        '| 对比高价值转化占比变化 | Week 4 | 分析负责人 | 未开始 |',
+      ].join('\n'),
+    };
+
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByText('Week 4: 优化与复盘')).toBeInTheDocument();
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+    expect(screen.getByText('对比新旧结构CPA/CVR/CTR')).toBeInTheDocument();
+    expect(screen.queryByText('| Task | Week | Owner | Status |')).toBeNull();
+    expect(screen.queryByText('Table Preview')).toBeNull();
+  });
+>>>>>>> theirs
+>>>>>>> theirs
 });

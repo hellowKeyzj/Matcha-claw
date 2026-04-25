@@ -10,6 +10,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChatShell } from './components/ChatShell';
 import { ChatOffline } from './components/ChatOffline';
+import { buildChatAutoFollowSignal } from './chat-auto-follow';
 import { useInboxLayout } from './useInboxLayout';
 import { useChatRealtimePerfMetrics } from './useChatPerf';
 import { useChatFirstPaint } from './useFirstPaint';
@@ -47,7 +48,7 @@ export function Chat() {
     waitingApproval,
   } = useChatPageModel();
   const {
-    messages,
+    canonicalMessages,
     currentSessionKey,
     currentSessionReady,
     currentSessionHasActivity,
@@ -61,6 +62,7 @@ export function Chat() {
   } = viewState;
   const {
     sending,
+    pendingUserMessage,
     streamingMessage,
     streamingTools,
     pendingFinal,
@@ -86,14 +88,14 @@ export function Chat() {
   const streamingTimestamp = lastUserMessageAt != null ? (lastUserMessageAt / 1000) : 0;
   const projection = useChatProjection({
     currentSessionKey,
-    liveMessages: messages,
+    liveMessages: canonicalMessages,
     gatewayRpc,
   });
   const projectionScopeKey = projection.projectionScopeKey;
-  const rowSourceMessages = projection.isHistoryProjection ? projection.messages : messages;
   const runtimeSending = projection.isHistoryProjection ? false : sending;
   const runtimePendingFinal = projection.isHistoryProjection ? false : pendingFinal;
   const runtimeWaitingApproval = projection.isHistoryProjection ? false : waitingApproval;
+  const runtimePendingUserMessage = projection.isHistoryProjection ? null : pendingUserMessage;
   const runtimeStreamingMessage = projection.isHistoryProjection ? null : streamingMessage;
   const runtimeStreamingTools = projection.isHistoryProjection ? [] : streamingTools;
   const {
@@ -128,41 +130,17 @@ export function Chat() {
   });
 
   const {
-    handleViewportPointerDown,
-    handleViewportTouchMove,
-    handleViewportWheel,
-    handleViewportScroll,
-    isUserScrolling,
-    scrollDirection,
-    scrollEventSeq,
-    scrollToRowKey,
-    prepareScopeAnchorRestore,
-    prepareScopeBottomAlign,
-  } = useChatListCtl({
-    scrollScopeKey: projectionScopeKey,
-    scrollResetKey: currentSessionKey,
-    messagesViewportRef,
-    messageContentRef,
-    markScrollActivity: () => markScrollActivityRef.current(),
-  });
-  const {
     chatRows,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    requestFullRender,
     hiddenHistoryCount,
     rowSliceCostMs,
     runtimeRowsCostMs,
   } = useRowsPipeline({
     projectionScopeKey,
     rowSessionKey: currentSessionKey,
-    messages: rowSourceMessages,
+    canonicalMessages,
+    projectionMessages: projection.messages,
     isHistoryProjection: projection.isHistoryProjection,
-    viewportRef: messagesViewportRef,
-    contentRef: messageContentRef,
-    isUserScrolling,
-    scrollDirection,
-    scrollEventSeq,
     agents,
     isGatewayRunning,
     gatewayRpc,
@@ -170,10 +148,38 @@ export function Chat() {
     pendingFinal: runtimePendingFinal,
     waitingApproval: runtimeWaitingApproval,
     showThinking,
+    pendingUserMessage: runtimePendingUserMessage,
     streamingMessage: runtimeStreamingMessage,
     streamingTools: runtimeStreamingTools,
     streamingTimestamp,
     sessionPipelineCostRef,
+  });
+  const autoFollowSignal = projection.isHistoryProjection
+    ? `${projectionScopeKey}|history`
+    : buildChatAutoFollowSignal(currentSessionKey, projection.messages);
+  const tailActivityOpen = !projection.isHistoryProjection && (
+    runtimeSending
+    || runtimePendingFinal
+    || runtimePendingUserMessage != null
+    || runtimeStreamingMessage != null
+    || runtimeStreamingTools.length > 0
+  );
+  const {
+    handleViewportPointerDown,
+    handleViewportTouchMove,
+    handleViewportWheel,
+    handleViewportScroll,
+    scrollToRowKey,
+    prepareScopeAnchorRestore,
+    prepareScopeBottomAlign,
+  } = useChatListCtl({
+    scrollScopeKey: projectionScopeKey,
+    scrollResetKey: currentSessionKey,
+    autoFollowSignal,
+    tailActivityOpen,
+    messagesViewportRef,
+    messageContentRef,
+    markScrollActivity: () => markScrollActivityRef.current(),
   });
   const chatItems = useChatRenderItems(projectionScopeKey, chatRows);
 
@@ -278,8 +284,6 @@ export function Chat() {
     assistantAvatarStyle: currentAgent?.avatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    requestFullRender,
     scrollToRowKey,
     error: projection.error ?? error,
     clearError,

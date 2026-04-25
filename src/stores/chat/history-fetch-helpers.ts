@@ -6,7 +6,10 @@ import { resolveSessionThinkingLevelFromList } from './session-helpers';
 import {
   buildHistoryFingerprint,
   buildQuickRawHistoryFingerprint,
+  getSessionMeta,
+  getSessionTranscript,
   nowMs,
+  patchSessionMeta,
 } from './store-state-helpers';
 import {
   isHistoryLoadAbortError,
@@ -74,9 +77,7 @@ function canShortCircuitByProbe(input: ProbeShortCircuitInput): boolean {
 
   const state = getState();
   const hasKnownFullSnapshot = historyRuntime.historyFingerprintBySession.has(requestedSessionKey);
-  const hasRenderableMessages = state.currentSessionKey === requestedSessionKey
-    ? state.messages.length > 0
-    : (state.sessionRuntimeByKey[requestedSessionKey]?.messages.length ?? 0) > 0;
+  const hasRenderableMessages = getSessionTranscript(state, requestedSessionKey).length > 0;
   const canShortCircuit = (
     previousProbeFingerprint === probeFingerprint
     && hasKnownFullSnapshot
@@ -85,12 +86,9 @@ function canShortCircuitByProbe(input: ProbeShortCircuitInput): boolean {
   if (!canShortCircuit) {
     return false;
   }
-  if (!state.sessionReadyByKey[requestedSessionKey]) {
+  if (!getSessionMeta(state, requestedSessionKey).ready) {
     set((current) => ({
-      sessionReadyByKey: {
-        ...current.sessionReadyByKey,
-        [requestedSessionKey]: true,
-      },
+      sessionsByKey: patchSessionMeta(current, requestedSessionKey, { ready: true }),
     }));
   }
   return true;

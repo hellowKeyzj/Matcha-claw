@@ -1,15 +1,20 @@
 import { hasNonToolAssistantContent } from './event-helpers';
+import { normalizeAssistantFinalTextForDedup } from './message-helpers';
 import { reduceRuntimeOverlay } from './overlay-reducer';
 import {
-  resolveSessionRuntime,
-  snapshotCurrentSessionRuntime,
+  areMessagesEquivalent,
+  getSessionMeta,
+  getSessionRuntime,
+  getSessionTranscript,
+  mergeMessageReferences,
+  patchSessionRecord,
   toMs,
 } from './store-state-helpers';
 import type {
   ChatHistoryLoadScope,
+  PendingUserMessageOverlay,
   ChatStoreState,
   RawMessage,
-  SessionRuntimeSnapshot,
 } from './types';
 
 interface ResolveHistoryActivityFlagsInput {
@@ -46,8 +51,7 @@ export function resolveHistoryActivityFlags(input: ResolveHistoryActivityFlagsIn
     if (message.role !== 'assistant') {
       continue;
     }
-    const isAfterUser = isAfterUserMsg(message);
-    if (!isAfterUser) {
+    if (!isAfterUserMsg(message)) {
       continue;
     }
     if (shouldTrackRecentAssistantActivity && !hasRecentAssistantActivity) {
@@ -76,6 +80,7 @@ interface BuildHistoryApplyPatchInput {
   lastAt: number | null;
   previousRenderFingerprint: string | null;
   renderFingerprint: string;
+  pendingUserMessage?: PendingUserMessageOverlay | null;
   flags: HistoryActivityFlags;
 }
 
@@ -84,94 +89,145 @@ export interface BuildHistoryApplyPatchOutput {
   didMessageListChange: boolean;
 }
 
+function resolveNextPendingUserMessage(input: {
+  currentRuntime: ReturnType<typeof getSessionRuntime>;
+  nextRuntime: ReturnType<typeof getSessionRuntime>;
+  pendingUserMessage: PendingUserMessageOverlay | null | undefined;
+}): PendingUserMessageOverlay | null {
+  const { currentRuntime, nextRuntime, pendingUserMessage } = input;
+  const runtimeClearedPendingUser = (
+    currentRuntime.pendingUserMessage != null
+    && nextRuntime.pendingUserMessage == null
+  );
+  if (runtimeClearedPendingUser) {
+    return null;
+  }
+  return pendingUserMessage ?? null;
+}
+
+function shouldClearSettledAssistantOverlay(
+  currentRuntime: ReturnType<typeof getSessionRuntime>,
+  nextTranscript: RawMessage[],
+  isCurrentSession: boolean,
+): boolean {
+  if (!isCurrentSession) {
+    return false;
+  }
+  const overlay = currentRuntime.assistantOverlay;
+  if (!overlay || currentRuntime.sending || currentRuntime.pendingFinal || currentRuntime.activeRunId != null) {
+    return false;
+  }
+
+  const overlayMessageId = overlay.messageId.trim();
+  const overlayText = normalizeAssistantFinalTextForDedup(overlay.targetText || overlay.committedText);
+  if (!overlayText) {
+    return false;
+  }
+
+  const matchedTranscriptMessage = [...nextTranscript].reverse().find((message) => (
+    message.role === 'assistant'
+    && (
+      (overlayMessageId && message.id === overlayMessageId)
+      || normalizeAssistantFinalTextForDedup(message.content) === overlayText
+    )
+  ));
+  if (!matchedTranscriptMessage) {
+    return false;
+  }
+
+  return normalizeAssistantFinalTextForDedup(matchedTranscriptMessage.content) === overlayText;
+}
+
 export function buildHistoryApplyPatch(
   state: ChatStoreState,
   input: BuildHistoryApplyPatchInput,
 ): BuildHistoryApplyPatchOutput {
   const patch: Partial<ChatStoreState> = {};
   let changed = false;
-  let didMessageListChange = false;
   const isCurrentSession = state.currentSessionKey === input.requestedSessionKey;
-  const shouldUpdateForeground = isCurrentSession && input.scope === 'foreground';
 
   if (!state.snapshotReady) {
     patch.snapshotReady = true;
     changed = true;
   }
-  if (!state.sessionReadyByKey[input.requestedSessionKey]) {
-    patch.sessionReadyByKey = {
-      ...state.sessionReadyByKey,
-      [input.requestedSessionKey]: true,
-    };
-    changed = true;
-  }
-  if (shouldUpdateForeground && (state.initialLoading || state.refreshing)) {
+  if (isCurrentSession && (state.initialLoading || state.refreshing)) {
     patch.initialLoading = false;
     patch.refreshing = false;
     changed = true;
   }
-  if (
-    shouldUpdateForeground
-    && input.previousRenderFingerprint !== input.renderFingerprint
-    && state.messages !== input.finalMessages
-  ) {
-    patch.messages = input.finalMessages;
-    didMessageListChange = true;
-    changed = true;
-  }
-  if (shouldUpdateForeground && state.thinkingLevel !== input.thinkingLevel) {
-    patch.thinkingLevel = input.thinkingLevel;
-    changed = true;
-  }
-  if (input.resolvedLabel && state.sessionLabels[input.requestedSessionKey] !== input.resolvedLabel) {
-    patch.sessionLabels = {
-      ...state.sessionLabels,
-      [input.requestedSessionKey]: input.resolvedLabel,
-    };
-    changed = true;
-  }
-  if (input.lastAt != null && state.sessionLastActivity[input.requestedSessionKey] !== input.lastAt) {
-    patch.sessionLastActivity = {
-      ...state.sessionLastActivity,
-      [input.requestedSessionKey]: input.lastAt,
-    };
-    changed = true;
-  }
 
-  const shouldCheckRuntimeOverlay = shouldUpdateForeground && (
-    state.sending
-    || state.pendingFinal
-    || state.activeRunId != null
+  const currentTranscript = getSessionTranscript(state, input.requestedSessionKey);
+  const nextTranscript = areMessagesEquivalent(currentTranscript, input.finalMessages)
+    ? currentTranscript
+    : mergeMessageReferences(currentTranscript, input.finalMessages);
+  const didMessageListChange = (
+    input.previousRenderFingerprint !== input.renderFingerprint
+    || nextTranscript !== currentTranscript
+  );
+  const currentMeta = getSessionMeta(state, input.requestedSessionKey);
+  const currentRuntime = getSessionRuntime(state, input.requestedSessionKey);
+  const runtimePatch = (isCurrentSession && input.scope === 'foreground' && (
+    currentRuntime.sending
+    || currentRuntime.pendingFinal
+    || currentRuntime.activeRunId != null
     || input.flags.hasRecentAssistantActivity
     || input.flags.hasRecentFinalAssistantMessage
-  );
-  if (shouldCheckRuntimeOverlay) {
-    const runtimePatch = reduceRuntimeOverlay(state, {
-      type: 'history_snapshot',
-      hasRecentAssistantActivity: input.flags.hasRecentAssistantActivity,
-      hasRecentFinalAssistantMessage: input.flags.hasRecentFinalAssistantMessage,
-    });
-    if (runtimePatch !== state) {
-      Object.assign(patch, runtimePatch);
-      changed = true;
-    }
-  }
+  ))
+    ? reduceRuntimeOverlay(currentRuntime, {
+        type: 'history_snapshot',
+        hasRecentAssistantActivity: input.flags.hasRecentAssistantActivity,
+        hasRecentFinalAssistantMessage: input.flags.hasRecentFinalAssistantMessage,
+      })
+    : currentRuntime;
 
-  const currentRuntimeSnapshot: SessionRuntimeSnapshot = isCurrentSession
-    ? snapshotCurrentSessionRuntime({
-        ...state,
-        ...patch,
-      } as ChatStoreState)
-    : resolveSessionRuntime(state.sessionRuntimeByKey[input.requestedSessionKey]);
-  const hasRuntimeEntry = Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, input.requestedSessionKey);
-  if (!hasRuntimeEntry || currentRuntimeSnapshot.messages !== input.finalMessages) {
-    patch.sessionRuntimeByKey = {
-      ...state.sessionRuntimeByKey,
-      [input.requestedSessionKey]: {
-        ...currentRuntimeSnapshot,
-        messages: input.finalMessages,
-      },
-    };
+  const nextMeta = {
+    ...currentMeta,
+    ready: true,
+    thinkingLevel: input.thinkingLevel,
+    label: input.resolvedLabel ?? currentMeta.label,
+    lastActivityAt: input.lastAt ?? currentMeta.lastActivityAt,
+  };
+  const nextRuntime = runtimePatch === currentRuntime
+    ? currentRuntime
+    : { ...currentRuntime, ...runtimePatch };
+  const shouldClearAssistantOverlay = shouldClearSettledAssistantOverlay(
+    nextRuntime,
+    nextTranscript,
+    isCurrentSession,
+  );
+  const nextPendingUserMessage = isCurrentSession
+    ? resolveNextPendingUserMessage({
+        currentRuntime,
+        nextRuntime,
+        pendingUserMessage: input.pendingUserMessage,
+      })
+    : (nextRuntime.pendingUserMessage ?? null);
+  const shouldPatchPendingUser = isCurrentSession
+    && nextRuntime.pendingUserMessage !== nextPendingUserMessage;
+  let resolvedRuntime = shouldPatchPendingUser
+    ? { ...nextRuntime, pendingUserMessage: nextPendingUserMessage }
+    : nextRuntime;
+  if (shouldClearAssistantOverlay) {
+    resolvedRuntime = resolvedRuntime.assistantOverlay == null
+      ? resolvedRuntime
+      : { ...resolvedRuntime, assistantOverlay: null };
+  }
+  const didMetaChange = (
+    nextMeta.ready !== currentMeta.ready
+    || nextMeta.thinkingLevel !== currentMeta.thinkingLevel
+    || nextMeta.label !== currentMeta.label
+    || nextMeta.lastActivityAt !== currentMeta.lastActivityAt
+  );
+  if (
+    nextTranscript !== currentTranscript
+    || didMetaChange
+    || resolvedRuntime !== currentRuntime
+  ) {
+    patch.sessionsByKey = patchSessionRecord(state, input.requestedSessionKey, {
+      transcript: nextTranscript,
+      meta: nextMeta,
+      runtime: resolvedRuntime,
+    });
     changed = true;
   }
 
@@ -191,25 +247,13 @@ export function buildHistoryPreviewHydrationPatch(
       ? { ...message, _attachedFiles: message._attachedFiles.map((file) => ({ ...file })) }
       : message
   ));
-  const patch: Partial<ChatStoreState> = {};
-  let changed = false;
-
-  const currentRuntime = state.sessionRuntimeByKey[requestedSessionKey];
-  if (currentRuntime && currentRuntime.messages === finalMessages) {
-    patch.sessionRuntimeByKey = {
-      ...state.sessionRuntimeByKey,
-      [requestedSessionKey]: {
-        ...currentRuntime,
-        messages: hydratedMessages,
-      },
-    };
-    changed = true;
+  const currentTranscript = getSessionTranscript(state, requestedSessionKey);
+  if (currentTranscript !== finalMessages) {
+    return state;
   }
-
-  if (state.currentSessionKey === requestedSessionKey && state.messages === finalMessages) {
-    patch.messages = hydratedMessages;
-    changed = true;
-  }
-
-  return changed ? patch : state;
+  return {
+    sessionsByKey: patchSessionRecord(state, requestedSessionKey, {
+      transcript: hydratedMessages,
+    }),
+  };
 }

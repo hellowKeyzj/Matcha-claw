@@ -24,19 +24,18 @@ import {
 import { resetToolSnapshotTxnState } from './tool-snapshot-txn';
 import {
   areSessionsEquivalent,
-  createEmptySessionRuntime,
-  resolveSessionRuntime,
-  snapshotCurrentSessionRuntime,
+  createEmptySessionRecord,
+  getSessionMeta,
+  getSessionRuntime,
+  patchSessionMeta,
+  removeSessionRecord,
+  resolveSessionRecord,
 } from './store-state-helpers';
-import { reduceRuntimeOverlay } from './overlay-reducer';
 import type { StoreHistoryCache } from './history-cache';
 import type {
   ChatSession,
   ChatStoreState,
-  SessionRuntimeSnapshot,
 } from './types';
-
-const SESSION_RUNTIME_CACHE_MAX_SESSIONS = 48;
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -91,67 +90,17 @@ function clearSessionHistoryFingerprints(
   historyRuntime.historyRenderFingerprintBySession.delete(sessionKey);
 }
 
-function touchSessionRuntimeSnapshot(
-  runtimeByKey: Record<string, SessionRuntimeSnapshot>,
+function ensureSessionRecordMap(
+  runtimeByKey: Record<string, ReturnType<typeof createEmptySessionRecord>>,
   sessionKey: string,
-  snapshot?: SessionRuntimeSnapshot,
-): void {
-  if (!sessionKey) {
-    return;
+): Record<string, ReturnType<typeof createEmptySessionRecord>> {
+  if (!sessionKey || Object.prototype.hasOwnProperty.call(runtimeByKey, sessionKey)) {
+    return runtimeByKey;
   }
-  const value = snapshot ?? runtimeByKey[sessionKey];
-  if (!value) {
-    return;
-  }
-  if (Object.prototype.hasOwnProperty.call(runtimeByKey, sessionKey)) {
-    delete runtimeByKey[sessionKey];
-  }
-  runtimeByKey[sessionKey] = value;
-}
-
-function trimSessionRuntimeSnapshots(
-  runtimeByKey: Record<string, SessionRuntimeSnapshot>,
-  keepSessionKeys: string[],
-): void {
-  const keys = Object.keys(runtimeByKey);
-  if (keys.length <= SESSION_RUNTIME_CACHE_MAX_SESSIONS) {
-    return;
-  }
-
-  const keepSet = new Set(keepSessionKeys.filter((key) => typeof key === 'string' && key.trim().length > 0));
-  for (const [sessionKey, runtime] of Object.entries(runtimeByKey)) {
-    if (runtime?.sending) {
-      keepSet.add(sessionKey);
-    }
-  }
-
-  let overflow = keys.length - SESSION_RUNTIME_CACHE_MAX_SESSIONS;
-  for (const sessionKey of keys) {
-    if (overflow <= 0) {
-      break;
-    }
-    if (keepSet.has(sessionKey)) {
-      continue;
-    }
-    delete runtimeByKey[sessionKey];
-    overflow -= 1;
-  }
-
-  if (overflow <= 0) {
-    return;
-  }
-
-  const hardKeepSet = new Set(keepSessionKeys.filter((key) => typeof key === 'string' && key.trim().length > 0));
-  for (const sessionKey of Object.keys(runtimeByKey)) {
-    if (overflow <= 0) {
-      break;
-    }
-    if (hardKeepSet.has(sessionKey)) {
-      continue;
-    }
-    delete runtimeByKey[sessionKey];
-    overflow -= 1;
-  }
+  return {
+    ...runtimeByKey,
+    [sessionKey]: createEmptySessionRecord(),
+  };
 }
 
 export function createStoreSessionActions(input: CreateStoreSessionActionsInput): StoreSessionActions {
@@ -231,9 +180,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
           const sessionsWithCurrent = !currentExistsInBackend && shouldKeepMissingCurrent && nextSessionKey
             ? [
-              ...dedupedSessions,
-              { key: nextSessionKey, displayName: nextSessionKey },
-            ]
+                ...dedupedSessions,
+                { key: nextSessionKey, displayName: nextSessionKey },
+              ]
             : dedupedSessions;
 
           const discoveredActivity = Object.fromEntries(
@@ -258,40 +207,31 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           const sessionsChanged = !areSessionsEquivalent(currentSessions, sessionsWithCurrent);
           const sessionKeyChanged = snapshot.currentSessionKey !== nextSessionKey;
           const discoveredActivityChanged = Object.entries(discoveredActivity).some(
-            ([sessionKey, updatedAt]) => snapshot.sessionLastActivity[sessionKey] !== updatedAt,
+            ([sessionKey, updatedAt]) => getSessionMeta(snapshot, sessionKey).lastActivityAt !== updatedAt,
           );
           const discoveredLabelsChanged = Object.entries(discoveredLabels).some(
-            ([sessionKey, label]) => snapshot.sessionLabels[sessionKey] !== label,
+            ([sessionKey, label]) => getSessionMeta(snapshot, sessionKey).label !== label,
           );
           const loadedAt = Date.now();
 
           if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
             set((state) => {
-              const next: Partial<ChatStoreState> = {};
-
-              if (sessionsChanged) {
-                next.sessionsResource = createReadyResourceState(sessionsWithCurrent, loadedAt);
+              let sessionsByKey = { ...state.sessionsByKey };
+              for (const [sessionKey, updatedAt] of Object.entries(discoveredActivity)) {
+                sessionsByKey = patchSessionMeta({ sessionsByKey }, sessionKey, { lastActivityAt: updatedAt });
               }
-              if (sessionKeyChanged) {
-                next.currentSessionKey = nextSessionKey;
-              }
-              if (discoveredActivityChanged) {
-                next.sessionLastActivity = {
-                  ...state.sessionLastActivity,
-                  ...discoveredActivity,
-                };
-              }
-              if (discoveredLabelsChanged) {
-                next.sessionLabels = {
-                  ...state.sessionLabels,
-                  ...discoveredLabels,
-                };
-              }
-              if (!next.sessionsResource) {
-                next.sessionsResource = createReadyResourceState(state.sessionsResource.data, loadedAt);
+              for (const [sessionKey, label] of Object.entries(discoveredLabels)) {
+                sessionsByKey = patchSessionMeta({ sessionsByKey }, sessionKey, { label });
               }
 
-              return next;
+              return {
+                sessionsResource: createReadyResourceState(
+                  sessionsChanged ? sessionsWithCurrent : state.sessionsResource.data,
+                  loadedAt,
+                ),
+                currentSessionKey: sessionKeyChanged ? nextSessionKey : state.currentSessionKey,
+                sessionsByKey,
+              };
             });
           } else {
             set({
@@ -324,7 +264,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const preferredSessionKey = resolvePreferredSessionKeyForAgent(
         normalized,
         readSessionsFromState(state),
-        state.sessionLastActivity,
+        state.sessionsByKey,
       );
       if (preferredSessionKey) {
         get().switchSession(preferredSessionKey);
@@ -344,85 +284,51 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
+      let nextSessionsByKey = { ...state.sessionsByKey };
       if (leavingEmpty) {
         clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+        nextSessionsByKey = removeSessionRecord({ sessionsByKey: nextSessionsByKey }, currentSessionKey);
       }
-      const nextSessionRuntimeByKey = { ...state.sessionRuntimeByKey };
-
-      if (leavingEmpty) {
-        delete nextSessionRuntimeByKey[currentSessionKey];
-      } else {
-        touchSessionRuntimeSnapshot(
-          nextSessionRuntimeByKey,
-          currentSessionKey,
-          snapshotCurrentSessionRuntime(state),
-        );
-      }
-      touchSessionRuntimeSnapshot(nextSessionRuntimeByKey, key);
-      trimSessionRuntimeSnapshots(nextSessionRuntimeByKey, [currentSessionKey, key]);
-      const hasTargetRuntimeSnapshot = Object.prototype.hasOwnProperty.call(nextSessionRuntimeByKey, key);
-      const targetRuntime = resolveSessionRuntime(nextSessionRuntimeByKey[key]);
+      nextSessionsByKey = ensureSessionRecordMap(nextSessionsByKey, key);
+      const targetRecord = resolveSessionRecord(nextSessionsByKey[key]);
       const hasHistoryFingerprint = historyRuntime.historyFingerprintBySession.has(key);
-      const targetPendingApprovals = state.pendingApprovalsBySession[key] ?? [];
-      const targetRuntimePatch = reduceRuntimeOverlay(state, {
-        type: 'session_runtime_restored',
-        targetRuntime,
-        currentPendingApprovals: targetPendingApprovals.length,
-      });
-      const targetSessionReady = Boolean(state.sessionReadyByKey[key])
-        || hasTargetRuntimeSnapshot
-        || hasHistoryFingerprint;
+      const targetSessionReady = Boolean(targetRecord.meta.ready) || hasHistoryFingerprint;
       trackUiEvent('chat.session_switch_start', {
         fromSessionKey: currentSessionKey,
         toSessionKey: key,
         targetSessionReady,
-        hasTargetRuntimeSnapshot,
         hasHistoryFingerprint,
-        targetSending: targetRuntime.sending,
+        targetSending: targetRecord.runtime.sending,
       });
-      const nextSessionReadyByKey = (() => {
-        const next = { ...state.sessionReadyByKey };
-        if (leavingEmpty) {
-          delete next[currentSessionKey];
-        }
-        if (targetSessionReady) {
-          next[key] = true;
-        }
-        return next;
-      })();
 
       set((stateValue) => ({
         currentSessionKey: key,
-        messages: targetRuntime.messages,
-        snapshotReady: state.snapshotReady || targetSessionReady,
+        snapshotReady: stateValue.snapshotReady || targetSessionReady,
         initialLoading: false,
         refreshing: false,
-        ...targetRuntimePatch,
         error: null,
-        sessionReadyByKey: nextSessionReadyByKey,
-        sessionRuntimeByKey: nextSessionRuntimeByKey,
+        sessionsByKey: nextSessionsByKey,
         ...(leavingEmpty ? {
           sessionsResource: {
             ...stateValue.sessionsResource,
             data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
           },
-          sessionLabels: Object.fromEntries(
-            Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-          ),
-          sessionLastActivity: Object.fromEntries(
-            Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+          pendingApprovalsBySession: Object.fromEntries(
+            Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
           ),
         } : {}),
       }));
-      if (targetRuntime.sending) {
+
+      if (targetRecord.runtime.sending) {
         const POLL_INTERVAL = 4_000;
         const pollHistory = () => {
           const current = get();
-          if (!current.sending) {
+          const runtime = getSessionRuntime(current, current.currentSessionKey);
+          if (!runtime.sending) {
             clearHistoryPoll();
             return;
           }
-          if (!current.streamingMessage && !current.streamRuntime) {
+          if (!runtime.assistantOverlay) {
             void current.loadHistory({
               sessionKey: current.currentSessionKey,
               mode: 'quiet',
@@ -434,8 +340,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         };
         setHistoryPollTimer(setTimeout(pollHistory, 1_000));
       }
+
       const shouldQuietReload = targetSessionReady;
-      const shouldDeferQuietReload = shouldQuietReload && !targetRuntime.sending;
+      const shouldDeferQuietReload = shouldQuietReload && !targetRecord.runtime.sending;
       scheduleNextFrame(() => {
         if (shouldDeferQuietReload) {
           scheduleIdleTask(() => {
@@ -482,32 +389,11 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           clearErrorRecoveryTimer();
           const next = remaining[0];
           set((state) => ({
-            ...(function buildNextState() {
-              const runtimeMap = Object.fromEntries(
-                Object.entries(state.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key),
-              );
-              const nextRuntime = resolveSessionRuntime(runtimeMap[next?.key ?? '']);
-              const nextPendingApprovalsCount = next?.key
-                ? (state.pendingApprovalsBySession[next.key] ?? []).length
-                : 0;
-              const nextRuntimePatch = reduceRuntimeOverlay(state, {
-                type: 'session_runtime_restored',
-                targetRuntime: nextRuntime,
-                currentPendingApprovals: nextPendingApprovalsCount,
-              });
-              return {
-                sessionRuntimeByKey: runtimeMap,
-                messages: nextRuntime.messages,
-                ...nextRuntimePatch,
-              };
-            })(),
+            sessionsByKey: removeSessionRecord(state, key),
             sessionsResource: {
               ...state.sessionsResource,
               data: remaining,
             },
-            sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
-            sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
-            sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
             pendingApprovalsBySession: Object.fromEntries(
               Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
             ),
@@ -526,14 +412,11 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           }
         } else {
           set((state) => ({
+            sessionsByKey: removeSessionRecord(state, key),
             sessionsResource: {
               ...state.sessionsResource,
               data: remaining,
             },
-            sessionLabels: Object.fromEntries(Object.entries(state.sessionLabels).filter(([sessionKey]) => sessionKey !== key)),
-            sessionLastActivity: Object.fromEntries(Object.entries(state.sessionLastActivity).filter(([sessionKey]) => sessionKey !== key)),
-            sessionReadyByKey: Object.fromEntries(Object.entries(state.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== key)),
-            sessionRuntimeByKey: Object.fromEntries(Object.entries(state.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== key)),
             pendingApprovalsBySession: Object.fromEntries(
               Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
             ),
@@ -560,17 +443,10 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const newKey = `${prefix}:session-${Date.now()}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
       set((stateValue) => ({
-        sessionRuntimeByKey: (() => {
-          const next = { ...stateValue.sessionRuntimeByKey };
-          if (leavingEmpty) {
-            delete next[currentSessionKey];
-          } else {
-            touchSessionRuntimeSnapshot(next, currentSessionKey, snapshotCurrentSessionRuntime(stateValue));
-          }
-          delete next[newKey];
-          trimSessionRuntimeSnapshots(next, [currentSessionKey, newKey]);
-          return next;
-        })(),
+        sessionsByKey: {
+          ...(leavingEmpty ? removeSessionRecord(stateValue, currentSessionKey) : stateValue.sessionsByKey),
+          [newKey]: createEmptySessionRecord(),
+        },
         currentSessionKey: newKey,
         sessionsResource: {
           ...stateValue.sessionsResource,
@@ -581,27 +457,11 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             newSessionEntry,
           ],
         },
-        sessionLabels: leavingEmpty
-          ? Object.fromEntries(Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey))
-          : stateValue.sessionLabels,
-        sessionLastActivity: leavingEmpty
-          ? Object.fromEntries(Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey))
-          : stateValue.sessionLastActivity,
-        sessionReadyByKey: (() => {
-          const next = { ...stateValue.sessionReadyByKey };
-          if (leavingEmpty) {
-            delete next[currentSessionKey];
-          }
-          next[newKey] = true;
-          return next;
-        })(),
-        pendingApprovalsBySession: (() => {
-          if (!leavingEmpty) return stateValue.pendingApprovalsBySession;
-          return Object.fromEntries(
-            Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-          );
-        })(),
-        ...createEmptySessionRuntime(),
+        pendingApprovalsBySession: leavingEmpty
+          ? Object.fromEntries(
+              Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+            )
+          : stateValue.pendingApprovalsBySession,
         snapshotReady: true,
         initialLoading: false,
         refreshing: false,
@@ -620,18 +480,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           ...stateValue.sessionsResource,
           data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
         },
-        sessionLabels: Object.fromEntries(
-          Object.entries(stateValue.sessionLabels).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-        ),
-        sessionLastActivity: Object.fromEntries(
-          Object.entries(stateValue.sessionLastActivity).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-        ),
-        sessionReadyByKey: Object.fromEntries(
-          Object.entries(stateValue.sessionReadyByKey).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-        ),
-        sessionRuntimeByKey: Object.fromEntries(
-          Object.entries(stateValue.sessionRuntimeByKey).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-        ),
+        sessionsByKey: removeSessionRecord(stateValue, currentSessionKey),
         pendingApprovalsBySession: Object.fromEntries(
           Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
         ),

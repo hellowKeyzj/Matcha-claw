@@ -71,16 +71,22 @@ export type ChatRunPhase =
 
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
-export type StreamRuntimeStatus = 'streaming' | 'draining' | 'finalizing';
+export type StreamRuntimeStatus = 'streaming' | 'finalizing';
 
-export interface ActiveStreamRuntime {
-  sessionKey: string;
+export interface AssistantMessageOverlay {
   runId: string;
-  chunks: string[];
-  rawChars: number;
-  displayedChars: number;
+  messageId: string;
+  sourceMessage: RawMessage | null;
+  committedText: string;
+  targetText: string;
   status: StreamRuntimeStatus;
   rafId: number | null;
+}
+
+export interface PendingUserMessageOverlay {
+  clientMessageId: string;
+  message: RawMessage;
+  createdAtMs: number;
 }
 
 export interface ApprovalItem {
@@ -99,17 +105,12 @@ export interface TaskInboxChatBridgeState {
   canSendRecoveryPrompt: boolean;
 }
 
-/**
- * Runtime snapshot stored per session key.
- * Used for instant switch without blanking the transcript while quiet refresh is running.
- */
-export interface SessionRuntimeSnapshot {
-  messages: RawMessage[];
+export interface ChatSessionRuntimeState {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  streamingMessage: unknown | null;
-  streamRuntime: ActiveStreamRuntime | null;
+  pendingUserMessage?: PendingUserMessageOverlay | null;
+  assistantOverlay: AssistantMessageOverlay | null;
   streamingTools: ToolStatus[];
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
@@ -117,43 +118,20 @@ export interface SessionRuntimeSnapshot {
   approvalStatus: ApprovalStatus;
 }
 
-/**
- * Layer 1: Session snapshot (persistent + cacheable state).
- * This layer owns historical messages and session metadata.
- */
-export interface ChatSessionSnapshotLayerState {
-  messages: RawMessage[];
-  sessions: ChatSession[];
-  currentSessionKey: string;
-  sessionLabels: Record<string, string>;
-  sessionLastActivity: Record<string, number>;
-  sessionReadyByKey: Record<string, boolean>;
+export interface ChatSessionMetaState {
+  label: string | null;
+  lastActivityAt: number | null;
+  ready: boolean;
+  thinkingLevel: string | null;
 }
 
-/**
- * Layer 2: Runtime overlay (transient execution state).
- * This layer owns sending/streaming/approval progression only.
- */
-export interface ChatRuntimeOverlayLayerState {
-  sending: boolean;
-  activeRunId: string | null;
-  runPhase: ChatRunPhase;
-  streamingMessage: unknown | null;
-  streamRuntime: ActiveStreamRuntime | null;
-  streamingTools: ToolStatus[];
-  pendingFinal: boolean;
-  lastUserMessageAt: number | null;
-  pendingToolImages: AttachedFileMeta[];
-  approvalStatus: ApprovalStatus;
-  pendingApprovalsBySession: Record<string, ApprovalItem[]>;
-  sessionRuntimeByKey: Record<string, SessionRuntimeSnapshot>;
+export interface ChatSessionRecord {
+  transcript: RawMessage[];
+  meta: ChatSessionMetaState;
+  runtime: ChatSessionRuntimeState;
 }
 
-/**
- * Layer 3: View-derived/meta state.
- * This layer contains UI control and load/meta flags.
- */
-export interface ChatViewDerivedLayerState {
+export interface ChatViewState {
   snapshotReady: boolean;
   initialLoading: boolean;
   refreshing: boolean;
@@ -161,19 +139,14 @@ export interface ChatViewDerivedLayerState {
   mutating: boolean;
   error: string | null;
   showThinking: boolean;
-  thinkingLevel: string | null;
 }
 
-export interface ChatLayeredState {
-  snapshot: ChatSessionSnapshotLayerState;
-  runtime: ChatRuntimeOverlayLayerState;
-  view: ChatViewDerivedLayerState;
+export interface ChatStoreBaseState extends ChatViewState {
+  currentSessionKey: string;
+  sessionsByKey: Record<string, ChatSessionRecord>;
+  pendingApprovalsBySession: Record<string, ApprovalItem[]>;
+  sessions?: ChatSession[];
 }
-
-export type ChatLayeredFlatState =
-  & ChatSessionSnapshotLayerState
-  & ChatRuntimeOverlayLayerState
-  & ChatViewDerivedLayerState;
 
 export interface ChatSendAttachment {
   fileName: string;
@@ -216,33 +189,12 @@ export interface ChatStoreActions {
   clearError: () => void;
 }
 
-export type ChatStoreState = ChatLayeredFlatState & ChatStoreActions;
+export type ChatStoreState = ChatStoreBaseState & ChatStoreActions;
 
-export const CHAT_SNAPSHOT_LAYER_KEYS = [
-  'messages',
-  'sessions',
+export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
-  'sessionLabels',
-  'sessionLastActivity',
-  'sessionReadyByKey',
-] as const satisfies readonly (keyof ChatSessionSnapshotLayerState)[];
-
-export const CHAT_RUNTIME_LAYER_KEYS = [
-  'sending',
-  'activeRunId',
-  'runPhase',
-  'streamingMessage',
-  'streamRuntime',
-  'streamingTools',
-  'pendingFinal',
-  'lastUserMessageAt',
-  'pendingToolImages',
-  'approvalStatus',
+  'sessionsByKey',
   'pendingApprovalsBySession',
-  'sessionRuntimeByKey',
-] as const satisfies readonly (keyof ChatRuntimeOverlayLayerState)[];
-
-export const CHAT_VIEW_LAYER_KEYS = [
   'snapshotReady',
   'initialLoading',
   'refreshing',
@@ -250,8 +202,7 @@ export const CHAT_VIEW_LAYER_KEYS = [
   'mutating',
   'error',
   'showThinking',
-  'thinkingLevel',
-] as const satisfies readonly (keyof ChatViewDerivedLayerState)[];
+] as const satisfies readonly (keyof ChatStoreBaseState)[];
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 export const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;

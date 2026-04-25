@@ -1,16 +1,24 @@
 import {
+  extractUserMessageClientId,
   createIntermediateToolTurnSnapshot,
   hasAssistantToolCall,
   normalizeAssistantFinalTextForDedup,
-  normalizeUserTextForReconcile,
   sanitizeIntermediateToolFillerMessage,
 } from './message-helpers';
-import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+import { reduceRuntimeOverlay } from './overlay-reducer';
 import { upsertToolStatuses } from './event-helpers';
-import { toMs } from './store-state-helpers';
-import type { AttachedFileMeta, ChatStoreState, RawMessage, ToolStatus } from './types';
+import {
+  getSessionRuntime,
+  getSessionTranscript,
+  patchSessionRecord,
+} from './store-state-helpers';
+import type {
+  AttachedFileMeta,
+  ChatStoreState,
+  PendingUserMessageOverlay,
+  RawMessage,
+  ToolStatus,
+} from './types';
 
 type RuntimeStateLike = ChatStoreState;
 
@@ -19,12 +27,20 @@ export function hasAssistantSemanticDuplicate(
   incoming: RawMessage,
   runtime: { sending: boolean; pendingFinal: boolean },
 ): boolean {
+  return findAssistantSemanticDuplicateIndex(messages, incoming, runtime) >= 0;
+}
+
+function findAssistantSemanticDuplicateIndex(
+  messages: RawMessage[],
+  incoming: RawMessage,
+  runtime: { sending: boolean; pendingFinal: boolean },
+): number {
   if (incoming.role !== 'assistant' || (!runtime.sending && !runtime.pendingFinal)) {
-    return false;
+    return -1;
   }
   const incomingText = normalizeAssistantFinalTextForDedup(incoming.content);
   if (!incomingText) {
-    return false;
+    return -1;
   }
   const scanStart = Math.max(0, messages.length - 6);
   for (let index = messages.length - 1; index >= scanStart; index -= 1) {
@@ -34,67 +50,84 @@ export function hasAssistantSemanticDuplicate(
     }
     const candidateText = normalizeAssistantFinalTextForDedup(candidate.content);
     if (candidateText && candidateText === incomingText) {
-      return true;
+      return index;
     }
-  }
-  return false;
-}
-
-export function findOptimisticUserMessageIndex(
-  messages: RawMessage[],
-  incoming: RawMessage,
-  lastUserMessageAt: number | null,
-  windowMs = 30_000,
-): number {
-  if (incoming.role !== 'user') {
-    return -1;
-  }
-  if (lastUserMessageAt == null) {
-    return -1;
-  }
-  const sentAtMs = toMs(lastUserMessageAt);
-  const incomingText = normalizeUserTextForReconcile(incoming.content);
-  if (!incomingText) {
-    return -1;
-  }
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const candidate = messages[index];
-    if (candidate.role !== 'user' || !candidate.timestamp) {
-      continue;
-    }
-    const candidateTsMs = toMs(candidate.timestamp);
-    if (Math.abs(candidateTsMs - sentAtMs) > windowMs) {
-      continue;
-    }
-    const candidateText = normalizeUserTextForReconcile(candidate.content);
-    if (!candidateText || candidateText !== incomingText) {
-      continue;
-    }
-    return index;
   }
   return -1;
 }
 
-export function mergeOptimisticUserMessage(
-  optimisticUser: RawMessage | undefined,
+function mergeAttachedFiles(
+  existingFiles: AttachedFileMeta[] | undefined,
+  incomingFiles: AttachedFileMeta[] | undefined,
+): AttachedFileMeta[] | undefined {
+  const merged: AttachedFileMeta[] = [];
+  const pushUnique = (file: AttachedFileMeta) => {
+    const alreadyExists = merged.some((candidate) => (
+      candidate.fileName === file.fileName
+      && candidate.mimeType === file.mimeType
+      && candidate.fileSize === file.fileSize
+      && (candidate.preview ?? null) === (file.preview ?? null)
+      && (candidate.filePath ?? null) === (file.filePath ?? null)
+    ));
+    if (!alreadyExists) {
+      merged.push(file);
+    }
+  };
+  for (const file of existingFiles ?? []) {
+    pushUnique(file);
+  }
+  for (const file of incomingFiles ?? []) {
+    pushUnique(file);
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function mergeCommittedMessage(
+  existingMessage: RawMessage,
+  incomingMessage: RawMessage,
+): RawMessage {
+  const incomingId = typeof incomingMessage.id === 'string' && incomingMessage.id.trim()
+    ? incomingMessage.id
+    : undefined;
+  return {
+    ...existingMessage,
+    ...incomingMessage,
+    ...(incomingId ? { id: incomingId } : {}),
+    _attachedFiles: mergeAttachedFiles(existingMessage._attachedFiles, incomingMessage._attachedFiles),
+  };
+}
+
+export function mergePendingUserMessage(
+  pendingUserMessage: PendingUserMessageOverlay,
   incoming: RawMessage,
 ): RawMessage {
-  const optimisticUserId = (
-    optimisticUser
-    && typeof optimisticUser.id === 'string'
-    && optimisticUser.id.trim()
-  )
-    ? optimisticUser.id.trim()
-    : '';
+  const pendingUserId = pendingUserMessage.clientMessageId.trim();
+  const pendingFiles = pendingUserMessage.message._attachedFiles ?? [];
 
   return {
     ...incoming,
-    ...(optimisticUserId ? { id: optimisticUserId } : {}),
+    ...(pendingUserId ? { id: pendingUserId } : {}),
     _attachedFiles: incoming._attachedFiles && incoming._attachedFiles.length > 0
       ? incoming._attachedFiles
-      : optimisticUser?._attachedFiles,
+      : pendingFiles,
   };
+}
+
+function matchesPendingUserMessage(
+  pendingUserMessage: PendingUserMessageOverlay,
+  message: RawMessage,
+): boolean {
+  if (message.role !== 'user') {
+    return false;
+  }
+  const pendingId = pendingUserMessage.clientMessageId.trim();
+  if (!pendingId) {
+    return false;
+  }
+  if (typeof message.id === 'string' && message.id.trim() === pendingId) {
+    return true;
+  }
+  return extractUserMessageClientId(message.content) === pendingId;
 }
 
 export function buildSanitizedIntermediateSnapshot(
@@ -123,133 +156,232 @@ interface BuildFinalMessageCommitPatchInput {
   toolOnly: boolean;
 }
 
+interface BuildAuthoritativeUserCommitPatchInput {
+  state: RuntimeStateLike;
+  finalMessage: RawMessage;
+}
+
+export function buildAuthoritativeUserCommitPatch(
+  input: BuildAuthoritativeUserCommitPatchInput,
+): Partial<ChatStoreState> {
+  const { state, finalMessage } = input;
+  const sessionKey = state.currentSessionKey;
+  const transcript = getSessionTranscript(state, sessionKey);
+  const runtime = getSessionRuntime(state, sessionKey);
+  const pendingUserMessage = runtime.pendingUserMessage ?? null;
+  const matchedPending = pendingUserMessage && matchesPendingUserMessage(pendingUserMessage, finalMessage)
+    ? pendingUserMessage
+    : null;
+  const nextMessage = matchedPending
+    ? mergePendingUserMessage(matchedPending, finalMessage)
+    : finalMessage;
+  const alreadyExists = transcript.some((message) => (
+    (typeof nextMessage.id === 'string' && nextMessage.id.trim() && message.id === nextMessage.id)
+    || (matchedPending != null && matchesPendingUserMessage(matchedPending, message))
+  ));
+  if (alreadyExists) {
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        runtime: matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
+      }),
+    };
+  }
+  return {
+    sessionsByKey: patchSessionRecord(state, sessionKey, {
+      transcript: [...transcript, nextMessage],
+      runtime: matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
+    }),
+  };
+}
+
 export function buildFinalMessageCommitPatch(
   input: BuildFinalMessageCommitPatchInput,
 ): Partial<ChatStoreState> {
   const { state, finalMessage, messageId, updates, hasOutput, toolOnly } = input;
+  const sessionKey = state.currentSessionKey;
+  const transcript = getSessionTranscript(state, sessionKey);
+  const runtime = getSessionRuntime(state, sessionKey);
   const nextTools = updates.length > 0
-    ? upsertToolStatuses(state.streamingTools, updates)
-    : state.streamingTools;
+    ? upsertToolStatuses(runtime.streamingTools, updates)
+    : runtime.streamingTools;
   const streamingTools = hasOutput ? [] : nextTools;
 
-  const pendingImages = state.pendingToolImages;
+  const pendingImages = runtime.pendingToolImages;
   const messageWithImages: RawMessage = pendingImages.length > 0
     ? {
-      ...finalMessage,
-      role: (finalMessage.role || 'assistant') as RawMessage['role'],
-      id: messageId,
-      _attachedFiles: [...(finalMessage._attachedFiles || []), ...pendingImages],
-    }
+        ...finalMessage,
+        role: (finalMessage.role || 'assistant') as RawMessage['role'],
+        id: messageId,
+        _attachedFiles: [...(finalMessage._attachedFiles || []), ...pendingImages],
+      }
     : { ...finalMessage, role: (finalMessage.role || 'assistant') as RawMessage['role'], id: messageId };
 
-  const assistantSemanticDuplicate = hasAssistantSemanticDuplicate(
-    state.messages,
+  const duplicateMessageIndexById = transcript.findIndex((message) => message.id === messageId);
+  const assistantSemanticDuplicateIndex = findAssistantSemanticDuplicateIndex(
+    transcript,
     messageWithImages,
-    { sending: state.sending, pendingFinal: state.pendingFinal },
+    { sending: runtime.sending, pendingFinal: runtime.pendingFinal },
   );
-  const alreadyExists = state.messages.some((message) => message.id === messageId) || assistantSemanticDuplicate;
-  const buildFinalRuntimePatch = (messages?: RawMessage[]) => reduceRuntimeOverlay(state, {
+  const existingMessageIndex = duplicateMessageIndexById >= 0
+    ? duplicateMessageIndexById
+    : assistantSemanticDuplicateIndex;
+  const runtimePatch = reduceRuntimeOverlay(runtime, {
     type: 'final_message_committed',
     hasOutput,
     toolOnly,
     streamingTools,
-    messages,
   });
+  const nextRuntimeBase = runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch };
+  const pendingUserMessage = runtime.pendingUserMessage ?? null;
+  const nextRuntime = nextRuntimeBase;
 
-  if (alreadyExists) {
-    return buildFinalRuntimePatch();
-  }
-
-  const optimisticUserIndex = findOptimisticUserMessageIndex(
-    state.messages,
-    messageWithImages,
-    state.lastUserMessageAt,
-  );
-  if (optimisticUserIndex >= 0) {
-    const mergedUserMessage = mergeOptimisticUserMessage(
-      state.messages[optimisticUserIndex],
+  if (existingMessageIndex >= 0) {
+    const mergedTranscript = [...transcript];
+    mergedTranscript[existingMessageIndex] = mergeCommittedMessage(
+      transcript[existingMessageIndex]!,
       messageWithImages,
     );
-    const nextMessages = [...state.messages];
-    nextMessages[optimisticUserIndex] = mergedUserMessage;
-    return buildFinalRuntimePatch(nextMessages);
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        transcript: mergedTranscript,
+        runtime: nextRuntime,
+      }),
+    };
   }
 
-  return buildFinalRuntimePatch([...state.messages, messageWithImages]);
+  if (messageWithImages.role === 'user' && pendingUserMessage && matchesPendingUserMessage(pendingUserMessage, messageWithImages)) {
+    const mergedPendingUser = mergePendingUserMessage(pendingUserMessage, messageWithImages);
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        transcript: [...transcript, mergedPendingUser],
+        runtime: { ...nextRuntime, pendingUserMessage: null },
+      }),
+    };
+  }
+
+  return {
+    sessionsByKey: patchSessionRecord(state, sessionKey, {
+      transcript: [...transcript, messageWithImages],
+      runtime: nextRuntime,
+    }),
+  };
 }
 
-interface ReconcileOptimisticHistoryInput {
+interface ReconcilePendingUserHistoryInput {
   historyMessages: RawMessage[];
-  currentMessages: RawMessage[];
-  lastUserMessageAt: number | null;
-  windowMs: number;
+  pendingUserMessage: PendingUserMessageOverlay | null | undefined;
 }
 
-export function reconcileOptimisticUserInHistory(
-  input: ReconcileOptimisticHistoryInput,
-): RawMessage[] {
-  const { historyMessages, currentMessages, lastUserMessageAt, windowMs } = input;
-  if (lastUserMessageAt == null) {
-    return historyMessages;
+export function reconcilePendingUserWithHistory(
+  input: ReconcilePendingUserHistoryInput,
+): {
+  historyMessages: RawMessage[];
+  pendingUserMessage: PendingUserMessageOverlay | null;
+} {
+  const { historyMessages, pendingUserMessage } = input;
+  if (!pendingUserMessage) {
+    return {
+      historyMessages,
+      pendingUserMessage: null,
+    };
   }
 
-  const sentAtMs = toMs(lastUserMessageAt);
-  const optimistic = [...currentMessages].reverse().find(
-    (message) => (
-      message.role === 'user'
-      && message.timestamp
-      && Math.abs(toMs(message.timestamp) - sentAtMs) <= windowMs
-    ),
-  );
-
-  if (!optimistic) {
-    return historyMessages;
-  }
-
-  const optimisticText = normalizeUserTextForReconcile(optimistic.content);
-  const matchedHistoryIndex = historyMessages.findIndex((candidate) => {
-    if (candidate.role !== 'user' || !candidate.timestamp) {
-      return false;
-    }
-    const candidateTsMs = toMs(candidate.timestamp);
-    if (Math.abs(candidateTsMs - sentAtMs) > windowMs) {
-      return false;
-    }
-    if (candidate.id && optimistic.id && candidate.id === optimistic.id) {
-      return true;
-    }
-    if (!optimisticText) {
-      return false;
-    }
-    const candidateText = normalizeUserTextForReconcile(candidate.content);
-    return candidateText !== '' && candidateText === optimisticText;
+  const pendingUser = pendingUserMessage.message;
+  const matchedHistoryIndex = [...historyMessages].reverse().findIndex((candidate) => {
+    return matchesPendingUserMessage(pendingUserMessage, candidate)
+      || (candidate.role === 'user' && pendingUser.id != null && candidate.id === pendingUser.id);
   });
 
   if (matchedHistoryIndex < 0) {
-    return [...historyMessages, optimistic];
+    return {
+      historyMessages,
+      pendingUserMessage,
+    };
   }
 
-  const matchedHistoryMessage = historyMessages[matchedHistoryIndex];
-  const optimisticFiles = optimistic._attachedFiles ?? [];
+  const historyIndex = historyMessages.length - 1 - matchedHistoryIndex;
+  const matchedHistoryMessage = historyMessages[historyIndex];
+  const pendingFiles = pendingUser._attachedFiles ?? [];
   const historyFiles = matchedHistoryMessage?._attachedFiles ?? [];
-  const optimisticId = typeof optimistic.id === 'string' && optimistic.id.trim()
-    ? optimistic.id.trim()
-    : '';
-  const shouldPreserveOptimisticId = Boolean(
-    optimisticId
-    && matchedHistoryMessage?.id !== optimisticId,
+  const pendingId = pendingUserMessage.clientMessageId.trim();
+  const shouldPreservePendingId = Boolean(
+    pendingId
+    && matchedHistoryMessage?.id !== pendingId,
   );
-  const shouldHydrateOptimisticFiles = optimisticFiles.length > 0 && historyFiles.length === 0;
-  if (!shouldPreserveOptimisticId && !shouldHydrateOptimisticFiles) {
+  const shouldHydratePendingFiles = pendingFiles.length > 0 && historyFiles.length === 0;
+  if (!shouldPreservePendingId && !shouldHydratePendingFiles) {
+    return {
+      historyMessages,
+      pendingUserMessage: null,
+    };
+  }
+
+  const merged = [...historyMessages];
+  merged[historyIndex] = {
+    ...matchedHistoryMessage,
+    ...(shouldPreservePendingId ? { id: pendingId } : {}),
+    ...(shouldHydratePendingFiles
+      ? { _attachedFiles: pendingFiles.map((file) => ({ ...file })) }
+      : {}),
+  };
+  return {
+    historyMessages: merged,
+    pendingUserMessage: null,
+  };
+}
+
+interface ReconcileAssistantHistoryInput {
+  historyMessages: RawMessage[];
+  currentMessages: RawMessage[];
+}
+
+export function reconcileLatestAssistantInHistory(
+  input: ReconcileAssistantHistoryInput,
+): RawMessage[] {
+  const { historyMessages, currentMessages } = input;
+  const currentAssistant = [...currentMessages].reverse().find((message) => (
+    message.role === 'assistant'
+    && normalizeAssistantFinalTextForDedup(message.content) !== ''
+  ));
+  if (!currentAssistant) {
+    return historyMessages;
+  }
+
+  const currentAssistantId = typeof currentAssistant.id === 'string' && currentAssistant.id.trim()
+    ? currentAssistant.id.trim()
+    : '';
+  const currentAssistantText = normalizeAssistantFinalTextForDedup(currentAssistant.content);
+  if (!currentAssistantId || !currentAssistantText) {
+    return historyMessages;
+  }
+
+  const matchedHistoryIndex = [...historyMessages].reverse().findIndex((candidate) => (
+    candidate.role === 'assistant'
+    && normalizeAssistantFinalTextForDedup(candidate.content) === currentAssistantText
+  ));
+  if (matchedHistoryIndex < 0) {
+    return historyMessages;
+  }
+
+  const historyIndex = historyMessages.length - 1 - matchedHistoryIndex;
+  const matchedHistoryMessage = historyMessages[historyIndex];
+  const historyAssistantId = typeof matchedHistoryMessage?.id === 'string' && matchedHistoryMessage.id.trim()
+    ? matchedHistoryMessage.id.trim()
+    : '';
+  const currentFiles = currentAssistant._attachedFiles ?? [];
+  const historyFiles = matchedHistoryMessage?._attachedFiles ?? [];
+  const shouldPreserveCurrentId = historyAssistantId !== currentAssistantId;
+  const shouldHydrateCurrentFiles = currentFiles.length > 0 && historyFiles.length === 0;
+  if (!shouldPreserveCurrentId && !shouldHydrateCurrentFiles) {
     return historyMessages;
   }
 
   const merged = [...historyMessages];
-  merged[matchedHistoryIndex] = {
+  merged[historyIndex] = {
     ...matchedHistoryMessage,
-    ...(shouldPreserveOptimisticId ? { id: optimisticId } : {}),
-    ...(shouldHydrateOptimisticFiles
-      ? { _attachedFiles: optimisticFiles.map((file) => ({ ...file })) }
+    ...(shouldPreserveCurrentId ? { id: currentAssistantId } : {}),
+    ...(shouldHydrateCurrentFiles
+      ? { _attachedFiles: currentFiles.map((file) => ({ ...file })) }
       : {}),
   };
   return merged;
@@ -273,13 +405,16 @@ export function buildToolResultFinalPatch(
     updates,
     toolFiles,
   } = input;
+  const sessionKey = state.currentSessionKey;
+  const transcript = getSessionTranscript(state, sessionKey);
+  const runtime = getSessionRuntime(state, sessionKey);
   const snapshotMessages: RawMessage[] = [];
   const nextPendingToolImages = toolFiles.length > 0
-    ? [...state.pendingToolImages, ...toolFiles]
-    : state.pendingToolImages;
+    ? [...runtime.pendingToolImages, ...toolFiles]
+    : runtime.pendingToolImages;
   const nextStreamingTools = updates.length > 0
-    ? upsertToolStatuses(state.streamingTools, updates)
-    : state.streamingTools;
+    ? upsertToolStatuses(runtime.streamingTools, updates)
+    : runtime.streamingTools;
 
   if (toolSnapshot) {
     const streamRole = toolSnapshot.role;
@@ -288,10 +423,10 @@ export function buildToolResultFinalPatch(
       && hasAssistantToolCall(toolSnapshot)
     );
     if (shouldSnapshotIntermediateToolTurn) {
-      const snapshotId = toolSnapshot.id || `${runId || 'run'}-turn-${state.messages.length}`;
+      const snapshotId = toolSnapshot.id || `${runId || 'run'}-turn-${transcript.length}`;
       const snapshot = buildSanitizedIntermediateSnapshot(
         toolSnapshot,
-        state.messages,
+        transcript,
         snapshotId,
       );
       if (snapshot) {
@@ -300,14 +435,17 @@ export function buildToolResultFinalPatch(
     }
   }
 
+  const runtimePatch = reduceRuntimeOverlay(runtime, {
+    type: 'tool_result_committed',
+    pendingToolImages: nextPendingToolImages,
+    streamingTools: nextStreamingTools,
+  });
   return {
-    messages: snapshotMessages.length > 0
-      ? [...state.messages, ...snapshotMessages]
-      : state.messages,
-    ...reduceRuntimeOverlay(state, {
-      type: 'tool_result_committed',
-      pendingToolImages: nextPendingToolImages,
-      streamingTools: nextStreamingTools,
+    sessionsByKey: patchSessionRecord(state, sessionKey, {
+      transcript: snapshotMessages.length > 0
+        ? [...transcript, ...snapshotMessages]
+        : transcript,
+      runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
     }),
   };
 }
@@ -331,4 +469,3 @@ export function buildErrorStreamSnapshot(
     : fallbackSnapshotId;
   return buildSanitizedIntermediateSnapshot(currentStream, currentMessages, snapshotId);
 }
-

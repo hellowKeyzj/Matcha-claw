@@ -30,7 +30,7 @@ export interface HistoryLoadExecutionDeps {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
-  optimisticUserReconcileWindowMs: number;
+  optimisticUserReconcileWindowMs?: number;
   pipelineStrategy?: HistoryLoadPipelineStrategy;
   pipelineStrategyLabel?: string;
 }
@@ -59,7 +59,6 @@ function createHistoryLoadExecutionContext(
     get,
     historyRuntime,
     loadingTimeoutMs,
-    optimisticUserReconcileWindowMs,
     pipelineStrategy = defaultHistoryLoadPipelineStrategy,
   } = deps;
 
@@ -118,7 +117,6 @@ function createHistoryLoadExecutionContext(
     scope,
     abortSignal: abortController.signal,
     shouldAbortHistoryProcessing,
-    optimisticUserReconcileWindowMs,
   });
 
   const pipelineContext: HistoryLoadPipelineContext = {

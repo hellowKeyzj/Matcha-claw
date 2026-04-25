@@ -4,6 +4,8 @@ import { useChatScroll } from './useChatScroll';
 interface UseChatListCtlInput {
   scrollScopeKey: string;
   scrollResetKey: string;
+  autoFollowSignal: string;
+  tailActivityOpen: boolean;
   messagesViewportRef: RefObject<HTMLDivElement | null>;
   messageContentRef: RefObject<HTMLDivElement | null>;
   markScrollActivity: () => void;
@@ -31,6 +33,8 @@ export function useChatListCtl(input: UseChatListCtlInput) {
   const {
     scrollScopeKey,
     scrollResetKey,
+    autoFollowSignal,
+    tailActivityOpen,
     messagesViewportRef,
     messageContentRef,
     markScrollActivity,
@@ -50,6 +54,8 @@ export function useChatListCtl(input: UseChatListCtlInput) {
   } = useChatScroll({
     scrollScopeKey,
     scrollResetKey,
+    autoFollowSignal,
+    tailActivityOpen,
     viewportRef: messagesViewportRef,
     contentRef: messageContentRef,
     stickyBottomThresholdPx: 120,

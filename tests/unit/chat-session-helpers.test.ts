@@ -7,6 +7,40 @@ import {
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
+import type { RawMessage } from '@/stores/chat';
+
+function createSessionRecord(input?: {
+  transcript?: RawMessage[];
+  label?: string | null;
+  lastActivityAt?: number | null;
+  runtime?: {
+    sending?: boolean;
+    pendingFinal?: boolean;
+    activeRunId?: string | null;
+  };
+}) {
+  return {
+    transcript: input?.transcript ?? [],
+    meta: {
+      label: input?.label ?? null,
+      lastActivityAt: input?.lastActivityAt ?? null,
+      ready: false,
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: input?.runtime?.sending ?? false,
+      pendingFinal: input?.runtime?.pendingFinal ?? false,
+      activeRunId: input?.runtime?.activeRunId ?? null,
+      runPhase: 'idle' as const,
+      streamingMessage: null,
+      streamRuntime: null,
+      streamingTools: [],
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle' as const,
+    },
+  };
+}
 
 describe('chat session helpers', () => {
   it('resolves thinking level from sessions list', () => {
@@ -45,10 +79,11 @@ describe('chat session helpers', () => {
     const keepMain = shouldKeepMissingCurrentSession(
       'agent:main:main',
       {
-        messages: [{ role: 'user', content: 'hi' }],
-        sessionLabels: {},
-        sessionLastActivity: {},
-        sessionRuntimeByKey: {},
+        sessionsByKey: {
+          'agent:main:main': createSessionRecord({
+            transcript: [{ role: 'user', content: 'hi' }],
+          }),
+        },
       } as never,
       2,
     );
@@ -57,10 +92,7 @@ describe('chat session helpers', () => {
     const keepEmptyDraft = shouldKeepMissingCurrentSession(
       'agent:foo:session-1',
       {
-        messages: [],
-        sessionLabels: {},
-        sessionLastActivity: {},
-        sessionRuntimeByKey: {},
+        sessionsByKey: {},
       } as never,
       2,
     );
@@ -69,10 +101,9 @@ describe('chat session helpers', () => {
     const dropDraftWithRuntime = shouldKeepMissingCurrentSession(
       'agent:foo:session-2',
       {
-        messages: [],
-        sessionLabels: {},
-        sessionLastActivity: {},
-        sessionRuntimeByKey: { 'agent:foo:session-2': {} as never },
+        sessionsByKey: {
+          'agent:foo:session-2': createSessionRecord(),
+        },
       } as never,
       2,
     );
@@ -84,9 +115,9 @@ describe('chat session helpers', () => {
     const bridge = buildTaskInboxBridgeState(
       {
         currentSessionKey: 'agent:foo:main',
-        sending: false,
-        pendingFinal: false,
-        activeRunId: null,
+        sessionsByKey: {
+          'agent:foo:main': createSessionRecord(),
+        },
       } as never,
       'agent:main:main',
     );
@@ -97,4 +128,3 @@ describe('chat session helpers', () => {
     });
   });
 });
-

@@ -8,6 +8,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import type { RawMessage } from '@/stores/chat';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
@@ -35,19 +36,56 @@ class ResizeObserverStub {
   }
 }
 
+function createSessionRecord(input?: {
+  transcript?: RawMessage[];
+  ready?: boolean;
+  lastActivityAt?: number | null;
+  runtime?: Partial<ReturnType<typeof useChatStore.getState>['sessionsByKey'][string]['runtime']>;
+}) {
+  return {
+    transcript: input?.transcript ?? [],
+    meta: {
+      label: null,
+      lastActivityAt: input?.lastActivityAt ?? null,
+      ready: input?.ready ?? false,
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      streamingMessage: null,
+      streamRuntime: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle' as const,
+      ...input?.runtime,
+    },
+  };
+}
+
 function setupStores() {
   const loadHistory = vi.fn().mockResolvedValue(undefined);
   const loadSessions = vi.fn().mockResolvedValue(undefined);
+  const now = Date.now();
 
   useGatewayStore.setState({
     status: { state: 'running', port: 18789 },
   } as never);
 
   useSubagentsStore.setState({
-    agents: [
-      { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
-      { id: 'another', name: 'Another Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
-    ],
+    agentsResource: {
+      status: 'ready',
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: now,
+      data: [
+        { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+        { id: 'another', name: 'Another Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+      ],
+    },
     loadAgents: vi.fn().mockResolvedValue(undefined),
     updateAgent: vi.fn().mockResolvedValue(undefined),
   } as never);
@@ -70,81 +108,72 @@ function setupStores() {
   } as never);
 
   useChatStore.setState({
-    messages: [
-      {
-        role: 'user',
-        content: 'pending user message',
-        timestamp: Date.now() / 1000,
-        id: 'user-1',
-      },
-    ],
+    sessionsResource: {
+      status: 'ready',
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: now,
+      data: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:another:main', displayName: 'agent:another:main' },
+      ],
+    },
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
     mutating: false,
     error: null,
-    sending: true,
-    activeRunId: 'run-current',
-    runPhase: 'streaming',
-    streamingMessage: {
-      id: 'assistant-final',
-      role: 'assistant',
-      content: 'partial answer',
-      timestamp: Date.now() / 1000,
-    },
-    streamRuntime: {
-      sessionKey: 'agent:test:main',
-      runId: 'run-current',
-      chunks: ['partial answer'],
-      rawChars: 14,
-      displayedChars: 14,
-      status: 'streaming',
-      rafId: null,
-    },
-    streamingTools: [],
-    pendingFinal: true,
-    lastUserMessageAt: Date.now(),
-    pendingToolImages: [],
-    approvalStatus: 'idle',
     pendingApprovalsBySession: {},
-    sessions: [
-      { key: 'agent:test:main', displayName: 'agent:test:main' },
-      { key: 'agent:another:main', displayName: 'agent:another:main' },
-    ],
     currentSessionKey: 'agent:test:main',
-    sessionLabels: {},
-    sessionLastActivity: {
-      'agent:test:main': Date.now(),
-      'agent:another:main': Date.now() - 1_000,
-    },
-    sessionReadyByKey: {
-      'agent:test:main': true,
-      'agent:another:main': true,
-    },
-    sessionRuntimeByKey: {
-      'agent:another:main': {
-        messages: [
+    sessionsByKey: {
+      'agent:test:main': createSessionRecord({
+        transcript: [
+          {
+            role: 'user',
+            content: 'pending user message',
+            timestamp: now / 1000,
+            id: 'user-1',
+          },
+        ],
+        ready: true,
+        lastActivityAt: now,
+        runtime: {
+          sending: true,
+          activeRunId: 'run-current',
+          runPhase: 'streaming',
+          streamingMessage: {
+            id: 'assistant-final',
+            role: 'assistant',
+            content: 'partial answer',
+            timestamp: now / 1000,
+          },
+          streamRuntime: {
+            sessionKey: 'agent:test:main',
+            runId: 'run-current',
+            chunks: ['partial answer'],
+            rawChars: 14,
+            displayedChars: 14,
+            status: 'streaming',
+            rafId: null,
+          },
+          pendingFinal: true,
+          lastUserMessageAt: now,
+        },
+      }),
+      'agent:another:main': createSessionRecord({
+        transcript: [
           {
             role: 'assistant',
             content: 'another session latest message',
-            timestamp: Date.now() / 1000,
+            timestamp: now / 1000,
             id: 'another-1',
           },
         ],
-        sending: false,
-        activeRunId: null,
-        runPhase: 'idle',
-        streamingMessage: null,
-        streamRuntime: null,
-        streamingTools: [],
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-        approvalStatus: 'idle',
-      },
+        ready: true,
+        lastActivityAt: now - 1_000,
+      }),
     },
     showThinking: true,
-    thinkingLevel: null,
     loadHistory,
     loadSessions,
   } as never);
@@ -267,9 +296,9 @@ describe('chat 会话切换 UX', () => {
 
     const state = useChatStore.getState();
     expect(state.currentSessionKey).toBe('agent:test:main');
-    expect(state.sending).toBe(true);
-    expect(state.pendingFinal).toBe(true);
-    expect(state.streamRuntime).toMatchObject({
+    expect(state.sessionsByKey['agent:test:main']?.runtime.sending).toBe(true);
+    expect(state.sessionsByKey['agent:test:main']?.runtime.pendingFinal).toBe(true);
+    expect(state.sessionsByKey['agent:test:main']?.runtime.streamRuntime).toMatchObject({
       sessionKey: 'agent:test:main',
       runId: 'run-current',
     });
@@ -298,13 +327,20 @@ describe('chat 会话切换 UX', () => {
 
   it('主聊天页只渲染最近 30 条，并给出完整历史入口', async () => {
     const messages = buildSessionMessages(35);
+    const queuedAnimationFrames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      queuedAnimationFrames.push(callback);
+      return queuedAnimationFrames.length;
+    });
     useChatStore.setState({
-      messages,
-      sending: false,
-      streamingMessage: null,
-      streamRuntime: null,
-      pendingFinal: false,
-      sessionRuntimeByKey: {},
+      sessionsByKey: {
+        ...useChatStore.getState().sessionsByKey,
+        'agent:test:main': createSessionRecord({
+          transcript: messages,
+          ready: true,
+          lastActivityAt: Date.now(),
+        }),
+      },
     } as never);
 
     renderChat();
@@ -315,40 +351,70 @@ describe('chat 会话切换 UX', () => {
     expect(screen.queryByText('session message 1')).toBeNull();
     expect(screen.queryByText('Showing the latest 30 messages in live chat.')).toBeNull();
     expect(screen.getByRole('button', { name: 'View history' })).toBeInTheDocument();
+
+    act(() => {
+      for (const callback of queuedAnimationFrames.splice(0)) {
+        callback(0);
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('session message 6')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('session message 5')).toBeNull();
+    vi.unstubAllGlobals();
   });
 
-  it('超长会话首屏应只让近处 assistant 正文进入 full，其余保留 lite 或 shell', async () => {
+  it('切到缓存会话时应先渲染预算尾部，再在下一帧扩到最后 30 条', async () => {
     const messages = Array.from({ length: 32 }, (_, index) => ({
       role: index % 2 === 0 ? 'assistant' : 'user',
       content: index % 2 === 0 ? buildHeavyMarkdownMessage(index + 1) : `user message ${index + 1}`,
       timestamp: (Date.now() / 1000) + index,
       id: `heavy-${index + 1}`,
     }));
+    const queuedAnimationFrames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      queuedAnimationFrames.push(callback);
+      return queuedAnimationFrames.length;
+    });
 
     useChatStore.setState({
-      messages,
-      sending: false,
-      streamingMessage: null,
-      streamRuntime: null,
-      pendingFinal: false,
-      sessionRuntimeByKey: {},
+      sessionsByKey: {
+        ...useChatStore.getState().sessionsByKey,
+        'agent:another:main': createSessionRecord({
+          transcript: messages,
+          ready: true,
+          lastActivityAt: Date.now(),
+        }),
+      },
     } as never);
 
-    const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    installChatLayoutMetrics(container, viewport, {
-      scrollHeight: 3200,
-      clientHeight: 320,
-      scrollTop: 0,
+    renderChat();
+
+    act(() => {
+      useChatStore.getState().switchSession('agent:another:main');
+    });
+
+    expect(screen.getByText(/user message 30/i)).toBeInTheDocument();
+    expect(screen.getByText(/message-31-line-0/i)).toBeInTheDocument();
+    expect(screen.getByText(/user message 32/i)).toBeInTheDocument();
+    expect(screen.queryByText(/message-3-line-0/i)).toBeNull();
+    expect(screen.queryByText(/user message 4/i)).toBeNull();
+    expect(screen.getByRole('button', { name: 'View history' })).toBeInTheDocument();
+    expect(document.querySelector('[data-chat-body-mode="shell"]')).toBeNull();
+    expect(document.querySelector('[data-chat-body-mode="lite"]')).toBeNull();
+
+    act(() => {
+      for (const callback of queuedAnimationFrames.splice(0)) {
+        callback(0);
+      }
     });
 
     await waitFor(() => {
-      const fullBodies = container.querySelectorAll('[data-chat-body-mode="full"]');
-      expect(fullBodies.length).toBeGreaterThan(0);
+      expect(screen.getByText(/message-3-line-0/i)).toBeInTheDocument();
     });
-
-    expect(container.querySelectorAll('[data-chat-body-mode="shell"]').length).toBeGreaterThan(0);
-    expect(container.querySelectorAll('[data-chat-body-mode="lite"]').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/message-1-line-0/i)).toBeNull();
+    vi.unstubAllGlobals();
   });
 
   it('切会话首屏时应先完成 live thread 首绘，再延后 execution graph 计算', async () => {

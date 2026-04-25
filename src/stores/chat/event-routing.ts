@@ -114,3 +114,18 @@ export function isRuntimeEventUsefulForPolling(kind: RuntimeEventKind): boolean 
     || kind === 'error'
     || kind === 'aborted';
 }
+
+export function canRuntimeEventReuseActiveRunId(kind: RuntimeEventKind): boolean {
+  return kind === 'started'
+    || kind === 'delta'
+    || kind === 'unknown';
+}
+
+export function isUnboundLifecycleEvent(kind: RuntimeEventKind, runId: string): boolean {
+  if (runId) {
+    return false;
+  }
+  return kind === 'final'
+    || kind === 'error'
+    || kind === 'aborted';
+}

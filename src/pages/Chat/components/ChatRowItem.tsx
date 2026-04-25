@@ -2,7 +2,6 @@ import { ChatMessage } from '../ChatMessage';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import type { ChatRow } from '../chat-row-model';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
-import type { MarkdownBodyRenderMode } from '../md-pipeline';
 import { ActivityIndicator, TypingIndicator } from './ChatStates';
 
 const EMPTY_SUPPRESSED_KEYS = new Set<string>();
@@ -16,8 +15,6 @@ export function ChatRowItem({
   assistantAvatarStyle,
   userAvatarImageUrl,
   suppressedToolCardRowKeys = EMPTY_SUPPRESSED_KEYS,
-  bodyRenderModeByRowKey,
-  onRequestFullRender,
   onJumpToRowKey,
 }: {
   row: ChatRow;
@@ -28,8 +25,6 @@ export function ChatRowItem({
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   suppressedToolCardRowKeys?: Set<string>;
-  bodyRenderModeByRowKey?: ReadonlyMap<string, MarkdownBodyRenderMode>;
-  onRequestFullRender?: (rowKey: string) => void;
   onJumpToRowKey?: (rowKey?: string) => void;
 }) {
   if (row.kind === 'message') {
@@ -37,14 +32,14 @@ export function ChatRowItem({
       <ChatMessage
         message={row.message}
         showThinking={showThinking}
+        isStreaming={row.isStreaming}
+        streamingTools={row.streamingTools}
         suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
         assistantAgentId={assistantAgentId}
         assistantAgentName={assistantAgentName}
         assistantAvatarSeed={assistantAvatarSeed}
         assistantAvatarStyle={assistantAvatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
-        bodyRenderMode={bodyRenderModeByRowKey?.get(row.key)}
-        onRequestFullRender={() => onRequestFullRender?.(row.key)}
       />
     );
   }
@@ -58,22 +53,6 @@ export function ChatRowItem({
         active={row.graph.active}
         onJumpToTrigger={() => onJumpToRowKey?.(row.graph.triggerMessageKey)}
         onJumpToReply={() => onJumpToRowKey?.(row.graph.replyMessageKey)}
-      />
-    );
-  }
-
-  if (row.kind === 'streaming') {
-    return (
-      <ChatMessage
-        message={row.message}
-        showThinking={showThinking}
-        isStreaming
-        streamingTools={row.streamingTools}
-        assistantAgentId={assistantAgentId}
-        assistantAgentName={assistantAgentName}
-        assistantAvatarSeed={assistantAvatarSeed}
-        assistantAvatarStyle={assistantAvatarStyle}
-        userAvatarImageUrl={userAvatarImageUrl}
       />
     );
   }

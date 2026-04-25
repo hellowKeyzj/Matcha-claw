@@ -1,6 +1,5 @@
-import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+import { reduceRuntimeOverlay } from './overlay-reducer';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type {
   ApprovalDecision,
   ApprovalItem,
@@ -34,14 +33,22 @@ export function buildSyncPendingApprovalsPatch(
     ? { ...state.pendingApprovalsBySession, [normalizedHint]: grouped[normalizedHint] ?? [] }
     : grouped;
   const currentPending = nextApprovals[state.currentSessionKey] ?? [];
-  const nextActiveRunId = state.activeRunId ?? currentPending.find((item) => typeof item.runId === 'string')?.runId ?? null;
+  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
+  const nextActiveRunId = currentRuntime.activeRunId ?? currentPending.find((item) => typeof item.runId === 'string')?.runId ?? null;
+  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+    type: 'pending_approvals_synced',
+    currentPendingCount: currentPending.length,
+    nextActiveRunId,
+  });
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...reduceRuntimeOverlay(state, {
-      type: 'pending_approvals_synced',
-      currentPendingCount: currentPending.length,
-      nextActiveRunId,
-    }),
+    ...(runtimePatch === currentRuntime
+      ? {}
+      : {
+          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+            runtime: { ...currentRuntime, ...runtimePatch },
+          }),
+        }),
   };
 }
 
@@ -63,14 +70,26 @@ export function buildApprovalRequestedPatch(
     ...state.pendingApprovalsBySession,
     [sessionKey]: nextSessionItems,
   };
-
+  if (!isCurrentSession) {
+    return {
+      pendingApprovalsBySession: nextApprovals,
+    };
+  }
+  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
+  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+    type: 'approval_requested',
+    isCurrentSession,
+    runId: approval.runId,
+  });
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...reduceRuntimeOverlay(state, {
-      type: 'approval_requested',
-      isCurrentSession,
-      runId: approval.runId,
-    }),
+    ...(runtimePatch === currentRuntime
+      ? {}
+      : {
+          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+            runtime: { ...currentRuntime, ...runtimePatch },
+          }),
+        }),
   };
 }
 
@@ -104,14 +123,27 @@ export function buildApprovalResolvedPatch(
 
   const stillPendingCurrent = (nextApprovals[state.currentSessionKey] ?? []).length > 0;
   const abortedCurrentByDeny = decision === 'deny' && matchedSessionKey === state.currentSessionKey;
+  if (matchedSessionKey !== state.currentSessionKey) {
+    return {
+      pendingApprovalsBySession: nextApprovals,
+    };
+  }
+
+  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
+  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+    type: 'approval_resolved',
+    stillPendingCurrent,
+    abortedCurrentByDeny,
+  });
 
   return {
     pendingApprovalsBySession: nextApprovals,
-    ...reduceRuntimeOverlay(state, {
-      type: 'approval_resolved',
-      stillPendingCurrent,
-      abortedCurrentByDeny,
-    }),
+    ...(runtimePatch === currentRuntime
+      ? {}
+      : {
+          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+            runtime: { ...currentRuntime, ...runtimePatch },
+          }),
+        }),
   };
 }
-

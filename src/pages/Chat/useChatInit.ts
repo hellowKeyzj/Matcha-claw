@@ -2,7 +2,11 @@ import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useChatStore } from '@/stores/chat';
-import { readSessionsFromState } from '@/stores/chat/session-helpers';
+import {
+  readSessionsFromState,
+  resolveSessionActivityMs,
+} from '@/stores/chat/session-helpers';
+import { getSessionMeta, getSessionTranscript } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
@@ -43,18 +47,18 @@ function collectSessionPrewarmTargets(limit: number): string[] {
   const state = useChatStore.getState();
   const currentSessionKey = state.currentSessionKey;
   const rankedSessionKeys = readSessionsFromState(state)
-    .map((session) => session.key)
-    .filter((sessionKey) => sessionKey && sessionKey !== currentSessionKey)
-    .filter((sessionKey) => {
-      if (state.sessionReadyByKey[sessionKey]) {
+    .filter((session) => session.key && session.key !== currentSessionKey)
+    .filter((session) => {
+      const meta = getSessionMeta(state, session.key);
+      if (meta.ready) {
         return false;
       }
-      const runtime = state.sessionRuntimeByKey[sessionKey];
-      return !runtime || runtime.messages.length === 0;
+      return getSessionTranscript(state, session.key).length === 0;
     })
-    .sort((leftKey, rightKey) => (
-      (state.sessionLastActivity[rightKey] ?? 0) - (state.sessionLastActivity[leftKey] ?? 0)
-    ));
+    .sort((left, right) => (
+      resolveSessionActivityMs(right, state.sessionsByKey) - resolveSessionActivityMs(left, state.sessionsByKey)
+    ))
+    .map((session) => session.key);
   return rankedSessionKeys.slice(0, limit);
 }
 
@@ -180,7 +184,10 @@ export function useChatInit(input: UseChatInitInput): void {
       };
       historyPrewarmIdleHandleRef.current = scheduleIdleTask(runNext, HISTORY_IDLE_LOAD_TIMEOUT_MS);
     };
-    const hasExistingMessages = useChatStore.getState().messages.length > 0;
+    const hasExistingMessages = getSessionTranscript(
+      useChatStore.getState(),
+      useChatStore.getState().currentSessionKey,
+    ).length > 0;
     const params = new URLSearchParams(locationSearch);
     const sessionParam = params.get('session')?.trim() ?? '';
     const agentParam = params.get('agent')?.trim() ?? '';

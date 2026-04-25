@@ -24,6 +24,7 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
+import { createEmptySessionRecord } from './store-state-helpers';
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
@@ -33,33 +34,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     get sessions(): ChatStoreState['sessions'] {
       return Array.isArray(this.sessionsResource?.data) ? this.sessionsResource.data : [];
     },
-    messages: [],
+    currentSessionKey: DEFAULT_SESSION_KEY,
+    sessionsByKey: {
+      [DEFAULT_SESSION_KEY]: createEmptySessionRecord(),
+    },
+    pendingApprovalsBySession: {},
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
     sessionsResource: createIdleResourceState([]),
     mutating: false,
     error: null,
-
-    sending: false,
-    activeRunId: null,
-    runPhase: 'idle',
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-    approvalStatus: 'idle',
-    pendingApprovalsBySession: {},
-    currentSessionKey: DEFAULT_SESSION_KEY,
-    sessionLabels: {},
-    sessionLastActivity: {},
-    sessionReadyByKey: {},
-    sessionRuntimeByKey: {},
-
     showThinking: true,
-    thinkingLevel: null,
 
     ...createStoreSessionActions({
       set,

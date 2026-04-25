@@ -1,6 +1,7 @@
 import { useGatewayStore } from '../gateway';
 import { disposeActiveStreamPacer } from './stream-pacer';
 import { reduceRuntimeOverlay } from './overlay-reducer';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
   ApprovalItem,
@@ -38,7 +39,15 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
 
   const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
   onAbortedTelemetry(sessionKey);
-  set((state) => reduceRuntimeOverlay(state, { type: 'run_aborted' }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, sessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_aborted' });
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 
   onBeginMutating();
   try {

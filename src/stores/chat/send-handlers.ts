@@ -1,7 +1,5 @@
 import { resolveSessionLabelFromMessages } from './message-helpers';
-import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+import { reduceRuntimeOverlay } from './overlay-reducer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -9,7 +7,17 @@ import {
   setHistoryPollTimer,
   setLastChatEventAt,
 } from './timers';
-import type { ChatSendAttachment, ChatStoreState, RawMessage } from './types';
+import { hasActiveStreamingRun } from './runtime-stream-state';
+import {
+  getSessionRuntime,
+  patchSessionRecord,
+  resolveSessionRecord,
+} from './store-state-helpers';
+import type {
+  ChatSendAttachment,
+  ChatStoreState,
+  PendingUserMessageOverlay,
+} from './types';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -20,54 +28,66 @@ export type ChatStoreGetFn = () => ChatStoreState;
 
 export const NO_RESPONSE_RECEIVED_ERROR = 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.';
 
-interface BuildOptimisticUserMessageInput {
+interface BuildPendingUserMessageInput {
+  clientMessageId: string;
   text: string;
   nowMs: number;
   attachments?: ChatSendAttachment[];
 }
 
-export function buildOptimisticUserMessage(input: BuildOptimisticUserMessageInput): RawMessage {
+export function buildPendingUserMessageOverlay(
+  input: BuildPendingUserMessageInput,
+): PendingUserMessageOverlay {
   return {
-    role: 'user',
-    content: input.text || (input.attachments?.length ? '(file attached)' : ''),
-    timestamp: input.nowMs / 1000,
-    id: crypto.randomUUID(),
-    _attachedFiles: input.attachments?.map((attachment) => ({
-      fileName: attachment.fileName,
-      mimeType: attachment.mimeType,
-      fileSize: attachment.fileSize,
-      preview: attachment.preview,
-      filePath: attachment.stagedPath,
-    })),
+    clientMessageId: input.clientMessageId,
+    createdAtMs: input.nowMs,
+    message: {
+      role: 'user',
+      content: input.text || (input.attachments?.length ? '(file attached)' : ''),
+      timestamp: input.nowMs / 1000,
+      id: input.clientMessageId,
+      _attachedFiles: input.attachments?.map((attachment) => ({
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        fileSize: attachment.fileSize,
+        preview: attachment.preview,
+        filePath: attachment.stagedPath,
+      })),
+    },
   };
 }
 
 interface ApplyStoreSendStartParams {
   set: ChatStoreSetFn;
   sessionKey: string;
-  message: RawMessage;
+  pendingUserMessage: PendingUserMessageOverlay;
   nowMs: number;
 }
 
 export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
-  const { set, sessionKey, message, nowMs } = params;
+  const { set, sessionKey, pendingUserMessage, nowMs } = params;
   set((state) => {
-    const nextMessages = [...state.messages, message];
+    const record = resolveSessionRecord(state.sessionsByKey[sessionKey]);
     const nextSessionLabel = sessionKey.endsWith(':main')
       ? ''
-      : resolveSessionLabelFromMessages(nextMessages);
-    const patch: Partial<ChatStoreState> = {
-      messages: nextMessages,
-      ...reduceRuntimeOverlay(state, {
-        type: 'send_submitted',
-        nowMs,
+      : resolveSessionLabelFromMessages([...record.transcript, pendingUserMessage.message]);
+    const runtimePatch = reduceRuntimeOverlay(record.runtime, {
+      type: 'send_submitted',
+      nowMs,
+      pendingUserMessage,
+    });
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        meta: {
+          ...record.meta,
+          label: nextSessionLabel || record.meta.label,
+          lastActivityAt: nowMs,
+        },
+        runtime: runtimePatch === record.runtime
+          ? record.runtime
+          : { ...record.runtime, ...runtimePatch },
       }),
-      sessionLastActivity: { ...state.sessionLastActivity, [sessionKey]: nowMs },
     };
-    if (nextSessionLabel && !state.sessionLabels[sessionKey]) {
-      patch.sessionLabels = { ...state.sessionLabels, [sessionKey]: nextSessionLabel };
-    }
-    return patch;
   });
 }
 
@@ -88,11 +108,12 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
   const POLL_INTERVAL = 4_000;
   const pollHistory = () => {
     const state = get();
-    if (!state.sending) {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    if (!runtime.sending) {
       clearHistoryPoll();
       return;
     }
-    if (state.streamingMessage) {
+    if (hasActiveStreamingRun(runtime)) {
       setHistoryPollTimer(setTimeout(pollHistory, POLL_INTERVAL));
       return;
     }
@@ -112,9 +133,10 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
   const SAFETY_INITIAL_CHECK_DELAY_MS = 30_000;
   const checkStuck = () => {
     const state = get();
-    if (!state.sending) return;
-    if (state.streamingMessage || state.streamRuntime) return;
-    if (state.pendingFinal) {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    if (!runtime.sending) return;
+    if (hasActiveStreamingRun(runtime)) return;
+    if (runtime.pendingFinal) {
       setTimeout(checkStuck, SAFETY_RETRY_INTERVAL_MS);
       return;
     }
@@ -124,11 +146,21 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
     }
     clearHistoryPoll();
     onSafetyTimeout();
-    set((state) => reduceRuntimeOverlay(state, {
-      type: 'send_failed',
-      error: NO_RESPONSE_RECEIVED_ERROR,
-      clearRun: true,
-    }));
+    set((current) => {
+      const currentRuntime = getSessionRuntime(current, current.currentSessionKey);
+      const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+        type: 'send_failed',
+        error: NO_RESPONSE_RECEIVED_ERROR,
+        clearRun: true,
+      });
+      return {
+        sessionsByKey: patchSessionRecord(current, current.currentSessionKey, {
+          runtime: runtimePatch === currentRuntime
+            ? currentRuntime
+            : { ...currentRuntime, ...runtimePatch },
+        }),
+      };
+    });
   };
   setTimeout(checkStuck, SAFETY_INITIAL_CHECK_DELAY_MS);
 }
@@ -157,15 +189,24 @@ export function hasStoreApprovalEvidence(
   sessionKey: string,
 ): boolean {
   const pendingApprovals = state.pendingApprovalsBySession[sessionKey] ?? [];
+  const runtime = getSessionRuntime(state, sessionKey);
   return (
     pendingApprovals.length > 0
-    || state.approvalStatus === 'awaiting_approval'
-    || state.activeRunId != null
+    || runtime.approvalStatus === 'awaiting_approval'
+    || runtime.activeRunId != null
   );
 }
 
 export function commitStoreSendWaitingApproval(set: ChatStoreSetFn): void {
-  set((state) => reduceRuntimeOverlay(state, { type: 'send_waiting_approval' }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_waiting_approval' });
+    return {
+      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }
 
 interface FinalizeStoreSendFailureParams {
@@ -178,7 +219,16 @@ export function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams)
   const { set, error, onTelemetryFailure } = params;
   clearHistoryPoll();
   onTelemetryFailure?.();
-  set((state) => reduceRuntimeOverlay(state, { type: 'send_failed', error }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_failed', error });
+    return {
+      error,
+      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }
 
 interface CommitStoreRunIdBoundParams {
@@ -188,5 +238,13 @@ interface CommitStoreRunIdBoundParams {
 
 export function commitStoreRunIdBound(params: CommitStoreRunIdBoundParams): void {
   const { set, runId } = params;
-  set((state) => reduceRuntimeOverlay(state, { type: 'send_run_bound', runId }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_run_bound', runId });
+    return {
+      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }

@@ -1,69 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionRuntimeSnapshot, ToolStatus } from '@/stores/chat/types';
-import {
-  reduceRuntimeOverlay,
-} from '@/stores/chat/overlay-reducer';
+import { reduceRuntimeOverlay } from '@/stores/chat/overlay-reducer';
+import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
+import type { ChatSessionRuntimeState, ToolStatus } from '@/stores/chat/types';
 
-function buildRuntimeSnapshot(
-  partial: Partial<SessionRuntimeSnapshot> = {},
-): SessionRuntimeSnapshot {
+function buildRuntimeState(
+  partial: Partial<ChatSessionRuntimeState> = {},
+): ChatSessionRuntimeState {
   return {
-    messages: [],
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingMessage: null,
-    streamRuntime: null,
+    assistantOverlay: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
     pendingToolImages: [],
     approvalStatus: 'idle',
-    ...partial,
-  };
-}
-
-function buildRuntimeState(partial: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    messages: [],
-    snapshotReady: true,
-    initialLoading: false,
-    refreshing: false,
-    mutating: false,
-    error: null,
-    sending: false,
-    activeRunId: null,
-    runPhase: 'idle',
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-    approvalStatus: 'idle',
-    pendingApprovalsBySession: {},
-    sessions: [],
-    currentSessionKey: 'agent:main:main',
-    sessionLabels: {},
-    sessionLastActivity: {},
-    sessionReadyByKey: {},
-    sessionRuntimeByKey: {},
-    showThinking: true,
-    thinkingLevel: null,
     ...partial,
   };
 }
 
 describe('chat runtime overlay reducer', () => {
   it('restores runtime and forces waiting_tool while approvals exist', () => {
-    const snapshot = buildRuntimeSnapshot({
+    const snapshot = buildRuntimeState({
       sending: true,
       runPhase: 'streaming',
       approvalStatus: 'idle',
       activeRunId: 'run-1',
     });
 
-    const patch = reduceRuntimeOverlay(buildRuntimeState() as never, {
+    const patch = reduceRuntimeOverlay(snapshot, {
       type: 'session_runtime_restored',
       targetRuntime: snapshot,
       currentPendingApprovals: 2,
@@ -76,12 +42,12 @@ describe('chat runtime overlay reducer', () => {
   });
 
   it('restores original runPhase when no pending approvals', () => {
-    const snapshot = buildRuntimeSnapshot({
+    const snapshot = buildRuntimeState({
       runPhase: 'done',
       approvalStatus: 'idle',
     });
 
-    const patch = reduceRuntimeOverlay(buildRuntimeState() as never, {
+    const patch = reduceRuntimeOverlay(snapshot, {
       type: 'session_runtime_restored',
       targetRuntime: snapshot,
       currentPendingApprovals: 0,
@@ -99,7 +65,14 @@ describe('chat runtime overlay reducer', () => {
         updatedAt: Date.now(),
       },
     ];
-    const patch = reduceRuntimeOverlay(buildRuntimeState() as never, {
+    const patch = reduceRuntimeOverlay(buildRuntimeState({
+      assistantOverlay: createAssistantOverlay({
+        runId: 'run-1',
+        messageId: 'assistant-1',
+        committedText: 'hello',
+        targetText: 'hello world',
+      }),
+    }), {
       type: 'tool_result_committed',
       pendingToolImages: [{
         fileName: 'result.png',
@@ -114,59 +87,123 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.pendingFinal).toBe(true);
     expect(patch.streamingTools).toBe(nextTools);
     expect(patch.pendingToolImages).toHaveLength(1);
-    expect(patch.streamingMessage).toBeNull();
+    expect(patch.assistantOverlay).toBeNull();
   });
 
-  it('queues stream delta into runtime source and keeps tool-only delta from replacing current view', () => {
-    const currentStream = { id: 'assistant-1', role: 'assistant', content: [{ type: 'text', text: 'hello' }] };
+  it('queues stream delta into assistant overlay without rewinding committed text', () => {
     const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
       runPhase: 'submitted',
-      error: 'stale',
-      streamingMessage: currentStream,
-      streamRuntime: {
-        sessionKey: 'agent:main:main',
+      lastUserMessageAt: 1_700_000_000_000,
+      assistantOverlay: createAssistantOverlay({
         runId: 'run-1',
-        chunks: ['hello'],
-        rawChars: 5,
-        displayedChars: 5,
+        messageId: 'assistant-1',
+        sourceMessage: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello',
+          timestamp: 1_700_000_000,
+        },
+        committedText: 'hello',
+        targetText: 'hello',
         status: 'streaming',
-        rafId: null,
+      }),
+    });
+
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'stream_delta_queued',
+      runId: 'run-1',
+      text: 'hello world',
+      messageId: 'assistant-1',
+      updates: [],
+    });
+
+    expect(patch.runPhase).toBe('streaming');
+    expect(patch.assistantOverlay).toMatchObject({
+      messageId: 'assistant-1',
+      committedText: 'hello',
+      targetText: 'hello world',
+      status: 'streaming',
+    });
+  });
+
+  it('clears assistant overlay immediately when final assistant message is committed', () => {
+    const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
+      runPhase: 'streaming',
+      lastUserMessageAt: 1_700_000_000_000,
+      assistantOverlay: createAssistantOverlay({
+        runId: 'run-1',
+        messageId: 'assistant-1',
+        sourceMessage: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello world',
+          timestamp: 1_700_000_000,
+        },
+        committedText: 'hello',
+        targetText: 'hello world',
+        status: 'streaming',
+      }),
+    });
+
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'final_message_committed',
+      hasOutput: true,
+      toolOnly: false,
+      streamingTools: [],
+    });
+
+    expect(patch.assistantOverlay).toBeNull();
+    expect(patch.sending).toBe(false);
+    expect(patch.activeRunId).toBeNull();
+    expect(patch.pendingFinal).toBe(false);
+    expect(patch.runPhase).toBe('done');
+  });
+
+  it('clears pending user when history confirms a final assistant message', () => {
+    const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
+      pendingFinal: true,
+      runPhase: 'finalizing',
+      pendingUserMessage: {
+        clientMessageId: 'user-local-1',
+        createdAtMs: 1_700_000_000_000,
+        message: {
+          id: 'user-local-1',
+          role: 'user',
+          content: 'hello',
+          timestamp: 1_700_000_000,
+        },
       },
     });
 
-    const patch = reduceRuntimeOverlay(state as never, {
-      type: 'stream_delta_queued',
-      sessionKey: 'agent:main:main',
-      runId: 'run-1',
-      text: 'hello world',
-      updates: [],
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'history_snapshot',
+      hasRecentAssistantActivity: false,
+      hasRecentFinalAssistantMessage: true,
     });
-    const next = patch === state ? state : { ...state, ...patch };
 
-    expect(next.runPhase).toBe('streaming');
-    expect(next.error).toBeNull();
-    expect(next.streamingMessage).toEqual(currentStream);
-    expect(next.streamRuntime).toMatchObject({
-      rawChars: 11,
-      displayedChars: 5,
-    });
+    expect(patch.sending).toBe(false);
+    expect(patch.activeRunId).toBeNull();
+    expect(patch.pendingFinal).toBe(false);
+    expect(patch.runPhase).toBe('done');
+    expect(patch.pendingUserMessage).toBeNull();
   });
 
-  it('clears event error and resets approval status after final refresh when no pending approvals', () => {
+  it('clears approval wait flag after final history refresh when no pending approvals', () => {
     const state = buildRuntimeState({
-      error: 'boom',
       approvalStatus: 'awaiting_approval',
     });
 
-    const clearedErrorPatch = reduceRuntimeOverlay(state as never, { type: 'event_error_cleared' });
-    const afterError = clearedErrorPatch === state ? state : { ...state, ...clearedErrorPatch };
-    expect(afterError.error).toBeNull();
-
-    const approvalPatch = reduceRuntimeOverlay(afterError as never, {
+    const patch = reduceRuntimeOverlay(state, {
       type: 'final_history_refresh_requested',
       hasPendingApprovals: false,
     });
-    const afterApproval = approvalPatch === afterError ? afterError : { ...afterError, ...approvalPatch };
-    expect(afterApproval.approvalStatus).toBe('idle');
+
+    expect(patch.approvalStatus).toBe('idle');
   });
 });

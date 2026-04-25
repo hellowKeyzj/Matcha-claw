@@ -1,8 +1,5 @@
 import { getMessageText } from './message-helpers';
 import {
-  clearPendingStreamFinalCommit,
-} from './stream-pacer';
-import {
   reduceRuntimeOverlay,
 } from './overlay-reducer';
 import {
@@ -22,6 +19,7 @@ import {
   resetToolSnapshotTxnState,
 } from './tool-snapshot-txn';
 import { maybeTrackSendToFirstToken } from './telemetry';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type { ChatStoreState, RawMessage } from './types';
 
 type ChatStoreSetFn = (
@@ -65,13 +63,22 @@ function hasTokenContent(message: unknown): boolean {
 }
 
 export function handleRuntimeStartedEvent(input: RuntimeEventDispatchBaseInput): void {
-  const { set, eventRunId } = input;
-  set((state) => reduceRuntimeOverlay(state, { type: 'run_started', runId: eventRunId }));
+  const { set, currentSessionKey, eventRunId } = input;
+  set((state) => {
+    const runtime = getSessionRuntime(state, currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_started', runId: eventRunId });
+    return {
+      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }
 
 export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): void {
   const {
     set,
+    get,
     message,
     currentSessionKey,
     eventRunId,
@@ -80,18 +87,38 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
   if (hasErrorRecoveryTimer()) {
     clearErrorRecoveryTimer();
   }
-  set((state) => reduceRuntimeOverlay(state, { type: 'delta_received' }));
+  if (get().error) {
+    set({ error: null });
+  }
+  set((state) => {
+    const runtime = getSessionRuntime(state, currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'delta_received' });
+    return {
+      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
   if (hasTokenContent(message)) {
     maybeTrackSendToFirstToken(currentSessionKey, 'delta');
   }
   const updates = collectToolUpdates(message, 'delta');
-  set((state) => reduceRuntimeOverlay(state, {
-    type: 'stream_delta_queued',
-    sessionKey: currentSessionKey,
-    runId: eventRunId,
-    text: getMessageText((message as RawMessage | undefined)?.content),
-    updates,
-  }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, {
+      type: 'stream_delta_queued',
+      runId: eventRunId,
+      text: getMessageText((message as RawMessage | undefined)?.content),
+      messageId: (message as RawMessage | undefined)?.id,
+      message: (message as RawMessage | undefined) ?? null,
+      updates,
+    });
+    return {
+      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
   armToolSnapshotTxnState(
     currentSessionKey,
     eventRunId,
@@ -151,26 +178,45 @@ export function handleRuntimeErrorEvent(input: RuntimeEventErrorDispatchInput): 
 }
 
 export function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInput): void {
-  const { set, get, onFinishAbortedTelemetry } = input;
+  const { set, onFinishAbortedTelemetry } = input;
   resetToolSnapshotTxnState();
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   onFinishAbortedTelemetry();
-  clearPendingStreamFinalCommit(get().currentSessionKey, get().activeRunId);
-  set((state) => reduceRuntimeOverlay(state, { type: 'run_aborted' }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_aborted' });
+    return {
+      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }
 
 export function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInput): void {
   const { set, get, message } = input;
-  const { sending } = get();
+  const runtime = getSessionRuntime(get(), get().currentSessionKey);
+  const { sending } = runtime;
   if (sending && message && typeof message === 'object') {
     const updates = collectToolUpdates(message, 'delta');
-    set((state) => reduceRuntimeOverlay(state, {
-      type: 'stream_delta_queued',
-      sessionKey: get().currentSessionKey,
-      runId: get().activeRunId ?? '',
-      text: getMessageText((message as RawMessage).content),
-      updates,
-    }));
+    const sessionKey = get().currentSessionKey;
+    const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? '';
+    set((state) => {
+      const currentRuntime = getSessionRuntime(state, sessionKey);
+      const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+        type: 'stream_delta_queued',
+        runId,
+        text: getMessageText((message as RawMessage).content),
+        messageId: (message as RawMessage).id,
+        message: message as RawMessage,
+        updates,
+      });
+      return {
+        sessionsByKey: patchSessionRecord(state, sessionKey, {
+          runtime: runtimePatch === currentRuntime ? currentRuntime : { ...currentRuntime, ...runtimePatch },
+        }),
+      };
+    });
   }
 }

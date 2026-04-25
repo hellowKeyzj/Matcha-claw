@@ -4,6 +4,8 @@ import { markChatScrollActivity } from './chat-scroll-drain';
 interface UseChatScrollInput {
   scrollScopeKey: string;
   scrollResetKey: string;
+  autoFollowSignal: string;
+  tailActivityOpen: boolean;
   viewportRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
   stickyBottomThresholdPx: number;
@@ -17,6 +19,7 @@ const SCROLL_IDLE_TIMEOUT_MS = 160;
 const WHEEL_INTENT_WINDOW_MS = 220;
 const INITIAL_ALIGN_RETRY_MS = 150;
 const ANCHOR_RESTORE_RETRY_MS = 150;
+const TAIL_SETTLE_IDLE_MS = 220;
 
 interface ChatViewportMetrics {
   scrollHeight: number;
@@ -28,6 +31,11 @@ interface ViewportAnchor {
   messageId?: string;
   timestamp?: number;
   offsetWithinViewport: number;
+}
+
+interface TailMessageMetrics {
+  rowKey: string;
+  height: number;
 }
 
 interface PendingScopeTransition {
@@ -97,9 +105,37 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
   return null;
 }
 
+function sampleTailMessageMetrics(viewport: HTMLDivElement | null): TailMessageMetrics | null {
+  if (!viewport) {
+    return null;
+  }
+  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]');
+  const tailRow = rows.length > 0 ? rows[rows.length - 1] : null;
+  const rowKey = tailRow?.dataset.chatRowKey;
+  if (!tailRow || !rowKey) {
+    return null;
+  }
+  return {
+    rowKey,
+    height: tailRow.getBoundingClientRect().height,
+  };
+}
+
+function hasTailResizeDelta(
+  previous: TailMessageMetrics | null,
+  next: TailMessageMetrics | null,
+): boolean {
+  if (!previous || !next) {
+    return previous !== next;
+  }
+  return previous.rowKey !== next.rowKey || previous.height !== next.height;
+}
+
 export function useChatScroll({
   scrollScopeKey,
   scrollResetKey,
+  autoFollowSignal,
+  tailActivityOpen,
   viewportRef,
   contentRef,
   stickyBottomThresholdPx,
@@ -125,6 +161,12 @@ export function useChatScroll({
     new Map([[scrollScopeKey, 'initial']]),
   );
   const pendingScopeTransitionRef = useRef<PendingScopeTransition | null>(null);
+  const lastFollowViewportHeightRef = useRef<number | null>(null);
+  const lastFollowScrollHeightRef = useRef<number | null>(null);
+  const lastFollowTailMetricsRef = useRef<TailMessageMetrics | null>(null);
+  const tailSettleTimerRef = useRef<number | null>(null);
+  const tailSettlePendingRef = useRef(false);
+  const tailActivityOpenRef = useRef(tailActivityOpen);
 
   const setBottomLocked = useCallback((next: boolean) => {
     isBottomLockedRef.current = next;
@@ -170,6 +212,29 @@ export function useChatScroll({
     }
     anchorRestoreFrameRef.current = null;
     anchorRestoreRetryTimerRef.current = null;
+  }, []);
+
+  const clearTailSettleTask = useCallback(() => {
+    tailSettlePendingRef.current = false;
+    if (tailSettleTimerRef.current == null || typeof window === 'undefined') {
+      return;
+    }
+    window.clearTimeout(tailSettleTimerRef.current);
+    tailSettleTimerRef.current = null;
+  }, []);
+
+  const armTailSettleTask = useCallback(() => {
+    tailSettlePendingRef.current = true;
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (tailSettleTimerRef.current != null) {
+      window.clearTimeout(tailSettleTimerRef.current);
+    }
+    tailSettleTimerRef.current = window.setTimeout(() => {
+      tailSettleTimerRef.current = null;
+      tailSettlePendingRef.current = false;
+    }, TAIL_SETTLE_IDLE_MS);
   }, []);
 
   const readScrollPhase = useCallback((sessionKey: string): ScrollPhase => {
@@ -233,6 +298,17 @@ export function useChatScroll({
       }, 16);
     }
   }, [viewportRef]);
+
+  const syncFollowResizeSnapshot = useCallback(() => {
+    const viewport = viewportRef.current;
+    lastFollowViewportHeightRef.current = viewport?.clientHeight ?? null;
+    lastFollowScrollHeightRef.current = viewport?.scrollHeight ?? null;
+    lastFollowTailMetricsRef.current = sampleTailMessageMetrics(viewport);
+  }, [viewportRef]);
+
+  const hasTailFollowWork = useCallback(() => (
+    tailActivityOpenRef.current || tailSettlePendingRef.current
+  ), []);
 
   const restoreViewportAnchor = useCallback((anchor: ViewportAnchor) => {
     const viewport = viewportRef.current;
@@ -388,9 +464,14 @@ export function useChatScroll({
     pointerScrollActiveRef.current = false;
     touchScrollActiveRef.current = false;
     wheelIntentUntilRef.current = 0;
+    tailActivityOpenRef.current = tailActivityOpen;
+    clearTailSettleTask();
     setIsUserScrolling(false);
     setScrollDirection(0);
     setScrollEventSeq(0);
+    lastFollowViewportHeightRef.current = null;
+    lastFollowScrollHeightRef.current = null;
+    lastFollowTailMetricsRef.current = null;
     const pendingTransition = pendingScopeTransitionRef.current;
     if (resetChanged) {
       pendingScopeTransitionRef.current = null;
@@ -437,10 +518,43 @@ export function useChatScroll({
     clearAnchorRestoreSchedule,
     scheduleInitialAlign,
     scheduleAnchorRestore,
+    clearTailSettleTask,
     scrollResetKey,
     scrollScopeKey,
     setBottomLocked,
+    tailActivityOpen,
     writeScrollPhase,
+  ]);
+
+  useLayoutEffect(() => {
+    const previousTailActivityOpen = tailActivityOpenRef.current;
+    tailActivityOpenRef.current = tailActivityOpen;
+
+    if (readScrollPhase(scrollScopeKey) !== 'following') {
+      if (tailActivityOpen) {
+        clearTailSettleTask();
+      }
+      return;
+    }
+
+    if (tailActivityOpen) {
+      clearTailSettleTask();
+      scrollToBottom();
+      syncFollowResizeSnapshot();
+      return;
+    }
+
+    if (previousTailActivityOpen) {
+      armTailSettleTask();
+    }
+  }, [
+    armTailSettleTask,
+    clearTailSettleTask,
+    readScrollPhase,
+    scrollScopeKey,
+    scrollToBottom,
+    syncFollowResizeSnapshot,
+    tailActivityOpen,
   ]);
 
   const viewportElement = viewportRef.current;
@@ -463,6 +577,21 @@ export function useChatScroll({
   }, [contentElement, readScrollPhase, scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, viewportElement]);
 
   useLayoutEffect(() => {
+    if (readScrollPhase(scrollScopeKey) !== 'following') {
+      return;
+    }
+    scrollToBottom();
+    syncFollowResizeSnapshot();
+    if (!tailActivityOpenRef.current) {
+      armTailSettleTask();
+    }
+  }, [armTailSettleTask, autoFollowSignal, readScrollPhase, scrollScopeKey, scrollToBottom, syncFollowResizeSnapshot]);
+
+  useLayoutEffect(() => {
+    syncFollowResizeSnapshot();
+  }, [contentElement, scrollScopeKey, syncFollowResizeSnapshot, viewportElement]);
+
+  useLayoutEffect(() => {
     const viewport = viewportElement;
     const content = contentElement;
     if (typeof ResizeObserver !== 'function' || (!viewport && !content)) {
@@ -481,10 +610,33 @@ export function useChatScroll({
       const phase = readScrollPhase(scrollScopeKey);
       if (phase === 'initial') {
         scheduleInitialAlign();
+        syncFollowResizeSnapshot();
         return;
       }
-      if (phase === 'following') {
+      const viewportMetrics = readViewportMetrics(viewportRef.current);
+      const scrollHeight = viewportMetrics?.scrollHeight ?? null;
+      const scrollHeightChanged = (
+        scrollHeight != null
+        && lastFollowScrollHeightRef.current != null
+        && scrollHeight !== lastFollowScrollHeightRef.current
+      );
+      const viewportHeight = viewportRef.current?.clientHeight ?? null;
+      const viewportHeightChanged = (
+        viewportHeight != null
+        && lastFollowViewportHeightRef.current != null
+        && viewportHeight !== lastFollowViewportHeightRef.current
+      );
+      const nextTailMetrics = sampleTailMessageMetrics(viewportRef.current);
+      const tailMetricsChanged = hasTailResizeDelta(lastFollowTailMetricsRef.current, nextTailMetrics);
+      lastFollowViewportHeightRef.current = viewportHeight;
+      lastFollowScrollHeightRef.current = scrollHeight;
+      lastFollowTailMetricsRef.current = nextTailMetrics;
+      if (phase === 'following' && hasTailFollowWork() && (scrollHeightChanged || viewportHeightChanged || tailMetricsChanged)) {
         scrollToBottom();
+        syncFollowResizeSnapshot();
+        if (!tailActivityOpenRef.current) {
+          armTailSettleTask();
+        }
       }
     });
     if (viewport) {
@@ -498,9 +650,12 @@ export function useChatScroll({
     contentElement,
     readScrollPhase,
     scheduleAnchorRestore,
+    armTailSettleTask,
+    hasTailFollowWork,
     scheduleInitialAlign,
     scrollScopeKey,
     scrollToBottom,
+    syncFollowResizeSnapshot,
     viewportElement,
     viewportRef,
   ]);
@@ -579,8 +734,9 @@ export function useChatScroll({
       clearScrollIdleTimer();
       clearInitialAlignSchedule();
       clearAnchorRestoreSchedule();
+      clearTailSettleTask();
     };
-  }, [clearAnchorRestoreSchedule, clearInitialAlignSchedule, clearScrollIdleTimer]);
+  }, [clearAnchorRestoreSchedule, clearInitialAlignSchedule, clearScrollIdleTimer, clearTailSettleTask]);
 
   useLayoutEffect(() => {
     if (typeof window === 'undefined') {

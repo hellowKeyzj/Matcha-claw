@@ -4,7 +4,6 @@ import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
 import { ChatShell } from './components/ChatShell';
 import { ChatInput } from './ChatInput';
 import type { ChatRenderItem } from './chat-render-items';
-import type { MarkdownBodyRenderMode } from './md-pipeline';
 
 type TranslateFn = (key: string, options?: Record<string, unknown>) => string;
 type ChatInputShellProps = ComponentProps<typeof ChatInput>;
@@ -40,8 +39,6 @@ interface UseChatShellPropsInput {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarDataUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
-  bodyRenderModeByRowKey: ReadonlyMap<string, MarkdownBodyRenderMode>;
-  requestFullRender: (rowKey: string) => void;
   scrollToRowKey: (rowKey?: string) => void;
   error: string | null;
   clearError: () => void;
@@ -96,8 +93,6 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    requestFullRender,
     scrollToRowKey,
     error,
     clearError,
@@ -168,8 +163,6 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarImageUrl: userAvatarDataUrl,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    onRequestFullRender: requestFullRender,
     onJumpToRowKey: scrollToRowKey,
   }), [
     messagesViewportRef,
@@ -192,8 +185,6 @@ export function useChatShellProps(input: UseChatShellPropsInput): ComponentProps
     assistantAvatarStyle,
     userAvatarDataUrl,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    requestFullRender,
     scrollToRowKey,
   ]);
 
