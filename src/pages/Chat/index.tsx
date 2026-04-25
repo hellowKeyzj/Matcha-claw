@@ -156,7 +156,7 @@ export function Chat() {
   });
   const autoFollowSignal = projection.isHistoryProjection
     ? `${projectionScopeKey}|history`
-    : buildChatAutoFollowSignal(currentSessionKey, projection.messages);
+    : buildChatAutoFollowSignal(chatRows);
   const tailActivityOpen = !projection.isHistoryProjection && (
     runtimeSending
     || runtimePendingFinal

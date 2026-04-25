@@ -8,6 +8,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
 import type { RawMessage } from '@/stores/chat';
 
 let triggerResizeObserver: (() => void) | null = null;
@@ -54,8 +55,7 @@ function createSessionRecord(input?: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingMessage: null,
-      streamRuntime: null,
+      assistantOverlay: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
@@ -141,21 +141,19 @@ function setupStores() {
           sending: true,
           activeRunId: 'run-current',
           runPhase: 'streaming',
-          streamingMessage: {
-            id: 'assistant-final',
-            role: 'assistant',
-            content: 'partial answer',
-            timestamp: now / 1000,
-          },
-          streamRuntime: {
-            sessionKey: 'agent:test:main',
+          assistantOverlay: createAssistantOverlay({
             runId: 'run-current',
-            chunks: ['partial answer'],
-            rawChars: 14,
-            displayedChars: 14,
+            messageId: 'assistant-final',
+            sourceMessage: {
+              id: 'assistant-final',
+              role: 'assistant',
+              content: 'partial answer',
+              timestamp: now / 1000,
+            },
+            committedText: 'partial answer',
+            targetText: 'partial answer',
             status: 'streaming',
-            rafId: null,
-          },
+          }),
           pendingFinal: true,
           lastUserMessageAt: now,
         },
@@ -298,8 +296,7 @@ describe('chat 会话切换 UX', () => {
     expect(state.currentSessionKey).toBe('agent:test:main');
     expect(state.sessionsByKey['agent:test:main']?.runtime.sending).toBe(true);
     expect(state.sessionsByKey['agent:test:main']?.runtime.pendingFinal).toBe(true);
-    expect(state.sessionsByKey['agent:test:main']?.runtime.streamRuntime).toMatchObject({
-      sessionKey: 'agent:test:main',
+    expect(state.sessionsByKey['agent:test:main']?.runtime.assistantOverlay).toMatchObject({
       runId: 'run-current',
     });
   });
@@ -327,11 +324,6 @@ describe('chat 会话切换 UX', () => {
 
   it('主聊天页只渲染最近 30 条，并给出完整历史入口', async () => {
     const messages = buildSessionMessages(35);
-    const queuedAnimationFrames: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      queuedAnimationFrames.push(callback);
-      return queuedAnimationFrames.length;
-    });
     useChatStore.setState({
       sessionsByKey: {
         ...useChatStore.getState().sessionsByKey,
@@ -347,36 +339,21 @@ describe('chat 会话切换 UX', () => {
 
     expect(screen.getByText('session message 35')).toBeInTheDocument();
     expect(screen.getByText('session message 34')).toBeInTheDocument();
+    expect(screen.getByText('session message 6')).toBeInTheDocument();
     expect(screen.queryByText('session message 5')).toBeNull();
     expect(screen.queryByText('session message 1')).toBeNull();
     expect(screen.queryByText('Showing the latest 30 messages in live chat.')).toBeNull();
     expect(screen.getByRole('button', { name: 'View history' })).toBeInTheDocument();
-
-    act(() => {
-      for (const callback of queuedAnimationFrames.splice(0)) {
-        callback(0);
-      }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('session message 6')).toBeInTheDocument();
-    });
     expect(screen.queryByText('session message 5')).toBeNull();
-    vi.unstubAllGlobals();
   });
 
-  it('切到缓存会话时应先渲染预算尾部，再在下一帧扩到最后 30 条', async () => {
+  it('切到缓存会话时应一次切到稳定 live rows，而不是经历两次可见数据切换', async () => {
     const messages = Array.from({ length: 32 }, (_, index) => ({
       role: index % 2 === 0 ? 'assistant' : 'user',
       content: index % 2 === 0 ? buildHeavyMarkdownMessage(index + 1) : `user message ${index + 1}`,
       timestamp: (Date.now() / 1000) + index,
       id: `heavy-${index + 1}`,
     }));
-    const queuedAnimationFrames: FrameRequestCallback[] = [];
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      queuedAnimationFrames.push(callback);
-      return queuedAnimationFrames.length;
-    });
 
     useChatStore.setState({
       sessionsByKey: {
@@ -395,26 +372,14 @@ describe('chat 会话切换 UX', () => {
       useChatStore.getState().switchSession('agent:another:main');
     });
 
-    expect(screen.getByText(/user message 30/i)).toBeInTheDocument();
-    expect(screen.getByText(/message-31-line-0/i)).toBeInTheDocument();
+    expect(screen.getByText(/message-3-line-0/i)).toBeInTheDocument();
+    expect(screen.getByText(/user message 4/i)).toBeInTheDocument();
     expect(screen.getByText(/user message 32/i)).toBeInTheDocument();
-    expect(screen.queryByText(/message-3-line-0/i)).toBeNull();
-    expect(screen.queryByText(/user message 4/i)).toBeNull();
+    expect(screen.getByText(/message-31-line-0/i)).toBeInTheDocument();
+    expect(screen.queryByText(/message-1-line-0/i)).toBeNull();
     expect(screen.getByRole('button', { name: 'View history' })).toBeInTheDocument();
     expect(document.querySelector('[data-chat-body-mode="shell"]')).toBeNull();
     expect(document.querySelector('[data-chat-body-mode="lite"]')).toBeNull();
-
-    act(() => {
-      for (const callback of queuedAnimationFrames.splice(0)) {
-        callback(0);
-      }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText(/message-3-line-0/i)).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/message-1-line-0/i)).toBeNull();
-    vi.unstubAllGlobals();
   });
 
   it('切会话首屏时应先完成 live thread 首绘，再延后 execution graph 计算', async () => {

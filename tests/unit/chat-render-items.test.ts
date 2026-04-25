@@ -3,7 +3,7 @@ import type { ChatRow } from '@/pages/Chat/chat-row-model';
 import { buildChatRenderItems } from '@/pages/Chat/chat-render-items';
 
 describe('chat render items', () => {
-  it('应将连续的用户或助手消息投影为更轻的分组渲染项', () => {
+  it('应直接按 row 维度投影渲染项，避免 group key 驱动整块重挂', () => {
     const rows: ChatRow[] = [
       {
         key: 'user-1',
@@ -49,25 +49,21 @@ describe('chat render items', () => {
 
     const items = buildChatRenderItems(rows);
 
-    expect(items).toHaveLength(4);
-    expect(items[0]).toMatchObject({
-      kind: 'group',
-      role: 'user',
-    });
-    expect(items[0]?.kind === 'group' ? items[0].rows.map((row) => row.key) : []).toEqual(['user-1', 'user-2']);
-    expect(items[1]).toMatchObject({
-      kind: 'group',
-      role: 'assistant',
-    });
-    expect(items[1]?.kind === 'group' ? items[1].rows.map((row) => row.key) : []).toEqual(['assistant-1', 'assistant-2']);
-    expect(items[2]).toMatchObject({
-      kind: 'row',
-      key: 'graph-1',
-    });
-    expect(items[3]).toMatchObject({
-      kind: 'group',
-      role: 'assistant',
-    });
-    expect(items[3]?.kind === 'group' ? items[3].rows.map((row) => row.key) : []).toEqual(['stream-1']);
+    expect(items.map((item) => item.key)).toEqual([
+      'user-1',
+      'user-2',
+      'assistant-1',
+      'assistant-2',
+      'graph-1',
+      'stream-1',
+    ]);
+    expect(items.map((item) => item.row.key)).toEqual([
+      'user-1',
+      'user-2',
+      'assistant-1',
+      'assistant-2',
+      'graph-1',
+      'stream-1',
+    ]);
   });
 });

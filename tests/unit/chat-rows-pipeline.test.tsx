@@ -1,4 +1,4 @@
-import { act, renderHook } from '@testing-library/react';
+import { renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useRowsPipeline } from '@/pages/Chat/useRowsPipeline';
 import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
@@ -30,11 +30,7 @@ describe('useRowsPipeline live projection timing', () => {
     vi.unstubAllGlobals();
   });
 
-  it('does not replay first-paint tail when canonical transcript updates inside the same live scope', () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => setTimeout(() => callback(16), 16));
-    vi.stubGlobal('cancelAnimationFrame', (handle: number) => clearTimeout(handle));
-
+  it('uses one stable live projection immediately and does not replay a staged first-paint tail', () => {
     const sessionPipelineCostRef = {
       current: {
         sessionKey: 'agent:main:main::live',
@@ -67,12 +63,9 @@ describe('useRowsPipeline live projection timing', () => {
       initialProps,
     });
 
-    act(() => {
-      vi.advanceTimersByTime(16);
-    });
-
     const initialLiveProjection = projectLiveThreadMessages(initialMessages);
     expect(result.current.hiddenHistoryCount).toBe(initialLiveProjection.hiddenRenderableCount);
+    expect(result.current.chatRows.filter((row) => row.kind === 'message')).toHaveLength(initialLiveProjection.messages.length);
 
     const nextMessages = [...initialMessages, {
       id: 'message-41',

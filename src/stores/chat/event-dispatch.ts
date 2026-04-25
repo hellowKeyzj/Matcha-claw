@@ -54,6 +54,44 @@ interface RuntimeEventUnknownDispatchInput extends RuntimeEventDispatchBaseInput
   eventState: string;
 }
 
+function resolveStreamDeltaTextUpdate(
+  previousTargetText: string,
+  message: RawMessage | undefined,
+): {
+  text: string;
+  textMode: 'append' | 'snapshot' | 'keep';
+} {
+  const nextText = getMessageText(message?.content);
+  if (!nextText.trim()) {
+    return {
+      text: '',
+      textMode: 'keep',
+    };
+  }
+  if (!previousTargetText) {
+    return {
+      text: nextText,
+      textMode: 'snapshot',
+    };
+  }
+  if (nextText.startsWith(previousTargetText)) {
+    return {
+      text: nextText,
+      textMode: 'snapshot',
+    };
+  }
+  if (previousTargetText.startsWith(nextText)) {
+    return {
+      text: '',
+      textMode: 'keep',
+    };
+  }
+  return {
+    text: nextText,
+    textMode: 'append',
+  };
+}
+
 function hasTokenContent(message: unknown): boolean {
   if (!message || typeof message !== 'object') {
     return false;
@@ -105,10 +143,15 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
   const updates = collectToolUpdates(message, 'delta');
   set((state) => {
     const runtime = getSessionRuntime(state, currentSessionKey);
+    const textUpdate = resolveStreamDeltaTextUpdate(
+      runtime.assistantOverlay?.targetText ?? '',
+      (message as RawMessage | undefined),
+    );
     const runtimePatch = reduceRuntimeOverlay(runtime, {
       type: 'stream_delta_queued',
       runId: eventRunId,
-      text: getMessageText((message as RawMessage | undefined)?.content),
+      text: textUpdate.text,
+      textMode: textUpdate.textMode,
       messageId: (message as RawMessage | undefined)?.id,
       message: (message as RawMessage | undefined) ?? null,
       updates,
@@ -204,10 +247,15 @@ export function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInpu
     const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? '';
     set((state) => {
       const currentRuntime = getSessionRuntime(state, sessionKey);
+      const textUpdate = resolveStreamDeltaTextUpdate(
+        currentRuntime.assistantOverlay?.targetText ?? '',
+        (message as RawMessage | undefined),
+      );
       const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
         type: 'stream_delta_queued',
         runId,
-        text: getMessageText((message as RawMessage).content),
+        text: textUpdate.text,
+        textMode: textUpdate.textMode,
         messageId: (message as RawMessage).id,
         message: message as RawMessage,
         updates,

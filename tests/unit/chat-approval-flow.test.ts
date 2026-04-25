@@ -115,6 +115,91 @@ describe('chat 审批等待态流程', () => {
     });
   });
 
+  it('增量 chunk 应按追加语义进入 overlay，而不是把已有文本覆盖掉', () => {
+    useChatStore.setState({
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-delta-append',
+            runPhase: 'streaming',
+            lastUserMessageAt: 1_700_000_000_000,
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-delta-append',
+              messageId: 'assistant-1',
+              sourceMessage: {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: 'hello',
+                timestamp: 1_700_000_000,
+              },
+              committedText: 'hello',
+              targetText: 'hello',
+              status: 'streaming',
+            }),
+          },
+        }),
+      },
+    } as never);
+
+    useChatStore.getState().handleChatEvent({
+      state: 'delta',
+      runId: 'run-delta-append',
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: ' world',
+      },
+    });
+
+    const runtime = useChatStore.getState().sessionsByKey['agent:main:main']?.runtime;
+    expect(runtime?.assistantOverlay?.targetText).toBe('hello world');
+    expect(runtime?.assistantOverlay?.committedText).toBe('hello');
+  });
+
+  it('tool-only delta 不能把当前可见 assistant 文本冲掉', () => {
+    useChatStore.setState({
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-delta-tool',
+            runPhase: 'streaming',
+            lastUserMessageAt: 1_700_000_000_000,
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-delta-tool',
+              messageId: 'assistant-1',
+              sourceMessage: {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: 'hello',
+                timestamp: 1_700_000_000,
+              },
+              committedText: 'hello',
+              targetText: 'hello',
+              status: 'streaming',
+            }),
+          },
+        }),
+      },
+    } as never);
+
+    useChatStore.getState().handleChatEvent({
+      state: 'delta',
+      runId: 'run-delta-tool',
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tool-1', name: 'shell', input: { command: 'pwd' } },
+        ],
+      },
+    });
+
+    const runtime = useChatStore.getState().sessionsByKey['agent:main:main']?.runtime;
+    expect(runtime?.assistantOverlay?.targetText).toBe('hello');
+  });
+
   it('停止时应先 deny 当前会话 pending 审批，再 chat.abort', async () => {
     const rpcMock = vi.fn(async () => ({}));
     useGatewayStore.setState({

@@ -115,6 +115,7 @@ describe('chat runtime overlay reducer', () => {
       type: 'stream_delta_queued',
       runId: 'run-1',
       text: 'hello world',
+      textMode: 'snapshot',
       messageId: 'assistant-1',
       updates: [],
     });
@@ -126,6 +127,85 @@ describe('chat runtime overlay reducer', () => {
       targetText: 'hello world',
       status: 'streaming',
     });
+  });
+
+  it('appends monotonic delta chunks without treating them as full snapshot replacement', () => {
+    const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
+      runPhase: 'streaming',
+      lastUserMessageAt: 1_700_000_000_000,
+      assistantOverlay: createAssistantOverlay({
+        runId: 'run-1',
+        messageId: 'assistant-1',
+        sourceMessage: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello',
+          timestamp: 1_700_000_000,
+        },
+        committedText: 'hello',
+        targetText: 'hello',
+        status: 'streaming',
+      }),
+    });
+
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'stream_delta_queued',
+      runId: 'run-1',
+      text: ' world',
+      textMode: 'append',
+      messageId: 'assistant-1',
+      updates: [],
+    });
+
+    expect(patch.assistantOverlay).toMatchObject({
+      messageId: 'assistant-1',
+      committedText: 'hello',
+      targetText: 'hello world',
+      status: 'streaming',
+    });
+  });
+
+  it('keeps existing visible text when a tool-only delta carries no renderable assistant text', () => {
+    const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
+      runPhase: 'streaming',
+      lastUserMessageAt: 1_700_000_000_000,
+      assistantOverlay: createAssistantOverlay({
+        runId: 'run-1',
+        messageId: 'assistant-1',
+        sourceMessage: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello',
+          timestamp: 1_700_000_000,
+        },
+        committedText: 'hello',
+        targetText: 'hello',
+        status: 'streaming',
+      }),
+    });
+
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'stream_delta_queued',
+      runId: 'run-1',
+      text: '',
+      textMode: 'keep',
+      messageId: 'assistant-1',
+      updates: [{
+        name: 'shell',
+        status: 'running',
+        updatedAt: Date.now(),
+      }],
+    });
+
+    expect(patch.assistantOverlay).toMatchObject({
+      targetText: 'hello',
+      committedText: 'hello',
+    });
+    expect(patch.streamingTools).toHaveLength(1);
   });
 
   it('clears assistant overlay immediately when final assistant message is committed', () => {

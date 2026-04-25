@@ -71,6 +71,31 @@ function createFallbackSourceMessage(
   };
 }
 
+function shouldPreferIncomingContent(message: RawMessage): boolean {
+  return Array.isArray(message.content);
+}
+
+function mergeOverlayBaseMessage(
+  previousMessage: RawMessage | null,
+  incomingMessage: RawMessage | null,
+): RawMessage | null {
+  if (!previousMessage) {
+    return incomingMessage;
+  }
+  if (!incomingMessage) {
+    return previousMessage;
+  }
+
+  return {
+    ...previousMessage,
+    ...incomingMessage,
+    content: shouldPreferIncomingContent(incomingMessage)
+      ? incomingMessage.content
+      : previousMessage.content,
+    _attachedFiles: incomingMessage._attachedFiles ?? previousMessage._attachedFiles,
+  };
+}
+
 export function createAssistantOverlay(input: {
   runId: string;
   messageId: string;
@@ -98,8 +123,10 @@ export function resolveOverlaySourceMessage(input: {
   targetText: string;
   lastUserMessageAt: number | null;
 }): RawMessage {
-  const base = input.incomingMessage
-    ?? input.previousMessage
+  const base = mergeOverlayBaseMessage(
+    input.previousMessage,
+    input.incomingMessage ?? null,
+  )
     ?? createFallbackSourceMessage(
       { messageId: input.messageId, targetText: input.targetText },
       input.lastUserMessageAt,

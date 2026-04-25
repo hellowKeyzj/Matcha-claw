@@ -3,6 +3,7 @@ import {
   createIntermediateToolTurnSnapshot,
   hasAssistantToolCall,
   normalizeAssistantFinalTextForDedup,
+  normalizeUserTextForReconcile,
   sanitizeIntermediateToolFillerMessage,
 } from './message-helpers';
 import { reduceRuntimeOverlay } from './overlay-reducer';
@@ -95,6 +96,25 @@ function mergeCommittedMessage(
     ...(incomingId ? { id: incomingId } : {}),
     _attachedFiles: mergeAttachedFiles(existingMessage._attachedFiles, incomingMessage._attachedFiles),
   };
+}
+
+function materializePendingUserMessage(
+  transcript: RawMessage[],
+  pendingUserMessage: PendingUserMessageOverlay,
+): RawMessage[] {
+  const matchedIndex = transcript.findIndex((message) => matchesPendingUserMessage(pendingUserMessage, message));
+  if (matchedIndex < 0) {
+    return [...transcript, pendingUserMessage.message];
+  }
+
+  const mergedMessage = mergePendingUserMessage(pendingUserMessage, transcript[matchedIndex]!);
+  if (mergedMessage === transcript[matchedIndex]) {
+    return transcript;
+  }
+
+  const nextTranscript = [...transcript];
+  nextTranscript[matchedIndex] = mergedMessage;
+  return nextTranscript;
 }
 
 export function mergePendingUserMessage(
@@ -215,16 +235,6 @@ export function buildFinalMessageCommitPatch(
         _attachedFiles: [...(finalMessage._attachedFiles || []), ...pendingImages],
       }
     : { ...finalMessage, role: (finalMessage.role || 'assistant') as RawMessage['role'], id: messageId };
-
-  const duplicateMessageIndexById = transcript.findIndex((message) => message.id === messageId);
-  const assistantSemanticDuplicateIndex = findAssistantSemanticDuplicateIndex(
-    transcript,
-    messageWithImages,
-    { sending: runtime.sending, pendingFinal: runtime.pendingFinal },
-  );
-  const existingMessageIndex = duplicateMessageIndexById >= 0
-    ? duplicateMessageIndexById
-    : assistantSemanticDuplicateIndex;
   const runtimePatch = reduceRuntimeOverlay(runtime, {
     type: 'final_message_committed',
     hasOutput,
@@ -233,12 +243,27 @@ export function buildFinalMessageCommitPatch(
   });
   const nextRuntimeBase = runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch };
   const pendingUserMessage = runtime.pendingUserMessage ?? null;
+  const transcriptWithCommittedUser = (
+    hasOutput && pendingUserMessage
+      ? materializePendingUserMessage(transcript, pendingUserMessage)
+      : transcript
+  );
   const nextRuntime = nextRuntimeBase;
 
+  const duplicateMessageIndexById = transcriptWithCommittedUser.findIndex((message) => message.id === messageId);
+  const assistantSemanticDuplicateIndex = findAssistantSemanticDuplicateIndex(
+    transcriptWithCommittedUser,
+    messageWithImages,
+    { sending: runtime.sending, pendingFinal: runtime.pendingFinal },
+  );
+  const existingMessageIndex = duplicateMessageIndexById >= 0
+    ? duplicateMessageIndexById
+    : assistantSemanticDuplicateIndex;
+
   if (existingMessageIndex >= 0) {
-    const mergedTranscript = [...transcript];
+    const mergedTranscript = [...transcriptWithCommittedUser];
     mergedTranscript[existingMessageIndex] = mergeCommittedMessage(
-      transcript[existingMessageIndex]!,
+      transcriptWithCommittedUser[existingMessageIndex]!,
       messageWithImages,
     );
     return {
@@ -261,7 +286,7 @@ export function buildFinalMessageCommitPatch(
 
   return {
     sessionsByKey: patchSessionRecord(state, sessionKey, {
-      transcript: [...transcript, messageWithImages],
+      transcript: [...transcriptWithCommittedUser, messageWithImages],
       runtime: nextRuntime,
     }),
   };
@@ -385,6 +410,156 @@ export function reconcileLatestAssistantInHistory(
       : {}),
   };
   return merged;
+}
+
+interface ReconcileCommittedCurrentTurnInput {
+  historyMessages: RawMessage[];
+  currentMessages: RawMessage[];
+}
+
+function mergeCommittedUserIntoHistory(
+  historyMessage: RawMessage,
+  currentMessage: RawMessage,
+): RawMessage {
+  return {
+    ...historyMessage,
+    ...(typeof currentMessage.id === 'string' && currentMessage.id.trim()
+      ? { id: currentMessage.id }
+      : {}),
+    _attachedFiles: mergeAttachedFiles(historyMessage._attachedFiles, currentMessage._attachedFiles),
+  };
+}
+
+function normalizeMessageForCurrentTurnReconcile(message: RawMessage | undefined): string {
+  if (!message) {
+    return '';
+  }
+  if (message.role === 'user') {
+    return normalizeUserTextForReconcile(message.content);
+  }
+  if (message.role === 'assistant') {
+    return normalizeAssistantFinalTextForDedup(message.content);
+  }
+  return '';
+}
+
+function findCurrentTurnPair(currentMessages: RawMessage[]): { user: RawMessage; assistant: RawMessage } | null {
+  const assistantIndex = [...currentMessages].reverse().findIndex((message) => (
+    message.role === 'assistant'
+    && normalizeAssistantFinalTextForDedup(message.content) !== ''
+  ));
+  if (assistantIndex < 0) {
+    return null;
+  }
+
+  const resolvedAssistantIndex = currentMessages.length - 1 - assistantIndex;
+  const assistant = currentMessages[resolvedAssistantIndex]!;
+  for (let index = resolvedAssistantIndex - 1; index >= 0; index -= 1) {
+    const message = currentMessages[index];
+    if (message.role !== 'user') {
+      continue;
+    }
+    const normalizedUserText = normalizeUserTextForReconcile(message.content);
+    if (!normalizedUserText) {
+      continue;
+    }
+    return {
+      user: message,
+      assistant,
+    };
+  }
+  return null;
+}
+
+export function reconcileCommittedCurrentTurnWithHistory(
+  input: ReconcileCommittedCurrentTurnInput,
+): RawMessage[] {
+  const { historyMessages, currentMessages } = input;
+  const pair = findCurrentTurnPair(currentMessages);
+  if (!pair) {
+    return historyMessages;
+  }
+
+  const currentUserId = typeof pair.user.id === 'string' ? pair.user.id.trim() : '';
+  const currentUserText = normalizeUserTextForReconcile(pair.user.content);
+  const currentAssistantId = typeof pair.assistant.id === 'string' ? pair.assistant.id.trim() : '';
+  const currentAssistantText = normalizeAssistantFinalTextForDedup(pair.assistant.content);
+  if (!currentUserText || !currentAssistantText) {
+    return historyMessages;
+  }
+
+  const matchedHistoryUserIndex = [...historyMessages].reverse().findIndex((message) => (
+    message.role === 'user'
+    && (
+      (currentUserId && typeof message.id === 'string' && message.id.trim() === currentUserId)
+      || (currentUserId && extractUserMessageClientId(message.content) === currentUserId)
+      || normalizeUserTextForReconcile(message.content) === currentUserText
+    )
+  ));
+
+  if (matchedHistoryUserIndex >= 0) {
+    const resolvedIndex = historyMessages.length - 1 - matchedHistoryUserIndex;
+    const mergedHistory = [...historyMessages];
+    mergedHistory[resolvedIndex] = mergeCommittedUserIntoHistory(historyMessages[resolvedIndex]!, pair.user);
+    return mergedHistory;
+  }
+
+  const matchedHistoryAssistantIndex = [...historyMessages].reverse().findIndex((message) => (
+    message.role === 'assistant'
+    && (
+      (currentAssistantId && typeof message.id === 'string' && message.id.trim() === currentAssistantId)
+      || normalizeAssistantFinalTextForDedup(message.content) === currentAssistantText
+    )
+  ));
+  if (matchedHistoryAssistantIndex < 0) {
+    return historyMessages;
+  }
+
+  const resolvedAssistantIndex = historyMessages.length - 1 - matchedHistoryAssistantIndex;
+  const resolvedCurrentAssistantIndex = currentMessages.findIndex((message) => message === pair.assistant);
+  const resolvedCurrentUserIndex = currentMessages.findIndex((message) => message === pair.user);
+  if (resolvedCurrentAssistantIndex < 0 || resolvedCurrentUserIndex < 0) {
+    return historyMessages;
+  }
+  const historyWithoutCurrentUser = [
+    ...currentMessages.slice(0, resolvedCurrentUserIndex),
+    ...currentMessages.slice(resolvedCurrentUserIndex + 1),
+  ];
+  if (historyWithoutCurrentUser.length !== historyMessages.length) {
+    return historyMessages;
+  }
+  for (let index = 0; index < historyMessages.length; index += 1) {
+    if (index === resolvedAssistantIndex) {
+      continue;
+    }
+    const currentMessage = historyWithoutCurrentUser[index];
+    const historyMessage = historyMessages[index];
+    if (
+      currentMessage?.role !== historyMessage?.role
+      || normalizeMessageForCurrentTurnReconcile(currentMessage) !== normalizeMessageForCurrentTurnReconcile(historyMessage)
+    ) {
+      return historyMessages;
+    }
+  }
+
+  const mergedAssistant = {
+    ...historyMessages[resolvedAssistantIndex],
+    ...(typeof pair.assistant.id === 'string' && pair.assistant.id.trim()
+      ? { id: pair.assistant.id }
+      : {}),
+    _attachedFiles: mergeAttachedFiles(
+      historyMessages[resolvedAssistantIndex]?._attachedFiles,
+      pair.assistant._attachedFiles,
+    ),
+  } satisfies RawMessage;
+
+  return [
+    ...currentMessages.slice(0, resolvedCurrentUserIndex),
+    pair.user,
+    ...currentMessages.slice(resolvedCurrentUserIndex + 1, resolvedCurrentAssistantIndex),
+    mergedAssistant,
+    ...currentMessages.slice(resolvedCurrentAssistantIndex + 1),
+  ];
 }
 
 interface BuildToolResultFinalPatchInput {
