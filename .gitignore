@@ -61,6 +61,7 @@ resources/bin
 *.key
 
 build/
+packages/memory-lancedb-pro/models/
 
 .cursor/
 .pnpm-store/

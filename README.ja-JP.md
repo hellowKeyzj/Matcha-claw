@@ -331,6 +331,9 @@ pnpm package:mac          # macOS向けにパッケージ化
 pnpm package:win          # Windows向けにパッケージ化
 pnpm package:linux        # Linux向けにパッケージ化
 ```
+
+リリース用の GitHub Actions では、同梱する MiniLM モデルを自動でダウンロードしてからパッケージします。ローカルで `pnpm build` や `pnpm package*` を実行し、`memory-lancedb-pro` のオフライン `local-minilm` 資産もインストーラに含めたい場合は、先に `pnpm run download:minilm-model` を実行してください。
+
 ### 技術スタック
 
 | レイヤー | 技術 |
