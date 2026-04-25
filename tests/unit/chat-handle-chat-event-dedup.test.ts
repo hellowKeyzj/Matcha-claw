@@ -3,6 +3,23 @@ import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { disposeActiveStreamPacer } from '@/stores/chat/stream-pacer';
 import { resetToolSnapshotTxnState } from '@/stores/chat/tool-snapshot-txn';
+import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    transcript: overrides?.transcript ?? base.transcript,
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+  };
+}
 
 function extractAssistantText(message: RawMessage): string {
   if (typeof message.content === 'string') {
@@ -20,7 +37,11 @@ function extractAssistantText(message: RawMessage): string {
 }
 
 function getAssistantMessages(): RawMessage[] {
-  return useChatStore.getState().messages.filter((message) => message.role === 'assistant');
+  return (useChatStore.getState().sessionsByKey['agent:main:main']?.transcript ?? []).filter((message) => message.role === 'assistant');
+}
+
+function getStreamingOverlay() {
+  return useChatStore.getState().sessionsByKey['agent:main:main']?.runtime.assistantOverlay ?? null;
 }
 
 async function drainStreamPacer(): Promise<void> {
@@ -29,31 +50,28 @@ async function drainStreamPacer(): Promise<void> {
 
 function resetChatState(partial: Record<string, unknown> = {}): void {
   useChatStore.setState({
-    messages: [],
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
     mutating: false,
     error: null,
-    sending: true,
-    activeRunId: 'run-1',
-    runPhase: 'streaming',
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: Date.now(),
-    pendingToolImages: [],
-    approvalStatus: 'idle',
     pendingApprovalsBySession: {},
     sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
     currentSessionKey: 'agent:main:main',
-    sessionLabels: {},
-    sessionLastActivity: {},
-    sessionReadyByKey: {},
-    sessionRuntimeByKey: {},
+    sessionsByKey: {
+      'agent:main:main': buildSessionRecord({
+        meta: {
+          ready: true,
+        },
+        runtime: {
+          sending: true,
+          activeRunId: 'run-1',
+          runPhase: 'streaming',
+          lastUserMessageAt: Date.now(),
+        },
+      }),
+    },
     showThinking: true,
-    thinkingLevel: null,
     loadHistory: vi.fn().mockResolvedValue(undefined),
     ...partial,
   } as never);
@@ -80,27 +98,37 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
   it('工具回合快照带有自然语言文本时，后续最终回复不应再出现同文案重复两条', async () => {
     vi.useFakeTimers();
     resetChatState({
-      streamingMessage: {
-        role: 'assistant',
-        id: 'stream-tool-turn',
-        content: [
-          { type: 'text', text: '在。' },
-          {
-            type: 'tool_use',
-            id: 'tool-call-1',
-            name: 'task_decision',
-            input: { decision: 'direct' },
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          meta: {
+            ready: true,
           },
-        ],
-      },
-      streamRuntime: {
-        sessionKey: 'agent:main:main',
-        runId: 'run-1',
-        chunks: ['在。'],
-        rawChars: 2,
-        displayedChars: 2,
-        status: 'streaming',
-        rafId: null,
+          runtime: {
+            sending: true,
+            activeRunId: 'run-1',
+            runPhase: 'streaming',
+            lastUserMessageAt: Date.now(),
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-1',
+              messageId: 'stream-tool-turn',
+              sourceMessage: {
+                role: 'assistant',
+                id: 'stream-tool-turn',
+                content: [
+                  { type: 'text', text: '在。' },
+                  {
+                    type: 'tool_use',
+                    id: 'tool-call-1',
+                    name: 'task_decision',
+                    input: { decision: 'direct' },
+                  },
+                ],
+              },
+              committedText: '在。',
+              targetText: '在。',
+            }),
+          },
+        }),
       },
     });
 
@@ -145,8 +173,18 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
 
   it('tool-only delta 不生成可见 streamView 时，toolresult final 也不能丢工具回合快照', () => {
     resetChatState({
-      activeRunId: 'run-frame-flush',
-      runPhase: 'submitted',
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          meta: {
+            ready: true,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: 'run-frame-flush',
+            runPhase: 'submitted',
+          },
+        }),
+      },
     });
 
     useChatStore.getState().handleChatEvent({
@@ -167,7 +205,7 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
       },
     });
 
-    expect(useChatStore.getState().streamingMessage).toBeNull();
+    expect(getStreamingOverlay()).toBeNull();
 
     useChatStore.getState().handleChatEvent({
       state: 'final',
@@ -192,19 +230,32 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     ]);
   });
 
-  it('authoritative user final 到达时，应与 optimistic user 合并而不是新增一条', () => {
+  it('authoritative user final 到达时，应与 pending user overlay 合并而不是新增一条', () => {
     const sentAtMs = Date.now();
     resetChatState({
-      messages: [
-        {
-          role: 'user',
-          id: 'optimistic-user-1',
-          content: '你能做什么',
-          timestamp: sentAtMs / 1000,
-        },
-      ],
-      activeRunId: 'run-user-merge-1',
-      lastUserMessageAt: sentAtMs,
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          meta: {
+            ready: true,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: 'run-user-merge-1',
+            runPhase: 'streaming',
+            lastUserMessageAt: sentAtMs,
+            pendingUserMessage: {
+              clientMessageId: 'optimistic-user-1',
+              createdAtMs: sentAtMs,
+              message: {
+                role: 'user',
+                id: 'optimistic-user-1',
+                content: '你能做什么',
+                timestamp: sentAtMs / 1000,
+              },
+            },
+          },
+        }),
+      },
     });
 
     useChatStore.getState().handleChatEvent({
@@ -214,33 +265,43 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
       message: {
         role: 'user',
         id: 'gateway-user-1',
-        content: '[Tue 2026-04-14 20:11 GMT+8]你能做什么 [message_id: u-1]',
+        content: '[Tue 2026-04-14 20:11 GMT+8]你能做什么 [message_id: optimistic-user-1]',
         timestamp: (sentAtMs + 1200) / 1000,
       },
     });
 
-    const userMessages = useChatStore.getState().messages.filter((message) => message.role === 'user');
+    const userMessages = (useChatStore.getState().sessionsByKey['agent:main:main']?.transcript ?? []).filter((message) => message.role === 'user');
     expect(userMessages).toHaveLength(1);
     expect(userMessages[0]?.id).toBe('optimistic-user-1');
+    expect(useChatStore.getState().sessionsByKey['agent:main:main']?.runtime.pendingUserMessage).toBeNull();
   });
 
   it('toolresult final 不应把纯文本 streaming assistant 快照进 messages，避免后续 assistant final 重复', async () => {
     vi.useFakeTimers();
     resetChatState({
-      activeRunId: 'run-toolresult-no-toolcall',
-      streamingMessage: {
-        role: 'assistant',
-        id: 'stream-plain-assistant',
-        content: '好的，我来处理。',
-      },
-      streamRuntime: {
-        sessionKey: 'agent:main:main',
-        runId: 'run-toolresult-no-toolcall',
-        chunks: ['好的，我来处理。'],
-        rawChars: 8,
-        displayedChars: 8,
-        status: 'streaming',
-        rafId: null,
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          meta: {
+            ready: true,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: 'run-toolresult-no-toolcall',
+            runPhase: 'streaming',
+            lastUserMessageAt: Date.now(),
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-toolresult-no-toolcall',
+              messageId: 'stream-plain-assistant',
+              sourceMessage: {
+                role: 'assistant',
+                id: 'stream-plain-assistant',
+                content: '好的，我来处理。',
+              },
+              committedText: '好的，我来处理。',
+              targetText: '好的，我来处理。',
+            }),
+          },
+        }),
       },
     });
 
@@ -278,30 +339,40 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     expect(assistantMessages[0]?.id).toBe('assistant-final-no-dup');
   });
 
-  it('同一轮 assistant final 文本一致但 id 不同，应按语义去重只保留一条', () => {
+  it('同一轮 assistant final 文本一致但 id 不同，应按语义去重并保留 overlay row id', () => {
     resetChatState({
-      messages: [
-        {
-          role: 'assistant',
-          id: 'assistant-existing',
-          content: '你好呀，我在。',
-        },
-      ],
-      activeRunId: 'run-assistant-semantic-dedup',
-      pendingFinal: true,
-      streamingMessage: {
-        role: 'assistant',
-        id: 'stream-assistant',
-        content: '你好呀，我在。',
-      },
-      streamRuntime: {
-        sessionKey: 'agent:main:main',
-        runId: 'run-assistant-semantic-dedup',
-        chunks: ['你好呀，我在。'],
-        rawChars: 7,
-        displayedChars: 7,
-        status: 'streaming',
-        rafId: null,
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          transcript: [
+            {
+              role: 'assistant',
+              id: 'assistant-existing',
+              content: '你好呀，我在。',
+            },
+          ],
+          meta: {
+            ready: true,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: 'run-assistant-semantic-dedup',
+            runPhase: 'streaming',
+            pendingFinal: true,
+            lastUserMessageAt: Date.now(),
+            assistantOverlay: createAssistantOverlay({
+              runId: 'run-assistant-semantic-dedup',
+              messageId: 'stream-assistant',
+              sourceMessage: {
+                role: 'assistant',
+                id: 'stream-assistant',
+                content: '你好呀，我在。',
+              },
+              committedText: '你好呀，我在。',
+              targetText: '你好呀，我在。',
+              status: 'finalizing',
+            }),
+          },
+        }),
       },
     });
 
@@ -321,6 +392,6 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
 
     expect(assistantTexts.filter((text) => text === '你好呀，我在。')).toHaveLength(1);
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0]?.id).toBe('assistant-existing');
+    expect(assistantMessages[0]?.id).toBe('stream-assistant');
   });
 });

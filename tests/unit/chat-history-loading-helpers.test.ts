@@ -6,6 +6,7 @@ import {
 } from '@/stores/chat/history-loading-helpers';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -27,8 +28,9 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionReadyByKey: {},
-    messages: [],
+    sessionsByKey: {
+      'agent:main:main': createEmptySessionRecord(),
+    },
     initialLoading: false,
     refreshing: false,
     error: null,
@@ -119,8 +121,9 @@ describe('chat history loading helpers', () => {
     const historyLoadRunId = historyRuntime.nextHistoryLoadRunId();
     const harness = createStateHarness({
       currentSessionKey: requestedSessionKey,
-      messages: [],
-      sessionReadyByKey: {},
+      sessionsByKey: {
+        [requestedSessionKey]: createEmptySessionRecord(),
+      },
       initialLoading: false,
       refreshing: false,
       error: 'stale',

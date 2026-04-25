@@ -7,6 +7,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
@@ -43,6 +44,21 @@ function buildSessionMessages(count: number, prefix = 'session message') {
     timestamp: index + 1,
     id: `${prefix.replace(/\s+/g, '-')}-${index + 1}`,
   }));
+}
+
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    transcript: overrides?.transcript ?? base.transcript,
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+  };
 }
 
 function setupStores(options?: {
@@ -111,54 +127,34 @@ function setupStores(options?: {
   } as never);
 
   useChatStore.setState({
-    messages: currentMessages,
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
     mutating: false,
     error: null,
-    sending: false,
-    activeRunId: null,
-    runPhase: 'idle',
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: Date.now(),
-    pendingToolImages: [],
-    approvalStatus: 'idle',
     pendingApprovalsBySession: {},
     sessions: [
       { key: 'agent:test:main', displayName: 'agent:test:main' },
       { key: 'agent:another:main', displayName: 'agent:another:main' },
     ],
     currentSessionKey: 'agent:test:main',
-    sessionLabels: {},
-    sessionLastActivity: {
-      'agent:test:main': Date.now(),
-      'agent:another:main': Date.now() - 1_000,
-    },
-    sessionReadyByKey: {
-      'agent:test:main': true,
-      'agent:another:main': true,
-    },
-    sessionRuntimeByKey: {
-      'agent:another:main': {
-        messages: anotherLiveMessages,
-        sending: false,
-        activeRunId: null,
-        runPhase: 'idle',
-        streamingMessage: null,
-        streamRuntime: null,
-        streamingTools: [],
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-        approvalStatus: 'idle',
-      },
+    sessionsByKey: {
+      'agent:test:main': buildSessionRecord({
+        transcript: currentMessages,
+        meta: {
+          ready: true,
+          lastActivityAt: Date.now(),
+        },
+      }),
+      'agent:another:main': buildSessionRecord({
+        transcript: anotherLiveMessages,
+        meta: {
+          ready: true,
+          lastActivityAt: Date.now() - 1_000,
+        },
+      }),
     },
     showThinking: true,
-    thinkingLevel: null,
     loadHistory,
     loadSessions,
     sendMessage,
@@ -297,23 +293,35 @@ describe('chat 历史投影切换', () => {
   it('history 投影不应混入 runtime streaming 内容', async () => {
     setupStores();
     useChatStore.setState({
-      sending: true,
-      streamingMessage: {
-        role: 'assistant',
-        content: 'live partial answer',
-        timestamp: Date.now() / 1000,
-        id: 'streaming-assistant',
+      sessionsByKey: {
+        ...useChatStore.getState().sessionsByKey,
+        'agent:test:main': buildSessionRecord({
+          transcript: buildSessionMessages(35),
+          meta: {
+            ready: true,
+            lastActivityAt: Date.now(),
+          },
+          runtime: {
+            sending: true,
+            pendingFinal: true,
+            activeRunId: 'run-current',
+            assistantOverlay: {
+              runId: 'run-current',
+              messageId: 'streaming-assistant',
+              sourceMessage: {
+                role: 'assistant',
+                content: 'live partial answer',
+                timestamp: Date.now() / 1000,
+                id: 'streaming-assistant',
+              },
+              committedText: 'live partial answer',
+              targetText: 'live partial answer',
+              status: 'streaming',
+              rafId: null,
+            },
+          },
+        }),
       },
-      streamRuntime: {
-        sessionKey: 'agent:test:main',
-        runId: 'run-current',
-        chunks: ['live partial answer'],
-        rawChars: 19,
-        displayedChars: 19,
-        status: 'streaming',
-        rafId: null,
-      },
-      pendingFinal: true,
     } as never);
 
     renderChat();
@@ -385,7 +393,16 @@ describe('chat 历史投影切换', () => {
 
     act(() => {
       useChatStore.setState({
-        messages: currentMessages.slice(0, 32),
+        sessionsByKey: {
+          ...useChatStore.getState().sessionsByKey,
+          'agent:test:main': buildSessionRecord({
+            transcript: currentMessages.slice(0, 32),
+            meta: {
+              ready: true,
+              lastActivityAt: Date.now(),
+            },
+          }),
+        },
       } as never);
     });
 

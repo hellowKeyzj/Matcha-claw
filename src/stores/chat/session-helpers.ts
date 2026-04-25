@@ -141,7 +141,7 @@ export function shouldKeepMissingCurrentSession(
   const hasRuntime = Object.prototype.hasOwnProperty.call(state.sessionsByKey, sessionKey);
   if (!sessionKey.endsWith(':main')) {
     // Keep only local draft sessions (created but still truly empty).
-    return !hasMessages && !hasLabel && !hasActivity && !hasRuntime;
+    return !hasMessages && !hasLabel && !hasActivity && hasRuntime;
   }
   return hasMessages || hasLabel || hasActivity || hasRuntime;
 }

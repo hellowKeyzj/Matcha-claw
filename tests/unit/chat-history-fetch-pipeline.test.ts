@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildHistoryFingerprint } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import {
   CHAT_HISTORY_ACTIVE_PROBE_LIMIT,
   CHAT_HISTORY_QUIET_PROBE_LIMIT,
@@ -29,8 +30,9 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    messages: [] as RawMessage[],
-    sessionReadyByKey: {} as Record<string, boolean>,
+    sessionsByKey: {
+      'agent:main:main': createEmptySessionRecord(),
+    },
     ...overrides,
   } as ChatStoreState;
 
@@ -61,8 +63,12 @@ describe('chat history fetch pipeline helpers', () => {
 
     const { set, getState } = createStateHarness({
       currentSessionKey: requestedSessionKey,
-      messages: [{ role: 'assistant', content: 'renderable', timestamp: 2 }],
-      sessionReadyByKey: {},
+      sessionsByKey: {
+        [requestedSessionKey]: {
+          ...createEmptySessionRecord(),
+          transcript: [{ role: 'assistant', content: 'renderable', timestamp: 2 }],
+        },
+      },
     });
 
     const applyLoadedMessages = vi.fn(async () => {});
@@ -80,17 +86,13 @@ describe('chat history fetch pipeline helpers', () => {
     });
 
     expect(applyLoadedMessages).not.toHaveBeenCalled();
-    expect(getState().sessionReadyByKey[requestedSessionKey]).toBe(true);
+    expect(getState().sessionsByKey[requestedSessionKey]?.meta.ready).toBe(true);
   });
 
   it('active pipeline applies probe then full window when probe is saturated', async () => {
     const requestedSessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
-    const { set, getState } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
-      messages: [],
-      sessionReadyByKey: {},
-    });
+    const { set, getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
 
     const probeMessages = Array.from({ length: CHAT_HISTORY_ACTIVE_PROBE_LIMIT }, (_, index) => ({
       role: 'assistant',
@@ -132,11 +134,7 @@ describe('chat history fetch pipeline helpers', () => {
   it('active pipeline skips redundant full apply when full payload matches probe payload', async () => {
     const requestedSessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
-    const { set, getState } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
-      messages: [],
-      sessionReadyByKey: {},
-    });
+    const { set, getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
 
     const probeMessages = Array.from({ length: CHAT_HISTORY_ACTIVE_PROBE_LIMIT }, (_, index) => ({
       role: 'assistant',
@@ -172,11 +170,7 @@ describe('chat history fetch pipeline helpers', () => {
   it('quiet pipeline skips redundant full apply when full payload matches probe payload', async () => {
     const requestedSessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
-    const { set, getState } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
-      messages: [],
-      sessionReadyByKey: {},
-    });
+    const { set, getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
 
     const probeMessages = Array.from({ length: CHAT_HISTORY_QUIET_PROBE_LIMIT }, (_, index) => ({
       role: 'assistant',
@@ -221,8 +215,12 @@ describe('chat history fetch pipeline helpers', () => {
 
     const { set, getState } = createStateHarness({
       currentSessionKey: requestedSessionKey,
-      messages: [{ role: 'assistant', content: 'renderable', timestamp: 2 }],
-      sessionReadyByKey: {},
+      sessionsByKey: {
+        [requestedSessionKey]: {
+          ...createEmptySessionRecord(),
+          transcript: [{ role: 'assistant', content: 'renderable', timestamp: 2 }],
+        },
+      },
     });
 
     const applyLoadedMessages = vi.fn(async () => {});
@@ -241,17 +239,13 @@ describe('chat history fetch pipeline helpers', () => {
 
     expect(fetchHistoryWindow).toHaveBeenCalledTimes(1);
     expect(applyLoadedMessages).not.toHaveBeenCalled();
-    expect(getState().sessionReadyByKey[requestedSessionKey]).toBe(true);
+    expect(getState().sessionsByKey[requestedSessionKey]?.meta.ready).toBe(true);
   });
 
   it('quiet pipeline stops when abort is raised after probe fetch', async () => {
     const requestedSessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
-    const { set, getState } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
-      messages: [],
-      sessionReadyByKey: {},
-    });
+    const { set, getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
 
     let aborted = false;
     const probeMessages = Array.from({ length: CHAT_HISTORY_QUIET_PROBE_LIMIT }, (_, index) => ({
@@ -281,4 +275,3 @@ describe('chat history fetch pipeline helpers', () => {
     expect(applyLoadedMessages).not.toHaveBeenCalled();
   });
 });
-

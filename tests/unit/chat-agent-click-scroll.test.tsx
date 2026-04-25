@@ -9,6 +9,22 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    transcript: overrides?.transcript ?? base.transcript,
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+  };
+}
 
 function findClosestScrollViewport(node: HTMLElement | null): HTMLDivElement | null {
   let current = node?.parentElement ?? null;
@@ -51,10 +67,16 @@ describe('chat 左侧点击链路回归', () => {
     } as never);
 
     useSubagentsStore.setState({
-      agents: [
-        { id: 'main', name: 'main', workspace: '.', isDefault: true, createdAt: 1, updatedAt: 1 },
-        { id: 'another', name: 'another', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
-      ],
+      agentsResource: {
+        status: 'ready',
+        data: [
+          { id: 'main', name: 'main', workspace: '.', isDefault: true, createdAt: 1, updatedAt: 1 },
+          { id: 'another', name: 'another', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: Date.now(),
+      },
       loadAgents: vi.fn().mockResolvedValue(undefined),
     } as never);
 
@@ -76,59 +98,45 @@ describe('chat 左侧点击链路回归', () => {
     } as never);
 
     useChatStore.setState({
-      messages: [
-        {
-          role: 'user',
-          content: 'current session user message',
-          timestamp: 1,
-          id: 'current-msg-1',
-        },
-        {
-          role: 'assistant',
-          content: 'current session mid message',
-          timestamp: 2,
-          id: 'current-msg-2',
-        },
-        {
-          role: 'assistant',
-          content: 'current session old message',
-          timestamp: 3,
-          id: 'current-msg-3',
-        },
-      ],
       snapshotReady: true,
       initialLoading: false,
       refreshing: false,
       mutating: false,
       error: null,
-      sending: false,
-      activeRunId: null,
-      streamingMessage: null,
-      streamRuntime: null,
-      streamingTools: [],
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
-      approvalStatus: 'idle',
       pendingApprovalsBySession: {},
       sessions: [
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:another:main', displayName: 'agent:another:main' },
       ],
       currentSessionKey: 'agent:main:main',
-      sessionLabels: {
-        'agent:another:main': 'another latest session',
-      },
-      sessionLastActivity: {
-        'agent:another:main': 3,
-      },
-      sessionReadyByKey: {
-        'agent:main:main': true,
-        'agent:another:main': true,
-      },
-      sessionRuntimeByKey: {
-        'agent:another:main': {
-          messages: [
+      sessionsByKey: {
+        'agent:main:main': buildSessionRecord({
+          transcript: [
+            {
+              role: 'user',
+              content: 'current session user message',
+              timestamp: 1,
+              id: 'current-msg-1',
+            },
+            {
+              role: 'assistant',
+              content: 'current session mid message',
+              timestamp: 2,
+              id: 'current-msg-2',
+            },
+            {
+              role: 'assistant',
+              content: 'current session old message',
+              timestamp: 3,
+              id: 'current-msg-3',
+            },
+          ],
+          meta: {
+            ready: true,
+          },
+        }),
+        'agent:another:main': buildSessionRecord({
+          transcript: [
             {
               role: 'user',
               content: 'another user message',
@@ -148,20 +156,14 @@ describe('chat 左侧点击链路回归', () => {
               id: 'another-msg-3',
             },
           ],
-          sending: false,
-          activeRunId: null,
-          runPhase: 'idle',
-          streamingMessage: null,
-          streamRuntime: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-          approvalStatus: 'idle',
-        },
+          meta: {
+            label: 'another latest session',
+            lastActivityAt: 3,
+            ready: true,
+          },
+        }),
       },
       showThinking: true,
-      thinkingLevel: null,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
     } as never);
