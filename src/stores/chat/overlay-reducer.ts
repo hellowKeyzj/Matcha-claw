@@ -380,24 +380,15 @@ export function reduceRuntimeOverlay(
     }
 
     case 'history_snapshot': {
-      if (hasActiveStreamingRun(state)) {
-        return state;
-      }
-
       const patch: Partial<ChatSessionRuntimeState> = {};
       let changed = false;
-
-      if (action.hasRecentAssistantActivity && state.sending && !state.pendingFinal) {
-        patch.pendingFinal = true;
-        patch.runPhase = 'waiting_tool';
-        changed = true;
-      }
 
       if (action.hasRecentFinalAssistantMessage && (
         state.sending
         || state.activeRunId != null
         || state.pendingFinal
         || state.pendingUserMessage != null
+        || state.assistantOverlay != null
       )) {
         patch.sending = false;
         patch.activeRunId = null;
@@ -405,6 +396,20 @@ export function reduceRuntimeOverlay(
         patch.runPhase = 'done';
         patch.assistantOverlay = null;
         patch.pendingUserMessage = null;
+        changed = true;
+      }
+
+      if (changed) {
+        return patch;
+      }
+
+      if (hasActiveStreamingRun(state)) {
+        return state;
+      }
+
+      if (action.hasRecentAssistantActivity && state.sending && !state.pendingFinal) {
+        patch.pendingFinal = true;
+        patch.runPhase = 'waiting_tool';
         changed = true;
       }
 

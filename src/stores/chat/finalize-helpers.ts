@@ -521,18 +521,18 @@ export function reconcileCommittedCurrentTurnWithHistory(
   if (resolvedCurrentAssistantIndex < 0 || resolvedCurrentUserIndex < 0) {
     return historyMessages;
   }
-  const historyWithoutCurrentUser = [
+  const currentMessagesWithoutCurrentUser = [
     ...currentMessages.slice(0, resolvedCurrentUserIndex),
     ...currentMessages.slice(resolvedCurrentUserIndex + 1),
   ];
-  if (historyWithoutCurrentUser.length !== historyMessages.length) {
+  if (currentMessagesWithoutCurrentUser.length !== historyMessages.length) {
     return historyMessages;
   }
   for (let index = 0; index < historyMessages.length; index += 1) {
     if (index === resolvedAssistantIndex) {
       continue;
     }
-    const currentMessage = historyWithoutCurrentUser[index];
+    const currentMessage = currentMessagesWithoutCurrentUser[index];
     const historyMessage = historyMessages[index];
     if (
       currentMessage?.role !== historyMessage?.role
@@ -543,23 +543,16 @@ export function reconcileCommittedCurrentTurnWithHistory(
   }
 
   const mergedAssistant = {
-    ...historyMessages[resolvedAssistantIndex],
-    ...(typeof pair.assistant.id === 'string' && pair.assistant.id.trim()
-      ? { id: pair.assistant.id }
-      : {}),
+    ...pair.assistant,
     _attachedFiles: mergeAttachedFiles(
-      historyMessages[resolvedAssistantIndex]?._attachedFiles,
       pair.assistant._attachedFiles,
+      historyMessages[resolvedAssistantIndex]?._attachedFiles,
     ),
   } satisfies RawMessage;
 
-  return [
-    ...currentMessages.slice(0, resolvedCurrentUserIndex),
-    pair.user,
-    ...currentMessages.slice(resolvedCurrentUserIndex + 1, resolvedCurrentAssistantIndex),
-    mergedAssistant,
-    ...currentMessages.slice(resolvedCurrentAssistantIndex + 1),
-  ];
+  const preservedTranscript = [...currentMessages];
+  preservedTranscript[resolvedCurrentAssistantIndex] = mergedAssistant;
+  return preservedTranscript;
 }
 
 interface BuildToolResultFinalPatchInput {

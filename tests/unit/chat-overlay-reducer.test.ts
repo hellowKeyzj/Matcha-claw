@@ -274,6 +274,51 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.pendingUserMessage).toBeNull();
   });
 
+  it('does not let a lingering overlay block final history settlement', () => {
+    const state = buildRuntimeState({
+      sending: true,
+      activeRunId: 'run-1',
+      pendingFinal: true,
+      runPhase: 'finalizing',
+      assistantOverlay: createAssistantOverlay({
+        runId: 'run-1',
+        messageId: 'assistant-1',
+        sourceMessage: {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: 'hello world',
+          timestamp: 1_700_000_000,
+        },
+        committedText: 'hello world',
+        targetText: 'hello world',
+        status: 'finalizing',
+      }),
+      pendingUserMessage: {
+        clientMessageId: 'user-local-1',
+        createdAtMs: 1_700_000_000_000,
+        message: {
+          id: 'user-local-1',
+          role: 'user',
+          content: 'hello',
+          timestamp: 1_700_000_000,
+        },
+      },
+    });
+
+    const patch = reduceRuntimeOverlay(state, {
+      type: 'history_snapshot',
+      hasRecentAssistantActivity: false,
+      hasRecentFinalAssistantMessage: true,
+    });
+
+    expect(patch.sending).toBe(false);
+    expect(patch.activeRunId).toBeNull();
+    expect(patch.pendingFinal).toBe(false);
+    expect(patch.runPhase).toBe('done');
+    expect(patch.pendingUserMessage).toBeNull();
+    expect(patch.assistantOverlay).toBeNull();
+  });
+
   it('clears approval wait flag after final history refresh when no pending approvals', () => {
     const state = buildRuntimeState({
       approvalStatus: 'awaiting_approval',
