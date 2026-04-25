@@ -1,5 +1,10 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
-import { toMs } from './store-state-helpers';
+import {
+  getSessionMeta,
+  getSessionRecord,
+  getSessionRuntime,
+  toMs,
+} from './store-state-helpers';
 
 export function readSessionsFromState(
   state: Pick<ChatStoreState, 'sessionsResource'> & { sessions?: ChatSession[] },
@@ -59,14 +64,15 @@ export function normalizeTaskInboxSessionKey(sessionKey: string | undefined, fal
 }
 
 export function buildTaskInboxBridgeState(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'sending' | 'pendingFinal' | 'activeRunId'>,
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
   defaultSessionKey: string,
 ): TaskInboxChatBridgeState {
   const sessionKey = normalizeTaskInboxSessionKey(state.currentSessionKey, defaultSessionKey);
+  const runtime = getSessionRuntime(state, sessionKey);
   return {
     sessionKey,
     owner: parseAgentIdFromSessionKey(sessionKey) || 'main',
-    canSendRecoveryPrompt: !state.sending && !state.pendingFinal && !state.activeRunId,
+    canSendRecoveryPrompt: !runtime.sending && !runtime.pendingFinal && !runtime.activeRunId,
   };
 }
 
@@ -81,9 +87,9 @@ export function parseSessionTimestampMs(sessionKey: string): number | null {
 
 export function resolveSessionActivityMs(
   session: ChatSession,
-  sessionLastActivity: Record<string, number>,
+  sessionsByKey: ChatStoreState['sessionsByKey'],
 ): number {
-  const fromStore = sessionLastActivity[session.key];
+  const fromStore = getSessionMeta({ sessionsByKey }, session.key).lastActivityAt;
   if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
     return fromStore;
   }
@@ -96,7 +102,7 @@ export function resolveSessionActivityMs(
 export function resolvePreferredSessionKeyForAgent(
   agentId: string,
   sessions: ChatSession[],
-  sessionLastActivity: Record<string, number>,
+  sessionsByKey: ChatStoreState['sessionsByKey'],
 ): string | null {
   const canonicalKey = `agent:${agentId}:main`;
   const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
@@ -107,8 +113,8 @@ export function resolvePreferredSessionKeyForAgent(
     return canonicalKey;
   }
   const sorted = [...owned].sort((left, right) => {
-    const leftActivity = resolveSessionActivityMs(left, sessionLastActivity);
-    const rightActivity = resolveSessionActivityMs(right, sessionLastActivity);
+    const leftActivity = resolveSessionActivityMs(left, sessionsByKey);
+    const rightActivity = resolveSessionActivityMs(right, sessionsByKey);
     if (leftActivity !== rightActivity) {
       return rightActivity - leftActivity;
     }
@@ -119,8 +125,7 @@ export function resolvePreferredSessionKeyForAgent(
 
 export function shouldKeepMissingCurrentSession(
   sessionKey: string,
-  state: Pick<ChatStoreState, 'messages' | 'sessionLabels' | 'sessionLastActivity'>
-    & { sessionRuntimeByKey?: Record<string, unknown> },
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
   backendSessionCount: number,
 ): boolean {
   if (!sessionKey) {
@@ -129,12 +134,11 @@ export function shouldKeepMissingCurrentSession(
   if (backendSessionCount === 0) {
     return true;
   }
-  const hasMessages = state.messages.length > 0;
-  const hasLabel = Boolean(state.sessionLabels[sessionKey]);
-  const hasActivity = Boolean(state.sessionLastActivity[sessionKey]);
-  const hasRuntime = state.sessionRuntimeByKey
-    ? Object.prototype.hasOwnProperty.call(state.sessionRuntimeByKey, sessionKey)
-    : false;
+  const record = getSessionRecord(state, sessionKey);
+  const hasMessages = record.transcript.length > 0;
+  const hasLabel = Boolean(record.meta.label);
+  const hasActivity = Boolean(record.meta.lastActivityAt);
+  const hasRuntime = Object.prototype.hasOwnProperty.call(state.sessionsByKey, sessionKey);
   if (!sessionKey.endsWith(':main')) {
     // Keep only local draft sessions (created but still truly empty).
     return !hasMessages && !hasLabel && !hasActivity && !hasRuntime;
@@ -157,10 +161,11 @@ export function parseSessionUpdatedAtMs(value: unknown): number | undefined {
 
 export function isTrulyEmptyNonMainSession(
   currentSessionKey: string,
-  state: Pick<ChatStoreState, 'messages' | 'sessionLastActivity' | 'sessionLabels'>,
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
 ): boolean {
+  const record = getSessionRecord(state, currentSessionKey);
   return !currentSessionKey.endsWith(':main')
-    && state.messages.length === 0
-    && !state.sessionLastActivity[currentSessionKey]
-    && !state.sessionLabels[currentSessionKey];
+    && record.transcript.length === 0
+    && !record.meta.lastActivityAt
+    && !record.meta.label;
 }

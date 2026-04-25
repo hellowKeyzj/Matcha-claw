@@ -17,8 +17,6 @@ import type {
   ChatStoreState,
 } from './types';
 
-const OPTIMISTIC_USER_RECONCILE_WINDOW_MS = 15_000;
-
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
   replace?: false,
@@ -109,7 +107,6 @@ export function createStoreHistoryActions(
         get,
         historyRuntime,
         loadingTimeoutMs: CHAT_HISTORY_LOADING_TIMEOUT_MS,
-        optimisticUserReconcileWindowMs: OPTIMISTIC_USER_RECONCILE_WINDOW_MS,
         pipelineStrategy: selection.strategy,
         pipelineStrategyLabel: selection.strategyKey,
       }).execute(normalizedRequest);

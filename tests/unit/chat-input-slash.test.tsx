@@ -29,9 +29,13 @@ const chatStoreState: {
   currentSessionKey: 'agent:main:main',
 };
 const subagentsStoreState: {
-  agents: Array<{ id: string; skills?: string[] }>;
+  agentsResource: {
+    data: Array<{ id: string; skills?: string[] }>;
+  };
 } = {
-  agents: [],
+  agentsResource: {
+    data: [],
+  },
 };
 
 vi.mock('@/stores/skills', () => ({
@@ -51,7 +55,7 @@ describe('chat input slash skills', () => {
     skillsStoreState.snapshotReady = true;
     skillsStoreState.initialLoading = false;
     chatStoreState.currentSessionKey = 'agent:main:main';
-    subagentsStoreState.agents = [];
+    subagentsStoreState.agentsResource.data = [];
   });
 
   it('slash 只展示可用技能（enabled 且 eligible=true）', () => {
@@ -79,7 +83,7 @@ describe('chat input slash skills', () => {
       { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, eligible: true, icon: '📄' },
     ];
     chatStoreState.currentSessionKey = 'agent:test:main';
-    subagentsStoreState.agents = [{ id: 'test', skills: ['feishu-doc'] }];
+    subagentsStoreState.agentsResource.data = [{ id: 'test', skills: ['feishu-doc'] }];
 
     render(<ChatInput onSend={vi.fn()} />);
 

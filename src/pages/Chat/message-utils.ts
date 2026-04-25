@@ -24,7 +24,7 @@ function stripLeadingUntrustedMetadataBlocks(text: string): string {
 
 function stripAssistantReplyDirectivePrefix(text: string): string {
   return text
-    .replace(/^\s*(?:\[\[reply_to_[a-z0-9:_-]+\]\]\s*)+/ig, '')
+    .replace(/^\s*(?:\[\[reply_to(?:[:_][a-z0-9:_-]+)?\]\]\s*)+/ig, '')
     .trim();
 }
 

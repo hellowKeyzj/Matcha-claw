@@ -1,15 +1,17 @@
 import type {
+  ApprovalItem,
   AttachedFileMeta,
   ChatSession,
+  ChatSessionMetaState,
+  ChatSessionRecord,
+  ChatSessionRuntimeState,
   ChatStoreState,
   RawMessage,
-  SessionRuntimeSnapshot,
   ToolStatus,
 } from './types';
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 export function toMs(ts: number): number {
-  // Timestamps < 1e12 are in seconds (before ~2033); >= 1e12 are milliseconds
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
@@ -54,6 +56,19 @@ function areAttachedFilesEqual(
   return true;
 }
 
+function areMessagesEqualAtIndex(left: RawMessage, right: RawMessage): boolean {
+  return (
+    (left.id ?? null) === (right.id ?? null)
+    && left.role === right.role
+    && (left.timestamp ?? null) === (right.timestamp ?? null)
+    && (left.toolCallId ?? null) === (right.toolCallId ?? null)
+    && (left.toolName ?? null) === (right.toolName ?? null)
+    && (left.isError ?? null) === (right.isError ?? null)
+    && safeStableStringify(left.content) === safeStableStringify(right.content)
+    && areAttachedFilesEqual(left._attachedFiles, right._attachedFiles)
+  );
+}
+
 export function areMessagesEquivalent(left: RawMessage[], right: RawMessage[]): boolean {
   if (left === right) {
     return true;
@@ -63,27 +78,39 @@ export function areMessagesEquivalent(left: RawMessage[], right: RawMessage[]): 
   }
 
   for (let index = 0; index < left.length; index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (
-      (a.id ?? null) !== (b.id ?? null)
-      || a.role !== b.role
-      || (a.timestamp ?? null) !== (b.timestamp ?? null)
-      || (a.toolCallId ?? null) !== (b.toolCallId ?? null)
-      || (a.toolName ?? null) !== (b.toolName ?? null)
-      || (a.isError ?? null) !== (b.isError ?? null)
-    ) {
-      return false;
-    }
-    if (safeStableStringify(a.content) !== safeStableStringify(b.content)) {
-      return false;
-    }
-    if (!areAttachedFilesEqual(a._attachedFiles, b._attachedFiles)) {
+    if (!areMessagesEqualAtIndex(left[index], right[index])) {
       return false;
     }
   }
 
   return true;
+}
+
+export function mergeMessageReferences(
+  current: RawMessage[],
+  next: RawMessage[],
+): RawMessage[] {
+  if (current === next) {
+    return current;
+  }
+  if (areMessagesEquivalent(current, next)) {
+    return current;
+  }
+
+  const merged: RawMessage[] = new Array(next.length);
+  let changed = current.length !== next.length;
+  for (let index = 0; index < next.length; index += 1) {
+    const currentMessage = current[index];
+    const nextMessage = next[index];
+    if (currentMessage && areMessagesEqualAtIndex(currentMessage, nextMessage)) {
+      merged[index] = currentMessage;
+      continue;
+    }
+    merged[index] = nextMessage;
+    changed = true;
+  }
+
+  return changed ? merged : current;
 }
 
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
@@ -206,15 +233,15 @@ export function buildRenderMessagesFingerprint(messages: RawMessage[]): string {
 const EMPTY_MESSAGES: RawMessage[] = [];
 const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
 const EMPTY_PENDING_TOOL_IMAGES: AttachedFileMeta[] = [];
+const EMPTY_APPROVALS: ApprovalItem[] = [];
 
-export function createEmptySessionRuntime(): SessionRuntimeSnapshot {
+export function createEmptySessionRuntime(): ChatSessionRuntimeState {
   return {
-    messages: EMPTY_MESSAGES,
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingMessage: null,
-    streamRuntime: null,
+    pendingUserMessage: null,
+    assistantOverlay: null,
     streamingTools: EMPTY_STREAMING_TOOLS,
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -223,48 +250,181 @@ export function createEmptySessionRuntime(): SessionRuntimeSnapshot {
   };
 }
 
-export function snapshotCurrentSessionRuntime(state: ChatStoreState): SessionRuntimeSnapshot {
-  // Session switch is on the hot path. Reuse immutable references instead of deep cloning.
+export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
-    messages: state.messages,
-    sending: state.sending,
-    activeRunId: state.activeRunId,
-    runPhase: state.runPhase,
-    streamingMessage: state.streamingMessage,
-    streamRuntime: state.streamRuntime,
-    streamingTools: state.streamingTools,
-    pendingFinal: state.pendingFinal,
-    lastUserMessageAt: state.lastUserMessageAt,
-    pendingToolImages: state.pendingToolImages,
-    approvalStatus: state.approvalStatus,
+    label: null,
+    lastActivityAt: null,
+    ready: false,
+    thinkingLevel: null,
   };
 }
 
-export function resolveSessionRuntime(snapshot: SessionRuntimeSnapshot | undefined): SessionRuntimeSnapshot {
-  if (!snapshot) {
+export function createEmptySessionRecord(): ChatSessionRecord {
+  return {
+    transcript: EMPTY_MESSAGES,
+    meta: createEmptySessionMeta(),
+    runtime: createEmptySessionRuntime(),
+  };
+}
+
+export function resolveSessionRuntime(session: ChatSessionRecord | undefined): ChatSessionRuntimeState {
+  if (!session?.runtime) {
     return createEmptySessionRuntime();
   }
-  const hasApprovalStatus = typeof snapshot.approvalStatus === 'string';
-  const hasPendingToolImages = Array.isArray(snapshot.pendingToolImages);
-  const hasRunPhase = typeof snapshot.runPhase === 'string';
-  if (hasApprovalStatus && hasPendingToolImages && hasRunPhase) {
-    return snapshot;
+  return {
+    ...createEmptySessionRuntime(),
+    ...session.runtime,
+  };
+}
+
+export function resolveSessionMeta(session: ChatSessionRecord | undefined): ChatSessionMetaState {
+  return session?.meta ?? createEmptySessionMeta();
+}
+
+export function resolveSessionTranscript(session: ChatSessionRecord | undefined): RawMessage[] {
+  return Array.isArray(session?.transcript) ? session!.transcript : EMPTY_MESSAGES;
+}
+
+export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
+  if (!session) {
+    return createEmptySessionRecord();
   }
   return {
-    messages: Array.isArray(snapshot.messages) ? snapshot.messages : EMPTY_MESSAGES,
-    sending: snapshot.sending,
-    activeRunId: snapshot.activeRunId,
-    runPhase: hasRunPhase
-      ? snapshot.runPhase
-      : (snapshot.sending ? 'submitted' : 'idle'),
-    streamingMessage: snapshot.streamingMessage,
-    streamRuntime: snapshot.streamRuntime ?? null,
-    streamingTools: Array.isArray(snapshot.streamingTools) ? snapshot.streamingTools : EMPTY_STREAMING_TOOLS,
-    pendingFinal: snapshot.pendingFinal,
-    lastUserMessageAt: snapshot.lastUserMessageAt,
-    pendingToolImages: hasPendingToolImages ? snapshot.pendingToolImages : EMPTY_PENDING_TOOL_IMAGES,
-    approvalStatus: snapshot.approvalStatus ?? 'idle',
+    transcript: resolveSessionTranscript(session),
+    meta: resolveSessionMeta(session),
+    runtime: resolveSessionRuntime(session),
   };
+}
+
+export function getSessionRecord(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionRecord {
+  return resolveSessionRecord(state.sessionsByKey[sessionKey]);
+}
+
+export function getSessionTranscript(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): RawMessage[] {
+  return resolveSessionTranscript(state.sessionsByKey[sessionKey]);
+}
+
+export function getSessionMeta(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionMetaState {
+  return resolveSessionMeta(state.sessionsByKey[sessionKey]);
+}
+
+export function getSessionRuntime(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionRuntimeState {
+  return resolveSessionRuntime(state.sessionsByKey[sessionKey]);
+}
+
+export function upsertSessionRecord(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+  nextRecord: ChatSessionRecord,
+): Record<string, ChatSessionRecord> {
+  return {
+    ...state.sessionsByKey,
+    [sessionKey]: nextRecord,
+  };
+}
+
+export function patchSessionRecord(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+  patch: Partial<ChatSessionRecord>,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return {
+    ...state.sessionsByKey,
+    [sessionKey]: {
+      transcript: patch.transcript ?? current.transcript,
+      meta: patch.meta ?? current.meta,
+      runtime: patch.runtime ?? current.runtime,
+    },
+  };
+}
+
+export function patchSessionMeta(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+  patch: Partial<ChatSessionMetaState>,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return {
+    ...state.sessionsByKey,
+    [sessionKey]: {
+      ...current,
+      meta: {
+        ...current.meta,
+        ...patch,
+      },
+    },
+  };
+}
+
+export function patchCurrentSessionMeta(
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  patch: Partial<ChatSessionMetaState>,
+): Record<string, ChatSessionRecord> {
+  return patchSessionMeta(state, state.currentSessionKey, patch);
+}
+
+export function patchSessionRuntime(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+  patch: Partial<ChatSessionRuntimeState>,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return {
+    ...state.sessionsByKey,
+    [sessionKey]: {
+      ...current,
+      runtime: {
+        ...current.runtime,
+        ...patch,
+      },
+    },
+  };
+}
+
+export function patchCurrentSessionRuntime(
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  patch: Partial<ChatSessionRuntimeState>,
+): Record<string, ChatSessionRecord> {
+  return patchSessionRuntime(state, state.currentSessionKey, patch);
+}
+
+export function patchSessionTranscript(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+  transcript: RawMessage[],
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return {
+    ...state.sessionsByKey,
+    [sessionKey]: {
+      ...current,
+      transcript,
+    },
+  };
+}
+
+export function patchCurrentSessionTranscript(
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  transcript: RawMessage[],
+): Record<string, ChatSessionRecord> {
+  return patchSessionTranscript(state, state.currentSessionKey, transcript);
+}
+
+export function removeSessionRecord(
+  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  sessionKey: string,
+): Record<string, ChatSessionRecord> {
+  return Object.fromEntries(
+    Object.entries(state.sessionsByKey).filter(([key]) => key !== sessionKey),
+  );
+}
+
+export function getPendingApprovals(
+  state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
+  sessionKey: string,
+): ApprovalItem[] {
+  return state.pendingApprovalsBySession[sessionKey] ?? EMPTY_APPROVALS;
 }
 
 export function hasTimeoutSignal(error: unknown): boolean {

@@ -1,18 +1,17 @@
 import type {
-  ActiveStreamRuntime,
   ApprovalStatus,
   AttachedFileMeta,
-  ChatStoreState,
+  ChatSessionRuntimeState,
+  PendingUserMessageOverlay,
   RawMessage,
-  SessionRuntimeSnapshot,
   StreamRuntimeStatus,
   ToolStatus,
 } from './types';
-import {
-  upsertToolStatuses,
-} from './event-helpers';
+import { upsertToolStatuses } from './event-helpers';
+import { hasActiveStreamingRun } from './runtime-stream-state';
+import { createAssistantOverlay, resolveOverlaySourceMessage } from './stream-overlay-message';
 
-type RuntimeStateLike = ChatStoreState;
+type RuntimeStateLike = ChatSessionRuntimeState;
 
 interface RuntimeRunStartedAction {
   type: 'run_started';
@@ -22,6 +21,7 @@ interface RuntimeRunStartedAction {
 interface RuntimeSendSubmittedAction {
   type: 'send_submitted';
   nowMs: number;
+  pendingUserMessage: PendingUserMessageOverlay;
 }
 
 interface RuntimeSendRunBoundAction {
@@ -70,7 +70,7 @@ interface RuntimeClearErrorAction {
 
 interface RuntimeSessionRuntimeRestoredAction {
   type: 'session_runtime_restored';
-  targetRuntime: SessionRuntimeSnapshot;
+  targetRuntime: ChatSessionRuntimeState;
   currentPendingApprovals: number;
 }
 
@@ -86,26 +86,18 @@ interface RuntimeDeltaReceivedAction {
 
 interface RuntimeStreamDeltaQueuedAction {
   type: 'stream_delta_queued';
-  sessionKey: string;
   runId: string;
   text: string;
+  messageId?: string | null;
+  message?: RawMessage | null;
   updates?: ToolStatus[];
 }
 
 interface RuntimeStreamViewAdvancedAction {
   type: 'stream_view_advanced';
-  message: RawMessage | null;
-  displayedChars: number;
+  committedText: string;
   status: StreamRuntimeStatus;
   rafId: number | null;
-}
-
-interface RuntimeStreamFinalQueuedAction {
-  type: 'stream_final_queued';
-  sessionKey: string;
-  runId: string;
-  text: string;
-  updates?: ToolStatus[];
 }
 
 interface RuntimeStreamSchedulerUpdatedAction {
@@ -145,7 +137,6 @@ interface RuntimeFinalMessageCommittedAction {
   hasOutput: boolean;
   toolOnly: boolean;
   streamingTools: ToolStatus[];
-  messages?: RawMessage[];
 }
 
 export type RuntimeOverlayAction =
@@ -164,7 +155,6 @@ export type RuntimeOverlayAction =
   | RuntimeDeltaReceivedAction
   | RuntimeStreamDeltaQueuedAction
   | RuntimeStreamViewAdvancedAction
-  | RuntimeStreamFinalQueuedAction
   | RuntimeStreamSchedulerUpdatedAction
   | RuntimeEventErrorClearedAction
   | RuntimeFinalHistoryRefreshRequestedAction
@@ -178,59 +168,61 @@ function normalizeRunId(runId: string | null | undefined): string {
   return typeof runId === 'string' ? runId.trim() : '';
 }
 
-function createStreamRuntime(sessionKey: string, runId: string): ActiveStreamRuntime {
-  return {
-    sessionKey,
-    runId,
-    chunks: [],
-    rawChars: 0,
-    displayedChars: 0,
-    status: 'streaming',
-    rafId: null,
-  };
+function resolveOverlayMessageId(runId: string, messageId?: string | null, currentMessageId?: string | null): string {
+  const candidate = typeof messageId === 'string' && messageId.trim()
+    ? messageId.trim()
+    : (typeof currentMessageId === 'string' && currentMessageId.trim() ? currentMessageId.trim() : '');
+  return candidate || `stream:${runId}`;
 }
 
-function joinChunks(chunks: string[]): string {
-  if (chunks.length === 0) {
-    return '';
-  }
-  if (chunks.length === 1) {
-    return chunks[0] ?? '';
-  }
-  return chunks.join('');
-}
+function upsertAssistantOverlay(
+  state: RuntimeStateLike,
+  input: {
+    runId: string;
+    text: string;
+    messageId?: string | null;
+    message?: RawMessage | null;
+    status: StreamRuntimeStatus;
+  },
+) {
+  const currentOverlay = (
+    state.assistantOverlay
+    && state.assistantOverlay.runId === input.runId
+  )
+    ? state.assistantOverlay
+    : null;
+  const resolvedMessageId = resolveOverlayMessageId(
+    input.runId,
+    input.messageId,
+    currentOverlay?.messageId ?? null,
+  );
+  const targetText = input.text;
+  const committedText = currentOverlay
+    ? currentOverlay.committedText.slice(0, targetText.length)
+    : '';
+  const sourceMessage = resolveOverlaySourceMessage({
+    previousMessage: currentOverlay?.sourceMessage ?? null,
+    incomingMessage: input.message ?? null,
+    messageId: resolvedMessageId,
+    targetText,
+    lastUserMessageAt: state.lastUserMessageAt,
+  });
 
-function appendStreamText(runtime: ActiveStreamRuntime, nextText: string): ActiveStreamRuntime {
-  const currentText = joinChunks(runtime.chunks);
-  if (!nextText) {
-    return runtime;
-  }
-  if (nextText === currentText) {
-    return runtime;
-  }
-  if (nextText.startsWith(currentText)) {
-    const suffix = nextText.slice(currentText.length);
-    if (!suffix) {
-      return runtime;
-    }
-    return {
-      ...runtime,
-      chunks: [...runtime.chunks, suffix],
-      rawChars: nextText.length,
-    };
-  }
-  return {
-    ...runtime,
-    chunks: [nextText],
-    rawChars: nextText.length,
-    displayedChars: Math.min(runtime.displayedChars, nextText.length),
-  };
+  return createAssistantOverlay({
+    runId: input.runId,
+    messageId: resolvedMessageId,
+    sourceMessage,
+    committedText,
+    targetText,
+    status: input.status,
+    rafId: currentOverlay?.rafId ?? null,
+  });
 }
 
 export function reduceRuntimeOverlay(
   state: RuntimeStateLike,
   action: RuntimeOverlayAction,
-): Partial<ChatStoreState> | RuntimeStateLike {
+): Partial<ChatSessionRuntimeState> | RuntimeStateLike {
   switch (action.type) {
     case 'run_started': {
       const normalizedRunId = normalizeRunId(action.runId);
@@ -241,7 +233,6 @@ export function reduceRuntimeOverlay(
         sending: true,
         activeRunId: normalizedRunId,
         runPhase: 'submitted',
-        error: null,
       };
     }
 
@@ -249,9 +240,8 @@ export function reduceRuntimeOverlay(
       return {
         sending: true,
         runPhase: 'submitted',
-        error: null,
-        streamingMessage: null,
-        streamRuntime: null,
+        pendingUserMessage: action.pendingUserMessage,
+        assistantOverlay: null,
         streamingTools: [],
         pendingFinal: false,
         lastUserMessageAt: action.nowMs,
@@ -272,7 +262,6 @@ export function reduceRuntimeOverlay(
 
     case 'send_waiting_approval': {
       return {
-        error: null,
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
@@ -282,19 +271,18 @@ export function reduceRuntimeOverlay(
 
     case 'send_failed': {
       return {
-        error: action.error,
         sending: false,
         runPhase: 'error',
-        streamRuntime: action.clearRun ? null : state.streamRuntime,
+        pendingUserMessage: null,
+        assistantOverlay: action.clearRun ? null : state.assistantOverlay,
         approvalStatus: action.approvalStatus ?? 'idle',
         ...(action.clearRun
           ? {
-            activeRunId: null,
-            streamingMessage: null,
-            lastUserMessageAt: null,
-            streamingTools: [],
-            pendingFinal: false,
-          }
+              activeRunId: null,
+              lastUserMessageAt: null,
+              streamingTools: [],
+              pendingFinal: false,
+            }
           : {}),
       };
     }
@@ -319,9 +307,7 @@ export function reduceRuntimeOverlay(
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
-        // Entering approval wait should clear stream placeholders so UI renders approval actions immediately.
-        streamingMessage: null,
-        streamRuntime: null,
+        assistantOverlay: null,
         streamingTools: [],
         activeRunId: action.runId
           ? (state.activeRunId ?? action.runId)
@@ -346,7 +332,11 @@ export function reduceRuntimeOverlay(
     }
 
     case 'history_snapshot': {
-      const patch: Partial<ChatStoreState> = {};
+      if (hasActiveStreamingRun(state)) {
+        return state;
+      }
+
+      const patch: Partial<ChatSessionRuntimeState> = {};
       let changed = false;
 
       if (action.hasRecentAssistantActivity && state.sending && !state.pendingFinal) {
@@ -355,13 +345,18 @@ export function reduceRuntimeOverlay(
         changed = true;
       }
 
-      if (action.hasRecentFinalAssistantMessage && (state.sending || state.activeRunId != null || state.pendingFinal)) {
+      if (action.hasRecentFinalAssistantMessage && (
+        state.sending
+        || state.activeRunId != null
+        || state.pendingFinal
+        || state.pendingUserMessage != null
+      )) {
         patch.sending = false;
         patch.activeRunId = null;
         patch.pendingFinal = false;
         patch.runPhase = 'done';
-        patch.streamingMessage = null;
-        patch.streamRuntime = null;
+        patch.assistantOverlay = null;
+        patch.pendingUserMessage = null;
         changed = true;
       }
 
@@ -369,20 +364,17 @@ export function reduceRuntimeOverlay(
     }
 
     case 'clear_error': {
-      return {
-        error: null,
-        ...((state.runPhase === 'error' && !state.sending && !state.pendingFinal)
-          ? { runPhase: 'idle' as const }
-          : {}),
-      };
+      return (state.runPhase === 'error' && !state.sending && !state.pendingFinal)
+        ? { runPhase: 'idle' }
+        : state;
     }
 
     case 'session_runtime_restored': {
       const waitingApproval = action.currentPendingApprovals > 0;
       return {
         sending: action.targetRuntime.sending,
-        streamingMessage: action.targetRuntime.streamingMessage,
-        streamRuntime: action.targetRuntime.streamRuntime,
+        pendingUserMessage: action.targetRuntime.pendingUserMessage ?? null,
+        assistantOverlay: action.targetRuntime.assistantOverlay,
         streamingTools: action.targetRuntime.streamingTools,
         activeRunId: action.targetRuntime.activeRunId,
         runPhase: waitingApproval ? 'waiting_tool' : action.targetRuntime.runPhase,
@@ -395,8 +387,7 @@ export function reduceRuntimeOverlay(
 
     case 'tool_result_committed': {
       return {
-        streamingMessage: null,
-        streamRuntime: null,
+        assistantOverlay: null,
         pendingFinal: true,
         runPhase: 'waiting_tool',
         pendingToolImages: action.pendingToolImages,
@@ -405,17 +396,12 @@ export function reduceRuntimeOverlay(
     }
 
     case 'delta_received': {
-      const patch: Partial<ChatStoreState> = {};
-      let changed = false;
-      if (state.runPhase !== 'streaming') {
-        patch.runPhase = 'streaming';
-        changed = true;
+      if (state.runPhase === 'streaming') {
+        return state;
       }
-      if (state.error) {
-        patch.error = null;
-        changed = true;
-      }
-      return changed ? patch : state;
+      return {
+        runPhase: 'streaming',
+      };
     }
 
     case 'stream_delta_queued': {
@@ -424,94 +410,61 @@ export function reduceRuntimeOverlay(
       const nextStreamingTools = updates.length > 0
         ? upsertToolStatuses(state.streamingTools, updates)
         : state.streamingTools;
-      const baseRuntime = (
-        state.streamRuntime
-        && state.streamRuntime.sessionKey === action.sessionKey
-        && state.streamRuntime.runId === action.runId
-      )
-        ? state.streamRuntime
-        : createStreamRuntime(action.sessionKey, action.runId);
-      const nextRuntime = appendStreamText({
-        ...baseRuntime,
+      const normalizedRunId = normalizeRunId(action.runId);
+      const nextOverlay = upsertAssistantOverlay(state, {
+        runId: normalizedRunId || (state.activeRunId ?? ''),
+        text: action.text,
+        messageId: action.messageId,
+        message: action.message,
         status: 'streaming',
-      }, action.text);
-      const changedRuntime = (
-        state.streamRuntime !== nextRuntime
-        && (
-          state.streamRuntime == null
-          || state.streamRuntime.rawChars !== nextRuntime.rawChars
-          || state.streamRuntime.chunks !== nextRuntime.chunks
-          || state.streamRuntime.status !== nextRuntime.status
-        )
-      );
+      });
+      const changedOverlay = state.assistantOverlay !== nextOverlay;
       const changedTools = nextStreamingTools !== state.streamingTools;
-      if (deltaPatch === state && !changedRuntime && !changedTools) {
+      if (deltaPatch === state && !changedOverlay && !changedTools) {
         return state;
       }
       return {
         ...(deltaPatch === state ? {} : deltaPatch),
-        ...(changedRuntime ? { streamRuntime: nextRuntime } : {}),
+        ...(changedOverlay ? { assistantOverlay: nextOverlay } : {}),
         ...(changedTools ? { streamingTools: nextStreamingTools } : {}),
       };
     }
 
     case 'stream_view_advanced': {
-      if (!state.streamRuntime) {
+      if (!state.assistantOverlay) {
+        return state;
+      }
+      if (
+        state.assistantOverlay.committedText === action.committedText
+        && state.assistantOverlay.status === action.status
+        && state.assistantOverlay.rafId === action.rafId
+      ) {
         return state;
       }
       return {
-        streamingMessage: action.message,
-        streamRuntime: {
-          ...state.streamRuntime,
-          displayedChars: action.displayedChars,
+        assistantOverlay: {
+          ...state.assistantOverlay,
+          committedText: action.committedText,
           status: action.status,
           rafId: action.rafId,
         },
       };
     }
 
-    case 'stream_final_queued': {
-      const updates = action.updates ?? [];
-      const nextStreamingTools = updates.length > 0
-        ? upsertToolStatuses(state.streamingTools, updates)
-        : state.streamingTools;
-      const baseRuntime = (
-        state.streamRuntime
-        && state.streamRuntime.sessionKey === action.sessionKey
-        && state.streamRuntime.runId === action.runId
-      )
-        ? state.streamRuntime
-        : createStreamRuntime(action.sessionKey, action.runId);
-      const nextRuntime = {
-        ...baseRuntime,
-        chunks: action.text ? [action.text] : [],
-        rawChars: action.text.length,
-        displayedChars: Math.min(baseRuntime.displayedChars, action.text.length),
-        status: 'draining' as const,
-      };
-      return {
-        streamRuntime: nextRuntime,
-        ...(nextStreamingTools !== state.streamingTools ? { streamingTools: nextStreamingTools } : {}),
-      };
-    }
-
     case 'stream_scheduler_updated': {
-      if (!state.streamRuntime || state.streamRuntime.rafId === action.rafId) {
+      if (!state.assistantOverlay || state.assistantOverlay.rafId === action.rafId) {
         return state;
       }
       return {
-        streamRuntime: {
-          ...state.streamRuntime,
+        assistantOverlay: {
+          ...state.assistantOverlay,
           rafId: action.rafId,
         },
       };
     }
 
     case 'event_error_cleared': {
-      if (!state.error) {
-        return state;
-      }
-      return { error: null };
+      return state;
     }
 
     case 'final_history_refresh_requested': {
@@ -528,8 +481,8 @@ export function reduceRuntimeOverlay(
         sending: false,
         activeRunId: null,
         runPhase: 'aborted',
-        streamingMessage: null,
-        streamRuntime: null,
+        pendingUserMessage: null,
+        assistantOverlay: null,
         streamingTools: [],
         pendingFinal: false,
         lastUserMessageAt: null,
@@ -540,10 +493,9 @@ export function reduceRuntimeOverlay(
 
     case 'event_error': {
       return {
-        error: action.error,
         runPhase: 'error',
-        streamingMessage: null,
-        streamRuntime: null,
+        pendingUserMessage: null,
+        assistantOverlay: null,
         streamingTools: [],
         pendingFinal: false,
         pendingToolImages: [],
@@ -556,6 +508,7 @@ export function reduceRuntimeOverlay(
         sending: false,
         activeRunId: null,
         runPhase: 'error',
+        pendingUserMessage: null,
         lastUserMessageAt: null,
       };
     }
@@ -566,23 +519,20 @@ export function reduceRuntimeOverlay(
           sending: false,
           activeRunId: null,
           runPhase: 'done',
-          streamingMessage: null,
-          streamRuntime: null,
+          assistantOverlay: null,
           pendingFinal: false,
         };
       }
       return {
         runPhase: 'finalizing',
-        ...(state.streamRuntime
+        ...(state.assistantOverlay
           ? {
-              streamRuntime: {
-                ...state.streamRuntime,
+              assistantOverlay: {
+                ...state.assistantOverlay,
                 status: 'finalizing' as const,
               },
             }
-          : {
-              streamingMessage: null,
-            }),
+          : {}),
         pendingFinal: true,
         sending: state.sending,
         activeRunId: state.activeRunId,
@@ -590,12 +540,10 @@ export function reduceRuntimeOverlay(
     }
 
     case 'final_message_committed': {
-      const patch: Partial<ChatStoreState> = {
-        streamingMessage: null,
-        streamRuntime: null,
+      const patch: Partial<ChatSessionRuntimeState> = {
+        assistantOverlay: null,
         streamingTools: action.streamingTools,
         pendingToolImages: [],
-        ...(action.messages ? { messages: action.messages } : {}),
       };
 
       if (action.toolOnly) {
@@ -608,6 +556,9 @@ export function reduceRuntimeOverlay(
       patch.activeRunId = action.hasOutput ? null : state.activeRunId;
       patch.pendingFinal = action.hasOutput ? false : true;
       patch.runPhase = action.hasOutput ? 'done' : 'finalizing';
+      if (action.hasOutput) {
+        patch.pendingUserMessage = null;
+      }
       return patch;
     }
 

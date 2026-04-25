@@ -4,7 +4,10 @@ import { scheduleIdleReady } from '@/lib/idle-ready';
 import { projectLiveThreadMessages } from './live-thread-projection';
 import { useExecutionGraphs } from './useExecutionGraphs';
 import { useChatRows } from './useRows';
-import { useBodyRenderProjection } from './useBodyRenderProjection';
+import {
+  countRenderableLiveMessages,
+  pickTailMessagesForFirstPaint,
+} from '@/stores/chat/history-first-paint-budget';
 
 const EMPTY_MESSAGES: RawMessage[] = [];
 
@@ -23,13 +26,9 @@ interface SessionPipelineCost {
 interface UseRowsPipelineInput {
   projectionScopeKey: string;
   rowSessionKey: string;
-  messages: RawMessage[];
+  canonicalMessages: RawMessage[];
+  projectionMessages: RawMessage[];
   isHistoryProjection: boolean;
-  viewportRef: React.RefObject<HTMLDivElement | null>;
-  contentRef: React.RefObject<HTMLDivElement | null>;
-  isUserScrolling: boolean;
-  scrollDirection: -1 | 0 | 1;
-  scrollEventSeq: number;
   agents: ExecutionGraphAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
@@ -37,6 +36,7 @@ interface UseRowsPipelineInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
+  pendingUserMessage?: RawMessage | null;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   streamingTimestamp: number;
@@ -46,8 +46,6 @@ interface UseRowsPipelineInput {
 interface UseRowsPipelineResult {
   chatRows: ReturnType<typeof useChatRows>['chatRows'];
   suppressedToolCardRowKeys: ReturnType<typeof useExecutionGraphs>['suppressedToolCardRowKeys'];
-  bodyRenderModeByRowKey: ReturnType<typeof useBodyRenderProjection>['bodyRenderModeByRowKey'];
-  requestFullRender: ReturnType<typeof useBodyRenderProjection>['requestFullRender'];
   hiddenHistoryCount: number;
   rowSliceCostMs: number;
   runtimeRowsCostMs: number;
@@ -64,13 +62,9 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
   const {
     projectionScopeKey,
     rowSessionKey,
-    messages,
+    canonicalMessages,
+    projectionMessages,
     isHistoryProjection,
-    viewportRef,
-    contentRef,
-    isUserScrolling,
-    scrollDirection,
-    scrollEventSeq,
     agents,
     isGatewayRunning,
     gatewayRpc,
@@ -78,25 +72,111 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     pendingFinal,
     waitingApproval,
     showThinking,
+    pendingUserMessage,
     streamingMessage,
     streamingTools,
     streamingTimestamp,
     sessionPipelineCostRef,
   } = input;
+  const [liveProjectionState, setLiveProjectionState] = useState(() => ({
+    scopeKey: projectionScopeKey,
+    ready: isHistoryProjection,
+  }));
+  const liveFirstPaintMessages = useMemo(
+    () => (isHistoryProjection ? EMPTY_MESSAGES : pickTailMessagesForFirstPaint(canonicalMessages)),
+    [canonicalMessages, isHistoryProjection, projectionScopeKey],
+  );
+  const shouldUseLiveFirstPaint = !isHistoryProjection && (
+    liveProjectionState.scopeKey !== projectionScopeKey
+    || !liveProjectionState.ready
+  );
+
+  useEffect(() => {
+    if (isHistoryProjection) {
+      setLiveProjectionState((current) => (
+        current.scopeKey === projectionScopeKey && current.ready
+          ? current
+          : { scopeKey: projectionScopeKey, ready: true }
+      ));
+      return;
+    }
+
+    setLiveProjectionState((current) => (
+      current.scopeKey === projectionScopeKey && !current.ready
+        ? current
+        : { scopeKey: projectionScopeKey, ready: false }
+    ));
+
+    let cancelled = false;
+    const handle = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame(() => {
+        if (!cancelled) {
+          setLiveProjectionState((current) => (
+            current.scopeKey === projectionScopeKey
+              ? { scopeKey: projectionScopeKey, ready: true }
+              : current
+          ));
+        }
+      })
+      : setTimeout(() => {
+        if (!cancelled) {
+          setLiveProjectionState((current) => (
+            current.scopeKey === projectionScopeKey
+              ? { scopeKey: projectionScopeKey, ready: true }
+              : current
+          ));
+        }
+      }, 16);
+
+    return () => {
+      cancelled = true;
+      if (typeof handle === 'number' && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(handle);
+        return;
+      }
+      clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
+  }, [isHistoryProjection, projectionScopeKey]);
 
   const projectionResult = useMemo(() => {
     const projectionStartedAt = nowMs();
-    const liveThreadProjection = isHistoryProjection
-      ? {
-        messages,
-        hiddenRenderableCount: 0,
+    const liveThreadProjection = (() => {
+      if (isHistoryProjection) {
+        return {
+          messages: projectionMessages,
+          hiddenRenderableCount: 0,
+        };
       }
-      : projectLiveThreadMessages(messages);
+      if (shouldUseLiveFirstPaint) {
+        return {
+          messages: liveFirstPaintMessages,
+          hiddenRenderableCount: Math.max(
+            0,
+            countRenderableLiveMessages(canonicalMessages) - countRenderableLiveMessages(liveFirstPaintMessages),
+          ),
+        };
+      }
+      const displayedProjection = projectLiveThreadMessages(canonicalMessages);
+      const hiddenRenderableCount = Math.max(
+        0,
+        countRenderableLiveMessages(canonicalMessages) - countRenderableLiveMessages(displayedProjection.messages),
+      );
+      return {
+        messages: displayedProjection.messages,
+        hiddenRenderableCount,
+      };
+    })();
     return {
       liveThreadProjection,
       rowSliceCostMs: Math.max(0, nowMs() - projectionStartedAt),
     };
-  }, [isHistoryProjection, messages]);
+  }, [
+    canonicalMessages,
+    isHistoryProjection,
+    liveFirstPaintMessages,
+    projectionMessages,
+    shouldUseLiveFirstPaint,
+  ]);
   const rowSourceMessages = projectionResult.liveThreadProjection.messages;
   const rowSliceCostMs = projectionResult.rowSliceCostMs;
 
@@ -113,9 +193,9 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     return cancel;
   }, [projectionScopeKey]);
 
-  const deferredMessages = useDeferredValue(messages);
+  const deferredMessages = useDeferredValue(rowSourceMessages);
   const deferredSessionKey = useDeferredValue(projectionScopeKey);
-  const executionGraphInputReady = deferredSessionKey === projectionScopeKey && deferredMessages === messages;
+  const executionGraphInputReady = deferredSessionKey === projectionScopeKey && deferredMessages === rowSourceMessages;
   const { executionGraphs, suppressedToolCardRowKeys } = useExecutionGraphs({
     enabled: !isHistoryProjection && executionGraphsEnabled && executionGraphInputReady,
     messages: executionGraphInputReady ? rowSourceMessages : EMPTY_MESSAGES,
@@ -142,23 +222,11 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
     pendingFinal,
     waitingApproval,
     showThinking,
+    pendingUserMessage,
     streamingMessage,
     streamingTools,
     streamingTimestamp,
   });
-  const {
-    bodyRenderModeByRowKey,
-    requestFullRender,
-  } = useBodyRenderProjection({
-    currentSessionKey: projectionScopeKey,
-    rows: chatRows,
-    viewportRef,
-    contentRef,
-    isUserScrolling,
-    scrollDirection,
-    scrollEventSeq,
-  });
-
   useEffect(() => {
     if (staticRowsCostMs <= 0) {
       return;
@@ -182,8 +250,6 @@ export function useRowsPipeline(input: UseRowsPipelineInput): UseRowsPipelineRes
   return {
     chatRows,
     suppressedToolCardRowKeys,
-    bodyRenderModeByRowKey,
-    requestFullRender,
     hiddenHistoryCount: projectionResult.liveThreadProjection.hiddenRenderableCount,
     rowSliceCostMs,
     runtimeRowsCostMs,

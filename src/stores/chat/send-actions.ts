@@ -1,7 +1,8 @@
 import { cacheSendAttachments } from './attachment-helpers';
+import { buildUserTransportMessage } from './message-helpers';
 import {
   applyStoreSendStart,
-  buildOptimisticUserMessage,
+  buildPendingUserMessageOverlay,
   commitStoreRunIdBound,
   commitStoreSendWaitingApproval,
   finalizeStoreSendFailure,
@@ -54,9 +55,10 @@ export function createStoreSendActions(input: CreateStoreSendActionsInput): Stor
         attachmentCount: attachments?.length ?? 0,
       });
 
-      // Add user message optimistically (with local file metadata for UI display)
       const nowMs = Date.now();
-      const userMsg = buildOptimisticUserMessage({
+      const clientMessageId = crypto.randomUUID();
+      const pendingUserMessage = buildPendingUserMessageOverlay({
+        clientMessageId,
         text: trimmed,
         nowMs,
         attachments,
@@ -64,7 +66,7 @@ export function createStoreSendActions(input: CreateStoreSendActionsInput): Stor
       applyStoreSendStart({
         set,
         sessionKey: currentSessionKey,
-        message: userMsg,
+        pendingUserMessage,
         nowMs,
       });
 
@@ -81,7 +83,7 @@ export function createStoreSendActions(input: CreateStoreSendActionsInput): Stor
 
       beginMutating();
       try {
-        const idempotencyKey = crypto.randomUUID();
+        const idempotencyKey = clientMessageId;
         const hasMedia = attachments && attachments.length > 0;
 
         // Cache image attachments BEFORE the IPC call to avoid race condition:
@@ -93,7 +95,7 @@ export function createStoreSendActions(input: CreateStoreSendActionsInput): Stor
 
         const sendResult = await sendChatTransport({
           sessionKey: currentSessionKey,
-          message: trimmed,
+          message: buildUserTransportMessage(trimmed, clientMessageId),
           idempotencyKey,
           attachments,
           timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
@@ -154,5 +156,3 @@ export function createStoreSendActions(input: CreateStoreSendActionsInput): Stor
     },
   };
 }
-
-

@@ -195,6 +195,34 @@ export function getMessageText(content: unknown): string {
   return '';
 }
 
+export function extractUserMessageClientId(content: unknown): string | null {
+  const text = getMessageText(content);
+  const matched = text.match(/\[message_id:\s*([^\]]+)\]/i);
+  if (!matched) {
+    return null;
+  }
+  const candidate = matched[1]?.trim();
+  return candidate ? candidate : null;
+}
+
+export function buildUserTransportMessage(
+  text: string,
+  clientMessageId: string,
+): string {
+  const normalizedId = clientMessageId.trim();
+  if (!normalizedId) {
+    return text;
+  }
+  const currentClientId = extractUserMessageClientId(text);
+  if (currentClientId === normalizedId) {
+    return text;
+  }
+  const normalizedText = text.trim();
+  return normalizedText
+    ? `${normalizedText} [message_id: ${normalizedId}]`
+    : `[message_id: ${normalizedId}]`;
+}
+
 function stripLeadingUntrustedMetadataBlocks(text: string): string {
   const fencedPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?```[a-z]*\n[\s\S]*?```\s*/i;
   const inlineJsonPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?\{[\s\S]*?\}\s*/i;
@@ -237,7 +265,7 @@ export function normalizeUserTextForReconcile(content: unknown): string {
 
 export function normalizeAssistantFinalTextForDedup(content: unknown): string {
   return getMessageText(content)
-    .replace(/^\s*(?:\[\[reply_to_[a-z0-9:_-]+\]\]\s*)+/ig, '')
+    .replace(/^\s*(?:\[\[reply_to(?:[:_][a-z0-9:_-]+)?\]\]\s*)+/ig, '')
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, ' ')
     .trim();
@@ -365,4 +393,3 @@ export function isInternalMessage(msg: Pick<RawMessage, 'role' | 'content'>): bo
   }
   return false;
 }
-

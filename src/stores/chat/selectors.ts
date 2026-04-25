@@ -1,33 +1,31 @@
 import { type ApprovalItem, type ChatStoreState } from '@/stores/chat';
 import { readSessionsFromState } from './session-helpers';
+import {
+  getPendingApprovals,
+  getSessionMeta,
+  getSessionRuntime,
+  getSessionTranscript,
+} from './store-state-helpers';
+import { selectStreamingRenderMessage } from './stream-overlay-message';
 
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 
-export function selectSnapshotLayerState(state: ChatStoreState) {
-  return {
-    messages: state.messages,
-    sessions: readSessionsFromState(state),
-    currentSessionKey: state.currentSessionKey,
-    sessionLabels: state.sessionLabels,
-    sessionLastActivity: state.sessionLastActivity,
-    sessionReadyByKey: state.sessionReadyByKey,
-  };
+export function selectCanonicalTranscript(state: ChatStoreState, sessionKey: string) {
+  return getSessionTranscript(state, sessionKey);
 }
 
-export function selectRuntimeLayerState(state: ChatStoreState) {
+export function selectSessionMeta(state: ChatStoreState, sessionKey: string) {
+  return getSessionMeta(state, sessionKey);
+}
+
+export function selectSessionRuntime(state: ChatStoreState, sessionKey: string) {
+  return getSessionRuntime(state, sessionKey);
+}
+
+export function selectSnapshotLayerState(state: ChatStoreState) {
   return {
-    sending: state.sending,
-    activeRunId: state.activeRunId,
-    runPhase: state.runPhase,
-    streamingMessage: state.streamingMessage,
-    streamRuntime: state.streamRuntime,
-    streamingTools: state.streamingTools,
-    pendingFinal: state.pendingFinal,
-    lastUserMessageAt: state.lastUserMessageAt,
-    pendingToolImages: state.pendingToolImages,
-    approvalStatus: state.approvalStatus,
-    pendingApprovalsBySession: state.pendingApprovalsBySession,
-    sessionRuntimeByKey: state.sessionRuntimeByKey,
+    sessions: readSessionsFromState(state),
+    currentSessionKey: state.currentSessionKey,
   };
 }
 
@@ -40,18 +38,18 @@ export function selectViewLayerState(state: ChatStoreState) {
     mutating: state.mutating,
     error: state.error,
     showThinking: state.showThinking,
-    thinkingLevel: state.thinkingLevel,
   };
 }
 
 export function selectChatPageSessionState(state: ChatStoreState) {
-  const snapshot = selectSnapshotLayerState(state);
-  const currentSessionKey = snapshot.currentSessionKey;
+  const currentSessionKey = state.currentSessionKey;
+  const currentSessionMeta = selectSessionMeta(state, currentSessionKey);
   return {
-    messages: snapshot.messages,
+    canonicalMessages: selectCanonicalTranscript(state, currentSessionKey),
     currentSessionKey,
-    currentSessionReady: Boolean(snapshot.sessionReadyByKey[currentSessionKey]),
-    currentSessionHasActivity: typeof snapshot.sessionLastActivity[currentSessionKey] === 'number',
+    currentSessionReady: Boolean(currentSessionMeta.ready),
+    currentSessionHasActivity: typeof currentSessionMeta.lastActivityAt === 'number',
+    thinkingLevel: currentSessionMeta.thinkingLevel,
   };
 }
 
@@ -68,15 +66,20 @@ export function selectChatPageViewState(state: ChatStoreState) {
 }
 
 export function selectChatPageRuntimeState(state: ChatStoreState) {
-  const runtime = selectRuntimeLayerState(state);
+  const runtime = selectSessionRuntime(state, state.currentSessionKey);
   return {
     sending: runtime.sending,
-    streamingMessage: runtime.streamingMessage,
+    activeRunId: runtime.activeRunId,
+    runPhase: runtime.runPhase,
+    pendingUserMessage: runtime.pendingUserMessage?.message ?? null,
+    streamingMessage: selectStreamingRenderMessage(runtime),
+    assistantOverlay: runtime.assistantOverlay,
     streamingTools: runtime.streamingTools,
     pendingFinal: runtime.pendingFinal,
     lastUserMessageAt: runtime.lastUserMessageAt,
+    pendingToolImages: runtime.pendingToolImages,
     approvalStatus: runtime.approvalStatus,
-    currentPendingApprovals: runtime.pendingApprovalsBySession[state.currentSessionKey] ?? EMPTY_APPROVAL_ITEMS,
+    currentPendingApprovals: getPendingApprovals(state, state.currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
   };
 }
 
@@ -106,11 +109,9 @@ export function selectChatToolbarState(state: ChatStoreState) {
 }
 
 export function selectSidebarPendingBlockersState(state: ChatStoreState) {
-  const runtime = selectRuntimeLayerState(state);
-  const snapshot = selectSnapshotLayerState(state);
   return {
-    pendingApprovalsBySession: runtime.pendingApprovalsBySession,
-    sessionLabels: snapshot.sessionLabels,
+    pendingApprovalsBySession: state.pendingApprovalsBySession,
+    sessionsByKey: state.sessionsByKey,
     chatSessions: readSessionsFromState(state),
   };
 }
@@ -124,13 +125,11 @@ export function selectChatInputSessionKey(state: ChatStoreState) {
 }
 
 export function selectAgentSessionsPaneState(state: ChatStoreState) {
-  const snapshot = selectSnapshotLayerState(state);
   return {
     sessions: readSessionsFromState(state),
-    sessionLabels: snapshot.sessionLabels,
-    sessionLastActivity: snapshot.sessionLastActivity,
+    sessionsByKey: state.sessionsByKey,
     sessionsResource: state.sessionsResource,
-    currentSessionKey: snapshot.currentSessionKey,
+    currentSessionKey: state.currentSessionKey,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
     newSession: state.newSession,

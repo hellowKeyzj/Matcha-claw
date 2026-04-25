@@ -1,13 +1,12 @@
 import { collectToolResultPendingFiles } from './attachment-helpers';
 import {
+  buildAuthoritativeUserCommitPatch,
   buildErrorStreamSnapshot,
   buildFinalMessageCommitPatch,
   buildToolResultFinalPatch,
 } from './finalize-helpers';
 import { requestFinalHistoryRefresh } from './final-history-refresh';
-import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+import { reduceRuntimeOverlay } from './overlay-reducer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -18,11 +17,9 @@ import {
   hasNonToolAssistantContent,
   isToolResultRole,
 } from './event-helpers';
-import { getMessageText, isToolOnlyMessage } from './message-helpers';
-import {
-  clearPendingStreamFinalCommit,
-  queuePendingStreamFinalCommit,
-} from './stream-pacer';
+import { isToolOnlyMessage } from './message-helpers';
+import { hasActiveStreamingRun } from './runtime-stream-state';
+import { getSessionRuntime, getSessionTranscript, patchSessionRecord } from './store-state-helpers';
 import type { ChatStoreState, RawMessage } from './types';
 
 export type ChatStoreSetFn = (
@@ -63,16 +60,25 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     onBeginFinalToHistory,
   } = params;
 
+  void resolvedState;
   clearErrorRecoveryTimer();
-  set((state) => reduceRuntimeOverlay(state, { type: 'event_error_cleared' }));
+  set({ error: null });
 
   const finalMsg = event.message as RawMessage | undefined;
   if (!finalMsg) {
     snapshot.reset();
-    set((state) => reduceRuntimeOverlay(state, {
-      type: 'final_without_message',
-      completedSignal: Boolean(eventRunId),
-    }));
+    set((state) => {
+      const runtime = getSessionRuntime(state, currentSessionKey);
+      const runtimePatch = reduceRuntimeOverlay(runtime, {
+        type: 'final_without_message',
+        completedSignal: Boolean(eventRunId),
+      });
+      return {
+        sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+          runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        }),
+      };
+    });
     void get().loadHistory({
       sessionKey: get().currentSessionKey,
       mode: 'active',
@@ -84,10 +90,10 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
 
   const updates = collectToolUpdates(finalMsg, resolvedState);
   if (isToolResultRole(finalMsg.role)) {
-    clearPendingStreamFinalCommit(currentSessionKey, eventRunId);
-    const currentStreamForPath = get().streamingMessage as RawMessage | null;
+    const currentRuntime = getSessionRuntime(get(), currentSessionKey);
+    const currentStreamForPath = currentRuntime.assistantOverlay?.sourceMessage ?? null;
     const toolFiles = collectToolResultPendingFiles(finalMsg, currentStreamForPath);
-    const currentStreamForSnapshot = get().streamingMessage as RawMessage | null;
+    const currentStreamForSnapshot = currentRuntime.assistantOverlay?.sourceMessage ?? null;
     snapshot.armIfIdle(currentSessionKey, eventRunId, currentStreamForSnapshot);
     const toolSnapshot = snapshot.consume(currentSessionKey, eventRunId);
     set((state) => buildToolResultFinalPatch({
@@ -100,37 +106,27 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     return;
   }
 
+  if (finalMsg.role === 'user') {
+    snapshot.reset();
+    set((state) => buildAuthoritativeUserCommitPatch({
+      state,
+      finalMessage: finalMsg,
+    }));
+    return;
+  }
+
   snapshot.reset();
-  clearPendingStreamFinalCommit(currentSessionKey, eventRunId);
   const toolOnly = isToolOnlyMessage(finalMsg);
   const hasOutput = hasNonToolAssistantContent(finalMsg);
   if (hasOutput) {
     onMaybeTrackFirstTokenFinal();
   }
   const fallbackRole = typeof finalMsg.role === 'string' ? finalMsg.role : 'assistant';
-  const msgId = finalMsg.id || (toolOnly
+  const currentRuntime = getSessionRuntime(get(), currentSessionKey);
+  const overlayMessageId = currentRuntime.assistantOverlay?.messageId ?? null;
+  const msgId = overlayMessageId || finalMsg.id || (toolOnly
     ? `run-${eventRunId}-tool-${Date.now()}`
     : `run-${eventRunId}-${fallbackRole}`);
-  const finalText = getMessageText(finalMsg.content);
-  const currentDisplayedTextChars = get().streamRuntime?.displayedChars
-    ?? getMessageText((get().streamingMessage as RawMessage | null)?.content).length;
-
-  if (hasOutput && !toolOnly && finalText.length > currentDisplayedTextChars) {
-    queuePendingStreamFinalCommit(currentSessionKey, eventRunId, {
-      finalMessage: finalMsg,
-      messageId: msgId,
-      updates,
-      onBeginFinalToHistory,
-    });
-    set((state) => reduceRuntimeOverlay(state, {
-      type: 'stream_final_queued',
-      sessionKey: currentSessionKey,
-      runId: eventRunId,
-      text: finalText,
-      updates,
-    }));
-    return;
-  }
 
   set((state) => buildFinalMessageCommitPatch({
     state,
@@ -164,33 +160,54 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   } = params;
   onResetSnapshotTxn();
   const errorMsg = String(event.errorMessage || 'An error occurred');
-  const wasSending = get().sending;
+  const currentSessionKey = get().currentSessionKey;
+  const wasSending = getSessionRuntime(get(), currentSessionKey).sending;
   onFinishFailedTelemetry(errorMsg);
 
-  const currentStream = get().streamingMessage as RawMessage | null;
+  const currentRuntime = getSessionRuntime(get(), currentSessionKey);
+  const currentStream = currentRuntime.assistantOverlay?.sourceMessage ?? null;
   const snapshot = buildErrorStreamSnapshot(
-    get().messages,
+    getSessionTranscript(get(), currentSessionKey),
     currentStream,
     `error-snap-${Date.now()}`,
   );
   if (snapshot) {
     set((state) => ({
-      messages: [...state.messages, snapshot],
+      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        transcript: [...getSessionTranscript(state, currentSessionKey), snapshot],
+      }),
     }));
   }
 
-  set((state) => reduceRuntimeOverlay(state, { type: 'event_error', error: errorMsg }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'event_error', error: errorMsg });
+    return {
+      error: errorMsg,
+      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 
   if (wasSending) {
-    clearPendingStreamFinalCommit(get().currentSessionKey, get().activeRunId);
     clearErrorRecoveryTimer();
     const ERROR_RECOVERY_GRACE_MS = 15_000;
     setErrorRecoveryTimer(setTimeout(() => {
       setErrorRecoveryTimer(null);
       const state = get();
-      if (state.sending && !state.streamingMessage && !state.streamRuntime) {
+      const runtime = getSessionRuntime(state, state.currentSessionKey);
+      if (runtime.sending && !hasActiveStreamingRun(runtime)) {
         clearHistoryPoll();
-        set((current) => reduceRuntimeOverlay(current, { type: 'error_recovery_timeout' }));
+        set((current) => {
+          const currentRuntimeState = getSessionRuntime(current, current.currentSessionKey);
+          const runtimePatch = reduceRuntimeOverlay(currentRuntimeState, { type: 'error_recovery_timeout' });
+          return {
+            sessionsByKey: patchSessionRecord(current, current.currentSessionKey, {
+              runtime: runtimePatch === currentRuntimeState ? currentRuntimeState : { ...currentRuntimeState, ...runtimePatch },
+            }),
+          };
+        });
         void state.loadHistory({
           sessionKey: state.currentSessionKey,
           mode: 'quiet',
@@ -203,5 +220,13 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   }
 
   clearHistoryPoll();
-  set((state) => reduceRuntimeOverlay(state, { type: 'error_recovery_timeout' }));
+  set((state) => {
+    const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'error_recovery_timeout' });
+    return {
+      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
 }

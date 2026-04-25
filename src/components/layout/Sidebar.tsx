@@ -230,12 +230,22 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const { pendingApprovalsBySession, sessionLabels, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
+  const { pendingApprovalsBySession, sessionsByKey, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
   const deferredTeams = useDeferredValue(teams);
   const deferredMailboxByTeamId = useDeferredValue(mailboxByTeamId);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
-  const deferredSessionLabels = useDeferredValue(sessionLabels);
+  const deferredSessionsByKey = useDeferredValue(sessionsByKey);
   const deferredChatSessions = useDeferredValue(chatSessions);
+  const deferredSessionLabels = useMemo(() => {
+    const next: Record<string, string> = {};
+    for (const [sessionKey, record] of Object.entries(deferredSessionsByKey)) {
+      const label = record.meta.label?.trim();
+      if (label) {
+        next[sessionKey] = label;
+      }
+    }
+    return next;
+  }, [deferredSessionsByKey]);
 
   const teamMailboxCards = useMemo(() => {
     const cards: PendingBlockerCard[] = [];
@@ -530,8 +540,9 @@ export function Sidebar({
         <button
           type="button"
           onClick={() => {
-            const { messages } = useChatStore.getState();
-            if (isOnChat && messages.length > 0) {
+            const { currentSessionKey, sessionsByKey } = useChatStore.getState();
+            const hasMessages = (sessionsByKey[currentSessionKey]?.transcript.length ?? 0) > 0;
+            if (isOnChat && hasMessages) {
               newSession();
             }
             navigate('/');

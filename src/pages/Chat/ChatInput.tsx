@@ -6,8 +6,8 @@
  * Files are staged to disk via IPC — only lightweight path references
  * are sent with the message (no base64 over WebSocket).
  */
-import { memo, useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2 } from 'lucide-react';
+import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
@@ -18,6 +18,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
+import { ChatImageLightbox } from './components/ChatImageLightbox';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -66,13 +67,6 @@ interface ChatInputProps {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 function FileIcon({ mimeType, className }: { mimeType: string; className?: string }) {
   if (mimeType.startsWith('video/')) return <Film className={className} />;
@@ -202,6 +196,13 @@ function buildStagingAttachment(
   };
 }
 
+function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
+  return attachment.status === 'ready'
+    && attachment.mimeType.startsWith('image/')
+    && typeof attachment.preview === 'string'
+    && attachment.preview.length > 0;
+}
+
 // ── Component ────────────────────────────────────────────────────
 
 export const ChatInput = memo(function ChatInput({
@@ -227,6 +228,11 @@ export const ChatInput = memo(function ChatInput({
   const [slashItems, setSlashItems] = useState<SelectedSkill[]>([]);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
+  const [lightboxAttachment, setLightboxAttachment] = useState<{
+    src: string;
+    fileName: string;
+    filePath?: string;
+  } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
@@ -531,6 +537,25 @@ export const ChatInput = memo(function ChatInput({
     setAttachments(prev => prev.filter(a => a.id !== id));
   }, []);
 
+  const openAttachment = useCallback((attachment: FileAttachment) => {
+    if (attachment.status !== 'ready') {
+      return;
+    }
+
+    if (isPreviewableImageAttachment(attachment)) {
+      setLightboxAttachment({
+        src: attachment.preview!,
+        fileName: attachment.fileName,
+        filePath: attachment.stagedPath || undefined,
+      });
+      return;
+    }
+
+    if (attachment.stagedPath) {
+      void invokeIpc('shell:openPath', attachment.stagedPath);
+    }
+  }, []);
+
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
   const canSend = (input.trim() || attachments.length > 0 || selectedSkills.length > 0)
@@ -700,19 +725,6 @@ export const ChatInput = memo(function ChatInput({
       onDrop={handleDrop}
     >
       <div className="mx-auto max-w-4xl">
-        {/* Attachment Previews */}
-        {attachments.length > 0 && (
-          <div className="flex gap-2 mb-2 flex-wrap">
-            {attachments.map((att) => (
-              <AttachmentPreview
-                key={att.id}
-                attachment={att}
-                onRemove={() => removeAttachment(att.id)}
-              />
-            ))}
-          </div>
-        )}
-
         {/* Input Row */}
         <div
           className={cn(
@@ -723,6 +735,18 @@ export const ChatInput = memo(function ChatInput({
         >
           <div className="relative min-w-0">
             <div className="px-2 pt-1">
+              {attachments.length > 0 && (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {attachments.map((attachment) => (
+                    <AttachmentChip
+                      key={attachment.id}
+                      attachment={attachment}
+                      onActivate={() => openAttachment(attachment)}
+                      onRemove={() => removeAttachment(attachment.id)}
+                    />
+                  ))}
+                </div>
+              )}
               {selectedSkills.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {selectedSkills.map((skill) => (
@@ -853,6 +877,7 @@ export const ChatInput = memo(function ChatInput({
               className="h-10 w-10 shrink-0"
               onClick={pickFiles}
               disabled={disabled || sending || approvalWaiting}
+              aria-label="Attach files"
               title="Attach files"
             >
               <Paperclip className="h-4 w-4" />
@@ -864,6 +889,7 @@ export const ChatInput = memo(function ChatInput({
               size="icon"
               className="h-11 w-11 shrink-0"
               variant={sending ? 'destructive' : 'default'}
+              aria-label={sending ? 'Stop' : 'Send'}
               title={sending ? 'Stop' : 'Send'}
             >
               {sending ? (
@@ -889,6 +915,14 @@ export const ChatInput = memo(function ChatInput({
             </Button>
           </div>
         )}
+        {lightboxAttachment && (
+          <ChatImageLightbox
+            src={lightboxAttachment.src}
+            fileName={lightboxAttachment.fileName}
+            filePath={lightboxAttachment.filePath}
+            onClose={() => setLightboxAttachment(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -896,57 +930,64 @@ export const ChatInput = memo(function ChatInput({
 
 // ── Attachment Preview ───────────────────────────────────────────
 
-function AttachmentPreview({
+function AttachmentChip({
   attachment,
+  onActivate,
   onRemove,
 }: {
   attachment: FileAttachment;
+  onActivate: () => void;
   onRemove: () => void;
 }) {
-  const isImage = attachment.mimeType.startsWith('image/') && attachment.preview;
+  const previewableImage = isPreviewableImageAttachment(attachment);
+  const canOpen = attachment.status === 'ready' && (previewableImage || attachment.stagedPath.length > 0);
+  const actionLabel = previewableImage ? `Preview ${attachment.fileName}` : `Open ${attachment.fileName}`;
+
+  let leading: ReactNode;
+  if (attachment.status === 'staging') {
+    leading = <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />;
+  } else if (attachment.status === 'error') {
+    leading = <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />;
+  } else if (previewableImage) {
+    leading = (
+      <img
+        src={attachment.preview!}
+        alt=""
+        aria-hidden="true"
+        className="h-5 w-5 shrink-0 rounded-full object-cover"
+      />
+    );
+  } else if (attachment.mimeType.startsWith('image/')) {
+    leading = <ImageIcon className="h-4 w-4 shrink-0 text-muted-foreground" />;
+  } else {
+    leading = <FileIcon mimeType={attachment.mimeType} className="h-4 w-4 shrink-0 text-muted-foreground" />;
+  }
 
   return (
-    <div className="relative group rounded-lg overflow-hidden border border-border">
-      {isImage ? (
-        // Image thumbnail
-        <div className="w-16 h-16">
-          <img
-            src={attachment.preview!}
-            alt={attachment.fileName}
-            className="w-full h-full object-cover"
-          />
-        </div>
+    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/70 bg-muted/35 pr-1 shadow-sm">
+      {canOpen ? (
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-muted/50"
+          onClick={onActivate}
+          aria-label={actionLabel}
+          title={actionLabel}
+        >
+          {leading}
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">{attachment.fileName}</span>
+        </button>
       ) : (
-        // Generic file card
-        <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 max-w-[200px]">
-          <FileIcon mimeType={attachment.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
-          <div className="min-w-0 overflow-hidden">
-            <p className="text-xs font-medium truncate">{attachment.fileName}</p>
-            <p className="text-[10px] text-muted-foreground">
-              {attachment.fileSize > 0 ? formatFileSize(attachment.fileSize) : '...'}
-            </p>
-          </div>
+        <div className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5">
+          {leading}
+          <span className="min-w-0 truncate text-xs font-medium text-foreground">{attachment.fileName}</span>
         </div>
       )}
-
-      {/* Staging overlay */}
-      {attachment.status === 'staging' && (
-        <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-          <Loader2 className="h-4 w-4 text-white animate-spin" />
-        </div>
-      )}
-
-      {/* Error overlay */}
-      {attachment.status === 'error' && (
-        <div className="absolute inset-0 bg-destructive/20 flex items-center justify-center">
-          <span className="text-[10px] text-destructive font-medium px-1">Error</span>
-        </div>
-      )}
-
-      {/* Remove button */}
       <button
+        type="button"
         onClick={onRemove}
-        className="absolute -top-1 -right-1 bg-destructive text-destructive-foreground rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+        aria-label={`Remove ${attachment.fileName}`}
+        title={`Remove ${attachment.fileName}`}
       >
         <X className="h-3 w-3" />
       </button>

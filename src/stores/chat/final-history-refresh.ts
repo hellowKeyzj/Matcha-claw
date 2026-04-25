@@ -1,5 +1,6 @@
 import { clearHistoryPoll } from './timers';
 import { reduceRuntimeOverlay } from './overlay-reducer';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type { ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
@@ -16,15 +17,24 @@ export function requestFinalHistoryRefresh(
 ): void {
   onBeginFinalToHistory();
   clearHistoryPoll();
-  const hasPendingApprovals = (get().pendingApprovalsBySession[get().currentSessionKey] ?? []).length > 0;
-  set((state) => reduceRuntimeOverlay(state, {
-    type: 'final_history_refresh_requested',
-    hasPendingApprovals,
-  }));
+  const sessionKey = get().currentSessionKey;
+  const hasPendingApprovals = (get().pendingApprovalsBySession[sessionKey] ?? []).length > 0;
+  set((state) => {
+    const runtime = getSessionRuntime(state, sessionKey);
+    const runtimePatch = reduceRuntimeOverlay(runtime, {
+      type: 'final_history_refresh_requested',
+      hasPendingApprovals,
+    });
+    return {
+      sessionsByKey: patchSessionRecord(state, sessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
+    };
+  });
   void get().loadHistory({
-    sessionKey: get().currentSessionKey,
+    sessionKey,
     mode: 'quiet',
-    scope: 'foreground',
+    scope: 'background',
     reason: 'final_event_reconcile',
   });
 }

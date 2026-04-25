@@ -3,9 +3,8 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, useMemo, memo, type ReactNode } from 'react';
-import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { createPortal } from 'react-dom';
+import { useState, useCallback, useMemo, memo, type ReactNode } from 'react';
+import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
@@ -23,9 +22,10 @@ import {
   buildMarkdownCacheKey,
   decodeFileHintHref,
   getOrBuildMarkdownBody,
-  shouldUseLiteMarkdown,
-  type MarkdownBodyRenderMode,
 } from './md-pipeline';
+import { ChatImageLightbox } from './components/ChatImageLightbox';
+import { CsvPreview } from './components/CsvPreview';
+import { StructuredTablePreview } from './components/StructuredTablePreview';
 
 interface ChatMessageProps {
   message: RawMessage;
@@ -37,8 +37,6 @@ interface ChatMessageProps {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   isStreaming?: boolean;
-  bodyRenderMode?: MarkdownBodyRenderMode;
-  onRequestFullRender?: () => void;
   streamingTools?: Array<{
     id?: string;
     toolCallId?: string;
@@ -69,8 +67,6 @@ export const ChatMessage = memo(function ChatMessage({
   assistantAvatarStyle,
   userAvatarImageUrl,
   isStreaming = false,
-  bodyRenderMode,
-  onRequestFullRender,
   streamingTools = [],
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
@@ -149,8 +145,6 @@ export const ChatMessage = memo(function ChatMessage({
                   key={`content-${i}`}
                   src={src}
                   fileName="image"
-                  base64={img.data}
-                  mimeType={img.mimeType}
                   onPreview={() => setLightboxImg({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
                 />
               );
@@ -171,8 +165,6 @@ export const ChatMessage = memo(function ChatMessage({
                     key={`local-${i}`}
                     src={file.preview}
                     fileName={file.fileName}
-                    filePath={file.filePath}
-                    mimeType={file.mimeType}
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
                   />
                 ) : (
@@ -196,8 +188,6 @@ export const ChatMessage = memo(function ChatMessage({
             text={text}
             isUser={isUser}
             isStreaming={isStreaming}
-            bodyRenderMode={bodyRenderMode}
-            onRequestFullRender={onRequestFullRender}
             resolveFileHintPath={resolveFileHintPath}
             markdownCacheKey={markdownCacheKey}
           />
@@ -214,8 +204,6 @@ export const ChatMessage = memo(function ChatMessage({
                   key={`content-${i}`}
                   src={src}
                   fileName="image"
-                  base64={img.data}
-                  mimeType={img.mimeType}
                   onPreview={() => setLightboxImg({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
                 />
               );
@@ -235,8 +223,6 @@ export const ChatMessage = memo(function ChatMessage({
                     key={`local-${i}`}
                     src={file.preview}
                     fileName={file.fileName}
-                    filePath={file.filePath}
-                    mimeType={file.mimeType}
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
                   />
                 );
@@ -268,12 +254,10 @@ export const ChatMessage = memo(function ChatMessage({
 
       {/* Image lightbox portal */}
       {lightboxImg && (
-        <ImageLightbox
+        <ChatImageLightbox
           src={lightboxImg.src}
           fileName={lightboxImg.fileName}
           filePath={lightboxImg.filePath}
-          base64={lightboxImg.base64}
-          mimeType={lightboxImg.mimeType}
           onClose={() => setLightboxImg(null)}
         />
       )}
@@ -431,16 +415,12 @@ const MessageBody = memo(function MessageBody({
   text,
   isUser,
   isStreaming,
-  bodyRenderMode,
-  onRequestFullRender,
   resolveFileHintPath,
   markdownCacheKey,
 }: {
   text: string;
   isUser: boolean;
   isStreaming: boolean;
-  bodyRenderMode?: MarkdownBodyRenderMode;
-  onRequestFullRender?: () => void;
   resolveFileHintPath?: FileHintPathResolver;
   markdownCacheKey: string;
 }) {
@@ -458,8 +438,6 @@ const MessageBody = memo(function MessageBody({
     <AssistantMessageBody
       text={text}
       isStreaming={isStreaming}
-      bodyRenderMode={bodyRenderMode}
-      onRequestFullRender={onRequestFullRender}
       resolveFileHintPath={resolveFileHintPath}
       markdownCacheKey={markdownCacheKey}
     />
@@ -469,15 +447,11 @@ const MessageBody = memo(function MessageBody({
 const AssistantMessageBody = memo(function AssistantMessageBody({
   text,
   isStreaming,
-  bodyRenderMode,
-  onRequestFullRender,
   resolveFileHintPath,
   markdownCacheKey,
 }: {
   text: string;
   isStreaming: boolean;
-  bodyRenderMode?: MarkdownBodyRenderMode;
-  onRequestFullRender?: () => void;
   resolveFileHintPath?: FileHintPathResolver;
   markdownCacheKey: string;
 }) {
@@ -492,7 +466,6 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
     }
   }, []);
 
-  const [forceFullMarkdown, setForceFullMarkdown] = useState(false);
   const markdownContent = useMemo(
     () => {
       return linkifyFileHintsInMarkdown(
@@ -500,33 +473,15 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
         resolveFileHintPath,
       );
     },
-    [markdownCacheKey, resolveFileHintPath, text],
+    [resolveFileHintPath, text],
   );
-  const canDeferMarkdown = shouldUseLiteMarkdown(markdownContent, isStreaming);
-  const effectiveBodyRenderMode = forceFullMarkdown
-    ? 'full'
-    : (bodyRenderMode ?? (canDeferMarkdown ? 'lite' : 'full'));
-  const preferLiteMarkdown = canDeferMarkdown && effectiveBodyRenderMode === 'lite';
   const markdownBody = useMemo(
-    () => {
-      return getOrBuildMarkdownBody(markdownCacheKey, {
-        markdown: markdownContent,
-        allowLite: canDeferMarkdown,
-        mode: effectiveBodyRenderMode === 'shell'
-          ? 'shell'
-          : (preferLiteMarkdown ? 'lite' : 'full'),
-      });
-    },
-    [canDeferMarkdown, effectiveBodyRenderMode, markdownCacheKey, markdownContent, preferLiteMarkdown],
+    () => getOrBuildMarkdownBody(markdownCacheKey, {
+      markdown: markdownContent,
+    }),
+    [markdownCacheKey, markdownContent],
   );
-  const shellPreview = markdownBody.shellPreview;
-  const renderedHtml = effectiveBodyRenderMode === 'full'
-    ? (markdownBody.fullHtml ?? '')
-    : (markdownBody.liteHtml ?? '');
-
-  useEffect(() => {
-    setForceFullMarkdown(false);
-  }, [markdownCacheKey]);
+  const renderNodes = markdownBody.nodes;
 
   const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -545,71 +500,49 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
     void handleOpenFileHint(decodedHint);
   }, [handleOpenFileHint]);
 
-  const handleRequestFullMarkdown = useCallback(() => {
-    setForceFullMarkdown(true);
-    onRequestFullRender?.();
-  }, [onRequestFullRender]);
-
   return (
     <div
-      data-chat-body-mode={effectiveBodyRenderMode}
+      data-chat-body-mode="full"
       className={cn(
         'relative',
         'w-full bg-transparent px-0 py-0',
       )}
     >
-      {effectiveBodyRenderMode === 'shell' && shellPreview ? (
-        <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3 text-sm text-foreground">
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <p className="whitespace-pre-wrap break-words text-sm leading-6">
-                {shellPreview.text}
-                {shellPreview.truncated ? '…' : ''}
-              </p>
-              {(shellPreview.hasCodeBlock || shellPreview.hasLinks) ? (
-                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  {shellPreview.hasCodeBlock ? (
-                    <span className="rounded-full border border-border/60 px-2 py-0.5">Contains code block</span>
-                  ) : null}
-                  {shellPreview.hasLinks ? (
-                    <span className="rounded-full border border-border/60 px-2 py-0.5">Contains links</span>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-muted-foreground">
-                Full markdown formatting is deferred until this message becomes active.
-              </p>
-              <Button type="button" size="sm" variant="outline" onClick={handleRequestFullMarkdown}>
-                Render full formatting
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {markdownBody.canUpgrade && effectiveBodyRenderMode !== 'full' ? (
-            <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-medium text-foreground">Large message preview</p>
-                <p className="text-xs text-muted-foreground">
-                  Full markdown formatting is deferred to keep session switching responsive.
-                </p>
-              </div>
-              <Button type="button" size="sm" variant="outline" onClick={handleRequestFullMarkdown}>
-                Render full formatting
-              </Button>
-            </div>
-          ) : null}
-          <div
-            className="prose prose-sm dark:prose-invert max-w-none break-words break-all [&_.chat-md-lite-code]:overflow-hidden [&_.chat-md-lite-code]:rounded-xl [&_.chat-md-lite-code]:border [&_.chat-md-lite-code]:border-border/60 [&_.chat-md-lite-code]:bg-muted/20 [&_.chat-md-lite-code__header]:border-b [&_.chat-md-lite-code__header]:border-border/60 [&_.chat-md-lite-code__header]:px-3 [&_.chat-md-lite-code__header]:py-2 [&_.chat-md-lite-code__header]:text-xs [&_.chat-md-lite-code__header]:text-muted-foreground [&_.chat-md-lite-code__summary]:flex [&_.chat-md-lite-code__summary]:cursor-pointer [&_.chat-md-lite-code__summary]:items-center [&_.chat-md-lite-code__summary]:justify-between [&_.chat-md-lite-code__summary]:gap-3 [&_.chat-md-lite-code__summary]:border-b [&_.chat-md-lite-code__summary]:border-border/60 [&_.chat-md-lite-code__summary]:px-3 [&_.chat-md-lite-code__summary]:py-2 [&_.chat-md-lite-code__summary]:text-xs [&_.chat-md-lite-code__summary]:text-muted-foreground [&_.chat-md-lite-code_pre]:m-0 [&_.chat-md-lite-code_pre]:overflow-x-auto [&_.chat-md-lite-code_pre]:px-4 [&_.chat-md-lite-code_pre]:py-3"
-            onClick={handleMarkdownClick}
-            dangerouslySetInnerHTML={{ __html: renderedHtml }}
-          />
-          {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
-        </div>
-      )}
+      <div className="space-y-3">
+        {renderNodes.map((node) => {
+          if (node.kind === 'csv') {
+            return (
+              <CsvPreview
+                key={node.key}
+                csv={node.csv}
+              />
+            );
+          }
+
+          if (node.kind === 'markdown_table') {
+            return (
+              <StructuredTablePreview
+                key={node.key}
+                rows={node.rows}
+              />
+            );
+          }
+
+          if (!node.html.trim()) {
+            return null;
+          }
+
+          return (
+            <div
+              key={node.key}
+              className="prose prose-sm dark:prose-invert max-w-none break-words"
+              onClick={handleMarkdownClick}
+              dangerouslySetInnerHTML={{ __html: node.html }}
+            />
+          );
+        })}
+        {isStreaming ? <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" /> : null}
+      </div>
     </div>
   );
 });
@@ -625,8 +558,6 @@ function ThinkingBlock({ content }: { content: string }) {
   })}`, [content]);
   const renderResult = useMemo(() => getOrBuildMarkdownBody(thinkingCacheKey, {
     markdown: content,
-    allowLite: false,
-    mode: 'full',
   }), [content, thinkingCacheKey]);
 
   return (
@@ -642,7 +573,7 @@ function ThinkingBlock({ content }: { content: string }) {
         <div className="px-3 pb-3 text-muted-foreground">
           <div
             className="prose prose-sm dark:prose-invert max-w-none opacity-75"
-            dangerouslySetInnerHTML={{ __html: renderResult.fullHtml ?? '' }}
+            dangerouslySetInnerHTML={{ __html: renderResult.fullHtml }}
           />
         </div>
       )}
@@ -714,19 +645,12 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
 function ImageThumbnail({
   src,
   fileName,
-  filePath,
-  base64,
-  mimeType,
   onPreview,
 }: {
   src: string;
   fileName: string;
-  filePath?: string;
-  base64?: string;
-  mimeType?: string;
   onPreview: () => void;
 }) {
-  void filePath; void base64; void mimeType;
   return (
     <div
       className="relative w-36 h-36 rounded-xl border overflow-hidden bg-muted group/img cursor-zoom-in"
@@ -745,19 +669,12 @@ function ImageThumbnail({
 function ImagePreviewCard({
   src,
   fileName,
-  filePath,
-  base64,
-  mimeType,
   onPreview,
 }: {
   src: string;
   fileName: string;
-  filePath?: string;
-  base64?: string;
-  mimeType?: string;
   onPreview: () => void;
 }) {
-  void filePath; void base64; void mimeType;
   return (
     <div
       className="relative max-w-xs rounded-lg border overflow-hidden group/img cursor-zoom-in"
@@ -768,84 +685,6 @@ function ImagePreviewCard({
         <ZoomIn className="h-6 w-6 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow" />
       </div>
     </div>
-  );
-}
-
-// ── Image Lightbox ───────────────────────────────────────────────
-
-function ImageLightbox({
-  src,
-  fileName,
-  filePath,
-  base64,
-  mimeType,
-  onClose,
-}: {
-  src: string;
-  fileName: string;
-  filePath?: string;
-  base64?: string;
-  mimeType?: string;
-  onClose: () => void;
-}) {
-  void src; void base64; void mimeType; void fileName;
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
-  const handleShowInFolder = useCallback(() => {
-    if (filePath) {
-      invokeIpc('shell:showItemInFolder', filePath);
-    }
-  }, [filePath]);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      {/* Image + buttons stacked */}
-      <div
-        className="flex flex-col items-center gap-3"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <img
-          src={src}
-          alt={fileName}
-          className="max-w-[90vw] max-h-[85vh] rounded-lg shadow-2xl object-contain"
-        />
-
-        {/* Action buttons below image */}
-        <div className="flex items-center gap-2">
-          {filePath && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 bg-white/10 hover:bg-white/20 text-white"
-              onClick={handleShowInFolder}
-              title="在文件夹中显示"
-            >
-              <FolderOpen className="h-4 w-4" />
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 bg-white/10 hover:bg-white/20 text-white"
-            onClick={onClose}
-            title="关闭"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }
 

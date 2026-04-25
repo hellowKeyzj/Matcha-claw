@@ -1,5 +1,9 @@
 import type { RawMessage } from '@/stores/chat';
-import { isRenderableChatMessage } from './chat-row-model';
+import {
+  countRenderableLiveMessages,
+  pickRenderableTailMessages,
+  pickExpandedLiveMessages,
+} from '@/stores/chat/history-first-paint-budget';
 
 export const LIVE_THREAD_RENDER_LIMIT = 30;
 
@@ -19,23 +23,18 @@ export function projectLiveThreadMessages(
     };
   }
 
-  const renderableIndexes: number[] = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    if (isRenderableChatMessage(messages[index])) {
-      renderableIndexes.push(index);
-    }
-  }
-
-  if (renderableIndexes.length <= limit) {
+  const expandedMessages = limit === LIVE_THREAD_RENDER_LIMIT
+    ? pickExpandedLiveMessages(messages)
+    : pickRenderableTailMessages(messages, Math.max(1, limit));
+  if (expandedMessages === messages) {
     return {
       messages,
       hiddenRenderableCount: 0,
     };
   }
 
-  const startIndex = renderableIndexes[renderableIndexes.length - limit];
   return {
-    messages: messages.slice(startIndex),
-    hiddenRenderableCount: renderableIndexes.length - limit,
+    messages: expandedMessages,
+    hiddenRenderableCount: Math.max(0, countRenderableLiveMessages(messages) - countRenderableLiveMessages(expandedMessages)),
   };
 }

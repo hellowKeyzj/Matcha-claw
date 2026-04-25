@@ -6,7 +6,7 @@ import {
   selectChatPageRuntimeState,
   selectChatPageSessionState,
   selectChatPageViewState,
-  selectRuntimeLayerState,
+  selectSessionRuntime,
   selectSidebarPendingBlockersState,
   selectSnapshotLayerState,
   selectViewLayerState,
@@ -14,23 +14,32 @@ import {
 
 function makeState(overrides: Record<string, unknown> = {}) {
   return {
-    messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+    sessionsByKey: {
+      'agent:main:main': {
+        transcript: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+        meta: {
+          label: 'Main',
+          lastActivityAt: 1_700_000_000_000,
+          ready: true,
+          thinkingLevel: null,
+        },
+        runtime: {
+          sending: false,
+          activeRunId: null,
+          runPhase: 'idle',
+          streamingMessage: null,
+          streamRuntime: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          approvalStatus: 'idle',
+        },
+      },
+    },
     sessions: [{ key: 'agent:main:main', displayName: 'main' }],
     currentSessionKey: 'agent:main:main',
-    sessionLabels: { 'agent:main:main': 'Main' },
-    sessionLastActivity: { 'agent:main:main': 1_700_000_000_000 },
-    sessionReadyByKey: { 'agent:main:main': true },
-    sending: false,
-    activeRunId: null,
-    streamingMessage: null,
-    streamRuntime: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-    approvalStatus: 'idle',
     pendingApprovalsBySession: {},
-    sessionRuntimeByKey: {},
     snapshotReady: true,
     initialLoading: false,
     refreshing: false,
@@ -64,16 +73,38 @@ function makeState(overrides: Record<string, unknown> = {}) {
 describe('chat selectors layering', () => {
   it('splits state into snapshot/runtime/view selectors', () => {
     const state = makeState({
-      sending: true,
+      sessionsByKey: {
+        'agent:main:main': {
+          transcript: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+          meta: {
+            label: 'Main',
+            lastActivityAt: 1_700_000_000_000,
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessage: null,
+            streamRuntime: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
       error: 'boom',
       refreshing: true,
     });
 
     const snapshot = selectSnapshotLayerState(state);
-    const runtime = selectRuntimeLayerState(state);
+    const runtime = selectSessionRuntime(state, state.currentSessionKey);
     const view = selectViewLayerState(state);
 
-    expect(snapshot.messages).toHaveLength(1);
+    expect(snapshot.sessions).toHaveLength(1);
     expect(runtime.sending).toBe(true);
     expect(view.error).toBe('boom');
     expect(view.refreshing).toBe(true);
@@ -83,11 +114,34 @@ describe('chat selectors layering', () => {
   it('chat page selectors split into session/runtime/view/actions surfaces', () => {
     const state = makeState({
       currentSessionKey: 'agent:a:main',
+      sessionsByKey: {
+        'agent:a:main': {
+          transcript: [],
+          meta: {
+            label: null,
+            lastActivityAt: null,
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessage: null,
+            streamRuntime: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
       pendingApprovalsBySession: {
         'agent:a:main': [{ id: 'ap-1', sessionKey: 'agent:a:main', createdAtMs: 1 }],
         'agent:b:main': [{ id: 'ap-2', sessionKey: 'agent:b:main', createdAtMs: 2 }],
       },
-      sessionReadyByKey: { 'agent:a:main': true },
+      sessions: [{ key: 'agent:a:main', displayName: 'a' }],
     });
 
     const session = selectChatPageSessionState(state);

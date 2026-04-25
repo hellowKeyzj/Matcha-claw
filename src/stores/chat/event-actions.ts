@@ -17,6 +17,8 @@ import {
   handleRuntimeUnknownEvent,
 } from './event-dispatch';
 import {
+  canRuntimeEventReuseActiveRunId,
+  isUnboundLifecycleEvent,
   normalizeRuntimeEvent,
   isRuntimeEventUsefulForPolling,
   shouldIgnoreRuntimeEvent,
@@ -26,6 +28,7 @@ import {
   bindChatRunIdTelemetry,
   finishChatRunTelemetry,
 } from './telemetry';
+import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type { ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
@@ -56,7 +59,8 @@ export function createStoreEventActions(
         kind,
         message,
       } = normalizedEvent;
-      const { activeRunId, currentSessionKey } = get();
+      const { currentSessionKey } = get();
+      const activeRunId = getSessionRuntime(get(), currentSessionKey).activeRunId;
 
       if (shouldIgnoreRuntimeEvent({
         activeRunId,
@@ -76,12 +80,31 @@ export function createStoreEventActions(
         clearHistoryPoll();
         // Adopt run started from another client (e.g. console at 127.0.0.1:18789):
         // show loading/streaming in the app when this session has an active run.
-        set((state) => reduceRuntimeOverlay(state, { type: 'run_started', runId }));
+        set((state) => {
+          const runtime = getSessionRuntime(state, currentSessionKey);
+          const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_started', runId });
+          return {
+            sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+              runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+            }),
+          };
+        });
         if (kind !== 'delta') {
           syncActiveStreamPacer(set, get);
         }
       }
-      const eventRunId = runId || activeRunId || '';
+      const eventRunId = runId || (canRuntimeEventReuseActiveRunId(kind) ? (activeRunId || '') : '');
+
+      if (isUnboundLifecycleEvent(kind, runId)) {
+        void get().loadHistory({
+          sessionKey: currentSessionKey,
+          mode: 'quiet',
+          scope: 'foreground',
+          reason: `unbound_${kind}_event_reconcile`,
+        });
+        syncActiveStreamPacer(set, get);
+        return;
+      }
 
       switch (kind) {
         case 'started': {

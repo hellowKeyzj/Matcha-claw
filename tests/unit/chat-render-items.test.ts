@@ -40,8 +40,9 @@ describe('chat render items', () => {
       },
       {
         key: 'stream-1',
-        kind: 'streaming',
+        kind: 'message',
         message: { role: 'assistant', content: 'live', timestamp: 5, id: 'live' },
+        isStreaming: true,
         streamingTools: [],
       },
     ];
@@ -64,8 +65,9 @@ describe('chat render items', () => {
       key: 'graph-1',
     });
     expect(items[3]).toMatchObject({
-      kind: 'row',
-      key: 'stream-1',
+      kind: 'group',
+      role: 'assistant',
     });
+    expect(items[3]?.kind === 'group' ? items[3].rows.map((row) => row.key) : []).toEqual(['stream-1']);
   });
 });

@@ -76,4 +76,13 @@ describe('chat message utils', () => {
 
     expect(text).toBe('你好呀！有什么想让我帮你做的吗？');
   });
+
+  it('strips assistant reply directive prefix with colon payload', () => {
+    const text = extractText({
+      role: 'assistant',
+      content: '[[reply_to:f4a00548-42a8-4826-8e45-0a655d7c6414]]好，我继续。',
+    });
+
+    expect(text).toBe('好，我继续。');
+  });
 });

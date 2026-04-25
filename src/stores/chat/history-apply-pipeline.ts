@@ -1,5 +1,4 @@
 import {
-  isInternalMessage,
   resolveSessionLabelFromMessages,
 } from './message-helpers';
 import {
@@ -8,10 +7,10 @@ import {
   loadMissingPreviews,
 } from './attachment-helpers';
 import {
-  reconcileOptimisticUserInHistory,
+  reconcileLatestAssistantInHistory,
+  reconcilePendingUserWithHistory,
 } from './finalize-helpers';
 import { trackUiTiming } from '@/lib/telemetry';
-import { isToolResultRole } from './event-helpers';
 import {
   finishChatRunTelemetry,
   maybeTrackFinalToHistoryVisible,
@@ -26,7 +25,10 @@ import { normalizeHistoryMessages } from './history-normalizer-worker-client';
 import {
   buildRenderMessagesFingerprint,
   buildQuickRawHistoryFingerprint,
+  getSessionRuntime,
+  getSessionTranscript,
   nowMs,
+  patchSessionMeta,
   toMs,
 } from './store-state-helpers';
 import {
@@ -40,10 +42,6 @@ import type {
   ChatStoreState,
   RawMessage,
 } from './types';
-
-const HISTORY_STAGE_FIRST_PAINT_THRESHOLD = 120;
-const HISTORY_STAGE_FIRST_PAINT_LIMIT = 48;
-const HISTORY_STAGE_FIRST_PAINT_DELAY_MS = 24;
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -61,7 +59,7 @@ interface CreateApplyLoadedMessagesInput {
   scope: ChatHistoryLoadScope;
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
-  optimisticUserReconcileWindowMs: number;
+  optimisticUserReconcileWindowMs?: number;
 }
 
 export function createApplyLoadedMessagesPipeline(
@@ -76,69 +74,48 @@ export function createApplyLoadedMessagesPipeline(
     scope,
     abortSignal,
     shouldAbortHistoryProcessing,
-    optimisticUserReconcileWindowMs,
   } = input;
-  const isQuiet = mode === 'quiet';
   const isForeground = scope === 'foreground';
 
   return async (rawMessages: RawMessage[], thinkingLevel: string | null) => {
     const applyStartedAt = nowMs();
     let outcome: 'applied' | 'quick_skip' | 'aborted' = 'applied';
-    let stageFirstPaintTimer: ReturnType<typeof setTimeout> | null = null;
-    let didStageFirstPaint = false;
-    const clearStageFirstPaintTimer = () => {
-      if (stageFirstPaintTimer != null) {
-        clearTimeout(stageFirstPaintTimer);
-        stageFirstPaintTimer = null;
-      }
-    };
     try {
       const quickFingerprint = buildQuickRawHistoryFingerprint(rawMessages, thinkingLevel);
       const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
       const currentStateForQuickPath = get();
-      const isCurrentSession = currentStateForQuickPath.currentSessionKey === requestedSessionKey;
-      const currentRenderableMessages = isCurrentSession
-        ? currentStateForQuickPath.messages
-        : (currentStateForQuickPath.sessionRuntimeByKey[requestedSessionKey]?.messages ?? []);
-      const hasReadySnapshot = (
-        Boolean(currentStateForQuickPath.sessionReadyByKey[requestedSessionKey])
-        || (isCurrentSession && currentStateForQuickPath.snapshotReady)
-      );
+      const currentTranscript = getSessionTranscript(currentStateForQuickPath, requestedSessionKey);
+      const currentMeta = currentStateForQuickPath.sessionsByKey[requestedSessionKey]?.meta;
+      const hasReadySnapshot = Boolean(currentMeta?.ready)
+        || (currentStateForQuickPath.currentSessionKey === requestedSessionKey && currentStateForQuickPath.snapshotReady);
       const canSkipWithQuickFingerprint = (
         previousQuickFingerprint === quickFingerprint
-        && (currentRenderableMessages.length > 0 || hasReadySnapshot)
-        && (!isCurrentSession || currentStateForQuickPath.thinkingLevel === thinkingLevel)
+        && (currentTranscript.length > 0 || hasReadySnapshot)
+        && (currentMeta?.thinkingLevel ?? null) === thinkingLevel
       );
       if (canSkipWithQuickFingerprint) {
         outcome = 'quick_skip';
         if (!historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)) {
           historyRuntime.historyRenderFingerprintBySession.set(
             requestedSessionKey,
-            buildRenderMessagesFingerprint(currentRenderableMessages),
+            buildRenderMessagesFingerprint(currentTranscript),
           );
         }
         if (isForeground && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
           set((state) => {
-            const alreadyReady = Boolean(state.sessionReadyByKey[requestedSessionKey]);
-            if (alreadyReady) {
+            if (state.sessionsByKey[requestedSessionKey]?.meta.ready) {
               return { initialLoading: false, refreshing: false, snapshotReady: true };
             }
             return {
               initialLoading: false,
               refreshing: false,
               snapshotReady: true,
-              sessionReadyByKey: {
-                ...state.sessionReadyByKey,
-                [requestedSessionKey]: true,
-              },
+              sessionsByKey: patchSessionMeta(state, requestedSessionKey, { ready: true }),
             };
           });
-        } else if (!currentStateForQuickPath.sessionReadyByKey[requestedSessionKey]) {
+        } else if (!currentMeta?.ready) {
           set((state) => ({
-            sessionReadyByKey: {
-              ...state.sessionReadyByKey,
-              [requestedSessionKey]: true,
-            },
+            sessionsByKey: patchSessionMeta(state, requestedSessionKey, { ready: true }),
           }));
         }
         return;
@@ -151,92 +128,8 @@ export function createApplyLoadedMessagesPipeline(
       }
       throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
 
-      const stageFirstPaintIfNeeded = () => {
-        if (didStageFirstPaint) {
-          return;
-        }
-        if (abortSignal.aborted || shouldAbortHistoryProcessing()) {
-          return;
-        }
-        if (isForeground && get().currentSessionKey !== requestedSessionKey) {
-          return;
-        }
-        const provisionalTail: RawMessage[] = [];
-        for (let index = rawMessages.length - 1; index >= 0; index -= 1) {
-          const current = rawMessages[index];
-          if (isToolResultRole(current.role) || isInternalMessage(current)) {
-            continue;
-          }
-          provisionalTail.push(current);
-          if (provisionalTail.length >= HISTORY_STAGE_FIRST_PAINT_LIMIT) {
-            break;
-          }
-        }
-        provisionalTail.reverse();
-        if (provisionalTail.length === 0) {
-          return;
-        }
-        didStageFirstPaint = true;
-        const provisionalLastMsg = provisionalTail[provisionalTail.length - 1];
-        const provisionalLastAt = provisionalLastMsg?.timestamp ? toMs(provisionalLastMsg.timestamp) : null;
-        const provisionalLabel = requestedSessionKey.endsWith(':main')
-          ? ''
-          : resolveSessionLabelFromMessages(provisionalTail);
-        set((state) => {
-          if (state.currentSessionKey !== requestedSessionKey) {
-            return state;
-          }
-          if (state.messages.length > 0) {
-            return state;
-          }
-          return {
-            messages: provisionalTail,
-            snapshotReady: true,
-            initialLoading: false,
-            refreshing: false,
-            thinkingLevel,
-            ...(provisionalLabel && state.sessionLabels[requestedSessionKey] !== provisionalLabel
-              ? {
-                  sessionLabels: {
-                    ...state.sessionLabels,
-                    [requestedSessionKey]: provisionalLabel,
-                  },
-                }
-              : {}),
-            ...(provisionalLastAt != null && state.sessionLastActivity[requestedSessionKey] !== provisionalLastAt
-              ? {
-                  sessionLastActivity: {
-                    ...state.sessionLastActivity,
-                    [requestedSessionKey]: provisionalLastAt,
-                  },
-                }
-              : {}),
-            sessionReadyByKey: state.sessionReadyByKey[requestedSessionKey]
-              ? state.sessionReadyByKey
-              : {
-                  ...state.sessionReadyByKey,
-                  [requestedSessionKey]: true,
-                },
-          };
-        });
-      };
-      const shouldStageFirstPaint = (
-        isForeground && !isQuiet
-        && get().currentSessionKey === requestedSessionKey
-        &&
-        get().messages.length === 0
-        && rawMessages.length > HISTORY_STAGE_FIRST_PAINT_THRESHOLD
-      );
-      if (shouldStageFirstPaint) {
-        stageFirstPaintTimer = setTimeout(() => {
-          stageFirstPaintTimer = null;
-          stageFirstPaintIfNeeded();
-        }, HISTORY_STAGE_FIRST_PAINT_DELAY_MS);
-      }
-
       const normalizeStartedAt = nowMs();
       const normalizedMessages = await normalizeHistoryMessages(rawMessages, { abortSignal });
-      clearStageFirstPaintTimer();
       trackUiTiming('chat.history_apply_normalize', Math.max(0, nowMs() - normalizeStartedAt), {
         sessionKey: requestedSessionKey,
         mode,
@@ -256,14 +149,21 @@ export function createApplyLoadedMessagesPipeline(
       throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
 
       let finalMessages = enrichedMessages;
+      let nextPendingUserMessage = null;
       const runtimeState = get();
-      const userMsgAt = runtimeState.lastUserMessageAt;
-      if (runtimeState.currentSessionKey === requestedSessionKey && runtimeState.sending && userMsgAt) {
-        finalMessages = reconcileOptimisticUserInHistory({
+      const currentRuntime = getSessionRuntime(runtimeState, requestedSessionKey);
+      if (runtimeState.currentSessionKey === requestedSessionKey) {
+        const pendingUserReconcile = reconcilePendingUserWithHistory({
           historyMessages: enrichedMessages,
-          currentMessages: runtimeState.messages,
-          lastUserMessageAt: userMsgAt,
-          windowMs: optimisticUserReconcileWindowMs,
+          pendingUserMessage: currentRuntime.pendingUserMessage ?? null,
+        });
+        finalMessages = pendingUserReconcile.historyMessages;
+        nextPendingUserMessage = pendingUserReconcile.pendingUserMessage;
+      }
+      if (runtimeState.currentSessionKey === requestedSessionKey) {
+        finalMessages = reconcileLatestAssistantInHistory({
+          historyMessages: finalMessages,
+          currentMessages: getSessionTranscript(runtimeState, requestedSessionKey),
         });
       }
       if (shouldAbortHistoryProcessing()) {
@@ -282,6 +182,7 @@ export function createApplyLoadedMessagesPipeline(
       const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
 
       const activityRuntimeState = get();
+      const activityRuntime = getSessionRuntime(activityRuntimeState, requestedSessionKey);
       const shouldResolveHistoryActivity = (
         isForeground
         && activityRuntimeState.currentSessionKey === requestedSessionKey
@@ -289,9 +190,9 @@ export function createApplyLoadedMessagesPipeline(
       const historyActivityFlags = shouldResolveHistoryActivity
         ? resolveHistoryActivityFlags({
             normalizedMessages,
-            isSendingNow: activityRuntimeState.sending,
-            pendingFinal: activityRuntimeState.pendingFinal,
-            lastUserMessageAt: activityRuntimeState.lastUserMessageAt,
+            isSendingNow: activityRuntime.sending,
+            pendingFinal: activityRuntime.pendingFinal,
+            lastUserMessageAt: activityRuntime.lastUserMessageAt,
           })
         : {
             hasRecentAssistantActivity: false,
@@ -310,6 +211,7 @@ export function createApplyLoadedMessagesPipeline(
           lastAt,
           previousRenderFingerprint,
           renderFingerprint,
+          pendingUserMessage: nextPendingUserMessage,
           flags: historyActivityFlags,
         });
         didMessageListChange = applyPatchResult.didMessageListChange;
@@ -341,23 +243,19 @@ export function createApplyLoadedMessagesPipeline(
           if (abortSignal.aborted || shouldAbortHistoryProcessing()) {
             return;
           }
-          set((state) => {
-            return buildHistoryPreviewHydrationPatch(
-              state,
-              requestedSessionKey,
-              finalMessages,
-            );
-          });
+          set((state) => buildHistoryPreviewHydrationPatch(
+            state,
+            requestedSessionKey,
+            finalMessages,
+          ));
         });
       }
     } catch (error) {
-      clearStageFirstPaintTimer();
       if (isHistoryLoadAbortError(error)) {
         outcome = 'aborted';
       }
       throw error;
     } finally {
-      clearStageFirstPaintTimer();
       trackUiTiming('chat.history_apply_total', Math.max(0, nowMs() - applyStartedAt), {
         sessionKey: requestedSessionKey,
         mode,

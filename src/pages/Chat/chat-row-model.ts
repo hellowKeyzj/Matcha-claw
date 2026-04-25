@@ -19,17 +19,13 @@ export type ChatRow =
     key: string;
     kind: 'message';
     message: RawMessage;
+    isStreaming?: boolean;
+    streamingTools?: ToolStatus[];
   }
   | {
     key: string;
     kind: 'execution_graph';
     graph: ExecutionGraphData;
-  }
-  | {
-    key: string;
-    kind: 'streaming';
-    message: RawMessage;
-    streamingTools: ToolStatus[];
   }
   | {
     key: string;
@@ -47,6 +43,7 @@ interface BuildChatRowsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
+  pendingUserMessage?: RawMessage | null;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   streamingTimestamp: number;
@@ -71,6 +68,7 @@ interface AppendRuntimeChatRowsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
+  pendingUserMessage?: RawMessage | null;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   streamingTimestamp: number;
@@ -81,6 +79,41 @@ function resolveRuntimeRowKey(sessionKey: string, streamMessage?: RawMessage | n
     return resolveMessageRowKey(sessionKey, streamMessage, 0);
   }
   return `runtime:${sessionKey}`;
+}
+
+function resolveMatchingBaseMessageIndex(baseRows: ChatRow[], streamingMessage: RawMessage): number {
+  const streamingId = typeof streamingMessage.id === 'string' ? streamingMessage.id.trim() : '';
+  if (!streamingId) {
+    return -1;
+  }
+
+  for (let index = baseRows.length - 1; index >= 0; index -= 1) {
+    const row = baseRows[index];
+    if (row.kind !== 'message') {
+      continue;
+    }
+    if (row.message.id === streamingId) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function hasCommittedPendingUser(baseRows: ChatRow[], pendingUserMessage: RawMessage): boolean {
+  if (!(typeof pendingUserMessage.id === 'string' && pendingUserMessage.id.trim())) {
+    return false;
+  }
+  for (let index = baseRows.length - 1; index >= 0; index -= 1) {
+    const row = baseRows[index];
+    if (row.kind !== 'message' || row.message.role !== 'user') {
+      continue;
+    }
+    if (row.message.id === pendingUserMessage.id) {
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
@@ -403,6 +436,7 @@ export function appendRuntimeChatRows({
   pendingFinal,
   waitingApproval,
   showThinking,
+  pendingUserMessage = null,
   streamingMessage,
   streamingTools,
   streamingTimestamp,
@@ -414,6 +448,14 @@ export function appendRuntimeChatRows({
     }
     return rows;
   };
+
+  if (pendingUserMessage && !hasCommittedPendingUser(baseRows, pendingUserMessage)) {
+    ensureMutableRows().push({
+      key: resolveMessageRowKey(sessionKey, pendingUserMessage, 0),
+      kind: 'message',
+      message: pendingUserMessage,
+    });
+  }
 
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as { role?: string; content?: unknown; timestamp?: number }
@@ -444,22 +486,37 @@ export function appendRuntimeChatRows({
           content: streamText,
           timestamp: streamingTimestamp,
         }) as RawMessage;
-    ensureMutableRows().push({
-      key: resolveRuntimeRowKey(sessionKey, streamingRowMessage),
-      kind: 'streaming',
-      message: streamingRowMessage,
-      streamingTools,
-    });
+    const matchingBaseRowIndex = resolveMatchingBaseMessageIndex(baseRows, streamingRowMessage);
+    if (matchingBaseRowIndex >= 0) {
+      const nextRows = ensureMutableRows();
+      const matchingRow = nextRows[matchingBaseRowIndex];
+      if (matchingRow?.kind === 'message') {
+        nextRows[matchingBaseRowIndex] = {
+          ...matchingRow,
+          message: streamingRowMessage,
+          isStreaming: sending,
+          streamingTools,
+        };
+      }
+    } else {
+      ensureMutableRows().push({
+        key: resolveRuntimeRowKey(sessionKey, streamingRowMessage),
+        kind: 'message',
+        message: streamingRowMessage,
+        isStreaming: true,
+        streamingTools,
+      });
+    }
   }
 
-  if (sending && pendingFinal && !waitingApproval && !shouldRenderStreaming) {
+  if (sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && !streamMsg && !hasStreamToolStatus) {
     ensureMutableRows().push({
       key: resolveRuntimeRowKey(sessionKey),
       kind: 'activity',
     });
   }
 
-  if (sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent) {
+  if (sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && !streamMsg && !hasStreamToolStatus) {
     ensureMutableRows().push({
       key: resolveRuntimeRowKey(sessionKey),
       kind: 'typing',
@@ -476,6 +533,7 @@ export function buildChatRows({
   pendingFinal,
   waitingApproval,
   showThinking,
+  pendingUserMessage = null,
   streamingMessage,
   streamingTools,
   streamingTimestamp,
@@ -493,6 +551,7 @@ export function buildChatRows({
     pendingFinal,
     waitingApproval,
     showThinking,
+    pendingUserMessage,
     streamingMessage,
     streamingTools,
     streamingTimestamp,

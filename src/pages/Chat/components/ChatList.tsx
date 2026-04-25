@@ -3,7 +3,6 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import type { ChatRenderItem } from '../chat-render-items';
-import type { MarkdownBodyRenderMode } from '../md-pipeline';
 import { WelcomeScreen } from './ChatStates';
 import { ChatRowItem } from './ChatRowItem';
 import type { ChatRow } from '../chat-row-model';
@@ -28,8 +27,6 @@ interface ChatListProps {
   assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl: string | null;
   suppressedToolCardRowKeys: Set<string>;
-  bodyRenderModeByRowKey: ReadonlyMap<string, MarkdownBodyRenderMode>;
-  onRequestFullRender: (rowKey: string) => void;
   onJumpToRowKey: (rowKey?: string) => void;
 }
 
@@ -53,8 +50,6 @@ export function ChatList({
   assistantAvatarStyle,
   userAvatarImageUrl,
   suppressedToolCardRowKeys,
-  bodyRenderModeByRowKey,
-  onRequestFullRender,
   onJumpToRowKey,
 }: ChatListProps) {
   const getRowDataAttributes = (row: ChatRow) => {
@@ -141,8 +136,6 @@ export function ChatList({
                             assistantAvatarStyle={assistantAvatarStyle}
                             userAvatarImageUrl={userAvatarImageUrl}
                             suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                            bodyRenderModeByRowKey={bodyRenderModeByRowKey}
-                            onRequestFullRender={onRequestFullRender}
                             onJumpToRowKey={onJumpToRowKey}
                           />
                         </div>
@@ -162,8 +155,6 @@ export function ChatList({
                         assistantAvatarStyle={assistantAvatarStyle}
                         userAvatarImageUrl={userAvatarImageUrl}
                         suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                        bodyRenderModeByRowKey={bodyRenderModeByRowKey}
-                        onRequestFullRender={onRequestFullRender}
                         onJumpToRowKey={onJumpToRowKey}
                       />
                     </div>

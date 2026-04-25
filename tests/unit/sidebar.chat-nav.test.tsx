@@ -9,6 +9,7 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import i18n from '@/i18n';
+import type { RawMessage } from '@/stores/chat';
 
 function LocationEcho() {
   const location = useLocation();
@@ -31,6 +32,34 @@ function mountSidebar(initialPath: string) {
       </Routes>
     </MemoryRouter>,
   );
+}
+
+function createSessionRecord(input?: {
+  transcript?: RawMessage[];
+  label?: string | null;
+  ready?: boolean;
+}) {
+  return {
+    transcript: input?.transcript ?? [],
+    meta: {
+      label: input?.label ?? null,
+      lastActivityAt: null,
+      ready: input?.ready ?? false,
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      streamingMessage: null,
+      streamRuntime: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      approvalStatus: 'idle' as const,
+    },
+  };
 }
 
 function setupSidebarState() {
@@ -106,9 +135,12 @@ describe('sidebar chat nav', () => {
     useChatStore.setState({
       sessions: [{ key: 'agent:main:main' }],
       currentSessionKey: 'agent:main:main',
-      sessionLabels: {},
-      sessionLastActivity: {},
-      messages: [{ role: 'user', content: 'existing' }],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          transcript: [{ role: 'user', content: 'existing' }],
+          ready: true,
+        }),
+      },
       newSession,
       switchSession: vi.fn(),
       deleteSession: vi.fn(),
@@ -128,9 +160,12 @@ describe('sidebar chat nav', () => {
     useChatStore.setState({
       sessions: [{ key: 'agent:main:main' }],
       currentSessionKey: 'agent:main:main',
-      sessionLabels: {},
-      sessionLastActivity: {},
-      messages: [{ role: 'user', content: 'existing' }],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({
+          transcript: [{ role: 'user', content: 'existing' }],
+          ready: true,
+        }),
+      },
       newSession,
       switchSession: vi.fn(),
       deleteSession: vi.fn(),
@@ -230,6 +265,10 @@ describe('sidebar chat nav', () => {
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:analytics:main', displayName: 'agent:analytics:main' },
       ],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:analytics:main': createSessionRecord({ ready: true }),
+      },
       pendingApprovalsBySession: {
         'agent:analytics:main': [
           {

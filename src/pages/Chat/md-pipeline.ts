@@ -9,28 +9,30 @@ const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 240;
 const MARKDOWN_RENDER_CACHE_MAX_BYTES = 4 * 1024 * 1024;
 const MARKDOWN_PROCESS_METRIC_MIN_CHARS = 256;
 const MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS = 2;
-const HEAVY_MESSAGE_CHAR_THRESHOLD = 20_000;
-const HEAVY_MESSAGE_LINE_THRESHOLD = 260;
-const HEAVY_CODE_BLOCK_LINE_THRESHOLD = 24;
 const FILEHINT_HOST = 'matchaclaw.local';
 const FILEHINT_PATH_PREFIX = '/__filehint__/';
 
-export type MarkdownRenderMode = 'full' | 'lite';
-export type MarkdownBodyRenderMode = 'shell' | MarkdownRenderMode;
-
 export interface MarkdownBodyRenderResult {
-  shellPreview: MarkdownShellPreview | null;
-  liteHtml: string | null;
-  fullHtml: string | null;
-  canUpgrade: boolean;
+  fullHtml: string;
+  nodes: MarkdownRenderNode[];
 }
 
-export interface MarkdownShellPreview {
-  text: string;
-  truncated: boolean;
-  hasLinks: boolean;
-  hasCodeBlock: boolean;
-}
+export type MarkdownRenderNode =
+  | {
+      kind: 'html';
+      key: string;
+      html: string;
+    }
+  | {
+      kind: 'csv';
+      key: string;
+      csv: string;
+    }
+  | {
+      kind: 'markdown_table';
+      key: string;
+      rows: string[][];
+    };
 
 interface MarkdownBodyRenderCacheEntry {
   value: MarkdownBodyRenderResult;
@@ -62,15 +64,6 @@ md.renderer.rules.link_open = (
   token.attrSet('rel', 'noopener noreferrer');
   return defaultLinkOpenRenderer(tokens, idx, options, env, self);
 };
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 function nowMonotonicMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -142,166 +135,6 @@ function rewriteFileHintHrefs(markdown: string): string {
   });
 }
 
-function isAllowedExternalHref(rawHref: string): boolean {
-  try {
-    const parsed = new URL(rawHref, 'https://matchaclaw.local');
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'mailto:';
-  } catch {
-    return false;
-  }
-}
-
-function renderInlineLiteHtml(text: string): string {
-  const tokenRe = /(\[[^\]\n]+\]\([^)]+\)|`[^`\n]+`)/g;
-  let html = '';
-  let cursor = 0;
-  let matched: RegExpExecArray | null;
-
-  while ((matched = tokenRe.exec(text)) !== null) {
-    if (matched.index > cursor) {
-      html += escapeHtml(text.slice(cursor, matched.index));
-    }
-    const token = matched[0];
-    if (token.startsWith('`')) {
-      html += `<code>${escapeHtml(token.slice(1, -1))}</code>`;
-      cursor = matched.index + token.length;
-      continue;
-    }
-    const linkMatch = token.match(/^\[([^\]\n]+)\]\(([^)\n]+)\)$/);
-    if (!linkMatch) {
-      html += escapeHtml(token);
-      cursor = matched.index + token.length;
-      continue;
-    }
-    const [, label, href] = linkMatch;
-    if (isAllowedExternalHref(href)) {
-      html += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
-    } else {
-      html += escapeHtml(label);
-    }
-    cursor = matched.index + token.length;
-  }
-
-  if (cursor < text.length) {
-    html += escapeHtml(text.slice(cursor));
-  }
-
-  return html;
-}
-
-function splitLiteBlocks(markdown: string): Array<
-  | { kind: 'paragraph'; content: string }
-  | { kind: 'code'; language: string; content: string }
-> {
-  const blocks: Array<
-    | { kind: 'paragraph'; content: string }
-    | { kind: 'code'; language: string; content: string }
-  > = [];
-  const fenceRe = /```([^\n`]*)\n([\s\S]*?)```/g;
-  let cursor = 0;
-  let matched: RegExpExecArray | null;
-  while ((matched = fenceRe.exec(markdown)) !== null) {
-    const [fullMatch, language = '', codeContent = ''] = matched;
-    if (matched.index > cursor) {
-      pushLiteParagraphBlocks(blocks, markdown.slice(cursor, matched.index));
-    }
-    blocks.push({
-      kind: 'code',
-      language: language.trim(),
-      content: codeContent.replace(/\s+$/, ''),
-    });
-    cursor = matched.index + fullMatch.length;
-  }
-  if (cursor < markdown.length) {
-    pushLiteParagraphBlocks(blocks, markdown.slice(cursor));
-  }
-  return blocks;
-}
-
-function pushLiteParagraphBlocks(
-  target: Array<
-    | { kind: 'paragraph'; content: string }
-    | { kind: 'code'; language: string; content: string }
-  >,
-  source: string,
-): void {
-  const paragraphs = source
-    .split(/\n{2,}/)
-    .map((paragraph) => paragraph.trim())
-    .filter((paragraph) => paragraph.length > 0);
-  for (const paragraph of paragraphs) {
-    target.push({
-      kind: 'paragraph',
-      content: paragraph,
-    });
-  }
-}
-
-function renderLiteCodeBlockHtml(language: string, content: string): string {
-  const lines = content.split(/\r?\n/);
-  if (lines.length <= HEAVY_CODE_BLOCK_LINE_THRESHOLD) {
-    return `<div class="chat-md-lite-code"><div class="chat-md-lite-code__header">${escapeHtml(language || 'code')}</div><pre><code>${escapeHtml(content)}</code></pre></div>`;
-  }
-  const preview = lines.slice(0, HEAVY_CODE_BLOCK_LINE_THRESHOLD).join('\n');
-  return [
-    '<details class="chat-md-lite-code" open>',
-    `<summary class="chat-md-lite-code__summary"><span>${escapeHtml(language || 'code')}</span><span>Show full code</span></summary>`,
-    `<pre><code>${escapeHtml(preview)}</code></pre>`,
-    `<div class="chat-md-lite-code__full"><pre><code>${escapeHtml(content)}</code></pre></div>`,
-    '</details>',
-  ].join('');
-}
-
-function renderLiteMarkdownHtml(markdown: string): string {
-  const blocks = splitLiteBlocks(markdown);
-  return blocks.map((block) => {
-    if (block.kind === 'code') {
-      return renderLiteCodeBlockHtml(block.language, block.content);
-    }
-    return `<p>${renderInlineLiteHtml(block.content).replace(/\n/g, '<br />')}</p>`;
-  }).join('');
-}
-
-function stripMarkdownForShellPreview(markdown: string): MarkdownShellPreview {
-  const hasCodeBlock = /```/.test(markdown);
-  const hasLinks = /\[[^\]\n]+\]\([^)]+\)/.test(markdown) || /\bhttps?:\/\/\S+/i.test(markdown);
-  const normalized = markdown
-    .replace(/```([^\n`]*)\n[\s\S]*?```/g, (_match, language = '') => `[${String(language).trim() || 'code'} block]`)
-    .replace(/`([^`\n]+)`/g, '$1')
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/\[([^\]\n]+)\]\([^)]+\)/g, '$1')
-    .replace(/^>\s?/gm, '')
-    .replace(/^[\s]*[-*+]\s+/gm, '')
-    .replace(/^[\s]*\d+\.\s+/gm, '')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/[*_~]/g, '')
-    .replace(/\r/g, '')
-    .trim();
-  const previewLines = normalized
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(0, 6);
-  const previewText = previewLines.join('\n');
-  const truncated = normalized.length > previewText.length;
-  return {
-    text: previewText || normalized.slice(0, 280),
-    truncated,
-    hasLinks,
-    hasCodeBlock,
-  };
-}
-
-export function shouldUseLiteMarkdown(markdown: string, isStreaming: boolean): boolean {
-  if (isStreaming) {
-    return false;
-  }
-  if (markdown.length >= HEAVY_MESSAGE_CHAR_THRESHOLD) {
-    return true;
-  }
-  return markdown.split(/\r?\n/).length >= HEAVY_MESSAGE_LINE_THRESHOLD;
-}
-
 function pruneMarkdownRenderCache(now = Date.now()): void {
   for (const [key, entry] of markdownBodyRenderCache.entries()) {
     if (entry.expiresAt > now) {
@@ -334,12 +167,7 @@ function getRenderedMarkdownFromCache(cacheKey: string): MarkdownBodyRenderResul
 function rememberRenderedMarkdown(cacheKey: string, value: MarkdownBodyRenderResult): void {
   const now = Date.now();
   pruneMarkdownRenderCache(now);
-  const previewBytes = value.shellPreview
-    ? (value.shellPreview.text.length * 2) + 32
-    : 0;
-  const liteBytes = value.liteHtml ? (value.liteHtml.length * 2) : 0;
-  const fullBytes = value.fullHtml ? (value.fullHtml.length * 2) : 0;
-  const bytes = previewBytes + liteBytes + fullBytes + 64;
+  const bytes = (value.fullHtml.length * 2) + (JSON.stringify(value.nodes).length * 2) + 64;
   const previous = markdownBodyRenderCache.get(cacheKey);
   if (previous) {
     markdownBodyRenderCache.delete(cacheKey);
@@ -371,7 +199,251 @@ function renderFullMarkdownHtml(markdown: string): string {
   return md.render(rewriteFileHintHrefs(markdown));
 }
 
-function trackMarkdownProcessCost(markdown: string, durationMs: number, mode: MarkdownRenderMode): void {
+const CSV_FENCE_RE = /```csv[^\n\r]*\r?\n([\s\S]*?)\r?\n```/gim;
+
+function parseCsvLine(line: string): string[] | null {
+  const columns: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (inQuotes) {
+      if (char === '"') {
+        if (line[index + 1] === '"') {
+          current += '"';
+          index += 1;
+        } else {
+          inQuotes = false;
+        }
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === ',') {
+      columns.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+
+  if (inQuotes) {
+    return null;
+  }
+
+  columns.push(current);
+  return columns;
+}
+
+function looksLikePlainCsvLine(line: string, expectedColumns?: number): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (
+    trimmed.startsWith('```')
+    || trimmed.startsWith('|')
+    || trimmed.startsWith('>')
+    || /^#{1,6}\s/.test(trimmed)
+    || /^[-*+]\s/.test(trimmed)
+    || /^\d+\.\s/.test(trimmed)
+  ) {
+    return false;
+  }
+
+  const columns = parseCsvLine(trimmed);
+  if (!columns || columns.length < 3) {
+    return false;
+  }
+  if (typeof expectedColumns === 'number' && columns.length !== expectedColumns) {
+    return false;
+  }
+  return columns.some((column) => column.trim().length > 0);
+}
+
+function parseMarkdownTableRow(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) {
+    return null;
+  }
+  const normalized = trimmed.replace(/^\|/, '').replace(/\|$/, '');
+  const columns = normalized.split('|').map((column) => column.trim().replace(/\\\|/g, '|'));
+  if (columns.length < 2) {
+    return null;
+  }
+  return columns;
+}
+
+function isMarkdownTableDividerLine(line: string, expectedColumns: number): boolean {
+  const columns = parseMarkdownTableRow(line);
+  if (!columns || columns.length !== expectedColumns) {
+    return false;
+  }
+  return columns.every((column) => /^:?-{3,}:?$/.test(column));
+}
+
+function looksLikeMarkdownTableHeaderLine(line: string): boolean {
+  const columns = parseMarkdownTableRow(line);
+  return Boolean(columns && columns.length >= 2 && columns.some((column) => column.length > 0));
+}
+
+function buildNodesFromPlainSegment(markdown: string, keyBase: number): MarkdownRenderNode[] {
+  const lines = markdown.split(/\r?\n/);
+  const nodes: MarkdownRenderNode[] = [];
+  const htmlBuffer: string[] = [];
+
+  const flushHtmlBuffer = (lineIndex: number) => {
+    const htmlChunk = htmlBuffer.join('\n');
+    htmlBuffer.length = 0;
+    if (!htmlChunk.trim()) {
+      return;
+    }
+    nodes.push({
+      kind: 'html',
+      key: `html:${keyBase}:${lineIndex}`,
+      html: renderFullMarkdownHtml(htmlChunk),
+    });
+  };
+
+  let lineIndex = 0;
+  while (lineIndex < lines.length) {
+    const line = lines[lineIndex];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      const fenceStart = lineIndex;
+      htmlBuffer.push(line);
+      lineIndex += 1;
+      while (lineIndex < lines.length) {
+        htmlBuffer.push(lines[lineIndex]);
+        if (lines[lineIndex].trim().startsWith('```')) {
+          lineIndex += 1;
+          break;
+        }
+        lineIndex += 1;
+      }
+      void fenceStart;
+      continue;
+    }
+
+    if (
+      looksLikeMarkdownTableHeaderLine(line)
+      && lineIndex + 1 < lines.length
+    ) {
+      const headerColumns = parseMarkdownTableRow(line);
+      const expectedColumns = headerColumns?.length ?? 0;
+      if (expectedColumns >= 2 && isMarkdownTableDividerLine(lines[lineIndex + 1], expectedColumns)) {
+        const bodyRows: string[][] = [];
+        let nextLineIndex = lineIndex + 2;
+        while (nextLineIndex < lines.length) {
+          const currentRow = parseMarkdownTableRow(lines[nextLineIndex]);
+          if (!currentRow || currentRow.length !== expectedColumns) {
+            break;
+          }
+          bodyRows.push(currentRow);
+          nextLineIndex += 1;
+        }
+
+        if (bodyRows.length > 0) {
+          flushHtmlBuffer(lineIndex);
+          nodes.push({
+            kind: 'markdown_table',
+            key: `markdown-table:${keyBase}:${lineIndex}`,
+            rows: [headerColumns!, ...bodyRows],
+          });
+          lineIndex = nextLineIndex;
+          continue;
+        }
+      }
+    }
+
+    if (!looksLikePlainCsvLine(line)) {
+      htmlBuffer.push(line);
+      lineIndex += 1;
+      continue;
+    }
+
+    const firstColumns = parseCsvLine(trimmed);
+    const expectedColumns = firstColumns?.length;
+    if (!expectedColumns || expectedColumns < 3) {
+      htmlBuffer.push(line);
+      lineIndex += 1;
+      continue;
+    }
+
+    const csvLines: string[] = [trimmed];
+    let nextLineIndex = lineIndex + 1;
+    while (nextLineIndex < lines.length && looksLikePlainCsvLine(lines[nextLineIndex], expectedColumns)) {
+      csvLines.push(lines[nextLineIndex].trim());
+      nextLineIndex += 1;
+    }
+
+    if (csvLines.length < 3) {
+      htmlBuffer.push(line);
+      lineIndex += 1;
+      continue;
+    }
+
+    flushHtmlBuffer(lineIndex);
+    nodes.push({
+      kind: 'csv',
+      key: `csv:${keyBase}:${lineIndex}`,
+      csv: csvLines.join('\n'),
+    });
+    lineIndex = nextLineIndex;
+  }
+
+  flushHtmlBuffer(lines.length);
+  return nodes;
+}
+
+function buildMarkdownRenderNodes(markdown: string): MarkdownRenderNode[] {
+  const nodes: MarkdownRenderNode[] = [];
+  let lastIndex = 0;
+
+  for (const match of markdown.matchAll(CSV_FENCE_RE)) {
+    const matchIndex = typeof match.index === 'number' ? match.index : -1;
+    if (matchIndex < 0) {
+      continue;
+    }
+
+    const htmlChunk = markdown.slice(lastIndex, matchIndex);
+    if (htmlChunk.trim().length > 0) {
+      nodes.push(...buildNodesFromPlainSegment(htmlChunk, lastIndex));
+    }
+
+    nodes.push({
+      kind: 'csv',
+      key: `csv:${matchIndex}`,
+      csv: match[1] ?? '',
+    });
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  const trailingHtmlChunk = markdown.slice(lastIndex);
+  if (trailingHtmlChunk.trim().length > 0) {
+    nodes.push(...buildNodesFromPlainSegment(trailingHtmlChunk, lastIndex));
+  }
+
+  if (nodes.length === 0) {
+    return [{
+      kind: 'html',
+      key: 'html:0',
+      html: renderFullMarkdownHtml(markdown),
+    }];
+  }
+
+  return nodes;
+}
+
+function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
   if (
     markdown.length < MARKDOWN_PROCESS_METRIC_MIN_CHARS
     && durationMs < MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS
@@ -381,55 +453,25 @@ function trackMarkdownProcessCost(markdown: string, durationMs: number, mode: Ma
   trackUiTiming('chat.md_process_cost', durationMs, {
     cacheState: 'miss',
     chars: markdown.length,
-    mode,
+    mode: 'full',
   });
 }
 
 export function getOrBuildMarkdownBody(
   cacheKey: string,
-  input: {
-    markdown: string;
-    allowLite: boolean;
-    mode: MarkdownBodyRenderMode;
-  },
+  input: { markdown: string },
 ): MarkdownBodyRenderResult {
-  const cacheIdentity = `${cacheKey}|${input.allowLite ? 'defer' : 'eager'}`;
-  const cached = getRenderedMarkdownFromCache(cacheIdentity);
-  const base = cached ?? {
-    shellPreview: input.allowLite ? stripMarkdownForShellPreview(input.markdown) : null,
-    liteHtml: null,
-    fullHtml: null,
-    canUpgrade: input.allowLite,
+  const cached = getRenderedMarkdownFromCache(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const startedAt = nowMonotonicMs();
+  const next = {
+    fullHtml: renderFullMarkdownHtml(input.markdown),
+    nodes: buildMarkdownRenderNodes(input.markdown),
   } satisfies MarkdownBodyRenderResult;
-
-  if (input.mode === 'shell') {
-    if (cached === undefined) {
-      rememberRenderedMarkdown(cacheIdentity, base);
-    }
-    return base;
-  }
-
-  if (input.mode === 'lite' && base.liteHtml == null) {
-    const startedAt = nowMonotonicMs();
-    const next = {
-      ...base,
-      liteHtml: renderLiteMarkdownHtml(input.markdown),
-    } satisfies MarkdownBodyRenderResult;
-    rememberRenderedMarkdown(cacheIdentity, next);
-    trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt), 'lite');
-    return next;
-  }
-
-  if (input.mode === 'full' && base.fullHtml == null) {
-    const startedAt = nowMonotonicMs();
-    const next = {
-      ...base,
-      fullHtml: renderFullMarkdownHtml(input.markdown),
-    } satisfies MarkdownBodyRenderResult;
-    rememberRenderedMarkdown(cacheIdentity, next);
-    trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt), 'full');
-    return next;
-  }
-
-  return base;
+  rememberRenderedMarkdown(cacheKey, next);
+  trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt));
+  return next;
 }
