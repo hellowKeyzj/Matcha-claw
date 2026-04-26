@@ -3,6 +3,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import type { ChatRenderItem } from '../chat-render-items';
+import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { WelcomeScreen } from './ChatStates';
 import { ChatRowItem } from './ChatRowItem';
 import type { ChatRow } from '../chat-row-model';
@@ -80,7 +81,7 @@ export function ChatList({
       <div
         ref={messagesViewportRef}
         className={cn(
-          'h-full overflow-y-auto px-4 py-4 md:px-6',
+          `h-full overflow-y-auto ${CHAT_LAYOUT_TOKENS.threadViewportPadding}`,
           isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
         )}
         style={{ overflowAnchor: 'none' }}
@@ -89,7 +90,7 @@ export function ChatList({
         onTouchMoveCapture={onTouchMove}
         onWheelCapture={onWheel}
       >
-        <div className={cn('mx-auto max-w-4xl', isEmptyState && 'flex min-h-full max-w-5xl items-start justify-center')}>
+        <div className={cn(CHAT_LAYOUT_TOKENS.threadRail, isEmptyState && CHAT_LAYOUT_TOKENS.threadEmptyStateRail)}>
           {showBlockingLoading ? (
             <div className="flex h-full items-center justify-center py-20">
               <LoadingSpinner size="lg" />

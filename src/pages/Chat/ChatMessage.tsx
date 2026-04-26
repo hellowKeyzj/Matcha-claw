@@ -17,6 +17,7 @@ import {
 } from '@/lib/chat-markdown-body';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractThinking, extractImages, extractToolUse, formatTimestamp } from './message-utils';
+import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import {
   buildMarkdownCacheKey,
   decodeFileHintHref,
@@ -297,13 +298,18 @@ function MessageShell({
   return (
     <div
       className={cn(
-        'flex gap-3 group',
-        isUser ? 'flex-row-reverse' : 'flex-row',
+        CHAT_LAYOUT_TOKENS.messageShell,
+        isUser
+          ? CHAT_LAYOUT_TOKENS.messageShellUserColumns
+          : CHAT_LAYOUT_TOKENS.messageShellAssistantColumns,
       )}
     >
       <div
         className={cn(
-          'mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
+          CHAT_LAYOUT_TOKENS.messageAvatar,
+          isUser
+            ? CHAT_LAYOUT_TOKENS.messageAvatarUserOrder
+            : CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
           isUser
             ? 'bg-primary text-primary-foreground'
             : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
@@ -333,8 +339,10 @@ function MessageShell({
 
       <div
         className={cn(
-          'flex w-full min-w-0 max-w-[80%] flex-col space-y-2',
-          isUser ? 'items-end' : 'items-start',
+          CHAT_LAYOUT_TOKENS.messageContentColumn,
+          isUser
+            ? CHAT_LAYOUT_TOKENS.messageContentUserOrder
+            : CHAT_LAYOUT_TOKENS.messageContentAssistantOrder,
         )}
       >
         {children}
@@ -437,7 +445,7 @@ const MessageBody = memo(function MessageBody({
   if (isUser) {
     return (
       <div
-        className="relative rounded-2xl border border-border/60 bg-secondary px-4 py-3 text-foreground dark:border-border/70 dark:bg-secondary/85"
+        className={CHAT_LAYOUT_TOKENS.userBubble}
       >
         <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
       </div>

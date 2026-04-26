@@ -18,6 +18,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
+import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -724,13 +725,15 @@ export const ChatInput = memo(function ChatInput({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="mx-auto max-w-4xl">
+      <div className={CHAT_LAYOUT_TOKENS.inputRail}>
         {/* Input Row */}
         <div
           className={cn(
-            'rounded-[1.75rem] border border-input bg-card px-3 py-3 transition-[border-color,box-shadow,background-color]',
+            CHAT_LAYOUT_TOKENS.inputCard,
             dragOver && 'border-ring shadow-[var(--shadow-focus)]',
-            layout === 'hero' ? 'min-h-[96px]' : 'min-h-[72px]',
+            layout === 'hero'
+              ? CHAT_LAYOUT_TOKENS.inputCardHeroMinHeight
+              : CHAT_LAYOUT_TOKENS.inputCardDockMinHeight,
           )}
         >
           <div className="relative min-w-0">
@@ -796,8 +799,8 @@ export const ChatInput = memo(function ChatInput({
                     : t('input.messagePlaceholder')}
                 disabled={disabled}
                 className={cn(
-                  'min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent pl-1 pr-2 text-sm shadow-none focus-visible:ring-0 focus-visible:ring-offset-0',
-                  layout === 'hero' && 'min-h-[72px]',
+                  CHAT_LAYOUT_TOKENS.inputTextarea,
+                  layout === 'hero' && CHAT_LAYOUT_TOKENS.inputTextareaHeroMinHeight,
                 )}
                 rows={1}
               />
@@ -870,11 +873,11 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
-          <div className="mt-2 flex items-center justify-between gap-3 px-2">
+          <div className={CHAT_LAYOUT_TOKENS.inputActionsRow}>
             <Button
               variant="ghost"
               size="icon"
-              className="h-10 w-10 shrink-0"
+              className={CHAT_LAYOUT_TOKENS.inputAttachButton}
               onClick={pickFiles}
               disabled={disabled || sending || approvalWaiting}
               aria-label="Attach files"
@@ -887,7 +890,7 @@ export const ChatInput = memo(function ChatInput({
               onClick={sending ? handleStop : handleSend}
               disabled={sending ? !canStop : !canSend}
               size="icon"
-              className="h-11 w-11 shrink-0"
+              className={CHAT_LAYOUT_TOKENS.inputSendButton}
               variant={sending ? 'destructive' : 'default'}
               aria-label={sending ? 'Stop' : 'Send'}
               title={sending ? 'Stop' : 'Send'}
