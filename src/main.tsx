@@ -11,6 +11,12 @@ import { initializeDefaultTransports } from './lib/api-client';
 
 initializeDefaultTransports();
 
+if (import.meta.env.DEV) {
+  void import('./lib/chat-memory-diagnostics').then(({ installChatMemoryDiagnosticsDebugApi }) => {
+    installChatMemoryDiagnosticsDebugApi(window);
+  });
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <HashRouter>

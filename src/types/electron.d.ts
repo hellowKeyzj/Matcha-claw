@@ -22,9 +22,14 @@ export interface ElectronAPI {
   isDev: boolean;
 }
 
+export interface MatchaClawDebugAPI {
+  collectMemoryDiagnostics?: () => Promise<unknown>;
+}
+
 declare global {
   interface Window {
     electron: ElectronAPI;
+    __MATCHACLAW_DEBUG__?: MatchaClawDebugAPI;
   }
 }
 
