@@ -437,16 +437,6 @@ export class BrowserControlService {
     params: BrowserActionParams,
     connectionMode: ConnectionMode,
   ): Promise<BrowserActionResult> {
-    if (connectionMode === 'relay' && !this.options.relay.hasExtensionConnection) {
-      const relayReady = await this.ensureRelayReady(action, params)
-      if (!relayReady) {
-        return {
-          ok: false,
-          error: 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
-        }
-      }
-    }
-
     const endpoint = connectionMode === 'direct-cdp'
       ? await this.resolveDirectEndpoint()
       : this.resolveRelayEndpoint()
@@ -792,97 +782,6 @@ export class BrowserControlService {
     return instance
       ? resolveCdpEndpoint({ directCdpPort: instance.port, directCdpWsUrl: instance.wsUrl })
       : null
-  }
-
-  private buildRelayDisconnectedResult(action: string): BrowserActionResult {
-    if (action === 'status') {
-      return {
-        ok: true,
-        enabled: true,
-        profile: 'chrome',
-        running: false,
-        cdpReady: false,
-        connectionType: 'extension',
-        tabCount: 0,
-        pid: null,
-        headless: false,
-        relayPort: this.options.relay.relayPort,
-        managedBrowserRunning: this.options.launcher.isRunning(),
-      }
-    }
-
-    if (action === 'profiles') {
-      return {
-        ok: true,
-        profiles: [{ name: 'chrome', running: false, tabCount: 0, isDefault: true }],
-      }
-    }
-
-    if (action === 'tabs') {
-      return {
-        ok: true,
-        running: false,
-        extensionConnected: false,
-        tabs: [],
-      }
-    }
-
-    return {
-      ok: false,
-      error: 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
-    }
-  }
-
-  private shouldAutoStartRelay(action: string): boolean {
-    return action === 'start'
-      || action === 'open'
-      || !this.isRelayDirectAction(action)
-  }
-
-  private requiresSelectedRelayTarget(action: string, params: BrowserActionParams): boolean {
-    if (this.isRelayDirectAction(action)) {
-      return false
-    }
-    return !asString(params.targetId)
-  }
-
-  private async ensureRelayReady(action: string, params: BrowserActionParams): Promise<boolean> {
-    if (!this.options.relay.hasExtensionConnection) {
-      if (!this.shouldAutoStartRelay(action)) {
-        return false
-      }
-      await this.options.launcher.ensureStarted()
-      await this.waitForRelayConnection()
-    }
-
-    if (this.requiresSelectedRelayTarget(action, params)) {
-      await this.waitForSelectedRelayTarget()
-    }
-
-    return true
-  }
-
-  private async waitForRelayConnection(timeoutMs = 20_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      if (this.options.relay.hasExtensionConnection && this.options.relay.relayPort !== null) {
-        return
-      }
-      await sleep(250)
-    }
-    throw new Error('Managed browser started, but the browser relay extension did not connect in time.')
-  }
-
-  private async waitForSelectedRelayTarget(timeoutMs = 12_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      this.syncRelayExecutionTarget()
-      if (this.tabState.currentSelectedPhysicalTargetId) {
-        return
-      }
-      await sleep(250)
-    }
-    throw new Error('No default browser target available. Select a window and keep its active page attached.')
   }
 
   private async syncDirectTabs(cdpUrl: string, port: number): Promise<Array<{ targetId: string; url: string; title: string; type?: string }>> {
