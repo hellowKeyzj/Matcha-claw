@@ -44,6 +44,11 @@ interface MarkdownBodyRenderCacheEntry {
 const markdownBodyRenderCache = new Map<string, MarkdownBodyRenderCacheEntry>();
 let markdownBodyRenderCacheBytes = 0;
 
+export interface MarkdownRenderCacheStats {
+  entryCount: number;
+  totalBytes: number;
+}
+
 function createMarkdownRenderer(mode: MarkdownRenderMode): MarkdownIt {
   const renderer = new MarkdownIt({
     html: false,
@@ -174,6 +179,18 @@ function getRenderedMarkdownFromCache(cacheKey: string): MarkdownBodyRenderResul
     expiresAt: now + MARKDOWN_RENDER_CACHE_TTL_MS,
   });
   return entry.value;
+}
+
+export function peekRenderedMarkdownBody(cacheKey: string): MarkdownBodyRenderResult | undefined {
+  return getRenderedMarkdownFromCache(cacheKey);
+}
+
+export function getMarkdownRenderCacheStats(): MarkdownRenderCacheStats {
+  pruneMarkdownRenderCache(Date.now());
+  return {
+    entryCount: markdownBodyRenderCache.size,
+    totalBytes: markdownBodyRenderCacheBytes,
+  };
 }
 
 function rememberRenderedMarkdown(cacheKey: string, value: MarkdownBodyRenderResult): void {
@@ -498,4 +515,11 @@ export function getOrBuildMarkdownBody(
   rememberRenderedMarkdown(cacheKey, next);
   trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt));
   return next;
+}
+
+export function prewarmMarkdownBody(
+  cacheKey: string,
+  input: { markdown: string; mode?: MarkdownRenderMode },
+): MarkdownBodyRenderResult {
+  return getOrBuildMarkdownBody(cacheKey, input);
 }

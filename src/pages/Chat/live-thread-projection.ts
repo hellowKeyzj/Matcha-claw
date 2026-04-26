@@ -12,6 +12,8 @@ export interface LiveThreadProjection {
   hiddenRenderableCount: number;
 }
 
+const liveThreadProjectionCache = new WeakMap<RawMessage[], Map<number, LiveThreadProjection>>();
+
 export function projectLiveThreadMessages(
   messages: RawMessage[],
   limit = LIVE_THREAD_RENDER_LIMIT,
@@ -23,18 +25,28 @@ export function projectLiveThreadMessages(
     };
   }
 
+  let cacheByLimit = liveThreadProjectionCache.get(messages);
+  if (!cacheByLimit) {
+    cacheByLimit = new Map<number, LiveThreadProjection>();
+    liveThreadProjectionCache.set(messages, cacheByLimit);
+  }
+  const cached = cacheByLimit.get(limit);
+  if (cached) {
+    return cached;
+  }
+
   const expandedMessages = limit === LIVE_THREAD_RENDER_LIMIT
     ? pickExpandedLiveMessages(messages)
     : pickRenderableTailMessages(messages, Math.max(1, limit));
-  if (expandedMessages === messages) {
-    return {
-      messages,
-      hiddenRenderableCount: 0,
-    };
-  }
-
-  return {
-    messages: expandedMessages,
-    hiddenRenderableCount: Math.max(0, countRenderableLiveMessages(messages) - countRenderableLiveMessages(expandedMessages)),
-  };
+  const projection = expandedMessages === messages
+    ? {
+        messages,
+        hiddenRenderableCount: 0,
+      }
+    : {
+        messages: expandedMessages,
+        hiddenRenderableCount: Math.max(0, countRenderableLiveMessages(messages) - countRenderableLiveMessages(expandedMessages)),
+      };
+  cacheByLimit.set(limit, projection);
+  return projection;
 }

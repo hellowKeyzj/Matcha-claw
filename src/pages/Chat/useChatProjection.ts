@@ -26,6 +26,13 @@ interface HistoryProjectionCacheEntry {
   mergedMessages: RawMessage[];
 }
 
+export interface ChatProjectionCacheStats {
+  cachedSessionCount: number;
+  cachedMessageCount: number;
+}
+
+const globalHistoryCache = new Map<string, HistoryCacheEntry>();
+
 interface UseChatProjectionInput {
   currentSessionKey: string;
   liveMessages: RawMessage[];
@@ -98,7 +105,7 @@ export function useChatProjection({
     messages: [],
     error: null,
   });
-  const historyCacheRef = useRef<Map<string, HistoryCacheEntry>>(new Map());
+  const historyCacheRef = useRef<Map<string, HistoryCacheEntry>>(globalHistoryCache);
   const projectionCacheRef = useRef<HistoryProjectionCacheEntry | null>(null);
   const requestIdRef = useRef(0);
 
@@ -214,5 +221,17 @@ export function useChatProjection({
     messages: projectionMessages,
     enterHistory,
     returnToLive,
+  };
+}
+
+export function getChatProjectionCacheStats(): ChatProjectionCacheStats {
+  let cachedMessageCount = 0;
+  for (const entry of globalHistoryCache.values()) {
+    cachedMessageCount += entry.messages.length;
+  }
+
+  return {
+    cachedSessionCount: globalHistoryCache.size,
+    cachedMessageCount,
   };
 }

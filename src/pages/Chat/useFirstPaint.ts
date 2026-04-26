@@ -9,6 +9,7 @@ interface SessionPipelineCost {
 }
 
 interface UseChatFirstPaintInput {
+  enabled: boolean;
   currentSessionKey: string;
   rowCount: number;
   isEmptyState: boolean;
@@ -50,6 +51,7 @@ export function useChatFirstPaint(
   input: UseChatFirstPaintInput,
 ): void {
   const {
+    enabled,
     currentSessionKey,
     rowCount,
     isEmptyState,
@@ -73,6 +75,11 @@ export function useChatFirstPaint(
   } | null>(null);
   const previousSessionKeyRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!enabled) {
+      sessionFirstPaintRef.current = null;
+      blockingLoadingRef.current = null;
+      return;
+    }
     if (blockingLoadingRef.current) {
       emitBlockingLoadingDuration(blockingLoadingRef.current);
       blockingLoadingRef.current = null;
@@ -94,10 +101,10 @@ export function useChatFirstPaint(
       staticRowsMs: 0,
       runtimeRowsMs: 0,
     };
-  }, [currentSessionKey, sessionPipelineCostRef]);
+  }, [currentSessionKey, enabled, sessionPipelineCostRef]);
 
   useEffect(() => {
-    if (rowSliceCostMs <= 0) {
+    if (!enabled || rowSliceCostMs <= 0) {
       return;
     }
     const cost = sessionPipelineCostRef.current;
@@ -105,9 +112,12 @@ export function useChatFirstPaint(
       return;
     }
     cost.rowSliceMs += rowSliceCostMs;
-  }, [currentSessionKey, rowSliceCostMs, sessionPipelineCostRef]);
+  }, [currentSessionKey, enabled, rowSliceCostMs, sessionPipelineCostRef]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const activeBlockingTracker = blockingLoadingRef.current;
     if (showBlockingLoading) {
       if (activeBlockingTracker?.sessionKey === currentSessionKey) {
@@ -141,9 +151,12 @@ export function useChatFirstPaint(
       emitBlockingLoadingDuration(activeBlockingTracker);
       blockingLoadingRef.current = null;
     }
-  }, [currentSessionKey, showBlockingLoading]);
+  }, [currentSessionKey, enabled, showBlockingLoading]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const tracker = sessionFirstPaintRef.current;
     if (!tracker || tracker.reported || tracker.sessionKey !== currentSessionKey) {
       return;
@@ -166,7 +179,7 @@ export function useChatFirstPaint(
       source: tracker.source,
       ...(tracker.fromSessionKey ? { fromSessionKey: tracker.fromSessionKey } : {}),
     });
-  }, [currentSessionKey, isEmptyState, rowCount, sessionPipelineCostRef, showBlockingLoading]);
+  }, [currentSessionKey, enabled, isEmptyState, rowCount, sessionPipelineCostRef, showBlockingLoading]);
 
   useEffect(() => () => {
     if (blockingLoadingRef.current) {

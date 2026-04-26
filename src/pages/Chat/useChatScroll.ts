@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type TouchEventHandler 
 import { markChatScrollActivity } from './chat-scroll-drain';
 
 interface UseChatScrollInput {
+  enabled: boolean;
   scrollScopeKey: string;
   scrollResetKey: string;
   autoFollowSignal: string;
@@ -132,6 +133,7 @@ function hasTailResizeDelta(
 }
 
 export function useChatScroll({
+  enabled,
   scrollScopeKey,
   scrollResetKey,
   autoFollowSignal,
@@ -277,6 +279,9 @@ export function useChatScroll({
   }, [nowMs]);
 
   const scrollToBottom = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     const viewport = viewportRef.current;
     if (!viewport) {
       return;
@@ -297,7 +302,7 @@ export function useChatScroll({
         programmaticScrollRef.current = false;
       }, 16);
     }
-  }, [viewportRef]);
+  }, [enabled, viewportRef]);
 
   const syncFollowResizeSnapshot = useCallback(() => {
     const viewport = viewportRef.current;
@@ -311,6 +316,9 @@ export function useChatScroll({
   ), []);
 
   const restoreViewportAnchor = useCallback((anchor: ViewportAnchor) => {
+    if (!enabled) {
+      return false;
+    }
     const viewport = viewportRef.current;
     if (!viewport) {
       return false;
@@ -357,7 +365,7 @@ export function useChatScroll({
       }, 16);
     }
     return true;
-  }, [viewportRef]);
+  }, [enabled, viewportRef]);
 
   const scheduleInitialAlignRetry = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -450,6 +458,9 @@ export function useChatScroll({
   }, [clearAnchorRestoreSchedule, runAnchorRestore]);
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const scopeChanged = lastScrollScopeKeyRef.current !== scrollScopeKey;
     const resetChanged = lastScrollResetKeyRef.current !== scrollResetKey;
     if (!scopeChanged && !resetChanged) {
@@ -519,6 +530,7 @@ export function useChatScroll({
     scheduleInitialAlign,
     scheduleAnchorRestore,
     clearTailSettleTask,
+    enabled,
     scrollResetKey,
     scrollScopeKey,
     setBottomLocked,
@@ -527,6 +539,9 @@ export function useChatScroll({
   ]);
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const previousTailActivityOpen = tailActivityOpenRef.current;
     tailActivityOpenRef.current = tailActivityOpen;
 
@@ -554,6 +569,7 @@ export function useChatScroll({
     scrollScopeKey,
     scrollToBottom,
     syncFollowResizeSnapshot,
+    enabled,
     tailActivityOpen,
   ]);
 
@@ -561,6 +577,9 @@ export function useChatScroll({
   const contentElement = contentRef.current;
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const pendingTransition = pendingScopeTransitionRef.current;
     if (
       pendingTransition
@@ -574,9 +593,12 @@ export function useChatScroll({
       return;
     }
     scheduleInitialAlign();
-  }, [contentElement, readScrollPhase, scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, viewportElement]);
+  }, [contentElement, enabled, readScrollPhase, scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, viewportElement]);
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     if (readScrollPhase(scrollScopeKey) !== 'following') {
       return;
     }
@@ -585,13 +607,19 @@ export function useChatScroll({
     if (!tailActivityOpenRef.current) {
       armTailSettleTask();
     }
-  }, [armTailSettleTask, autoFollowSignal, readScrollPhase, scrollScopeKey, scrollToBottom, syncFollowResizeSnapshot]);
+  }, [armTailSettleTask, autoFollowSignal, enabled, readScrollPhase, scrollScopeKey, scrollToBottom, syncFollowResizeSnapshot]);
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     syncFollowResizeSnapshot();
-  }, [contentElement, scrollScopeKey, syncFollowResizeSnapshot, viewportElement]);
+  }, [contentElement, enabled, scrollScopeKey, syncFollowResizeSnapshot, viewportElement]);
 
   useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const viewport = viewportElement;
     const content = contentElement;
     if (typeof ResizeObserver !== 'function' || (!viewport && !content)) {
@@ -656,11 +684,15 @@ export function useChatScroll({
     scrollScopeKey,
     scrollToBottom,
     syncFollowResizeSnapshot,
+    enabled,
     viewportElement,
     viewportRef,
   ]);
 
   const handleViewportScroll = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     const metrics = readViewportMetrics(viewportRef.current);
     if (!metrics) {
       return;
@@ -690,9 +722,12 @@ export function useChatScroll({
       return;
     }
     writeScrollPhase(scrollScopeKey, 'detached');
-  }, [hasActiveUserScrollIntent, markUserScrollActivity, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [enabled, hasActiveUserScrollIntent, markUserScrollActivity, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
   const handleViewportPointerDown = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     pointerScrollActiveRef.current = true;
     const metrics = readViewportMetrics(viewportRef.current);
     if (!metrics) {
@@ -701,15 +736,21 @@ export function useChatScroll({
     if (!isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       writeScrollPhase(scrollScopeKey, 'detached');
     }
-  }, [scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [enabled, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
   const handleViewportTouchMove = useCallback<TouchEventHandler<HTMLDivElement>>(() => {
+    if (!enabled) {
+      return;
+    }
     touchScrollActiveRef.current = true;
     markUserScrollActivity(scrollDirection === 0 ? -1 : scrollDirection);
     writeScrollPhase(scrollScopeKey, 'detached');
-  }, [markUserScrollActivity, scrollDirection, scrollScopeKey, writeScrollPhase]);
+  }, [enabled, markUserScrollActivity, scrollDirection, scrollScopeKey, writeScrollPhase]);
 
   const handleViewportWheel = useCallback((event?: { deltaY?: number }) => {
+    if (!enabled) {
+      return;
+    }
     markWheelIntent();
     const deltaY = event?.deltaY ?? 0;
     let directionHint: ScrollDirection = 0;
@@ -727,7 +768,7 @@ export function useChatScroll({
     if (metrics && isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       writeScrollPhase(scrollScopeKey, 'following');
     }
-  }, [markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [enabled, markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
   useLayoutEffect(() => {
     return () => {

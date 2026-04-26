@@ -1,10 +1,9 @@
-import type { ComponentProps, RefObject } from 'react';
+import type { ComponentProps, ReactNode, RefObject } from 'react';
 import { VerticalPaneResizer } from '@/components/layout/VerticalPaneResizer';
 import { cn } from '@/lib/utils';
 import { ChatInput } from '../ChatInput';
 import { TaskInboxPanel } from './TaskInboxPanel';
 import { AgentSkillConfigDialog } from './AgentSkillConfigDialog';
-import { ChatList } from './ChatList';
 import { ChatHeaderBar } from './ChatHeaderBar';
 import { ChatApprovalDock, ChatErrorBanner } from './ChatRuntimeDock';
 
@@ -16,7 +15,7 @@ interface ChatShellProps {
   onTaskInboxResizeStart: ComponentProps<typeof VerticalPaneResizer>['onMouseDown'];
   onToggleTaskInbox: () => void;
   headerProps: ComponentProps<typeof ChatHeaderBar>;
-  listProps: ComponentProps<typeof ChatList>;
+  threadPanel: ReactNode;
   errorBannerProps: ComponentProps<typeof ChatErrorBanner> | null;
   approvalDockProps: ComponentProps<typeof ChatApprovalDock> | null;
   inputProps: ComponentProps<typeof ChatInput>;
@@ -31,7 +30,7 @@ export function ChatShell({
   onTaskInboxResizeStart,
   onToggleTaskInbox,
   headerProps,
-  listProps,
+  threadPanel,
   errorBannerProps,
   approvalDockProps,
   inputProps,
@@ -52,7 +51,7 @@ export function ChatShell({
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-card">
         <ChatHeaderBar {...headerProps} />
 
-        <ChatList {...listProps} />
+        {threadPanel}
 
         {errorBannerProps && (
           <ChatErrorBanner {...errorBannerProps} />

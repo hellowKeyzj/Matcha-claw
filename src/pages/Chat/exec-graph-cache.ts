@@ -18,6 +18,17 @@ type IdleCallback = (deadline: IdleDeadlineLike) => void;
 export const globalSessionExecutionCache = new Map<string, SessionExecutionCache>();
 export const globalSubagentHistoryBySession = new Map<string, RawMessage[]>();
 
+export interface ExecutionGraphCacheStats {
+  cachedSessionCount: number;
+  cachedGraphCount: number;
+  cachedSuppressedRowKeyCount: number;
+  graphSignatureCacheEntryCount: number;
+  mainStepCacheEntryCount: number;
+  childStepCacheEntryCount: number;
+  subagentHistorySessionCount: number;
+  subagentHistoryMessageCount: number;
+}
+
 export function rememberSessionExecutionCache(sessionKey: string, cache: SessionExecutionCache): void {
   if (globalSessionExecutionCache.has(sessionKey)) {
     globalSessionExecutionCache.delete(sessionKey);
@@ -68,4 +79,36 @@ export function snapshotExecutionGraphs(executionGraphs: ExecutionGraphData[]): 
 
 export function snapshotSuppressedToolCardRowKeys(keys: Set<string>): Set<string> {
   return keys.size > 0 ? new Set(keys) : EMPTY_SUPPRESSED_KEYS;
+}
+
+export function getExecutionGraphCacheStats(): ExecutionGraphCacheStats {
+  let cachedGraphCount = 0;
+  let cachedSuppressedRowKeyCount = 0;
+  let graphSignatureCacheEntryCount = 0;
+  let mainStepCacheEntryCount = 0;
+  let childStepCacheEntryCount = 0;
+
+  for (const cache of globalSessionExecutionCache.values()) {
+    cachedGraphCount += cache.executionGraphs.length;
+    cachedSuppressedRowKeyCount += cache.suppressedToolCardRowKeys.size;
+    graphSignatureCacheEntryCount += cache.graphCacheBySignature.size;
+    mainStepCacheEntryCount += cache.mainStepsCacheBySignature.size;
+    childStepCacheEntryCount += cache.childStepsCacheBySignature.size;
+  }
+
+  let subagentHistoryMessageCount = 0;
+  for (const messages of globalSubagentHistoryBySession.values()) {
+    subagentHistoryMessageCount += messages.length;
+  }
+
+  return {
+    cachedSessionCount: globalSessionExecutionCache.size,
+    cachedGraphCount,
+    cachedSuppressedRowKeyCount,
+    graphSignatureCacheEntryCount,
+    mainStepCacheEntryCount,
+    childStepCacheEntryCount,
+    subagentHistorySessionCount: globalSubagentHistoryBySession.size,
+    subagentHistoryMessageCount,
+  };
 }

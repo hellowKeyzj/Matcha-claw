@@ -4,30 +4,33 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useCallback, useRef } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useShallow } from 'zustand/react/shallow';
+import { useChatStore } from '@/stores/chat';
+import { selectChatLiveThreadHostKeys } from '@/stores/chat/selectors';
 import { ChatShell } from './components/ChatShell';
 import { ChatOffline } from './components/ChatOffline';
-import { buildChatAutoFollowSignal } from './chat-auto-follow';
+import { ChatThreadPane, type ChatThreadPaneHandle } from './components/ChatThreadPane';
 import { useInboxLayout } from './useInboxLayout';
-import { useChatRealtimePerfMetrics } from './useChatPerf';
-import { useChatFirstPaint } from './useFirstPaint';
-import { useChatRenderItems } from './chat-render-items';
-import { useRowsPipeline } from './useRowsPipeline';
-import { useChatInit } from './useChatInit';
+import { useChatActivation } from './useChatActivation';
 import { useSkillConfig } from './useSkillConfig';
 import { useChatView } from './useChatView';
 import { useChatPageModel } from './useChatPageModel';
-import { useChatListCtl } from './useChatListCtl';
 import { useChatShellProps } from './useChatShellProps';
 import { useChatProjection } from './useChatProjection';
 
-export function Chat() {
+interface ChatProps {
+  isActive?: boolean;
+}
+
+export function Chat({ isActive = true }: ChatProps) {
   const { t } = useTranslation('chat');
   const location = useLocation();
   const navigate = useNavigate();
+  const liveSessionHostKeys = useChatStore(useShallow(selectChatLiveThreadHostKeys));
   const {
     isGatewayRunning,
     gatewayRpc,
@@ -65,8 +68,6 @@ export function Chat() {
     pendingUserMessage,
     streamingMessage,
     streamingTools,
-    pendingFinal,
-    lastUserMessageAt,
     currentPendingApprovals,
   } = runtimeState;
   const {
@@ -81,43 +82,10 @@ export function Chat() {
     cleanupEmptySession,
   } = actions;
 
-  const messagesViewportRef = useRef<HTMLDivElement>(null);
-  const messageContentRef = useRef<HTMLDivElement>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
-  const markScrollActivityRef = useRef<() => void>(() => {});
-  const streamingTimestamp = lastUserMessageAt != null ? (lastUserMessageAt / 1000) : 0;
-  const projection = useChatProjection({
-    currentSessionKey,
-    liveMessages: canonicalMessages,
-    gatewayRpc,
-  });
-  const projectionScopeKey = projection.projectionScopeKey;
-  const runtimeSending = projection.isHistoryProjection ? false : sending;
-  const runtimePendingFinal = projection.isHistoryProjection ? false : pendingFinal;
-  const runtimeWaitingApproval = projection.isHistoryProjection ? false : waitingApproval;
-  const runtimePendingUserMessage = projection.isHistoryProjection ? null : pendingUserMessage;
-  const runtimeStreamingMessage = projection.isHistoryProjection ? null : streamingMessage;
-  const runtimeStreamingTools = projection.isHistoryProjection ? [] : streamingTools;
-  const {
-    taskInboxCollapsed,
-    setTaskInboxCollapsed,
-    taskInboxWidth,
-    startTaskInboxResize,
-    taskInboxResizerWidth,
-  } = useInboxLayout(chatLayoutRef);
-  const sessionPipelineCostRef = useRef<{
-    sessionKey: string;
-    rowSliceMs: number;
-    staticRowsMs: number;
-    runtimeRowsMs: number;
-  }>({
-    sessionKey: currentSessionKey,
-    rowSliceMs: 0,
-    staticRowsMs: 0,
-    runtimeRowsMs: 0,
-  });
-
-  useChatInit({
+  const threadPaneRef = useRef<ChatThreadPaneHandle>(null);
+  const activation = useChatActivation({
+    isActive,
     isGatewayRunning,
     locationSearch: location.search,
     navigate,
@@ -128,113 +96,63 @@ export function Chat() {
     loadHistory,
     cleanupEmptySession,
   });
-
-  const {
-    chatRows,
-    suppressedToolCardRowKeys,
-    hiddenHistoryCount,
-    rowSliceCostMs,
-    runtimeRowsCostMs,
-  } = useRowsPipeline({
-    projectionScopeKey,
-    rowSessionKey: currentSessionKey,
-    canonicalMessages,
-    projectionMessages: projection.messages,
-    isHistoryProjection: projection.isHistoryProjection,
-    agents,
-    isGatewayRunning,
+  const projection = useChatProjection({
+    currentSessionKey,
+    liveMessages: canonicalMessages,
     gatewayRpc,
-    sending: runtimeSending,
-    pendingFinal: runtimePendingFinal,
-    waitingApproval: runtimeWaitingApproval,
-    showThinking,
-    pendingUserMessage: runtimePendingUserMessage,
-    streamingMessage: runtimeStreamingMessage,
-    streamingTools: runtimeStreamingTools,
-    streamingTimestamp,
-    sessionPipelineCostRef,
   });
-  const autoFollowSignal = projection.isHistoryProjection
-    ? `${projectionScopeKey}|history`
-    : buildChatAutoFollowSignal(chatRows);
-  const tailActivityOpen = !projection.isHistoryProjection && (
-    runtimeSending
-    || runtimePendingFinal
-    || runtimePendingUserMessage != null
-    || runtimeStreamingMessage != null
-    || runtimeStreamingTools.length > 0
-  );
-  const {
-    handleViewportPointerDown,
-    handleViewportTouchMove,
-    handleViewportWheel,
-    handleViewportScroll,
-    scrollToRowKey,
-    prepareScopeAnchorRestore,
-    prepareScopeBottomAlign,
-  } = useChatListCtl({
-    scrollScopeKey: projectionScopeKey,
-    scrollResetKey: currentSessionKey,
-    autoFollowSignal,
-    tailActivityOpen,
-    messagesViewportRef,
-    messageContentRef,
-    markScrollActivity: () => markScrollActivityRef.current(),
-  });
-  const chatItems = useChatRenderItems(projectionScopeKey, chatRows);
 
-  const handleOpenHistoryProjection = useCallback(() => {
-    prepareScopeAnchorRestore(`${currentSessionKey}::history`);
-    projection.enterHistory();
-  }, [currentSessionKey, prepareScopeAnchorRestore, projection]);
+  const {
+    taskInboxCollapsed,
+    setTaskInboxCollapsed,
+    taskInboxWidth,
+    startTaskInboxResize,
+    taskInboxResizerWidth,
+  } = useInboxLayout(activation.layoutEffectsActive, chatLayoutRef);
 
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
   ) => {
     if (projection.isHistoryProjection) {
-      prepareScopeBottomAlign(`${currentSessionKey}::live`);
+      threadPaneRef.current?.prepareCurrentLiveBottomAlign();
       flushSync(() => {
         projection.returnToLive();
       });
     }
     await sendMessage(text, attachments);
-  }, [currentSessionKey, prepareScopeBottomAlign, projection, sendMessage]);
+  }, [projection, sendMessage]);
+
+  const inputRowCount = useMemo(() => {
+    const historyMessageCount = projection.messages.length;
+    if (projection.isHistoryProjection) {
+      return historyMessageCount;
+    }
+    let runtimeRowCount = historyMessageCount;
+    if (pendingUserMessage) {
+      runtimeRowCount += 1;
+    }
+    if (streamingMessage || streamingTools.length > 0) {
+      runtimeRowCount += 1;
+    }
+    return runtimeRowCount;
+  }, [pendingUserMessage, projection, streamingMessage, streamingTools.length]);
 
   const liveView = useChatView({
     currentSessionKey,
     currentSessionReady,
     currentSessionHasActivity,
-    rowCount: chatRows.length,
-    sending: runtimeSending,
+    rowCount: inputRowCount,
+    sending: projection.isHistoryProjection ? false : sending,
     initialLoading,
     refreshing,
     mutating,
   });
-  const showBlockingLoading = projection.isHistoryProjection ? projection.loading : liveView.showBlockingLoading;
   const showBackgroundStatus = projection.isHistoryProjection ? false : liveView.showBackgroundStatus;
   const isEmptyState = projection.isHistoryProjection
-    ? !projection.loading && chatRows.length === 0
+    ? projection.messages.length === 0 && !projection.loading
     : liveView.isEmptyState;
 
-  useChatFirstPaint({
-    currentSessionKey: projectionScopeKey,
-    rowCount: chatRows.length,
-    isEmptyState,
-    showBlockingLoading,
-    rowSliceCostMs,
-    sessionPipelineCostRef,
-  });
-
-  const { markScrollActivity } = useChatRealtimePerfMetrics({
-    currentSessionKey: projectionScopeKey,
-    sending: runtimeSending,
-    streamingMessage: runtimeStreamingMessage,
-    streamingTools: runtimeStreamingTools,
-    runtimeRowsCostMs,
-    chatRowRenderSignal: chatRows,
-  });
-  markScrollActivityRef.current = markScrollActivity;
   const {
     open: skillConfigOpen,
     saving: skillConfigSaving,
@@ -253,6 +171,29 @@ export function Chat() {
     fetchSkills,
     updateAgent,
   });
+
+  const threadPanel = (
+    <ChatThreadPane
+      ref={threadPaneRef}
+      isActive={activation.workspaceActive}
+      currentSessionKey={currentSessionKey}
+      liveSessionHostKeys={liveSessionHostKeys}
+      readProjection={projection.readProjection}
+      historyMessages={projection.messages}
+      historyLoading={projection.loading}
+      agents={agents}
+      isGatewayRunning={isGatewayRunning}
+      gatewayRpc={gatewayRpc}
+      initialLoading={initialLoading}
+      refreshing={refreshing}
+      mutating={mutating}
+      showThinking={showThinking}
+      userAvatarDataUrl={userAvatarDataUrl}
+      onEnterHistory={projection.enterHistory}
+      viewFullHistoryLabel={t('liveThread.viewFullHistory')}
+    />
+  );
+
   const chatShellProps = useChatShellProps({
     t,
     chatLayoutRef,
@@ -265,29 +206,12 @@ export function Chat() {
     refreshing,
     hasCurrentAgent: Boolean(currentAgent),
     openSkillConfigDialog,
-    messagesViewportRef,
-    messageContentRef,
+    threadPanel,
     isEmptyState,
-    showBlockingLoading,
-    handleViewportPointerDown,
-    handleViewportScroll,
-    handleViewportTouchMove,
-    handleViewportWheel,
-    chatItems,
-    hiddenHistoryCount,
-    isHistoryProjection: projection.isHistoryProjection,
-    onViewHistory: handleOpenHistoryProjection,
-    showThinking,
-    assistantAgentId: currentAgentId,
-    assistantAgentName: currentAgent?.name || currentAgentId,
-    assistantAvatarSeed: currentAgent?.avatarSeed,
-    assistantAvatarStyle: currentAgent?.avatarStyle,
-    userAvatarDataUrl,
-    suppressedToolCardRowKeys,
-    scrollToRowKey,
     error: projection.error ?? error,
     clearError,
-    waitingApproval: runtimeWaitingApproval,
+    waitingApproval: projection.isHistoryProjection ? false : waitingApproval,
+    isHistoryProjection: projection.isHistoryProjection,
     currentPendingApprovals,
     resolveApproval,
     sendMessage: handleSendMessage,
@@ -306,7 +230,6 @@ export function Chat() {
     saveSkillConfig,
   });
 
-  // Gateway not running
   if (!isGatewayRunning) {
     return (
       <ChatOffline

@@ -2,22 +2,13 @@ import { useMemo } from 'react';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import {
   appendRuntimeChatRows,
-  appendMessageRows,
-  buildStaticChatRowsWithMeta,
-  canAppendMessageList,
-  canPrependMessageList,
-  prependMessageRows,
   type ChatRow,
   type ExecutionGraphData,
 } from './chat-row-model';
-import { getSessionCacheValue, rememberSessionCacheValue } from './chat-session-cache';
-
-interface SessionStaticRowsCache {
-  messagesRef: RawMessage[];
-  executionGraphsRef: ExecutionGraphData[];
-  rows: ChatRow[];
-  renderableCount: number;
-}
+import {
+  getOrBuildStaticRowsCacheEntry,
+  peekStaticRowsCacheEntry,
+} from './chat-rows-cache';
 
 interface UseChatRowsInput {
   currentSessionKey: string;
@@ -38,8 +29,6 @@ interface UseChatRowsResult {
   staticRowsCostMs: number;
   runtimeRowsCostMs: number;
 }
-
-const globalStaticRowsCache = new Map<string, SessionStaticRowsCache>();
 
 function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -68,69 +57,17 @@ export function useChatRows(
   const staticRowsResult = useMemo(
     () => {
       const startedAt = nowMs();
-      const previousCache = getSessionCacheValue(globalStaticRowsCache, currentSessionKey);
-      if (
-        previousCache
-        && previousCache.messagesRef === rowSourceMessages
-        && previousCache.executionGraphsRef === executionGraphs
-      ) {
+      const cached = peekStaticRowsCacheEntry(currentSessionKey, rowSourceMessages, executionGraphs);
+      if (cached) {
         return {
-          rows: previousCache.rows,
+          rows: cached.rows,
           costMs: Math.max(0, nowMs() - startedAt),
         };
       }
-
-      let rows: ChatRow[];
-      let renderableCount: number;
-      const canIncrementalAppend = Boolean(
-        previousCache
-        && previousCache.executionGraphsRef === executionGraphs
-        && canAppendMessageList(previousCache.messagesRef, rowSourceMessages),
-      );
-      const canIncrementalPrepend = Boolean(
-        previousCache
-        && previousCache.executionGraphsRef === executionGraphs
-        && canPrependMessageList(previousCache.messagesRef, rowSourceMessages),
-      );
-      if (canIncrementalAppend && previousCache) {
-        const appended = appendMessageRows(
-          currentSessionKey,
-          previousCache.rows,
-          rowSourceMessages,
-          previousCache.messagesRef.length,
-          previousCache.renderableCount,
-        );
-        rows = appended.rows;
-        renderableCount = appended.renderableCount;
-      } else if (canIncrementalPrepend && previousCache) {
-        const prepended = prependMessageRows(
-          currentSessionKey,
-          previousCache.rows,
-          rowSourceMessages,
-          rowSourceMessages.length - previousCache.messagesRef.length,
-          previousCache.renderableCount,
-        );
-        rows = prepended.rows;
-        renderableCount = prepended.renderableCount;
-      } else {
-        const built = buildStaticChatRowsWithMeta({
-          sessionKey: currentSessionKey,
-          messages: rowSourceMessages,
-          executionGraphs,
-        });
-        rows = built.rows;
-        renderableCount = built.renderableCount;
-      }
-
-      rememberSessionCacheValue(globalStaticRowsCache, currentSessionKey, {
-        messagesRef: rowSourceMessages,
-        executionGraphsRef: executionGraphs,
-        rows,
-        renderableCount,
-      });
+      const next = getOrBuildStaticRowsCacheEntry(currentSessionKey, rowSourceMessages, executionGraphs);
 
       return {
-        rows,
+        rows: next.rows,
         costMs: Math.max(0, nowMs() - startedAt),
       };
     },
@@ -177,3 +114,5 @@ export function useChatRows(
     runtimeRowsCostMs: runtimeRowsResult.costMs,
   };
 }
+
+export { getStaticRowsCacheStats } from './chat-rows-cache';

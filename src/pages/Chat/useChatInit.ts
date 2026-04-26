@@ -73,6 +73,7 @@ function toErrorMessage(error: unknown): string {
 }
 
 interface UseChatInitInput {
+  isActive: boolean;
   isGatewayRunning: boolean;
   locationSearch: string;
   navigate: NavigateFunction;
@@ -86,6 +87,7 @@ interface UseChatInitInput {
 
 export function useChatInit(input: UseChatInitInput): void {
   const {
+    isActive,
     isGatewayRunning,
     locationSearch,
     navigate,
@@ -103,7 +105,7 @@ export function useChatInit(input: UseChatInitInput): void {
   const sessionsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!isGatewayRunning) return;
+    if (!isActive || !isGatewayRunning) return;
     let cancelled = false;
     const scheduleAgentsRetry = (attempt = 1) => {
       if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS) {
@@ -279,6 +281,7 @@ export function useChatInit(input: UseChatInitInput): void {
     };
   }, [
     cleanupEmptySession,
+    isActive,
     isGatewayRunning,
     loadAgents,
     loadHistory,

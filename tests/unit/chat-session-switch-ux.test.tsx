@@ -382,6 +382,51 @@ describe('chat 会话切换 UX', () => {
     expect(document.querySelector('[data-chat-body-mode="lite"]')).toBeNull();
   });
 
+  it('切到已就绪长消息会话时，不应在切换瞬间同步重算整批 markdown', async () => {
+    vi.useFakeTimers();
+    try {
+      const messages = Array.from({ length: 32 }, (_, index) => ({
+        role: index % 2 === 0 ? 'assistant' : 'user',
+        content: index % 2 === 0 ? buildHeavyMarkdownMessage(index + 1) : `user message ${index + 1}`,
+        timestamp: (Date.now() / 1000) + index,
+        id: `warm-heavy-${index + 1}`,
+      }));
+
+      useChatStore.setState({
+        sessionsByKey: {
+          ...useChatStore.getState().sessionsByKey,
+          'agent:another:main': createSessionRecord({
+            transcript: messages,
+            ready: true,
+            lastActivityAt: Date.now(),
+          }),
+        },
+      } as never);
+
+      renderChat();
+
+      await act(async () => {
+        for (let round = 0; round < 12; round += 1) {
+          vi.runOnlyPendingTimers();
+          await Promise.resolve();
+        }
+      });
+
+      clearUiTelemetry();
+
+      act(() => {
+        useChatStore.getState().switchSession('agent:another:main');
+      });
+
+      expect(screen.getByText(/message-3-line-0/i)).toBeInTheDocument();
+      expect(
+        getUiTelemetrySnapshot().filter((entry) => entry.event === 'chat.md_process_cost'),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('切会话首屏时应先完成 live thread 首绘，再延后 execution graph 计算', async () => {
     vi.useFakeTimers();
     try {

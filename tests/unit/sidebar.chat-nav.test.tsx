@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
@@ -129,7 +129,7 @@ function setupSidebarState() {
 }
 
 describe('sidebar chat nav', () => {
-  it('from non-chat routes, clicking chat only navigates and does not create new session', () => {
+  it('from non-chat routes, clicking chat only navigates and does not create new session', async () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
@@ -151,7 +151,9 @@ describe('sidebar chat nav', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New Chat' }));
 
     expect(newSession).not.toHaveBeenCalled();
-    expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+    await waitFor(() => {
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/');
+    });
   });
 
   it('on chat route, clicking chat creates new session when current session has messages', () => {
@@ -178,7 +180,7 @@ describe('sidebar chat nav', () => {
     expect(newSession).toHaveBeenCalledTimes(1);
   });
 
-  it('renders pending question cards and navigates to team detail', () => {
+  it('renders pending question cards and navigates to team detail', async () => {
     setupSidebarState();
     useTeamsStore.setState({
       teams: [
@@ -211,7 +213,9 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText('Session Blockers')).toBeInTheDocument();
     expect(screen.getByText('Task task-123')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Task task-123/i }));
-    expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+    await waitFor(() => {
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/teams/team-1');
+    });
   });
 
   it('hides question blocker when the same task has a newer decision', () => {
@@ -257,7 +261,7 @@ describe('sidebar chat nav', () => {
     expect(screen.queryByText('Task task-456')).not.toBeInTheDocument();
   });
 
-  it('renders chat approval blockers and navigates to target chat session', () => {
+  it('renders chat approval blockers and navigates to target chat session', async () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -286,6 +290,8 @@ describe('sidebar chat nav', () => {
 
     expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Approval Blocker · browser.fetch/i }));
-    expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
+    await waitFor(() => {
+      expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
+    });
   });
 });

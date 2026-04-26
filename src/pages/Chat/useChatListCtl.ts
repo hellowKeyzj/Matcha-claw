@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useChatScroll } from './useChatScroll';
 
 interface UseChatListCtlInput {
+  enabled: boolean;
   scrollScopeKey: string;
   scrollResetKey: string;
   autoFollowSignal: string;
@@ -31,6 +32,7 @@ function areRowKeySetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string
 
 export function useChatListCtl(input: UseChatListCtlInput) {
   const {
+    enabled,
     scrollScopeKey,
     scrollResetKey,
     autoFollowSignal,
@@ -52,6 +54,7 @@ export function useChatListCtl(input: UseChatListCtlInput) {
     scrollDirection,
     scrollEventSeq,
   } = useChatScroll({
+    enabled,
     scrollScopeKey,
     scrollResetKey,
     autoFollowSignal,
@@ -65,6 +68,9 @@ export function useChatListCtl(input: UseChatListCtlInput) {
   const rafIdRef = useRef<number | null>(null);
 
   const sampleRowKeys = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     const viewport = messagesViewportRef.current;
     if (!viewport) {
       setVisibleRowKeys((previous) => (previous.size === 0 ? previous : EMPTY_ROW_KEYS));
@@ -110,9 +116,12 @@ export function useChatListCtl(input: UseChatListCtlInput) {
 
     setVisibleRowKeys((previous) => (areRowKeySetsEqual(previous, nextVisible) ? previous : nextVisible));
     setPreheatRowKeys((previous) => (areRowKeySetsEqual(previous, nextPreheat) ? previous : nextPreheat));
-  }, [messagesViewportRef, scrollDirection, scrollIdle]);
+  }, [enabled, messagesViewportRef, scrollDirection, scrollIdle]);
 
   const scheduleSample = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
       sampleRowKeys();
       return;
@@ -124,7 +133,7 @@ export function useChatListCtl(input: UseChatListCtlInput) {
       rafIdRef.current = null;
       sampleRowKeys();
     });
-  }, [sampleRowKeys]);
+  }, [enabled, sampleRowKeys]);
 
   const handleViewportScrollCombined = useCallback(() => {
     markScrollActivity();
@@ -158,20 +167,29 @@ export function useChatListCtl(input: UseChatListCtlInput) {
 
   useLayoutEffect(() => {
     scheduleSample();
-  }, [scheduleSample, scrollScopeKey]);
+  }, [enabled, scheduleSample, scrollScopeKey]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     if (scrollEventSeq <= 0) {
       return;
     }
     scheduleSample();
-  }, [scheduleSample, scrollEventSeq]);
+  }, [enabled, scheduleSample, scrollEventSeq]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     scheduleSample();
-  }, [scheduleSample, scrollDirection, scrollIdle]);
+  }, [enabled, scheduleSample, scrollDirection, scrollIdle]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const viewport = messagesViewportRef.current;
     const content = messageContentRef.current;
     if (typeof ResizeObserver !== 'function' || (!viewport && !content)) {
@@ -187,7 +205,7 @@ export function useChatListCtl(input: UseChatListCtlInput) {
       observer.observe(content);
     }
     return () => observer.disconnect();
-  }, [messageContentRef, messagesViewportRef, scheduleSample]);
+  }, [enabled, messageContentRef, messagesViewportRef, scheduleSample]);
 
   useEffect(() => () => {
     if (rafIdRef.current != null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {

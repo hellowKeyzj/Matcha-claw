@@ -27,6 +27,7 @@ interface TokenRenderSampleState {
 }
 
 interface UseChatRealtimePerfMetricsInput {
+  enabled: boolean;
   currentSessionKey: string;
   sending: boolean;
   streamingMessage: unknown | null;
@@ -53,6 +54,7 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
   markScrollActivity: () => void;
 } {
   const {
+    enabled,
     currentSessionKey,
     sending,
     streamingMessage,
@@ -115,6 +117,9 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
   }, [currentSessionKey]);
 
   const markScrollActivity = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
       return;
     }
@@ -159,11 +164,15 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
     };
 
     sample.rafId = window.requestAnimationFrame(tick);
-  }, [currentSessionKey, stopScrollFpsSampler]);
+  }, [currentSessionKey, enabled, stopScrollFpsSampler]);
 
   useEffect(() => {
+    if (!enabled) {
+      stopScrollFpsSampler('session-change');
+      return;
+    }
     stopScrollFpsSampler('session-change');
-  }, [currentSessionKey, stopScrollFpsSampler]);
+  }, [currentSessionKey, enabled, stopScrollFpsSampler]);
 
   useEffect(() => {
     return () => {
@@ -204,6 +213,10 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      finalizeTokenRenderSample('session-change');
+      return;
+    }
     const sample = tokenRenderSampleRef.current;
     if (!sending) {
       finalizeTokenRenderSample('send-complete');
@@ -224,7 +237,7 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
       sample.lastStreamingMessageRef = streamingMessage;
       sample.lastStreamingToolsRef = streamingTools;
     }
-  }, [currentSessionKey, finalizeTokenRenderSample, sending, streamingMessage, streamingTools]);
+  }, [currentSessionKey, enabled, finalizeTokenRenderSample, sending, streamingMessage, streamingTools]);
 
   useEffect(() => {
     return () => {
@@ -233,6 +246,9 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
   }, [finalizeTokenRenderSample]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const sample = tokenRenderSampleRef.current;
     if (!sample.active || !sending || sample.sessionKey !== currentSessionKey || runtimeRowsCostMs <= 0) {
       return;
@@ -240,17 +256,23 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
     sample.batchCount += 1;
     sample.totalBatchCostMs += runtimeRowsCostMs;
     sample.maxBatchCostMs = Math.max(sample.maxBatchCostMs, runtimeRowsCostMs);
-  }, [currentSessionKey, runtimeRowsCostMs, sending]);
+  }, [currentSessionKey, enabled, runtimeRowsCostMs, sending]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const sample = tokenRenderSampleRef.current;
     if (!sample.active || !sending || sample.sessionKey !== currentSessionKey) {
       return;
     }
     sample.renderPassCount += 1;
-  }, [chatRowRenderSignal, currentSessionKey, sending]);
+  }, [chatRowRenderSignal, currentSessionKey, enabled, sending]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const sample = tokenRenderSampleRef.current;
     if (!sample.active || !sending || sample.sessionKey !== currentSessionKey) {
       return;
@@ -262,7 +284,7 @@ export function useChatRealtimePerfMetrics(input: UseChatRealtimePerfMetricsInpu
       sample.lastStreamingMessageRef = streamingMessage;
       sample.lastStreamingToolsRef = streamingTools;
     }
-  }, [currentSessionKey, sending, streamingMessage, streamingTools]);
+  }, [currentSessionKey, enabled, sending, streamingMessage, streamingTools]);
 
   return {
     markScrollActivity,

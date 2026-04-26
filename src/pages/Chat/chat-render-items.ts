@@ -14,6 +14,11 @@ interface SessionRenderItemsCache {
 
 const globalRenderItemsCache = new Map<string, SessionRenderItemsCache>();
 
+export interface RenderItemsCacheStats {
+  cachedSessionCount: number;
+  cachedItemCount: number;
+}
+
 export function buildChatRenderItems(rows: ChatRow[]): ChatRenderItem[] {
   return rows.map((row) => ({
     key: row.key,
@@ -38,4 +43,16 @@ export function useChatRenderItems(
     });
     return items;
   }, [currentSessionKey, rows]);
+}
+
+export function getRenderItemsCacheStats(): RenderItemsCacheStats {
+  let cachedItemCount = 0;
+  for (const cache of globalRenderItemsCache.values()) {
+    cachedItemCount += cache.items.length;
+  }
+
+  return {
+    cachedSessionCount: globalRenderItemsCache.size,
+    cachedItemCount,
+  };
 }
