@@ -58,7 +58,7 @@ describe('plugins store', () => {
     hostApiFetchMock.mockReset();
   });
 
-  it('首次无缓存时走 initialLoading，并在成功后写入快照', async () => {
+  it('首次加载时 runtime 和 catalog 分层写入，不再等整份 snapshot', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
         return buildRuntimePayload();
@@ -70,20 +70,25 @@ describe('plugins store', () => {
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
-    expect(usePluginsStore.getState().snapshotReady).toBe(false);
-    expect(usePluginsStore.getState().initialLoading).toBe(true);
+    expect(usePluginsStore.getState().runtimeReady).toBe(false);
+    expect(usePluginsStore.getState().catalogReady).toBe(false);
 
-    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial' });
+    await usePluginsStore.getState().refreshRuntime({ reason: 'initial' });
 
-    const state = usePluginsStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
+    let state = usePluginsStore.getState();
+    expect(state.runtimeReady).toBe(true);
+    expect(state.catalogReady).toBe(false);
+    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
+
+    await usePluginsStore.getState().refreshCatalog({ reason: 'initial' });
+
+    state = usePluginsStore.getState();
+    expect(state.catalogReady).toBe(true);
+    expect(state.catalog).toHaveLength(1);
     expect(state.error).toBeNull();
-    expect(state.pluginSnapshot.plugins).toHaveLength(1);
   });
 
-  it('有缓存时刷新失败保留旧快照，不回退空白', async () => {
+  it('有缓存时 refreshSnapshot 失败保留旧 runtime 和 catalog', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
         return buildRuntimePayload();
@@ -93,21 +98,42 @@ describe('plugins store', () => {
       }
       throw new Error(`unexpected path: ${path}`);
     });
+
     const { usePluginsStore } = await import('@/stores/plugins-store');
-    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial' });
+    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
 
     hostApiFetchMock.mockRejectedValue(new Error('network error'));
-    await expect(usePluginsStore.getState().refreshSnapshot({ reason: 'manual' })).rejects.toThrow();
+    await expect(usePluginsStore.getState().refreshSnapshot({ reason: 'manual', force: true })).rejects.toThrow();
 
     const state = usePluginsStore.getState();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.pluginSnapshot.plugins).toHaveLength(1);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
+    expect(state.runtimeReady).toBe(true);
+    expect(state.catalogReady).toBe(true);
+    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
+    expect(state.catalog).toHaveLength(1);
     expect(state.error).toBe('plugins:errors.loadFailed');
   });
 
-  it('toggleExecution 后做 mutation refresh，并在结束后清理 mutating 状态', async () => {
+  it('缓存新鲜时 prewarm 不重复请求插件数据', async () => {
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/plugins/runtime') {
+        return buildRuntimePayload();
+      }
+      if (path === '/api/plugins/catalog') {
+        return buildCatalogPayload();
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    const { usePluginsStore } = await import('@/stores/plugins-store');
+    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
+    hostApiFetchMock.mockClear();
+
+    await usePluginsStore.getState().prewarm();
+
+    expect(hostApiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('toggleExecution 后刷新 runtime 与 catalog，并在结束后清理 mutating 状态', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
         return buildRuntimePayload({ executionEnabled: true, enabledPluginIds: ['plugin-a'] });
@@ -122,13 +148,13 @@ describe('plugins store', () => {
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
-    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial' });
+    await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
     await usePluginsStore.getState().toggleExecution(false);
 
     const state = usePluginsStore.getState();
     expect(state.mutating).toBe(false);
     expect(state.mutatingAction).toBeNull();
-    expect(state.pluginSnapshot.runtime?.execution.pluginExecutionEnabled).toBe(true);
+    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/execution', {
       method: 'PUT',
       body: JSON.stringify({ enabled: false }),

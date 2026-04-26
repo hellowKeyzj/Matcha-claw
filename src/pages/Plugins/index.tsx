@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -6,10 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useGatewayStore } from '@/stores/gateway';
 import { usePluginsStore } from '@/stores/plugins-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
+
+const PLUGINS_CATALOG_IDLE_TIMEOUT_MS = 320;
+const PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT = 12;
 
 function formatLifecycleLabel(lifecycle: string): string {
   switch (lifecycle) {
@@ -46,34 +50,59 @@ export function PluginsPage() {
   const { t } = useTranslation(['plugins', 'common']);
   const runtimeHostEventState = useGatewayStore((state) => state.runtimeHost);
   const initGatewayEvents = useGatewayStore((state) => state.init);
-  const pluginSnapshot = usePluginsStore((state) => state.pluginSnapshot);
-  const snapshotReady = usePluginsStore((state) => state.snapshotReady);
-  const initialLoading = usePluginsStore((state) => state.initialLoading);
+  const runtime = usePluginsStore((state) => state.runtime);
+  const catalog = usePluginsStore((state) => state.catalog);
+  const runtimeReady = usePluginsStore((state) => state.runtimeReady);
+  const catalogReady = usePluginsStore((state) => state.catalogReady);
+  const runtimePending = usePluginsStore((state) => state.runtimePending);
+  const catalogPending = usePluginsStore((state) => state.catalogPending);
   const refreshing = usePluginsStore((state) => state.refreshing);
   const refreshReason = usePluginsStore((state) => state.refreshReason);
   const mutating = usePluginsStore((state) => state.mutating);
   const mutatingAction = usePluginsStore((state) => state.mutatingAction);
   const mutatingPluginId = usePluginsStore((state) => state.mutatingPluginId);
   const error = usePluginsStore((state) => state.error);
+  const refreshRuntime = usePluginsStore((state) => state.refreshRuntime);
+  const refreshCatalog = usePluginsStore((state) => state.refreshCatalog);
   const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
   const restartHostAction = usePluginsStore((state) => state.restartHost);
   const toggleExecutionAction = usePluginsStore((state) => state.toggleExecution);
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
   const manualRefreshing = refreshing && refreshReason === 'manual';
   const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
+  const [catalogRenderReady, setCatalogRenderReady] = useState(
+    () => catalogReady && catalog.length <= PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT,
+  );
 
   useEffect(() => {
     void initGatewayEvents();
-    const hadSnapshot = usePluginsStore.getState().snapshotReady;
-    void refreshSnapshot({ reason: 'initial', silent: true }).catch(() => {
-      if (!hadSnapshot) {
+    const hadRuntime = usePluginsStore.getState().runtimeReady;
+    void refreshRuntime({ reason: 'initial' }).catch(() => {
+      if (!hadRuntime) {
         toast.error(t('plugins:errors.loadFailed'));
       }
     });
-  }, [initGatewayEvents, refreshSnapshot, t]);
+    void refreshCatalog({ reason: 'initial' }).catch(() => {});
+  }, [initGatewayEvents, refreshCatalog, refreshRuntime, t]);
 
-  const runtime = pluginSnapshot.runtime;
-  const plugins = pluginSnapshot.plugins;
+  useEffect(() => {
+    if (!catalogReady) {
+      setCatalogRenderReady(false);
+      return;
+    }
+    if (catalog.length <= PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT) {
+      setCatalogRenderReady(true);
+      return;
+    }
+    const cancel = scheduleIdleReady(() => {
+      setCatalogRenderReady(true);
+    }, {
+      idleTimeoutMs: PLUGINS_CATALOG_IDLE_TIMEOUT_MS,
+      fallbackDelayMs: 120,
+      useAnimationFrame: true,
+    });
+    return cancel;
+  }, [catalog.length, catalogReady]);
 
   const enabledPluginIds = useMemo(
     () => runtime?.execution.enabledPluginIds ?? [],
@@ -111,7 +140,7 @@ export function PluginsPage() {
 
   const refresh = useCallback(async () => {
     try {
-      await refreshSnapshot({ reason: 'manual' });
+      await refreshSnapshot({ reason: 'manual', force: true });
     } catch {
       toast.error(t('plugins:errors.loadFailed'));
     }
@@ -140,6 +169,10 @@ export function PluginsPage() {
       toast.error(t('plugins:errors.togglePluginFailed'));
     }
   }, [togglePluginEnabledAction, t]);
+
+  const showRuntimeLoading = !runtimeReady && runtimePending;
+  const showCatalogLoading = !catalogReady && catalogPending;
+  const showCatalogShell = catalogPending || (catalogReady && !catalogRenderReady);
 
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-4 md:p-6">
@@ -175,8 +208,12 @@ export function PluginsPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          {!snapshotReady && initialLoading ? (
-            <p className="text-sm text-muted-foreground">{t('common:status.loading')}</p>
+          {showRuntimeLoading ? (
+            <div className="space-y-2">
+              <div className="h-5 w-48 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-full animate-pulse rounded bg-muted" />
+              <div className="h-3 w-3/4 animate-pulse rounded bg-muted" />
+            </div>
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-2">
@@ -240,7 +277,7 @@ export function PluginsPage() {
             <Switch
               id="plugin-execution-toggle"
               checked={executionEnabled}
-              disabled={!snapshotReady || initialLoading || manualRefreshing || mutatingAction !== null}
+              disabled={!runtimeReady || runtimePending || manualRefreshing || mutatingAction !== null}
               onCheckedChange={(checked) => {
                 void toggleExecution(checked);
               }}
@@ -255,9 +292,27 @@ export function PluginsPage() {
           <CardDescription>{t('plugins:catalog.description')}</CardDescription>
         </CardHeader>
         <CardContent>
-          {!snapshotReady && initialLoading ? (
-            <p className="text-sm text-muted-foreground">{t('common:status.loading')}</p>
-          ) : plugins.length === 0 ? (
+          {showCatalogLoading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 5 }).map((_, index) => (
+                <div key={`plugin-catalog-loading-${index}`} className="rounded-md border border-border/70 px-3 py-3">
+                  <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-3/5 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-2/5 animate-pulse rounded bg-muted" />
+                </div>
+              ))}
+            </div>
+          ) : showCatalogShell ? (
+            <div className="space-y-3">
+              {Array.from({ length: Math.min(Math.max(catalog.length, 3), 6) }).map((_, index) => (
+                <div key={`plugin-catalog-shell-${index}`} className="rounded-md border border-border/70 px-3 py-3">
+                  <div className="h-4 w-44 animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-full animate-pulse rounded bg-muted" />
+                  <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-muted" />
+                </div>
+              ))}
+            </div>
+          ) : catalog.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t('plugins:catalog.empty')}</p>
           ) : (
             <div className="space-y-2">
@@ -269,7 +324,7 @@ export function PluginsPage() {
                 <span>{t('plugins:catalog.columns.version')}</span>
                 <span className="text-right">{t('plugins:catalog.columns.enabled')}</span>
               </div>
-              {plugins.map((plugin) => {
+              {catalog.map((plugin) => {
                 const channelManaged = plugin.controlMode === 'channel-config';
                 return (
                   <div
@@ -303,8 +358,8 @@ export function PluginsPage() {
                       <Switch
                         checked={enabledPluginIdSet.has(plugin.id)}
                         disabled={
-                          !snapshotReady
-                          || initialLoading
+                          !runtimeReady
+                          || runtimePending
                           || manualRefreshing
                           || mutatingAction !== null
                           || mutatingPluginId !== null

@@ -45,58 +45,99 @@ type CatalogPayload = {
   plugins: PluginCatalogItem[];
 };
 
-export type PluginSnapshot = {
-  runtime: RuntimePayload | null;
-  plugins: PluginCatalogItem[];
-};
-
 export type PluginRefreshReason = 'initial' | 'manual' | 'mutation' | 'background';
 
-const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
-
-const EMPTY_PLUGIN_SNAPSHOT: PluginSnapshot = {
-  runtime: null,
-  plugins: [],
+type PluginFetchOptions = {
+  force?: boolean;
+  reason?: PluginRefreshReason;
 };
 
-let pluginSnapshotCache: PluginSnapshot | null = null;
-let pluginSnapshotInflightTask: Promise<PluginSnapshot> | null = null;
-let latestPluginRefreshRequestId = 0;
+type PluginRefreshOptions = PluginFetchOptions & {
+  silent?: boolean;
+};
 
-function clonePluginSnapshot(snapshot: PluginSnapshot): PluginSnapshot {
-  return JSON.parse(JSON.stringify(snapshot)) as PluginSnapshot;
+const PLUGIN_LOAD_FAILED_KEY = 'plugins:errors.loadFailed';
+const PLUGIN_CACHE_FRESH_MS = 30_000;
+const EMPTY_CATALOG: PluginCatalogItem[] = [];
+
+let runtimeCache: RuntimePayload | null = null;
+let runtimeCacheUpdatedAt = 0;
+let catalogCache: PluginCatalogItem[] | null = null;
+let catalogCacheUpdatedAt = 0;
+let runtimeInflightTask: Promise<RuntimePayload> | null = null;
+let catalogInflightTask: Promise<PluginCatalogItem[]> | null = null;
+let latestRuntimeRequestId = 0;
+let latestCatalogRequestId = 0;
+let latestSnapshotRefreshRequestId = 0;
+
+function cloneValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function writePluginSnapshotCache(snapshot: PluginSnapshot): PluginSnapshot {
-  const cloned = clonePluginSnapshot(snapshot);
-  pluginSnapshotCache = cloned;
-  return cloned;
+function readRuntimeCache(): RuntimePayload | null {
+  return runtimeCache ? cloneValue(runtimeCache) : null;
 }
 
-async function fetchPluginSnapshotShared(): Promise<PluginSnapshot> {
-  if (pluginSnapshotInflightTask) {
-    return await pluginSnapshotInflightTask;
+function readCatalogCache(): PluginCatalogItem[] {
+  return catalogCache ? cloneValue(catalogCache) : cloneValue(EMPTY_CATALOG);
+}
+
+function writeRuntimeCache(payload: RuntimePayload): RuntimePayload {
+  runtimeCache = cloneValue(payload);
+  runtimeCacheUpdatedAt = Date.now();
+  return readRuntimeCache() as RuntimePayload;
+}
+
+function writeCatalogCache(plugins: PluginCatalogItem[]): PluginCatalogItem[] {
+  catalogCache = cloneValue(Array.isArray(plugins) ? plugins : EMPTY_CATALOG);
+  catalogCacheUpdatedAt = Date.now();
+  return readCatalogCache();
+}
+
+function hasFreshRuntimeCache(): boolean {
+  return runtimeCache !== null && (Date.now() - runtimeCacheUpdatedAt) < PLUGIN_CACHE_FRESH_MS;
+}
+
+function hasFreshCatalogCache(): boolean {
+  return catalogCache !== null && (Date.now() - catalogCacheUpdatedAt) < PLUGIN_CACHE_FRESH_MS;
+}
+
+async function fetchRuntimeShared(): Promise<RuntimePayload> {
+  if (runtimeInflightTask) {
+    return await runtimeInflightTask;
   }
 
   const task = (async () => {
-    const [runtimePayload, catalogPayload] = await Promise.all([
-      hostApiFetch<RuntimePayload>('/api/plugins/runtime'),
-      hostApiFetch<CatalogPayload>('/api/plugins/catalog'),
-    ]);
-
-    const snapshot: PluginSnapshot = {
-      runtime: runtimePayload,
-      plugins: Array.isArray(catalogPayload.plugins) ? catalogPayload.plugins : [],
-    };
-    return writePluginSnapshotCache(snapshot);
+    const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime');
+    return writeRuntimeCache(payload);
   })();
 
-  pluginSnapshotInflightTask = task;
+  runtimeInflightTask = task;
   try {
     return await task;
   } finally {
-    if (pluginSnapshotInflightTask === task) {
-      pluginSnapshotInflightTask = null;
+    if (runtimeInflightTask === task) {
+      runtimeInflightTask = null;
+    }
+  }
+}
+
+async function fetchCatalogShared(): Promise<PluginCatalogItem[]> {
+  if (catalogInflightTask) {
+    return await catalogInflightTask;
+  }
+
+  const task = (async () => {
+    const payload = await hostApiFetch<CatalogPayload>('/api/plugins/catalog');
+    return writeCatalogCache(Array.isArray(payload.plugins) ? payload.plugins : EMPTY_CATALOG);
+  })();
+
+  catalogInflightTask = task;
+  try {
+    return await task;
+  } finally {
+    if (catalogInflightTask === task) {
+      catalogInflightTask = null;
     }
   }
 }
@@ -106,16 +147,22 @@ function hasMutatingState(action: 'execution' | 'restart' | null, pluginId: stri
 }
 
 interface PluginsStoreState {
-  pluginSnapshot: PluginSnapshot;
-  snapshotReady: boolean;
-  initialLoading: boolean;
+  runtime: RuntimePayload | null;
+  catalog: PluginCatalogItem[];
+  runtimeReady: boolean;
+  catalogReady: boolean;
+  runtimePending: boolean;
+  catalogPending: boolean;
   refreshing: boolean;
   refreshReason: PluginRefreshReason | null;
   mutating: boolean;
   mutatingAction: 'execution' | 'restart' | null;
   mutatingPluginId: string | null;
   error: string | null;
-  refreshSnapshot: (options?: { reason?: PluginRefreshReason; silent?: boolean }) => Promise<void>;
+  prewarm: () => Promise<void>;
+  refreshRuntime: (options?: PluginFetchOptions) => Promise<void>;
+  refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
+  refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
   toggleExecution: (nextValue: boolean) => Promise<void>;
   togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
@@ -123,11 +170,12 @@ interface PluginsStoreState {
 }
 
 export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
-  pluginSnapshot: pluginSnapshotCache
-    ? clonePluginSnapshot(pluginSnapshotCache)
-    : clonePluginSnapshot(EMPTY_PLUGIN_SNAPSHOT),
-  snapshotReady: pluginSnapshotCache !== null,
-  initialLoading: pluginSnapshotCache === null,
+  runtime: readRuntimeCache(),
+  catalog: readCatalogCache(),
+  runtimeReady: runtimeCache !== null,
+  catalogReady: catalogCache !== null,
+  runtimePending: false,
+  catalogPending: false,
   refreshing: false,
   refreshReason: null,
   mutating: false,
@@ -135,51 +183,121 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   mutatingPluginId: null,
   error: null,
 
+  prewarm: async () => {
+    await Promise.allSettled([
+      get().refreshRuntime({ reason: 'background' }),
+      get().refreshCatalog({ reason: 'background' }),
+    ]);
+  },
+
+  refreshRuntime: async (options) => {
+    const reason = options?.reason ?? 'background';
+    const force = options?.force ?? (reason === 'manual' || reason === 'mutation');
+    if (!force && hasFreshRuntimeCache()) {
+      return;
+    }
+
+    const requestId = ++latestRuntimeRequestId;
+    set({ runtimePending: true, error: null });
+
+    try {
+      const runtime = await fetchRuntimeShared();
+      if (requestId !== latestRuntimeRequestId) {
+        return;
+      }
+      set({
+        runtime,
+        runtimeReady: true,
+        runtimePending: false,
+      });
+    } catch (error) {
+      if (requestId !== latestRuntimeRequestId) {
+        return;
+      }
+      set({
+        runtimePending: false,
+        error: PLUGIN_LOAD_FAILED_KEY,
+      });
+      throw error;
+    }
+  },
+
+  refreshCatalog: async (options) => {
+    const reason = options?.reason ?? 'background';
+    const force = options?.force ?? (reason === 'manual' || reason === 'mutation');
+    if (!force && hasFreshCatalogCache()) {
+      return;
+    }
+
+    const requestId = ++latestCatalogRequestId;
+    set({ catalogPending: true, error: null });
+
+    try {
+      const catalog = await fetchCatalogShared();
+      if (requestId !== latestCatalogRequestId) {
+        return;
+      }
+      set({
+        catalog,
+        catalogReady: true,
+        catalogPending: false,
+      });
+    } catch (error) {
+      if (requestId !== latestCatalogRequestId) {
+        return;
+      }
+      set({
+        catalogPending: false,
+        error: PLUGIN_LOAD_FAILED_KEY,
+      });
+      throw error;
+    }
+  },
+
   refreshSnapshot: async (options) => {
     const reason = options?.reason ?? 'background';
-    const requestId = ++latestPluginRefreshRequestId;
-    const hasSnapshot = get().snapshotReady;
-    const silent = options?.silent ?? ((reason === 'initial' || reason === 'background') && hasSnapshot);
-    if (hasSnapshot) {
+    const hasCachedData = get().runtimeReady || get().catalogReady;
+    const silent = options?.silent ?? ((reason === 'initial' || reason === 'background') && hasCachedData);
+    const requestId = ++latestSnapshotRefreshRequestId;
+
+    if (!silent) {
       set({
-        refreshing: !silent,
-        refreshReason: silent ? null : reason,
-        initialLoading: false,
-        error: null,
-      });
-    } else {
-      set({
-        initialLoading: true,
-        refreshing: false,
+        refreshing: true,
         refreshReason: reason,
         error: null,
       });
     }
 
     try {
-      const snapshot = await fetchPluginSnapshotShared();
-      if (requestId !== latestPluginRefreshRequestId) {
+      await Promise.all([
+        get().refreshRuntime({ reason, force: options?.force }),
+        get().refreshCatalog({ reason, force: options?.force }),
+      ]);
+      if (requestId !== latestSnapshotRefreshRequestId || silent) {
         return;
       }
       set({
-        pluginSnapshot: snapshot,
-        snapshotReady: true,
-        initialLoading: false,
         refreshing: false,
         refreshReason: null,
-        error: null,
       });
     } catch (error) {
-      if (requestId !== latestPluginRefreshRequestId) {
+      if (requestId !== latestSnapshotRefreshRequestId || silent) {
         return;
       }
       set({
-        initialLoading: false,
         refreshing: false,
         refreshReason: null,
         error: PLUGIN_LOAD_FAILED_KEY,
       });
       throw error;
+    } finally {
+      if (requestId === latestSnapshotRefreshRequestId && !silent) {
+        set((state) => ({
+          ...state,
+          refreshing: false,
+          refreshReason: null,
+        }));
+      }
     }
   },
 
@@ -187,17 +305,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     set({ mutatingAction: 'restart', mutating: true, error: null });
     try {
       const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/restart', { method: 'POST' });
-      set((state) => {
-        const nextSnapshot: PluginSnapshot = {
-          ...state.pluginSnapshot,
-          runtime: payload,
-        };
-        return {
-          pluginSnapshot: writePluginSnapshotCache(nextSnapshot),
-          snapshotReady: true,
-        };
+      set({
+        runtime: writeRuntimeCache(payload),
+        runtimeReady: true,
       });
-      await get().refreshSnapshot({ reason: 'mutation' });
+      await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });
     } finally {
       set((state) => {
         const nextAction = state.mutatingAction === 'restart' ? null : state.mutatingAction;
@@ -216,17 +328,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
         method: 'PUT',
         body: JSON.stringify({ enabled: nextValue }),
       });
-      set((state) => {
-        const nextSnapshot: PluginSnapshot = {
-          ...state.pluginSnapshot,
-          runtime: payload,
-        };
-        return {
-          pluginSnapshot: writePluginSnapshotCache(nextSnapshot),
-          snapshotReady: true,
-        };
+      set({
+        runtime: writeRuntimeCache(payload),
+        runtimeReady: true,
       });
-      await get().refreshSnapshot({ reason: 'mutation' });
+      await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });
     } finally {
       set((state) => {
         const nextAction = state.mutatingAction === 'execution' ? null : state.mutatingAction;
@@ -239,18 +345,18 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   },
 
   togglePluginEnabled: async (pluginId, nextEnabled) => {
-    const runtime = get().pluginSnapshot.runtime;
+    const runtime = get().runtime;
     if (!runtime) {
       return;
     }
-    const pluginSnapshot = get().pluginSnapshot.plugins;
-    const targetPlugin = pluginSnapshot.find((plugin) => plugin.id === pluginId);
+    const catalog = get().catalog;
+    const targetPlugin = catalog.find((plugin) => plugin.id === pluginId);
     if (targetPlugin?.controlMode === 'channel-config') {
       return;
     }
     const enabledPluginIds = runtime.execution.enabledPluginIds ?? [];
     const manuallyManagedEnabledPluginIds = enabledPluginIds.filter((enabledPluginId) => {
-      const plugin = pluginSnapshot.find((item) => item.id === enabledPluginId);
+      const plugin = catalog.find((item) => item.id === enabledPluginId);
       return plugin?.controlMode !== 'channel-config';
     });
     const nextIds = nextEnabled
@@ -262,17 +368,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
         method: 'PUT',
         body: JSON.stringify({ pluginIds: nextIds }),
       });
-      set((state) => {
-        const nextSnapshot: PluginSnapshot = {
-          ...state.pluginSnapshot,
-          runtime: payload,
-        };
-        return {
-          pluginSnapshot: writePluginSnapshotCache(nextSnapshot),
-          snapshotReady: true,
-        };
+      set({
+        runtime: writeRuntimeCache(payload),
+        runtimeReady: true,
       });
-      await get().refreshSnapshot({ reason: 'mutation' });
+      await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });
     } finally {
       set((state) => {
         const nextPluginId = state.mutatingPluginId === pluginId ? null : state.mutatingPluginId;
@@ -290,3 +390,7 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
       : { ...state, error: null }
   )),
 }));
+
+export async function prewarmPluginsData(): Promise<void> {
+  await usePluginsStore.getState().prewarm();
+}
