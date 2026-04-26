@@ -30,9 +30,10 @@ import { interceptEvent } from '../events/index.js'
 
 const log = createLogger('tabs')
 
-const CANCELLED_TABS_KEY = 'accio_cancelledTabs'
-
-let _sessionSeq = 0
+const TAB_MANAGER_STATE_KEY = 'accio_tabManagerState'
+const ALARM_TAB_RECOVERY = 'relayTabRecovery'
+const REATTACH_BASE_DELAY_MS = 1_000
+const REATTACH_MAX_DELAY_MS = 30_000
 
 const DEBUGGABLE_URL_RE = /^(https?|file):\/\//
 
@@ -41,8 +42,12 @@ function isDebuggableUrl(url) {
   return DEBUGGABLE_URL_RE.test(url) || url === 'about:blank'
 }
 
+function toNullableNumber(value) {
+  return Number.isInteger(value) ? value : null
+}
+
 export class TabManager {
-  /** @type {Map<number, {state: string, sessionId: string, targetId: string, url?: string, title?: string}>} */
+  /** @type {Map<number, {state: string, sessionId: string, targetKey: string, targetId: string, url?: string, title?: string, windowId?: number|null, active?: boolean}>} */
   #tabs = new Map()
   /** @type {Map<string, number>} sessionId → tabId */
   #bySession = new Map()
@@ -58,13 +63,27 @@ export class TabManager {
   #cancelled = new Set()
   /** @type {Map<number, Promise<boolean>>} tabId → pending attach promise */
   #pending = new Map()
+  /** @type {Map<number, {attempt: number, nextAttemptAt: number, reason: string}>} */
+  #recovery = new Map()
   #retainedCount = 0
   /** @type {boolean} */
   #shuttingDown = false
-  /** @type {number|null} */
-  #lastAttached = null
+  /** @type {boolean} */
+  #restored = false
+  /** @type {Promise<void>|null} */
+  #restorePromise = null
+  /** @type {boolean} */
+  #persistScheduled = false
+  /** @type {Promise<void>} */
+  #persistChain = Promise.resolve()
+  /** @type {boolean} */
+  #recoveryRunning = false
+  /** @type {boolean} */
+  #healthCheckRunning = false
   /** @type {(payload: any) => void} */
   #sendToRelay
+  /** @type {() => string} */
+  #getBrowserInstanceId
 
   /** @type {SessionIndicators} */
   #indicators
@@ -74,8 +93,11 @@ export class TabManager {
   /**
    * @param {(payload: any) => void} sendToRelay — fire-and-forget relay send function
    */
-  constructor(sendToRelay) {
+  constructor(sendToRelay, options = {}) {
     this.#sendToRelay = sendToRelay
+    this.#getBrowserInstanceId = typeof options.getBrowserInstanceId === 'function'
+      ? options.getBrowserInstanceId
+      : () => 'browser-instance'
     this.#group = new AgentGroupManager()
     this.#indicators = new SessionIndicators({
       getGroupId: () => this.#group.groupId,
@@ -104,10 +126,171 @@ export class TabManager {
     return this.#indicators.handleAlarm(alarmName)
   }
 
+  handleMaintenanceAlarm(alarmName) {
+    if (alarmName !== ALARM_TAB_RECOVERY) return false
+    void this.#runRecoveryPass()
+    return true
+  }
+
+  handleTransportClosed() {
+    this.stopSessionIndicators()
+    chrome.alarms.clear(ALARM_TAB_RECOVERY)
+    this.#schedulePersist()
+  }
+
+  async restoreState() {
+    if (this.#restored) return
+    if (this.#restorePromise) {
+      await this.#restorePromise
+      return
+    }
+
+    this.#restorePromise = (async () => {
+      this.#restored = true
+      if (this.#tabs.size > 0 || this.#agentTabs.size > 0 || this.#cancelled.size > 0) return
+
+      try {
+        const stored = await chrome.storage.session.get(TAB_MANAGER_STATE_KEY)
+        const snapshot = stored[TAB_MANAGER_STATE_KEY]
+        if (!snapshot || typeof snapshot !== 'object') return
+
+        const currentTabs = await chrome.tabs.query({})
+        const currentById = new Map(
+          currentTabs
+            .filter((tab) => Number.isInteger(tab?.id))
+            .map((tab) => [tab.id, tab]),
+        )
+
+        const rawTabs = Array.isArray(snapshot.tabs) ? snapshot.tabs : []
+        for (const raw of rawTabs) {
+          const tabId = Number(raw?.tabId)
+          const sessionId = typeof raw?.sessionId === 'string' ? raw.sessionId : ''
+          const targetKey = typeof raw?.targetKey === 'string' ? raw.targetKey : ''
+          const targetId = typeof raw?.targetId === 'string' ? raw.targetId : ''
+          if (!Number.isInteger(tabId) || tabId <= 0 || !sessionId || !targetId || !targetKey) continue
+          if (this.#tabs.has(tabId) || this.#bySession.has(sessionId) || this.#byTarget.has(targetId)) continue
+
+          const current = currentById.get(tabId)
+          const url = current?.url ?? raw?.url
+          const title = current?.title ?? raw?.title
+          if (!isDebuggableUrl(url)) continue
+
+          const state = raw?.state === 'connected' || raw?.state === 'attaching'
+            ? raw.state
+            : 'virtual'
+          this.#tabs.set(tabId, {
+            state,
+            sessionId,
+            targetKey,
+            targetId,
+            url,
+            title,
+            windowId: toNullableNumber(current?.windowId ?? raw?.windowId),
+            active: current?.active === true || raw?.active === true,
+          })
+          this.#bySession.set(sessionId, tabId)
+          this.#byTarget.set(targetId, tabId)
+        }
+
+        const rawAgents = Array.isArray(snapshot.agentTabs) ? snapshot.agentTabs : []
+        for (const raw of rawAgents) {
+          const tabId = Number(raw?.tabId)
+          const type = raw?.type === TabType.RETAINED ? TabType.RETAINED : TabType.AGENT
+          if (!Number.isInteger(tabId) || !this.#tabs.has(tabId)) continue
+          this.#agentTabs.set(tabId, type)
+          if (type === TabType.RETAINED) this.#retainedCount++
+        }
+
+        const rawCancelled = Array.isArray(snapshot.cancelled) ? snapshot.cancelled : []
+        for (const id of rawCancelled) {
+          const tabId = Number(id)
+          if (Number.isInteger(tabId) && tabId > 0) this.#cancelled.add(tabId)
+        }
+
+        await this.#group.restore(snapshot.groupId)
+        await this.#restoreAgentGroupMembership(currentById)
+      } catch (err) {
+        log.warn('restoreState failed:', err)
+      }
+    })()
+
+    try {
+      await this.#restorePromise
+    } finally {
+      this.#restorePromise = null
+    }
+  }
+
+  async refreshAfterTransportReady() {
+    await this.restoreState()
+
+    const currentTabs = await chrome.tabs.query({})
+    const currentById = new Map(
+      currentTabs
+        .filter((tab) => Number.isInteger(tab?.id))
+        .map((tab) => [tab.id, tab]),
+    )
+
+    const toRemove = []
+    const toDiscover = []
+    const toAttach = []
+
+    for (const [tabId, entry] of this.#tabs) {
+      const current = currentById.get(tabId)
+      if (!current) {
+        toRemove.push(tabId)
+        continue
+      }
+
+      entry.url = current.url ?? entry.url
+      entry.title = current.title ?? entry.title
+      entry.windowId = toNullableNumber(current.windowId)
+      entry.active = current.active === true
+
+      if (!isDebuggableUrl(entry.url)) {
+        toRemove.push(tabId)
+        continue
+      }
+
+      if (entry.state === 'connected' || entry.state === 'attaching') {
+        const attached = await this.#recoverPhysicalConnection(tabId, entry)
+        if (attached) {
+          this.#clearRecovery(tabId)
+          toAttach.push(tabId)
+        } else {
+          await this.#scheduleRecovery(tabId, 'connection-restored', { tab: current, emitDetached: false })
+          toDiscover.push(tabId)
+        }
+        continue
+      }
+
+      entry.state = 'virtual'
+      toDiscover.push(tabId)
+    }
+
+    for (const tabId of toRemove) {
+      this.#removeEntry(tabId)
+    }
+
+    for (const tabId of toDiscover) {
+      const entry = this.#tabs.get(tabId)
+      if (entry) this.#emitDiscovered(entry)
+    }
+
+    for (const tabId of toAttach) {
+      const entry = this.#tabs.get(tabId)
+      if (entry) this.#emitAttached(entry)
+    }
+
+    await this.#restoreAgentGroupMembership(currentById)
+    this.#schedulePersist()
+  }
+
   // ── Tab group ──
 
   async addToAgentGroup(tabId) {
     await this.#group.addTab(tabId)
+    this.#schedulePersist()
   }
 
   async dissolveAgentGroup() {
@@ -137,6 +320,7 @@ export class TabManager {
   get agentTabCount() { return this.#agentTabs.size }
   get retainedTabCount() { return this.#retainedCount }
   get agentTabs() { return this.#agentTabs }
+  get browserInstanceId() { return this.#getBrowserInstanceId() }
 
   // ── Lookup ──
 
@@ -152,6 +336,21 @@ export class TabManager {
     return this.#byTarget.get(targetId) ?? null
   }
 
+  resolveSelectedPhysicalTarget() {
+    for (const [tabId, entry] of this.#tabs) {
+      if (entry.active === true && entry.state === 'connected') {
+        return {
+          tabId,
+          sessionId: entry.sessionId,
+          targetId: entry.targetId,
+          targetKey: entry.targetKey,
+          windowId: entry.windowId ?? null,
+        }
+      }
+    }
+    return null
+  }
+
   resolveTabId(sessionId, targetId) {
     if (sessionId) {
       const found = this.getBySessionId(sessionId)
@@ -161,9 +360,6 @@ export class TabManager {
       const found = this.getByTargetId(targetId)
       if (found !== null) return found
     }
-    if (this.#lastAttached !== null && this.#tabs.has(this.#lastAttached)) {
-      return this.#lastAttached
-    }
     return null
   }
 
@@ -171,35 +367,14 @@ export class TabManager {
 
   markCancelled(tabId) {
     this.#cancelled.add(tabId)
-    void this.#persistCancelled()
+    this.#schedulePersist()
   }
 
   isCancelled(tabId) { return this.#cancelled.has(tabId) }
 
   removeCancelled(tabId) {
     this.#cancelled.delete(tabId)
-    void this.#persistCancelled()
-  }
-
-  async loadCancelled() {
-    try {
-      const { [CANCELLED_TABS_KEY]: ids } = await chrome.storage.session.get(CANCELLED_TABS_KEY)
-      const arr = Array.isArray(ids) ? ids : []
-      this.#cancelled.clear()
-      for (const id of arr) {
-        if (typeof id === 'number' && Number.isInteger(id)) this.#cancelled.add(id)
-      }
-    } catch (err) {
-      log.warn('loadCancelled failed:', err)
-    }
-  }
-
-  async #persistCancelled() {
-    try {
-      await chrome.storage.session.set({ [CANCELLED_TABS_KEY]: [...this.#cancelled] })
-    } catch (err) {
-      log.warn('persistCancelled failed:', err)
-    }
+    this.#schedulePersist()
   }
 
   // ── Agent tab tracking ──
@@ -210,6 +385,7 @@ export class TabManager {
     this.#agentTabs.set(tabId, next)
     if (next === TabType.RETAINED && prev !== TabType.RETAINED) this.#retainedCount++
     else if (next !== TabType.RETAINED && prev === TabType.RETAINED) this.#retainedCount--
+    this.#schedulePersist()
   }
 
   deleteAgent(tabId) {
@@ -217,6 +393,7 @@ export class TabManager {
     if (prev === undefined) return
     if (prev === TabType.RETAINED) this.#retainedCount--
     this.#agentTabs.delete(tabId)
+    this.#schedulePersist()
   }
 
   isAgent(tabId) { return this.#agentTabs.has(tabId) }
@@ -234,15 +411,18 @@ export class TabManager {
     let count = 0
     for (const tab of allTabs) {
       if (!tab.id || this.#tabs.has(tab.id) || this.#cancelled.has(tab.id)) continue
-      this.#registerVirtual(tab.id, tab.url, tab.title)
+      this.#registerVirtual(tab.id, tab.url, tab.title, {
+        windowId: tab.windowId ?? null,
+        active: tab.active === true,
+      })
       count++
     }
     log.info('discoverAll: registered', count, 'virtual tabs in', (performance.now() - t0).toFixed(1), 'ms')
   }
 
-  discover(tabId, url, title) {
+  discover(tabId, url, title, tabMeta = {}) {
     if (!this.#tabs.has(tabId) && isDebuggableUrl(url)) {
-      this.#registerVirtual(tabId, url, title)
+      this.#registerVirtual(tabId, url, title, tabMeta)
       log.debug('discover: registered virtual tab', tabId)
     }
   }
@@ -251,13 +431,21 @@ export class TabManager {
    * Update a tracked tab's URL and/or title.
    * Sends Extension.tabUpdated to the relay so the agent side stays in sync.
    */
-  updateTab(tabId, url, title) {
+  updateTab(tabId, url, title, tabMeta = {}) {
     const entry = this.#tabs.get(tabId)
     if (!entry) return
 
     let changed = false
     if (url !== undefined && url !== entry.url) { entry.url = url; changed = true }
     if (title !== undefined && title !== entry.title) { entry.title = title; changed = true }
+    if ('windowId' in tabMeta) {
+      const nextWindowId = toNullableNumber(tabMeta.windowId)
+      if (nextWindowId !== entry.windowId) { entry.windowId = nextWindowId; changed = true }
+    }
+    if ('active' in tabMeta) {
+      const nextActive = tabMeta.active === true
+      if (nextActive !== entry.active) { entry.active = nextActive; changed = true }
+    }
     if (!changed) return
 
     this.#sendToRelay({
@@ -266,6 +454,10 @@ export class TabManager {
         method: 'Extension.tabUpdated',
         params: {
           sessionId: entry.sessionId,
+          tabId,
+          windowId: entry.windowId ?? null,
+          active: entry.active === true,
+          targetKey: entry.targetKey,
           targetInfo: {
             targetId: entry.targetId, type: 'page',
             title: entry.title || '', url: entry.url || '',
@@ -274,28 +466,30 @@ export class TabManager {
         },
       },
     })
+    this.#schedulePersist()
   }
 
-  #registerVirtual(tabId, url, title) {
+  #registerVirtual(tabId, url, title, tabMeta = {}) {
     if (this.#tabs.has(tabId) || this.#cancelled.has(tabId)) return
 
-    const sessionId = `cb-tab-${++_sessionSeq}-${tabId}`
-    const targetId = `vtab-${tabId}`
+    const sessionId = this.#buildSessionId(tabId)
+    const targetKey = this.#buildTargetKey(tabId)
+    const targetId = targetKey
 
-    this.#tabs.set(tabId, { state: 'virtual', sessionId, targetId, url, title })
+    this.#tabs.set(tabId, {
+      state: 'virtual',
+      sessionId,
+      targetKey,
+      targetId,
+      url,
+      title,
+      windowId: toNullableNumber(tabMeta.windowId),
+      active: tabMeta.active === true,
+    })
     this.#bySession.set(sessionId, tabId)
     this.#byTarget.set(targetId, tabId)
-
-    this.#sendToRelay({
-      method: 'forwardCDPEvent',
-      params: {
-        method: 'Extension.tabDiscovered',
-        params: {
-          sessionId,
-          targetInfo: { targetId, type: 'page', title: title || '', url: url || '', attached: false },
-        },
-      },
-    })
+    this.#emitDiscovered(this.#tabs.get(tabId))
+    this.#schedulePersist()
   }
 
   // ── Lazy Attach (on-demand physical attachment) ──
@@ -342,7 +536,7 @@ export class TabManager {
       }
 
       entry.state = 'connected'
-      this.#lastAttached = tabId
+      this.#clearRecovery(tabId)
 
       this.#sendToRelay({
         method: 'forwardCDPEvent',
@@ -350,6 +544,10 @@ export class TabManager {
           method: 'Target.attachedToTarget',
           params: {
             sessionId: entry.sessionId,
+            tabId,
+            windowId: entry.windowId ?? null,
+            active: entry.active === true,
+            targetKey: entry.targetKey,
             targetInfo: {
               targetId: entry.targetId, type: 'page',
               title: entry.title || '', url: entry.url || '', attached: true,
@@ -360,14 +558,13 @@ export class TabManager {
       })
 
       log.info('physicalAttach: done', tabId, 'in', (performance.now() - t0).toFixed(1), 'ms')
+      this.#schedulePersist()
       return true
     } catch (err) {
       log.warn('physicalAttach: failed', tabId, (performance.now() - t0).toFixed(1), 'ms', err)
       void detachDebugger(tabId)
-      if (this.#tabs.has(tabId)) {
-        this.#notifyRemoved(entry.sessionId)
-        this.#removeEntry(tabId)
-      }
+      if (this.#tabs.has(tabId)) entry.state = 'virtual'
+      this.#schedulePersist()
       return false
     }
   }
@@ -386,13 +583,18 @@ export class TabManager {
     const wasNew = !existing
     if (wasNew) {
       let url, title
+      let windowId = null
+      let active = false
       try {
         const tab = await chrome.tabs.get(tabId)
         url = tab.url; title = tab.title
+        windowId = toNullableNumber(tab.windowId)
+        active = tab.active === true
       } catch { /* tab may have closed */ }
-      const sessionId = `cb-tab-${++_sessionSeq}-${tabId}`
-      const targetId = `vtab-${tabId}`
-      this.#tabs.set(tabId, { state: 'virtual', sessionId, targetId, url, title })
+      const sessionId = this.#buildSessionId(tabId)
+      const targetKey = this.#buildTargetKey(tabId)
+      const targetId = targetKey
+      this.#tabs.set(tabId, { state: 'virtual', sessionId, targetKey, targetId, url, title, windowId, active })
       this.#bySession.set(sessionId, tabId)
       this.#byTarget.set(targetId, tabId)
     }
@@ -436,6 +638,7 @@ export class TabManager {
       await detachDebugger(tabId)
       log.debug('detach: chrome.debugger cleanup', tabId, (performance.now() - t0).toFixed(1), 'ms')
     }
+    this.#schedulePersist()
   }
 
   clearAll() {
@@ -458,12 +661,13 @@ export class TabManager {
     this.#childSession.clear()
     this.#childSets.clear()
     this.#pending.clear()
+    this.#recovery.clear()
+    chrome.alarms.clear(ALARM_TAB_RECOVERY)
     this.#cancelled.clear()
-    void chrome.storage.session.remove(CANCELLED_TABS_KEY).catch(() => {})
+    void chrome.storage.session.remove(TAB_MANAGER_STATE_KEY).catch(() => {})
     this.#agentTabs.clear()
     this.#retainedCount = 0
     this.#group.reset()
-    this.#lastAttached = null
     this.#indicators.clear()
     cleanupAllTabQueues()
 
@@ -497,14 +701,298 @@ export class TabManager {
     })
   }
 
-  onDebuggerDetach(source, reason) {
+  async onDebuggerDetach(source, reason) {
     const tabId = source.tabId
     log.info('onDebuggerDetach:', tabId, reason, 'tracked:', this.#tabs.has(tabId))
     if (!tabId || !this.#tabs.has(tabId)) return
-    void this.detach(tabId, reason)
+    if (reason === 'canceled_by_user') {
+      this.markCancelled(tabId)
+      await this.detach(tabId, reason)
+      return
+    }
+    await this.#scheduleRecovery(tabId, reason)
+  }
+
+  async handleTabRemoved(tabId) {
+    await this.detach(tabId, 'tab-closed')
+    this.deleteAgent(tabId)
+    this.removeCancelled(tabId)
+  }
+
+  async handleTabReplaced(addedTabId, removedTabId) {
+    const replacementTab = await chrome.tabs.get(addedTabId).catch(() => null)
+
+    const movedCancelled = this.#cancelled.delete(removedTabId)
+    if (movedCancelled) {
+      this.#cancelled.add(addedTabId)
+    }
+
+    const agentType = this.#agentTabs.get(removedTabId)
+    if (agentType !== undefined) {
+      this.#agentTabs.delete(removedTabId)
+      this.#agentTabs.set(addedTabId, agentType)
+    }
+
+    const entry = this.#tabs.get(removedTabId)
+    if (!entry) {
+      if (!replacementTab) {
+        this.deleteAgent(addedTabId)
+        this.removeCancelled(addedTabId)
+        this.#schedulePersist()
+        return
+      }
+      if (agentType !== undefined && replacementTab) {
+        await this.#group.addTab(addedTabId)
+      }
+      if (replacementTab && !movedCancelled) {
+        this.discover(addedTabId, replacementTab.url, replacementTab.title)
+      }
+      this.#schedulePersist()
+      return
+    }
+
+    const wasPhysical = entry.state === 'connected' || entry.state === 'attaching'
+    this.#moveTrackedTab(removedTabId, addedTabId, replacementTab?.url, replacementTab?.title)
+
+    if (!replacementTab || !isDebuggableUrl(replacementTab.url)) {
+      this.#notifyRemoved(entry.sessionId)
+      this.#removeEntry(addedTabId)
+      if (agentType === undefined) this.removeCancelled(addedTabId)
+      this.deleteAgent(addedTabId)
+      this.#schedulePersist()
+      return
+    }
+
+    if (agentType !== undefined) {
+      await this.#group.addTab(addedTabId)
+    }
+
+    if (wasPhysical) {
+      await this.#scheduleRecovery(addedTabId, 'tab-replaced')
+      return
+    }
+
+    entry.state = 'virtual'
+    this.updateTab(addedTabId, replacementTab.url, replacementTab.title)
+    this.#schedulePersist()
+  }
+
+  async performHealthCheck() {
+    if (this.#shuttingDown || this.#healthCheckRunning) return
+    this.#healthCheckRunning = true
+
+    try {
+      const connectedTabs = [...this.#tabs.entries()]
+        .filter(([, entry]) => entry.state === 'connected')
+
+      for (const [tabId, entry] of connectedTabs) {
+        if (!this.#tabs.has(tabId) || this.#recovery.has(tabId)) continue
+        try {
+          await this.#refreshTargetInfo(tabId, entry)
+        } catch {
+          await this.#scheduleRecovery(tabId, 'debugger-unhealthy')
+        }
+      }
+    } finally {
+      this.#healthCheckRunning = false
+    }
   }
 
   // ── Private helpers ──
+
+  #buildSessionId(tabId) {
+    return `cb-tab:${this.browserInstanceId}:${tabId}`
+  }
+
+  #buildTargetKey(tabId) {
+    return `vtab:${this.browserInstanceId}:${tabId}`
+  }
+
+  setActiveTab(tabId, windowId = null) {
+    let changed = false
+    for (const [entryTabId, entry] of this.#tabs) {
+      const nextActive = entryTabId === tabId
+      if (entry.active !== nextActive) {
+        entry.active = nextActive
+        changed = true
+      }
+      if (entryTabId === tabId) {
+        const nextWindowId = toNullableNumber(windowId ?? entry.windowId)
+        if (nextWindowId !== entry.windowId) {
+          entry.windowId = nextWindowId
+          changed = true
+        }
+      }
+    }
+    if (changed) this.#schedulePersist()
+  }
+
+  async #restoreAgentGroupMembership(currentById) {
+    if (this.#agentTabs.size === 0) return
+    for (const tabId of this.#agentTabs.keys()) {
+      if (!currentById.has(tabId)) continue
+      await this.#group.addTab(tabId)
+    }
+  }
+
+  async #recoverPhysicalConnection(tabId, entry) {
+    try {
+      await this.#refreshTargetInfo(tabId, entry)
+      entry.state = 'connected'
+      return true
+    } catch {
+      try {
+        const { realTargetId } = await attachDebugger(tabId)
+        this.#updateTargetId(tabId, entry, realTargetId)
+        entry.state = 'connected'
+        return true
+      } catch (err) {
+        log.warn('recoverPhysicalConnection failed:', tabId, err)
+        return false
+      }
+    }
+  }
+
+  async #scheduleRecovery(tabId, reason, options = {}) {
+    const entry = this.#tabs.get(tabId)
+    if (!entry) return
+
+    const wasPhysical = entry.state === 'connected' || entry.state === 'attaching'
+    const existing = this.#recovery.get(tabId)
+    const tab = options.tab ?? await chrome.tabs.get(tabId).catch(() => null)
+
+    if (!tab || !isDebuggableUrl(tab.url)) {
+      this.#notifyRemoved(entry.sessionId)
+      this.#removeEntry(tabId)
+      this.deleteAgent(tabId)
+      this.removeCancelled(tabId)
+      this.#schedulePersist()
+      return
+    }
+
+    entry.url = tab.url ?? entry.url
+    entry.title = tab.title ?? entry.title
+    entry.windowId = toNullableNumber(tab.windowId)
+    entry.active = tab.active === true
+    entry.state = 'attaching'
+    this.#clearChildSessions(tabId)
+
+    if (options.emitDetached !== false && wasPhysical && !existing) {
+      this.#emitDetached(entry, reason)
+    }
+
+    const attempt = existing ? existing.attempt + 1 : 0
+    const delayMs = Math.min(REATTACH_MAX_DELAY_MS, REATTACH_BASE_DELAY_MS * Math.pow(2, attempt))
+    this.#recovery.set(tabId, {
+      attempt,
+      nextAttemptAt: Date.now() + delayMs,
+      reason,
+    })
+    this.#ensureRecoveryAlarm()
+    this.#schedulePersist()
+  }
+
+  #ensureRecoveryAlarm() {
+    if (this.#recovery.size === 0) {
+      chrome.alarms.clear(ALARM_TAB_RECOVERY)
+      return
+    }
+
+    let nextAttemptAt = Infinity
+    for (const recovery of this.#recovery.values()) {
+      if (recovery.nextAttemptAt < nextAttemptAt) nextAttemptAt = recovery.nextAttemptAt
+    }
+
+    const delayInMinutes = Math.max((nextAttemptAt - Date.now()) / 60_000, 1 / 60)
+    chrome.alarms.create(ALARM_TAB_RECOVERY, { delayInMinutes })
+  }
+
+  #clearRecovery(tabId) {
+    if (!this.#recovery.delete(tabId)) return
+    this.#ensureRecoveryAlarm()
+  }
+
+  async #runRecoveryPass() {
+    if (this.#shuttingDown || this.#recoveryRunning) return
+    this.#recoveryRunning = true
+
+    try {
+      const now = Date.now()
+      const dueTabs = [...this.#recovery.entries()]
+        .filter(([, recovery]) => recovery.nextAttemptAt <= now)
+        .map(([tabId]) => tabId)
+
+      for (const tabId of dueTabs) {
+        const entry = this.#tabs.get(tabId)
+        if (!entry) {
+          this.#clearRecovery(tabId)
+          continue
+        }
+
+        const attached = await this.#recoverPhysicalConnection(tabId, entry)
+        if (attached) {
+          this.#clearRecovery(tabId)
+          this.#emitAttached(entry)
+          this.#schedulePersist()
+          continue
+        }
+
+        await this.#scheduleRecovery(tabId, this.#recovery.get(tabId)?.reason || 'reattach-failed')
+      }
+    } finally {
+      this.#recoveryRunning = false
+      this.#ensureRecoveryAlarm()
+    }
+  }
+
+  async #refreshTargetInfo(tabId, entry) {
+    const info = /** @type {any} */ (
+      await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
+    )
+    const realTargetId = String(info?.targetInfo?.targetId || '').trim()
+    this.#updateTargetId(tabId, entry, realTargetId)
+  }
+
+  #updateTargetId(tabId, entry, realTargetId) {
+    if (!realTargetId || realTargetId === entry.targetId) return
+    this.#byTarget.delete(entry.targetId)
+    entry.targetId = realTargetId
+    this.#byTarget.set(realTargetId, tabId)
+  }
+
+  #moveTrackedTab(fromTabId, toTabId, url, title) {
+    const entry = this.#tabs.get(fromTabId)
+    if (!entry) return null
+
+    this.#tabs.delete(fromTabId)
+    entry.url = url ?? entry.url
+    entry.title = title ?? entry.title
+    this.#tabs.set(toTabId, entry)
+    this.#bySession.set(entry.sessionId, toTabId)
+    this.#byTarget.set(entry.targetId, toTabId)
+
+    const pending = this.#pending.get(fromTabId)
+    if (pending) {
+      this.#pending.delete(fromTabId)
+    }
+
+    const recovery = this.#recovery.get(fromTabId)
+    if (recovery) {
+      this.#recovery.delete(fromTabId)
+      this.#recovery.set(toTabId, recovery)
+    }
+
+    const children = this.#childSets.get(fromTabId)
+    if (children) {
+      this.#childSets.delete(fromTabId)
+      this.#childSets.set(toTabId, children)
+      for (const sid of children) this.#childSession.set(sid, toTabId)
+    }
+
+    this.#indicators.moveTab(fromTabId, toTabId)
+    cleanupTabQueue(fromTabId)
+    return entry
+  }
 
   #removeEntry(tabId) {
     const entry = this.#tabs.get(tabId)
@@ -514,13 +1002,9 @@ export class TabManager {
     this.#tabs.delete(tabId)
     this.#indicators.removeTab(tabId)
     cleanupTabQueue(tabId)
-    if (this.#lastAttached === tabId) this.#lastAttached = null
+    this.#clearRecovery(tabId)
 
-    const children = this.#childSets.get(tabId)
-    if (children) {
-      for (const sid of children) this.#childSession.delete(sid)
-      this.#childSets.delete(tabId)
-    }
+    this.#clearChildSessions(tabId)
   }
 
   #notifyRemoved(sessionId) {
@@ -529,5 +1013,116 @@ export class TabManager {
       method: 'forwardCDPEvent',
       params: { method: 'Extension.tabRemoved', params: { sessionId } },
     })
+  }
+
+  #emitDiscovered(entry) {
+    if (!entry?.sessionId || !entry?.targetId) return
+    const tabId = this.#bySession.get(entry.sessionId)
+    this.#sendToRelay({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Extension.tabDiscovered',
+        params: {
+          sessionId: entry.sessionId,
+          tabId: Number.isInteger(tabId) ? tabId : null,
+          windowId: entry.windowId ?? null,
+          active: entry.active === true,
+          targetKey: entry.targetKey,
+          targetInfo: {
+            targetId: entry.targetId,
+            type: 'page',
+            title: entry.title || '',
+            url: entry.url || '',
+            attached: false,
+          },
+        },
+      },
+    })
+  }
+
+  #emitAttached(entry) {
+    if (!entry?.sessionId || !entry?.targetId) return
+    const tabId = this.#bySession.get(entry.sessionId)
+    this.#sendToRelay({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: entry.sessionId,
+          tabId: Number.isInteger(tabId) ? tabId : null,
+          windowId: entry.windowId ?? null,
+          active: entry.active === true,
+          targetKey: entry.targetKey,
+          targetInfo: {
+            targetId: entry.targetId,
+            type: 'page',
+            title: entry.title || '',
+            url: entry.url || '',
+            attached: true,
+          },
+          waitingForDebugger: false,
+        },
+      },
+    })
+  }
+
+  #emitDetached(entry, reason) {
+    if (!entry?.sessionId || !entry?.targetId) return
+    const tabId = this.#bySession.get(entry.sessionId)
+    this.#sendToRelay({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: entry.sessionId,
+          tabId: Number.isInteger(tabId) ? tabId : null,
+          windowId: entry.windowId ?? null,
+          active: entry.active === true,
+          targetKey: entry.targetKey,
+          targetId: entry.targetId,
+          reason,
+        },
+      },
+    })
+  }
+
+  #clearChildSessions(tabId) {
+    const children = this.#childSets.get(tabId)
+    if (!children) return
+    for (const sid of children) this.#childSession.delete(sid)
+    this.#childSets.delete(tabId)
+  }
+
+  #schedulePersist() {
+    if (this.#shuttingDown || this.#persistScheduled) return
+    this.#persistScheduled = true
+    queueMicrotask(() => {
+      this.#persistScheduled = false
+      this.#persistChain = this.#persistChain
+        .then(() => this.#persistState())
+        .catch((err) => log.warn('persistState failed:', err))
+    })
+  }
+
+  async #persistState() {
+    const snapshot = {
+      tabs: [...this.#tabs.entries()].map(([tabId, entry]) => ({
+        tabId,
+        state: entry.state === 'connected' || entry.state === 'attaching'
+          ? entry.state
+          : 'virtual',
+        sessionId: entry.sessionId,
+        targetKey: entry.targetKey,
+        targetId: entry.targetId,
+        url: entry.url || '',
+        title: entry.title || '',
+        windowId: entry.windowId ?? null,
+        active: entry.active === true,
+      })),
+      agentTabs: [...this.#agentTabs.entries()].map(([tabId, type]) => ({ tabId, type })),
+      cancelled: [...this.#cancelled],
+      groupId: this.#group.groupId,
+    }
+    await chrome.storage.session.set({ [TAB_MANAGER_STATE_KEY]: snapshot })
   }
 }

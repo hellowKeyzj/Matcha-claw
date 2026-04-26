@@ -13,8 +13,9 @@ Connect the MatchaClaw agent to your Chrome browser so it can see and interact w
 
 1. Make sure MatchaClaw is running with browser control enabled
 2. Click the toolbar icon — badge shows **ON** when connected
-3. Navigate to any webpage
-4. Send a browser-related query to MatchaClaw — it can now control your tabs
+3. In the popup, click **Use This Browser** for the browser instance you want MatchaClaw to control
+4. Keep the page you want to use active in that browser window
+5. Send a browser-related query to MatchaClaw — it will use the selected browser's current active page
 
 ## File Structure
 
@@ -58,7 +59,8 @@ accio-browser-relay/
 - **Persistent**: Stays active across browser restarts
 - **Cancellable**: Mid-connection clicks properly abort and clean up
 - **Tab safety**: Agent can only close tabs it created
-- **Auto-attach**: All compatible tabs are attached when relay connects
+- **Selected-browser control**: Only the browser instance you select becomes the default control target
+- **Active-page auto-attach**: The selected browser's current active page is attached automatically
 
 ## Troubleshooting
 
@@ -108,7 +110,7 @@ accio-browser-relay/
   },
 
   "action": {
-    "default_title": "MatchaClaw Browser Relay (click to attach/detach)",
+    "default_title": "MatchaClaw Browser Relay",
     "default_icon": { ... }    // Toolbar icon (same as extension icons)
   },
 

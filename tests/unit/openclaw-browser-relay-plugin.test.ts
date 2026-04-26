@@ -200,6 +200,7 @@ describe('openclaw browser relay plugin', () => {
         params: {
           protocolVersion: RELAY_PROTOCOL_VERSION,
           extensionVersion: '0.1.3',
+          browserInstanceId: 'browser-a',
           encryptedSessionKey: encryptSessionKey(sessionKey),
         },
       }),
@@ -248,6 +249,7 @@ describe('openclaw browser relay plugin', () => {
         method: 'Extension.hello',
         params: {
           protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
           encryptedSessionKey: encryptSessionKey(sessionKey),
         },
       }),
@@ -306,7 +308,7 @@ describe('openclaw browser relay plugin', () => {
 
     expect(targets).toHaveLength(1)
     expect(targets[0]).toMatchObject({
-      id: 'target-1',
+      id: 'browser-a|tid|target-1',
       title: 'Example',
       url: 'https://example.com',
     })
@@ -330,6 +332,7 @@ describe('openclaw browser relay plugin', () => {
         method: 'Extension.hello',
         params: {
           protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
           encryptedSessionKey: encryptSessionKey(sessionKey),
         },
       }),
@@ -414,6 +417,7 @@ describe('openclaw browser relay plugin', () => {
         method: 'Extension.hello',
         params: {
           protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
           encryptedSessionKey: encryptSessionKey(sessionKey),
         },
       }),
@@ -469,12 +473,12 @@ describe('openclaw browser relay plugin', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
 
     expect(server.listAttachments()).toEqual([
-      {
-        sessionId: 'page-session',
-        targetId: 'page-target',
+      expect.objectContaining({
+        sessionId: 'browser-a|sid|page-session',
+        targetId: 'browser-a|tid|page-target',
         title: 'Example',
         url: 'https://example.com',
-      },
+      }),
     ])
 
     const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
@@ -486,12 +490,324 @@ describe('openclaw browser relay plugin', () => {
 
     expect(targets).toEqual([
       expect.objectContaining({
-        id: 'page-target',
+        id: 'browser-a|tid|page-target',
         type: 'page',
       }),
     ])
 
     extensionWs.close()
+  })
+
+  it('tracks multiple browser instances and switches the selected default window explicitly', async () => {
+    server = new BrowserRelayServer({ port: 0, logger })
+    await server.start()
+
+    const port = server.port
+    const sessionKeyA = randomBytes(32)
+    const sessionKeyB = randomBytes(32)
+
+    const extensionA = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-a' },
+    })
+    const extensionB = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-b' },
+    })
+
+    await Promise.all([waitForOpen(extensionA), waitForOpen(extensionB)])
+
+    extensionA.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKeyA),
+      },
+    }))
+    extensionB.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-b',
+        encryptedSessionKey: encryptSessionKey(sessionKeyB),
+      },
+    }))
+
+    await Promise.all([waitForMessage(extensionA), waitForMessage(extensionB)])
+
+    extensionA.send(encryptWireMessage(sessionKeyA, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 1,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-b',
+          tabId: 22,
+          windowId: 2,
+          active: true,
+          targetKey: 'vtab:browser-b:22',
+          targetInfo: {
+            targetId: 'target-b',
+            type: 'page',
+            title: 'Page B',
+            url: 'https://b.example.com',
+          },
+        },
+      },
+    })))
+
+    extensionA.send(encryptWireMessage(sessionKeyA, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 1 },
+    })))
+    extensionA.send(encryptWireMessage(sessionKeyA, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-a',
+      },
+    })))
+    await waitForMessage(extensionA)
+    await waitForMessage(extensionB)
+
+    expect(server.listTabs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        browserInstanceId: 'browser-a',
+        tabId: 11,
+        windowId: 1,
+        active: true,
+        targetKey: 'browser-a|tid|vtab:browser-a:11',
+        targetId: 'browser-a|tid|target-a',
+        selectedBrowser: true,
+        selectedWindow: true,
+        selected: true,
+        primary: true,
+      }),
+      expect.objectContaining({
+        browserInstanceId: 'browser-b',
+        tabId: 22,
+        windowId: 2,
+        active: true,
+        targetKey: 'browser-b|tid|vtab:browser-b:22',
+        targetId: 'browser-b|tid|target-b',
+        selectedBrowser: false,
+        selectedWindow: false,
+        selected: false,
+        primary: false,
+      }),
+    ]))
+    expect(server.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
+
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 2 },
+    })))
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-b',
+      },
+    })))
+    await waitForMessage(extensionA)
+    await waitForMessage(extensionB)
+
+    expect(server.resolveSelectedSessionId()).toBe('browser-b|sid|page-b')
+
+    extensionA.close()
+    extensionB.close()
+  })
+
+  it('switches the selected default window within the same browser instance', async () => {
+    server = new BrowserRelayServer({ port: 0, logger })
+    await server.start()
+
+    const port = server.port
+    const sessionKey = randomBytes(32)
+
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-a' },
+    })
+
+    await waitForOpen(extension)
+
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+
+    await waitForMessage(extension)
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 1,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-b',
+          tabId: 22,
+          windowId: 2,
+          active: true,
+          targetKey: 'vtab:browser-a:22',
+          targetInfo: {
+            targetId: 'target-b',
+            type: 'page',
+            title: 'Page B',
+            url: 'https://b.example.com',
+          },
+        },
+      },
+    })))
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 1 },
+    })))
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-a',
+      },
+    })))
+    await waitForMessage(extension)
+
+    expect(server.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 2 },
+    })))
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-b',
+      },
+    })))
+    await waitForMessage(extension)
+
+    expect(server.resolveSelectedSessionId()).toBe('browser-a|sid|page-b')
+    expect(server.listTabs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        browserInstanceId: 'browser-a',
+        windowId: 1,
+        selectedWindow: false,
+        selected: false,
+        primary: false,
+      }),
+      expect.objectContaining({
+        browserInstanceId: 'browser-a',
+        windowId: 2,
+        selectedWindow: true,
+        selected: true,
+        primary: true,
+      }),
+    ]))
+
+    extension.close()
+  })
+
+  it('clears the selected window when the selected browser instance disconnects', async () => {
+    server = new BrowserRelayServer({ port: 0, logger })
+    await server.start()
+
+    const port = server.port
+    const sessionKey = randomBytes(32)
+
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-a' },
+    })
+
+    await waitForOpen(extension)
+
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+
+    await waitForMessage(extension)
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 1,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 1 },
+    })))
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-a',
+      },
+    })))
+    await waitForMessage(extension)
+
+    expect(server.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server.status.selectedWindowId).toBe(1)
+    expect(server.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
+
+    extension.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(server.status.selectedBrowserInstanceId).toBeNull()
+    expect(server.status.selectedWindowId).toBeNull()
+    expect(() => server.resolveSelectedSessionId()).toThrow('No browser window selected')
   })
 
   it('reclaims the recorded stale relay owner before binding the fixed relay port', async () => {

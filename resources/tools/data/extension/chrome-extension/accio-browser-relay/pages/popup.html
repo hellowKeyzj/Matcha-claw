@@ -240,6 +240,34 @@
       }
       .chip-num { font-weight: 700; }
 
+      .browser-select {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        margin-bottom: 10px;
+        padding: 9px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--muted);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        transition: color 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+      }
+      .browser-select:hover {
+        color: var(--heading);
+        border-color: rgba(0, 0, 0, 0.16);
+        background: rgba(0, 0, 0, 0.03);
+      }
+      .browser-select[data-selected="true"] {
+        color: var(--heading);
+        border-color: rgba(34, 197, 94, 0.28);
+        background: var(--green-soft);
+        box-shadow: 0 2px 12px -6px var(--green-glow);
+      }
+
       /* ── Divider ── */
       .divider {
         height: 1px;
@@ -271,6 +299,36 @@
         width: 10px;
         height: 10px;
         transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .tabs-window-header {
+        justify-content: space-between;
+        cursor: default;
+        gap: 8px;
+      }
+      .window-select-button {
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 4px 8px;
+        font: inherit;
+        font-size: 9px;
+        font-weight: 700;
+        text-transform: none;
+        letter-spacing: 0;
+        cursor: pointer;
+        transition: color 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+      }
+      .window-select-button:hover {
+        color: var(--heading);
+        border-color: rgba(0, 0, 0, 0.16);
+        background: rgba(0, 0, 0, 0.03);
+      }
+      .window-select-button[data-selected="true"] {
+        color: var(--heading);
+        border-color: rgba(34, 197, 94, 0.28);
+        background: var(--green-soft);
+        box-shadow: 0 2px 12px -6px var(--green-glow);
       }
       .tabs-section[data-open="true"] .tabs-header svg {
         transform: rotate(90deg);
@@ -458,6 +516,10 @@
       </div>
 
       <div class="meta anim anim-d2" id="meta"></div>
+
+      <button class="browser-select anim anim-d2" id="browser-select" data-selected="false">
+        Use This Window
+      </button>
 
       <div class="tabs-section anim anim-d2" id="tabs-section" data-empty="true" data-open="false">
         <div class="tabs-header" id="tabs-header">

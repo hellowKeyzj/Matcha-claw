@@ -45,7 +45,11 @@ function asStringArray(value: unknown): string[] | undefined {
 }
 
 function sanitizeFileName(input: string): string {
-  return input.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+  return [...input].map((char) => {
+    const code = char.charCodeAt(0)
+    if (code >= 0 && code <= 31) return '_'
+    return /[<>:"/\\|?*]/.test(char) ? '_' : char
+  }).join('')
 }
 
 async function normalizeScreenshot(buffer: Buffer): Promise<Buffer> {
@@ -139,6 +143,7 @@ export class BrowserControlService {
   }
 
   getStatus(): BrowserActionResult {
+    this.syncRelayExecutionTarget()
     return {
       running: true,
       relayPort: this.options.relay.relayPort,
@@ -185,7 +190,9 @@ export class BrowserControlService {
   }
 
   private async handleRelayAction(action: string, params: BrowserActionParams): Promise<BrowserActionResult> {
+    this.syncRelayExecutionTarget()
     const attachments = this.options.relay.listAttachments()
+    const tabs = this.options.relay.listTabs()
     const relayPort = this.options.relay.relayPort
 
     if (action === 'start') {
@@ -230,12 +237,22 @@ export class BrowserControlService {
         ok: true,
         running: true,
         extensionConnected: true,
-        tabs: attachments.map((entry) => ({
-          targetId: entry.targetId,
+        tabs: tabs.map((entry) => ({
+          targetKey: entry.targetKey,
+          targetId: entry.physical ? entry.targetId : null,
           title: entry.title || '(no title)',
           url: entry.url || '(no url)',
-          isAgent: this.tabState.isAgent(entry.targetId),
-          isRetained: this.tabState.isRetained(entry.targetId),
+          browserInstanceId: entry.browserInstanceId,
+          browserName: entry.browserName,
+          windowId: entry.windowId,
+          tabId: entry.tabId,
+          active: entry.active,
+          physical: entry.physical,
+          isSelectedBrowser: entry.selectedBrowser,
+          isSelectedWindow: entry.selectedWindow,
+          isPrimary: entry.primary,
+          isAgent: entry.physical ? this.tabState.isAgent(entry.targetId) : false,
+          isRetained: entry.physical ? this.tabState.isRetained(entry.targetId) : false,
         })),
       }
     }
@@ -419,7 +436,10 @@ export class BrowserControlService {
       }
     }
 
-    const targetId = asString(params.targetId)
+    const targetId =
+      endpoint.mode === 'relay'
+        ? this.resolveExecutionTarget(asString(params.targetId))
+        : asString(params.targetId)
     const mode = endpoint.mode
     const cdpUrl = endpoint.endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
@@ -756,8 +776,8 @@ export class BrowserControlService {
       let list = await listDirectCdpTabs(port)
       if (list.length === 1 && list[0]?.targetId === M144_PLACEHOLDER_TARGET_ID) {
         try {
-          const page = await this.session.getPageForTargetId({ cdpUrl, mode: 'direct-cdp' })
-          const browser = page.context().browser()
+          const connection = await this.session.connectBrowser(cdpUrl, 'direct-cdp')
+          const browser = connection.browser
           list = browser
             .contexts()
             .flatMap((context: any) => context.pages())
@@ -789,6 +809,30 @@ export class BrowserControlService {
     }
 
     return tabs
+  }
+
+  private syncRelayExecutionTarget(): void {
+    const selected = this.options.relay.listAttachments().find((entry) => entry.selected && entry.primary)
+    if (!selected?.targetId || selected.windowId == null || selected.tabId == null) {
+      this.tabState.clearSelectedExecutionTarget()
+      return
+    }
+    this.tabState.setSelectedExecutionTarget({
+      browserInstanceId: selected.browserInstanceId,
+      windowId: selected.windowId,
+      tabId: selected.tabId,
+      targetId: selected.targetId,
+    })
+  }
+
+  private resolveExecutionTarget(explicitTargetId?: string): string {
+    if (explicitTargetId) return explicitTargetId
+    this.syncRelayExecutionTarget()
+    const selected = this.tabState.currentSelectedPhysicalTargetId
+    if (selected) {
+      return selected
+    }
+    throw new Error('No default browser target available. Select a window and keep its active page attached.')
   }
 }
 

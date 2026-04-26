@@ -135,10 +135,11 @@ const tabsList = document.getElementById('tabs-list')
 
 async function refreshTabList() {
   try {
-    const resp = await chrome.runtime.sendMessage({ type: 'getTabList' })
-    const tabs = resp?.tabs || []
+    const resp = await chrome.runtime.sendMessage({ type: 'getBrowserInstanceList' })
+    const browser = resp?.browserInstances?.[0]
+    const tabs = (browser?.windows || []).flatMap((window) => window.tabs || [])
     tabs.sort((a, b) => {
-      const rank = (t) => t.isRetained ? 0 : t.isAgent ? 1 : 2
+      const rank = (t) => t.active ? -1 : t.isRetained ? 0 : t.isAgent ? 1 : 2
       return rank(a) - rank(b)
     })
     tabsSection.style.display = tabs.length > 0 ? '' : 'none'

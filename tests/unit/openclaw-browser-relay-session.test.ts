@@ -48,4 +48,25 @@ describe('browser relay session', () => {
 
     expect(resolved).toBe(page)
   })
+
+  it('requires targetId for page lookup', async () => {
+    const session = new PlaywrightSession(
+      logger as any,
+      {
+        closeTab: () => {},
+        agentTabCount: 0,
+        retainedTabCount: 0,
+      } as any,
+      () => ({
+        connected: true,
+        relayPort: 9236,
+        authHeaders: {},
+      }),
+    )
+
+    await expect(session.getPageForTargetId({
+      cdpUrl: 'http://127.0.0.1:9236',
+      mode: 'relay',
+    })).rejects.toThrow('targetId is required')
+  })
 })

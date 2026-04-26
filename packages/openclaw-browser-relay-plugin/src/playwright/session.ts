@@ -376,35 +376,34 @@ export class PlaywrightSession {
   }
 
   async getPageForTargetId(input: { cdpUrl: string; targetId?: string; mode?: ConnectionMode }): Promise<any> {
+    if (!input.targetId) {
+      throw new Error('targetId is required')
+    }
+
     const existing = await this.findExistingPage(input)
     if (existing) return existing
 
-    if (input.targetId) {
-      const retries = 3
-      for (let attempt = 0; attempt < retries; attempt += 1) {
-        if (attempt === 0 && (input.mode ?? this.getActiveConnectionMode()) === 'relay') {
-          try {
-            await this.sendBrowserCdpCommand(input.cdpUrl, 'Target.setAutoAttach', {
-              autoAttach: true,
-              waitForDebuggerOnStart: false,
-              flatten: true,
-            }, input.mode)
-          } catch {
-            // noop
-          }
+    const retries = 3
+    for (let attempt = 0; attempt < retries; attempt += 1) {
+      if (attempt === 0 && (input.mode ?? this.getActiveConnectionMode()) === 'relay') {
+        try {
+          await this.sendBrowserCdpCommand(input.cdpUrl, 'Target.setAutoAttach', {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+          }, input.mode)
+        } catch {
+          // noop
         }
-
-        await sleep(Math.min(2_000, 600 * (attempt + 1)))
-        const retried = await this.findExistingPage(input)
-        if (retried) return retried
       }
+
+      await sleep(Math.min(2_000, 600 * (attempt + 1)))
+      const retried = await this.findExistingPage(input)
+      if (retried) return retried
     }
 
     const connection = await this.connectBrowser(input.cdpUrl, input.mode)
     const pages = connection.browser.contexts().flatMap((context: any) => context.pages())
-    if (!input.targetId) {
-      throw new Error('No pages available in the connected browser.')
-    }
     throw new Error(
       `Page not found for targetId="${input.targetId}" after retries. There are ${pages.length} open page(s): ${pages.map((page: any) => page.url()).join(', ')}`,
     )
@@ -476,7 +475,7 @@ export class PlaywrightSession {
     const browser = (await this.connectBrowser(input.cdpUrl, input.mode)).browser
     const pages = browser.contexts().flatMap((context: any) => context.pages())
     if (pages.length === 0) return null
-    if (!input.targetId) return pages[0]
+    if (!input.targetId) return null
 
     for (const page of pages) {
       const targetId = await this.resolveTargetId(page)

@@ -118,17 +118,6 @@ export function createDispatcher(mgr) {
       if (method === 'Extension.markElements') return extMarkElements(tabId, params)
       if (method === 'Extension.click') return extClick(tabId, params)
       if (method === 'Extension.input') return extInput(tabId, params)
-      // vtab 自动附加：桌面端 browser tool 发现 targetId 是虚拟标签页（vtab-*）时，
-      // 通过 relay 调用此命令让扩展执行 chrome.debugger.attach，将虚拟标签页升级为物理附加。
-      // 返回附加后的真实 targetId 和 sessionId，供后续 CDP 命令使用。
-      // 调用链：browser.ts autoAttachVtab() → relay ensureTargetAttached() → 此处
-      if (method === 'Extension.ensureAttach') {
-        const ok = await mgr.ensureAttached(tabId)
-        if (!ok) throw new Error(`Failed to attach tab ${tabId}`)
-        const entry = mgr.get(tabId)
-        return { targetId: entry?.targetId, sessionId: entry?.sessionId }
-      }
-
       // ── Standard CDP forwarding (requires debugger attach) ──
       const ok = await mgr.ensureAttached(tabId)
       if (!ok) throw new Error(`Failed to attach debugger to tab ${tabId} for ${method}`)
