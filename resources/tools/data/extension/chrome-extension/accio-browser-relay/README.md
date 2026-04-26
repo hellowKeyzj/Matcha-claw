@@ -13,9 +13,19 @@ Connect the MatchaClaw agent to your Chrome browser so it can see and interact w
 
 1. Make sure MatchaClaw is running with browser control enabled
 2. Click the toolbar icon — badge shows **ON** when connected
-3. In the popup, click **Use This Browser** for the browser instance you want MatchaClaw to control
-4. Keep the page you want to use active in that browser window
-5. Send a browser-related query to MatchaClaw — it will use the selected browser's current active page
+3. In the popup, click **Use This Window** for the browser window you want MatchaClaw to control
+4. Keep the page you want to use active in that selected window
+5. Send a browser-related query to MatchaClaw
+6. If you do not pass a `targetId`, MatchaClaw will only use that selected window's current active physical page
+
+## Default Target Semantics
+
+- Each extension connection is one `browserInstanceId` (one Chrome profile)
+- You explicitly choose one `windowId` with **Use This Window**
+- MatchaClaw persists that selection across desktop restarts
+- The default browser target is always: `selectedBrowserInstanceId + selectedWindowId + current active physical page`
+- If that window has no active attached physical page, browser execution fails fast instead of guessing another page
+- Passing an explicit `targetId` still overrides the default target
 
 ## File Structure
 
@@ -59,8 +69,9 @@ accio-browser-relay/
 - **Persistent**: Stays active across browser restarts
 - **Cancellable**: Mid-connection clicks properly abort and clean up
 - **Tab safety**: Agent can only close tabs it created
-- **Selected-browser control**: Only the browser instance you select becomes the default control target
-- **Active-page auto-attach**: The selected browser's current active page is attached automatically
+- **Selected-window control**: Only the window you select becomes the default control target
+- **Active-page auto-attach**: The selected window's current active page is attached automatically
+- **Restart persistence**: The last selected window is restored after MatchaClaw restarts
 
 ## Troubleshooting
 

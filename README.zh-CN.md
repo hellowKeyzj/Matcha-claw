@@ -128,6 +128,9 @@ ClawX 还会内置预装完整的文档处理技能（`pdf`、`xlsx`、`docx`、
 连接多个 AI 供应商（OpenAI、Anthropic 等），凭证安全存储在系统原生密钥链中。OpenAI 同时支持 API Key 与浏览器 OAuth（Codex 订阅）登录。
 若通过 **Custom** Provider 对接 OpenAI-compatible 网关，可在 **设置 → 模型 → 编辑 Provider** 中自定义 `User-Agent`。
 
+### 🌐 Browser Relay 窗口级默认目标
+启用 Browser Relay 后，每个 Chrome profile 会作为一个浏览器实例连接，但默认 browser 控制目标是在 **窗口** 级选择的。你需要在扩展弹窗里点击 **Use This Window**；MatchaClaw 会在桌面端重启后恢复这次选择，默认 browser 动作只会命中该窗口当前活动的物理页面。如果这个窗口当前没有已 attach 的活动物理页，系统会直接报错，不再猜其他标签页。
+
 ### 🔑 授权门禁与诊断支持
 设置向导需要先完成 License 校验才能继续，运行时也会执行授权门禁。设置页新增了 License、Task Plugin、Diagnostics 与用户头像分栏，便于统一维护运行状态与授权信息。
 

@@ -18,7 +18,7 @@ class BrowserRelayRuntime {
   private server: BrowserRelayServer | null = null
   private control: BrowserControlService | null = null
 
-  async start(config: BrowserRelayPluginConfig, logger: PluginLogger): Promise<void> {
+  async start(config: BrowserRelayPluginConfig, logger: PluginLogger, stateDir: string): Promise<void> {
     if (this.server && this.server.port === config.port && this.control) {
       return
     }
@@ -28,6 +28,7 @@ class BrowserRelayRuntime {
     const server = new BrowserRelayServer({
       port: config.port,
       logger,
+      stateDir,
     })
     await server.start()
 
@@ -94,7 +95,7 @@ export function registerBrowserRelayRuntime(api: OpenClawPluginApi): void {
   api.registerService({
     id: `${BROWSER_RELAY_PLUGIN_ID}.server`,
     async start(ctx) {
-      await runtime.start(resolvePluginConfig(ctx.config), ctx.logger)
+      await runtime.start(resolvePluginConfig(ctx.config), ctx.logger, ctx.stateDir)
     },
     async stop() {
       await runtime.stop()
