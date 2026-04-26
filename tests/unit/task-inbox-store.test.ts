@@ -51,7 +51,6 @@ describe('task inbox store', () => {
     });
     getPluginRuntimeMock.mockResolvedValue({
       execution: {
-        pluginExecutionEnabled: true,
         enabledPluginIds: ['task-manager'],
       },
     });
@@ -59,7 +58,7 @@ describe('task inbox store', () => {
       currentSessionKey: 'agent:main:main',
       messages: [],
       refreshHistory: vi.fn(),
-      send: sendMessageMock,
+      sendMessage: sendMessageMock,
       sending: false,
       pendingFinal: false,
       activeRunId: null,
