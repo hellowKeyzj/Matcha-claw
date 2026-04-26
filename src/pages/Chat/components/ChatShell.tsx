@@ -40,8 +40,8 @@ export function ChatShell({
     <div
       ref={chatLayoutRef}
       className={cn(
-        'grid h-full min-h-0 grid-cols-1 overflow-hidden xl:[grid-template-columns:minmax(0,1fr)_var(--task-inbox-resizer-width)_var(--task-inbox-width)]',
-        taskInboxCollapsed ? 'xl:[grid-template-columns:minmax(0,1fr)_52px]' : '',
+        'grid h-full min-h-0 overflow-hidden [grid-template-columns:minmax(0,1fr)_var(--task-inbox-resizer-width)_var(--task-inbox-width)]',
+        taskInboxCollapsed ? '[grid-template-columns:minmax(0,1fr)_52px]' : '',
       )}
       style={{
         ['--task-inbox-width' as string]: `${taskInboxWidth}px`,
@@ -69,7 +69,7 @@ export function ChatShell({
       {!taskInboxCollapsed && (
         <VerticalPaneResizer
           testId="chat-right-resizer"
-          className="hidden xl:block"
+          className="block"
           onMouseDown={onTaskInboxResizeStart}
           ariaLabel="Resize task inbox"
           variant="subtle-border"

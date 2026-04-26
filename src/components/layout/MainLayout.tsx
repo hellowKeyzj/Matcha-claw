@@ -2,137 +2,109 @@
  * Main Layout Component
  * TitleBar at top, then resizable panes below.
  */
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type SetStateAction } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 import { TitleBar } from './TitleBar';
 import { VerticalPaneResizer } from './VerticalPaneResizer';
 import { cn } from '@/lib/utils';
+import {
+  CHAT_WORKSPACE_LAYOUT,
+  clampPaneWidth,
+  getAgentSessionsResizeMaxWidth,
+  getSidebarResizeMaxWidth,
+  resolveChatWorkspaceLayout,
+} from '@/pages/Chat/chat-workspace-layout';
 import { useSettingsStore } from '@/stores/settings';
-
-const SIDEBAR_MIN_WIDTH = 200;
-const SIDEBAR_MAX_WIDTH = 420;
-const SIDEBAR_DEFAULT_WIDTH = 256;
-const SIDEBAR_COLLAPSED_WIDTH = 64;
-const LAYOUT_RESIZER_WIDTH = 6;
-const AGENT_SESSIONS_PANE_MIN_WIDTH = 220;
-const AGENT_SESSIONS_PANE_MAX_WIDTH = 520;
-const AGENT_SESSIONS_PANE_DEFAULT_WIDTH = 300;
-const AGENT_SESSIONS_COLLAPSED_WIDTH = 52;
-const MAIN_CONTENT_MIN_WIDTH = 520;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
 
 function loadSidebarWidth(): number {
   try {
-    const raw = Number(window.localStorage.getItem('layout:sidebar-width') || SIDEBAR_DEFAULT_WIDTH);
+    const raw = Number(window.localStorage.getItem('layout:sidebar-width') || CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth);
     if (!Number.isFinite(raw)) {
-      return SIDEBAR_DEFAULT_WIDTH;
+      return CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth;
     }
-    return clamp(raw, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    return clampPaneWidth(raw, CHAT_WORKSPACE_LAYOUT.sidebarMinWidth, CHAT_WORKSPACE_LAYOUT.sidebarMaxWidth);
   } catch {
-    return SIDEBAR_DEFAULT_WIDTH;
+    return CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth;
   }
 }
 
 function loadAgentSessionsWidth(): number {
   try {
-    const raw = Number(window.localStorage.getItem('layout:agent-sessions-width') || AGENT_SESSIONS_PANE_DEFAULT_WIDTH);
+    const raw = Number(window.localStorage.getItem('layout:agent-sessions-width') || CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth);
     if (!Number.isFinite(raw)) {
-      return AGENT_SESSIONS_PANE_DEFAULT_WIDTH;
+      return CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth;
     }
-    return clamp(raw, AGENT_SESSIONS_PANE_MIN_WIDTH, AGENT_SESSIONS_PANE_MAX_WIDTH);
+    return clampPaneWidth(
+      raw,
+      CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
+      CHAT_WORKSPACE_LAYOUT.agentSessionsMaxWidth,
+    );
   } catch {
-    return AGENT_SESSIONS_PANE_DEFAULT_WIDTH;
+    return CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth;
   }
 }
 
 export function MainLayout() {
   const location = useLocation();
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
-  const [sidebarWidth, setSidebarWidth] = useState<number>(() => loadSidebarWidth());
-  const [agentSessionsWidth, setAgentSessionsWidth] = useState<number>(() => loadAgentSessionsWidth());
-  const [agentSessionsCollapsed, setAgentSessionsCollapsed] = useState<boolean>(() => {
+  const [sidebarPreferredWidth, setSidebarPreferredWidth] = useState<number>(() => loadSidebarWidth());
+  const [agentSessionsPreferredWidth, setAgentSessionsPreferredWidth] = useState<number>(() => loadAgentSessionsWidth());
+  const [agentSessionsUserCollapsed, setAgentSessionsUserCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('layout:agent-sessions-collapsed') === '1';
     } catch {
       return false;
     }
   });
+  const [containerWidth, setContainerWidth] = useState<number>(() => window.innerWidth);
   const layoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
   const isChatRoute = location.pathname === '/';
 
-  const getRenderedSidebarWidth = useCallback(
-    () => (sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth),
-    [sidebarCollapsed, sidebarWidth],
-  );
-
-  const getAgentSessionsMaxWidth = useCallback((containerWidth: number, renderedSidebarWidth: number) => {
-    const sidebarResizerWidth = sidebarCollapsed ? 0 : LAYOUT_RESIZER_WIDTH;
-    const reserved = MAIN_CONTENT_MIN_WIDTH + renderedSidebarWidth + sidebarResizerWidth + LAYOUT_RESIZER_WIDTH;
-    return Math.max(AGENT_SESSIONS_PANE_MIN_WIDTH, containerWidth - reserved);
-  }, [sidebarCollapsed]);
-
-  const getSidebarMaxWidth = useCallback((containerWidth: number) => {
-    const agentPaneWidth = agentSessionsCollapsed
-      ? AGENT_SESSIONS_COLLAPSED_WIDTH
-      : agentSessionsWidth + LAYOUT_RESIZER_WIDTH;
-    const sidebarResizerWidth = sidebarCollapsed ? 0 : LAYOUT_RESIZER_WIDTH;
-    const reserved = MAIN_CONTENT_MIN_WIDTH + agentPaneWidth + sidebarResizerWidth;
-    return Math.max(SIDEBAR_MIN_WIDTH, containerWidth - reserved);
-  }, [agentSessionsCollapsed, agentSessionsWidth, sidebarCollapsed]);
+  const workspaceLayout = useMemo(() => resolveChatWorkspaceLayout({
+    containerWidth,
+    sidebarCollapsed,
+    sidebarPreferredWidth,
+    agentSessionsUserCollapsed,
+    agentSessionsPreferredWidth,
+  }), [
+    agentSessionsPreferredWidth,
+    agentSessionsUserCollapsed,
+    containerWidth,
+    sidebarCollapsed,
+    sidebarPreferredWidth,
+  ]);
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('layout:sidebar-width', String(sidebarWidth));
+      window.localStorage.setItem('layout:sidebar-width', String(sidebarPreferredWidth));
     } catch {
       // ignore localStorage errors
     }
-  }, [sidebarWidth]);
+  }, [sidebarPreferredWidth]);
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('layout:agent-sessions-collapsed', agentSessionsCollapsed ? '1' : '0');
+      window.localStorage.setItem('layout:agent-sessions-collapsed', agentSessionsUserCollapsed ? '1' : '0');
     } catch {
       // ignore localStorage errors
     }
-  }, [agentSessionsCollapsed]);
+  }, [agentSessionsUserCollapsed]);
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('layout:agent-sessions-width', String(agentSessionsWidth));
+      window.localStorage.setItem('layout:agent-sessions-width', String(agentSessionsPreferredWidth));
     } catch {
       // ignore localStorage errors
     }
-  }, [agentSessionsWidth]);
+  }, [agentSessionsPreferredWidth]);
 
   useEffect(() => {
     const applyResize = () => {
-      const layoutWidth = layoutRef.current?.clientWidth ?? window.innerWidth;
-      const maxSidebarWidth = getSidebarMaxWidth(layoutWidth);
-      const nextSidebarWidth = sidebarCollapsed
-        ? SIDEBAR_COLLAPSED_WIDTH
-        : clamp(sidebarWidth, SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, maxSidebarWidth));
-
-      if (!sidebarCollapsed) {
-        setSidebarWidth((prev) => (prev === nextSidebarWidth ? prev : nextSidebarWidth));
-      }
-
-      if (!agentSessionsCollapsed) {
-        const maxAgentWidth = getAgentSessionsMaxWidth(layoutWidth, nextSidebarWidth);
-        setAgentSessionsWidth((prev) => {
-          const next = clamp(
-            prev,
-            AGENT_SESSIONS_PANE_MIN_WIDTH,
-            Math.min(AGENT_SESSIONS_PANE_MAX_WIDTH, maxAgentWidth),
-          );
-          return next === prev ? prev : next;
-        });
-      }
+      const nextContainerWidth = layoutRef.current?.clientWidth ?? window.innerWidth;
+      setContainerWidth((prev) => (prev === nextContainerWidth ? prev : nextContainerWidth));
     };
 
     const scheduleResize = () => {
@@ -154,13 +126,21 @@ export function MainLayout() {
         resizeRafRef.current = null;
       }
     };
-  }, [
-    agentSessionsCollapsed,
-    getAgentSessionsMaxWidth,
-    getSidebarMaxWidth,
-    sidebarCollapsed,
-    sidebarWidth,
-  ]);
+  }, []);
+
+  const setAgentSessionsCollapsed = useCallback((next: SetStateAction<boolean>) => {
+    const desiredCollapsed = typeof next === 'function'
+      ? next(workspaceLayout.agentSessionsCollapsed)
+      : next;
+    setAgentSessionsUserCollapsed(desiredCollapsed);
+    if (!desiredCollapsed) {
+      setAgentSessionsPreferredWidth((prev) => clampPaneWidth(
+        prev,
+        CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
+        getAgentSessionsResizeMaxWidth(containerWidth, workspaceLayout.sidebarWidth, sidebarCollapsed),
+      ));
+    }
+  }, [containerWidth, sidebarCollapsed, workspaceLayout.agentSessionsCollapsed, workspaceLayout.sidebarWidth]);
 
   const startSidebarResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (sidebarCollapsed) {
@@ -173,13 +153,12 @@ export function MainLayout() {
       if (!rect) {
         return;
       }
-      const maxSidebarWidth = getSidebarMaxWidth(rect.width);
-      const nextWidth = clamp(
+      const nextWidth = clampPaneWidth(
         moveEvent.clientX - rect.left,
-        SIDEBAR_MIN_WIDTH,
-        Math.min(SIDEBAR_MAX_WIDTH, maxSidebarWidth),
+        CHAT_WORKSPACE_LAYOUT.sidebarMinWidth,
+        getSidebarResizeMaxWidth(rect.width),
       );
-      setSidebarWidth(nextWidth);
+      setSidebarPreferredWidth(nextWidth);
     };
 
     const onMouseUp = () => {
@@ -196,7 +175,7 @@ export function MainLayout() {
   };
 
   const startAgentSessionsResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (agentSessionsCollapsed) {
+    if (workspaceLayout.agentSessionsCollapsed) {
       return;
     }
     event.preventDefault();
@@ -206,16 +185,15 @@ export function MainLayout() {
       if (!rect) {
         return;
       }
-      const renderedSidebarWidth = getRenderedSidebarWidth();
-      const sidebarResizerWidth = sidebarCollapsed ? 0 : LAYOUT_RESIZER_WIDTH;
+      const renderedSidebarWidth = workspaceLayout.sidebarWidth;
+      const sidebarResizerWidth = sidebarCollapsed ? 0 : CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
       const paneLeft = rect.left + renderedSidebarWidth + sidebarResizerWidth;
-      const maxAgentWidth = getAgentSessionsMaxWidth(rect.width, renderedSidebarWidth);
-      const nextWidth = clamp(
+      const nextWidth = clampPaneWidth(
         moveEvent.clientX - paneLeft,
-        AGENT_SESSIONS_PANE_MIN_WIDTH,
-        Math.min(AGENT_SESSIONS_PANE_MAX_WIDTH, maxAgentWidth),
+        CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
+        getAgentSessionsResizeMaxWidth(rect.width, renderedSidebarWidth, sidebarCollapsed),
       );
-      setAgentSessionsWidth(nextWidth);
+      setAgentSessionsPreferredWidth(nextWidth);
     };
 
     const onMouseUp = () => {
@@ -240,8 +218,8 @@ export function MainLayout() {
         className="flex flex-1 overflow-hidden bg-card"
       >
         <Sidebar
-          expandedWidth={sidebarWidth}
-          collapsedWidth={SIDEBAR_COLLAPSED_WIDTH}
+          expandedWidth={workspaceLayout.sidebarWidth}
+          collapsedWidth={CHAT_WORKSPACE_LAYOUT.sidebarCollapsedWidth}
           showRightDivider={sidebarCollapsed}
         />
         {!sidebarCollapsed && (
@@ -255,9 +233,9 @@ export function MainLayout() {
         <main className="relative min-w-0 flex-1 overflow-hidden bg-card">
           <ChatWorkspaceHost
             isActive={isChatRoute}
-            agentSessionsWidth={agentSessionsWidth}
-            agentSessionsCollapsed={agentSessionsCollapsed}
-            agentSessionsCollapsedWidth={AGENT_SESSIONS_COLLAPSED_WIDTH}
+            agentSessionsWidth={workspaceLayout.agentSessionsWidth}
+            agentSessionsCollapsed={workspaceLayout.agentSessionsCollapsed}
+            agentSessionsCollapsedWidth={CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth}
             onToggleAgentSessionsCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
             onAgentSessionsResizeStart={startAgentSessionsResize}
           />

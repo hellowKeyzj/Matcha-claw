@@ -142,7 +142,7 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
     return (
       <aside
         data-testid="chat-task-inbox-panel"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden border-t [border-top-color:var(--divider-line)] bg-card xl:border-l xl:[border-left-color:var(--divider-line)] xl:border-t-0"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-card"
       >
         <div className="flex flex-1 flex-col items-center gap-2 px-1 py-3">
           <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
@@ -164,7 +164,7 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
   }
 
   return (
-    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-t [border-top-color:var(--divider-line)] bg-card xl:border-t-0">
+    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-card">
       <div className="px-4 py-3">
         <div className="flex items-center justify-between">
           <div>

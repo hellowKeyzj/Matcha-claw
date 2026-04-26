@@ -1,33 +1,30 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-
-const TASK_INBOX_MIN_WIDTH = 260;
-const TASK_INBOX_MAX_WIDTH = 560;
-const TASK_INBOX_DEFAULT_WIDTH = 360;
-const TASK_INBOX_RESIZER_WIDTH = 6;
-const CHAT_MAIN_MIN_WIDTH = 520;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type SetStateAction } from 'react';
+import {
+  CHAT_WORKSPACE_LAYOUT,
+  clampPaneWidth,
+  canExpandTaskInbox,
+  getTaskInboxResizeMaxWidth,
+  resolveTaskInboxLayout,
+} from './chat-workspace-layout';
 
 function loadTaskInboxWidth(): number {
   try {
-    const raw = Number(window.localStorage.getItem('chat:task-inbox-width') || TASK_INBOX_DEFAULT_WIDTH);
+    const raw = Number(window.localStorage.getItem('chat:task-inbox-width') || CHAT_WORKSPACE_LAYOUT.taskInboxDefaultWidth);
     if (!Number.isFinite(raw)) {
-      return TASK_INBOX_DEFAULT_WIDTH;
+      return CHAT_WORKSPACE_LAYOUT.taskInboxDefaultWidth;
     }
-    return clamp(raw, TASK_INBOX_MIN_WIDTH, TASK_INBOX_MAX_WIDTH);
+    return clampPaneWidth(
+      raw,
+      CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth,
+      CHAT_WORKSPACE_LAYOUT.taskInboxMaxWidth,
+    );
   } catch {
-    return TASK_INBOX_DEFAULT_WIDTH;
+    return CHAT_WORKSPACE_LAYOUT.taskInboxDefaultWidth;
   }
 }
 
-function clampTaskInboxWidth(width: number, containerWidth: number): number {
-  const maxWidth = Math.max(
-    TASK_INBOX_MIN_WIDTH,
-    containerWidth - CHAT_MAIN_MIN_WIDTH - TASK_INBOX_RESIZER_WIDTH,
-  );
-  return clamp(width, TASK_INBOX_MIN_WIDTH, Math.min(TASK_INBOX_MAX_WIDTH, maxWidth));
+function readContainerWidth(chatLayoutRef: React.RefObject<HTMLDivElement | null>): number {
+  return chatLayoutRef.current?.clientWidth ?? window.innerWidth;
 }
 
 export function useInboxLayout(
@@ -35,30 +32,36 @@ export function useInboxLayout(
   chatLayoutRef: React.RefObject<HTMLDivElement | null>,
 ) {
   const resizeRafRef = useRef<number | null>(null);
-  const [taskInboxCollapsed, setTaskInboxCollapsed] = useState<boolean>(() => {
+  const [taskInboxUserCollapsed, setTaskInboxUserCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('chat:task-inbox-collapsed') === '1';
     } catch {
       return false;
     }
   });
-  const [taskInboxWidth, setTaskInboxWidth] = useState<number>(() => loadTaskInboxWidth());
+  const [taskInboxPreferredWidth, setTaskInboxPreferredWidth] = useState<number>(() => loadTaskInboxWidth());
+  const [containerWidth, setContainerWidth] = useState<number>(() => window.innerWidth);
+
+  const layout = useMemo(
+    () => resolveTaskInboxLayout(taskInboxUserCollapsed, taskInboxPreferredWidth, containerWidth),
+    [containerWidth, taskInboxPreferredWidth, taskInboxUserCollapsed],
+  );
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('chat:task-inbox-collapsed', taskInboxCollapsed ? '1' : '0');
+      window.localStorage.setItem('chat:task-inbox-collapsed', taskInboxUserCollapsed ? '1' : '0');
     } catch {
       // ignore localStorage errors
     }
-  }, [taskInboxCollapsed]);
+  }, [taskInboxUserCollapsed]);
 
   useEffect(() => {
     try {
-      window.localStorage.setItem('chat:task-inbox-width', String(taskInboxWidth));
+      window.localStorage.setItem('chat:task-inbox-width', String(taskInboxPreferredWidth));
     } catch {
       // ignore localStorage errors
     }
-  }, [taskInboxWidth]);
+  }, [taskInboxPreferredWidth]);
 
   useEffect(() => {
     if (!enabled) {
@@ -66,11 +69,8 @@ export function useInboxLayout(
     }
 
     const applyResize = () => {
-      const containerWidth = chatLayoutRef.current?.clientWidth ?? window.innerWidth;
-      setTaskInboxWidth((prev) => {
-        const next = clampTaskInboxWidth(prev, containerWidth);
-        return next === prev ? prev : next;
-      });
+      const nextContainerWidth = readContainerWidth(chatLayoutRef);
+      setContainerWidth((prev) => (prev === nextContainerWidth ? prev : nextContainerWidth));
     };
 
     const scheduleResize = () => {
@@ -94,8 +94,22 @@ export function useInboxLayout(
     };
   }, [chatLayoutRef, enabled]);
 
+  const setTaskInboxCollapsed = useCallback((next: SetStateAction<boolean>) => {
+    const desiredCollapsed = typeof next === 'function'
+      ? next(layout.taskInboxCollapsed)
+      : next;
+    setTaskInboxUserCollapsed(desiredCollapsed);
+    if (!desiredCollapsed && canExpandTaskInbox(containerWidth)) {
+      setTaskInboxPreferredWidth((prev) => clampPaneWidth(
+        prev,
+        CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth,
+        getTaskInboxResizeMaxWidth(containerWidth),
+      ));
+    }
+  }, [containerWidth, layout.taskInboxCollapsed]);
+
   const startTaskInboxResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (taskInboxCollapsed) {
+    if (layout.taskInboxCollapsed) {
       return;
     }
     event.preventDefault();
@@ -105,9 +119,13 @@ export function useInboxLayout(
       if (!rect) {
         return;
       }
-      const rawWidth = rect.right - moveEvent.clientX - TASK_INBOX_RESIZER_WIDTH;
-      const next = clampTaskInboxWidth(rawWidth, rect.width);
-      setTaskInboxWidth(next);
+      const rawWidth = rect.right - moveEvent.clientX - CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
+      const nextWidth = clampPaneWidth(
+        rawWidth,
+        CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth,
+        getTaskInboxResizeMaxWidth(rect.width),
+      );
+      setTaskInboxPreferredWidth(nextWidth);
     };
 
     const onMouseUp = () => {
@@ -124,10 +142,10 @@ export function useInboxLayout(
   };
 
   return {
-    taskInboxCollapsed,
+    taskInboxCollapsed: layout.taskInboxCollapsed,
     setTaskInboxCollapsed,
-    taskInboxWidth,
+    taskInboxWidth: layout.taskInboxWidth,
     startTaskInboxResize,
-    taskInboxResizerWidth: TASK_INBOX_RESIZER_WIDTH,
+    taskInboxResizerWidth: CHAT_WORKSPACE_LAYOUT.paneResizerWidth,
   };
 }
