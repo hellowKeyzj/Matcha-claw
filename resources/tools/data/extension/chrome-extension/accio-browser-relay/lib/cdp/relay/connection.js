@@ -628,6 +628,13 @@ async function onRelayMessage(rawText) {
     return
   }
 
+  if (msg?.method === 'Extension.disconnectRelay') {
+    void disconnect().catch((err) => {
+      log.warn('Extension.disconnectRelay failed:', err)
+    })
+    return
+  }
+
   const MESSAGE_EXPIRE_MS = 130_000
   if (typeof msg?.ts === 'number') {
     const age = Date.now() - msg.ts

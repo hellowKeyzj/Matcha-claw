@@ -1,3 +1,4 @@
+import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import ts from 'typescript'
@@ -7,16 +8,19 @@ const BUILD_TARGETS = [
     pluginId: 'task-manager',
     packageDir: 'packages/openclaw-task-manager-plugin',
     compileDirs: ['src'],
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
   {
     pluginId: 'security-core',
     packageDir: 'packages/openclaw-security-plugin',
     compileDirs: ['src'],
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
   {
     pluginId: 'browser-relay',
     packageDir: 'packages/openclaw-browser-relay-plugin',
     compileDirs: ['src'],
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
   {
     pluginId: 'memory-lancedb-pro',
@@ -24,6 +28,7 @@ const BUILD_TARGETS = [
     compileDirs: ['src'],
     compileFiles: ['index.ts', 'cli.ts'],
     preserveDirStructure: true,
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'models', 'skills'],
   },
 ]
 
@@ -35,6 +40,10 @@ function replaceJsonImportSpecifiers(source) {
 
 function createJsonModuleSource(rawJson) {
   return `export default ${rawJson.trim()}\n`
+}
+
+function readJson(filePath) {
+  return JSON.parse(fsSync.readFileSync(filePath, 'utf8'))
 }
 
 async function pathExists(targetPath) {
@@ -66,6 +75,167 @@ async function listSourceFiles(rootDir) {
 
 async function ensureParentDir(filePath) {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
+}
+
+function createSkipPackages(packageJson) {
+  const skipPackages = new Set(['typescript', '@playwright/test'])
+  for (const peerDependency of Object.keys(packageJson?.peerDependencies ?? {})) {
+    skipPackages.add(peerDependency)
+  }
+  return skipPackages
+}
+
+function getRuntimeDependencyNames(packageJson) {
+  return Object.keys(packageJson?.dependencies ?? {})
+}
+
+function getVirtualStoreNodeModules(realPkgPath) {
+  let dir = realPkgPath
+  while (dir !== path.dirname(dir)) {
+    if (path.basename(dir) === 'node_modules') {
+      return dir
+    }
+    dir = path.dirname(dir)
+  }
+  return null
+}
+
+function resolveInstalledPackagePath(packageName, nodeModulesDirs) {
+  for (const nodeModulesDir of nodeModulesDirs) {
+    const packagePath = path.join(nodeModulesDir, ...packageName.split('/'))
+    if (fsSync.existsSync(packagePath)) {
+      return packagePath
+    }
+  }
+  return null
+}
+
+function listPackages(nodeModulesDir) {
+  const packages = []
+  if (!fsSync.existsSync(nodeModulesDir)) {
+    return packages
+  }
+
+  for (const entry of fsSync.readdirSync(nodeModulesDir)) {
+    if (entry === '.bin') {
+      continue
+    }
+    const entryPath = path.join(nodeModulesDir, entry)
+    if (entry.startsWith('@')) {
+      if (!fsSync.existsSync(entryPath)) {
+        continue
+      }
+      for (const scopedEntry of fsSync.readdirSync(entryPath)) {
+        packages.push({
+          name: `${entry}/${scopedEntry}`,
+          fullPath: path.join(entryPath, scopedEntry),
+        })
+      }
+      continue
+    }
+    packages.push({ name: entry, fullPath: entryPath })
+  }
+
+  return packages
+}
+
+function collectTransitiveDepsFromPackageNames(packageNames, skipPackages, nodeModulesDirs) {
+  const collected = new Map()
+  const queue = []
+  const skipScopes = ['@types/']
+
+  for (const packageName of packageNames) {
+    if (!packageName || skipPackages.has(packageName) || skipScopes.some((scope) => packageName.startsWith(scope))) {
+      continue
+    }
+
+    const packagePath = resolveInstalledPackagePath(packageName, nodeModulesDirs)
+    if (!packagePath) {
+      throw new Error(`Missing dependency "${packageName}" in local plugin runtime node_modules.`)
+    }
+
+    const realPath = fsSync.realpathSync(packagePath)
+    if (collected.has(realPath)) {
+      continue
+    }
+
+    collected.set(realPath, packageName)
+    const virtualNodeModules = getVirtualStoreNodeModules(realPath)
+    if (virtualNodeModules) {
+      queue.push({ nodeModulesDir: virtualNodeModules, skipPkg: packageName })
+    }
+  }
+
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift()
+    for (const { name, fullPath } of listPackages(nodeModulesDir)) {
+      if (name === skipPkg) {
+        continue
+      }
+      if (skipPackages.has(name) || skipScopes.some((scope) => name.startsWith(scope))) {
+        continue
+      }
+
+      let realPath
+      try {
+        realPath = fsSync.realpathSync(fullPath)
+      } catch {
+        continue
+      }
+      if (collected.has(realPath)) {
+        continue
+      }
+
+      collected.set(realPath, name)
+      const depVirtualNodeModules = getVirtualStoreNodeModules(realPath)
+      if (depVirtualNodeModules && depVirtualNodeModules !== nodeModulesDir) {
+        queue.push({ nodeModulesDir: depVirtualNodeModules, skipPkg: name })
+      }
+    }
+  }
+
+  return collected
+}
+
+function copyFlattenedDeps(outputDir, collected) {
+  const outputNodeModules = path.join(outputDir, 'node_modules')
+  fsSync.mkdirSync(outputNodeModules, { recursive: true })
+
+  for (const [realPath, packageName] of collected) {
+    const destination = path.join(outputNodeModules, packageName)
+    fsSync.mkdirSync(path.dirname(destination), { recursive: true })
+    fsSync.cpSync(realPath, destination, { recursive: true, dereference: true })
+  }
+}
+
+async function copyRuntimeFiles(sourceDir, outputDir, runtimeFiles) {
+  for (const relativePath of runtimeFiles) {
+    const sourcePath = path.join(sourceDir, relativePath)
+    if (!await pathExists(sourcePath)) {
+      throw new Error(`Missing runtime file "${relativePath}" in local plugin "${sourceDir}".`)
+    }
+    const destinationPath = path.join(outputDir, relativePath)
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true })
+    await fs.cp(sourcePath, destinationPath, { recursive: true, force: true })
+  }
+}
+
+async function refreshManagedPluginMirror({ rootDir, target }) {
+  const packageDir = path.join(rootDir, target.packageDir)
+  const outputDir = path.join(rootDir, 'build', 'openclaw-plugins', target.pluginId)
+
+  await fs.rm(outputDir, { recursive: true, force: true })
+  await fs.mkdir(outputDir, { recursive: true })
+  await copyRuntimeFiles(packageDir, outputDir, target.runtimeFiles)
+
+  const pluginPackageJson = readJson(path.join(outputDir, 'package.json'))
+  const runtimeDependencyNames = getRuntimeDependencyNames(pluginPackageJson)
+  const dependencyMap = collectTransitiveDepsFromPackageNames(
+    runtimeDependencyNames,
+    createSkipPackages(pluginPackageJson),
+    [path.join(packageDir, 'node_modules'), path.join(rootDir, 'node_modules')],
+  )
+  copyFlattenedDeps(outputDir, dependencyMap)
 }
 
 function toAbsolutePath(packageDir, targetPath) {
@@ -167,16 +337,26 @@ export async function buildLocalPluginArtifacts({
 export async function buildManagedOpenClawPlugins({
   rootDir,
   pluginIds,
+  refreshMirrors = true,
 } = {}) {
+  const resolvedRootDir = rootDir ?? process.cwd()
   const selectedTargets = BUILD_TARGETS.filter((target) => !pluginIds || pluginIds.includes(target.pluginId))
 
   for (const target of selectedTargets) {
+    const packageDir = path.join(resolvedRootDir, target.packageDir)
     await buildLocalPluginArtifacts({
-      packageDir: path.join(rootDir ?? process.cwd(), target.packageDir),
+      packageDir,
       ...(Array.isArray(target.compileDirs) ? { compileDirs: target.compileDirs } : {}),
       ...(Array.isArray(target.compileFiles) ? { compileFiles: target.compileFiles } : {}),
       ...(target.preserveDirStructure === true ? { preserveDirStructure: true } : {}),
     })
+
+    if (refreshMirrors) {
+      await refreshManagedPluginMirror({
+        rootDir: resolvedRootDir,
+        target,
+      })
+    }
   }
 }
 

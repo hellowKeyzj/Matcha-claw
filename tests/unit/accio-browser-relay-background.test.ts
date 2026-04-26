@@ -182,6 +182,10 @@ beforeEach(() => {
         onReplaced: registerChromeEvent('tabs.onReplaced'),
       },
       windows: {
+        getAll: vi.fn(async () => {
+          const windowIds = [...new Set(currentTabs.map((tab) => tab.windowId).filter((value): value is number => typeof value === 'number'))]
+          return windowIds.map((id) => ({ id, type: 'normal' }))
+        }),
         getLastFocused: vi.fn(async () => ({ tabs: currentTabs })),
         update: vi.fn(async () => {}),
         onFocusChanged: registerChromeEvent('windows.onFocusChanged'),
@@ -316,6 +320,34 @@ describe('accio browser relay background', () => {
         targetId: 'target-11',
         tabId: 11,
         windowId: 1,
+      },
+    })
+  })
+
+  it('auto-selects the only normal window after relay connect', async () => {
+    currentTabs = [
+      { id: 31, url: 'https://example.com/only', title: 'Only Tab', windowId: 9, active: true },
+    ]
+
+    await loadBackground()
+    await flushTasks()
+
+    expect(relayCallbacks.onConnected).toBeTypeOf('function')
+    await relayCallbacks.onConnected?.()
+    await flushTasks()
+
+    expect(trySendToRelay).toHaveBeenCalledWith({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 9 },
+    })
+    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(31)
+    expect(trySendToRelay).toHaveBeenCalledWith({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'cb-tab:browser-a:31',
+        targetId: 'target-31',
+        tabId: 31,
+        windowId: 9,
       },
     })
   })

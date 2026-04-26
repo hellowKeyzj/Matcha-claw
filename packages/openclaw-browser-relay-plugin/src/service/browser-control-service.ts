@@ -20,6 +20,7 @@ export type BrowserControlServiceOptions = {
 }
 
 type BrowserActionParams = Record<string, unknown>
+type ConnectionMode = 'relay' | 'direct-cdp'
 
 type BrowserActionResult = Record<string, unknown> & {
   ok?: boolean
@@ -133,7 +134,11 @@ export class BrowserControlService {
       if (this.isRelayDirectAction(action)) {
         return await this.handleRelayOrDirectAction(action, params)
       }
-      return await this.handlePlaywrightAction(action, params)
+      return await this.handlePlaywrightAction(
+        action,
+        params,
+        this.resolveConnectionMode(params),
+      )
     } catch (error) {
       return {
         ok: false,
@@ -182,7 +187,7 @@ export class BrowserControlService {
       }
       return {
         ok: false,
-        error: 'Browser extension not connected and no direct CDP browser detected.',
+        error: 'Browser extension not connected and no direct CDP browser detected.'
       }
     }
 
@@ -427,21 +432,40 @@ export class BrowserControlService {
     return { ok: false, error: `Unsupported direct CDP action: ${action}` }
   }
 
-  private async handlePlaywrightAction(action: string, params: BrowserActionParams): Promise<BrowserActionResult> {
-    const endpoint = await this.resolvePreferredEndpoint()
+  private async handlePlaywrightAction(
+    action: string,
+    params: BrowserActionParams,
+    connectionMode: ConnectionMode,
+  ): Promise<BrowserActionResult> {
+    if (connectionMode === 'relay' && !this.options.relay.hasExtensionConnection) {
+      const relayReady = await this.ensureRelayReady(action, params)
+      if (!relayReady) {
+        return {
+          ok: false,
+          error: 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
+        }
+      }
+    }
+
+    const endpoint = connectionMode === 'direct-cdp'
+      ? await this.resolveDirectEndpoint()
+      : this.resolveRelayEndpoint()
     if (!endpoint) {
       return {
         ok: false,
-        error: 'No browser connection available. Connect the browser extension or enable direct CDP first.',
+        error:
+          connectionMode === 'direct-cdp'
+            ? 'No direct CDP browser detected. Start Chrome with remote debugging enabled before using direct-cdp mode.'
+            : 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
       }
     }
 
     const targetId =
-      endpoint.mode === 'relay'
+      connectionMode === 'relay'
         ? this.resolveExecutionTarget(asString(params.targetId))
         : asString(params.targetId)
-    const mode = endpoint.mode
-    const cdpUrl = endpoint.endpoint.preferredUrl
+    const mode = connectionMode
+    const cdpUrl = endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
 
     if (targetId) {
@@ -745,22 +769,21 @@ export class BrowserControlService {
     }
   }
 
-  private async resolvePreferredEndpoint(): Promise<{ endpoint: ResolvedCdpEndpoint; mode: 'relay' | 'direct-cdp' } | null> {
-    const relayPort = this.options.relay.relayPort
-    if (this.options.relay.hasExtensionConnection && relayPort !== null) {
-      return {
-        endpoint: {
-          httpUrl: `http://127.0.0.1:${relayPort}`,
-          wsUrl: null,
-          port: relayPort,
-          preferredUrl: `http://127.0.0.1:${relayPort}`,
-        },
-        mode: 'relay',
-      }
-    }
+  private resolveConnectionMode(params: BrowserActionParams): ConnectionMode {
+    return asString(params.connectionMode) === 'direct-cdp' ? 'direct-cdp' : 'relay'
+  }
 
-    const direct = await this.resolveDirectEndpoint()
-    return direct ? { endpoint: direct, mode: 'direct-cdp' } : null
+  private resolveRelayEndpoint(): ResolvedCdpEndpoint | null {
+    const relayPort = this.options.relay.relayPort
+    if (!this.options.relay.hasExtensionConnection || relayPort === null) {
+      return null
+    }
+    return {
+      httpUrl: `http://127.0.0.1:${relayPort}`,
+      wsUrl: null,
+      port: relayPort,
+      preferredUrl: `http://127.0.0.1:${relayPort}`,
+    }
   }
 
   private async resolveDirectEndpoint(): Promise<ResolvedCdpEndpoint | null> {
@@ -769,6 +792,97 @@ export class BrowserControlService {
     return instance
       ? resolveCdpEndpoint({ directCdpPort: instance.port, directCdpWsUrl: instance.wsUrl })
       : null
+  }
+
+  private buildRelayDisconnectedResult(action: string): BrowserActionResult {
+    if (action === 'status') {
+      return {
+        ok: true,
+        enabled: true,
+        profile: 'chrome',
+        running: false,
+        cdpReady: false,
+        connectionType: 'extension',
+        tabCount: 0,
+        pid: null,
+        headless: false,
+        relayPort: this.options.relay.relayPort,
+        managedBrowserRunning: this.options.launcher.isRunning(),
+      }
+    }
+
+    if (action === 'profiles') {
+      return {
+        ok: true,
+        profiles: [{ name: 'chrome', running: false, tabCount: 0, isDefault: true }],
+      }
+    }
+
+    if (action === 'tabs') {
+      return {
+        ok: true,
+        running: false,
+        extensionConnected: false,
+        tabs: [],
+      }
+    }
+
+    return {
+      ok: false,
+      error: 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
+    }
+  }
+
+  private shouldAutoStartRelay(action: string): boolean {
+    return action === 'start'
+      || action === 'open'
+      || !this.isRelayDirectAction(action)
+  }
+
+  private requiresSelectedRelayTarget(action: string, params: BrowserActionParams): boolean {
+    if (this.isRelayDirectAction(action)) {
+      return false
+    }
+    return !asString(params.targetId)
+  }
+
+  private async ensureRelayReady(action: string, params: BrowserActionParams): Promise<boolean> {
+    if (!this.options.relay.hasExtensionConnection) {
+      if (!this.shouldAutoStartRelay(action)) {
+        return false
+      }
+      await this.options.launcher.ensureStarted()
+      await this.waitForRelayConnection()
+    }
+
+    if (this.requiresSelectedRelayTarget(action, params)) {
+      await this.waitForSelectedRelayTarget()
+    }
+
+    return true
+  }
+
+  private async waitForRelayConnection(timeoutMs = 20_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (this.options.relay.hasExtensionConnection && this.options.relay.relayPort !== null) {
+        return
+      }
+      await sleep(250)
+    }
+    throw new Error('Managed browser started, but the browser relay extension did not connect in time.')
+  }
+
+  private async waitForSelectedRelayTarget(timeoutMs = 12_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      this.syncRelayExecutionTarget()
+      if (this.tabState.currentSelectedPhysicalTargetId) {
+        return
+      }
+      await sleep(250)
+    }
+    throw new Error('No default browser target available. Select a window and keep its active page attached.')
   }
 
   private async syncDirectTabs(cdpUrl: string, port: number): Promise<Array<{ targetId: string; url: string; title: string; type?: string }>> {

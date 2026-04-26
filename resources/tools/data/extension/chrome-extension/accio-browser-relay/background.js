@@ -140,6 +140,31 @@ function clearPrimaryTarget() {
   })
 }
 
+async function maybeAutoSelectSingleWindow() {
+  await ensureRuntimeReady()
+  if (!isRelayConnected()) return false
+  if (currentSelectedBrowserInstanceId() || currentSelectedWindowId() !== null) {
+    return false
+  }
+
+  const windows = await chrome.windows.getAll({
+    populate: false,
+    windowTypes: ['normal'],
+  }).catch(() => [])
+  const normalWindows = windows.filter((entry) => Number.isInteger(entry?.id))
+  if (normalWindows.length !== 1) {
+    return false
+  }
+
+  const selectedWindowId = normalWindows[0].id
+  mirrorSelectionState({
+    selectedBrowserInstanceId: currentBrowserInstanceId(),
+    selectedWindowId,
+  })
+  announceWindowSelection(selectedWindowId)
+  return true
+}
+
 async function getPrimaryTabForSelectedWindow() {
   const windowId = currentSelectedWindowId()
   if (!Number.isInteger(windowId)) return null
@@ -265,6 +290,7 @@ initRelay({
     await mgr.refreshAfterTransportReady()
     mgr.startSessionIndicators()
     void mgr.discoverAll(isRelayConnected)
+    await maybeAutoSelectSingleWindow()
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
       await syncSelectedBrowserPrimary()
     }

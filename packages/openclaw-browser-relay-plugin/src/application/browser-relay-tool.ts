@@ -70,6 +70,7 @@ const browserRelayToolParameters = {
     targetUrl: { type: 'string' },
     url: { type: 'string' },
     targetId: { type: 'string' },
+    connectionMode: { type: 'string', enum: ['relay', 'direct-cdp'] },
     limit: { type: 'number' },
     maxChars: { type: 'number' },
     mode: { type: 'string', enum: ['efficient'] },
@@ -382,7 +383,7 @@ export function createBrowserRelayTool(
     name: 'browser',
     label: 'Browser',
     description:
-      'Control the browser through MatchaClaw Browser Relay (status/start/profiles/tabs/open/snapshot/screenshot/actions).',
+      'Control the browser through MatchaClaw Browser Relay. Default mode uses the extension relay; direct-cdp is debug-only and must be requested explicitly.',
     parameters: browserRelayToolParameters,
     async execute(_toolCallId: string, params: BrowserRelayToolParams) {
       const result = await resolveControl().handleRequest({
