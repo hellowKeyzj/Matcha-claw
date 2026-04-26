@@ -27,6 +27,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useSkillsStore } from '@/stores/skills';
+import { prewarmPluginsData } from '@/stores/plugins-store';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
@@ -467,11 +468,17 @@ export function Sidebar({
         void initTaskCenter();
       }
       void refreshTaskCenter({ silent: true });
+      return;
+    }
+
+    if (path === '/plugins') {
+      void prewarmPluginsData();
     }
   }, [
     fetchSkills,
     gatewayState,
     initTaskCenter,
+    prewarmPluginsData,
     refreshTaskCenter,
     taskCenterInitialized,
   ]);

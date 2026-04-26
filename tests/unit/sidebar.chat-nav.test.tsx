@@ -8,6 +8,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
+import { usePluginsStore } from '@/stores/plugins-store';
 import i18n from '@/i18n';
 import type { RawMessage } from '@/stores/chat';
 
@@ -125,10 +126,31 @@ function setupSidebarState() {
     refreshTasks: vi.fn().mockResolvedValue(undefined),
     handleGatewayNotification: vi.fn(),
   } as never);
+  usePluginsStore.setState({
+    prewarm: vi.fn().mockResolvedValue(undefined),
+  } as never);
   i18n.changeLanguage('en');
 }
 
 describe('sidebar chat nav', () => {
+  it('hover 插件入口时会预热插件数据', async () => {
+    vi.useFakeTimers();
+    try {
+      setupSidebarState();
+      const prewarm = vi.fn().mockResolvedValue(undefined);
+      usePluginsStore.setState({ prewarm } as never);
+
+      mountSidebar('/dashboard');
+
+      fireEvent.mouseEnter(screen.getByRole('link', { name: 'Plugin Center' }));
+      vi.advanceTimersByTime(140);
+
+      expect(prewarm).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('from non-chat routes, clicking chat only navigates and does not create new session', async () => {
     setupSidebarState();
     const newSession = vi.fn();
