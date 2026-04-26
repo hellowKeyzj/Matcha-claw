@@ -22,6 +22,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/files/thumbnails',
   '/api/files/save-image',
   '/api/diagnostics/collect',
+  '/api/diagnostics/memory',
   '/api/logs',
   '/api/logs/dir',
   '/api/logs/files',
