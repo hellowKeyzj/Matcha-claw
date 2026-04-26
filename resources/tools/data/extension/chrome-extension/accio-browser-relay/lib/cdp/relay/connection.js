@@ -20,6 +20,7 @@ import { RelayState, STATE_UI, DEFAULT_CONTROL_PORT, RELAY_PORT_OFFSET, clampPor
 import { setIconWithDot } from '../../icon-badge.js'
 import { createLogger } from '../../logger.js'
 import { prepareSessionKey, activateEncryption, resetEncryption, encryptMessage, decryptMessage, isEncryptionActive } from '../../crypto.js'
+import { getBrowserInstanceId } from '../../browser-instance.js'
 
 const log = createLogger('relay')
 
@@ -234,11 +235,20 @@ export function resetReconnectBackoff() {
  * atomic callback so callers can handle group dissolution and tab cleanup
  * in one place, avoiding ordering bugs.
  *
- * @type {{ onMessage: (msg: any) => Promise<any>, onShutdown: (reason: 'connectionLost'|'disabled') => Promise<any>|void, onConnected: () => void, installDebuggerListeners: () => void }}
+ * @type {{
+ *   onMessage: (msg: any) => Promise<any>,
+ *   onControlMessage: (msg: any) => Promise<any>|void,
+ *   onShutdown: (reason: 'disabled') => Promise<any>|void,
+ *   onTransportClosed: (reason: 'connectionLost') => Promise<any>|void,
+ *   onConnected: () => void,
+ *   installDebuggerListeners: () => void
+ * }}
  */
 let callbacks = {
   onMessage: async () => null,
-  onShutdown: async (_reason) => {},
+  onControlMessage: async () => {},
+  onShutdown: async () => {},
+  onTransportClosed: async () => {},
   onConnected: () => {},
   installDebuggerListeners: () => {},
 }
@@ -497,7 +507,12 @@ async function ensureConnection() {
     //   1. 此处的 protocolVersion 值
     //   2. 桌面端 server.ts — 搜索 `protocolVersion !== 1` 和 `requiredProtocol: 1`
     //      路径: packages/sdk/src/browser/relay/server.ts
-    const helloParams = { protocolVersion: 1, extensionVersion: LOADED_VERSION }
+    const helloParams = {
+      protocolVersion: 1,
+      extensionVersion: LOADED_VERSION,
+      browserInstanceId: await getBrowserInstanceId(),
+      browserName: 'Chrome',
+    }
     try {
       const { encryptedSessionKey } = await prepareSessionKey()
       helloParams.encryptedSessionKey = encryptedSessionKey
@@ -530,8 +545,8 @@ function onRelayClosed(reason) {
   resetEncryption()
   _sendChain = Promise.resolve()
 
-  void Promise.resolve(callbacks.onShutdown('connectionLost')).catch((err) => {
-    log.warn('onRelayClosed: onShutdown error:', err)
+  void Promise.resolve(callbacks.onTransportClosed('connectionLost')).catch((err) => {
+    log.warn('onRelayClosed: onTransportClosed error:', err)
   })
 
   setState(RelayState.DISCONNECTED)
@@ -606,6 +621,13 @@ async function onRelayMessage(rawText) {
     return
   }
 
+  if (msg?.method === 'Extension.selectionChanged') {
+    void Promise.resolve(callbacks.onControlMessage(msg)).catch((err) => {
+      log.warn('onRelayMessage: onControlMessage error:', err)
+    })
+    return
+  }
+
   const MESSAGE_EXPIRE_MS = 130_000
   if (typeof msg?.ts === 'number') {
     const age = Date.now() - msg.ts
@@ -667,8 +689,7 @@ export async function connectAndAttach() {
  * The sync neutralization block (relayWs = null, cancel timers, abort connect)
  * runs BEFORE any await so that isRelayConnected() returns false immediately.
  *
- * onShutdown('disabled') handles both group dissolution and tab cleanup
- * atomically — the callback decides internally what to do based on the reason.
+ * onShutdown() handles the explicit user-disabled path only.
  */
 export async function disconnect() {
   const t0 = performance.now()
@@ -700,7 +721,7 @@ export async function disconnect() {
   await Promise.all([
     setRelayEnabled(false),
     Promise.resolve(callbacks.onShutdown('disabled')).catch((err) => {
-      log.warn('disconnect: onShutdown(disabled) failed:', err)
+      log.warn('disconnect: onShutdown failed:', err)
     }),
   ])
 

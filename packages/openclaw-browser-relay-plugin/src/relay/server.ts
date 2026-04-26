@@ -20,6 +20,9 @@ const EXTENSION_HELLO_TIMEOUT_MS = 5_000
 const EXTENSION_REQUEST_TIMEOUT_MS = 15_000
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
+const SESSION_ID_MARKER = '|sid|'
+const TARGET_ID_MARKER = '|tid|'
+
 type RelayTargetInfo = {
   targetId: string
   type: string
@@ -32,9 +35,18 @@ type RelayTargetInfo = {
 }
 
 type ConnectedTarget = {
+  browserInstanceId: string
+  browserName: string
   sessionId: string
-  targetId: string
+  localSessionId: string
+  targetKey: string
+  localTargetKey: string
+  targetId: string | null
+  localTargetId: string | null
   targetInfo: RelayTargetInfo
+  windowId: number | null
+  tabId: number | null
+  active: boolean
   physical: boolean
 }
 
@@ -52,6 +64,20 @@ type CdpClientState = {
 type RelayHelloParams = {
   protocolVersion?: number
   encryptedSessionKey?: string
+  browserInstanceId?: string
+  browserName?: string
+}
+
+type ExtensionClient = {
+  ws: WebSocket
+  sessionKey: Buffer | null
+  handshakeOk: boolean
+  browserInstanceId: string
+  browserName: string
+  nextRequestId: number
+  pendingRequests: Map<number, PendingExtensionRequest>
+  connectedTargets: Map<string, ConnectedTarget>
+  primarySessionId: string | null
 }
 
 export type BrowserRelayServerOptions = {
@@ -66,6 +92,9 @@ export type BrowserRelayStatus = {
   extensionConnected: boolean
   handshakeOk: boolean
   tabCount: number
+  browserCount: number
+  selectedBrowserInstanceId: string | null
+  selectedWindowId: number | null
 }
 
 function isLoopback(remoteAddress?: string | null): boolean {
@@ -137,6 +166,45 @@ function decryptWireMessage(sessionKey: Buffer, wireMessage: string): string {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
 }
 
+function encodeExternalSessionId(browserInstanceId: string, localSessionId: string): string {
+  return `${browserInstanceId}${SESSION_ID_MARKER}${localSessionId}`
+}
+
+function encodeExternalTargetId(browserInstanceId: string, localTargetId: string): string {
+  return `${browserInstanceId}${TARGET_ID_MARKER}${localTargetId}`
+}
+
+function parseExternalId(value: string, marker: string): { browserInstanceId: string; localId: string } | null {
+  const index = value.indexOf(marker)
+  if (index <= 0) return null
+  const browserInstanceId = value.slice(0, index)
+  const localId = value.slice(index + marker.length)
+  if (!browserInstanceId || !localId) return null
+  return { browserInstanceId, localId }
+}
+
+function parseExternalSessionId(value?: string): { browserInstanceId: string; localSessionId: string } | null {
+  if (!value) return null
+  const parsed = parseExternalId(value, SESSION_ID_MARKER)
+  return parsed ? { browserInstanceId: parsed.browserInstanceId, localSessionId: parsed.localId } : null
+}
+
+function parseExternalTargetId(value?: string): { browserInstanceId: string; localTargetId: string } | null {
+  if (!value) return null
+  const parsed = parseExternalId(value, TARGET_ID_MARKER)
+  return parsed ? { browserInstanceId: parsed.browserInstanceId, localTargetId: parsed.localId } : null
+}
+
+function toNullableInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) ? value : null
+}
+
+function ensureExternalTargetId(browserInstanceId: string, targetId: string): string {
+  const parsed = parseExternalTargetId(targetId)
+  if (parsed) return targetId
+  return encodeExternalTargetId(browserInstanceId, targetId)
+}
+
 export class BrowserRelayServer {
   private readonly requestedPort: number
   private readonly logger: PluginLogger
@@ -146,15 +214,12 @@ export class BrowserRelayServer {
   private httpServer: Server | null = null
   private extensionWss: WebSocketServer | null = null
   private cdpWss: WebSocketServer | null = null
-  private extensionWs: WebSocket | null = null
-  private extensionSessionKey: Buffer | null = null
-  private handshakeOk = false
-  private nextRequestId = 1
-  private pendingExtensionRequests = new Map<number, PendingExtensionRequest>()
+  private extensionClients = new Map<string, ExtensionClient>()
   private cdpClients = new Set<WebSocket>()
   private cdpClientState = new WeakMap<WebSocket, CdpClientState>()
-  private connectedTargets = new Map<string, ConnectedTarget>()
   private pendingTargetUrls = new Map<string, string>()
+  private selectedBrowserInstanceId: string | null = null
+  private selectedWindowId: number | null = null
   private actualPort: number | null = null
 
   constructor(options: BrowserRelayServerOptions) {
@@ -172,7 +237,7 @@ export class BrowserRelayServer {
   }
 
   get hasExtensionConnection(): boolean {
-    return this.extensionWs?.readyState === WebSocket.OPEN && this.handshakeOk
+    return this.extensionClients.size > 0
   }
 
   get authHeaders(): Record<string, string> {
@@ -183,52 +248,101 @@ export class BrowserRelayServer {
     return {
       running: this.httpServer !== null,
       port: this.actualPort,
-      extensionConnected: this.extensionWs?.readyState === WebSocket.OPEN,
-      handshakeOk: this.handshakeOk,
-      tabCount: this.connectedTargets.size,
+      extensionConnected: this.hasExtensionConnection,
+      handshakeOk: this.hasExtensionConnection,
+      tabCount: this.getAllConnectedTargets().length,
+      browserCount: this.extensionClients.size,
+      selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+      selectedWindowId: this.selectedWindowId,
     }
   }
 
-  listTabs(): Array<{ sessionId: string; targetId: string; title: string; url: string; physical: boolean }> {
-    return Array.from(this.connectedTargets.values()).map((target) => ({
+  listTabs(): Array<{
+    browserInstanceId: string
+    browserName: string
+    windowId: number | null
+    tabId: number | null
+    active: boolean
+    sessionId: string
+    targetKey: string
+    targetId: string
+    title: string
+    url: string
+    selectedBrowser: boolean
+    selectedWindow: boolean
+    physical: boolean
+    selected: boolean
+    primary: boolean
+  }> {
+    return this.getAllConnectedTargets().map((target) => ({
+      browserInstanceId: target.browserInstanceId,
+      browserName: target.browserName,
+      windowId: target.windowId,
+      tabId: target.tabId,
+      active: target.active,
       sessionId: target.sessionId,
-      targetId: target.targetId,
+      targetKey: target.targetKey,
+      targetId: target.targetId ?? '',
       title: target.targetInfo.title ?? '',
       url: target.targetInfo.url ?? '',
+      selectedBrowser: target.browserInstanceId === this.selectedBrowserInstanceId,
+      selectedWindow: this.isTargetInSelectedWindow(target),
       physical: target.physical,
+      selected: this.isTargetInSelectedWindow(target),
+      primary: this.getSelectedPrimaryTarget()?.sessionId === target.sessionId,
     }))
   }
 
-  listAttachments(): Array<{ sessionId: string; targetId: string; title: string; url: string }> {
+  listAttachments(): Array<{
+    browserInstanceId: string
+    browserName: string
+    windowId: number | null
+    tabId: number | null
+    active: boolean
+    sessionId: string
+    targetId: string
+    title: string
+    url: string
+    selectedBrowser: boolean
+    selectedWindow: boolean
+    selected: boolean
+    primary: boolean
+  }> {
     return this.getInspectablePageTargets().map((target) => ({
+      browserInstanceId: target.browserInstanceId,
+      browserName: target.browserName,
+      windowId: target.windowId,
+      tabId: target.tabId,
+      active: target.active,
       sessionId: target.sessionId,
-      targetId: target.targetId,
+      targetId: target.targetId ?? '',
       title: target.targetInfo.title ?? '',
       url: target.targetInfo.url ?? '',
+      selectedBrowser: target.browserInstanceId === this.selectedBrowserInstanceId,
+      selectedWindow: this.isTargetInSelectedWindow(target),
+      selected: this.isTargetInSelectedWindow(target),
+      primary: this.getSelectedPrimaryTarget()?.sessionId === target.sessionId,
     }))
   }
 
   getTargetIdForSession(sessionId: string): string | undefined {
-    return this.connectedTargets.get(sessionId)?.targetId
+    return this.findTargetBySessionId(sessionId)?.targetId ?? undefined
   }
 
   getTargetUrl(targetId: string): string | undefined {
-    return Array.from(this.connectedTargets.values()).find((target) => target.targetId === targetId)?.targetInfo.url ?? this.pendingTargetUrls.get(targetId)
+    return this.findTargetByTargetId(targetId)?.targetInfo.url ?? this.pendingTargetUrls.get(targetId)
   }
 
   updateTargetUrl(targetId: string, url: string): void {
     if (!targetId || !url) return
     this.pendingTargetUrls.set(targetId, url)
-    for (const [sessionId, target] of this.connectedTargets.entries()) {
-      if (target.targetId !== targetId) continue
-      this.connectedTargets.set(sessionId, {
-        ...target,
-        targetInfo: {
-          ...target.targetInfo,
-          url,
-        },
-      })
-    }
+    const existing = this.findTargetByTargetId(targetId)
+    if (!existing) return
+    existing.targetInfo = normalizeTargetInfo({
+      ...existing.targetInfo,
+      url,
+      targetId: existing.targetId,
+    })
   }
 
   async start(): Promise<void> {
@@ -272,7 +386,7 @@ export class BrowserRelayServer {
           socket.destroy()
           return
         }
-        if (!this.handshakeOk) {
+        if (!this.hasExtensionConnection) {
           socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
           socket.destroy()
           return
@@ -331,23 +445,19 @@ export class BrowserRelayServer {
   }
 
   async stop(): Promise<void> {
-    for (const pending of this.pendingExtensionRequests.values()) {
-      clearTimeout(pending.timer)
-      pending.reject(new Error('Relay stopping'))
+    for (const client of this.extensionClients.values()) {
+      this.rejectPendingRequests(client, 'Relay stopping')
+      client.ws.close(1001, 'server stopping')
     }
-    this.pendingExtensionRequests.clear()
-
-    this.extensionWs?.close(1001, 'server stopping')
-    this.extensionWs = null
-    this.extensionSessionKey = null
-    this.handshakeOk = false
+    this.extensionClients.clear()
+    this.pendingTargetUrls.clear()
+    this.selectedBrowserInstanceId = null
+    this.selectedWindowId = null
 
     for (const client of this.cdpClients) {
       client.close(1001, 'server stopping')
     }
     this.cdpClients.clear()
-    this.connectedTargets.clear()
-    this.pendingTargetUrls.clear()
 
     await new Promise<void>((resolve) => {
       this.extensionWss?.close()
@@ -376,13 +486,11 @@ export class BrowserRelayServer {
   }
 
   private async disposeFailedStart(): Promise<void> {
-    this.extensionWs = null
-    this.extensionSessionKey = null
-    this.handshakeOk = false
-    this.connectedTargets.clear()
+    this.extensionClients.clear()
     this.pendingTargetUrls.clear()
+    this.selectedBrowserInstanceId = null
+    this.selectedWindowId = null
     this.cdpClients.clear()
-    this.pendingExtensionRequests.clear()
 
     await new Promise<void>((resolve) => {
       this.extensionWss?.close()
@@ -406,30 +514,37 @@ export class BrowserRelayServer {
   }
 
   async openTarget(url: string): Promise<{ targetId: string }> {
-    const result = await this.sendToExtension('Target.createTarget', { url })
-    const targetId = typeof result?.targetId === 'string' ? result.targetId : ''
-    if (!targetId) throw new Error('Target.createTarget returned no targetId')
+    const client = this.requireSelectedClient()
+    const result = await this.sendToExtension(client, 'Target.createTarget', { url })
+    const rawTargetId = typeof result?.targetId === 'string' ? result.targetId : ''
+    if (!rawTargetId) throw new Error('Target.createTarget returned no targetId')
+    const targetId = ensureExternalTargetId(client.browserInstanceId, rawTargetId)
     this.pendingTargetUrls.set(targetId, url)
     return { targetId }
   }
 
   async focusTarget(targetId: string): Promise<void> {
-    const sessionId = this.findSessionId(targetId)
-    await this.sendToExtension('Target.activateTarget', { targetId }, sessionId)
+    const { client, localTargetId } = this.requireClientForTarget(targetId)
+    await this.sendToExtension(client, 'Target.activateTarget', { targetId: localTargetId })
   }
 
   async closeTarget(targetId: string): Promise<void> {
-    const sessionId = this.findSessionId(targetId)
-    await this.sendToExtension('Target.closeTarget', { targetId }, sessionId)
+    const { client, localTargetId } = this.requireClientForTarget(targetId)
+    await this.sendToExtension(client, 'Target.closeTarget', { targetId: localTargetId })
   }
 
   async evaluate(targetId: string, expression: string): Promise<unknown> {
-    const sessionId = this.findSessionId(targetId)
-    return this.sendToExtension('Runtime.evaluate', { expression, returnByValue: true }, sessionId)
+    const { client, localSessionId } = this.requireClientForTarget(targetId)
+    return this.sendToExtension(client, 'Runtime.evaluate', { expression, returnByValue: true }, localSessionId)
   }
 
   async closeAllAgentTabs(): Promise<unknown> {
-    return this.sendToExtension('Target.closeAllAgentTabs', {})
+    const client = this.requireSelectedClient()
+    return this.sendToExtension(client, 'Target.closeAllAgentTabs', {})
+  }
+
+  resolveSelectedSessionId(): string {
+    return this.requireSelectedPrimaryTarget().sessionId
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -464,13 +579,16 @@ export class BrowserRelayServer {
         200,
         {
           connected: this.hasExtensionConnection,
-          tabCount: this.hasExtensionConnection ? this.connectedTargets.size : 0,
+          tabCount: this.hasExtensionConnection ? this.getAllConnectedTargets().length : 0,
           relayPort: this.actualPort,
           connectionType: this.hasExtensionConnection ? 'extension' : 'none',
+          selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+          selectedWindowId: this.selectedWindowId,
           availability: {
             extension: {
               available: this.hasExtensionConnection,
-              tabCount: this.hasExtensionConnection ? this.connectedTargets.size : 0,
+              browserCount: this.extensionClients.size,
+              tabCount: this.hasExtensionConnection ? this.getAllConnectedTargets().length : 0,
             },
           },
         },
@@ -483,7 +601,7 @@ export class BrowserRelayServer {
       writeJson(
         res,
         200,
-        this.handshakeOk
+        this.hasExtensionConnection
           ? { status: 'compatible', protocolVersion: RELAY_PROTOCOL_VERSION }
           : { status: 'unknown', error: 'no_extension_connected' },
         { 'Access-Control-Allow-Origin': '*' },
@@ -492,7 +610,9 @@ export class BrowserRelayServer {
     }
 
     if (req.method === 'POST' && pathname === '/cdp-reconnect') {
-      this.handleExtensionClose()
+      for (const client of this.extensionClients.values()) {
+        client.ws.close(1012, 'relay reconnect requested')
+      }
       writeJson(res, 200, { ok: true }, { 'Access-Control-Allow-Origin': '*' })
       return
     }
@@ -505,11 +625,14 @@ export class BrowserRelayServer {
       }
       const physicalTargets = this.getInspectablePageTargets()
       writeJson(res, 200, {
-        extensionConnected: this.handshakeOk,
+        extensionConnected: this.hasExtensionConnection,
+        browserCount: this.extensionClients.size,
+        selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+        selectedWindowId: this.selectedWindowId,
         physicalTargets: physicalTargets.length,
-        virtualTargets: this.connectedTargets.size - physicalTargets.length,
+        virtualTargets: this.getAllConnectedTargets().length - physicalTargets.length,
         cdpClients: this.cdpClients.size,
-        pendingRequests: this.pendingExtensionRequests.size,
+        pendingRequests: [...this.extensionClients.values()].reduce((sum, client) => sum + client.pendingRequests.size, 0),
       })
       return
     }
@@ -531,7 +654,7 @@ export class BrowserRelayServer {
       writeJson(res, 200, {
         Browser: 'OpenClaw/browser-relay',
         'Protocol-Version': '1.3',
-        ...(this.handshakeOk ? { webSocketDebuggerUrl: cdpUrl } : {}),
+        ...(this.hasExtensionConnection ? { webSocketDebuggerUrl: cdpUrl } : {}),
       })
       return
     }
@@ -586,22 +709,16 @@ export class BrowserRelayServer {
   }
 
   private handleExtensionConnection(ws: WebSocket): void {
-    if (this.extensionWs && this.extensionWs.readyState === WebSocket.OPEN) {
-      this.extensionWs.close(1000, 'replaced by new connection')
-    }
-
-    this.extensionWs = ws
-    this.extensionSessionKey = null
-    this.handshakeOk = false
-
     const helloTimer = setTimeout(() => {
       this.logger.warn?.('[browser-relay] extension did not send Extension.hello within timeout')
       ws.close(4001, 'Protocol handshake timeout')
     }, EXTENSION_HELLO_TIMEOUT_MS)
 
+    let client: ExtensionClient | null = null
+
     const onHandshakeMessage = (raw: RawData) => {
       const text = toText(raw)
-      let message: { method?: string; params?: RelayHelloParams } | null = null
+      let message: { method?: string; params?: RelayHelloParams }
       try {
         message = JSON.parse(text)
       } catch {
@@ -614,83 +731,124 @@ export class BrowserRelayServer {
       clearTimeout(helloTimer)
       const params = message.params ?? {}
       if (params.protocolVersion !== RELAY_PROTOCOL_VERSION) {
-        this.sendExtensionMessage(
-          {
-            method: 'Extension.helloAck',
-            params: {
-              status: 'version_mismatch',
-              requiredVersion: RELAY_PROTOCOL_VERSION,
-            },
+        ws.send(JSON.stringify({
+          method: 'Extension.helloAck',
+          params: {
+            status: 'version_mismatch',
+            requiredVersion: RELAY_PROTOCOL_VERSION,
           },
-          false,
-        )
+        }))
         ws.close(4001, 'Protocol version mismatch')
         return
       }
 
       if (typeof params.encryptedSessionKey !== 'string' || !params.encryptedSessionKey) {
-        this.sendExtensionMessage(
-          {
-            method: 'Extension.helloAck',
-            params: {
-              status: 'encryption_required',
-            },
+        ws.send(JSON.stringify({
+          method: 'Extension.helloAck',
+          params: {
+            status: 'encryption_required',
           },
-          false,
-        )
+        }))
         ws.close(4002, 'Encrypted session key required')
         return
       }
 
+      const browserInstanceId = typeof params.browserInstanceId === 'string' ? params.browserInstanceId.trim() : ''
+      if (!browserInstanceId) {
+        ws.close(4004, 'browserInstanceId required')
+        return
+      }
+
+      const existing = this.extensionClients.get(browserInstanceId)
+      if (existing && existing.ws.readyState === WebSocket.OPEN) {
+        existing.ws.close(1000, 'replaced by new connection')
+      }
+
       try {
-        this.extensionSessionKey = decryptSessionKey(params.encryptedSessionKey)
+        client = {
+          ws,
+          sessionKey: decryptSessionKey(params.encryptedSessionKey),
+          handshakeOk: true,
+          browserInstanceId,
+          browserName: typeof params.browserName === 'string' && params.browserName.trim()
+            ? params.browserName.trim()
+            : browserInstanceId,
+          nextRequestId: 1,
+          pendingRequests: new Map(),
+          connectedTargets: new Map(),
+          primarySessionId: null,
+        }
       } catch (error) {
         this.logger.warn?.(`[browser-relay] failed to decrypt session key: ${String(error)}`)
         ws.close(4003, 'Invalid encrypted session key')
         return
       }
 
-      this.handshakeOk = true
+      this.extensionClients.set(browserInstanceId, client)
+
       this.sendExtensionMessage(
+        client,
         {
           method: 'Extension.helloAck',
           params: {
             status: 'ok',
             encrypted: true,
+            selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+            selectedWindowId: this.selectedWindowId,
+            selected: this.selectedBrowserInstanceId === browserInstanceId,
+            selectedBrowser: this.selectedBrowserInstanceId === browserInstanceId,
+            selectedWindow:
+              this.selectedBrowserInstanceId === browserInstanceId
+              && this.selectedWindowId !== null,
           },
         },
         true,
       )
 
       ws.off('message', onHandshakeMessage)
-      ws.on('message', (payload) => this.onExtensionMessage(payload))
+      ws.on('message', (payload) => {
+        if (client) {
+          this.onExtensionMessage(client, payload)
+        }
+      })
+      this.broadcastBrowserSelection()
     }
 
     ws.on('message', onHandshakeMessage)
     ws.on('close', () => {
       clearTimeout(helloTimer)
-      if (this.extensionWs === ws) this.handleExtensionClose()
+      if (client) {
+        this.handleExtensionClose(client)
+      }
     })
     ws.on('error', () => {
       clearTimeout(helloTimer)
-      if (this.extensionWs === ws) this.handleExtensionClose()
+      if (client) {
+        this.handleExtensionClose(client)
+      }
     })
   }
 
-  private handleExtensionClose(): void {
-    for (const pending of this.pendingExtensionRequests.values()) {
-      clearTimeout(pending.timer)
-      pending.reject(new Error('Extension disconnected'))
+  private handleExtensionClose(client: ExtensionClient): void {
+    const current = this.extensionClients.get(client.browserInstanceId)
+    if (current !== client) return
+
+    this.rejectPendingRequests(client, 'Extension disconnected')
+    this.extensionClients.delete(client.browserInstanceId)
+    this.clearClientTargets(client, true)
+
+    if (this.selectedBrowserInstanceId === client.browserInstanceId) {
+      this.selectedBrowserInstanceId = null
+      this.selectedWindowId = null
+      this.broadcastBrowserSelection()
     }
-    this.pendingExtensionRequests.clear()
-    this.extensionWs = null
-    this.extensionSessionKey = null
-    this.handshakeOk = false
-    this.connectedTargets.clear()
-    for (const client of this.cdpClients) {
-      client.close(1011, 'extension disconnected')
+
+    if (!this.hasExtensionConnection) {
+      for (const cdpClient of this.cdpClients) {
+        cdpClient.close(1011, 'extension disconnected')
+      }
+      this.cdpClients.clear()
     }
-    this.cdpClients.clear()
   }
 
   private handleCdpConnection(ws: WebSocket): void {
@@ -701,7 +859,7 @@ export class BrowserRelayServer {
     })
 
     ws.on('message', async (raw) => {
-      let message: { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string } | null = null
+      let message: { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string }
       try {
         message = JSON.parse(toText(raw))
       } catch {
@@ -781,40 +939,61 @@ export class BrowserRelayServer {
       case 'Target.getTargetInfo': {
         const targetId = typeof input.params?.targetId === 'string' ? input.params.targetId : undefined
         if (targetId) {
-          const target = Array.from(this.connectedTargets.values()).find((entry) => entry.targetId === targetId)
+          const target = this.findTargetByTargetId(targetId)
           if (!target) throw new Error('target not found')
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
         }
         if (input.sessionId) {
-          const target = this.connectedTargets.get(input.sessionId)
+          const target = this.findTargetBySessionId(input.sessionId)
           if (!target) throw new Error('target not found')
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
         }
-        const fallback = this.getInspectablePageTargets()[0]
-        if (!fallback) throw new Error('target not found')
-        return { targetInfo: normalizeTargetInfo(fallback.targetInfo) }
+        const selectedTarget = this.requireSelectedPrimaryTarget()
+        return { targetInfo: normalizeTargetInfo(selectedTarget.targetInfo) }
       }
       case 'Target.attachToTarget': {
         const targetId = typeof input.params?.targetId === 'string' ? input.params.targetId : undefined
         if (!targetId) throw new Error('targetId required')
-        const target = this.getInspectablePageTargets().find((entry) => entry.targetId === targetId)
+        const target = this.findTargetByTargetId(targetId)
         if (!target) throw new Error('target not found')
         return { sessionId: target.sessionId }
       }
-      case 'Target.createTarget':
-      case 'Target.closeTarget':
-      case 'Target.closeAllAgentTabs':
-        return this.sendToExtension(input.method, input.params ?? {}, input.sessionId)
+      case 'Target.createTarget': {
+        const client = this.requireSelectedClient()
+        const result = await this.sendToExtension(client, input.method, input.params ?? {})
+        const rawTargetId = typeof result?.targetId === 'string' ? result.targetId : ''
+        const externalTargetId = rawTargetId
+          ? ensureExternalTargetId(client.browserInstanceId, rawTargetId)
+          : ''
+        return {
+          ...((result && typeof result === 'object') ? result as Record<string, unknown> : {}),
+          ...(externalTargetId ? { targetId: externalTargetId } : {}),
+        }
+      }
+      case 'Target.closeTarget': {
+        const targetId = typeof input.params?.targetId === 'string' ? input.params.targetId : undefined
+        if (!targetId) throw new Error('targetId required')
+        const { client, localTargetId } = this.requireClientForTarget(targetId)
+        return this.sendToExtension(client, input.method, { ...(input.params ?? {}), targetId: localTargetId })
+      }
+      case 'Target.closeAllAgentTabs': {
+        const client = this.requireSelectedClient()
+        return this.sendToExtension(client, input.method, input.params ?? {})
+      }
       case 'Runtime.enable':
       case 'Network.enable':
-        return input.sessionId ? this.sendToExtension(input.method, input.params ?? {}, input.sessionId) : {}
+        if (!input.sessionId) return {}
+        return this.sendToExtensionForExternalSession(input.sessionId, input.method, input.params ?? {})
       default:
-        return this.sendToExtension(input.method, input.params ?? {}, input.sessionId)
+        if (!input.sessionId) {
+          throw new Error(`sessionId is required for method ${input.method}`)
+        }
+        return this.sendToExtensionForExternalSession(input.sessionId, input.method, input.params ?? {})
     }
   }
 
-  private onExtensionMessage(raw: RawData): void {
-    const text = this.decodeExtensionPayload(toText(raw))
+  private onExtensionMessage(client: ExtensionClient, raw: RawData): void {
+    const text = this.decodeExtensionPayload(client, toText(raw))
     if (!text) return
 
     let message:
@@ -829,7 +1008,7 @@ export class BrowserRelayServer {
           error?: unknown
           result?: unknown
         }
-      | null = null
+      | undefined
 
     try {
       message = JSON.parse(text)
@@ -839,7 +1018,7 @@ export class BrowserRelayServer {
     if (!message) return
 
     if (message.method === 'ping') {
-      this.sendExtensionMessage({ method: 'pong' }, true)
+      this.sendExtensionMessage(client, { method: 'pong' }, true)
       return
     }
     if (message.method === 'pong') {
@@ -847,15 +1026,43 @@ export class BrowserRelayServer {
     }
 
     if (typeof message.id === 'number') {
-      const pending = this.pendingExtensionRequests.get(message.id)
+      const pending = client.pendingRequests.get(message.id)
       if (!pending) return
-      this.pendingExtensionRequests.delete(message.id)
+      client.pendingRequests.delete(message.id)
       clearTimeout(pending.timer)
       if (message.error != null) {
         pending.reject(new Error(String(message.error)))
         return
       }
-      pending.resolve(message.result)
+      pending.resolve(this.normalizeExtensionResult(client, message.result))
+      return
+    }
+
+    if (message.method === 'Extension.selectExecutionWindow') {
+      const selectedWindowId = toNullableInteger(message.params?.windowId)
+      if (selectedWindowId === null) {
+        return
+      }
+      this.selectedBrowserInstanceId = client.browserInstanceId
+      this.selectedWindowId = selectedWindowId
+      this.broadcastBrowserSelection()
+      return
+    }
+
+    if (message.method === 'Extension.primaryTargetChanged') {
+      const localSessionId = typeof message.params?.sessionId === 'string' ? message.params.sessionId : ''
+      const externalSessionId = localSessionId
+        ? encodeExternalSessionId(client.browserInstanceId, localSessionId)
+        : null
+      const target = externalSessionId ? client.connectedTargets.get(externalSessionId) ?? null : null
+      client.primarySessionId =
+        target
+        && target.physical
+        && this.selectedBrowserInstanceId === client.browserInstanceId
+        && target.windowId !== null
+        && target.windowId === this.selectedWindowId
+          ? externalSessionId
+          : null
       return
     }
 
@@ -863,117 +1070,217 @@ export class BrowserRelayServer {
 
     const eventMethod = typeof message.params?.method === 'string' ? message.params.method : ''
     const eventParams = (message.params?.params ?? {}) as Record<string, unknown>
-    const sessionId = typeof message.params?.sessionId === 'string' ? message.params.sessionId : undefined
+    const localSessionId = typeof message.params?.sessionId === 'string' ? message.params.sessionId : undefined
+    const externalSessionId = localSessionId
+      ? encodeExternalSessionId(client.browserInstanceId, localSessionId)
+      : undefined
     if (!eventMethod) return
 
     switch (eventMethod) {
-      case 'Extension.tabDiscovered': {
-        const discoveredSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
-        const targetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
-        if (!discoveredSessionId || !targetInfo?.targetId) return
-        const pendingUrl = this.pendingTargetUrls.get(targetInfo.targetId)
-        const normalized = normalizeTargetInfo({
-          ...targetInfo,
-          url: pendingUrl ?? targetInfo.url,
-          targetId: targetInfo.targetId,
-        })
-        this.pendingTargetUrls.delete(targetInfo.targetId)
-        this.connectedTargets.set(discoveredSessionId, {
-          sessionId: discoveredSessionId,
-          targetId: normalized.targetId,
-          targetInfo: normalized,
-          physical: false,
-        })
+      case 'Extension.tabDiscovered':
+        this.handleTabDiscovered(client, eventParams)
         return
-      }
-      case 'Extension.tabRemoved': {
-        const removedSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
-        if (!removedSessionId) return
-        this.connectedTargets.delete(removedSessionId)
+      case 'Extension.tabRemoved':
+        this.handleTabRemoved(client, eventParams)
         return
-      }
-      case 'Extension.tabUpdated': {
-        const updatedSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
-        const targetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
-        const existing = this.connectedTargets.get(updatedSessionId)
-        if (!updatedSessionId || !existing || !targetInfo) return
-        this.connectedTargets.set(updatedSessionId, {
-          ...existing,
-          targetInfo: normalizeTargetInfo({
-            ...existing.targetInfo,
-            ...targetInfo,
-            targetId: existing.targetId,
-          }),
-        })
+      case 'Extension.tabUpdated':
+        this.handleTabUpdated(client, eventParams)
         return
-      }
-      case 'Target.attachedToTarget': {
-        if (eventParams.targetInfo && typeof eventParams.sessionId === 'string') {
-          const attachedTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>
-          const normalized = normalizeTargetInfo(attachedTargetInfo)
-          if (normalized.type === 'page') {
-            this.connectedTargets.set(eventParams.sessionId, {
-              sessionId: eventParams.sessionId,
-              targetId: normalized.targetId,
-              targetInfo: normalized,
-              physical: true,
-            })
-          }
-          this.broadcastToCdpClients({
-            method: eventMethod,
-            params: {
-              ...eventParams,
-              targetInfo: normalized,
-            },
-            sessionId,
-          })
-        }
+      case 'Target.attachedToTarget':
+        this.handleAttachedToTarget(client, eventParams, externalSessionId)
         return
-      }
-      case 'Target.detachedFromTarget': {
-        if (typeof eventParams.sessionId === 'string') {
-          const existing = this.connectedTargets.get(eventParams.sessionId)
-          if (existing) {
-            this.connectedTargets.set(eventParams.sessionId, {
-              ...existing,
-              physical: false,
-            })
-          }
-        }
-        this.broadcastToCdpClients({ method: eventMethod, params: eventParams, sessionId })
+      case 'Target.detachedFromTarget':
+        this.handleDetachedFromTarget(client, eventParams, externalSessionId)
         return
-      }
-      case 'Target.targetInfoChanged': {
-        const changedTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
-        const targetId = changedTargetInfo?.targetId
-        if (targetId) {
-          for (const [entrySessionId, existing] of this.connectedTargets.entries()) {
-            if (existing.targetId !== targetId) continue
-            this.connectedTargets.set(entrySessionId, {
-              ...existing,
-              targetInfo: normalizeTargetInfo({
-                ...existing.targetInfo,
-                ...changedTargetInfo,
-                targetId,
-              }),
-            })
-          }
-        }
+      case 'Target.targetInfoChanged':
+        this.handleTargetInfoChanged(client, eventParams, externalSessionId)
+        return
+      default:
         this.broadcastToCdpClients({
           method: eventMethod,
-          params: {
-            ...eventParams,
-            ...(changedTargetInfo?.targetId
-              ? { targetInfo: normalizeTargetInfo(changedTargetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>) }
-              : {}),
-          },
-          sessionId,
+          params: eventParams,
+          sessionId: externalSessionId,
         })
-        return
-      }
-      default:
-        this.broadcastToCdpClients({ method: eventMethod, params: eventParams, sessionId })
     }
+  }
+
+  private handleTabDiscovered(client: ExtensionClient, eventParams: Record<string, unknown>): void {
+    const discoveredLocalSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
+    const targetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
+    if (!discoveredLocalSessionId || !targetInfo?.targetId) return
+    const sessionId = encodeExternalSessionId(client.browserInstanceId, discoveredLocalSessionId)
+    const localTargetKey = typeof eventParams.targetKey === 'string' && eventParams.targetKey
+      ? eventParams.targetKey
+      : targetInfo.targetId
+    const targetKey = encodeExternalTargetId(client.browserInstanceId, localTargetKey)
+    const pendingUrl = this.pendingTargetUrls.get(targetKey)
+    const normalized = this.normalizeExternalTargetInfo(client, {
+      ...targetInfo,
+      url: pendingUrl ?? targetInfo.url,
+      targetId: localTargetKey,
+    })
+    this.pendingTargetUrls.delete(targetKey)
+    client.connectedTargets.set(sessionId, {
+      browserInstanceId: client.browserInstanceId,
+      browserName: client.browserName,
+      sessionId,
+      localSessionId: discoveredLocalSessionId,
+      targetKey,
+      localTargetKey,
+      targetId: null,
+      localTargetId: null,
+      targetInfo: normalized,
+      windowId: toNullableInteger(eventParams.windowId),
+      tabId: toNullableInteger(eventParams.tabId),
+      active: eventParams.active === true,
+      physical: false,
+    })
+  }
+
+  private handleTabRemoved(client: ExtensionClient, eventParams: Record<string, unknown>): void {
+    const removedLocalSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
+    if (!removedLocalSessionId) return
+    const sessionId = encodeExternalSessionId(client.browserInstanceId, removedLocalSessionId)
+    const existing = client.connectedTargets.get(sessionId)
+    if (!existing) return
+    client.connectedTargets.delete(sessionId)
+    if (client.primarySessionId === sessionId) {
+      client.primarySessionId = null
+    }
+    if (existing.physical) {
+      this.broadcastToCdpClients({
+        method: 'Target.detachedFromTarget',
+        params: { sessionId, targetId: existing.targetId, reason: 'target_removed' },
+      })
+    }
+  }
+
+  private handleTabUpdated(client: ExtensionClient, eventParams: Record<string, unknown>): void {
+    const updatedLocalSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
+    const targetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
+    const sessionId = encodeExternalSessionId(client.browserInstanceId, updatedLocalSessionId)
+    const existing = client.connectedTargets.get(sessionId)
+    if (!updatedLocalSessionId || !existing || !targetInfo) return
+    existing.targetInfo = this.normalizeExternalTargetInfo(client, {
+      ...existing.targetInfo,
+      ...targetInfo,
+      targetId: existing.localTargetId ?? existing.localTargetKey,
+    })
+    existing.windowId = toNullableInteger(eventParams.windowId)
+    existing.tabId = toNullableInteger(eventParams.tabId)
+    existing.active = eventParams.active === true
+  }
+
+  private handleAttachedToTarget(
+    client: ExtensionClient,
+    eventParams: Record<string, unknown>,
+    externalSessionId?: string,
+  ): void {
+    if (!eventParams.targetInfo || typeof eventParams.sessionId !== 'string') return
+    const attachedLocalSessionId = eventParams.sessionId
+    const localTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>
+    const sessionId = encodeExternalSessionId(client.browserInstanceId, attachedLocalSessionId)
+    const normalized = this.normalizeExternalTargetInfo(client, localTargetInfo)
+    if (normalized.type === 'page') {
+      const existing = client.connectedTargets.get(sessionId)
+      const targetKey = existing?.targetKey ?? encodeExternalTargetId(
+        client.browserInstanceId,
+        typeof eventParams.targetKey === 'string' && eventParams.targetKey ? eventParams.targetKey : localTargetInfo.targetId,
+      )
+      client.connectedTargets.set(sessionId, {
+        browserInstanceId: client.browserInstanceId,
+        browserName: client.browserName,
+        sessionId,
+        localSessionId: attachedLocalSessionId,
+        targetKey,
+        localTargetKey: existing?.localTargetKey
+          ?? (typeof eventParams.targetKey === 'string' && eventParams.targetKey ? eventParams.targetKey : localTargetInfo.targetId),
+        targetId: normalized.targetId,
+        localTargetId: localTargetInfo.targetId,
+        targetInfo: normalized,
+        windowId: toNullableInteger(eventParams.windowId),
+        tabId: toNullableInteger(eventParams.tabId),
+        active: eventParams.active === true,
+        physical: true,
+      })
+    }
+    this.broadcastToCdpClients({
+      method: 'Target.attachedToTarget',
+      params: {
+        ...eventParams,
+        sessionId,
+        targetInfo: normalized,
+      },
+      sessionId: externalSessionId,
+    })
+  }
+
+  private handleDetachedFromTarget(
+    client: ExtensionClient,
+    eventParams: Record<string, unknown>,
+    externalSessionId?: string,
+  ): void {
+    const detachedLocalSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
+    const sessionId = detachedLocalSessionId
+      ? encodeExternalSessionId(client.browserInstanceId, detachedLocalSessionId)
+      : ''
+    const existing = sessionId ? client.connectedTargets.get(sessionId) : undefined
+    if (existing) {
+      existing.physical = false
+      existing.targetId = null
+      existing.localTargetId = null
+      existing.active = eventParams.active === true
+      existing.windowId = toNullableInteger(eventParams.windowId)
+      existing.tabId = toNullableInteger(eventParams.tabId)
+      existing.targetInfo = this.normalizeExternalTargetInfo(client, {
+        ...existing.targetInfo,
+        targetId: existing.localTargetKey,
+      })
+    }
+    if (client.primarySessionId === sessionId) {
+      client.primarySessionId = null
+    }
+    this.broadcastToCdpClients({
+      method: 'Target.detachedFromTarget',
+      params: {
+        ...eventParams,
+        ...(sessionId ? { sessionId } : {}),
+        ...(existing?.targetId ? { targetId: existing.targetId } : {}),
+      },
+      sessionId: externalSessionId,
+    })
+  }
+
+  private handleTargetInfoChanged(
+    client: ExtensionClient,
+    eventParams: Record<string, unknown>,
+    externalSessionId?: string,
+  ): void {
+    const changedTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
+    const localTargetId = changedTargetInfo?.targetId
+    if (localTargetId) {
+      for (const existing of client.connectedTargets.values()) {
+        if (existing.localTargetId !== localTargetId) continue
+        existing.targetInfo = this.normalizeExternalTargetInfo(client, {
+          ...existing.targetInfo,
+          ...changedTargetInfo,
+          targetId: localTargetId,
+        })
+        existing.windowId = toNullableInteger(eventParams.windowId)
+        existing.tabId = toNullableInteger(eventParams.tabId)
+        existing.active = eventParams.active === true
+      }
+    }
+    this.broadcastToCdpClients({
+      method: 'Target.targetInfoChanged',
+      params: {
+        ...eventParams,
+        ...(changedTargetInfo?.targetId
+          ? { targetInfo: this.normalizeExternalTargetInfo(client, changedTargetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>) }
+          : {}),
+      },
+      sessionId: externalSessionId,
+    })
   }
 
   private ensureTargetEventsForClient(client: WebSocket, mode: 'autoAttach' | 'discover'): void {
@@ -1019,68 +1326,233 @@ export class BrowserRelayServer {
     }
   }
 
+  private getAllConnectedTargets(): ConnectedTarget[] {
+    return [...this.extensionClients.values()].flatMap((client) => [...client.connectedTargets.values()])
+  }
+
   private getPhysicalTargets(): ConnectedTarget[] {
-    return Array.from(this.connectedTargets.values()).filter((target) => target.physical)
+    return this.getAllConnectedTargets().filter((target) => target.physical)
   }
 
   private getInspectablePageTargets(): ConnectedTarget[] {
     return this.getPhysicalTargets().filter((target) => target.targetInfo.type === 'page')
   }
 
-  private findSessionId(targetId?: string): string | undefined {
-    if (targetId) {
-      return Array.from(this.connectedTargets.values()).find((entry) => entry.targetId === targetId)?.sessionId
-    }
-    return this.getInspectablePageTargets()[0]?.sessionId ?? this.getPhysicalTargets()[0]?.sessionId
+  private getPrimaryTargetForClient(client: ExtensionClient | undefined): ConnectedTarget | null {
+    if (!client?.primarySessionId) return null
+    const target = client.connectedTargets.get(client.primarySessionId)
+    return target && target.physical ? target : null
   }
 
-  private sendToExtension(method: string, params: Record<string, unknown>, sessionId?: string): Promise<any> {
-    const ws = this.extensionWs
-    if (!ws || ws.readyState !== WebSocket.OPEN || !this.handshakeOk) {
+  private getSelectedPrimaryTarget(): ConnectedTarget | null {
+    if (!this.selectedBrowserInstanceId || this.selectedWindowId === null) {
+      return null
+    }
+    const target = this.getPrimaryTargetForClient(this.extensionClients.get(this.selectedBrowserInstanceId))
+    return target && this.isTargetInSelectedWindow(target) ? target : null
+  }
+
+  private isTargetInSelectedWindow(target: ConnectedTarget): boolean {
+    return this.selectedBrowserInstanceId !== null
+      && this.selectedWindowId !== null
+      && target.browserInstanceId === this.selectedBrowserInstanceId
+      && target.windowId === this.selectedWindowId
+  }
+
+  private findTargetBySessionId(sessionId: string): ConnectedTarget | null {
+    const parsed = parseExternalSessionId(sessionId)
+    if (!parsed) return null
+    return this.extensionClients.get(parsed.browserInstanceId)?.connectedTargets.get(sessionId) ?? null
+  }
+
+  private findTargetByTargetId(targetId: string): ConnectedTarget | null {
+    for (const client of this.extensionClients.values()) {
+      for (const target of client.connectedTargets.values()) {
+        if (target.targetId === targetId) return target
+      }
+    }
+    return null
+  }
+
+  private requireSelectedClient(): ExtensionClient {
+    if (!this.selectedBrowserInstanceId) {
+      throw new Error('No browser instance selected. Select a browser before using browser control.')
+    }
+    const client = this.extensionClients.get(this.selectedBrowserInstanceId)
+    if (!client) {
+      throw new Error('Selected browser instance is not connected.')
+    }
+    return client
+  }
+
+  private requireSelectedPrimaryTarget(): ConnectedTarget {
+    if (this.selectedWindowId === null) {
+      throw new Error('No browser window selected. Select a window before using browser control.')
+    }
+    const target = this.getSelectedPrimaryTarget()
+    if (!target) {
+      throw new Error('Selected window has no active attached page.')
+    }
+    return target
+  }
+
+  private requireClientForTarget(targetId: string): { client: ExtensionClient; localTargetId: string; localSessionId?: string } {
+    const parsed = parseExternalTargetId(targetId)
+    if (!parsed) {
+      throw new Error('Invalid targetId')
+    }
+    const client = this.extensionClients.get(parsed.browserInstanceId)
+    if (!client) {
+      throw new Error('Target browser instance is not connected.')
+    }
+    const target = this.findTargetByTargetId(targetId)
+    if (!target) {
+      throw new Error('target not found')
+    }
+    return {
+      client,
+      localTargetId: parsed.localTargetId,
+      localSessionId: target.localSessionId,
+    }
+  }
+
+  private sendToExtensionForExternalSession(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    const parsed = parseExternalSessionId(sessionId)
+    if (!parsed) {
+      return Promise.reject(new Error('Invalid sessionId'))
+    }
+    const client = this.extensionClients.get(parsed.browserInstanceId)
+    if (!client) {
+      return Promise.reject(new Error('Target browser instance is not connected.'))
+    }
+    return this.sendToExtension(client, method, params, parsed.localSessionId)
+  }
+
+  private sendToExtension(
+    client: ExtensionClient,
+    method: string,
+    params: Record<string, unknown>,
+    localSessionId?: string,
+  ): Promise<unknown> {
+    if (client.ws.readyState !== WebSocket.OPEN || !client.handshakeOk) {
       return Promise.reject(new Error('Chrome extension not connected'))
     }
 
-    const id = this.nextRequestId++
+    const id = client.nextRequestId++
     const payload = {
       id,
       ts: Date.now(),
       method: 'forwardCDPCommand',
       params: {
-        ...(sessionId ? { sessionId } : {}),
+        ...(localSessionId ? { sessionId: localSessionId } : {}),
         method,
         params,
       },
     }
 
-    this.sendExtensionMessage(payload, true)
+    this.sendExtensionMessage(client, payload, true)
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pendingExtensionRequests.delete(id)
+        client.pendingRequests.delete(id)
         reject(new Error(`Extension request timeout: ${method}`))
       }, EXTENSION_REQUEST_TIMEOUT_MS)
-      this.pendingExtensionRequests.set(id, { resolve, reject, timer })
+      client.pendingRequests.set(id, { resolve, reject, timer })
     })
   }
 
-  private sendExtensionMessage(payload: unknown, encrypt: boolean): void {
-    const ws = this.extensionWs
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+  private sendExtensionMessage(client: ExtensionClient, payload: unknown, encrypt: boolean): void {
+    if (client.ws.readyState !== WebSocket.OPEN) return
     const raw = JSON.stringify(payload)
     const message =
-      encrypt && this.extensionSessionKey ? encryptWireMessage(this.extensionSessionKey, raw) : raw
-    ws.send(message)
+      encrypt && client.sessionKey ? encryptWireMessage(client.sessionKey, raw) : raw
+    client.ws.send(message)
   }
 
-  private decodeExtensionPayload(payload: string): string | null {
+  private decodeExtensionPayload(client: ExtensionClient, payload: string): string | null {
     try {
-      if (this.extensionSessionKey) {
-        return decryptWireMessage(this.extensionSessionKey, payload)
+      if (client.sessionKey) {
+        return decryptWireMessage(client.sessionKey, payload)
       }
       return payload
     } catch (error) {
       this.logger.warn?.(`[browser-relay] failed to decrypt extension payload: ${String(error)}`)
       return null
+    }
+  }
+
+  private rejectPendingRequests(client: ExtensionClient, message: string): void {
+    for (const pending of client.pendingRequests.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error(message))
+    }
+    client.pendingRequests.clear()
+  }
+
+  private clearClientTargets(client: ExtensionClient, broadcastDetach: boolean): void {
+    if (client.primarySessionId) {
+      client.primarySessionId = null
+    }
+    if (broadcastDetach) {
+      for (const target of client.connectedTargets.values()) {
+        if (!target.physical) continue
+        this.broadcastToCdpClients({
+          method: 'Target.detachedFromTarget',
+          params: {
+            sessionId: target.sessionId,
+            targetId: target.targetId,
+            reason: 'browser_disconnected',
+          },
+        })
+      }
+    }
+    client.connectedTargets.clear()
+  }
+
+  private normalizeExternalTargetInfo(
+    client: ExtensionClient,
+    raw: Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>,
+  ): RelayTargetInfo {
+    return normalizeTargetInfo({
+      ...raw,
+      targetId: encodeExternalTargetId(client.browserInstanceId, raw.targetId),
+      openerId: raw.openerId ? encodeExternalTargetId(client.browserInstanceId, raw.openerId) : undefined,
+    })
+  }
+
+  private normalizeExtensionResult(client: ExtensionClient, result: unknown): unknown {
+    if (!result || typeof result !== 'object') return result
+    const record = result as Record<string, unknown>
+    const localTargetId = typeof record.targetId === 'string' ? record.targetId : ''
+    if (!localTargetId) return result
+    return {
+      ...record,
+      targetId: encodeExternalTargetId(client.browserInstanceId, localTargetId),
+    }
+  }
+
+  private broadcastBrowserSelection(): void {
+    for (const client of this.extensionClients.values()) {
+      this.sendExtensionMessage(
+        client,
+        {
+          method: 'Extension.selectionChanged',
+          params: {
+            selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+            selectedWindowId: this.selectedWindowId,
+            selected: client.browserInstanceId === this.selectedBrowserInstanceId,
+            selectedBrowser: client.browserInstanceId === this.selectedBrowserInstanceId,
+            selectedWindow:
+              client.browserInstanceId === this.selectedBrowserInstanceId
+              && this.selectedWindowId !== null,
+          },
+        },
+        true,
+      )
     }
   }
 

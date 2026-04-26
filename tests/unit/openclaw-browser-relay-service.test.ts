@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCipheriv, createDecipheriv, publicEncrypt, randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
 import { BrowserRelayServer, RELAY_PROTOCOL_VERSION } from '../../packages/openclaw-browser-relay-plugin/src/relay/server'
@@ -12,6 +12,17 @@ const logger = {
   warn: () => {},
   error: () => {},
   debug: () => {},
+}
+
+type RelayMock = Pick<
+  BrowserRelayServer,
+  'hasExtensionConnection' | 'relayPort' | 'authHeaders' | 'listAttachments' | 'listTabs'
+>
+
+type BrowserControlServiceWithActions = BrowserControlService & {
+  actions: {
+    snapshot: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
+  }
 }
 
 function encryptSessionKey(sessionKey: Buffer): string {
@@ -85,9 +96,23 @@ describe('browser relay service', () => {
         method: 'Extension.hello',
         params: {
           protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
           encryptedSessionKey: encryptSessionKey(sessionKey),
         },
       }),
+    )
+    await waitForMessage(extensionWs)
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'Extension.selectExecutionWindow',
+          params: {
+            windowId: 1,
+          },
+        }),
+      ),
     )
     await waitForMessage(extensionWs)
 
@@ -114,7 +139,7 @@ describe('browser relay service', () => {
     const openResult = await openPromise
     expect(openResult).toMatchObject({
       ok: true,
-      targetId: 'target-opened',
+      targetId: 'browser-a|tid|target-opened',
       url: 'https://example.com/opened',
     })
 
@@ -147,7 +172,7 @@ describe('browser relay service', () => {
     })
     expect(tabsResult.tabs).toEqual([
       expect.objectContaining({
-        targetId: 'target-opened',
+        targetId: 'browser-a|tid|target-opened',
         title: 'Opened Page',
         url: 'https://example.com/opened',
         isAgent: true,
@@ -175,5 +200,223 @@ describe('browser relay service', () => {
     expect(parsed.refs.e1).toEqual({ role: 'heading', name: 'Settings' })
     expect(parsed.refs.e2).toEqual({ role: 'button', name: 'Save' })
     expect(parsed.stats.refs).toBe(4)
+  })
+
+  it('uses the selected primary relay target when browser action omits targetId', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: {
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      } as RelayMock as BrowserRelayServer,
+    })
+
+    const snapshot = vi.fn(async (input: Record<string, unknown>) => ({
+      snapshot: 'button "Submit"',
+      refs: {},
+      stats: { lines: 1, chars: 15, refs: 0, interactive: 0 },
+      pageUrl: 'https://example.com/selected',
+      input,
+    }))
+
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|page-target',
+      mode: 'relay',
+    }))
+    expect(result).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|page-target',
+      url: 'https://example.com/selected',
+    })
+  })
+
+  it('fails clearly when no selected primary relay target exists', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: {
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+      } as RelayMock as BrowserRelayServer,
+    })
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'No default browser target available. Select a window and keep its active page attached.',
+    })
+  })
+
+  it('rejects default execution when physical relay tabs exist but no browser instance is selected', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: {
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 1,
+            tabId: 11,
+            active: true,
+            sessionId: 'browser-a|sid|page-a',
+            targetId: 'browser-a|tid|target-a',
+            title: 'Page A',
+            url: 'https://a.example.com',
+            selectedBrowser: false,
+            selectedWindow: false,
+            selected: false,
+            primary: true,
+          },
+          {
+            browserInstanceId: 'browser-b',
+            browserName: 'browser-b',
+            windowId: 2,
+            tabId: 22,
+            active: true,
+            sessionId: 'browser-b|sid|page-b',
+            targetId: 'browser-b|tid|target-b',
+            title: 'Page B',
+            url: 'https://b.example.com',
+            selectedBrowser: false,
+            selectedWindow: false,
+            selected: false,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      } as RelayMock as BrowserRelayServer,
+    })
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'No default browser target available. Select a window and keep its active page attached.',
+    })
+  })
+
+  it('returns all discovered relay tabs with browser and window metadata', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: {
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 1,
+            tabId: 11,
+            active: true,
+            sessionId: 'browser-a|sid|page-a',
+            targetId: 'browser-a|tid|target-a',
+            title: 'Page A',
+            url: 'https://a.example.com',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 1,
+            tabId: 11,
+            active: true,
+            sessionId: 'browser-a|sid|page-a',
+            targetKey: 'browser-a|tid|vtab:browser-a:11',
+            targetId: 'browser-a|tid|target-a',
+            title: 'Page A',
+            url: 'https://a.example.com',
+            physical: true,
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+          {
+            browserInstanceId: 'browser-b',
+            browserName: 'browser-b',
+            windowId: 2,
+            tabId: 22,
+            active: false,
+            sessionId: 'browser-b|sid|page-b',
+            targetKey: 'browser-b|tid|vtab:browser-b:22',
+            targetId: '',
+            title: 'Page B',
+            url: 'https://b.example.com',
+            physical: false,
+            selectedBrowser: false,
+            selectedWindow: false,
+            selected: false,
+            primary: false,
+          },
+        ],
+      } as RelayMock as BrowserRelayServer,
+    })
+
+    const result = await service.handleRequest({ action: 'tabs' })
+
+    expect(result).toMatchObject({
+      ok: true,
+      tabs: [
+        expect.objectContaining({
+          browserInstanceId: 'browser-a',
+          windowId: 1,
+          tabId: 11,
+          active: true,
+          targetKey: 'browser-a|tid|vtab:browser-a:11',
+          targetId: 'browser-a|tid|target-a',
+          physical: true,
+          isSelectedBrowser: true,
+          isSelectedWindow: true,
+          isPrimary: true,
+        }),
+        expect.objectContaining({
+          browserInstanceId: 'browser-b',
+          windowId: 2,
+          tabId: 22,
+          active: false,
+          targetKey: 'browser-b|tid|vtab:browser-b:22',
+          targetId: null,
+          physical: false,
+          isSelectedBrowser: false,
+          isSelectedWindow: false,
+          isPrimary: false,
+        }),
+      ],
+    })
   })
 })

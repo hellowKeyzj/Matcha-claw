@@ -46,6 +46,20 @@ export class AgentGroupManager {
 
   reset() { this.#groupId = null }
 
+  async restore(groupId) {
+    if (Number.isInteger(groupId) && groupId >= 0) {
+      this.#groupId = groupId
+      try {
+        await chrome.tabGroups.get(groupId)
+        return
+      } catch {
+        this.#groupId = null
+      }
+    }
+
+    await this.#tryRecoverExistingGroup()
+  }
+
   async addTab(tabId) {
     const done = this.#queue.then(() => this.#doAddTab(tabId))
     this.#queue = done.catch(() => {})

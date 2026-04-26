@@ -56,6 +56,15 @@ export class SessionIndicators {
     this.#lastCommandTime.delete(tabId)
   }
 
+  moveTab(fromTabId, toTabId) {
+    if (!this.#lastCommandTime.has(fromTabId)) return
+    const lastCommand = this.#lastCommandTime.get(fromTabId)
+    this.#lastCommandTime.delete(fromTabId)
+    if (lastCommand !== undefined) {
+      this.#lastCommandTime.set(toTabId, lastCommand)
+    }
+  }
+
   clear() {
     this.#lastCommandTime.clear()
   }
