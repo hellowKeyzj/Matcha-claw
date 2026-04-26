@@ -54,9 +54,6 @@ export interface AppSettings {
   enabledSkills: string[];
   disabledSkills: string[];
 
-  // Plugin Center
-  pluginExecutionEnabled: boolean;
-
   // Security
   securityPreset: 'strict' | 'balanced' | 'relaxed';
   securityPolicyVersion: number;
@@ -111,9 +108,6 @@ const defaults: AppSettings = {
   selectedBundles: ['productivity', 'developer'],
   enabledSkills: [],
   disabledSkills: [],
-
-  // Plugin Center
-  pluginExecutionEnabled: true,
 
   // Security
   securityPreset: 'balanced',

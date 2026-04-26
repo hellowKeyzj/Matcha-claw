@@ -14,15 +14,15 @@ import {
 describe('main api boundary', () => {
   it('主进程路由归属判定正确', () => {
     expect(isMainOwnedRoute('/api/gateway/status')).toBe(true);
+    expect(isMainOwnedRoute('/api/plugins/runtime/restart')).toBe(true);
     expect(isMainOwnedRoute('/api/plugins/runtime')).toBe(false);
     expect(isMainOwnedRoute('/api/plugins/runtime/enabled-plugins')).toBe(false);
-    expect(isMainOwnedRoute('/internal/runtime-host/execution-sync')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/security/audit')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/chat/send-with-media')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/platform/tools')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/plugins/catalog')).toBe(true);
     expect(isRuntimeHostBusinessRoute('/api/gateway/status')).toBe(false);
-    expect(isRuntimeHostBusinessRoute('/internal/runtime-host/execution-sync')).toBe(false);
+    expect(isRuntimeHostBusinessRoute('/api/plugins/runtime/restart')).toBe(false);
     expect(isMainOwnedRoute('/api/platform/tools')).toBe(false);
   });
 

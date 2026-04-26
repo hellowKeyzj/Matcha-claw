@@ -58,12 +58,10 @@ export interface RuntimeHostCatalogPlugin {
 }
 
 export interface RuntimeHostExecutionState {
-  readonly pluginExecutionEnabled: boolean;
   readonly enabledPluginIds: readonly string[];
 }
 
 export const DEFAULT_ENABLED_PLUGIN_IDS: readonly string[] = [];
-export const DEFAULT_PLUGIN_EXECUTION_ENABLED = true;
 
 export function normalizePluginIds(ids: readonly string[]): string[] {
   return Array.from(new Set(

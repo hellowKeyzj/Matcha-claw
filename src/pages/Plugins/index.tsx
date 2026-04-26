@@ -1,42 +1,20 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { scheduleIdleReady } from '@/lib/idle-ready';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  DEFAULT_PLUGIN_GROUP_ID,
+  PLUGIN_GROUP_REGISTRY,
+  type PluginGroupId,
+} from '@/features/plugins/plugin-groups';
 import { useGatewayStore } from '@/stores/gateway';
-import { usePluginsStore } from '@/stores/plugins-store';
+import { usePluginsStore, type PluginCatalogItem } from '@/stores/plugins-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
-
-const PLUGINS_CATALOG_IDLE_TIMEOUT_MS = 320;
-const PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT = 12;
-
-function formatLifecycleLabel(lifecycle: string): string {
-  switch (lifecycle) {
-    case 'running':
-      return 'running';
-    case 'starting':
-      return 'starting';
-    case 'ready':
-      return 'ready';
-    case 'booting':
-      return 'booting';
-    case 'degraded':
-      return 'degraded';
-    case 'stopped':
-      return 'stopped';
-    case 'error':
-      return 'error';
-    case 'idle':
-      return 'idle';
-    default:
-      return lifecycle;
-  }
-}
 
 function formatIsoTime(timestamp: number): string {
   const date = new Date(timestamp);
@@ -44,6 +22,24 @@ function formatIsoTime(timestamp: number): string {
     return '';
   }
   return date.toISOString().replace('T', ' ').replace('.000Z', 'Z');
+}
+
+function buildPluginsByGroup(catalog: PluginCatalogItem[]): Record<PluginGroupId, PluginCatalogItem[]> {
+  const grouped: Record<PluginGroupId, PluginCatalogItem[]> = {
+    channel: [],
+    model: [],
+    general: [],
+  };
+
+  for (const plugin of catalog) {
+    grouped[plugin.group].push(plugin);
+  }
+
+  return grouped;
+}
+
+function pickFirstNonEmptyGroupId(groupedCatalog: Record<PluginGroupId, PluginCatalogItem[]>): PluginGroupId {
+  return PLUGIN_GROUP_REGISTRY.find((group) => groupedCatalog[group.id].length > 0)?.id ?? DEFAULT_PLUGIN_GROUP_ID;
 }
 
 export function PluginsPage() {
@@ -66,13 +62,11 @@ export function PluginsPage() {
   const refreshCatalog = usePluginsStore((state) => state.refreshCatalog);
   const refreshSnapshot = usePluginsStore((state) => state.refreshSnapshot);
   const restartHostAction = usePluginsStore((state) => state.restartHost);
-  const toggleExecutionAction = usePluginsStore((state) => state.toggleExecution);
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
   const manualRefreshing = refreshing && refreshReason === 'manual';
   const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
-  const [catalogRenderReady, setCatalogRenderReady] = useState(
-    () => catalogReady && catalog.length <= PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT,
-  );
+  const [activeGroupId, setActiveGroupId] = useState<PluginGroupId>(() => pickFirstNonEmptyGroupId(buildPluginsByGroup(catalog)));
+  const didUserSelectGroupRef = useRef(false);
 
   useEffect(() => {
     void initGatewayEvents();
@@ -85,25 +79,6 @@ export function PluginsPage() {
     void refreshCatalog({ reason: 'initial' }).catch(() => {});
   }, [initGatewayEvents, refreshCatalog, refreshRuntime, t]);
 
-  useEffect(() => {
-    if (!catalogReady) {
-      setCatalogRenderReady(false);
-      return;
-    }
-    if (catalog.length <= PLUGINS_CATALOG_IMMEDIATE_RENDER_LIMIT) {
-      setCatalogRenderReady(true);
-      return;
-    }
-    const cancel = scheduleIdleReady(() => {
-      setCatalogRenderReady(true);
-    }, {
-      idleTimeoutMs: PLUGINS_CATALOG_IDLE_TIMEOUT_MS,
-      fallbackDelayMs: 120,
-      useAnimationFrame: true,
-    });
-    return cancel;
-  }, [catalog.length, catalogReady]);
-
   const enabledPluginIds = useMemo(
     () => runtime?.execution.enabledPluginIds ?? [],
     [runtime],
@@ -112,8 +87,15 @@ export function PluginsPage() {
     () => new Set(enabledPluginIds),
     [enabledPluginIds],
   );
-  const executionEnabled = runtime?.execution.pluginExecutionEnabled ?? true;
-
+  const pluginsByGroup = useMemo(
+    () => buildPluginsByGroup(catalog),
+    [catalog],
+  );
+  const preferredGroupId = useMemo(
+    () => pickFirstNonEmptyGroupId(pluginsByGroup),
+    [pluginsByGroup],
+  );
+  const visiblePlugins = pluginsByGroup[activeGroupId];
   const lifecycleTags = useMemo(() => {
     if (!runtime) {
       return [];
@@ -121,14 +103,23 @@ export function PluginsPage() {
     return [
       {
         id: 'host',
-        label: `host:${formatLifecycleLabel(runtime.state.lifecycle)}`,
+        label: t(`plugins:lifecycle.host.${runtime.state.lifecycle}`),
       },
       {
         id: 'runtime',
-        label: `runtime:${formatLifecycleLabel(runtime.state.runtimeLifecycle)}`,
+        label: t(`plugins:lifecycle.runtime.${runtime.state.runtimeLifecycle}`),
       },
     ];
-  }, [runtime]);
+  }, [runtime, t]);
+
+  useEffect(() => {
+    if (!catalogReady || didUserSelectGroupRef.current) {
+      return;
+    }
+    if (pluginsByGroup[activeGroupId].length === 0) {
+      setActiveGroupId(preferredGroupId);
+    }
+  }, [activeGroupId, catalogReady, pluginsByGroup, preferredGroupId]);
 
   const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
   const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
@@ -154,14 +145,6 @@ export function PluginsPage() {
     }
   }, [restartHostAction, t]);
 
-  const toggleExecution = useCallback(async (nextValue: boolean) => {
-    try {
-      await toggleExecutionAction(nextValue);
-    } catch {
-      toast.error(t('plugins:errors.toggleExecutionFailed'));
-    }
-  }, [toggleExecutionAction, t]);
-
   const togglePluginEnabled = useCallback(async (pluginId: string, nextEnabled: boolean) => {
     try {
       await togglePluginEnabledAction(pluginId, nextEnabled);
@@ -169,10 +152,13 @@ export function PluginsPage() {
       toast.error(t('plugins:errors.togglePluginFailed'));
     }
   }, [togglePluginEnabledAction, t]);
+  const handleGroupChange = useCallback((value: string) => {
+    didUserSelectGroupRef.current = true;
+    setActiveGroupId(value as PluginGroupId);
+  }, []);
 
   const showRuntimeLoading = !runtimeReady && runtimePending;
   const showCatalogLoading = !catalogReady && catalogPending;
-  const showCatalogShell = catalogPending || (catalogReady && !catalogRenderReady);
 
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-4 md:p-6">
@@ -229,9 +215,6 @@ export function PluginsPage() {
                 {(effectiveRuntimeHostStatus === 'stopped' || effectiveRuntimeHostStatus === 'error') && (
                   <Badge variant="destructive">{t('plugins:state.hostStopped')}</Badge>
                 )}
-                <Badge variant="outline">
-                  {executionEnabled ? t('plugins:state.executionOn') : t('plugins:state.executionOff')}
-                </Badge>
                 {lifecycleTags.map((tag) => (
                   <Badge key={tag.id} variant="outline">{tag.label}</Badge>
                 ))}
@@ -268,26 +251,6 @@ export function PluginsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>{t('plugins:execution.title')}</CardTitle>
-          <CardDescription>{t('plugins:execution.description')}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between gap-3 rounded-md border border-border/80 p-3">
-            <Label htmlFor="plugin-execution-toggle" className="text-sm">{t('plugins:execution.switchLabel')}</Label>
-            <Switch
-              id="plugin-execution-toggle"
-              checked={executionEnabled}
-              disabled={!runtimeReady || runtimePending || manualRefreshing || mutatingAction !== null}
-              onCheckedChange={(checked) => {
-                void toggleExecution(checked);
-              }}
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle>{t('plugins:catalog.title')}</CardTitle>
           <CardDescription>{t('plugins:catalog.description')}</CardDescription>
         </CardHeader>
@@ -302,77 +265,86 @@ export function PluginsPage() {
                 </div>
               ))}
             </div>
-          ) : showCatalogShell ? (
-            <div className="space-y-3">
-              {Array.from({ length: Math.min(Math.max(catalog.length, 3), 6) }).map((_, index) => (
-                <div key={`plugin-catalog-shell-${index}`} className="rounded-md border border-border/70 px-3 py-3">
-                  <div className="h-4 w-44 animate-pulse rounded bg-muted" />
-                  <div className="mt-2 h-3 w-full animate-pulse rounded bg-muted" />
-                  <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-muted" />
-                </div>
-              ))}
-            </div>
-          ) : catalog.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t('plugins:catalog.empty')}</p>
           ) : (
-            <div className="space-y-2">
-              <div className="grid grid-cols-[1.5fr_0.9fr_0.8fr_1fr_0.8fr_0.7fr] gap-2 px-3 text-xs text-muted-foreground">
-                <span>{t('plugins:catalog.columns.plugin')}</span>
-                <span>{t('plugins:catalog.columns.platform')}</span>
-                <span>{t('plugins:catalog.columns.kind')}</span>
-                <span>{t('plugins:catalog.columns.category')}</span>
-                <span>{t('plugins:catalog.columns.version')}</span>
-                <span className="text-right">{t('plugins:catalog.columns.enabled')}</span>
-              </div>
-              {catalog.map((plugin) => {
-                const channelManaged = plugin.controlMode === 'channel-config';
-                return (
-                  <div
-                    key={plugin.id}
-                    className="grid grid-cols-[1.5fr_0.9fr_0.8fr_1fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{plugin.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
-                      {plugin.description && (
-                        <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
-                      )}
-                      {channelManaged && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          {t('plugins:catalog.channelManaged')}
-                        </div>
-                      )}
-                    </div>
-                    <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
-                      {t(`plugins:catalog.platform.${plugin.platform}`)}
-                    </Badge>
-                    <Badge variant="outline" className="justify-self-start">
-                      {t(`plugins:catalog.kind.${plugin.kind}`)}
-                    </Badge>
-                    <span className="truncate text-sm">{plugin.category}</span>
-                    <span className="truncate text-sm">{plugin.version}</span>
-                    <div className="justify-self-end">
-                      {mutatingPluginId === plugin.id && (
-                        <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                      )}
-                      <Switch
-                        checked={enabledPluginIdSet.has(plugin.id)}
-                        disabled={
-                          !runtimeReady
-                          || runtimePending
-                          || manualRefreshing
-                          || mutatingAction !== null
-                          || mutatingPluginId !== null
-                          || channelManaged
-                        }
-                        onCheckedChange={(checked) => {
-                          void togglePluginEnabled(plugin.id, checked);
-                        }}
-                      />
-                    </div>
+            <div className="space-y-4">
+              {catalog.length > 0 && (
+                <Tabs value={activeGroupId} onValueChange={handleGroupChange}>
+                  <TabsList className="grid h-auto w-full grid-cols-3 gap-1">
+                    {PLUGIN_GROUP_REGISTRY.map((group) => (
+                      <TabsTrigger key={group.id} value={group.id}>
+                        {`${t(group.labelKey)} (${pluginsByGroup[group.id].length})`}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+              )}
+              {catalog.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t('plugins:catalog.empty')}</p>
+              ) : visiblePlugins.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t('plugins:catalog.emptyGroup', {
+                    group: t(PLUGIN_GROUP_REGISTRY.find((group) => group.id === activeGroupId)?.labelKey ?? 'plugins:catalog.groups.general'),
+                  })}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-[1.7fr_0.9fr_0.8fr_0.8fr_0.7fr] gap-2 px-3 text-xs text-muted-foreground">
+                    <span>{t('plugins:catalog.columns.plugin')}</span>
+                    <span>{t('plugins:catalog.columns.platform')}</span>
+                    <span>{t('plugins:catalog.columns.kind')}</span>
+                    <span>{t('plugins:catalog.columns.version')}</span>
+                    <span className="text-right">{t('plugins:catalog.columns.enabled')}</span>
                   </div>
-                );
-              })}
+                  {visiblePlugins.map((plugin) => {
+                    const channelManaged = plugin.controlMode === 'channel-config';
+                    return (
+                      <div
+                        key={plugin.id}
+                        className="grid grid-cols-[1.7fr_0.9fr_0.8fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">{plugin.name}</div>
+                          <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
+                          {plugin.description && (
+                            <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
+                          )}
+                          {channelManaged && (
+                            <div className="truncate text-xs text-muted-foreground">
+                              {t('plugins:catalog.channelManaged')}
+                            </div>
+                          )}
+                        </div>
+                        <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
+                          {t(`plugins:catalog.platform.${plugin.platform}`)}
+                        </Badge>
+                        <Badge variant="outline" className="justify-self-start">
+                          {t(`plugins:catalog.kind.${plugin.kind}`)}
+                        </Badge>
+                        <span className="truncate text-sm">{plugin.version}</span>
+                        <div className="justify-self-end">
+                          {mutatingPluginId === plugin.id && (
+                            <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                          )}
+                          <Switch
+                            checked={enabledPluginIdSet.has(plugin.id)}
+                            disabled={
+                              !runtimeReady
+                              || runtimePending
+                              || manualRefreshing
+                              || mutatingAction !== null
+                              || mutatingPluginId !== null
+                              || channelManaged
+                            }
+                            onCheckedChange={(checked) => {
+                              void togglePluginEnabled(plugin.id, checked);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </CardContent>

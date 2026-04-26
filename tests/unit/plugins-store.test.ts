@@ -6,8 +6,7 @@ vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
 }));
 
-function buildRuntimePayload(params?: { executionEnabled?: boolean; enabledPluginIds?: string[] }) {
-  const executionEnabled = params?.executionEnabled ?? true;
+function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
   const enabledPluginIds = params?.enabledPluginIds ?? ['plugin-a'];
   return {
     success: true,
@@ -15,7 +14,6 @@ function buildRuntimePayload(params?: { executionEnabled?: boolean; enabledPlugi
       lifecycle: 'running',
       runtimeLifecycle: 'ready',
       activePluginCount: enabledPluginIds.length,
-      pluginExecutionEnabled: executionEnabled,
       enabledPluginIds,
     },
     health: {
@@ -25,19 +23,17 @@ function buildRuntimePayload(params?: { executionEnabled?: boolean; enabledPlugi
       degradedPlugins: [],
     },
     execution: {
-      pluginExecutionEnabled: executionEnabled,
       enabledPluginIds,
     },
   };
 }
 
 function buildCatalogPayload() {
-  return {
-    success: true,
-    execution: {
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['plugin-a'],
-    },
+    return {
+      success: true,
+      execution: {
+        enabledPluginIds: ['plugin-a'],
+      },
     plugins: [
       {
         id: 'plugin-a',
@@ -46,6 +42,7 @@ function buildCatalogPayload() {
         kind: 'builtin' as const,
         platform: 'matchaclaw' as const,
         category: 'runtime',
+        group: 'model' as const,
         enabled: true,
       },
     ],
@@ -78,7 +75,7 @@ describe('plugins store', () => {
     let state = usePluginsStore.getState();
     expect(state.runtimeReady).toBe(true);
     expect(state.catalogReady).toBe(false);
-    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
+    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
 
     await usePluginsStore.getState().refreshCatalog({ reason: 'initial' });
 
@@ -108,7 +105,7 @@ describe('plugins store', () => {
     const state = usePluginsStore.getState();
     expect(state.runtimeReady).toBe(true);
     expect(state.catalogReady).toBe(true);
-    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
+    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
     expect(state.catalog).toHaveLength(1);
     expect(state.error).toBe('plugins:errors.loadFailed');
   });
@@ -133,31 +130,31 @@ describe('plugins store', () => {
     expect(hostApiFetchMock).not.toHaveBeenCalled();
   });
 
-  it('toggleExecution 后刷新 runtime 与 catalog，并在结束后清理 mutating 状态', async () => {
+  it('togglePluginEnabled 后刷新 runtime 与 catalog，并在结束后清理 mutating 状态', async () => {
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload({ executionEnabled: true, enabledPluginIds: ['plugin-a'] });
+        return buildRuntimePayload({ enabledPluginIds: ['plugin-a'] });
       }
       if (path === '/api/plugins/catalog') {
         return buildCatalogPayload();
       }
-      if (path === '/api/plugins/runtime/execution') {
-        return buildRuntimePayload({ executionEnabled: false, enabledPluginIds: ['plugin-a'] });
+      if (path === '/api/plugins/runtime/enabled-plugins') {
+        return buildRuntimePayload({ enabledPluginIds: [] });
       }
       throw new Error(`unexpected path: ${path}`);
     });
 
     const { usePluginsStore } = await import('@/stores/plugins-store');
     await usePluginsStore.getState().refreshSnapshot({ reason: 'initial', force: true });
-    await usePluginsStore.getState().toggleExecution(false);
+    await usePluginsStore.getState().togglePluginEnabled('plugin-a', false);
 
     const state = usePluginsStore.getState();
     expect(state.mutating).toBe(false);
-    expect(state.mutatingAction).toBeNull();
-    expect(state.runtime?.execution.pluginExecutionEnabled).toBe(true);
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/execution', {
+    expect(state.mutatingPluginId).toBeNull();
+    expect(state.runtime?.execution.enabledPluginIds).toEqual(['plugin-a']);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/enabled-plugins', {
       method: 'PUT',
-      body: JSON.stringify({ enabled: false }),
+      body: JSON.stringify({ pluginIds: [] }),
     });
   });
 });

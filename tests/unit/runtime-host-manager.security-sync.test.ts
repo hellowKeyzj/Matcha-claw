@@ -21,10 +21,8 @@ const hoisted = vi.hoisted(() => {
       port: 3211,
     })),
   }));
-  const getSettingMock = vi.fn(async (key: string) => {
-    if (key === 'pluginExecutionEnabled') return true;
-    return undefined;
-  });
+  const getSettingMock = vi.fn(async () => undefined);
+  const getOpenClawDirMock = vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw');
 
   return {
     childRequestMock,
@@ -32,6 +30,7 @@ const hoisted = vi.hoisted(() => {
     createRuntimeHostHttpClientMock,
     createRuntimeHostProcessManagerMock,
     getSettingMock,
+    getOpenClawDirMock,
   };
 });
 
@@ -46,6 +45,10 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
 vi.mock('../../electron/services/settings/settings-store', () => ({
   getSetting: hoisted.getSettingMock,
   setSetting: vi.fn(async () => {}),
+}));
+
+vi.mock('../../electron/utils/paths', () => ({
+  getOpenClawDir: hoisted.getOpenClawDirMock,
 }));
 
 vi.mock('../../electron/services/channels/channel-runtime-service', () => ({

@@ -6,6 +6,7 @@
     "gateway.ts",
     "logs.ts",
     "runtime-host-internal.ts",
+    "runtime-host.ts",
     "runtime-host-proxy.ts"
   ],
   "mainOwnedExactRoutes": [
@@ -22,10 +23,11 @@
     "/api/files/thumbnails",
     "/api/files/save-image",
     "/api/diagnostics/collect",
+    "/api/diagnostics/memory",
     "/api/logs",
     "/api/logs/dir",
     "/api/logs/files",
-    "/internal/runtime-host/execution-sync",
+    "/api/plugins/runtime/restart",
     "/internal/runtime-host/shell-actions"
   ],
   "mainOwnedPrefixRoutes": [

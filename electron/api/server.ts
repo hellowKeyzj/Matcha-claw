@@ -6,6 +6,7 @@ import type { HostApiContext } from './context';
 import { handleAppRoutes } from './routes/app';
 import { handleGatewayRoutes } from './routes/gateway';
 import { handleRuntimeHostInternalRoutes } from './routes/runtime-host-internal';
+import { handleRuntimeHostRoutes } from './routes/runtime-host';
 import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
@@ -22,6 +23,7 @@ type RouteHandler = (
 
 const mainOwnedHandlers: RouteHandler[] = [
   handleRuntimeHostInternalRoutes,
+  handleRuntimeHostRoutes,
   handleAppRoutes,
   handleGatewayRoutes,
   handleFileRoutes,

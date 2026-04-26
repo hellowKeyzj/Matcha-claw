@@ -24,7 +24,7 @@ describe('runtime-host internal routes', () => {
         },
       } as unknown as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
+      new URL('http://127.0.0.1:3210/internal/runtime-host/shell-actions'),
       {
         runtimeHost: {
           getInternalDispatchToken: () => 'good-token',
@@ -38,63 +38,6 @@ describe('runtime-host internal routes', () => {
       status: 403,
       error: expect.objectContaining({ code: 'FORBIDDEN' }),
     }));
-  });
-
-  it('execution-sync 路由会调用 runtimeHost 执行态写入并返回最新 execution', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({
-      version: 1,
-      action: 'set_execution_enabled',
-      payload: { enabled: false },
-    });
-    const setExecutionEnabled = vi.fn(async () => ({
-      pluginExecutionEnabled: false,
-      enabledPluginIds: ['security-core'],
-    }));
-    const setEnabledPluginIds = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
-    }));
-    const restart = vi.fn(async () => {});
-
-    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
-    const handled = await handleRuntimeHostInternalRoutes(
-      {
-        method: 'POST',
-        headers: {
-          'x-runtime-host-dispatch-token': 'test-token',
-        },
-      } as unknown as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
-      {
-        runtimeHost: {
-          getInternalDispatchToken: () => 'test-token',
-          setExecutionEnabled,
-          setEnabledPluginIds,
-          restart,
-          getExecutionState: () => ({
-            pluginExecutionEnabled: false,
-            enabledPluginIds: ['security-core'],
-          }),
-        },
-      } as never,
-    );
-
-    expect(handled).toBe(true);
-    expect(setExecutionEnabled).toHaveBeenCalledWith(false);
-    expect(setEnabledPluginIds).not.toHaveBeenCalled();
-    expect(restart).not.toHaveBeenCalled();
-    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {
-      version: 1,
-      success: true,
-      status: 200,
-      data: {
-        execution: {
-          pluginExecutionEnabled: false,
-          enabledPluginIds: ['security-core'],
-        },
-      },
-    });
   });
 
   it('shell-actions 路由会调用 runtimeHost.executeShellAction 并透传结果', async () => {
@@ -311,62 +254,6 @@ describe('runtime-host internal routes', () => {
     });
   });
 
-  it('execution-sync restart_runtime_host 会调用 restart', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({
-      version: 1,
-      action: 'restart_runtime_host',
-    });
-    const setExecutionEnabled = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
-    }));
-    const setEnabledPluginIds = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
-    }));
-    const restart = vi.fn(async () => {});
-
-    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
-    const handled = await handleRuntimeHostInternalRoutes(
-      {
-        method: 'POST',
-        headers: {
-          'x-runtime-host-dispatch-token': 'test-token',
-        },
-      } as unknown as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
-      {
-        runtimeHost: {
-          getInternalDispatchToken: () => 'test-token',
-          setExecutionEnabled,
-          setEnabledPluginIds,
-          restart,
-          getExecutionState: () => ({
-            pluginExecutionEnabled: true,
-            enabledPluginIds: ['security-core'],
-          }),
-        },
-      } as never,
-    );
-
-    expect(handled).toBe(true);
-    expect(setExecutionEnabled).not.toHaveBeenCalled();
-    expect(setEnabledPluginIds).not.toHaveBeenCalled();
-    expect(restart).toHaveBeenCalledTimes(1);
-    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 200, {
-      version: 1,
-      success: true,
-      status: 200,
-      data: {
-        execution: {
-          pluginExecutionEnabled: true,
-          enabledPluginIds: ['security-core'],
-        },
-      },
-    });
-  });
-
   it('非 POST 方法会返回统一 transport 错误体', async () => {
     const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
     const handled = await handleRuntimeHostInternalRoutes(
@@ -377,7 +264,7 @@ describe('runtime-host internal routes', () => {
         },
       } as unknown as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
+      new URL('http://127.0.0.1:3210/internal/runtime-host/shell-actions'),
       {
         runtimeHost: {
           getInternalDispatchToken: () => 'test-token',
@@ -396,17 +283,12 @@ describe('runtime-host internal routes', () => {
     }));
   });
 
-  it('execution-sync body 非对象时返回 BAD_REQUEST', async () => {
+  it('shell-actions body 非对象时返回 BAD_REQUEST', async () => {
     parseJsonBodyMock.mockResolvedValueOnce('invalid-body');
-    const setExecutionEnabled = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
+    const executeShellAction = vi.fn(async () => ({
+      status: 200,
+      data: { success: true },
     }));
-    const setEnabledPluginIds = vi.fn(async () => ({
-      pluginExecutionEnabled: true,
-      enabledPluginIds: ['security-core'],
-    }));
-    const restart = vi.fn(async () => {});
 
     const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
     const handled = await handleRuntimeHostInternalRoutes(
@@ -417,25 +299,17 @@ describe('runtime-host internal routes', () => {
         },
       } as unknown as IncomingMessage,
       {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/execution-sync'),
+      new URL('http://127.0.0.1:3210/internal/runtime-host/shell-actions'),
       {
         runtimeHost: {
           getInternalDispatchToken: () => 'test-token',
-          setExecutionEnabled,
-          setEnabledPluginIds,
-          restart,
-          getExecutionState: () => ({
-            pluginExecutionEnabled: true,
-            enabledPluginIds: ['security-core'],
-          }),
+          executeShellAction,
         },
       } as never,
     );
 
     expect(handled).toBe(true);
-    expect(setExecutionEnabled).not.toHaveBeenCalled();
-    expect(setEnabledPluginIds).not.toHaveBeenCalled();
-    expect(restart).not.toHaveBeenCalled();
+    expect(executeShellAction).not.toHaveBeenCalled();
     expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 400, expect.objectContaining({
       version: 1,
       success: false,

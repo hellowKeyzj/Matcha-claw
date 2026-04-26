@@ -48,7 +48,6 @@ type RuntimeHostStatusPayload = {
   hostLifecycle: RuntimeHostManagerState['lifecycle'];
   runtimeLifecycle: RuntimeHostManagerState['runtimeLifecycle'];
   activePluginCount: number;
-  pluginExecutionEnabled: boolean;
   enabledPluginIds: readonly string[];
   pid?: number;
   error?: string;
@@ -84,7 +83,6 @@ function asRuntimeHostStatus(
     hostLifecycle: state.lifecycle,
     runtimeLifecycle: state.runtimeLifecycle,
     activePluginCount: state.activePluginCount,
-    pluginExecutionEnabled: state.pluginExecutionEnabled,
     enabledPluginIds: state.enabledPluginIds,
     ...(typeof state.pid === 'number' ? { pid: state.pid } : {}),
     ...(typeof mergedError === 'string' && mergedError.trim() ? { error: mergedError } : {}),

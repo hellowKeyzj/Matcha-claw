@@ -1,5 +1,4 @@
 import {
-  DEFAULT_PLUGIN_EXECUTION_ENABLED,
   type RuntimeHostCatalogPlugin,
   type RuntimeHostExecutionState,
   type RuntimeHostRouteResult,
@@ -7,7 +6,7 @@ import {
 import type { GatewayManager } from '../gateway/manager';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'node:events';
-import { getSetting, setSetting } from '../services/settings/settings-store';
+import { getSetting } from '../services/settings/settings-store';
 import { createChannelRuntimeService } from '../services/channels/channel-runtime-service';
 import { browserOAuthManager, type BrowserOAuthProviderType } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager, type OAuthProviderType } from '../services/providers/oauth/device-oauth-manager';
@@ -68,7 +67,6 @@ export interface RuntimeHostManagerState {
   readonly runtimeLifecycle: RuntimeHealthLifecycle;
   readonly pid?: number;
   readonly activePluginCount: number;
-  readonly pluginExecutionEnabled: boolean;
   readonly enabledPluginIds: readonly string[];
   readonly lastError?: string;
 }
@@ -82,7 +80,6 @@ export interface RuntimeHostManager {
   readonly getState: () => RuntimeHostManagerState;
   readonly getExecutionState: () => RuntimeHostExecutionState;
   readonly refreshExecutionState: () => Promise<RuntimeHostExecutionState>;
-  readonly setExecutionEnabled: (enabled: boolean) => Promise<RuntimeHostExecutionState>;
   readonly setEnabledPluginIds: (pluginIds: readonly string[]) => Promise<RuntimeHostExecutionState>;
   readonly listAvailablePlugins: () => Promise<readonly RuntimeHostCatalogPlugin[]>;
   readonly request: <TResponse>(
@@ -166,7 +163,6 @@ export function createRuntimeHostManager(
   }
 
   let executionState: RuntimeHostExecutionState = {
-    pluginExecutionEnabled: DEFAULT_PLUGIN_EXECUTION_ENABLED,
     enabledPluginIds: deps.enabledPluginIds?.length
       ? Array.from(new Set(deps.enabledPluginIds))
       : [],
@@ -211,7 +207,6 @@ export function createRuntimeHostManager(
     parentApiBaseUrl: `http://127.0.0.1:${hostApiPort}`,
     parentDispatchToken: internalDispatchToken,
     childEnv: () => ({
-      MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: executionState.pluginExecutionEnabled ? '1' : '0',
       MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(executionState.enabledPluginIds),
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(childPluginCatalogSnapshot),
       MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT: String(childGatewayBridgeSnapshot.port),
@@ -230,19 +225,14 @@ export function createRuntimeHostManager(
     httpClient: runtimeHostHttpClient,
     settingsStore: {
       get: getSetting,
-      set: setSetting,
     },
   } as const;
 
   async function hydrateExecutionStateFromSources(): Promise<void> {
-    const [pluginExecutionEnabled, gatewayToken] = await Promise.all([
-      infrastructure.settingsStore.get('pluginExecutionEnabled').catch(() => DEFAULT_PLUGIN_EXECUTION_ENABLED),
+    const [gatewayToken] = await Promise.all([
       infrastructure.settingsStore.get('gatewayToken').catch(() => ''),
     ]);
     executionState = {
-      pluginExecutionEnabled: typeof pluginExecutionEnabled === 'boolean'
-        ? pluginExecutionEnabled
-        : DEFAULT_PLUGIN_EXECUTION_ENABLED,
       enabledPluginIds: readEnabledPluginIdsFromOpenClawConfig(),
     };
     const gatewayStatusPort = infrastructure.gatewayManager.getStatus().port;
@@ -253,18 +243,6 @@ export function createRuntimeHostManager(
       port: gatewayStatusPort,
       token: typeof gatewayToken === 'string' ? gatewayToken : '',
     };
-  }
-
-  async function setExecutionEnabledInternal(enabled: boolean): Promise<RuntimeHostExecutionState> {
-    if (executionState.pluginExecutionEnabled === enabled) {
-      return executionState;
-    }
-    executionState = {
-      ...executionState,
-      pluginExecutionEnabled: enabled,
-    };
-    await infrastructure.settingsStore.set('pluginExecutionEnabled', enabled);
-    return executionState;
   }
 
   async function setEnabledPluginIdsInternal(pluginIds: readonly string[]): Promise<RuntimeHostExecutionState> {
@@ -528,7 +506,7 @@ export function createRuntimeHostManager(
         await infrastructure.processManager.start();
         lifecycle = 'running';
         logger.info(
-          `Runtime Host started (execution=${executionState.pluginExecutionEnabled ? 'enabled' : 'disabled'}, plugins=${executionState.enabledPluginIds.join(', ') || 'none'})`,
+          `Runtime Host started (plugins=${executionState.enabledPluginIds.join(', ') || 'none'})`,
         );
       } catch (error) {
         lifecycle = 'error';
@@ -607,7 +585,6 @@ export function createRuntimeHostManager(
         lifecycle,
         runtimeLifecycle,
         ...(processState.pid ? { pid: processState.pid } : {}),
-        pluginExecutionEnabled: executionState.pluginExecutionEnabled,
         activePluginCount,
         enabledPluginIds: executionState.enabledPluginIds,
         ...((lastError || processState.lastError) ? { lastError: processState.lastError ?? lastError } : {}),
@@ -621,10 +598,6 @@ export function createRuntimeHostManager(
     async refreshExecutionState() {
       await hydrateExecutionStateFromSources();
       return executionState;
-    },
-
-    async setExecutionEnabled(enabled) {
-      return await setExecutionEnabledInternal(enabled);
     },
 
     async setEnabledPluginIds(pluginIds) {

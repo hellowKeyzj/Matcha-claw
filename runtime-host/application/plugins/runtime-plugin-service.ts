@@ -7,6 +7,7 @@ import {
   discoverPluginCatalogLocal,
   mergePluginCatalogSnapshots,
 } from './catalog';
+import { pickCatalogGroup } from './plugin-groups';
 import {
   MANAGED_OPENCLAW_PLUGIN_DEFINITIONS,
   findManagedOpenClawPluginDefinition,
@@ -115,6 +116,12 @@ async function discoverManagedRegistryPlugin(
         kind: pickKind(packageJson),
         platform: 'openclaw',
         category: manifest.category,
+        group: pickCatalogGroup({
+          id: definition.id,
+          category: manifest.category,
+          description: manifest.description,
+          groupHints: manifest.groupHints,
+        }),
         controlMode: 'manual',
         ...(description ? { description } : {}),
         sourceDir,

@@ -8,7 +8,6 @@ describe('runtime-host API 真实链路 contract', () => {
 
   beforeAll(async () => {
     harness = await createRuntimeHostApiHarness({
-      pluginExecutionEnabled: true,
       enabledPluginIds: ['task-manager'],
       pluginCatalog: [
         {
@@ -94,10 +93,9 @@ describe('runtime-host API 真实链路 contract', () => {
   it('plugins 运行态和目录均由 API 暴露，不依赖内部 import', async () => {
     const runtime = await harness.dispatchOk<{
       success: boolean;
-      execution: { pluginExecutionEnabled: boolean; enabledPluginIds: string[] };
+      execution: { enabledPluginIds: string[] };
     }>('GET', '/api/plugins/runtime');
     expect(runtime.success).toBe(true);
-    expect(runtime.execution.pluginExecutionEnabled).toBe(true);
     expect(runtime.execution.enabledPluginIds).toContain('task-manager');
 
     const catalog = await harness.dispatchOk<{

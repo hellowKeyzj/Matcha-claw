@@ -20,6 +20,7 @@ import { createRuntimeHostPlatformRoot } from './platform/runtime-root';
 import {
   mergePluginCatalogSnapshots,
 } from '../application/plugins/catalog';
+import { pickCatalogGroup } from '../application/plugins/plugin-groups';
 import {
   ensureConfiguredManagedPluginsInstalled,
   listEnabledPluginIdsFromConfig,
@@ -56,7 +57,6 @@ const fallbackEnabledPluginIds = (() => {
   }
 })();
 let lifecycle = 'running';
-let pluginExecutionEnabled = process.env.MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED !== '0';
 let enabledPluginIds: string[] = listEnabledPluginIdsFromConfig();
 if (enabledPluginIds.length === 0 && fallbackEnabledPluginIds.length > 0) {
   enabledPluginIds = [...fallbackEnabledPluginIds];
@@ -65,8 +65,6 @@ let pluginCatalog: Array<Record<string, any>> = [];
 const transportStats = {
   totalDispatchRequests: 0,
   localBusinessHandled: 0,
-  executionSyncHandled: 0,
-  executionSyncFailed: 0,
   unhandledRouteCount: 0,
   badRequestRejected: 0,
   dispatchInternalError: 0,
@@ -78,7 +76,6 @@ const parentTransportClient = createParentTransportClient({
 });
 const {
   requestParentShellAction,
-  requestParentExecutionSync,
   emitParentGatewayEvent,
   mapParentTransportResponse,
 } = parentTransportClient;
@@ -128,6 +125,14 @@ try {
           && typeof candidate.category === 'string';
       }).map((item) => ({
         ...item,
+        group: item.group === 'channel' || item.group === 'model' || item.group === 'general'
+          ? item.group
+          : pickCatalogGroup({
+            id: typeof item.id === 'string' ? item.id : undefined,
+            category: item.category,
+            description: typeof item.description === 'string' ? item.description : undefined,
+            controlMode: item.controlMode === 'channel-config' ? 'channel-config' : 'manual',
+          }),
         platform: item.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
       }));
     }
@@ -157,7 +162,6 @@ function createHealthPayload() {
 function buildRuntimeStateParams() {
   return {
     lifecycle,
-    pluginExecutionEnabled,
     enabledPluginIds,
     pluginCatalog,
   };
@@ -185,7 +189,6 @@ const tryHandleLocalBusinessDispatch = createLocalBusinessDispatcher({
   buildTransportStatsSnapshot,
   buildLocalPluginsRuntimePayload,
   refreshPluginCatalog,
-  getPluginExecutionEnabled: () => pluginExecutionEnabled,
   getEnabledPluginIds: () => enabledPluginIds,
   getPluginCatalog: () => pluginCatalog,
   openclawBridge,
@@ -226,14 +229,6 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     handleDispatchRoute(req, res, {
       transportStats,
       tryHandleLocalBusinessDispatch,
-      requestParentExecutionSync,
-      buildLocalPluginsRuntimePayload,
-      setPluginExecutionEnabled: (enabled) => {
-        pluginExecutionEnabled = enabled;
-      },
-      setEnabledPluginIds: async (pluginIds) => {
-        enabledPluginIds = await setRuntimeEnabledPluginIds(pluginIds);
-      },
     });
     return;
   }

@@ -46,7 +46,6 @@ describe('host event bridge runtime-host lifecycle', () => {
       runtimeLifecycle: 'running' as const,
       pid: 1111,
       activePluginCount: 2,
-      pluginExecutionEnabled: true,
       enabledPluginIds: ['security-core'],
     };
     let runtimeHealth = {

@@ -5,13 +5,8 @@ import {
 import type { RuntimeHostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
-const EXECUTION_SYNC_PATH = '/internal/runtime-host/execution-sync';
 const SHELL_ACTION_PATH = '/internal/runtime-host/shell-actions';
 const GATEWAY_EVENT_PATH = '/internal/runtime-host/gateway-events';
-
-type RuntimeHostExecutionSyncAction =
-  | 'set_execution_enabled'
-  | 'restart_runtime_host';
 
 type RuntimeHostShellAction =
   | 'shell_open_path'
@@ -87,11 +82,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function isExecutionSyncAction(value: unknown): value is RuntimeHostExecutionSyncAction {
-  return value === 'set_execution_enabled'
-    || value === 'restart_runtime_host';
-}
-
 function isShellAction(value: unknown): value is RuntimeHostShellAction {
   return value === 'shell_open_path'
     || value === 'gateway_restart'
@@ -113,90 +103,6 @@ function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayF
     || value === 'gateway:channel-status'
     || value === 'gateway:error'
     || value === 'gateway:connection';
-}
-
-async function handleExecutionSyncRoute(
-  req: IncomingMessage,
-  res: ServerResponse,
-  ctx: RuntimeHostApiContext,
-): Promise<boolean> {
-  if (req.method !== 'POST') {
-    sendTransportError(
-      res,
-      405,
-      'BAD_REQUEST',
-      `Method not allowed: ${req.method ?? 'UNKNOWN'}`,
-    );
-    return true;
-  }
-
-  if (!ensureInternalToken(req, res, ctx)) {
-    return true;
-  }
-
-  try {
-    const body = await parseJsonBody<unknown>(req);
-    const record = asRecord(body);
-    if (!record) {
-      sendTransportError(
-        res,
-        400,
-        'BAD_REQUEST',
-        'Execution sync body 必须是 object',
-      );
-      return true;
-    }
-
-    if (record.version !== RUNTIME_HOST_TRANSPORT_VERSION) {
-      sendTransportError(
-        res,
-        400,
-        'BAD_REQUEST',
-        `Unsupported transport version: ${String(record.version)}`,
-      );
-      return true;
-    }
-
-    if (!isExecutionSyncAction(record.action)) {
-      sendTransportError(
-        res,
-        400,
-        'BAD_REQUEST',
-        `Invalid execution sync action: ${String(record.action)}`,
-      );
-      return true;
-    }
-
-    if (record.action === 'set_execution_enabled') {
-      const payload = asRecord(record.payload);
-      if (!payload || typeof payload.enabled !== 'boolean') {
-        sendTransportError(res, 400, 'BAD_REQUEST', 'enabled 必须是 boolean');
-        return true;
-      }
-      await ctx.runtimeHost.setExecutionEnabled(payload.enabled);
-    } else {
-      await ctx.runtimeHost.restart();
-    }
-
-    const execution = ctx.runtimeHost.getExecutionState();
-    sendJson(res, 200, {
-      version: RUNTIME_HOST_TRANSPORT_VERSION,
-      success: true,
-      status: 200,
-      data: {
-        execution,
-      },
-    });
-    return true;
-  } catch (error) {
-    sendTransportError(
-      res,
-      500,
-      'INTERNAL_ERROR',
-      error instanceof Error ? error.message : String(error),
-    );
-    return true;
-  }
 }
 
 async function handleShellActionRoute(
@@ -347,9 +253,6 @@ export async function handleRuntimeHostInternalRoutes(
   url: URL,
   ctx: RuntimeHostApiContext,
 ): Promise<boolean> {
-  if (url.pathname === EXECUTION_SYNC_PATH) {
-    return await handleExecutionSyncRoute(req, res, ctx);
-  }
   if (url.pathname === SHELL_ACTION_PATH) {
     return await handleShellActionRoute(req, res, ctx);
   }

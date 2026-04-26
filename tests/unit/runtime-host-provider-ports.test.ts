@@ -24,15 +24,12 @@ const hoisted = vi.hoisted(() => ({
       port: 3211,
     })),
   })),
-  getSettingMock: vi.fn(async (key: string) => {
-    if (key === 'pluginExecutionEnabled') return true;
-    return undefined;
-  }),
+  getSettingMock: vi.fn(async () => undefined),
+  getOpenClawDirMock: vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw'),
 }));
 
 vi.mock('../../electron/main/runtime-host-contract', () => ({
   DEFAULT_ENABLED_PLUGIN_IDS: ['security-core'],
-  DEFAULT_PLUGIN_EXECUTION_ENABLED: true,
   normalizePluginIds: (pluginIds: readonly string[]) => Array.from(new Set(pluginIds)),
 }));
 
@@ -47,6 +44,10 @@ vi.mock('../../electron/main/runtime-host-process-manager', () => ({
 vi.mock('../../electron/services/settings/settings-store', () => ({
   getSetting: hoisted.getSettingMock,
   setSetting: vi.fn(async () => {}),
+}));
+
+vi.mock('../../electron/utils/paths', () => ({
+  getOpenClawDir: hoisted.getOpenClawDirMock,
 }));
 
 vi.mock('../../electron/services/channels/channel-runtime-service', () => ({

@@ -15,7 +15,6 @@ interface PluginRuntimeRouteDeps {
     data?: unknown;
     error?: { code: string; message: string };
   }>;
-  pluginExecutionEnabled: boolean;
   enabledPluginIds: string[];
   getPluginCatalog: () => Array<Record<string, any>>;
 }
@@ -49,12 +48,12 @@ export async function handlePluginRuntimeRoute(
       data: {
         success: true,
         execution: {
-          pluginExecutionEnabled: deps.pluginExecutionEnabled,
           enabledPluginIds: deps.enabledPluginIds,
         },
         plugins: deps.getPluginCatalog().map((plugin) => ({
           ...plugin,
           enabled: enabledSet.has(plugin.id),
+          group: isChannelDerivedPluginId(plugin.id) ? 'channel' : plugin.group,
           controlMode: isChannelDerivedPluginId(plugin.id) ? 'channel-config' : (plugin.controlMode ?? 'manual'),
         })),
       },

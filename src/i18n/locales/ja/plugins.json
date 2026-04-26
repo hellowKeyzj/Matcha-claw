@@ -1,6 +1,6 @@
 {
   "title": "プラグインセンター",
-  "description": "プラグイン実行層と状態を一元管理します。Runtime Host は常駐です。",
+  "description": "プラグイン状態を一元管理します。Runtime Host は常駐です。",
   "runtime": {
     "title": "ランタイム状態",
     "description": "Runtime Host のライフサイクルとヘルスを確認します。",
@@ -10,23 +10,23 @@
     "recoveredNotice": "Runtime Host は {{count}} 回自動復旧しました",
     "recoveredAt": "最終復旧時刻: {{time}}"
   },
-  "execution": {
-    "title": "プラグイン実行層",
-    "description": "制御対象はプラグイン実行のみです。OpenClaw Bridge と基本導線には影響しません。",
-    "switchLabel": "プラグイン実行層を有効化"
-  },
   "catalog": {
     "title": "プラグイン一覧",
     "description": "プラグインの有効化はここで管理します。設定ページには配置しません。",
     "empty": "管理可能なプラグインがありません。",
+    "emptyGroup": "{{group}}に該当するプラグインはありません。",
     "channelManaged": "チャンネル設定で管理されます",
     "columns": {
       "plugin": "プラグイン",
       "platform": "プラットフォーム",
       "kind": "種別",
-      "category": "カテゴリ",
       "version": "バージョン",
       "enabled": "有効"
+    },
+    "groups": {
+      "channel": "チャネル",
+      "model": "モデル",
+      "general": "共通"
     },
     "platform": {
       "openclaw": "OpenClaw",
@@ -38,16 +38,31 @@
     }
   },
   "state": {
-    "executionOn": "実行層は有効",
-    "executionOff": "実行層は無効",
     "hostRunning": "ホスト稼働中",
     "hostStopped": "ホスト停止中",
     "hostStarting": "ホスト起動中",
     "hostDegraded": "ホスト劣化状態"
   },
+  "lifecycle": {
+    "host": {
+      "idle": "ホスト待機中",
+      "starting": "ホスト起動中",
+      "running": "ホスト稼働中",
+      "stopped": "ホスト停止中",
+      "error": "ホストエラー"
+    },
+    "runtime": {
+      "idle": "ランタイム待機中",
+      "booting": "ランタイム起動中",
+      "ready": "ランタイム準備完了",
+      "running": "ランタイム稼働中",
+      "degraded": "ランタイム劣化状態",
+      "stopped": "ランタイム停止中",
+      "error": "ランタイムエラー"
+    }
+  },
   "errors": {
     "loadFailed": "プラグインセンターの読み込みに失敗しました",
-    "toggleExecutionFailed": "実行層の切り替えに失敗しました",
     "togglePluginFailed": "プラグイン有効化の切り替えに失敗しました",
     "restartFailed": "Runtime Host の再起動に失敗しました"
   }

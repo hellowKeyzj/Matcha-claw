@@ -19,7 +19,6 @@ export interface LocalBusinessDispatchContext {
   buildLocalPluginsRuntimePayload: () => unknown;
   refreshPluginCatalog: () => Promise<void>;
   setEnabledPluginIds: (pluginIds: string[]) => Promise<string[]>;
-  getPluginExecutionEnabled: () => boolean;
   getEnabledPluginIds: () => string[];
   getPluginCatalog: () => Array<Record<string, any>>;
   openclawBridge: OpenClawBridge;

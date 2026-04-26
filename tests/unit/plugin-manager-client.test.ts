@@ -9,7 +9,7 @@ describe('plugin manager client', () => {
   it('getPluginCatalog/getPluginRuntime 走通用插件中心接口', async () => {
     hostApiFetchMock
       .mockResolvedValueOnce({ success: true, plugins: [] })
-      .mockResolvedValueOnce({ success: true, execution: { pluginExecutionEnabled: true, enabledPluginIds: [] } });
+      .mockResolvedValueOnce({ success: true, execution: { enabledPluginIds: [] } });
 
     const { getPluginCatalog, getPluginRuntime } = await import('@/services/openclaw/plugin-manager-client');
     const catalog = await getPluginCatalog();
@@ -21,20 +21,14 @@ describe('plugin manager client', () => {
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime', undefined);
   });
 
-  it('setPluginExecutionEnabled/setEnabledPluginIds 走通用插件写接口', async () => {
+  it('setEnabledPluginIds 走通用插件写接口', async () => {
     hostApiFetchMock
-      .mockResolvedValueOnce({ success: true, execution: { pluginExecutionEnabled: true, enabledPluginIds: [] } })
-      .mockResolvedValueOnce({ success: true, execution: { pluginExecutionEnabled: true, enabledPluginIds: ['task-manager'] } });
+      .mockResolvedValueOnce({ success: true, execution: { enabledPluginIds: ['task-manager'] } });
 
-    const { setPluginExecutionEnabled, setEnabledPluginIds } = await import('@/services/openclaw/plugin-manager-client');
-    await setPluginExecutionEnabled(true);
+    const { setEnabledPluginIds } = await import('@/services/openclaw/plugin-manager-client');
     await setEnabledPluginIds(['task-manager']);
 
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/plugins/runtime/execution', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: true }),
-    });
-    expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/plugins/runtime/enabled-plugins', {
+    expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/plugins/runtime/enabled-plugins', {
       method: 'PUT',
       body: JSON.stringify({ pluginIds: ['task-manager'] }),
     });

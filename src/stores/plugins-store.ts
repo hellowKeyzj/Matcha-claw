@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import type { PluginGroupId } from '@/features/plugins/plugin-groups';
 
 export type PluginCatalogItem = {
   id: string;
@@ -8,6 +9,7 @@ export type PluginCatalogItem = {
   kind: 'builtin' | 'third-party';
   platform: 'openclaw' | 'matchaclaw';
   category: string;
+  group: PluginGroupId;
   description?: string;
   enabled: boolean;
   controlMode?: 'manual' | 'channel-config';
@@ -19,7 +21,6 @@ export type RuntimePayload = {
     lifecycle: 'idle' | 'starting' | 'running' | 'stopped' | 'error';
     runtimeLifecycle: 'idle' | 'booting' | 'ready' | 'degraded' | 'stopped';
     activePluginCount: number;
-    pluginExecutionEnabled: boolean;
     enabledPluginIds: string[];
     lastError?: string;
   };
@@ -31,7 +32,6 @@ export type RuntimePayload = {
     error?: string;
   };
   execution: {
-    pluginExecutionEnabled: boolean;
     enabledPluginIds: string[];
   };
 };
@@ -39,7 +39,6 @@ export type RuntimePayload = {
 type CatalogPayload = {
   success: boolean;
   execution: {
-    pluginExecutionEnabled: boolean;
     enabledPluginIds: string[];
   };
   plugins: PluginCatalogItem[];
@@ -142,7 +141,7 @@ async function fetchCatalogShared(): Promise<PluginCatalogItem[]> {
   }
 }
 
-function hasMutatingState(action: 'execution' | 'restart' | null, pluginId: string | null): boolean {
+function hasMutatingState(action: 'restart' | null, pluginId: string | null): boolean {
   return action !== null || pluginId !== null;
 }
 
@@ -156,7 +155,7 @@ interface PluginsStoreState {
   refreshing: boolean;
   refreshReason: PluginRefreshReason | null;
   mutating: boolean;
-  mutatingAction: 'execution' | 'restart' | null;
+  mutatingAction: 'restart' | null;
   mutatingPluginId: string | null;
   error: string | null;
   prewarm: () => Promise<void>;
@@ -164,7 +163,6 @@ interface PluginsStoreState {
   refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
   refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
-  toggleExecution: (nextValue: boolean) => Promise<void>;
   togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<void>;
   clearError: () => void;
 }
@@ -313,29 +311,6 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     } finally {
       set((state) => {
         const nextAction = state.mutatingAction === 'restart' ? null : state.mutatingAction;
-        return {
-          mutatingAction: nextAction,
-          mutating: hasMutatingState(nextAction, state.mutatingPluginId),
-        };
-      });
-    }
-  },
-
-  toggleExecution: async (nextValue) => {
-    set({ mutatingAction: 'execution', mutating: true, error: null });
-    try {
-      const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime/execution', {
-        method: 'PUT',
-        body: JSON.stringify({ enabled: nextValue }),
-      });
-      set({
-        runtime: writeRuntimeCache(payload),
-        runtimeReady: true,
-      });
-      await get().refreshSnapshot({ reason: 'mutation', force: true, silent: true });
-    } finally {
-      set((state) => {
-        const nextAction = state.mutatingAction === 'execution' ? null : state.mutatingAction;
         return {
           mutatingAction: nextAction,
           mutating: hasMutatingState(nextAction, state.mutatingPluginId),

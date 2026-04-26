@@ -1,4 +1,5 @@
 import { hostApiFetch } from '@/lib/host-api';
+import type { PluginGroupId } from '@/features/plugins/plugin-groups';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -7,6 +8,7 @@ export type RuntimePluginCatalogItem = {
   kind: 'builtin' | 'third-party';
   platform: 'openclaw' | 'matchaclaw';
   category: string;
+  group: PluginGroupId;
   description?: string;
   enabled: boolean;
   controlMode?: 'manual' | 'channel-config';
@@ -16,7 +18,6 @@ export type RuntimePluginCatalogItem = {
 type PluginCatalogPayload = {
   success: boolean;
   execution: {
-    pluginExecutionEnabled: boolean;
     enabledPluginIds: string[];
   };
   plugins: RuntimePluginCatalogItem[];
@@ -25,7 +26,6 @@ type PluginCatalogPayload = {
 type PluginRuntimePayload = {
   success: boolean;
   execution: {
-    pluginExecutionEnabled: boolean;
     enabledPluginIds: string[];
   };
 };
@@ -38,13 +38,6 @@ export async function getPluginRuntime(): Promise<PluginRuntimePayload> {
   return await hostApiFetch<PluginRuntimePayload>('/api/plugins/runtime');
 }
 
-export async function setPluginExecutionEnabled(enabled: boolean): Promise<PluginRuntimePayload> {
-  return await hostApiFetch<PluginRuntimePayload>('/api/plugins/runtime/execution', {
-    method: 'PUT',
-    body: JSON.stringify({ enabled }),
-  });
-}
-
 export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRuntimePayload> {
   return await hostApiFetch<PluginRuntimePayload>('/api/plugins/runtime/enabled-plugins', {
     method: 'PUT',
@@ -54,12 +47,8 @@ export async function setEnabledPluginIds(pluginIds: string[]): Promise<PluginRu
 
 export async function ensurePluginEnabled(pluginId: string): Promise<PluginRuntimePayload> {
   const runtime = await getPluginRuntime();
-  let current = runtime;
-  if (!current.execution.pluginExecutionEnabled) {
-    current = await setPluginExecutionEnabled(true);
+  if (runtime.execution.enabledPluginIds.includes(pluginId)) {
+    return runtime;
   }
-  if (current.execution.enabledPluginIds.includes(pluginId)) {
-    return current;
-  }
-  return await setEnabledPluginIds([...current.execution.enabledPluginIds, pluginId]);
+  return await setEnabledPluginIds([...runtime.execution.enabledPluginIds, pluginId]);
 }

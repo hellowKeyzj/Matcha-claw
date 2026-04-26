@@ -57,7 +57,6 @@ interface RuntimeHostObservedState {
   runtimeLifecycle?: string;
   pid?: number;
   activePluginCount?: number;
-  pluginExecutionEnabled?: boolean;
   enabledPluginIds?: string[];
   error?: string;
   gatewayConnectionState?: GatewayConnectionObservedStatus;
@@ -368,7 +367,6 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             runtimeLifecycle?: string;
             pid?: number;
             activePluginCount?: number;
-            pluginExecutionEnabled?: boolean;
             enabledPluginIds?: string[];
             error?: string;
             updatedAt?: number;
@@ -381,7 +379,6 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
                 runtimeLifecycle: payload.runtimeLifecycle,
                 pid: payload.pid,
                 activePluginCount: payload.activePluginCount,
-                pluginExecutionEnabled: payload.pluginExecutionEnabled,
                 enabledPluginIds: payload.enabledPluginIds ?? state.runtimeHost.enabledPluginIds,
                 error: payload.error,
                 updatedAt: payload.updatedAt ?? Date.now(),
