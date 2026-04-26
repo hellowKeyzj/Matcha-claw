@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
 
@@ -40,7 +40,6 @@ function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
       lifecycle: 'running',
       runtimeLifecycle: 'ready',
       activePluginCount: enabledPluginIds.length,
-      pluginExecutionEnabled: true,
       enabledPluginIds,
     },
     health: {
@@ -50,9 +49,21 @@ function buildRuntimePayload(params?: { enabledPluginIds?: string[] }) {
       degradedPlugins: [],
     },
     execution: {
-      pluginExecutionEnabled: true,
       enabledPluginIds,
     },
+  };
+}
+
+function buildCatalogPlugin(index: number) {
+  return {
+    id: `plugin-${index}`,
+    name: `Plugin ${index}`,
+    version: `1.0.${index}`,
+    kind: 'builtin' as const,
+    platform: 'matchaclaw' as const,
+    category: 'runtime',
+    group: 'model' as const,
+    enabled: index === 1,
   };
 }
 
@@ -73,7 +84,6 @@ describe('plugins page', () => {
         return {
           success: true,
           execution: {
-            pluginExecutionEnabled: true,
             enabledPluginIds: ['plugin-a'],
           },
           plugins: [
@@ -84,6 +94,7 @@ describe('plugins page', () => {
               kind: 'builtin',
               platform: 'matchaclaw',
               category: 'runtime',
+              group: 'model',
               enabled: true,
             },
           ],
@@ -140,7 +151,6 @@ describe('plugins page', () => {
     resolveCatalog?.({
       success: true,
       execution: {
-        pluginExecutionEnabled: true,
         enabledPluginIds: ['plugin-a'],
       },
       plugins: [
@@ -151,6 +161,7 @@ describe('plugins page', () => {
           kind: 'builtin',
           platform: 'matchaclaw',
           category: 'runtime',
+          group: 'model',
           enabled: true,
         },
       ],
@@ -182,6 +193,129 @@ describe('plugins page', () => {
     expect(screen.getByText('runtime-host health check failed')).toBeInTheDocument();
   });
 
+  it('按正式 group 分页签，只显示当前分类的插件', async () => {
+    const { PluginsPage } = await import('@/pages/Plugins');
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/plugins/runtime') {
+        return buildRuntimePayload({ enabledPluginIds: ['plugin-channel'] });
+      }
+      if (path === '/api/plugins/catalog') {
+        return {
+          success: true,
+          execution: {
+            enabledPluginIds: ['plugin-channel'],
+          },
+          plugins: [
+            {
+              id: 'plugin-channel',
+              name: 'Channel Plugin',
+              version: '1.0.0',
+              kind: 'builtin',
+              platform: 'openclaw',
+              category: 'channel',
+              group: 'channel',
+              enabled: true,
+              controlMode: 'channel-config',
+            },
+            {
+              id: 'plugin-model',
+              name: 'Model Plugin',
+              version: '1.0.1',
+              kind: 'builtin',
+              platform: 'matchaclaw',
+              category: 'runtime',
+              group: 'model',
+              enabled: false,
+            },
+            {
+              id: 'plugin-general',
+              name: 'General Plugin',
+              version: '1.0.2',
+              kind: 'third-party',
+              platform: 'matchaclaw',
+              category: 'tools',
+              group: 'general',
+              enabled: false,
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <PluginsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Channel Plugin')).toBeInTheDocument();
+    expect(screen.queryByText('Model Plugin')).not.toBeInTheDocument();
+    expect(screen.queryByText('General Plugin')).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Models (1)' }));
+    expect(await screen.findByText('Model Plugin')).toBeInTheDocument();
+    expect(screen.queryByText('Channel Plugin')).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'General (1)' }));
+    expect(await screen.findByText('General Plugin')).toBeInTheDocument();
+    expect(screen.queryByText('Model Plugin')).not.toBeInTheDocument();
+  });
+
+  it('catalog 到达后直接渲染真实插件列表，不再额外等待 idle shell', async () => {
+    const { PluginsPage } = await import('@/pages/Plugins');
+    const plugins = Array.from({ length: 13 }, (_, index) => buildCatalogPlugin(index + 1));
+
+    let resolveCatalog: ((value: unknown) => void) | null = null;
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/plugins/runtime') {
+        return buildRuntimePayload({ enabledPluginIds: ['plugin-1'] });
+      }
+      if (path === '/api/plugins/catalog') {
+        return await new Promise((resolve) => {
+          resolveCatalog = resolve;
+        });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+
+    render(
+      <MemoryRouter>
+        <PluginsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findAllByText('Host running')).toHaveLength(2);
+
+    await act(async () => {
+      resolveCatalog?.({
+        success: true,
+        execution: {
+          enabledPluginIds: ['plugin-1'],
+        },
+        plugins,
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Plugin 13')).toBeInTheDocument();
+  });
+
+  it('runtime lifecycle badge 使用正式文案，不回退原始状态键', async () => {
+    const { PluginsPage } = await import('@/pages/Plugins');
+
+    render(
+      <MemoryRouter>
+        <PluginsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findAllByText('Host running')).toHaveLength(2);
+    expect(screen.getByText('Runtime ready')).toBeInTheDocument();
+    expect(screen.queryByText('host:running')).not.toBeInTheDocument();
+    expect(screen.queryByText('runtime:ready')).not.toBeInTheDocument();
+  });
+
   it('渠道托管插件在插件中心显示为只读', async () => {
     const { PluginsPage } = await import('@/pages/Plugins');
     hostApiFetchMock.mockImplementation(async (path: string) => {
@@ -192,7 +326,6 @@ describe('plugins page', () => {
         return {
           success: true,
           execution: {
-            pluginExecutionEnabled: true,
             enabledPluginIds: ['openclaw-lark'],
           },
           plugins: [
@@ -203,6 +336,7 @@ describe('plugins page', () => {
               kind: 'builtin',
               platform: 'openclaw',
               category: 'channel',
+              group: 'channel',
               enabled: true,
               controlMode: 'channel-config',
             },

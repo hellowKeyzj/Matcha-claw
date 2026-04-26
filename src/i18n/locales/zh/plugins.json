@@ -1,6 +1,6 @@
 {
   "title": "插件中心",
-  "description": "统一管理插件执行层与插件状态；Runtime Host 常驻运行。",
+  "description": "统一管理插件",
   "runtime": {
     "title": "运行时状态",
     "description": "查看 Runtime Host 生命周期与健康状态。",
@@ -10,23 +10,23 @@
     "recoveredNotice": "Runtime Host 已自动恢复 {{count}} 次",
     "recoveredAt": "最近恢复时间：{{time}}"
   },
-  "execution": {
-    "title": "插件执行层",
-    "description": "仅控制插件执行，不影响 OpenClaw Bridge 与基础交互链路。",
-    "switchLabel": "启用插件执行层"
-  },
   "catalog": {
     "title": "插件目录",
-    "description": "在此管理插件启用状态；设置页不提供插件管理入口。",
+    "description": "管理插件启用状态",
     "empty": "暂无可管理插件。",
+    "emptyGroup": "{{group}}分类下暂无插件。",
     "channelManaged": "由渠道配置管理",
     "columns": {
       "plugin": "插件",
       "platform": "平台",
       "kind": "类型",
-      "category": "分类",
       "version": "版本",
       "enabled": "启用"
+    },
+    "groups": {
+      "channel": "渠道",
+      "model": "模型",
+      "general": "通用"
     },
     "platform": {
       "openclaw": "OpenClaw",
@@ -38,16 +38,31 @@
     }
   },
   "state": {
-    "executionOn": "执行层已启用",
-    "executionOff": "执行层已停用",
     "hostRunning": "宿主运行中",
     "hostStopped": "宿主未运行",
     "hostStarting": "宿主启动中",
     "hostDegraded": "宿主降级运行"
   },
+  "lifecycle": {
+    "host": {
+      "idle": "宿主空闲",
+      "starting": "宿主启动中",
+      "running": "宿主运行中",
+      "stopped": "宿主已停止",
+      "error": "宿主错误"
+    },
+    "runtime": {
+      "idle": "运行时空闲",
+      "booting": "运行时启动中",
+      "ready": "运行时就绪",
+      "running": "运行时运行中",
+      "degraded": "运行时降级",
+      "stopped": "运行时已停止",
+      "error": "运行时错误"
+    }
+  },
   "errors": {
     "loadFailed": "加载插件中心数据失败",
-    "toggleExecutionFailed": "切换插件执行层失败",
     "togglePluginFailed": "切换插件启用状态失败",
     "restartFailed": "重启 Runtime Host 失败"
   }

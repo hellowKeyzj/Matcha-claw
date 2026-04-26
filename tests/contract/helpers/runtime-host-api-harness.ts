@@ -35,7 +35,6 @@ export interface RuntimeHostApiHarness {
 }
 
 interface RuntimeHostApiHarnessOptions {
-  readonly pluginExecutionEnabled?: boolean;
   readonly enabledPluginIds?: string[];
   readonly pluginCatalog?: Array<Record<string, unknown>>;
 }
@@ -111,7 +110,6 @@ async function startParentApiServer(port: number, token: string): Promise<Parent
         status: 200,
         data: {
           execution: {
-            pluginExecutionEnabled: true,
             enabledPluginIds: [],
           },
           action: body.action,
@@ -207,7 +205,6 @@ export async function createRuntimeHostApiHarness(
     childEnv: () => ({
       OPENCLAW_CONFIG_DIR: openclawConfigDir,
       MATCHACLAW_RUNTIME_HOST_DATA_DIR: runtimeHostDataDir,
-      MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: options.pluginExecutionEnabled === false ? '0' : '1',
       MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(enabledPluginIds),
       MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify(options.pluginCatalog ?? []),
     }),

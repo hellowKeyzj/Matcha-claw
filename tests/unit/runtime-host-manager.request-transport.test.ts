@@ -33,10 +33,7 @@ const hoisted = vi.hoisted(() => {
   }));
   const setSettingMock = vi.fn(async () => {});
   const shellOpenPathMock = vi.fn(async () => '');
-  const getSettingMock = vi.fn(async (key: string) => {
-    if (key === 'pluginExecutionEnabled') return true;
-    return undefined;
-  });
+  const getSettingMock = vi.fn(async () => undefined);
   const getOpenClawDirMock = vi.fn(() => 'E:\\code\\Matcha-claw\\node_modules\\openclaw');
   return {
     childRequestMock,
@@ -332,32 +329,8 @@ describe('runtime-host manager request transport policy', () => {
     const result = await manager.setEnabledPluginIds(['task-manager']);
 
     expect(result).toEqual({
-      pluginExecutionEnabled: true,
       enabledPluginIds: ['task-manager'],
     });
-    expect(processManager?.restart).not.toHaveBeenCalled();
-  });
-
-  it('setExecutionEnabled 在运行态只持久化 execution state，不直接重启 runtime-host 子进程', async () => {
-    const gatewayManager = {
-      getStatus: vi.fn(() => ({ state: 'running', port: 19876 })),
-    } as never;
-
-    const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
-    const manager = createRuntimeHostManager({ gatewayManager });
-
-    await manager.start();
-    const processManager = hoisted.createRuntimeHostProcessManagerMock.mock.results[0]?.value as
-      | { restart: ReturnType<typeof vi.fn> }
-      | undefined;
-
-    const result = await manager.setExecutionEnabled(false);
-
-    expect(result).toEqual({
-      pluginExecutionEnabled: false,
-      enabledPluginIds: ['security-core'],
-    });
-    expect(hoisted.setSettingMock).toHaveBeenCalledWith('pluginExecutionEnabled', false);
     expect(processManager?.restart).not.toHaveBeenCalled();
   });
 

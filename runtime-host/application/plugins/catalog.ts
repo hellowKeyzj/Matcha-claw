@@ -4,6 +4,7 @@ import type { RuntimeHostCatalogPlugin } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
 import { createPluginManifestLoader } from '../../plugin-engine/plugin-manifest-loader';
 import type { RuntimeHostDiscoveredPlugin } from '../../shared/types';
+import { pickCatalogGroup } from './plugin-groups';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -45,16 +46,6 @@ function pickCatalogVersion(
   return typeof packageJson?.version === 'string' && packageJson.version.trim().length > 0
     ? packageJson.version.trim()
     : manifestVersion;
-}
-
-function pickCatalogCategory(
-  manifestCategory: string,
-  discovered: RuntimeHostDiscoveredPlugin,
-): string {
-  if (manifestCategory && manifestCategory !== 'general') {
-    return manifestCategory;
-  }
-  return discovered.platform;
 }
 
 function pickCatalogDescription(
@@ -114,7 +105,13 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
         version: pickCatalogVersion(manifest.version, packageJson),
         kind: inferPluginKind(plugin, packageJson),
         platform: plugin.platform,
-        category: pickCatalogCategory(manifest.category, plugin),
+        category: manifest.category,
+        group: pickCatalogGroup({
+          id: manifest.id,
+          category: manifest.category,
+          description: manifest.description,
+          groupHints: manifest.groupHints,
+        }),
         controlMode: 'manual',
         ...(description ? { description } : {}),
       } satisfies RuntimeHostCatalogPlugin;

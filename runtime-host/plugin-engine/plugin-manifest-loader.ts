@@ -7,6 +7,10 @@ export interface PluginManifestLoader {
   readonly load: (manifestPath: string) => Promise<RuntimeHostPluginManifest>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function createPluginManifestLoader(): PluginManifestLoader {
   return {
     async load(manifestPath: string): Promise<RuntimeHostPluginManifest> {
@@ -30,12 +34,28 @@ export function createPluginManifestLoader(): PluginManifestLoader {
       const description = typeof parsed.description === 'string' && parsed.description.trim().length > 0
         ? parsed.description.trim()
         : undefined;
+      const contracts = isRecord(parsed.contracts) ? parsed.contracts : null;
+      const speechProviders = Array.isArray(contracts?.speechProviders)
+        ? contracts.speechProviders.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        : [];
+      const mediaUnderstandingProviders = Array.isArray(contracts?.mediaUnderstandingProviders)
+        ? contracts.mediaUnderstandingProviders.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        : [];
+      const hasChannelConfig = isRecord(parsed.channel)
+        || (isRecord(parsed.openclaw) && isRecord(parsed.openclaw.channel));
+      const hasModelConfig = (
+        Array.isArray(parsed.providers) && parsed.providers.some((value) => typeof value === 'string' && value.trim().length > 0)
+      ) || speechProviders.length > 0 || mediaUnderstandingProviders.length > 0;
 
       return {
         id,
         name,
         version,
         category,
+        groupHints: {
+          channel: hasChannelConfig,
+          model: hasModelConfig,
+        },
         ...(description ? { description } : {}),
       };
     },

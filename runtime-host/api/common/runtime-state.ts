@@ -28,7 +28,6 @@ export function toRuntimeLifecycle(lifecycle: string) {
 
 export function buildLocalPluginStates(params: {
   lifecycle: string;
-  pluginExecutionEnabled: boolean;
   enabledPluginIds: string[];
   pluginCatalog: Array<Record<string, any>>;
 }) {
@@ -40,7 +39,7 @@ export function buildLocalPluginStates(params: {
     id: plugin.id,
     kind: plugin.kind,
     platform: plugin.platform,
-    lifecycle: isRuntimeRunning && params.pluginExecutionEnabled && enabledSet.has(plugin.id)
+    lifecycle: isRuntimeRunning && enabledSet.has(plugin.id)
       ? 'active'
       : 'inactive',
     version: plugin.version,
@@ -51,7 +50,6 @@ export function buildLocalPluginStates(params: {
 
 export function buildLocalRuntimeState(params: {
   lifecycle: string;
-  pluginExecutionEnabled: boolean;
   enabledPluginIds: string[];
   pluginCatalog: Array<Record<string, any>>;
 }) {
@@ -78,8 +76,6 @@ export function buildTransportStatsSnapshot(transportStats: Record<string, numbe
   return {
     totalDispatchRequests: transportStats.totalDispatchRequests,
     localBusinessHandled: transportStats.localBusinessHandled,
-    executionSyncHandled: transportStats.executionSyncHandled,
-    executionSyncFailed: transportStats.executionSyncFailed,
     unhandledRouteCount: transportStats.unhandledRouteCount,
     badRequestRejected: transportStats.badRequestRejected,
     dispatchInternalError: transportStats.dispatchInternalError,
@@ -88,7 +84,6 @@ export function buildTransportStatsSnapshot(transportStats: Record<string, numbe
 
 export function buildLocalPluginsRuntimePayload(params: {
   lifecycle: string;
-  pluginExecutionEnabled: boolean;
   enabledPluginIds: string[];
   pluginCatalog: Array<Record<string, any>>;
 }) {
@@ -100,12 +95,10 @@ export function buildLocalPluginsRuntimePayload(params: {
       lifecycle: params.lifecycle,
       runtimeLifecycle: toRuntimeLifecycle(params.lifecycle),
       activePluginCount: runtimeHealth.activePluginCount,
-      pluginExecutionEnabled: params.pluginExecutionEnabled,
       enabledPluginIds: params.enabledPluginIds,
     },
     health: runtimeHealth,
     execution: {
-      pluginExecutionEnabled: params.pluginExecutionEnabled,
       enabledPluginIds: params.enabledPluginIds,
     },
   };

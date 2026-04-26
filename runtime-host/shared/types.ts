@@ -47,6 +47,10 @@ export interface RuntimeHostPluginManifest {
   readonly version: string;
   readonly category: string;
   readonly description?: string;
+  readonly groupHints: {
+    readonly channel: boolean;
+    readonly model: boolean;
+  };
 }
 
 export interface RuntimeHostDiscoveredPlugin {

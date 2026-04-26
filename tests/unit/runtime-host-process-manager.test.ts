@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { createRuntimeHostProcessManager } from '../../electron/main/runtime-host-process-manager';
 
@@ -32,7 +33,7 @@ async function startParentDispatchServer(
   token: string,
   options?: {
     onExecutionSync?: (body: {
-      action: 'set_execution_enabled' | 'restart_runtime_host';
+      action: 'restart_runtime_host';
       payload?: unknown;
     }) => {
       status: number;
@@ -139,7 +140,7 @@ async function startParentDispatchServer(
     }
 
     const executionSyncBody = parsedBody as {
-      action: 'set_execution_enabled' | 'restart_runtime_host';
+      action: 'restart_runtime_host';
       payload?: unknown;
     };
     executionSyncRequestCount += 1;
@@ -160,7 +161,6 @@ async function startParentDispatchServer(
       status: 200,
       data: {
         execution: {
-          pluginExecutionEnabled: true,
           enabledPluginIds: [],
         },
       },
@@ -421,6 +421,20 @@ describe('runtime-host process manager', () => {
   let openClawConfigDir = '';
   let previousOpenClawConfigDir: string | undefined;
 
+  beforeAll(() => {
+    const result = spawnSync('pnpm', ['run', 'build:runtime-host-process'], {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+    if (result.error) {
+      throw result.error;
+    }
+    if ((result.status ?? 1) !== 0) {
+      throw new Error(`build:runtime-host-process failed with exit code ${String(result.status ?? 1)}`);
+    }
+  });
+
   beforeEach(() => {
     previousOpenClawConfigDir = process.env.OPENCLAW_CONFIG_DIR;
     openClawConfigDir = mkdtempSync(join(tmpdir(), 'runtime-host-process-config-'));
@@ -619,7 +633,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
@@ -3080,7 +3093,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '0',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core', 'task-manager']),
       }),
     });
@@ -3102,7 +3114,6 @@ describe('runtime-host process manager', () => {
         data?: {
           success?: boolean;
           execution?: {
-            pluginExecutionEnabled?: boolean;
             enabledPluginIds?: string[];
           };
         };
@@ -3115,7 +3126,6 @@ describe('runtime-host process manager', () => {
         data: {
           success: true,
           execution: {
-            pluginExecutionEnabled: false,
             enabledPluginIds: ['security-core', 'task-manager'],
           },
         },
@@ -3148,7 +3158,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
@@ -3271,7 +3280,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('execution 路由仍走 execution-sync，且不会改写本地 enabled plugin 列表', async () => {
+  it('restart 路由不再由子进程处理，当前线程配置保持不变', async () => {
     writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
       plugins: {
         allow: ['security-core'],
@@ -3283,40 +3292,7 @@ describe('runtime-host process manager', () => {
     const port = createPort(8);
     const parentApiPort = createPort(35);
     const token = 'test-runtime-host-dispatch-token-execution-sync';
-    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
-      onExecutionSync: (body) => {
-        if (body.action === 'set_execution_enabled') {
-          return {
-            status: 200,
-            payload: {
-              version: 1,
-              success: true,
-              status: 200,
-              data: {
-                execution: {
-                  pluginExecutionEnabled: false,
-                  enabledPluginIds: [],
-                },
-              },
-            },
-          };
-        }
-        return {
-          status: 200,
-          payload: {
-            version: 1,
-            success: true,
-            status: 200,
-            data: {
-              execution: {
-                pluginExecutionEnabled: true,
-                enabledPluginIds: [],
-              },
-            },
-          },
-        };
-      },
-    });
+    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
 
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -3325,7 +3301,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
@@ -3346,30 +3321,21 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/execution',
-          payload: { enabled: false },
+          method: 'POST',
+          route: '/api/plugins/runtime/restart',
         }),
       });
-      expect(toggleResponse.status).toBe(200);
+      expect(toggleResponse.status).toBe(404);
       const togglePayload = await toggleResponse.json() as {
         success: boolean;
         status: number;
-        data?: {
-          execution?: {
-            pluginExecutionEnabled?: boolean;
-            enabledPluginIds?: string[];
-          };
-        };
+        error?: { code?: string };
       };
       expect(togglePayload).toMatchObject({
-        success: true,
-        status: 200,
-        data: {
-          execution: {
-            pluginExecutionEnabled: false,
-            enabledPluginIds: ['security-core'],
-          },
+        success: false,
+        status: 404,
+        error: {
+          code: 'NOT_FOUND',
         },
       });
 
@@ -3387,7 +3353,6 @@ describe('runtime-host process manager', () => {
         status: number;
         data?: {
           execution?: {
-            pluginExecutionEnabled?: boolean;
             enabledPluginIds?: string[];
           };
         };
@@ -3399,13 +3364,12 @@ describe('runtime-host process manager', () => {
         status: 200,
         data: {
           execution: {
-            pluginExecutionEnabled: false,
             enabledPluginIds: ['security-core'],
           },
         },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
-      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(1);
+      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
@@ -3442,7 +3406,6 @@ describe('runtime-host process manager', () => {
             status: 200,
             data: {
               execution: {
-                pluginExecutionEnabled: true,
                 enabledPluginIds: ['task-manager'],
               },
             },
@@ -3458,7 +3421,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
@@ -3507,7 +3469,6 @@ describe('runtime-host process manager', () => {
         status: number;
         data?: {
           execution?: {
-            pluginExecutionEnabled?: boolean;
             enabledPluginIds?: string[];
           };
         };
@@ -3518,7 +3479,6 @@ describe('runtime-host process manager', () => {
         status: 200,
         data: {
           execution: {
-            pluginExecutionEnabled: true,
             enabledPluginIds: ['task-manager'],
           },
         },
@@ -3591,7 +3551,6 @@ describe('runtime-host process manager', () => {
             status: 200,
             data: {
               execution: {
-                pluginExecutionEnabled: true,
                 enabledPluginIds: ['openclaw-lark', 'task-manager'],
               },
             },
@@ -3607,7 +3566,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['openclaw-lark']),
         MATCHACLAW_RUNTIME_HOST_PLUGIN_CATALOG: JSON.stringify([
           {
@@ -3674,7 +3632,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
       }),
     });
@@ -3713,24 +3670,11 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('execution-sync 上游拒绝时透传错误并保持失败语义', async () => {
+  it('restart 路由在子进程侧不会误触发上游 execution-sync', async () => {
     const port = createPort(11);
     const parentApiPort = createPort(38);
     const token = 'test-runtime-host-dispatch-token-forbidden';
-    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token, {
-      onExecutionSync: () => ({
-        status: 403,
-        payload: {
-          version: 1,
-          success: false,
-          status: 403,
-          error: {
-            code: 'FORBIDDEN',
-            message: 'Invalid runtime-host internal dispatch token',
-          },
-        },
-      }),
-    });
+    const parentDispatchServer = await startParentDispatchServer(parentApiPort, token);
 
     const manager = createRuntimeHostProcessManager({
       scriptPath,
@@ -3739,7 +3683,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
       }),
     });
@@ -3751,9 +3694,8 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/execution',
-          payload: { enabled: false },
+          method: 'POST',
+          route: '/api/plugins/runtime/restart',
         }),
       });
       const payload = await response.json() as {
@@ -3762,23 +3704,23 @@ describe('runtime-host process manager', () => {
         error?: { code?: string };
       };
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
       expect(payload).toMatchObject({
         success: false,
-        status: 403,
+        status: 404,
         error: {
-          code: 'FORBIDDEN',
+          code: 'NOT_FOUND',
         },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
-      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(1);
+      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();
     }
   });
 
-  it('transport-stats 会反映本地处理、execution-sync 与未实现路由命中情况', async () => {
+  it('transport-stats 会反映本地处理与未实现路由命中情况', async () => {
     const port = createPort(13);
     const parentApiPort = createPort(40);
     const token = 'test-runtime-host-dispatch-token-transport-stats';
@@ -3791,7 +3733,6 @@ describe('runtime-host process manager', () => {
       parentApiBaseUrl: `http://127.0.0.1:${parentApiPort}`,
       parentDispatchToken: token,
       childEnv: () => ({
-        MATCHACLAW_RUNTIME_HOST_PLUGIN_EXECUTION_ENABLED: '1',
         MATCHACLAW_RUNTIME_HOST_ENABLED_PLUGIN_IDS: JSON.stringify(['security-core']),
       }),
     });
@@ -3812,9 +3753,8 @@ describe('runtime-host process manager', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           version: 1,
-          method: 'PUT',
-          route: '/api/plugins/runtime/execution',
-          payload: { enabled: false },
+          method: 'POST',
+          route: '/api/plugins/runtime/restart',
         }),
       });
       await fetch(`http://127.0.0.1:${port}/dispatch`, {
@@ -3845,7 +3785,6 @@ describe('runtime-host process manager', () => {
           stats?: {
             totalDispatchRequests?: number;
             localBusinessHandled?: number;
-            executionSyncHandled?: number;
             unhandledRouteCount?: number;
           };
         };
@@ -3860,13 +3799,12 @@ describe('runtime-host process manager', () => {
           stats: {
             totalDispatchRequests: 4,
             localBusinessHandled: 1,
-            executionSyncHandled: 1,
-            unhandledRouteCount: 1,
+            unhandledRouteCount: 2,
           },
         },
       });
       expect(parentDispatchServer.getDispatchRequestCount()).toBe(0);
-      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(1);
+      expect(parentDispatchServer.getExecutionSyncRequestCount()).toBe(0);
     } finally {
       await manager.stop();
       await parentDispatchServer.close();

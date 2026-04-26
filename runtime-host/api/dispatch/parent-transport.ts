@@ -5,10 +5,6 @@ interface ParentTransportClientOptions {
   parentDispatchToken: string;
 }
 
-export type ParentExecutionSyncAction =
-  | 'set_execution_enabled'
-  | 'restart_runtime_host';
-
 export type ParentShellAction =
   | 'shell_open_path'
   | 'gateway_restart'
@@ -109,7 +105,7 @@ export function createParentTransportClient(options: ParentTransportClientOption
 
   async function requestParentTransport(
     endpointPath: string,
-    action: ParentShellAction | ParentExecutionSyncAction,
+    action: ParentShellAction,
     payload?: unknown,
   ) {
     const controller = new AbortController();
@@ -137,10 +133,6 @@ export function createParentTransportClient(options: ParentTransportClientOption
 
   async function requestParentShellAction(action: ParentShellAction, payload?: unknown) {
     return await requestParentTransport('/internal/runtime-host/shell-actions', action, payload);
-  }
-
-  async function requestParentExecutionSync(action: ParentExecutionSyncAction, payload?: unknown) {
-    return await requestParentTransport('/internal/runtime-host/execution-sync', action, payload);
   }
 
   async function emitParentGatewayEvent(
@@ -186,7 +178,6 @@ export function createParentTransportClient(options: ParentTransportClientOption
 
   return {
     requestParentShellAction,
-    requestParentExecutionSync,
     emitParentGatewayEvent,
     mapParentTransportResponse,
   };

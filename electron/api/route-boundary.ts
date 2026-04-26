@@ -5,6 +5,7 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
   'gateway.ts',
   'logs.ts',
   'runtime-host-internal.ts',
+  'runtime-host.ts',
   'runtime-host-proxy.ts',
 ]);
 
@@ -26,7 +27,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/logs',
   '/api/logs/dir',
   '/api/logs/files',
-  '/internal/runtime-host/execution-sync',
+  '/api/plugins/runtime/restart',
   '/internal/runtime-host/shell-actions',
 ]);
 
