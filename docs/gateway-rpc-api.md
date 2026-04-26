@@ -85,6 +85,14 @@
 - 使用“实现层额外方法”前，先在本项目文档和调用层显式标注（防后续版本变动）。
 - 使用“插件动态方法”前，必须先确认插件加载策略与禁用场景。
 
+`browser.request` 补充约束：
+
+- 该方法由 Browser Relay 插件动态注册，不属于 Gateway 固有握手方法。
+- 默认执行目标不允许猜页。
+- 调用方未显式传 `targetId` 时，只允许命中 `selectedBrowserInstanceId + selectedWindowId` 对应窗口的当前活动物理页。
+- 这个窗口选择由扩展协议 `Extension.selectExecutionWindow` 上报，并由 relay server 作为真相源广播。
+- 桌面端重启后会恢复上次选择的 `selectedBrowserInstanceId + selectedWindowId`；如果当前没有活动物理页，执行直接报错。
+
 ## 4. 握手宣告方法（111）
 
 ```text

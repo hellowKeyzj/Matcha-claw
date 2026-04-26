@@ -2,9 +2,8 @@ import { execFile } from 'node:child_process'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import type { PluginLogger } from 'openclaw/plugin-sdk'
 import { createServer } from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
-import { BROWSER_RELAY_PLUGIN_ID } from '../manifest.js'
+import { resolveRelayPluginStatePath } from './paths.js'
 
 const OWNER_FILE_NAME = 'relay-owner.json'
 const PROCESS_INFO_TIMEOUT_MS = 5_000
@@ -28,20 +27,8 @@ type RelayOwnershipOptions = {
   stateDir?: string
 }
 
-function resolveStateDir(stateDir?: string): string {
-  const explicitStateDir = stateDir?.trim()
-  if (explicitStateDir) {
-    return path.resolve(explicitStateDir)
-  }
-  const envStateDir = process.env.OPENCLAW_STATE_DIR?.trim()
-  if (envStateDir) {
-    return path.resolve(envStateDir)
-  }
-  return path.join(os.homedir(), '.openclaw')
-}
-
 export function getRelayOwnerFilePath(stateDir?: string): string {
-  return path.join(resolveStateDir(stateDir), 'plugins', BROWSER_RELAY_PLUGIN_ID, OWNER_FILE_NAME)
+  return resolveRelayPluginStatePath(OWNER_FILE_NAME, stateDir)
 }
 
 function execFileAsync(file: string, args: string[]): Promise<string> {

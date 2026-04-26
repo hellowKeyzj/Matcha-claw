@@ -743,7 +743,7 @@ describe('openclaw browser relay plugin', () => {
     extension.close()
   })
 
-  it('clears the selected window when the selected browser instance disconnects', async () => {
+  it('retains the selected window when the selected browser instance disconnects', async () => {
     server = new BrowserRelayServer({ port: 0, logger })
     await server.start()
 
@@ -805,9 +805,116 @@ describe('openclaw browser relay plugin', () => {
     extension.close()
     await new Promise((resolve) => setTimeout(resolve, 50))
 
-    expect(server.status.selectedBrowserInstanceId).toBeNull()
-    expect(server.status.selectedWindowId).toBeNull()
-    expect(() => server.resolveSelectedSessionId()).toThrow('No browser window selected')
+    expect(server.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server.status.selectedWindowId).toBe(1)
+    expect(() => server.resolveSelectedSessionId()).toThrow('Selected window has no active attached page.')
+  })
+
+  it('restores the selected window across relay restart and rebinds it after reconnect', async () => {
+    tempStateDir = await mkdtemp(path.join(os.tmpdir(), 'matchaclaw-relay-selection-'))
+
+    server = new BrowserRelayServer({ port: 0, logger, stateDir: tempStateDir })
+    await server.start()
+
+    const firstPort = server.port
+    const firstSessionKey = randomBytes(32)
+    const firstExtension = new WebSocket(`ws://127.0.0.1:${firstPort}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-a' },
+    })
+
+    await waitForOpen(firstExtension)
+
+    firstExtension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(firstSessionKey),
+      },
+    }))
+
+    await waitForMessage(firstExtension)
+
+    firstExtension.send(encryptWireMessage(firstSessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 7 },
+    })))
+    await waitForMessage(firstExtension)
+
+    expect(server.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server.status.selectedWindowId).toBe(7)
+
+    firstExtension.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await server.stop()
+    server = null
+
+    server = new BrowserRelayServer({ port: 0, logger, stateDir: tempStateDir })
+    await server.start()
+
+    expect(server.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server.status.selectedWindowId).toBe(7)
+    expect(() => server.resolveSelectedSessionId()).toThrow('Selected window has no active attached page.')
+
+    const secondPort = server.port
+    const secondSessionKey = randomBytes(32)
+    const secondExtension = new WebSocket(`ws://127.0.0.1:${secondPort}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-a' },
+    })
+
+    await waitForOpen(secondExtension)
+
+    secondExtension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(secondSessionKey),
+      },
+    }))
+
+    const helloAck = JSON.parse(decryptWireMessage(secondSessionKey, await waitForMessage(secondExtension)))
+    expect(helloAck).toMatchObject({
+      method: 'Extension.helloAck',
+      params: {
+        selectedBrowserInstanceId: 'browser-a',
+        selectedWindowId: 7,
+        selected: true,
+        selectedBrowser: true,
+        selectedWindow: true,
+      },
+    })
+
+    secondExtension.send(encryptWireMessage(secondSessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 7,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    secondExtension.send(encryptWireMessage(secondSessionKey, JSON.stringify({
+      method: 'Extension.primaryTargetChanged',
+      params: {
+        sessionId: 'page-a',
+      },
+    })))
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(server.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
+
+    secondExtension.close()
   })
 
   it('reclaims the recorded stale relay owner before binding the fixed relay port', async () => {

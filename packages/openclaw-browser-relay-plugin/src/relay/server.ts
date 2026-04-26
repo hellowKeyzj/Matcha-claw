@@ -8,6 +8,7 @@ import {
   ensureRelayPortOwnership,
   releaseRelayPortOwnership,
 } from './ownership.js'
+import { readRelaySelection, writeRelaySelection } from './selection-state.js'
 
 export const RELAY_PROTOCOL_VERSION = 1
 export const RELAY_AUTH_HEADER = 'x-phoenix-relay-token'
@@ -348,6 +349,7 @@ export class BrowserRelayServer {
   async start(): Promise<void> {
     if (this.httpServer) return
 
+    await this.restoreSelectionState()
     await ensureRelayPortOwnership({
       port: this.requestedPort,
       logger: this.logger,
@@ -545,6 +547,40 @@ export class BrowserRelayServer {
 
   resolveSelectedSessionId(): string {
     return this.requireSelectedPrimaryTarget().sessionId
+  }
+
+  private async restoreSelectionState(): Promise<void> {
+    const selection = await readRelaySelection(this.stateDir)
+    if (!selection) {
+      this.selectedBrowserInstanceId = null
+      this.selectedWindowId = null
+      return
+    }
+    this.selectedBrowserInstanceId = selection.selectedBrowserInstanceId
+    this.selectedWindowId = selection.selectedWindowId
+  }
+
+  private async persistSelectionState(): Promise<void> {
+    if (!this.selectedBrowserInstanceId || this.selectedWindowId === null) {
+      return
+    }
+    await writeRelaySelection(
+      {
+        selectedBrowserInstanceId: this.selectedBrowserInstanceId,
+        selectedWindowId: this.selectedWindowId,
+      },
+      this.stateDir,
+    )
+  }
+
+  private async setSelectedExecutionWindow(browserInstanceId: string, windowId: number): Promise<void> {
+    this.selectedBrowserInstanceId = browserInstanceId
+    this.selectedWindowId = windowId
+    try {
+      await this.persistSelectionState()
+    } catch (error) {
+      this.logger.warn?.(`[browser-relay] failed to persist selected window: ${String(error)}`)
+    }
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -838,8 +874,6 @@ export class BrowserRelayServer {
     this.clearClientTargets(client, true)
 
     if (this.selectedBrowserInstanceId === client.browserInstanceId) {
-      this.selectedBrowserInstanceId = null
-      this.selectedWindowId = null
       this.broadcastBrowserSelection()
     }
 
@@ -1043,9 +1077,9 @@ export class BrowserRelayServer {
       if (selectedWindowId === null) {
         return
       }
-      this.selectedBrowserInstanceId = client.browserInstanceId
-      this.selectedWindowId = selectedWindowId
-      this.broadcastBrowserSelection()
+      void this.setSelectedExecutionWindow(client.browserInstanceId, selectedWindowId).finally(() => {
+        this.broadcastBrowserSelection()
+      })
       return
     }
 
