@@ -172,9 +172,56 @@ describe('chat selectors layering', () => {
 
     expect(Object.keys(sidebar.pendingApprovalsBySession)).toEqual(['agent:main:main']);
     expect(sidebar.chatSessions).toHaveLength(2);
-    expect(pane.sessions).toHaveLength(2);
+    expect(pane.sessionEntries).toHaveLength(2);
     expect(pane.sessionsResource.status).toBe('ready');
     expect(pane.currentSessionKey).toBe('agent:main:main');
+  });
+
+  it('session pane selector should keep stable session entry references when only transcript changes', () => {
+    const baseState = makeState({
+      sessions: [
+        { key: 'agent:main:main', displayName: 'main' },
+      ],
+      sessionsByKey: {
+        'agent:main:main': {
+          transcript: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+          meta: {
+            label: 'Main',
+            lastActivityAt: 1_700_000_000_000,
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessage: null,
+            streamRuntime: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
+    });
+    const nextState = makeState({
+      ...baseState,
+      sessions: baseState.sessions,
+      sessionsByKey: {
+        'agent:main:main': {
+          ...baseState.sessionsByKey['agent:main:main'],
+          transcript: [{ role: 'assistant', content: 'hello again', id: 'm2' }],
+        },
+      },
+    });
+
+    const firstPane = selectAgentSessionsPaneState(baseState);
+    const secondPane = selectAgentSessionsPaneState(nextState);
+
+    expect(secondPane.sessionEntries).toBe(firstPane.sessionEntries);
+    expect(secondPane).toBe(firstPane);
   });
 
   it('chat input selector only exposes current session key', () => {

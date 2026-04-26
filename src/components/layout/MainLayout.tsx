@@ -5,9 +5,10 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
-import { AgentSessionsPane } from './AgentSessionsPane';
+import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 import { TitleBar } from './TitleBar';
 import { VerticalPaneResizer } from './VerticalPaneResizer';
+import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 
 const SIDEBAR_MIN_WIDTH = 200;
@@ -77,13 +78,13 @@ export function MainLayout() {
   }, [sidebarCollapsed]);
 
   const getSidebarMaxWidth = useCallback((containerWidth: number) => {
-    const agentPaneWidth = isChatRoute
-      ? (agentSessionsCollapsed ? AGENT_SESSIONS_COLLAPSED_WIDTH : agentSessionsWidth + LAYOUT_RESIZER_WIDTH)
-      : 0;
+    const agentPaneWidth = agentSessionsCollapsed
+      ? AGENT_SESSIONS_COLLAPSED_WIDTH
+      : agentSessionsWidth + LAYOUT_RESIZER_WIDTH;
     const sidebarResizerWidth = sidebarCollapsed ? 0 : LAYOUT_RESIZER_WIDTH;
     const reserved = MAIN_CONTENT_MIN_WIDTH + agentPaneWidth + sidebarResizerWidth;
     return Math.max(SIDEBAR_MIN_WIDTH, containerWidth - reserved);
-  }, [agentSessionsCollapsed, agentSessionsWidth, isChatRoute, sidebarCollapsed]);
+  }, [agentSessionsCollapsed, agentSessionsWidth, sidebarCollapsed]);
 
   useEffect(() => {
     try {
@@ -121,7 +122,7 @@ export function MainLayout() {
         setSidebarWidth((prev) => (prev === nextSidebarWidth ? prev : nextSidebarWidth));
       }
 
-      if (isChatRoute && !agentSessionsCollapsed) {
+      if (!agentSessionsCollapsed) {
         const maxAgentWidth = getAgentSessionsMaxWidth(layoutWidth, nextSidebarWidth);
         setAgentSessionsWidth((prev) => {
           const next = clamp(
@@ -157,7 +158,6 @@ export function MainLayout() {
     agentSessionsCollapsed,
     getAgentSessionsMaxWidth,
     getSidebarMaxWidth,
-    isChatRoute,
     sidebarCollapsed,
     sidebarWidth,
   ]);
@@ -196,7 +196,7 @@ export function MainLayout() {
   };
 
   const startAgentSessionsResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!isChatRoute || agentSessionsCollapsed) {
+    if (agentSessionsCollapsed) {
       return;
     }
     event.preventDefault();
@@ -252,27 +252,25 @@ export function MainLayout() {
             variant="subtle-border"
           />
         )}
-        {isChatRoute && (
-          <AgentSessionsPane
-            expandedWidth={agentSessionsWidth}
-            collapsed={agentSessionsCollapsed}
-            collapsedWidth={AGENT_SESSIONS_COLLAPSED_WIDTH}
-            onToggleCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
-            showRightDivider={agentSessionsCollapsed}
+        <main className="relative min-w-0 flex-1 overflow-hidden bg-card">
+          <ChatWorkspaceHost
+            isActive={isChatRoute}
+            agentSessionsWidth={agentSessionsWidth}
+            agentSessionsCollapsed={agentSessionsCollapsed}
+            agentSessionsCollapsedWidth={AGENT_SESSIONS_COLLAPSED_WIDTH}
+            onToggleAgentSessionsCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
+            onAgentSessionsResizeStart={startAgentSessionsResize}
           />
-        )}
-        {isChatRoute && !agentSessionsCollapsed && (
-          <VerticalPaneResizer
-            testId="layout-agent-sessions-resizer"
-            onMouseDown={startAgentSessionsResize}
-            ariaLabel="Resize agent sessions pane"
-            variant="subtle-border"
-          />
-        )}
-        <main className="min-w-0 flex-1 overflow-hidden bg-card">
-          <div className="h-full overflow-auto px-5 py-4 md:px-8 md:py-6">
-            <Outlet />
-          </div>
+          {!isChatRoute && (
+            <div
+              data-testid="main-layout-route-overlay"
+              className={cn(
+                'absolute inset-0 z-10 h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6',
+              )}
+            >
+              <Outlet />
+            </div>
+          )}
         </main>
       </div>
     </div>

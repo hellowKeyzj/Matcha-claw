@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, startTransition, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
@@ -330,7 +330,8 @@ const SessionListSection = memo(function SessionListSection({
 
             {!bucketCollapsed && (
               <div className="space-y-1">
-                {bucket.sessions.map((session) => {
+                {bucket.sessions.map((entry) => {
+                  const session = entry.session;
                   const viewModel = sessionViewModelByKey.get(session.key);
                   const deleting = Boolean(deletingSessionKeys[session.key]);
                   return (
@@ -372,8 +373,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const {
-    sessions,
-    sessionsByKey,
+    sessionEntries,
     sessionsResource,
     currentSessionKey,
     switchSession,
@@ -381,25 +381,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     newSession,
     deleteSession,
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
-  const sessionLabels = useMemo(() => {
-    const next: Record<string, string> = {};
-    for (const [sessionKey, record] of Object.entries(sessionsByKey)) {
-      const label = record.meta.label?.trim();
-      if (label) {
-        next[sessionKey] = label;
-      }
-    }
-    return next;
-  }, [sessionsByKey]);
-  const sessionLastActivity = useMemo(() => {
-    const next: Record<string, number> = {};
-    for (const [sessionKey, record] of Object.entries(sessionsByKey)) {
-      if (typeof record.meta.lastActivityAt === 'number') {
-        next[sessionKey] = record.meta.lastActivityAt;
-      }
-    }
-    return next;
-  }, [sessionsByKey]);
   const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
     () => loadCollapsedSessionBucketMap(),
   );
@@ -412,10 +393,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const paneViewModel = useAgentSessionsPaneViewModel({
     agents,
     agentsResource,
-    sessions,
+    sessionEntries,
     sessionsResource,
-    sessionLabels,
-    sessionLastActivity,
     currentSessionKey,
     locale: i18n.language,
     t,

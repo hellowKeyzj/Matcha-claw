@@ -31,6 +31,7 @@ function clampTaskInboxWidth(width: number, containerWidth: number): number {
 }
 
 export function useInboxLayout(
+  enabled: boolean,
   chatLayoutRef: React.RefObject<HTMLDivElement | null>,
 ) {
   const resizeRafRef = useRef<number | null>(null);
@@ -60,6 +61,10 @@ export function useInboxLayout(
   }, [taskInboxWidth]);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     const applyResize = () => {
       const containerWidth = chatLayoutRef.current?.clientWidth ?? window.innerWidth;
       setTaskInboxWidth((prev) => {
@@ -87,7 +92,7 @@ export function useInboxLayout(
         resizeRafRef.current = null;
       }
     };
-  }, [chatLayoutRef]);
+  }, [chatLayoutRef, enabled]);
 
   const startTaskInboxResize = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (taskInboxCollapsed) {

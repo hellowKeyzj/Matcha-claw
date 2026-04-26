@@ -34,7 +34,7 @@ import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import type { TeamMailboxMessage } from '@/features/teams/api/runtime-client';
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 interface NavItemProps {
@@ -525,7 +525,9 @@ export function Sidebar({
     if (to === '/skills' && gatewayState === 'running' && !skillsSnapshotReady) {
       void fetchSkills({ silent: true });
     }
-    navigate(to);
+    startTransition(() => {
+      navigate(to);
+    });
   }, [fetchSkills, gatewayState, location.pathname, navigate, skillsSnapshotReady]);
 
   return (
@@ -545,7 +547,9 @@ export function Sidebar({
             if (isOnChat && hasMessages) {
               newSession();
             }
-            navigate('/');
+            startTransition(() => {
+              navigate('/');
+            });
           }}
           className={cn(
             'flex items-center gap-3 rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] text-muted-foreground transition-[background-color,color,box-shadow]',

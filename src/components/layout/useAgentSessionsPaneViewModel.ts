@@ -2,6 +2,7 @@ import { useDeferredValue, useMemo, useRef } from 'react';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ResourceStateMeta } from '@/lib/resource-state';
 import type { ChatSession } from '@/stores/chat';
+import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -21,7 +22,7 @@ interface SessionBucketSpec {
 }
 
 interface SessionSortEntry {
-  session: ChatSession;
+  entry: AgentSessionsPaneSessionEntry;
   agentId: string;
   activityMs: number;
 }
@@ -53,7 +54,7 @@ export interface AgentSessionNode {
 }
 
 interface SessionListNode {
-  session: ChatSession;
+  entry: AgentSessionsPaneSessionEntry;
   agentId: string;
   agentName: string;
   avatarSeed?: string;
@@ -63,7 +64,7 @@ interface SessionListNode {
 export interface SessionBucketNode {
   id: SessionBucketId;
   label: string;
-  sessions: ChatSession[];
+  sessions: AgentSessionsPaneSessionEntry[];
   defaultCollapsed: boolean;
 }
 
@@ -164,13 +165,13 @@ function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): s
 }
 
 function resolveSessionActivityMs(
-  session: ChatSession,
-  sessionLastActivityMap: Record<string, number>,
+  entry: AgentSessionsPaneSessionEntry,
 ): number {
-  const fromStore = sessionLastActivityMap[session.key];
+  const fromStore = entry.lastActivityAt;
   if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
     return fromStore;
   }
+  const session = entry.session;
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
@@ -181,7 +182,7 @@ function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEnt
   if (left.activityMs !== right.activityMs) {
     return right.activityMs - left.activityMs;
   }
-  return left.session.key.localeCompare(right.session.key);
+  return left.entry.session.key.localeCompare(right.entry.session.key);
 }
 
 function removeSortedSessionKey(sortedKeys: string[], key: string): void {
@@ -221,14 +222,14 @@ function insertSortedSessionKey(
 
 function buildIncrementalSessionActivityIndex(input: {
   previous: SessionActivityIndex;
-  sessions: ChatSession[];
-  sessionLastActivityMap: Record<string, number>;
+  sessionEntries: AgentSessionsPaneSessionEntry[];
 }): SessionActivityIndex {
   const entriesByKey = new Map(input.previous.entriesByKey);
   const sortedKeys = [...input.previous.sortedKeys];
   const seen = new Set<string>();
 
-  for (const session of input.sessions) {
+  for (const entry of input.sessionEntries) {
+    const session = entry.session;
     const key = session.key;
     seen.add(key);
     const agentId = parseAgentIdFromSessionKey(key);
@@ -239,24 +240,24 @@ function buildIncrementalSessionActivityIndex(input: {
       }
       continue;
     }
-    const activityMs = resolveSessionActivityMs(session, input.sessionLastActivityMap);
+    const activityMs = resolveSessionActivityMs(entry);
     const previousEntry = entriesByKey.get(key);
     if (!previousEntry) {
-      entriesByKey.set(key, { session, agentId, activityMs });
+      entriesByKey.set(key, { entry, agentId, activityMs });
       insertSortedSessionKey(sortedKeys, key, entriesByKey);
       continue;
     }
     const sortChanged = previousEntry.agentId !== agentId || previousEntry.activityMs !== activityMs;
     if (sortChanged) {
       removeSortedSessionKey(sortedKeys, key);
-      entriesByKey.set(key, { session, agentId, activityMs });
+      entriesByKey.set(key, { entry, agentId, activityMs });
       insertSortedSessionKey(sortedKeys, key, entriesByKey);
       continue;
     }
-    if (previousEntry.session !== session) {
+    if (previousEntry.entry !== entry) {
       entriesByKey.set(key, {
         ...previousEntry,
-        session,
+        entry,
       });
     }
   }
@@ -283,7 +284,7 @@ function buildSessionAggregation(index: SessionActivityIndex): SessionAggregatio
       continue;
     }
     const bucket = sessionsByAgent.get(entry.agentId) ?? [];
-    bucket.push(entry.session);
+    bucket.push(entry.entry.session);
     sessionsByAgent.set(entry.agentId, bucket);
   }
   return {
@@ -304,8 +305,7 @@ function matchesBucket(ageMs: number, spec: SessionBucketSpec): boolean {
 }
 
 function buildSessionBuckets(
-  sessions: ChatSession[],
-  sessionLastActivityMap: Record<string, number>,
+  entries: AgentSessionsPaneSessionEntry[],
   t: (key: string, options?: Record<string, unknown>) => string,
 ): SessionBucketNode[] {
   const bucketsById = new Map<SessionBucketId, SessionBucketNode>(
@@ -321,13 +321,13 @@ function buildSessionBuckets(
   );
 
   const now = Date.now();
-  for (const session of sessions) {
-    const activityMs = resolveSessionActivityMs(session, sessionLastActivityMap);
+  for (const entry of entries) {
+    const activityMs = resolveSessionActivityMs(entry);
     const ageMs = Math.max(0, now - activityMs);
     const matched = SESSION_BUCKET_SPECS.find((spec) => matchesBucket(ageMs, spec));
     const bucket = matched ? bucketsById.get(matched.id) : bucketsById.get('older_than_30_days');
     if (bucket) {
-      bucket.sessions.push(session);
+      bucket.sessions.push(entry);
     }
   }
 
@@ -370,10 +370,8 @@ export function inferUntitledSessionLabel(
 interface UseAgentSessionsPaneViewModelInput {
   agents: SidebarAgentSummary[];
   agentsResource: ResourceStateMeta;
-  sessions: ChatSession[];
+  sessionEntries: AgentSessionsPaneSessionEntry[];
   sessionsResource: ResourceStateMeta;
-  sessionLabels: Record<string, string>;
-  sessionLastActivity: Record<string, number>;
   currentSessionKey: string;
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -382,9 +380,7 @@ interface UseAgentSessionsPaneViewModelInput {
 export function useAgentSessionsPaneViewModel(
   input: UseAgentSessionsPaneViewModelInput,
 ): AgentSessionsPaneViewModel {
-  const deferredSessions = useDeferredValue(input.sessions);
-  const deferredSessionLabels = useDeferredValue(input.sessionLabels);
-  const deferredSessionLastActivity = useDeferredValue(input.sessionLastActivity);
+  const deferredSessionEntries = useDeferredValue(input.sessionEntries);
   const sessionActivityIndexRef = useRef<SessionActivityIndex>({
     entriesByKey: new Map<string, SessionSortEntry>(),
     sortedKeys: [],
@@ -393,12 +389,11 @@ export function useAgentSessionsPaneViewModel(
   const sessionAggregation = useMemo<SessionAggregation>(() => {
     const nextIndex = buildIncrementalSessionActivityIndex({
       previous: sessionActivityIndexRef.current,
-      sessions: deferredSessions,
-      sessionLastActivityMap: deferredSessionLastActivity,
+      sessionEntries: deferredSessionEntries,
     });
     sessionActivityIndexRef.current = nextIndex;
     return buildSessionAggregation(nextIndex);
-  }, [deferredSessionLastActivity, deferredSessions]);
+  }, [deferredSessionEntries]);
 
   const agentNodes = useMemo<AgentSessionNode[]>(() => {
     const sessionsByAgent = sessionAggregation.sessionsByAgent;
@@ -443,7 +438,7 @@ export function useAgentSessionsPaneViewModel(
       }
       const owner = agentNodeById.get(entry.agentId);
       nodes.push({
-        session: entry.session,
+        entry: entry.entry,
         agentId: entry.agentId,
         agentName: owner?.agentName ?? entry.agentId,
         avatarSeed: owner?.avatarSeed,
@@ -453,22 +448,23 @@ export function useAgentSessionsPaneViewModel(
     return nodes;
   }, [agentNodeById, preferredSessionKeyByAgent, sessionAggregation]);
 
-  const globalSessions = useMemo(
-    () => globalSessionNodes.map((node) => node.session),
+  const globalSessionEntries = useMemo(
+    () => globalSessionNodes.map((node) => node.entry),
     [globalSessionNodes],
   );
 
   const globalSessionOwnerByKey = useMemo(() => {
     const map = new Map<string, SessionListNode>();
     for (const node of globalSessionNodes) {
-      map.set(node.session.key, node);
+      map.set(node.entry.session.key, node);
     }
     return map;
   }, [globalSessionNodes]);
 
   const resolveSessionTitle = useMemo(() => {
-    return (session: ChatSession): string => {
-      const topicTitle = deferredSessionLabels[session.key]?.trim();
+    return (entry: AgentSessionsPaneSessionEntry): string => {
+      const session = entry.session;
+      const topicTitle = entry.label?.trim();
       if (topicTitle) {
         return normalizeSessionTitle(topicTitle);
       }
@@ -478,19 +474,20 @@ export function useAgentSessionsPaneViewModel(
       }
       return inferUntitledSessionLabel(session, input.t);
     };
-  }, [deferredSessionLabels, input.t]);
+  }, [input.t]);
 
   const sessionBuckets = useMemo(
-    () => buildSessionBuckets(globalSessions, deferredSessionLastActivity, input.t),
-    [deferredSessionLastActivity, globalSessions, input.t],
+    () => buildSessionBuckets(globalSessionEntries, input.t),
+    [globalSessionEntries, input.t],
   );
 
   const sessionViewModelByKey = useMemo(() => {
     const map = new Map<string, SessionViewModel>();
-    for (const session of globalSessions) {
-      const sessionTitle = resolveSessionTitle(session);
+    for (const entry of globalSessionEntries) {
+      const session = entry.session;
+      const sessionTitle = resolveSessionTitle(entry);
       const sessionOwner = globalSessionOwnerByKey.get(session.key);
-      const activityMs = resolveSessionActivityMs(session, deferredSessionLastActivity);
+      const activityMs = resolveSessionActivityMs(entry);
       const sessionMeta = sessionOwner
         ? `${sessionOwner.agentName} / ${formatSessionMeta(session, activityMs, input.locale)}`
         : formatSessionMeta(session, activityMs, input.locale);
@@ -505,7 +502,7 @@ export function useAgentSessionsPaneViewModel(
       });
     }
     return map;
-  }, [deferredSessionLastActivity, globalSessionOwnerByKey, globalSessions, input.locale, input.t, resolveSessionTitle]);
+  }, [globalSessionEntries, globalSessionOwnerByKey, input.locale, input.t, resolveSessionTitle]);
 
   const agentListState = !input.agentsResource.hasLoadedOnce
     && (input.agentsResource.status === 'idle' || input.agentsResource.status === 'loading')

@@ -3,21 +3,20 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useMemo, memo, type ReactNode } from 'react';
+import { startTransition, useEffect, useState, useCallback, useMemo, memo, type ReactNode } from 'react';
 import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
+import {
+  prewarmAssistantMarkdownBody,
+  getMessageAttachedFiles,
+  peekAssistantMarkdownBody,
+} from '@/lib/chat-markdown-body';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractThinking, extractImages, extractToolUse, formatTimestamp } from './message-utils';
-import {
-  createFileHintPathResolver,
-  linkifyFileHintsInMarkdown,
-  migrateLegacyMarkdownFileLinks,
-  type FileHintPathResolver,
-} from './md-link';
 import {
   buildMarkdownCacheKey,
   decodeFileHintHref,
@@ -48,6 +47,33 @@ interface ChatMessageProps {
 }
 
 interface ExtractedImage { url?: string; data?: string; mimeType: string; }
+
+type MarkdownWarmupHandle = number | ReturnType<typeof setTimeout>;
+
+function scheduleMarkdownWarmup(task: () => void): MarkdownWarmupHandle {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      return win.requestIdleCallback(() => task(), { timeout: 120 });
+    }
+  }
+  return setTimeout(task, 0);
+}
+
+function cancelMarkdownWarmup(handle: MarkdownWarmupHandle): void {
+  if (typeof window !== 'undefined') {
+    const win = window as Window & {
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.cancelIdleCallback === 'function' && typeof handle === 'number') {
+      win.cancelIdleCallback(handle);
+      return;
+    }
+  }
+  clearTimeout(handle);
+}
 
 /** Resolve an ExtractedImage to a displayable src string, or null if not possible. */
 function imageSrc(img: ExtractedImage): string | null {
@@ -81,23 +107,9 @@ export const ChatMessage = memo(function ChatMessage({
   const visibleTools = suppressToolCards ? [] : tools;
 
   const attachedFiles = useMemo(
-    () => (Array.isArray(message._attachedFiles) ? message._attachedFiles : []),
-    [message._attachedFiles],
+    () => getMessageAttachedFiles(message),
+    [message],
   );
-  const resolveFileHintPath = useMemo(
-    () => createFileHintPathResolver(attachedFiles),
-    [attachedFiles],
-  );
-  const markdownCacheKey = useMemo(() => {
-    const baseKey = buildMarkdownCacheKey({
-      messageId: typeof message.id === 'string' ? message.id : undefined,
-      role: typeof message.role === 'string' ? message.role : undefined,
-      timestamp: typeof message.timestamp === 'number' ? message.timestamp : undefined,
-      text,
-      attachedFiles,
-    });
-    return `${baseKey}|${isStreaming ? 'streaming' : 'settled'}`;
-  }, [attachedFiles, isStreaming, message.id, message.role, message.timestamp, text]);
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
 
   // Never render tool result messages in chat UI
@@ -185,12 +197,11 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Main text bubble */}
         {hasText && (
-          <MessageBody
-            text={text}
+        <MessageBody
+          text={text}
+          message={message}
             isUser={isUser}
             isStreaming={isStreaming}
-            resolveFileHintPath={resolveFileHintPath}
-            markdownCacheKey={markdownCacheKey}
           />
         )}
 
@@ -414,16 +425,14 @@ const AssistantHoverBar = memo(function AssistantHoverBar({ text, timestamp }: {
 
 const MessageBody = memo(function MessageBody({
   text,
+  message,
   isUser,
   isStreaming,
-  resolveFileHintPath,
-  markdownCacheKey,
 }: {
   text: string;
+  message: RawMessage;
   isUser: boolean;
   isStreaming: boolean;
-  resolveFileHintPath?: FileHintPathResolver;
-  markdownCacheKey: string;
 }) {
   if (isUser) {
     return (
@@ -436,25 +445,22 @@ const MessageBody = memo(function MessageBody({
   }
 
   return (
-    <AssistantMessageBody
+      <AssistantMessageBody
       text={text}
+      message={message}
       isStreaming={isStreaming}
-      resolveFileHintPath={resolveFileHintPath}
-      markdownCacheKey={markdownCacheKey}
     />
   );
 });
 
 const AssistantMessageBody = memo(function AssistantMessageBody({
   text,
+  message,
   isStreaming,
-  resolveFileHintPath,
-  markdownCacheKey,
 }: {
   text: string;
+  message: RawMessage;
   isStreaming: boolean;
-  resolveFileHintPath?: FileHintPathResolver;
-  markdownCacheKey: string;
 }) {
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
@@ -467,23 +473,45 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
     }
   }, []);
 
-  const markdownContent = useMemo(
-    () => {
-      return linkifyFileHintsInMarkdown(
-        migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
-        resolveFileHintPath,
-      );
-    },
-    [resolveFileHintPath, text],
-  );
+  const renderMode = isStreaming ? 'streaming' : 'settled';
+  const [cacheVersion, setCacheVersion] = useState(0);
   const markdownBody = useMemo(
-    () => getOrBuildMarkdownBody(markdownCacheKey, {
-      markdown: markdownContent,
-      mode: isStreaming ? 'streaming' : 'settled',
-    }),
-    [isStreaming, markdownCacheKey, markdownContent],
+    () => peekAssistantMarkdownBody(message, renderMode),
+    [cacheVersion, message, renderMode],
   );
-  const renderNodes = markdownBody.nodes;
+
+  useEffect(() => {
+    if (isStreaming || markdownBody) {
+      return;
+    }
+    let cancelled = false;
+    const handle = scheduleMarkdownWarmup(() => {
+      if (cancelled) {
+        return;
+      }
+      if (!prewarmAssistantMarkdownBody(message, renderMode)) {
+        return;
+      }
+      if (cancelled) {
+        return;
+      }
+      startTransition(() => {
+        setCacheVersion((version) => version + 1);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelMarkdownWarmup(handle);
+    };
+  }, [isStreaming, markdownBody, message, renderMode]);
+
+  const streamingMarkdownBody = useMemo(
+    () => (isStreaming && !markdownBody ? prewarmAssistantMarkdownBody(message, renderMode) : markdownBody),
+    [isStreaming, markdownBody, message, renderMode],
+  );
+  const resolvedMarkdownBody = streamingMarkdownBody ?? markdownBody;
+  const renderNodes = resolvedMarkdownBody?.nodes ?? [];
 
   const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -511,6 +539,9 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
       )}
     >
       <div className="space-y-3">
+        {!resolvedMarkdownBody && (
+          <p className="whitespace-pre-wrap break-words break-all text-sm text-foreground">{text}</p>
+        )}
         {renderNodes.map((node) => {
           if (node.kind === 'csv') {
             return (

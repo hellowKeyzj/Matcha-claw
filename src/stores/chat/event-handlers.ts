@@ -1,4 +1,8 @@
 import { collectToolResultPendingFiles } from './attachment-helpers';
+import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { EMPTY_EXECUTION_GRAPHS } from '@/pages/Chat/exec-graph-types';
+import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
+import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
 import {
   buildAuthoritativeUserCommitPatch,
   buildErrorStreamSnapshot,
@@ -28,6 +32,14 @@ export type ChatStoreSetFn = (
 ) => void;
 
 export type ChatStoreGetFn = () => ChatStoreState;
+
+function prewarmCurrentSessionRows(
+  sessionKey: string,
+  transcript: RawMessage[],
+): void {
+  const liveMessages = projectLiveThreadMessages(transcript).messages;
+  prewarmStaticRowsForMessages(sessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
+}
 
 interface StoreToolSnapshotAdapter {
   reset: () => void;
@@ -103,6 +115,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       updates,
       toolFiles,
     }));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
     return;
   }
 
@@ -112,6 +125,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       state,
       finalMessage: finalMsg,
     }));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
     return;
   }
 
@@ -136,6 +150,14 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     hasOutput,
     toolOnly,
   }));
+  prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
+
+  if (hasOutput && !toolOnly) {
+    prewarmAssistantMarkdownBody({
+      ...finalMsg,
+      id: msgId,
+    }, 'settled');
+  }
 
   if (hasOutput && !toolOnly) {
     requestFinalHistoryRefresh(set, get, onBeginFinalToHistory);
@@ -177,6 +199,7 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
         transcript: [...getSessionTranscript(state, currentSessionKey), snapshot],
       }),
     }));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
   }
 
   set((state) => {

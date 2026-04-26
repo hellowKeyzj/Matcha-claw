@@ -38,6 +38,11 @@ function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
 
 const imageCache = loadImageCache();
 
+export interface AttachmentImageCacheStats {
+  entryCount: number;
+  previewCharCount: number;
+}
+
 async function yieldToEventLoop(): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 0);
@@ -550,6 +555,18 @@ export async function loadMissingPreviews(messages: RawMessage[]): Promise<boole
   } catch {
     return false;
   }
+}
+
+export function getAttachmentImageCacheStats(): AttachmentImageCacheStats {
+  let previewCharCount = 0;
+  for (const file of imageCache.values()) {
+    previewCharCount += typeof file.preview === 'string' ? file.preview.length : 0;
+  }
+
+  return {
+    entryCount: imageCache.size,
+    previewCharCount,
+  };
 }
 
 export function hasPendingPreviewLoads(messages: RawMessage[]): boolean {

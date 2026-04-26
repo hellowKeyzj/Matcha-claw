@@ -1,6 +1,9 @@
 import {
   resolveSessionLabelFromMessages,
 } from './message-helpers';
+import { prewarmAssistantMarkdownBodies } from '@/lib/chat-markdown-body';
+import { EMPTY_EXECUTION_GRAPHS } from '@/pages/Chat/exec-graph-types';
+import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
 import {
   hasPendingPreviewLoads,
   hydrateAttachedFilesFromCache,
@@ -43,6 +46,7 @@ import type {
   ChatStoreState,
   RawMessage,
 } from './types';
+import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -232,6 +236,9 @@ export function createApplyLoadedMessagesPipeline(
         changed: didMessageListChange,
       });
       historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
+      const liveMessages = projectLiveThreadMessages(finalMessages).messages;
+      prewarmAssistantMarkdownBodies(liveMessages, 'settled');
+      prewarmStaticRowsForMessages(requestedSessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
 
       if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
         maybeTrackFinalToHistoryVisible(requestedSessionKey, {

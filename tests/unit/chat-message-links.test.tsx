@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import type { RawMessage } from '@/stores/chat';
 
 const invokeIpcMock = vi.fn();
@@ -29,10 +30,11 @@ describe('chat message links', () => {
         },
       ],
     };
+    prewarmAssistantMarkdownBody(message, 'settled');
 
     render(<ChatMessage message={message} showThinking={false} />);
 
-    fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
+    fireEvent.click(screen.getByRole('link', { name: 'TOOLS.md' }));
 
     expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
   });
@@ -52,6 +54,7 @@ describe('chat message links', () => {
         },
       ],
     };
+    prewarmAssistantMarkdownBody(message, 'settled');
 
     render(<ChatMessage message={message} showThinking={false} />);
 
@@ -78,6 +81,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
+    prewarmAssistantMarkdownBody(message, 'settled');
 
     render(<ChatMessage message={message} showThinking={false} />);
 
@@ -122,6 +126,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: longMarkdown,
     };
+    prewarmAssistantMarkdownBody(message, 'settled');
 
     render(<ChatMessage message={message} showThinking={false} />);
 
@@ -148,7 +153,23 @@ describe('chat message links', () => {
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
   });
 
-  it('assistant streaming plain csv should not switch into structured preview before settle', () => {
+  it('assistant plain markdown miss should first paint raw text and then hydrate rich markdown', async () => {
+    const content = '[OpenAI Miss](https://openai.com/?miss=1)';
+    const message: RawMessage = {
+      role: 'assistant',
+      content,
+    };
+
+    render(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByText(content)).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
+    });
+  });
+
+  it('assistant streaming plain csv should not switch into structured preview before settle', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -174,11 +195,13 @@ describe('chat message links', () => {
 
     view.rerender(<ChatMessage message={message} showThinking={false} />);
 
-    expect(screen.getByRole('table')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('table')).toBeInTheDocument();
+    });
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
   });
 
-  it('assistant streaming markdown table should not switch into structured preview before settle', () => {
+  it('assistant streaming markdown table should not switch into structured preview before settle', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -204,11 +227,13 @@ describe('chat message links', () => {
 
     view.rerender(<ChatMessage message={message} showThinking={false} />);
 
-    expect(screen.getByRole('table')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('table')).toBeInTheDocument();
+    });
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
   });
 
-  it('renders fenced csv blocks as table preview while preserving surrounding markdown', () => {
+  it('renders fenced csv blocks as table preview while preserving surrounding markdown', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -225,11 +250,13 @@ describe('chat message links', () => {
 
     render(<ChatMessage message={message} showThinking={false} />);
 
-    expect(screen.getByText('下面是可导入的 CSV：')).toBeInTheDocument();
-    expect(screen.getByRole('table')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('下面是可导入的 CSV：')).toBeInTheDocument();
+      expect(screen.getByRole('table')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'OpenAI' })).toHaveAttribute('href', 'https://openai.com');
+    });
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
     expect(screen.getByText('Build UI')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'OpenAI' })).toHaveAttribute('href', 'https://openai.com');
     expect(screen.getByRole('button', { name: '复制 CSV' })).toBeInTheDocument();
   });
 });
