@@ -13,6 +13,11 @@ function withTimeout(timeoutMs: unknown, fallback: number): number {
   return Math.max(500, Math.min(120_000, typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : fallback))
 }
 
+function isDetachedFrameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('Frame has been detached') || message.includes('frame was detached')
+}
+
 function mapLocatorError(error: unknown, ref: string): Error {
   const message = error instanceof Error ? error.message : String(error)
   if (message.includes('strict mode violation')) {
@@ -60,12 +65,37 @@ export class PlaywrightActions {
   constructor(private readonly session: PlaywrightSession) {}
 
   async navigate(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; url: string; timeoutMs?: number; waitUntil?: string }): Promise<{ url: string }> {
-    const page = await this.session.getPageForTargetId(input)
+    const url = requiredString(input.url, 'url')
+    let page = await this.session.getPageForTargetId(input)
     this.session.ensurePageState(page)
-    await page.goto(requiredString(input.url, 'url'), {
-      timeout: withTimeout(input.timeoutMs, 20_000),
-      waitUntil: input.waitUntil ?? 'domcontentloaded',
-    })
+    await this.session.logPageSnapshot('navigate before goto', page, input.targetId)
+    try {
+      await page.goto(url, {
+        timeout: withTimeout(input.timeoutMs, 20_000),
+        waitUntil: input.waitUntil ?? 'domcontentloaded',
+      })
+      await this.session.logPageSnapshot('navigate after goto', page, input.targetId)
+    } catch (error) {
+      await this.session.logPageSnapshot('navigate failed', page, input.targetId, error)
+      if (!isDetachedFrameError(error)) {
+        throw error
+      }
+
+      await this.session.closeConnections(input.mode)
+      page = await this.session.getPageForTargetId(input)
+      this.session.ensurePageState(page)
+      await this.session.logPageSnapshot('navigate retry before goto', page, input.targetId)
+      try {
+        await page.goto(url, {
+          timeout: withTimeout(input.timeoutMs, 20_000),
+          waitUntil: input.waitUntil ?? 'domcontentloaded',
+        })
+        await this.session.logPageSnapshot('navigate retry after goto', page, input.targetId)
+      } catch (retryError) {
+        await this.session.logPageSnapshot('navigate retry failed', page, input.targetId, retryError)
+        throw retryError
+      }
+    }
     return { url: page.url() }
   }
 

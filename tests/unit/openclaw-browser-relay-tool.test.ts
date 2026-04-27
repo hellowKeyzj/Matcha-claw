@@ -6,6 +6,14 @@ const onePixelPngBase64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP2cAAAAASUVORK5CYII='
 
 describe('browser relay tool', () => {
+  it('exposes the final browser url parameter schema', () => {
+    const tool = createBrowserRelayTool({}, () => ({
+      handleRequest: async () => ({ ok: true }),
+    }))
+
+    expect(Object.keys(tool.parameters.properties)).toContain('url')
+  })
+
   it('forwards session context to relay control', async () => {
     const handleRequest = vi.fn(async (params: Record<string, unknown>) => ({
       ok: true,

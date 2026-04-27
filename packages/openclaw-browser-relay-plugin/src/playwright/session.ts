@@ -1,5 +1,6 @@
 import type { PluginLogger } from 'openclaw/plugin-sdk'
 import { BrowserTabState } from '../state/browser-tab-state.js'
+import { waitForBrowserCdpReady } from './cdp-readiness.js'
 import { loadPlaywrightCore } from './dependency.js'
 import type { RoleRef } from './role-refs.js'
 
@@ -50,6 +51,46 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function safePageUrl(page: any): string {
+  try {
+    return typeof page?.url === 'function' ? String(page.url()) : ''
+  } catch {
+    return ''
+  }
+}
+
+function safeFrameUrl(frame: any): string {
+  try {
+    return typeof frame?.url === 'function' ? String(frame.url()) : ''
+  } catch {
+    return ''
+  }
+}
+
+function safeFrameName(frame: any): string {
+  try {
+    return typeof frame?.name === 'function' ? String(frame.name()) : ''
+  } catch {
+    return ''
+  }
+}
+
+function safeFrameDetached(frame: any): boolean {
+  try {
+    return typeof frame?.isDetached === 'function' ? frame.isDetached() === true : false
+  } catch {
+    return false
+  }
+}
+
+function safePageClosed(page: any): boolean {
+  try {
+    return typeof page?.isClosed === 'function' ? page.isClosed() === true : false
+  } catch {
+    return false
+  }
+}
+
 function isPageCloseLikeError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return [
@@ -70,7 +111,7 @@ export class PlaywrightSession {
   private relayConnectPromise: Promise<BrowserConnection> | null = null
   private directConnectPromise: Promise<BrowserConnection> | null = null
   private readonly pageState = new WeakMap<any, PageState>()
-  private readonly targetIdCache = new WeakMap<any, string | null>()
+  private readonly targetIdCache = new WeakMap<any, string>()
   private readonly targetIdByPage = new WeakMap<any, string>()
   private readonly pageStateInitialized = new WeakSet<any>()
   private readonly rememberedRoleRefs = new Map<string, RememberedRoleRefs>()
@@ -226,8 +267,37 @@ export class PlaywrightSession {
       current.failureText = request.failure()?.errorText
     })
 
+    page.on('frameattached', (frame: any) => {
+      this.logger.warn?.(
+        `[browser-playwright] frameattached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+      )
+    })
+
+    page.on('framenavigated', (frame: any) => {
+      this.logger.warn?.(
+        `[browser-playwright] framenavigated targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+      )
+    })
+
+    page.on('framedetached', (frame: any) => {
+      this.logger.warn?.(
+        `[browser-playwright] framedetached targetId=${this.targetIdByPage.get(page) ?? 'unknown'} isMainFrame=${frame === page.mainFrame()} frameName="${safeFrameName(frame)}" frameUrl="${safeFrameUrl(frame)}" frameDetached=${safeFrameDetached(frame)}`,
+      )
+    })
+
+    page.on('crash', () => {
+      const mainFrame = page.mainFrame?.()
+      this.logger.warn?.(
+        `[browser-playwright] page crashed targetId=${this.targetIdByPage.get(page) ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(mainFrame)}"`,
+      )
+    })
+
     page.on('close', () => {
       const targetId = this.targetIdByPage.get(page) ?? null
+      const mainFrame = page.mainFrame?.()
+      this.logger.warn?.(
+        `[browser-playwright] page closed targetId=${targetId ?? 'unknown'} pageUrl="${safePageUrl(page)}" mainFrameUrl="${safeFrameUrl(mainFrame)}"`,
+      )
       this.pageState.delete(page)
       this.pageStateInitialized.delete(page)
       this.targetIdCache.delete(page)
@@ -381,7 +451,13 @@ export class PlaywrightSession {
     }
 
     const existing = await this.findExistingPage(input)
-    if (existing) return existing
+    if (existing) {
+      this.logger.warn?.(
+        `[browser-playwright] resolved page immediately targetId=${input.targetId} mode=${input.mode ?? 'auto'} pageUrl="${safePageUrl(existing)}"`,
+      )
+      await this.logPageSnapshot('getPageForTargetId resolved immediately', existing, input.targetId)
+      return existing
+    }
 
     const retries = 3
     for (let attempt = 0; attempt < retries; attempt += 1) {
@@ -399,13 +475,43 @@ export class PlaywrightSession {
 
       await sleep(Math.min(2_000, 600 * (attempt + 1)))
       const retried = await this.findExistingPage(input)
-      if (retried) return retried
+      if (retried) {
+        this.logger.warn?.(
+          `[browser-playwright] resolved page after retry targetId=${input.targetId} attempt=${attempt + 1} mode=${input.mode ?? 'auto'} pageUrl="${safePageUrl(retried)}"`,
+        )
+        await this.logPageSnapshot('getPageForTargetId resolved after retry', retried, input.targetId)
+        return retried
+      }
     }
 
     const connection = await this.connectBrowser(input.cdpUrl, input.mode)
     const pages = connection.browser.contexts().flatMap((context: any) => context.pages())
+    const pageSummaries = await Promise.all(
+      pages.map(async (page: any, index: number) => {
+        const resolvedTargetId = await this.resolveTargetId(page)
+        return `#${index + 1} targetId=${resolvedTargetId ?? 'null'} url="${safePageUrl(page)}"`
+      }),
+    )
+    this.logger.warn?.(
+      `[browser-playwright] failed to resolve page targetId=${input.targetId} mode=${input.mode ?? 'auto'} openPages=${pageSummaries.join('; ')}`,
+    )
     throw new Error(
       `Page not found for targetId="${input.targetId}" after retries. There are ${pages.length} open page(s): ${pages.map((page: any) => page.url()).join(', ')}`,
+    )
+  }
+
+  async resolvePageTargetId(page: any): Promise<string | null> {
+    return await this.resolveTargetId(page)
+  }
+
+  async logPageSnapshot(label: string, page: any, expectedTargetId?: string, error?: unknown): Promise<void> {
+    const cachedTargetId = this.targetIdByPage.get(page) ?? this.targetIdCache.get(page)
+    const resolvedTargetId = cachedTargetId ?? await this.resolveTargetId(page)
+    const mainFrame = page.mainFrame?.()
+    const errorText = error instanceof Error ? error.message : error ? String(error) : ''
+    const suffix = errorText ? ` error="${errorText}"` : ''
+    this.logger.warn?.(
+      `[browser-playwright] ${label} expectedTargetId=${expectedTargetId ?? 'null'} resolvedTargetId=${resolvedTargetId ?? 'null'} pageUrl="${safePageUrl(page)}" pageClosed=${safePageClosed(page)} mainFrameName="${safeFrameName(mainFrame)}" mainFrameUrl="${safeFrameUrl(mainFrame)}" mainFrameDetached=${safeFrameDetached(mainFrame)}${suffix}`,
     )
   }
 
@@ -417,7 +523,6 @@ export class PlaywrightSession {
   }
 
   private async createConnection(cdpUrl: string, mode: ConnectionMode): Promise<BrowserConnection> {
-    const playwright = await loadPlaywrightCore()
     const headers = mode === 'relay' ? this.getRelayStatus().authHeaders : undefined
     const timeouts = mode === 'relay' ? [10_000, 12_000, 14_000] : [15_000, 18_000]
     let lastError: unknown
@@ -428,6 +533,16 @@ export class PlaywrightSession {
         throw new Error('Chrome extension not connected')
       }
     }
+
+    await waitForBrowserCdpReady({
+      cdpUrl,
+      headers,
+      httpTimeoutMs: mode === 'relay' ? 1_200 : 2_000,
+      readyTimeoutMs: mode === 'relay' ? 3_000 : 4_000,
+      label: mode === 'relay' ? 'Browser relay' : 'Direct CDP browser',
+    })
+
+    const playwright = await loadPlaywrightCore()
 
     for (const timeout of timeouts) {
       try {
@@ -483,6 +598,9 @@ export class PlaywrightSession {
         return page
       }
     }
+    this.logger.warn?.(
+      `[browser-playwright] targetId miss targetId=${input.targetId} mode=${input.mode ?? 'auto'} scannedPages=${pages.length}`,
+    )
     return null
   }
 
@@ -493,33 +611,28 @@ export class PlaywrightSession {
     }
 
     try {
-      const delegateTargetId = page?._delegate?._targetId
-      if (delegateTargetId) {
-        this.targetIdCache.set(page, delegateTargetId)
-        this.targetIdByPage.set(page, delegateTargetId)
-        return delegateTargetId
-      }
-    } catch {
-      // noop
-    }
-
-    try {
       const session = await page.context().newCDPSession(page)
       try {
         const info = await session.send('Target.getTargetInfo')
-        const targetId = String(info?.targetInfo?.targetId ?? '').trim() || null
-        this.targetIdCache.set(page, targetId)
+        const targetId = String(info?.targetInfo?.targetId ?? '').trim()
         if (targetId) {
+          this.targetIdCache.set(page, targetId)
           this.targetIdByPage.set(page, targetId)
+          this.logger.warn?.(
+            `[browser-playwright] resolved Target.getTargetInfo targetId=${targetId} pageUrl="${safePageUrl(page)}"`,
+          )
+          return targetId
         }
-        return targetId
+        return null
       } finally {
         if (this.getActiveConnectionMode() !== 'relay') {
           await session.detach().catch(() => {})
         }
       }
-    } catch {
-      this.targetIdCache.set(page, null)
+    } catch (error) {
+      this.logger.warn?.(
+        `[browser-playwright] resolveTargetId failed pageUrl="${safePageUrl(page)}" error=${error instanceof Error ? error.message : String(error)}`,
+      )
       return null
     }
   }
@@ -546,6 +659,15 @@ export class PlaywrightSession {
     }
     if (message.includes('Execution context was destroyed')) {
       return `${message.split('\n')[0].trim()}\nPage navigated or reloaded while the script was running. Re-run after the page settles.`
+    }
+    if (message.includes('missing chromium.connectOverCDP')) {
+      return `${message.split('\n')[0].trim()}\nBrowser automation runtime failed to initialize correctly.`
+    }
+    if (message.includes('HTTP endpoint is not reachable') || message.includes('CDP endpoint is not reachable')) {
+      return `${message.split('\n')[0].trim()}\nBrowser is not ready for control yet. Wait a moment and retry.`
+    }
+    if (message.includes('Timed out waiting for target "') && message.includes('" to become attached.')) {
+      return `${message.split('\n')[0].trim()}\nThe new tab was created, but the extension did not finish attaching it in time.`
     }
     if (message.includes('Call log:')) {
       return message.split('Call log:')[0].trim()

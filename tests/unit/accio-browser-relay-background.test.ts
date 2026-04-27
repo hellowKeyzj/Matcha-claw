@@ -48,9 +48,11 @@ class MockTabManager {
     sessionId: `cb-tab:browser-a:${tabId}`,
     targetId: `target-${tabId}`,
   }))
+  announceCurrentTarget = vi.fn()
   setActiveTab = vi.fn()
   updateTab = vi.fn()
   has = vi.fn(() => true)
+  get = vi.fn((tabId: number) => currentTabs.find((tab) => tab.id === tabId) ?? null)
   entries = vi.fn(() => new Map().entries())
   restoreState = vi.fn(async () => {})
   refreshAfterTransportReady = vi.fn(async () => {})
@@ -247,16 +249,8 @@ describe('accio browser relay background', () => {
     await flushTasks()
 
     expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(22)
-    expect(trySendToRelay).toHaveBeenCalledWith({
-      method: 'Extension.primaryTargetChanged',
-      params: {
-        sessionId: 'cb-tab:browser-a:22',
-        targetId: 'target-22',
-        tabId: 22,
-        windowId: 2,
-      },
-    })
+    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(22, { manual: false })
+    expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(22)
   })
 
   it('does not auto-attach active tab changes outside the selected window', async () => {
@@ -272,7 +266,7 @@ describe('accio browser relay background', () => {
     })
     await flushTasks()
     MockTabManager.latest?.attach.mockClear()
-    trySendToRelay.mockClear()
+    MockTabManager.latest?.announceCurrentTarget.mockClear()
 
     currentTabs = [
       { id: 11, url: 'https://example.com/a', title: 'Page A', windowId: 1, active: false },
@@ -287,9 +281,7 @@ describe('accio browser relay background', () => {
 
     expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
     expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
-    expect(trySendToRelay).not.toHaveBeenCalledWith(
-      expect.objectContaining({ method: 'Extension.primaryTargetChanged' }),
-    )
+    expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
   })
 
   it('restores selected-window active-page binding after worker restart reconnect', async () => {
@@ -312,19 +304,11 @@ describe('accio browser relay background', () => {
     })
     await flushTasks()
 
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(11)
-    expect(trySendToRelay).toHaveBeenCalledWith({
-      method: 'Extension.primaryTargetChanged',
-      params: {
-        sessionId: 'cb-tab:browser-a:11',
-        targetId: 'target-11',
-        tabId: 11,
-        windowId: 1,
-      },
-    })
+    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(11, { manual: true })
+    expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(11)
   })
 
-  it('auto-selects the only normal window after relay connect', async () => {
+  it('does not auto-select the only normal window after relay connect', async () => {
     currentTabs = [
       { id: 31, url: 'https://example.com/only', title: 'Only Tab', windowId: 9, active: true },
     ]
@@ -336,18 +320,44 @@ describe('accio browser relay background', () => {
     await relayCallbacks.onConnected?.()
     await flushTasks()
 
-    expect(trySendToRelay).toHaveBeenCalledWith({
+    expect(trySendToRelay).not.toHaveBeenCalledWith({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 9 },
     })
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(31)
+    expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
+    expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
+  })
+
+  it('manual attach selects the tab window and promotes it to current target', async () => {
+    await loadBackground()
+    await flushTasks()
+
+    const onMessage = listeners['runtime.onMessage']
+    expect(onMessage).toBeTypeOf('function')
+
+    const sendResponse = vi.fn()
+    const result = onMessage?.({ type: 'attachTab', tabId: 22 }, {}, sendResponse)
+    expect(result).toBe(true)
+    await flushTasks()
+
+    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(22, { manual: true })
+    expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
+    expect(MockTabManager.latest?.updateTab).toHaveBeenCalledWith(22, 'https://example.com/b', 'Page B', {
+      windowId: 2,
+      active: true,
+    })
+    expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(22)
     expect(trySendToRelay).toHaveBeenCalledWith({
-      method: 'Extension.primaryTargetChanged',
-      params: {
-        sessionId: 'cb-tab:browser-a:31',
-        targetId: 'target-31',
-        tabId: 31,
-        windowId: 9,
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 2 },
+    })
+    expect(chrome.tabs.update).toHaveBeenCalledWith(22, { active: true })
+    expect(chrome.windows.update).toHaveBeenCalledWith(2, { focused: true })
+    expect(sendResponse).toHaveBeenCalledWith({
+      ok: true,
+      attached: {
+        sessionId: 'cb-tab:browser-a:22',
+        targetId: 'target-22',
       },
     })
   })

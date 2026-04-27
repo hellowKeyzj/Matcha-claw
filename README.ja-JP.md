@@ -128,7 +128,8 @@ ClawX はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）
 OpenAI 互換ゲートウェイを **Custom** プロバイダーで使う場合は、**設定 → Models → Provider 編集** で `User-Agent` を指定できます。
 
 ### 🌐 Browser Relay のウィンドウ単位デフォルトターゲット
-Browser Relay を有効にすると、各 Chrome profile は 1 つの browser instance として接続されますが、既定の browser 制御ターゲットは **ウィンドウ** 単位で選びます。拡張のポップアップで **Use This Window** を押すと、その選択はデスクトップ再起動後も復元され、既定の browser 操作はそのウィンドウで現在アクティブな物理ページにしか当たりません。該当ウィンドウに attach 済みのアクティブ物理ページがなければ、別タブを推測せず即座にエラーにします。
+Browser Relay を有効にすると、各 Chrome profile は 1 つの browser instance として接続されますが、既定の browser 制御ターゲットは **ウィンドウ** 単位で選びます。拡張のポップアップで **Use This Window** を押すと、その選択はデスクトップ再起動後も復元され、既定の browser 操作はそのウィンドウの現在 attach 済みページに対して実行されます。`open` と `focus` もそのページを前面に出すため、ユーザーに見えているページと自動化が操作するページが一致します。該当ウィンドウに attach 済みの現在ページがなければ、別タブを推測せず即座にエラーにします。
+relay 対応ブラウザが起動していない場合、MatchaClaw はまず「前回正常に再接続できた」既存の Chrome profile を優先して起動し、その profile からの自動再接続を待ちます。まだ記録がない場合のみ、Browser Relay 拡張が健全な別の Chrome profile にフォールバックします。
 
 ### 🔑 ライセンスゲートと診断機能
 セットアップウィザードはライセンス検証を完了しないと次へ進めません。ランタイムもライセンスゲートで保護され、設定画面は License / Task Plugin / Diagnostics / ユーザーアバターの分割セクションで管理できます。

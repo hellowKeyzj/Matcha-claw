@@ -7,13 +7,6 @@ export type BrowserTabRecord = {
   rootSessionKey?: string
 }
 
-export type SelectedExecutionTarget = {
-  browserInstanceId: string
-  windowId: number
-  tabId: number
-  targetId: string
-}
-
 function resolveRootSessionKey(sessionKey?: string): string | undefined {
   if (!sessionKey) return undefined
   let current = sessionKey
@@ -28,10 +21,7 @@ function resolveRootSessionKey(sessionKey?: string): string | undefined {
 export class BrowserTabState {
   private readonly tabs = new Map<string, BrowserTabRecord>()
   private readonly recentlyClosed = new Set<string>()
-  private selectedBrowserInstanceId: string | null = null
-  private selectedWindowId: number | null = null
-  private selectedTabId: number | null = null
-  private selectedPhysicalTargetId: string | null = null
+  private currentTarget: string | null = null
   private syncChain = Promise.resolve()
 
   registerTab(targetId: string, options: { retain?: boolean; sessionKey?: string } = {}): void {
@@ -58,8 +48,8 @@ export class BrowserTabState {
     this.recentlyClosed.add(targetId)
     setTimeout(() => this.recentlyClosed.delete(targetId), 10_000)
 
-    if (this.selectedPhysicalTargetId === targetId) {
-      this.selectedPhysicalTargetId = null
+    if (this.currentTarget === targetId) {
+      this.currentTarget = null
     }
 
     return true
@@ -118,51 +108,19 @@ export class BrowserTabState {
     return this.tabs.get(targetId)?.kind === 'retained'
   }
 
-  setSelectedExecutionTarget(selection: SelectedExecutionTarget): void {
-    this.selectedBrowserInstanceId = selection.browserInstanceId
-    this.selectedWindowId = selection.windowId
-    this.selectedTabId = selection.tabId
-    this.selectedPhysicalTargetId = selection.targetId
+  setCurrentTarget(targetId: string): void {
+    if (!targetId || this.recentlyClosed.has(targetId)) return
+    this.currentTarget = targetId
   }
 
-  clearSelectedExecutionTarget(): void {
-    this.selectedBrowserInstanceId = null
-    this.selectedWindowId = null
-    this.selectedTabId = null
-    this.selectedPhysicalTargetId = null
-  }
-
-  get currentSelectedExecutionTarget(): SelectedExecutionTarget | null {
-    if (
-      !this.selectedBrowserInstanceId
-      || this.selectedWindowId === null
-      || this.selectedTabId === null
-      || !this.selectedPhysicalTargetId
-    ) {
-      return null
-    }
-    return {
-      browserInstanceId: this.selectedBrowserInstanceId,
-      windowId: this.selectedWindowId,
-      tabId: this.selectedTabId,
-      targetId: this.selectedPhysicalTargetId,
+  clearCurrentTarget(targetId?: string): void {
+    if (!targetId || this.currentTarget === targetId) {
+      this.currentTarget = null
     }
   }
 
-  get currentSelectedBrowserInstanceId(): string | null {
-    return this.selectedBrowserInstanceId
-  }
-
-  get currentSelectedWindowId(): number | null {
-    return this.selectedWindowId
-  }
-
-  get currentSelectedTabId(): number | null {
-    return this.selectedTabId
-  }
-
-  get currentSelectedPhysicalTargetId(): string | null {
-    return this.selectedPhysicalTargetId
+  get currentTargetId(): string | null {
+    return this.currentTarget
   }
 
   purgeStale(validTargetIds: Set<string>): number {
@@ -189,7 +147,7 @@ export class BrowserTabState {
   reset(): void {
     this.tabs.clear()
     this.recentlyClosed.clear()
-    this.clearSelectedExecutionTarget()
+    this.currentTarget = null
   }
 
   async withSyncLock<T>(task: () => Promise<T>): Promise<T> {

@@ -129,7 +129,8 @@ Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials 
 For OpenAI-compatible gateways configured via **Custom** provider, you can set a custom `User-Agent` in **Settings → Models → Edit Provider**.
 
 ### 🌐 Browser Relay Window Targeting
-When Browser Relay is enabled, each Chrome profile connects as one browser instance, but the default browser control target is chosen at the **window** level. In the extension popup you use **Use This Window**, MatchaClaw remembers that window across desktop restarts, and default browser actions only run against that selected window's current active physical page. If no such page is attached, MatchaClaw fails fast instead of guessing another tab.
+When Browser Relay is enabled, each Chrome profile connects as one browser instance, but the default browser control target is chosen at the **window** level. In the extension popup you use **Use This Window**, MatchaClaw remembers that window across desktop restarts, and default browser actions always run against that selected window's current attached page. `open` and `focus` also bring that page to the foreground, so the visible page and the automation page stay aligned. If no such page is attached, MatchaClaw fails fast instead of guessing another tab.
+If no relay-backed browser is running, MatchaClaw now prefers the last Chrome profile that successfully reconnected with Browser Relay, launches that existing profile, and waits for it to reconnect automatically. If no remembered profile is available, it falls back to another healthy Chrome profile with Browser Relay already enabled.
 
 ### 🔑 License Gate & Diagnostics
 The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.

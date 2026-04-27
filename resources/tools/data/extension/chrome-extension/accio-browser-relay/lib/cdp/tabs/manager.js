@@ -60,7 +60,7 @@ export class TabManager {
   /** @type {Map<number, string>} tabId → TabType */
   #agentTabs = new Map()
   /** @type {Set<number>} */
-  #cancelled = new Set()
+  #autoAttachBlocked = new Set()
   /** @type {Map<number, Promise<boolean>>} tabId → pending attach promise */
   #pending = new Map()
   /** @type {Map<number, {attempt: number, nextAttemptAt: number, reason: string}>} */
@@ -84,6 +84,8 @@ export class TabManager {
   #sendToRelay
   /** @type {() => string} */
   #getBrowserInstanceId
+  /** @type {() => number|null} */
+  #getSelectedWindowId
 
   /** @type {SessionIndicators} */
   #indicators
@@ -98,6 +100,9 @@ export class TabManager {
     this.#getBrowserInstanceId = typeof options.getBrowserInstanceId === 'function'
       ? options.getBrowserInstanceId
       : () => 'browser-instance'
+    this.#getSelectedWindowId = typeof options.getSelectedWindowId === 'function'
+      ? options.getSelectedWindowId
+      : () => null
     this.#group = new AgentGroupManager()
     this.#indicators = new SessionIndicators({
       getGroupId: () => this.#group.groupId,
@@ -147,7 +152,7 @@ export class TabManager {
 
     this.#restorePromise = (async () => {
       this.#restored = true
-      if (this.#tabs.size > 0 || this.#agentTabs.size > 0 || this.#cancelled.size > 0) return
+      if (this.#tabs.size > 0 || this.#agentTabs.size > 0 || this.#autoAttachBlocked.size > 0) return
 
       try {
         const stored = await chrome.storage.session.get(TAB_MANAGER_STATE_KEY)
@@ -201,10 +206,12 @@ export class TabManager {
           if (type === TabType.RETAINED) this.#retainedCount++
         }
 
-        const rawCancelled = Array.isArray(snapshot.cancelled) ? snapshot.cancelled : []
-        for (const id of rawCancelled) {
+        const rawAutoAttachBlocked = Array.isArray(snapshot.autoAttachBlocked)
+          ? snapshot.autoAttachBlocked
+          : []
+        for (const id of rawAutoAttachBlocked) {
           const tabId = Number(id)
-          if (Number.isInteger(tabId) && tabId > 0) this.#cancelled.add(tabId)
+          if (Number.isInteger(tabId) && tabId > 0) this.#autoAttachBlocked.add(tabId)
         }
 
         await this.#group.restore(snapshot.groupId)
@@ -249,6 +256,12 @@ export class TabManager {
 
       if (!isDebuggableUrl(entry.url)) {
         toRemove.push(tabId)
+        continue
+      }
+
+      if (!this.#shouldAutoAttachEntry(tabId, entry)) {
+        this.#setEntryVirtual(tabId, entry)
+        toDiscover.push(tabId)
         continue
       }
 
@@ -321,6 +334,7 @@ export class TabManager {
   get retainedTabCount() { return this.#retainedCount }
   get agentTabs() { return this.#agentTabs }
   get browserInstanceId() { return this.#getBrowserInstanceId() }
+  get selectedWindowId() { return this.#getSelectedWindowId() }
 
   // ── Lookup ──
 
@@ -337,8 +351,14 @@ export class TabManager {
   }
 
   resolveSelectedPhysicalTarget() {
+    const selectedWindowId = this.selectedWindowId
     for (const [tabId, entry] of this.#tabs) {
-      if (entry.active === true && entry.state === 'connected') {
+      if (
+        entry.active === true
+        && entry.state === 'connected'
+        && Number.isInteger(selectedWindowId)
+        && entry.windowId === selectedWindowId
+      ) {
         return {
           tabId,
           sessionId: entry.sessionId,
@@ -363,17 +383,17 @@ export class TabManager {
     return null
   }
 
-  // ── User-cancelled tab tracking (persisted to session storage) ──
+  // ── Auto-attach block tracking (persisted to session storage) ──
 
-  markCancelled(tabId) {
-    this.#cancelled.add(tabId)
+  markAutoAttachBlocked(tabId) {
+    this.#autoAttachBlocked.add(tabId)
     this.#schedulePersist()
   }
 
-  isCancelled(tabId) { return this.#cancelled.has(tabId) }
+  isAutoAttachBlocked(tabId) { return this.#autoAttachBlocked.has(tabId) }
 
-  removeCancelled(tabId) {
-    this.#cancelled.delete(tabId)
+  clearAutoAttachBlocked(tabId) {
+    this.#autoAttachBlocked.delete(tabId)
     this.#schedulePersist()
   }
 
@@ -410,7 +430,7 @@ export class TabManager {
 
     let count = 0
     for (const tab of allTabs) {
-      if (!tab.id || this.#tabs.has(tab.id) || this.#cancelled.has(tab.id)) continue
+      if (!tab.id || this.#tabs.has(tab.id)) continue
       this.#registerVirtual(tab.id, tab.url, tab.title, {
         windowId: tab.windowId ?? null,
         active: tab.active === true,
@@ -470,7 +490,7 @@ export class TabManager {
   }
 
   #registerVirtual(tabId, url, title, tabMeta = {}) {
-    if (this.#tabs.has(tabId) || this.#cancelled.has(tabId)) return
+    if (this.#tabs.has(tabId)) return
 
     const sessionId = this.#buildSessionId(tabId)
     const targetKey = this.#buildTargetKey(tabId)
@@ -494,10 +514,14 @@ export class TabManager {
 
   // ── Lazy Attach (on-demand physical attachment) ──
 
-  async ensureAttached(tabId) {
-    if (this.#cancelled.has(tabId)) {
-      log.warn('ensureAttached: tab was cancelled by user', tabId)
-      throw new Error(`User denied debugger permission for tab ${tabId}`)
+  async ensureAttached(tabId, options = {}) {
+    const manual = options.manual === true
+    if (this.#autoAttachBlocked.has(tabId) && !manual) {
+      log.info('ensureAttached: auto-attach blocked for tab', tabId)
+      return false
+    }
+    if (manual) {
+      this.clearAutoAttachBlocked(tabId)
     }
     const entry = this.#tabs.get(tabId)
     if (!entry) { log.warn('ensureAttached: tab not tracked', tabId); return false }
@@ -521,6 +545,13 @@ export class TabManager {
     try {
       if (this.#shuttingDown) return false
       const { realTargetId } = await attachDebugger(tabId)
+      log.info('physicalAttach: debugger attached', {
+        tabId,
+        sessionId: entry.sessionId,
+        previousTargetId: entry.targetId,
+        realTargetId: realTargetId || null,
+        url: entry.url || '',
+      })
 
       // Guard: tab may have been removed by clearAll/detach while we were awaiting
       if (!this.#tabs.has(tabId)) {
@@ -556,6 +587,15 @@ export class TabManager {
           },
         },
       })
+      log.info('physicalAttach: emitted Target.attachedToTarget', {
+        tabId,
+        sessionId: entry.sessionId,
+        targetKey: entry.targetKey,
+        targetId: entry.targetId,
+        windowId: entry.windowId ?? null,
+        active: entry.active === true,
+        url: entry.url || '',
+      })
 
       log.info('physicalAttach: done', tabId, 'in', (performance.now() - t0).toFixed(1), 'ms')
       this.#schedulePersist()
@@ -569,13 +609,17 @@ export class TabManager {
     }
   }
 
-  async attach(tabId) {
-    if (this.#cancelled.has(tabId)) {
-      log.warn('attach: tab was cancelled by user', tabId)
+  async attach(tabId, options = {}) {
+    const manual = options.manual === true
+    if (this.#autoAttachBlocked.has(tabId) && !manual) {
+      log.info('attach: auto-attach blocked for tab', tabId)
       return null
     }
     const existing = this.#tabs.get(tabId)
     if (existing?.state === 'connected') {
+      if (manual) {
+        this.clearAutoAttachBlocked(tabId)
+      }
       log.debug('attach: already connected', tabId)
       return existing
     }
@@ -599,7 +643,7 @@ export class TabManager {
       this.#byTarget.set(targetId, tabId)
     }
 
-    const ok = await this.ensureAttached(tabId)
+    const ok = await this.ensureAttached(tabId, { manual })
     if (!ok) {
       if (wasNew && this.#tabs.has(tabId)) this.#removeEntry(tabId)
       return null
@@ -663,7 +707,7 @@ export class TabManager {
     this.#pending.clear()
     this.#recovery.clear()
     chrome.alarms.clear(ALARM_TAB_RECOVERY)
-    this.#cancelled.clear()
+    this.#autoAttachBlocked.clear()
     void chrome.storage.session.remove(TAB_MANAGER_STATE_KEY).catch(() => {})
     this.#agentTabs.clear()
     this.#retainedCount = 0
@@ -695,6 +739,25 @@ export class TabManager {
 
     if (result.suppress) return
 
+    if (
+      method === 'Target.attachedToTarget'
+      || method === 'Target.detachedFromTarget'
+      || method === 'Target.targetInfoChanged'
+    ) {
+      log.info('onDebuggerEvent forwarding target event', {
+        tabId,
+        sourceSessionId: source.sessionId || null,
+        method,
+        eventSessionId: typeof params?.sessionId === 'string' ? params.sessionId : null,
+        eventTargetId:
+          typeof params?.targetId === 'string'
+            ? params.targetId
+            : typeof params?.targetInfo?.targetId === 'string'
+              ? params.targetInfo.targetId
+              : null,
+      })
+    }
+
     this.#sendToRelay({
       method: 'forwardCDPEvent',
       params: { sessionId: source.sessionId || tab.sessionId, method, params },
@@ -706,8 +769,14 @@ export class TabManager {
     log.info('onDebuggerDetach:', tabId, reason, 'tracked:', this.#tabs.has(tabId))
     if (!tabId || !this.#tabs.has(tabId)) return
     if (reason === 'canceled_by_user') {
-      this.markCancelled(tabId)
-      await this.detach(tabId, reason)
+      const entry = this.#tabs.get(tabId)
+      if (!entry) return
+      this.markAutoAttachBlocked(tabId)
+      if (entry.state === 'connected' || entry.state === 'attaching') {
+        this.#emitDetached(entry, reason)
+      }
+      this.#setEntryVirtual(tabId, entry)
+      this.#schedulePersist()
       return
     }
     await this.#scheduleRecovery(tabId, reason)
@@ -716,15 +785,15 @@ export class TabManager {
   async handleTabRemoved(tabId) {
     await this.detach(tabId, 'tab-closed')
     this.deleteAgent(tabId)
-    this.removeCancelled(tabId)
+    this.clearAutoAttachBlocked(tabId)
   }
 
   async handleTabReplaced(addedTabId, removedTabId) {
     const replacementTab = await chrome.tabs.get(addedTabId).catch(() => null)
 
-    const movedCancelled = this.#cancelled.delete(removedTabId)
-    if (movedCancelled) {
-      this.#cancelled.add(addedTabId)
+    const movedAutoAttachBlocked = this.#autoAttachBlocked.delete(removedTabId)
+    if (movedAutoAttachBlocked) {
+      this.#autoAttachBlocked.add(addedTabId)
     }
 
     const agentType = this.#agentTabs.get(removedTabId)
@@ -737,14 +806,14 @@ export class TabManager {
     if (!entry) {
       if (!replacementTab) {
         this.deleteAgent(addedTabId)
-        this.removeCancelled(addedTabId)
+        this.clearAutoAttachBlocked(addedTabId)
         this.#schedulePersist()
         return
       }
       if (agentType !== undefined && replacementTab) {
         await this.#group.addTab(addedTabId)
       }
-      if (replacementTab && !movedCancelled) {
+      if (replacementTab) {
         this.discover(addedTabId, replacementTab.url, replacementTab.title)
       }
       this.#schedulePersist()
@@ -757,7 +826,7 @@ export class TabManager {
     if (!replacementTab || !isDebuggableUrl(replacementTab.url)) {
       this.#notifyRemoved(entry.sessionId)
       this.#removeEntry(addedTabId)
-      if (agentType === undefined) this.removeCancelled(addedTabId)
+      if (agentType === undefined) this.clearAutoAttachBlocked(addedTabId)
       this.deleteAgent(addedTabId)
       this.#schedulePersist()
       return
@@ -783,7 +852,7 @@ export class TabManager {
 
     try {
       const connectedTabs = [...this.#tabs.entries()]
-        .filter(([, entry]) => entry.state === 'connected')
+        .filter(([tabId, entry]) => entry.state === 'connected' && this.#shouldAutoAttachEntry(tabId, entry))
 
       for (const [tabId, entry] of connectedTabs) {
         if (!this.#tabs.has(tabId) || this.#recovery.has(tabId)) continue
@@ -827,6 +896,21 @@ export class TabManager {
     if (changed) this.#schedulePersist()
   }
 
+  announceCurrentTarget(tabId) {
+    const entry = this.#tabs.get(tabId)
+    if (!entry?.sessionId || !entry?.targetId) return
+
+    this.#sendToRelay({
+      method: 'Extension.currentTargetChanged',
+      params: {
+        sessionId: entry.sessionId,
+        targetId: entry.targetId,
+        tabId,
+        windowId: entry.windowId ?? null,
+      },
+    })
+  }
+
   async #restoreAgentGroupMembership(currentById) {
     if (this.#agentTabs.size === 0) return
     for (const tabId of this.#agentTabs.keys()) {
@@ -865,7 +949,7 @@ export class TabManager {
       this.#notifyRemoved(entry.sessionId)
       this.#removeEntry(tabId)
       this.deleteAgent(tabId)
-      this.removeCancelled(tabId)
+      this.clearAutoAttachBlocked(tabId)
       this.#schedulePersist()
       return
     }
@@ -926,6 +1010,13 @@ export class TabManager {
         const entry = this.#tabs.get(tabId)
         if (!entry) {
           this.#clearRecovery(tabId)
+          continue
+        }
+
+        if (!this.#shouldAutoAttachEntry(tabId, entry)) {
+          this.#setEntryVirtual(tabId, entry)
+          this.#clearRecovery(tabId)
+          this.#schedulePersist()
           continue
         }
 
@@ -1043,6 +1134,15 @@ export class TabManager {
   #emitAttached(entry) {
     if (!entry?.sessionId || !entry?.targetId) return
     const tabId = this.#bySession.get(entry.sessionId)
+    log.info('emitAttached', {
+      tabId: Number.isInteger(tabId) ? tabId : null,
+      sessionId: entry.sessionId,
+      targetKey: entry.targetKey,
+      targetId: entry.targetId,
+      windowId: entry.windowId ?? null,
+      active: entry.active === true,
+      url: entry.url || '',
+    })
     this.#sendToRelay({
       method: 'forwardCDPEvent',
       params: {
@@ -1093,6 +1193,24 @@ export class TabManager {
     this.#childSets.delete(tabId)
   }
 
+  #shouldAutoAttachEntry(tabId, entry) {
+    const selectedWindowId = this.selectedWindowId
+    return !this.#autoAttachBlocked.has(tabId)
+      && Number.isInteger(selectedWindowId)
+      && entry.windowId === selectedWindowId
+  }
+
+  #setEntryVirtual(tabId, entry) {
+    this.#clearRecovery(tabId)
+    this.#clearChildSessions(tabId)
+    entry.state = 'virtual'
+    if (entry.targetId !== entry.targetKey) {
+      this.#byTarget.delete(entry.targetId)
+      entry.targetId = entry.targetKey
+      this.#byTarget.set(entry.targetId, tabId)
+    }
+  }
+
   #schedulePersist() {
     if (this.#shuttingDown || this.#persistScheduled) return
     this.#persistScheduled = true
@@ -1120,7 +1238,7 @@ export class TabManager {
         active: entry.active === true,
       })),
       agentTabs: [...this.#agentTabs.entries()].map(([tabId, type]) => ({ tabId, type })),
-      cancelled: [...this.#cancelled],
+      autoAttachBlocked: [...this.#autoAttachBlocked],
       groupId: this.#group.groupId,
     }
     await chrome.storage.session.set({ [TAB_MANAGER_STATE_KEY]: snapshot })

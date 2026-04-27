@@ -121,6 +121,7 @@ function runWhenRuntimeReady(task, label) {
 
 const mgr = new TabManager(trySendToRelay, {
   getBrowserInstanceId: requireBrowserInstanceId,
+  getSelectedWindowId: currentSelectedWindowId,
 })
 const handleCdp = createDispatcher(mgr)
 
@@ -132,40 +133,15 @@ function announceWindowSelection(windowId) {
   })
 }
 
-function clearPrimaryTarget() {
+function clearCurrentTarget() {
   if (!isRelayConnected()) return
   trySendToRelay({
-    method: 'Extension.primaryTargetChanged',
+    method: 'Extension.currentTargetChanged',
     params: {},
   })
 }
 
-async function maybeAutoSelectSingleWindow() {
-  await ensureRuntimeReady()
-  if (!isRelayConnected()) return false
-  if (currentSelectedBrowserInstanceId() || currentSelectedWindowId() !== null) {
-    return false
-  }
-
-  const windows = await chrome.windows.getAll({
-    populate: false,
-    windowTypes: ['normal'],
-  }).catch(() => [])
-  const normalWindows = windows.filter((entry) => Number.isInteger(entry?.id))
-  if (normalWindows.length !== 1) {
-    return false
-  }
-
-  const selectedWindowId = normalWindows[0].id
-  mirrorSelectionState({
-    selectedBrowserInstanceId: currentBrowserInstanceId(),
-    selectedWindowId,
-  })
-  announceWindowSelection(selectedWindowId)
-  return true
-}
-
-async function getPrimaryTabForSelectedWindow() {
+async function getCurrentTabForSelectedWindow() {
   const windowId = currentSelectedWindowId()
   if (!Number.isInteger(windowId)) return null
 
@@ -177,16 +153,17 @@ async function getPrimaryTabForSelectedWindow() {
   return activeTab
 }
 
-async function syncSelectedBrowserPrimary() {
+async function syncSelectedBrowserCurrentTarget(options = {}) {
+  const manual = options.manual === true
   await ensureRuntimeReady()
   if (!isCurrentBrowserSelected() || currentSelectedWindowId() === null || !isRelayConnected()) {
-    clearPrimaryTarget()
+    clearCurrentTarget()
     return
   }
 
-  const tab = await getPrimaryTabForSelectedWindow()
+  const tab = await getCurrentTabForSelectedWindow()
   if (!tab?.id) {
-    clearPrimaryTarget()
+    clearCurrentTarget()
     return
   }
 
@@ -196,24 +173,16 @@ async function syncSelectedBrowserPrimary() {
     active: true,
   })
 
-  const attached = await mgr.attach(tab.id).catch((error) => {
-    log.warn('syncSelectedBrowserPrimary attach failed:', tab.id, error)
+  const attached = await mgr.attach(tab.id, { manual }).catch((error) => {
+    log.warn('syncSelectedBrowserCurrentTarget attach failed:', tab.id, error)
     return null
   })
   if (!attached) {
-    clearPrimaryTarget()
+    clearCurrentTarget()
     return
   }
 
-  trySendToRelay({
-    method: 'Extension.primaryTargetChanged',
-    params: {
-      sessionId: attached.sessionId,
-      targetId: attached.targetId,
-      tabId: tab.id,
-      windowId: tab.windowId ?? null,
-    },
-  })
+  mgr.announceCurrentTarget(tab.id)
 }
 
 async function buildBrowserInstanceList() {
@@ -263,9 +232,9 @@ initRelay({
     if (msg?.method !== 'Extension.selectionChanged') return
     mirrorSelectionState(msg.params)
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
-      await syncSelectedBrowserPrimary()
+      await syncSelectedBrowserCurrentTarget({ manual: true })
     } else {
-      clearPrimaryTarget()
+      clearCurrentTarget()
     }
   },
   async onShutdown() {
@@ -290,9 +259,8 @@ initRelay({
     await mgr.refreshAfterTransportReady()
     mgr.startSessionIndicators()
     void mgr.discoverAll(isRelayConnected)
-    await maybeAutoSelectSingleWindow()
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
-      await syncSelectedBrowserPrimary()
+      await syncSelectedBrowserCurrentTarget({ manual: true })
     }
   },
   installDebuggerListeners() {
@@ -336,7 +304,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     // tab may already be gone
   }
   if (isSelectedWindow(windowId) && isRelayConnected()) {
-    void syncSelectedBrowserPrimary()
+    void syncSelectedBrowserCurrentTarget()
     return
   }
   if (getRelayState() === RelayState.DISABLED || isRelayConnected() || isReconnecting()) return
@@ -360,7 +328,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         active: tab.active === true,
       })
       if (tab.active && isSelectedWindow(tab.windowId ?? null)) {
-        void syncSelectedBrowserPrimary()
+        void syncSelectedBrowserCurrentTarget()
       }
     }
   }, 'tabs.onUpdated init failed')
@@ -371,7 +339,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     const removedWindowId = mgr.get(tabId)?.windowId ?? null
     await mgr.handleTabRemoved(tabId)
     if (isSelectedWindow(removedWindowId) && isRelayConnected()) {
-      await syncSelectedBrowserPrimary()
+      await syncSelectedBrowserCurrentTarget()
     }
   }, 'tabs.onRemoved init failed')
 })
@@ -381,7 +349,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
     const replacedWindowId = mgr.get(removedTabId)?.windowId ?? null
     await mgr.handleTabReplaced(addedTabId, removedTabId)
     if (isSelectedWindow(replacedWindowId) && isRelayConnected()) {
-      await syncSelectedBrowserPrimary()
+      await syncSelectedBrowserCurrentTarget()
     }
   }, 'tabs.onReplaced init failed')
 })
@@ -401,7 +369,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
       }
     }
     if (isSelectedWindow(windowId) && isRelayConnected()) {
-      await syncSelectedBrowserPrimary()
+      await syncSelectedBrowserCurrentTarget()
     }
   }, 'windows.onFocusChanged init failed')
 })
@@ -544,7 +512,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           selectedWindowId: windowId,
         })
         announceWindowSelection(windowId)
-        await syncSelectedBrowserPrimary()
+        await syncSelectedBrowserCurrentTarget({ manual: true })
         sendResponse({
           ok: true,
           selectedBrowserInstanceId: currentSelectedBrowserInstanceId(),
@@ -568,7 +536,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       try {
         await ensureRuntimeReady()
         log.info('attachTab request:', tabId)
-        const attached = await mgr.attach(tabId)
+        const attached = await mgr.attach(tabId, { manual: true })
         if (!attached) {
           sendResponse({ ok: false, error: `attach failed for tab ${tabId}` })
           return
@@ -576,10 +544,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         try {
           const tab = await chrome.tabs.get(tabId)
+          mirrorSelectionState({
+            selectedBrowserInstanceId: currentBrowserInstanceId(),
+            selectedWindowId: tab.windowId ?? null,
+          })
+          if (Number.isInteger(tab.windowId)) {
+            announceWindowSelection(tab.windowId)
+          }
+          mgr.setActiveTab(tabId, tab.windowId ?? null)
+          mgr.updateTab(tabId, tab.url, tab.title, {
+            windowId: tab.windowId ?? null,
+            active: true,
+          })
           await chrome.tabs.update(tabId, { active: true })
-          if (tab.windowId) {
+          if (Number.isInteger(tab.windowId)) {
             await chrome.windows.update(tab.windowId, { focused: true })
           }
+          mgr.announceCurrentTarget(tabId)
         } catch (focusError) {
           log.warn('attachTab focus failed:', tabId, focusError)
         }

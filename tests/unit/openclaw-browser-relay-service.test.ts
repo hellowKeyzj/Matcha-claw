@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCipheriv, createDecipheriv, publicEncrypt, randomBytes } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import WebSocket from 'ws'
 import { BrowserRelayServer, RELAY_PROTOCOL_VERSION } from '../../packages/openclaw-browser-relay-plugin/src/relay/server'
 import { BrowserControlService } from '../../packages/openclaw-browser-relay-plugin/src/service/browser-control-service'
@@ -16,13 +19,61 @@ const logger = {
 
 type RelayMock = Pick<
   BrowserRelayServer,
-  'hasExtensionConnection' | 'relayPort' | 'authHeaders' | 'listAttachments' | 'listTabs'
+  | 'hasExtensionConnection'
+  | 'relayPort'
+  | 'authHeaders'
+  | 'status'
+  | 'listAttachments'
+  | 'listTabs'
+  | 'onExtensionConnected'
+  | 'waitForAttachedTarget'
+  | 'selectExecutionWindowForTargetIfUnset'
+  | 'updateTargetUrl'
 >
 
 type BrowserControlServiceWithActions = BrowserControlService & {
   actions: {
     snapshot: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
+    navigate: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
   }
+  session: {
+    sendBrowserCdpCommand: (
+      cdpUrl: string,
+      method: string,
+      params: Record<string, unknown>,
+      mode?: 'relay' | 'direct-cdp',
+    ) => Promise<Record<string, unknown>>
+  }
+}
+
+function createRelayMock(overrides: Omit<RelayMock, 'onExtensionConnected'>): BrowserRelayServer {
+  return {
+    onExtensionConnected: () => () => {},
+    status: {
+      running: true,
+      port: 9236,
+      extensionConnected: true,
+      handshakeOk: true,
+      tabCount: 0,
+      browserCount: 1,
+      selectedBrowserInstanceId: null,
+      selectedWindowId: null,
+    },
+    waitForAttachedTarget: async (targetId: string) => ({
+      browserInstanceId: 'browser-a',
+      browserName: 'browser-a',
+      sessionId: 'browser-a|sid|session-opened',
+      targetId,
+      windowId: 1,
+      tabId: 1,
+      active: false,
+      title: '',
+      url: '',
+    }),
+    selectExecutionWindowForTargetIfUnset: async () => false,
+    updateTargetUrl: () => {},
+    ...overrides,
+  } as RelayMock as BrowserRelayServer
 }
 
 function encryptSessionKey(sessionKey: Buffer): string {
@@ -70,21 +121,40 @@ function waitForMessage(ws: WebSocket): Promise<string> {
 
 let server: BrowserRelayServer | null = null
 let service: BrowserControlService | null = null
+let tempStateDir: string | null = null
+
+async function startRelayServer(): Promise<BrowserRelayServer> {
+  tempStateDir ??= await mkdtemp(path.join(os.tmpdir(), 'matchaclaw-relay-service-test-'))
+  server = new BrowserRelayServer({ port: 0, logger, stateDir: tempStateDir })
+  await server.start()
+  return server
+}
 
 afterEach(async () => {
   await service?.stop()
   await server?.stop()
+  if (tempStateDir) {
+    await rm(tempStateDir, { recursive: true, force: true })
+  }
   service = null
   server = null
+  tempStateDir = null
 })
 
 describe('browser relay service', () => {
   it('handles browser.request open and tabs through the unified service', async () => {
-    server = new BrowserRelayServer({ port: 0, logger })
-    await server.start()
-    service = new BrowserControlService({ logger, relay: server })
+    const relay = await startRelayServer()
+    service = new BrowserControlService({ logger, relay })
+    const snapshot = vi.fn(async (input: Record<string, unknown>) => ({
+      snapshot: 'opened-page',
+      refs: {},
+      stats: { lines: 1, chars: 11, refs: 0, interactive: 0 },
+      pageUrl: 'https://example.com/opened',
+      input,
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
 
-    const port = server.port
+    const port = relay.port
     const sessionKey = randomBytes(32)
     const extensionWs = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
       headers: { Origin: 'chrome-extension://unit-test' },
@@ -116,32 +186,16 @@ describe('browser relay service', () => {
     )
     await waitForMessage(extensionWs)
 
+    const relayCommandPromise = waitForMessage(extensionWs)
     const openPromise = service.handleRequest({
       action: 'open',
-      targetUrl: 'https://example.com/opened',
+      url: 'https://example.com/opened',
       sessionKey: 'agent:test',
     })
 
-    const relayCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
-    expect(relayCommand.method).toBe('forwardCDPCommand')
-    expect(relayCommand.params.method).toBe('Target.createTarget')
-
-    extensionWs.send(
-      encryptWireMessage(
-        sessionKey,
-        JSON.stringify({
-          id: relayCommand.id,
-          result: { targetId: 'target-opened' },
-        }),
-      ),
-    )
-
-    const openResult = await openPromise
-    expect(openResult).toMatchObject({
-      ok: true,
-      targetId: 'browser-a|tid|target-opened',
-      url: 'https://example.com/opened',
-    })
+    const createTargetCommand = JSON.parse(decryptWireMessage(sessionKey, await relayCommandPromise))
+    expect(createTargetCommand.method).toBe('forwardCDPCommand')
+    expect(createTargetCommand.params.method).toBe('Target.createTarget')
 
     extensionWs.send(
       encryptWireMessage(
@@ -157,13 +211,82 @@ describe('browser relay service', () => {
                 targetId: 'target-opened',
                 type: 'page',
                 title: 'Opened Page',
-                url: 'https://example.com/opened',
+                url: 'about:blank',
               },
             },
           },
         }),
       ),
     )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Extension.tabUpdated',
+            params: {
+              sessionId: 'session-opened',
+              tabId: 1,
+              windowId: 1,
+              active: false,
+              targetKey: 'vtab:browser-a:1',
+              targetInfo: {
+                targetId: 'target-opened',
+                type: 'page',
+                title: 'Opened Page',
+                url: 'https://example.com/opened',
+                attached: true,
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'Extension.currentTargetChanged',
+          params: {
+            sessionId: 'session-opened',
+          },
+        }),
+      ),
+    )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: createTargetCommand.id,
+          result: { targetId: 'target-opened' },
+        }),
+      ),
+    )
+
+    const openResult = await openPromise
+    expect(openResult).toMatchObject({
+      ok: true,
+      action: 'open',
+      targetId: 'browser-a|tid|target-opened',
+      requestedUrl: 'https://example.com/opened',
+      url: 'https://example.com/opened',
+    })
+
+    const snapshotResult = await service.handleRequest({ action: 'snapshot' })
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({
+      cdpUrl: `http://127.0.0.1:${port}`,
+      targetId: 'browser-a|tid|target-opened',
+      mode: 'relay',
+    }))
+    expect(snapshotResult).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|target-opened',
+      url: 'https://example.com/opened',
+    })
     await new Promise((resolve) => setTimeout(resolve, 10))
 
     const tabsResult = await service.handleRequest({ action: 'tabs' })
@@ -180,6 +303,89 @@ describe('browser relay service', () => {
     ])
 
     extensionWs.close()
+  })
+
+  it('uses the current relay target and follows relay current-page changes', async () => {
+    let attachments = [
+      {
+        browserInstanceId: 'browser-a',
+        browserName: 'browser-a',
+        windowId: 3,
+        tabId: 7,
+        active: true,
+        sessionId: 'browser-a|sid|page-session',
+        targetId: 'browser-a|tid|page-target',
+        title: 'Selected Page',
+        url: 'https://example.com/selected',
+        selectedBrowser: true,
+        selectedWindow: true,
+        selected: true,
+        primary: false,
+      },
+      {
+        browserInstanceId: 'browser-a',
+        browserName: 'browser-a',
+        windowId: 3,
+        tabId: 8,
+        active: true,
+        sessionId: 'browser-a|sid|opened-session',
+        targetId: 'browser-a|tid|opened-target',
+        title: 'Opened Page',
+        url: 'https://example.com/opened',
+        selectedBrowser: true,
+        selectedWindow: true,
+        selected: true,
+        primary: true,
+      },
+    ]
+
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => attachments,
+        listTabs: () => [],
+      }),
+    })
+
+    const snapshot = vi.fn(async (input: Record<string, unknown>) => ({
+      snapshot: 'snapshot',
+      refs: {},
+      stats: { lines: 1, chars: 8, refs: 0, interactive: 0 },
+      pageUrl: String(input.targetId),
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
+
+    const openedResult = await service.handleRequest({ action: 'snapshot' })
+    expect(snapshot).toHaveBeenLastCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|opened-target',
+      mode: 'relay',
+    }))
+    expect(openedResult).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|opened-target',
+      url: 'browser-a|tid|opened-target',
+    })
+
+    attachments = [
+      {
+        ...attachments[0],
+        primary: true,
+      },
+    ]
+
+    const fallbackResult = await service.handleRequest({ action: 'snapshot' })
+    expect(snapshot).toHaveBeenLastCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|page-target',
+      mode: 'relay',
+    }))
+    expect(fallbackResult).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|page-target',
+      url: 'browser-a|tid|page-target',
+    })
   })
 
   it('parses role snapshots into stable refs', () => {
@@ -202,10 +408,10 @@ describe('browser relay service', () => {
     expect(parsed.stats.refs).toBe(4)
   })
 
-  it('uses the selected primary relay target when browser action omits targetId', async () => {
+  it('uses the current relay target when browser action omits targetId', async () => {
     service = new BrowserControlService({
       logger,
-      relay: {
+      relay: createRelayMock({
         hasExtensionConnection: true,
         relayPort: 9236,
         authHeaders: {},
@@ -227,7 +433,7 @@ describe('browser relay service', () => {
           },
         ],
         listTabs: () => [],
-      } as RelayMock as BrowserRelayServer,
+      }),
     })
 
     const snapshot = vi.fn(async (input: Record<string, unknown>) => ({
@@ -253,30 +459,221 @@ describe('browser relay service', () => {
     })
   })
 
-  it('fails clearly when no selected primary relay target exists', async () => {
+  it('uses url for navigate requests', async () => {
     service = new BrowserControlService({
       logger,
-      relay: {
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      }),
+    })
+
+    const navigate = vi.fn(async (input: Record<string, unknown>) => ({
+      url: String(input.url),
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.navigate = navigate
+
+    const result = await service.handleRequest({
+      action: 'navigate',
+      url: 'https://example.com/next',
+    })
+
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|page-target',
+      mode: 'relay',
+      url: 'https://example.com/next',
+    }))
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'navigate',
+      targetId: 'browser-a|tid|page-target',
+      requestedUrl: 'https://example.com/next',
+      url: 'https://example.com/next',
+    })
+  })
+
+  it('opens direct-cdp targets with the requested url and does not perform a follow-up Playwright navigation', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: false,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+      }),
+    })
+
+    const sendBrowserCdpCommand = vi.fn(async () => ({ targetId: 'direct-target' }))
+
+    ;(service as any).resolveDirectEndpoint = async () => ({
+      httpUrl: 'http://127.0.0.1:9222',
+      wsUrl: null,
+      port: 9222,
+      preferredUrl: 'http://127.0.0.1:9222',
+    })
+    ;(service as any).autoLauncher.ensureRelayBrowserAvailable = async () => {}
+    ;(service as BrowserControlServiceWithActions).session.sendBrowserCdpCommand = sendBrowserCdpCommand
+
+    const result = await service.handleRequest({
+      action: 'open',
+      url: 'https://example.com/direct-opened',
+    })
+
+    expect(sendBrowserCdpCommand).toHaveBeenCalledWith(
+      'http://127.0.0.1:9222',
+      'Target.createTarget',
+      { url: 'https://example.com/direct-opened' },
+      'direct-cdp',
+    )
+    expect((service as any).tabState.currentTargetId).toBe('direct-target')
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'open',
+      targetId: 'direct-target',
+      requestedUrl: 'https://example.com/direct-opened',
+      url: 'https://example.com/direct-opened',
+    })
+  })
+
+  it('delegates opened-window auto-selection to relay when no window is currently selected', async () => {
+    const selectExecutionWindowForTargetIfUnset = vi.fn(async () => true)
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        status: {
+          running: true,
+          port: 9236,
+          extensionConnected: true,
+          handshakeOk: true,
+          tabCount: 0,
+          browserCount: 1,
+          selectedBrowserInstanceId: null,
+          selectedWindowId: null,
+        },
+        listAttachments: () => [],
+        listTabs: () => [],
+        waitForAttachedTarget: async (targetId: string) => ({
+          browserInstanceId: 'browser-a',
+          browserName: 'browser-a',
+          sessionId: 'browser-a|sid|session-opened',
+          targetId,
+          windowId: 7,
+          tabId: 71,
+          active: true,
+          title: 'Opened Page',
+          url: 'https://example.com/opened',
+        }),
+        selectExecutionWindowForTargetIfUnset,
+      }),
+    })
+
+    ;(service as any).options.relay.openTarget = async (url: string) => ({
+      targetId: `browser-a|tid|opened:${url}`,
+    })
+
+    const result = await (service as any).handleRelayAction('open', { action: 'open', url: 'https://example.com/opened' })
+
+    expect(selectExecutionWindowForTargetIfUnset).toHaveBeenCalledWith('browser-a|tid|opened:https://example.com/opened')
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'open',
+      targetId: 'browser-a|tid|opened:https://example.com/opened',
+      requestedUrl: 'https://example.com/opened',
+      url: 'https://example.com/opened',
+    })
+  })
+
+  it('always delegates opened-window selection to relay even when a window is already selected', async () => {
+    const selectExecutionWindowForTargetIfUnset = vi.fn(async () => false)
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        status: {
+          running: true,
+          port: 9236,
+          extensionConnected: true,
+          handshakeOk: true,
+          tabCount: 1,
+          browserCount: 1,
+          selectedBrowserInstanceId: 'browser-a',
+          selectedWindowId: 3,
+        },
+        listAttachments: () => [],
+        listTabs: () => [],
+        waitForAttachedTarget: async (targetId: string) => ({
+          browserInstanceId: 'browser-a',
+          browserName: 'browser-a',
+          sessionId: 'browser-a|sid|session-opened',
+          targetId,
+          windowId: 7,
+          tabId: 71,
+          active: true,
+          title: 'Opened Page',
+          url: 'https://example.com/opened',
+        }),
+        selectExecutionWindowForTargetIfUnset,
+      }),
+    })
+
+    ;(service as any).options.relay.openTarget = async (url: string) => ({
+      targetId: `browser-a|tid|opened:${url}`,
+    })
+
+    await (service as any).handleRelayAction('open', { action: 'open', url: 'https://example.com/opened' })
+
+    expect(selectExecutionWindowForTargetIfUnset).toHaveBeenCalledWith('browser-a|tid|opened:https://example.com/opened')
+  })
+
+  it('fails clearly when no current relay target exists', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
         hasExtensionConnection: true,
         relayPort: 9236,
         authHeaders: {},
         listAttachments: () => [],
         listTabs: () => [],
-      } as RelayMock as BrowserRelayServer,
+      }),
     })
 
     const result = await service.handleRequest({ action: 'snapshot' })
 
     expect(result).toMatchObject({
       ok: false,
-      error: 'No default browser target available. Select a window and keep its active page attached.',
+      error: 'No current browser target available. Open or focus a page before using browser actions.',
     })
   })
 
   it('rejects default execution when physical relay tabs exist but no browser instance is selected', async () => {
     service = new BrowserControlService({
       logger,
-      relay: {
+      relay: createRelayMock({
         hasExtensionConnection: true,
         relayPort: 9236,
         authHeaders: {},
@@ -313,21 +710,21 @@ describe('browser relay service', () => {
           },
         ],
         listTabs: () => [],
-      } as RelayMock as BrowserRelayServer,
+      }),
     })
 
     const result = await service.handleRequest({ action: 'snapshot' })
 
     expect(result).toMatchObject({
       ok: false,
-      error: 'No default browser target available. Select a window and keep its active page attached.',
+      error: 'No current browser target available. Open or focus a page before using browser actions.',
     })
   })
 
   it('returns all discovered relay tabs with browser and window metadata', async () => {
     service = new BrowserControlService({
       logger,
-      relay: {
+      relay: createRelayMock({
         hasExtensionConnection: true,
         relayPort: 9236,
         authHeaders: {},
@@ -384,7 +781,7 @@ describe('browser relay service', () => {
             primary: false,
           },
         ],
-      } as RelayMock as BrowserRelayServer,
+      }),
     })
 
     const result = await service.handleRequest({ action: 'tabs' })

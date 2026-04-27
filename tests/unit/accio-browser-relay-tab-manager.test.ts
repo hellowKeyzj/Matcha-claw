@@ -97,9 +97,11 @@ type StoredTabManagerState = {
     tabId: number
     type: string
   }>
-  cancelled?: number[]
+  autoAttachBlocked?: number[]
   groupId?: number | null
 }
+
+let selectedWindowId = 11
 
 async function loadTabManager() {
   const mod = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/manager.js')
@@ -116,9 +118,10 @@ beforeEach(() => {
   }
 
   tabsById = new Map([
-    [1, { id: 1, url: 'https://example.com', title: 'Example' }],
+    [1, { id: 1, url: 'https://example.com', title: 'Example', windowId: 11, active: true }],
     [2, { id: 2, url: 'https://example.org', title: 'Docs', windowId: 12, active: false }],
   ])
+  selectedWindowId = 11
 
   attachDebugger.mockResolvedValue({ realTargetId: 'target-1' })
   debuggerSendCommand.mockReset()
@@ -165,7 +168,7 @@ describe('accio browser relay tab manager', () => {
 
     const sendToRelay = vi.fn()
     const TabManager = await loadTabManager()
-    const mgr = new TabManager(sendToRelay)
+    const mgr = new TabManager(sendToRelay, { getSelectedWindowId: () => selectedWindowId })
 
     const attached = await mgr.attach(1)
     await flushTasks()
@@ -192,8 +195,8 @@ describe('accio browser relay tab manager', () => {
         params: {
           sessionId: attached?.sessionId,
           tabId: 1,
-          windowId: null,
-          active: false,
+          windowId: 11,
+          active: true,
           targetKey: 'vtab:browser-instance:1',
           targetId: attached?.targetId,
           reason: 'target_closed',
@@ -207,8 +210,8 @@ describe('accio browser relay tab manager', () => {
         params: {
           sessionId: attached?.sessionId,
           tabId: 1,
-          windowId: null,
-          active: false,
+          windowId: 11,
+          active: true,
           targetKey: 'vtab:browser-instance:1',
           targetInfo: {
             targetId: 'target-1',
@@ -258,7 +261,7 @@ describe('accio browser relay tab manager', () => {
         },
       ],
       agentTabs: [{ tabId: 2, type: 'agent' }],
-      cancelled: [],
+      autoAttachBlocked: [],
       groupId: 77,
     }
 
@@ -272,16 +275,17 @@ describe('accio browser relay tab manager', () => {
 
     const sendToRelay = vi.fn()
     const TabManager = await loadTabManager()
-    const mgr = new TabManager(sendToRelay)
+    selectedWindowId = 12
+    const mgr = new TabManager(sendToRelay, { getSelectedWindowId: () => selectedWindowId })
 
     await mgr.restoreState()
     await mgr.refreshAfterTransportReady()
 
     expect(mgr.get(1)).toMatchObject({
-      state: 'connected',
+      state: 'virtual',
       sessionId: 'cb-tab:browser-instance:1',
       targetKey: 'vtab:browser-instance:1',
-      targetId: 'target-1',
+      targetId: 'vtab:browser-instance:1',
     })
     expect(mgr.get(2)).toMatchObject({
       state: 'connected',
@@ -291,17 +295,21 @@ describe('accio browser relay tab manager', () => {
     })
     expect(groupRestore).toHaveBeenCalledWith(77)
     expect(groupAddTab).toHaveBeenCalledWith(2)
-    expect(sendToRelay).not.toHaveBeenCalledWith({
+    expect(sendToRelay).toHaveBeenCalledWith({
       method: 'forwardCDPEvent',
       params: {
         method: 'Extension.tabDiscovered',
         params: {
-          sessionId: 'session-2',
+          sessionId: 'cb-tab:browser-instance:1',
+          tabId: 1,
+          windowId: 11,
+          active: true,
+          targetKey: 'vtab:browser-instance:1',
           targetInfo: {
-            targetId: 'vtab-2',
+            targetId: 'vtab:browser-instance:1',
             type: 'page',
-            title: 'Docs',
-            url: 'https://example.org',
+            title: 'Example',
+            url: 'https://example.com',
             attached: false,
           },
         },
@@ -338,7 +346,7 @@ describe('accio browser relay tab manager', () => {
 
     const sendToRelay = vi.fn()
     const TabManager = await loadTabManager()
-    const mgr = new TabManager(sendToRelay)
+    const mgr = new TabManager(sendToRelay, { getSelectedWindowId: () => selectedWindowId })
 
     const attached = await mgr.attach(1)
     mgr.markAgent(1)
@@ -346,7 +354,7 @@ describe('accio browser relay tab manager', () => {
     sendToRelay.mockClear()
 
     tabsById.delete(1)
-    tabsById.set(3, { id: 3, url: 'https://example.net', title: 'Replacement' })
+    tabsById.set(3, { id: 3, url: 'https://example.net', title: 'Replacement', windowId: 11, active: true })
     debuggerSendCommand.mockRejectedValue(new Error('debugger lost'))
 
     await mgr.handleTabReplaced(3, 1)
@@ -379,8 +387,8 @@ describe('accio browser relay tab manager', () => {
         params: {
           sessionId: attached?.sessionId,
           tabId: 3,
-          windowId: null,
-          active: false,
+          windowId: 11,
+          active: true,
           targetKey: 'vtab:browser-instance:1',
           targetId: attached?.targetId,
           reason: 'tab-replaced',
@@ -394,8 +402,8 @@ describe('accio browser relay tab manager', () => {
         params: {
           sessionId: attached?.sessionId,
           tabId: 3,
-          windowId: null,
-          active: false,
+          windowId: 11,
+          active: true,
           targetKey: 'vtab:browser-instance:1',
           targetInfo: {
             targetId: 'target-3',
@@ -416,7 +424,7 @@ describe('accio browser relay tab manager', () => {
 
     const sendToRelay = vi.fn()
     const TabManager = await loadTabManager()
-    const mgr = new TabManager(sendToRelay)
+    const mgr = new TabManager(sendToRelay, { getSelectedWindowId: () => selectedWindowId })
 
     const attached = await mgr.attach(1)
     await flushTasks()
@@ -434,8 +442,8 @@ describe('accio browser relay tab manager', () => {
         params: {
           sessionId: attached?.sessionId,
           tabId: 1,
-          windowId: null,
-          active: false,
+          windowId: 11,
+          active: true,
           targetKey: 'vtab:browser-instance:1',
           targetId: attached?.targetId,
           reason: 'debugger-unhealthy',
@@ -448,5 +456,55 @@ describe('accio browser relay tab manager', () => {
     await flushTasks()
 
     expect(mgr.get(1)?.state).toBe('connected')
+  })
+
+  it('keeps a canceled tab visible, blocks passive reattach, and allows explicit reattach', async () => {
+    const sendToRelay = vi.fn()
+    const TabManager = await loadTabManager()
+    const mgr = new TabManager(sendToRelay, { getSelectedWindowId: () => selectedWindowId })
+
+    const attached = await mgr.attach(1)
+    await flushTasks()
+    sendToRelay.mockClear()
+
+    await mgr.onDebuggerDetach({ tabId: 1 }, 'canceled_by_user')
+    await flushTasks()
+
+    expect(mgr.has(1)).toBe(true)
+    expect(mgr.get(1)).toMatchObject({
+      state: 'virtual',
+      sessionId: attached?.sessionId,
+      targetId: 'vtab:browser-instance:1',
+      windowId: 11,
+    })
+    expect(mgr.isAutoAttachBlocked(1)).toBe(true)
+    expect(sendToRelay).toHaveBeenCalledWith({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: attached?.sessionId,
+          tabId: 1,
+          windowId: 11,
+          active: true,
+          targetKey: 'vtab:browser-instance:1',
+          targetId: attached?.targetId,
+          reason: 'canceled_by_user',
+        },
+      },
+    })
+
+    expect(await mgr.attach(1)).toBeNull()
+    expect(attachDebugger).toHaveBeenCalledTimes(1)
+
+    attachDebugger.mockResolvedValueOnce({ realTargetId: 'target-1b' })
+    const reattached = await mgr.attach(1, { manual: true })
+    await flushTasks()
+
+    expect(reattached).toEqual({
+      sessionId: 'cb-tab:browser-instance:1',
+      targetId: 'target-1b',
+    })
+    expect(mgr.isAutoAttachBlocked(1)).toBe(false)
   })
 })
