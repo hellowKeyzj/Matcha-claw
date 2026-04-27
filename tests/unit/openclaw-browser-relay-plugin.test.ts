@@ -1317,11 +1317,12 @@ describe('openclaw browser relay plugin', () => {
     expect(helloAck).toMatchObject({
       method: 'Extension.helloAck',
       params: {
+        browserCount: 1,
         selectedBrowserInstanceId: 'browser-a',
-        selectedWindowId: 7,
+        selectedWindowId: null,
         selected: true,
         selectedBrowser: true,
-        selectedWindow: true,
+        selectedWindow: false,
       },
     })
 
@@ -1352,6 +1353,7 @@ describe('openclaw browser relay plugin', () => {
     })))
 
     await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(server!.status.selectedWindowId).toBe(7)
     expect(server!.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
 
     secondExtension.close()
@@ -1590,6 +1592,85 @@ describe('openclaw browser relay plugin', () => {
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
       selectedBrowserInstanceId: 'browser-a',
       selectedWindowId: 1,
+    })
+
+    extension.close()
+  })
+
+  it('clears a stale persisted window selection for the same browser until a live window is rediscovered', async () => {
+    tempStateDir = await ensureTempStateDir('matchaclaw-relay-selection-stale-same-browser-')
+    await writeRelaySelection(
+      {
+        selectedBrowserInstanceId: 'browser-a',
+        selectedWindowId: 7,
+      },
+      tempStateDir,
+    )
+
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKey = randomBytes(32)
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-same-browser-stale-window' },
+    })
+    await waitForOpen(extension)
+
+    const helloAckPromise = waitForMessage(extension)
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+
+    const helloAck = JSON.parse(decryptWireMessage(sessionKey, await helloAckPromise))
+    expect(helloAck).toMatchObject({
+      method: 'Extension.helloAck',
+      params: {
+        selectedBrowserInstanceId: 'browser-a',
+        selectedWindowId: null,
+        selected: true,
+        selectedBrowser: true,
+        selectedWindow: false,
+      },
+    })
+    expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server!.status.selectedWindowId).toBeNull()
+    await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
+      selectedBrowserInstanceId: 'browser-a',
+      selectedWindowId: null,
+    })
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 22,
+          windowId: 9,
+          active: true,
+          targetKey: 'vtab:browser-a:22',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server!.status.selectedWindowId).toBe(9)
+    await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
+      selectedBrowserInstanceId: 'browser-a',
+      selectedWindowId: 9,
     })
 
     extension.close()

@@ -153,6 +153,47 @@ async function getCurrentTabForSelectedWindow() {
   return activeTab
 }
 
+async function getSingleNormalWindowId() {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] }).catch(() => [])
+  const windowIds = windows
+    .map((entry) => entry?.id)
+    .filter((windowId) => Number.isInteger(windowId))
+  return windowIds.length === 1 ? windowIds[0] : null
+}
+
+async function applyExecutionWindowSelection(windowId, options = {}) {
+  const announce = options.announce !== false
+  mirrorSelectionState({
+    selectedBrowserInstanceId: currentBrowserInstanceId(),
+    selectedWindowId: windowId,
+  })
+  if (announce && isRelayConnected()) {
+    announceWindowSelection(windowId)
+  }
+  await syncSelectedBrowserCurrentTarget({ manual: true })
+}
+
+async function maybeAutoSelectCurrentBrowserWindow(params = {}) {
+  if (!isRelayConnected()) return false
+  if (currentSelectedWindowId() !== null) return false
+
+  const selectedBrowserInstanceId = currentSelectedBrowserInstanceId()
+  const browserCount = Number.isInteger(params.browserCount) ? params.browserCount : null
+
+  if (selectedBrowserInstanceId && !isCurrentBrowserSelected()) {
+    return false
+  }
+  if (!selectedBrowserInstanceId && browserCount !== 1) {
+    return false
+  }
+
+  const windowId = await getSingleNormalWindowId()
+  if (!Number.isInteger(windowId)) return false
+
+  await applyExecutionWindowSelection(windowId)
+  return true
+}
+
 async function syncSelectedBrowserCurrentTarget(options = {}) {
   const manual = options.manual === true
   await ensureRuntimeReady()
@@ -231,6 +272,9 @@ initRelay({
     await ensureRuntimeReady()
     if (msg?.method !== 'Extension.selectionChanged') return
     mirrorSelectionState(msg.params)
+    if (await maybeAutoSelectCurrentBrowserWindow(msg.params ?? {})) {
+      return
+    }
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
       await syncSelectedBrowserCurrentTarget({ manual: true })
     } else {
@@ -507,12 +551,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (!isRelayConnected()) {
           throw new Error('Relay not connected')
         }
-        mirrorSelectionState({
-          selectedBrowserInstanceId: currentBrowserInstanceId(),
-          selectedWindowId: windowId,
-        })
-        announceWindowSelection(windowId)
-        await syncSelectedBrowserCurrentTarget({ manual: true })
+        await applyExecutionWindowSelection(windowId)
         sendResponse({
           ok: true,
           selectedBrowserInstanceId: currentSelectedBrowserInstanceId(),

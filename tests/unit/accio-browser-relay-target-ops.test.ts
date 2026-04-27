@@ -6,6 +6,7 @@ const tabsGet = vi.fn()
 const tabsUpdate = vi.fn()
 const tabsRemove = vi.fn()
 const windowsCreate = vi.fn()
+const windowsGet = vi.fn()
 const windowsUpdate = vi.fn()
 
 describe('accio browser relay target ops', () => {
@@ -24,6 +25,7 @@ describe('accio browser relay target ops', () => {
       },
       windows: {
         create: windowsCreate,
+        get: windowsGet,
         update: windowsUpdate,
       },
       debugger: {
@@ -33,6 +35,7 @@ describe('accio browser relay target ops', () => {
   })
 
   it('creates a tab, navigates it in the attached page session, and returns the attached target without a second-stage open', async () => {
+    windowsGet.mockResolvedValue({ id: 9 })
     tabsCreate.mockResolvedValue({
       id: 123,
       windowId: 9,
@@ -115,6 +118,79 @@ describe('accio browser relay target ops', () => {
     })
     expect(result).toEqual({
       targetId: 'real-target-id',
+      retained: false,
+    })
+  })
+
+  it('falls back to an unscoped tab create when the selected window no longer exists', async () => {
+    windowsGet.mockRejectedValue(new Error('No window with id: 9'))
+    tabsCreate.mockResolvedValue({
+      id: 456,
+      windowId: 12,
+      url: 'about:blank',
+    })
+    tabsGet.mockResolvedValue({
+      id: 456,
+      windowId: 12,
+      active: false,
+      title: 'Opened Page',
+      url: 'https://example.com/fallback',
+    })
+    sendCommand.mockImplementation(async (_debuggee: unknown, method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.getFrameTree') {
+        return {
+          frameTree: {
+            frame: {
+              id: 'main-frame',
+              url: 'https://example.com/fallback',
+            },
+          },
+        }
+      }
+      if (method === 'Runtime.evaluate') {
+        return {
+          result: {
+            value: 'complete',
+          },
+        }
+      }
+      if (method === 'Page.navigate') {
+        expect(params).toEqual({ url: 'https://example.com/fallback' })
+      }
+      return {}
+    })
+
+    const { createTargetOps } = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/target-ops.js')
+    const mgr = {
+      retainedTabCount: 0,
+      markAgent: vi.fn(),
+      addToAgentGroup: vi.fn(async () => {}),
+      selectedWindowId: 9,
+      attach: vi.fn(async () => ({
+        sessionId: 'cb-tab:browser-a:456',
+        targetId: 'fallback-target-id',
+      })),
+      get: vi.fn(() => ({
+        sessionId: 'cb-tab:browser-a:456',
+        targetId: 'fallback-target-id',
+        windowId: 12,
+        active: false,
+        title: 'Opened Page',
+        url: 'about:blank',
+      })),
+      setActiveTab: vi.fn(),
+      announceCurrentTarget: vi.fn(),
+      updateTab: vi.fn(),
+    }
+
+    const { cdpCreateTarget } = createTargetOps(mgr as any)
+    const result = await cdpCreateTarget({ url: 'https://example.com/fallback' })
+
+    expect(tabsCreate).toHaveBeenCalledWith({ url: 'about:blank', active: false })
+    expect(windowsUpdate).toHaveBeenCalledWith(12, { focused: true })
+    expect(mgr.setActiveTab).toHaveBeenCalledWith(456, 12)
+    expect(result).toEqual({
+      targetId: 'fallback-target-id',
       retained: false,
     })
   })

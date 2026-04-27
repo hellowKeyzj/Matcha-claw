@@ -948,6 +948,7 @@ export class BrowserRelayServer {
           params: {
             status: 'ok',
             encrypted: true,
+            browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
             selected: this.selectedBrowserInstanceId === browserInstanceId,
@@ -1686,7 +1687,7 @@ export class BrowserRelayServer {
     }
 
     const knownWindowIds = this.getKnownWindowIdsForClient(client)
-    if (knownWindowIds.length === 0 || knownWindowIds.includes(this.selectedWindowId)) {
+    if (knownWindowIds.includes(this.selectedWindowId)) {
       return {
         browserInstanceId: client.browserInstanceId,
         windowId: this.selectedWindowId,
@@ -1979,6 +1980,7 @@ export class BrowserRelayServer {
         {
           method: 'Extension.selectionChanged',
           params: {
+            browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
             selected: client.browserInstanceId === this.selectedBrowserInstanceId,

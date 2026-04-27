@@ -132,6 +132,18 @@ async function navigateAttachedTab(tabId, requestedUrl) {
   return await waitForPageReady(debuggerSession, requestedUrl)
 }
 
+async function resolveCreateWindowId(selectedWindowId) {
+  if (!Number.isInteger(selectedWindowId) || typeof chrome.windows?.get !== 'function') {
+    return null
+  }
+  try {
+    const win = await chrome.windows.get(selectedWindowId)
+    return Number.isInteger(win?.id) ? win.id : null
+  } catch {
+    return null
+  }
+}
+
 export function createTargetOps(mgr) {
 
   async function cdpCreateTarget(params) {
@@ -159,7 +171,7 @@ export function createTargetOps(mgr) {
       tab = win.tabs?.[0]
       if (!tab?.id) throw new Error('Failed to create window')
     } else {
-      const selectedWindowId = mgr.selectedWindowId
+      const selectedWindowId = await resolveCreateWindowId(mgr.selectedWindowId)
       tab = await chrome.tabs.create({
         url: creationUrl,
         active: false,
