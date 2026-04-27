@@ -13,7 +13,7 @@ interface UseChatScrollInput {
 }
 
 type ScrollDirection = -1 | 0 | 1;
-type ScrollPhase = 'initial' | 'following' | 'detached';
+type ScrollPhase = 'initial' | 'following' | 'restoring' | 'detached';
 type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
 
 const SCROLL_IDLE_TIMEOUT_MS = 160;
@@ -46,6 +46,11 @@ interface PendingScopeTransition {
   anchor?: ViewportAnchor;
 }
 
+interface PendingAnchorRestore extends PendingScopeTransition {
+  mode: 'restore-anchor';
+  anchor: ViewportAnchor;
+}
+
 export function isChatViewportNearBottom(
   metrics: ChatViewportMetrics,
   thresholdPx: number,
@@ -59,6 +64,10 @@ export function computeBottomLockedScrollTopOnResize(
   nextMetrics: ChatViewportMetrics,
 ): number {
   return Math.max(0, nextMetrics.scrollHeight - nextMetrics.clientHeight);
+}
+
+function isBottomLockedPhase(phase: ScrollPhase): boolean {
+  return phase === 'initial' || phase === 'following';
 }
 
 function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetrics | null {
@@ -165,6 +174,7 @@ export function useChatScroll({
     new Map([[scrollScopeKey, 'initial']]),
   );
   const pendingScopeTransitionRef = useRef<PendingScopeTransition | null>(null);
+  const detachedViewportAnchorRef = useRef<ViewportAnchor | null>(null);
   const lastFollowViewportHeightRef = useRef<number | null>(null);
   const lastFollowViewportWidthRef = useRef<number | null>(null);
   const lastFollowScrollHeightRef = useRef<number | null>(null);
@@ -246,12 +256,58 @@ export function useChatScroll({
     return scrollPhaseBySessionRef.current.get(sessionKey) ?? 'initial';
   }, []);
 
+  const readPendingAnchorRestore = useCallback((scopeKey: string): PendingAnchorRestore | null => {
+    const pending = pendingScopeTransitionRef.current;
+    if (
+      !pending
+      || pending.targetScopeKey !== scopeKey
+      || pending.mode !== 'restore-anchor'
+      || !pending.anchor
+    ) {
+      return null;
+    }
+    return pending as PendingAnchorRestore;
+  }, []);
+
+  const cancelAnchorRestoreForScope = useCallback((scopeKey: string) => {
+    const pending = readPendingAnchorRestore(scopeKey);
+    if (!pending) {
+      return;
+    }
+    pendingScopeTransitionRef.current = null;
+    clearAnchorRestoreSchedule();
+  }, [clearAnchorRestoreSchedule, readPendingAnchorRestore]);
+
+  const clearDetachedViewportAnchor = useCallback(() => {
+    detachedViewportAnchorRef.current = null;
+  }, []);
+
+  const syncDetachedViewportAnchor = useCallback(() => {
+    detachedViewportAnchorRef.current = sampleViewportAnchor(viewportRef.current);
+    return detachedViewportAnchorRef.current;
+  }, [viewportRef]);
+
+  const scheduleProgrammaticScrollCleanup = useCallback((onComplete?: () => void) => {
+    const complete = () => {
+      programmaticScrollRef.current = false;
+      onComplete?.();
+    };
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(complete);
+      return;
+    }
+    setTimeout(complete, 16);
+  }, []);
+
   const writeScrollPhase = useCallback((sessionKey: string, nextPhase: ScrollPhase) => {
     scrollPhaseBySessionRef.current.set(sessionKey, nextPhase);
     if (sessionKey === scrollScopeKey) {
-      setBottomLocked(nextPhase !== 'detached');
+      setBottomLocked(isBottomLockedPhase(nextPhase));
+      if (nextPhase !== 'detached') {
+        clearDetachedViewportAnchor();
+      }
     }
-  }, [scrollScopeKey, setBottomLocked]);
+  }, [clearDetachedViewportAnchor, scrollScopeKey, setBottomLocked]);
 
   const markUserScrollActivity = useCallback((directionHint: ScrollDirection = 0) => {
     markChatScrollActivity();
@@ -296,16 +352,8 @@ export function useChatScroll({
     const nextScrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
     programmaticScrollRef.current = true;
     viewport.scrollTop = nextScrollTop;
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
-      });
-    } else {
-      setTimeout(() => {
-        programmaticScrollRef.current = false;
-      }, 16);
-    }
-  }, [enabled, viewportRef]);
+    scheduleProgrammaticScrollCleanup();
+  }, [enabled, scheduleProgrammaticScrollCleanup, viewportRef]);
 
   const syncFollowResizeSnapshot = useCallback(() => {
     const viewport = viewportRef.current;
@@ -359,17 +407,29 @@ export function useChatScroll({
     const delta = (targetRect.top - viewportRect.top) - anchor.offsetWithinViewport;
     programmaticScrollRef.current = true;
     viewport.scrollTop += delta;
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => {
-        programmaticScrollRef.current = false;
-      });
-    } else {
-      setTimeout(() => {
-        programmaticScrollRef.current = false;
-      }, 16);
-    }
+    scheduleProgrammaticScrollCleanup();
     return true;
-  }, [enabled, viewportRef]);
+  }, [enabled, scheduleProgrammaticScrollCleanup, viewportRef]);
+
+  const scheduleAnchorRestoreRetry = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (anchorRestoreRetryTimerRef.current != null) {
+      window.clearTimeout(anchorRestoreRetryTimerRef.current);
+    }
+    anchorRestoreRetryTimerRef.current = window.setTimeout(() => {
+      anchorRestoreRetryTimerRef.current = null;
+      if (readScrollPhase(scrollScopeKey) !== 'restoring') {
+        return;
+      }
+      const pending = readPendingAnchorRestore(scrollScopeKey);
+      if (!pending) {
+        return;
+      }
+      restoreViewportAnchor(pending.anchor);
+    }, ANCHOR_RESTORE_RETRY_MS);
+  }, [readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scrollScopeKey]);
 
   const scheduleInitialAlignRetry = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -419,13 +479,11 @@ export function useChatScroll({
   }, [clearInitialAlignSchedule, runInitialAlign]);
 
   const runAnchorRestore = useCallback(() => {
-    const pending = pendingScopeTransitionRef.current;
-    if (
-      !pending
-      || pending.targetScopeKey !== scrollScopeKey
-      || pending.mode !== 'restore-anchor'
-      || !pending.anchor
-    ) {
+    if (readScrollPhase(scrollScopeKey) !== 'restoring') {
+      return;
+    }
+    const pending = readPendingAnchorRestore(scrollScopeKey);
+    if (!pending) {
       return;
     }
     if (!hasRenderableChatRows(contentRef.current)) {
@@ -434,20 +492,8 @@ export function useChatScroll({
     if (!restoreViewportAnchor(pending.anchor)) {
       return;
     }
-    pendingScopeTransitionRef.current = null;
-    if (typeof window !== 'undefined') {
-      if (anchorRestoreRetryTimerRef.current != null) {
-        window.clearTimeout(anchorRestoreRetryTimerRef.current);
-      }
-      anchorRestoreRetryTimerRef.current = window.setTimeout(() => {
-        anchorRestoreRetryTimerRef.current = null;
-        if (readScrollPhase(scrollScopeKey) !== 'detached') {
-          return;
-        }
-        restoreViewportAnchor(pending.anchor!);
-      }, ANCHOR_RESTORE_RETRY_MS);
-    }
-  }, [contentRef, readScrollPhase, restoreViewportAnchor, scrollScopeKey]);
+    scheduleAnchorRestoreRetry();
+  }, [contentRef, readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scheduleAnchorRestoreRetry, scrollScopeKey]);
 
   const scheduleAnchorRestore = useCallback(() => {
     clearAnchorRestoreSchedule();
@@ -481,6 +527,7 @@ export function useChatScroll({
     wheelIntentUntilRef.current = 0;
     tailActivityOpenRef.current = tailActivityOpen;
     clearTailSettleTask();
+    clearDetachedViewportAnchor();
     setIsUserScrolling(false);
     setScrollDirection(0);
     setScrollEventSeq(0);
@@ -502,8 +549,7 @@ export function useChatScroll({
       && pendingTransition.mode === 'restore-anchor'
       && pendingTransition.anchor
     ) {
-      writeScrollPhase(scrollScopeKey, 'detached');
-      setBottomLocked(false);
+      writeScrollPhase(scrollScopeKey, 'restoring');
       scheduleAnchorRestore();
       return;
     }
@@ -524,7 +570,7 @@ export function useChatScroll({
       scheduleInitialAlign();
       return;
     }
-    setBottomLocked(existingPhase !== 'detached');
+    setBottomLocked(isBottomLockedPhase(existingPhase));
     if (existingPhase === 'initial') {
       scheduleInitialAlign();
     }
@@ -535,6 +581,7 @@ export function useChatScroll({
     scheduleInitialAlign,
     scheduleAnchorRestore,
     clearTailSettleTask,
+    clearDetachedViewportAnchor,
     enabled,
     scrollResetKey,
     scrollScopeKey,
@@ -631,12 +678,8 @@ export function useChatScroll({
       return;
     }
     const observer = new ResizeObserver(() => {
-      const pendingTransition = pendingScopeTransitionRef.current;
-      if (
-        pendingTransition
-        && pendingTransition.targetScopeKey === scrollScopeKey
-        && pendingTransition.mode === 'restore-anchor'
-      ) {
+      const pendingTransition = readPendingAnchorRestore(scrollScopeKey);
+      if (pendingTransition) {
         scheduleAnchorRestore();
         return;
       }
@@ -644,6 +687,17 @@ export function useChatScroll({
       if (phase === 'initial') {
         scheduleInitialAlign();
         syncFollowResizeSnapshot();
+        return;
+      }
+      if (phase === 'restoring') {
+        scheduleAnchorRestore();
+        return;
+      }
+      if (phase === 'detached') {
+        const anchor = detachedViewportAnchorRef.current ?? syncDetachedViewportAnchor();
+        if (anchor) {
+          restoreViewportAnchor(anchor);
+        }
         return;
       }
       const viewportMetrics = readViewportMetrics(viewportRef.current);
@@ -694,6 +748,7 @@ export function useChatScroll({
     scheduleAnchorRestore,
     armTailSettleTask,
     hasTailFollowWork,
+    syncDetachedViewportAnchor,
     scheduleInitialAlign,
     scrollScopeKey,
     scrollToBottom,
@@ -731,12 +786,14 @@ export function useChatScroll({
     }
 
     markUserScrollActivity(directionHint);
+    cancelAnchorRestoreForScope(scrollScopeKey);
     if (isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       writeScrollPhase(scrollScopeKey, 'following');
       return;
     }
     writeScrollPhase(scrollScopeKey, 'detached');
-  }, [enabled, hasActiveUserScrollIntent, markUserScrollActivity, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+    syncDetachedViewportAnchor();
+  }, [enabled, hasActiveUserScrollIntent, markUserScrollActivity, scrollScopeKey, stickyBottomThresholdPx, syncDetachedViewportAnchor, viewportRef, writeScrollPhase]);
 
   const handleViewportPointerDown = useCallback(() => {
     if (!enabled) {
@@ -748,9 +805,10 @@ export function useChatScroll({
       return;
     }
     if (!isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
+      cancelAnchorRestoreForScope(scrollScopeKey);
       writeScrollPhase(scrollScopeKey, 'detached');
     }
-  }, [enabled, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [cancelAnchorRestoreForScope, enabled, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
   const handleViewportTouchMove = useCallback<TouchEventHandler<HTMLDivElement>>(() => {
     if (!enabled) {
@@ -758,8 +816,9 @@ export function useChatScroll({
     }
     touchScrollActiveRef.current = true;
     markUserScrollActivity(scrollDirection === 0 ? -1 : scrollDirection);
+    cancelAnchorRestoreForScope(scrollScopeKey);
     writeScrollPhase(scrollScopeKey, 'detached');
-  }, [enabled, markUserScrollActivity, scrollDirection, scrollScopeKey, writeScrollPhase]);
+  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, scrollDirection, scrollScopeKey, writeScrollPhase]);
 
   const handleViewportWheel = useCallback((event?: { deltaY?: number }) => {
     if (!enabled) {
@@ -774,6 +833,7 @@ export function useChatScroll({
       directionHint = 1;
     }
     markUserScrollActivity(directionHint);
+    cancelAnchorRestoreForScope(scrollScopeKey);
     if (deltaY < 0) {
       writeScrollPhase(scrollScopeKey, 'detached');
       return;
@@ -782,7 +842,7 @@ export function useChatScroll({
     if (metrics && isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       writeScrollPhase(scrollScopeKey, 'following');
     }
-  }, [enabled, markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
   useLayoutEffect(() => {
     return () => {

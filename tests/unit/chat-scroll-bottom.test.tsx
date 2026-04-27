@@ -148,7 +148,7 @@ function renderChat() {
 
 function installViewportMetrics(
   viewport: HTMLDivElement,
-  metrics: { scrollHeight: number; clientHeight: number; scrollTop: number },
+  metrics: { scrollHeight: number; clientHeight: number; scrollTop: number; clientWidth?: number },
 ) {
   Object.defineProperty(viewport, 'scrollHeight', {
     configurable: true,
@@ -157,6 +157,10 @@ function installViewportMetrics(
   Object.defineProperty(viewport, 'clientHeight', {
     configurable: true,
     get: () => metrics.clientHeight,
+  });
+  Object.defineProperty(viewport, 'clientWidth', {
+    configurable: true,
+    get: () => metrics.clientWidth ?? 400,
   });
   Object.defineProperty(viewport, 'scrollTop', {
     configurable: true,
@@ -176,6 +180,43 @@ function installRowHeight(element: HTMLElement, height: number) {
       width: 400,
       height,
     }),
+  });
+}
+
+function installViewportRect(
+  viewport: HTMLDivElement,
+  metrics: { clientHeight: number; clientWidth?: number },
+) {
+  Object.defineProperty(viewport, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => DOMRect.fromRect({
+      x: 0,
+      y: 0,
+      width: metrics.clientWidth ?? 400,
+      height: metrics.clientHeight,
+    }),
+  });
+}
+
+function installVirtualRowLayout(
+  rowElements: HTMLElement[],
+  metrics: { scrollTop: number; clientWidth?: number },
+  rowHeights: number[],
+) {
+  let offsetTop = 0;
+  rowElements.forEach((element, index) => {
+    const rowTop = offsetTop;
+    const rowHeight = rowHeights[index] ?? 0;
+    offsetTop += rowHeight;
+    Object.defineProperty(element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => DOMRect.fromRect({
+        x: 0,
+        y: rowTop - metrics.scrollTop,
+        width: metrics.clientWidth ?? 400,
+        height: rowHeight,
+      }),
+    });
   });
 }
 
@@ -765,6 +806,98 @@ describe('chat 主线程滚动锁', () => {
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(420);
+    });
+  });
+
+  it('静态线程脱离锁底后，上方消息因 resize 重排增高时应保持当前阅读锚点', async () => {
+    useChatStore.setState({
+      sessionsByKey: {
+        'agent:test:main': {
+          transcript: [
+            {
+              role: 'user',
+              content: 'message-1',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-2',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-3',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-2',
+            },
+          ],
+          meta: {
+            label: null,
+            lastActivityAt: Date.now(),
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            assistantOverlay: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
+    } as never);
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
+    expect(rowElements.length).toBeGreaterThanOrEqual(2);
+    const initialRowHeights = [100, 300, ...Array.from({ length: Math.max(0, rowElements.length - 2) }, () => 80)];
+    const resizedRowHeights = [160, 300, ...Array.from({ length: Math.max(0, rowElements.length - 2) }, () => 80)];
+    const metrics = {
+      scrollHeight: initialRowHeights.reduce((sum, height) => sum + height, 0),
+      clientHeight: 120,
+      clientWidth: 400,
+      scrollTop: 0,
+    };
+    installViewportMetrics(viewport, metrics);
+    installViewportRect(viewport, metrics);
+    installVirtualRowLayout(rowElements, metrics, initialRowHeights);
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(metrics.scrollHeight - metrics.clientHeight);
+    });
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 150;
+      fireEvent.scroll(viewport);
+    });
+
+    act(() => {
+      metrics.clientWidth = 320;
+      metrics.scrollHeight = resizedRowHeights.reduce((sum, height) => sum + height, 0);
+      installViewportRect(viewport, metrics);
+      installVirtualRowLayout(rowElements, metrics, resizedRowHeights);
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(210);
     });
   });
 
