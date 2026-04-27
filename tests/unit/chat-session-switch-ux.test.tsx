@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -224,6 +224,15 @@ function installViewportMetrics(
   });
 }
 
+function getVisibleChatViewport(container: HTMLElement): HTMLDivElement {
+  const viewport = Array.from(container.querySelectorAll<HTMLDivElement>('.overflow-y-auto'))
+    .find((element) => !element.closest('.hidden'));
+  if (!viewport) {
+    throw new Error('visible chat viewport not found');
+  }
+  return viewport;
+}
+
 function installChatLayoutMetrics(
   container: HTMLElement,
   viewport: HTMLDivElement,
@@ -303,7 +312,7 @@ describe('chat 会话切换 UX', () => {
 
   it('切会话时应直接贴到底部，而不是等旧虚拟列表命令', async () => {
     const { container } = renderChat();
-    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const viewport = getVisibleChatViewport(container);
     const metrics = {
       scrollHeight: 900,
       clientHeight: 320,
@@ -314,11 +323,53 @@ describe('chat 会话切换 UX', () => {
     act(() => {
       metrics.scrollHeight = 760;
       useChatStore.getState().switchSession('agent:another:main');
+      installViewportMetrics(getVisibleChatViewport(container), metrics);
       triggerResizeObserver?.();
     });
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(440);
+    });
+  });
+
+  it('live 会话切走再切回时，应回到底部最新消息而不是保留旧阅读位置', async () => {
+    const { container } = renderChat();
+    let viewport = getVisibleChatViewport(container);
+    const metrics = {
+      scrollHeight: 900,
+      clientHeight: 320,
+      scrollTop: 0,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(580);
+    });
+
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 240;
+      fireEvent.scroll(viewport);
+    });
+
+    act(() => {
+      metrics.scrollHeight = 760;
+      useChatStore.getState().switchSession('agent:another:main');
+      viewport = getVisibleChatViewport(container);
+      installViewportMetrics(viewport, metrics);
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      metrics.scrollHeight = 900;
+      useChatStore.getState().switchSession('agent:test:main');
+      viewport = getVisibleChatViewport(container);
+      installViewportMetrics(viewport, metrics);
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(580);
     });
   });
 

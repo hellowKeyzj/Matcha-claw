@@ -180,6 +180,7 @@ function renderChat() {
 function installViewportMetrics(
   viewport: HTMLDivElement,
   metrics: { scrollHeight: number; clientHeight: number; scrollTop: number },
+  options?: { onScrollTopSet?: (value: number) => void },
 ) {
   Object.defineProperty(viewport, 'scrollHeight', {
     configurable: true,
@@ -194,8 +195,18 @@ function installViewportMetrics(
     get: () => metrics.scrollTop,
     set: (value: number) => {
       metrics.scrollTop = value;
+      options?.onScrollTopSet?.(value);
     },
   });
+}
+
+function getVisibleChatViewport(container: HTMLElement): HTMLDivElement {
+  const viewport = Array.from(container.querySelectorAll<HTMLDivElement>('.overflow-y-auto'))
+    .find((element) => !element.closest('.hidden'));
+  if (!viewport) {
+    throw new Error('visible chat viewport not found');
+  }
+  return viewport;
 }
 
 function installDynamicLayoutMetrics(
@@ -636,5 +647,120 @@ describe('chat 历史投影切换', () => {
     });
 
     expect(screen.queryByText('session message 1')).toBeNull();
+  });
+
+  it('history cache 过渡到远端完整历史前，不应因为固定延时重试再次改写滚动位置', async () => {
+    const currentSessionKey = 'agent:test-history-retry:main';
+    const anotherSessionKey = 'agent:test-history-retry:secondary';
+    const currentMessages = buildSessionMessages(35);
+    const currentHistoryMessages = currentMessages;
+    const immediateRpc = vi.fn(async (method: string, params?: unknown) => {
+      if (method === 'sessions.get') {
+        const key = (params as { key?: string } | undefined)?.key;
+        if (key === currentSessionKey) {
+          return { messages: currentHistoryMessages };
+        }
+        if (key === anotherSessionKey) {
+          return { messages: buildSessionMessages(12, 'another history') };
+        }
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      return {};
+    });
+
+    setupStores({
+      currentMessages,
+      currentHistoryMessages,
+      currentSessionKey,
+      anotherSessionKey,
+    });
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: immediateRpc,
+    } as never);
+
+    const { container } = renderChat();
+    let viewport = getVisibleChatViewport(container);
+    const metrics = {
+      scrollHeight: 30 * 88,
+      clientHeight: 320,
+      scrollTop: 176,
+    };
+    const scrollTopWrites: number[] = [];
+    let restoreLayoutMetrics = installDynamicLayoutMetrics(viewport, metrics);
+    installViewportMetrics(viewport, metrics, {
+      onScrollTopSet: (value) => {
+        scrollTopWrites.push(value);
+      },
+    });
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+      await waitFor(() => {
+        expect(screen.getByText('session message 1')).toBeInTheDocument();
+      });
+
+      act(() => {
+        useChatStore.getState().switchSession(anotherSessionKey);
+      });
+      await waitFor(() => {
+        expect(screen.getByText('another live message')).toBeInTheDocument();
+      });
+
+      act(() => {
+        useChatStore.getState().switchSession(currentSessionKey);
+      });
+      await waitFor(() => {
+        expect(screen.queryByText('session message 1')).toBeNull();
+      });
+
+      const delayedRpc = vi.fn(async (method: string, params?: unknown) => {
+        if (method === 'sessions.get') {
+          const key = (params as { key?: string } | undefined)?.key;
+          if (key === currentSessionKey) {
+            return await new Promise<{ messages: typeof currentHistoryMessages }>(() => {});
+          }
+          if (key === anotherSessionKey) {
+            return { messages: buildSessionMessages(12, 'another history') };
+          }
+        }
+        if (method === 'chat.history') {
+          return { messages: [] };
+        }
+        return {};
+      });
+      act(() => {
+        useGatewayStore.setState({
+          status: { state: 'running', port: 18789 },
+          rpc: delayedRpc,
+        } as never);
+      });
+
+      viewport = getVisibleChatViewport(container);
+      restoreLayoutMetrics();
+      restoreLayoutMetrics = installDynamicLayoutMetrics(viewport, metrics);
+      scrollTopWrites.length = 0;
+      installViewportMetrics(viewport, metrics, {
+        onScrollTopSet: (value) => {
+          scrollTopWrites.push(value);
+        },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('session message 1')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 220));
+      });
+
+      expect(scrollTopWrites).toHaveLength(1);
+    } finally {
+      restoreLayoutMetrics();
+    }
   });
 });

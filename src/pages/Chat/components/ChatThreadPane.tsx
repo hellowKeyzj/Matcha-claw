@@ -51,6 +51,7 @@ interface ChatThreadPaneProps {
   readProjection: ReadProjection;
   historyMessages: RawMessage[];
   historyLoading: boolean;
+  historyTransitionPending: boolean;
   agents: ThreadAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
@@ -75,6 +76,7 @@ interface ChatSessionThreadHostProps {
   readProjection: ReadProjection;
   historyMessages: RawMessage[];
   historyLoading: boolean;
+  historyTransitionPending: boolean;
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   agents: ThreadAgent[];
@@ -324,6 +326,7 @@ function ChatSessionThreadHost({
     readProjection,
     historyMessages,
     historyLoading,
+    historyTransitionPending,
     isGatewayRunning,
     gatewayRpc,
     agents,
@@ -349,6 +352,7 @@ function ChatSessionThreadHost({
 
   const projectionScopeKey = `${sessionKey}::${readProjection}`;
   const liveScopeKey = `${sessionKey}::live`;
+  const scrollActivationKey = visible ? projectionScopeKey : `${sessionKey}::hidden`;
   const isHistoryProjection = readProjection === 'history';
   const projectionMessages = isHistoryProjection ? historyMessages : canonicalMessages;
   const runtimeStreamingTools = isHistoryProjection ? EMPTY_STREAMING_TOOLS : (sessionRuntime?.streamingTools ?? EMPTY_STREAMING_TOOLS);
@@ -512,8 +516,10 @@ function ChatSessionThreadHost({
   } = useChatListCtl({
     enabled,
     scrollScopeKey: projectionScopeKey,
+    scrollActivationKey,
     scrollResetKey: sessionKey,
     autoFollowSignal,
+    scopeRestorePending: isHistoryProjection && historyTransitionPending,
     tailActivityOpen,
     messagesViewportRef,
     messageContentRef,
@@ -607,6 +613,7 @@ export const ChatThreadPane = forwardRef<ChatThreadPaneHandle, ChatThreadPanePro
     readProjection,
     historyMessages,
     historyLoading,
+    historyTransitionPending,
     agents,
     isGatewayRunning,
     gatewayRpc,
@@ -713,6 +720,7 @@ export const ChatThreadPane = forwardRef<ChatThreadPaneHandle, ChatThreadPanePro
             readProjection={visible ? readProjection : 'live'}
             historyMessages={visible && readProjection === 'history' ? historyMessages : []}
             historyLoading={visible && readProjection === 'history' ? historyLoading : false}
+            historyTransitionPending={visible && readProjection === 'history' ? historyTransitionPending : false}
             isGatewayRunning={isGatewayRunning}
             gatewayRpc={gatewayRpc}
             agents={stableAgents}

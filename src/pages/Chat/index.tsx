@@ -181,6 +181,7 @@ export function Chat({ isActive = true }: ChatProps) {
       readProjection={projection.readProjection}
       historyMessages={projection.messages}
       historyLoading={projection.loading}
+      historyTransitionPending={projection.historyTransitionPending}
       agents={agents}
       isGatewayRunning={isGatewayRunning}
       gatewayRpc={gatewayRpc}
