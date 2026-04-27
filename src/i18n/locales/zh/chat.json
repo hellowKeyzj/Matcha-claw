@@ -22,7 +22,8 @@
         "hideThinking": "隐藏思考过程"
     },
     "liveThread": {
-        "viewFullHistory": "查看历史"
+        "viewFullHistory": "查看历史",
+        "jumpToBottom": "跳到底部"
     },
     "status": {
         "refreshing": "正在刷新...",

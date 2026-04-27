@@ -862,6 +862,29 @@ export function useChatScroll({
     }
   }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
 
+  const jumpToBottom = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
+    cancelAnchorRestoreForScope(scrollScopeKey);
+    clearTailSettleTask();
+    writeScrollPhase(scrollScopeKey, 'following');
+    scrollToBottom();
+    syncFollowResizeSnapshot();
+    if (!tailActivityOpenRef.current) {
+      armTailSettleTask();
+    }
+  }, [
+    armTailSettleTask,
+    cancelAnchorRestoreForScope,
+    clearTailSettleTask,
+    enabled,
+    scrollScopeKey,
+    scrollToBottom,
+    syncFollowResizeSnapshot,
+    writeScrollPhase,
+  ]);
+
   useLayoutEffect(() => {
     return () => {
       clearScrollIdleTimer();
@@ -921,6 +944,7 @@ export function useChatScroll({
         mode: 'force-bottom',
       };
     },
+    jumpToBottom,
     isBottomLocked,
     isUserScrolling,
     scrollIdle: !isUserScrolling,

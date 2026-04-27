@@ -22,7 +22,8 @@
         "hideThinking": "Hide thinking"
     },
     "liveThread": {
-        "viewFullHistory": "View history"
+        "viewFullHistory": "View history",
+        "jumpToBottom": "Jump to bottom"
     },
     "status": {
         "refreshing": "Refreshing...",

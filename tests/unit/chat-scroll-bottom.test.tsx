@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -597,6 +597,66 @@ describe('chat 主线程滚动锁', () => {
       const nextRowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
       installRowHeight(nextRowElements[0]!, 120);
       installRowHeight(nextRowElements[1]!, 140);
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(1000);
+    });
+  });
+
+  it('用户上滑脱离贴底后，点击按钮应立即跳到底部并恢复跟随', async () => {
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 980,
+      clientHeight: 320,
+      scrollTop: 660,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 420;
+      fireEvent.scroll(viewport);
+    });
+
+    const jumpButton = await screen.findByRole('button', { name: 'Jump to bottom' });
+    fireEvent.click(jumpButton);
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(660);
+    });
+
+    act(() => {
+      metrics.scrollHeight = 1320;
+      useChatStore.setState({
+        sessionsByKey: {
+          'agent:test:main': {
+            ...useChatStore.getState().sessionsByKey['agent:test:main'],
+            runtime: {
+              ...useChatStore.getState().sessionsByKey['agent:test:main']!.runtime,
+              assistantOverlay: createAssistantOverlay({
+                runId: 'run-1',
+                messageId: 'assistant-1',
+                sourceMessage: {
+                  id: 'assistant-1',
+                  role: 'assistant',
+                  content: 'first chunk second chunk',
+                  timestamp: Date.now() / 1000,
+                },
+                committedText: 'first chunk second chunk',
+                targetText: 'first chunk second chunk',
+                status: 'streaming',
+              }),
+            },
+          },
+        },
+      } as never);
       triggerResizeObserver?.();
     });
 
