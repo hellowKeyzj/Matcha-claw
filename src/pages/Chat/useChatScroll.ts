@@ -26,6 +26,7 @@ interface ChatViewportMetrics {
   scrollHeight: number;
   scrollTop: number;
   clientHeight: number;
+  clientWidth: number;
 }
 
 interface ViewportAnchor {
@@ -68,6 +69,7 @@ function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetri
     scrollHeight: viewport.scrollHeight,
     scrollTop: viewport.scrollTop,
     clientHeight: viewport.clientHeight,
+    clientWidth: viewport.clientWidth,
   };
 }
 
@@ -164,6 +166,7 @@ export function useChatScroll({
   );
   const pendingScopeTransitionRef = useRef<PendingScopeTransition | null>(null);
   const lastFollowViewportHeightRef = useRef<number | null>(null);
+  const lastFollowViewportWidthRef = useRef<number | null>(null);
   const lastFollowScrollHeightRef = useRef<number | null>(null);
   const lastFollowTailMetricsRef = useRef<TailMessageMetrics | null>(null);
   const tailSettleTimerRef = useRef<number | null>(null);
@@ -307,6 +310,7 @@ export function useChatScroll({
   const syncFollowResizeSnapshot = useCallback(() => {
     const viewport = viewportRef.current;
     lastFollowViewportHeightRef.current = viewport?.clientHeight ?? null;
+    lastFollowViewportWidthRef.current = viewport?.clientWidth ?? null;
     lastFollowScrollHeightRef.current = viewport?.scrollHeight ?? null;
     lastFollowTailMetricsRef.current = sampleTailMessageMetrics(viewport);
   }, [viewportRef]);
@@ -481,6 +485,7 @@ export function useChatScroll({
     setScrollDirection(0);
     setScrollEventSeq(0);
     lastFollowViewportHeightRef.current = null;
+    lastFollowViewportWidthRef.current = null;
     lastFollowScrollHeightRef.current = null;
     lastFollowTailMetricsRef.current = null;
     const pendingTransition = pendingScopeTransitionRef.current;
@@ -654,15 +659,24 @@ export function useChatScroll({
         && lastFollowViewportHeightRef.current != null
         && viewportHeight !== lastFollowViewportHeightRef.current
       );
+      const viewportWidth = viewportRef.current?.clientWidth ?? null;
+      const viewportWidthChanged = (
+        viewportWidth != null
+        && lastFollowViewportWidthRef.current != null
+        && viewportWidth !== lastFollowViewportWidthRef.current
+      );
       const nextTailMetrics = sampleTailMessageMetrics(viewportRef.current);
       const tailMetricsChanged = hasTailResizeDelta(lastFollowTailMetricsRef.current, nextTailMetrics);
       lastFollowViewportHeightRef.current = viewportHeight;
+      lastFollowViewportWidthRef.current = viewportWidth;
       lastFollowScrollHeightRef.current = scrollHeight;
       lastFollowTailMetricsRef.current = nextTailMetrics;
-      if (phase === 'following' && hasTailFollowWork() && (scrollHeightChanged || viewportHeightChanged || tailMetricsChanged)) {
+      const layoutChanged = viewportHeightChanged || viewportWidthChanged;
+      const tailFollowChanged = hasTailFollowWork() && (scrollHeightChanged || tailMetricsChanged);
+      if (phase === 'following' && (layoutChanged || tailFollowChanged)) {
         scrollToBottom();
         syncFollowResizeSnapshot();
-        if (!tailActivityOpenRef.current) {
+        if (tailFollowChanged && !tailActivityOpenRef.current) {
           armTailSettleTask();
         }
       }

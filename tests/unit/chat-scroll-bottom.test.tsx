@@ -617,12 +617,154 @@ describe('chat 主线程滚动锁', () => {
     });
 
     act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
       metrics.scrollHeight = 1280;
       triggerResizeObserver?.();
     });
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(660);
+    });
+  });
+
+  it('锁底时窗口缩小导致 viewport 变矮，静态线程仍应保持贴底', async () => {
+    useChatStore.setState({
+      sessionsByKey: {
+        'agent:test:main': {
+          transcript: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'assistant body',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
+          meta: {
+            label: null,
+            lastActivityAt: Date.now(),
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            assistantOverlay: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
+    } as never);
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 980,
+      clientHeight: 320,
+      scrollTop: 0,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(660);
+    });
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      metrics.clientHeight = 220;
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(760);
+    });
+  });
+
+  it('静态线程脱离锁底后窗口缩小，不应被重新拉回到底部', async () => {
+    useChatStore.setState({
+      sessionsByKey: {
+        'agent:test:main': {
+          transcript: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'assistant body',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
+          meta: {
+            label: null,
+            lastActivityAt: Date.now(),
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            assistantOverlay: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
+    } as never);
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 980,
+      clientHeight: 320,
+      scrollTop: 0,
+    };
+    installViewportMetrics(viewport, metrics);
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(660);
+    });
+
+    act(() => {
+      triggerResizeObserver?.();
+    });
+
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 420;
+      fireEvent.scroll(viewport);
+    });
+
+    act(() => {
+      metrics.clientHeight = 220;
+      triggerResizeObserver?.();
+    });
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(420);
     });
   });
 
@@ -714,17 +856,19 @@ describe('chat 主线程滚动锁', () => {
       scrollHeight: 1000,
       clientHeight: 300,
       scrollTop: 690,
+      clientWidth: 800,
     }, 12)).toBe(true);
 
     expect(isChatViewportNearBottom({
       scrollHeight: 1000,
       clientHeight: 300,
       scrollTop: 650,
+      clientWidth: 800,
     }, 12)).toBe(false);
 
     expect(computeBottomLockedScrollTopOnResize(
-      { scrollHeight: 900, clientHeight: 300, scrollTop: 600 },
-      { scrollHeight: 1180, clientHeight: 320, scrollTop: 0 },
+      { scrollHeight: 900, clientHeight: 300, scrollTop: 600, clientWidth: 800 },
+      { scrollHeight: 1180, clientHeight: 320, scrollTop: 0, clientWidth: 800 },
     )).toBe(860);
   });
 });
