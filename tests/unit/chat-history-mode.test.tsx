@@ -65,9 +65,13 @@ function setupStores(options?: {
   currentMessages?: ReturnType<typeof buildSessionMessages>;
   currentHistoryMessages?: ReturnType<typeof buildSessionMessages>;
   sendMessage?: ReturnType<typeof vi.fn>;
+  currentSessionKey?: string;
+  anotherSessionKey?: string;
 }) {
   const currentMessages = options?.currentMessages ?? buildSessionMessages(35);
   const currentHistoryMessages = options?.currentHistoryMessages ?? currentMessages;
+  const currentSessionKey = options?.currentSessionKey ?? 'agent:test:main';
+  const anotherSessionKey = options?.anotherSessionKey ?? 'agent:another:main';
   const anotherLiveMessages = [
     {
       role: 'assistant',
@@ -82,10 +86,10 @@ function setupStores(options?: {
   const rpc = vi.fn(async (method: string, params?: unknown) => {
     if (method === 'sessions.get') {
       const key = (params as { key?: string } | undefined)?.key;
-      if (key === 'agent:test:main') {
+      if (key === currentSessionKey) {
         return { messages: currentHistoryMessages };
       }
-      if (key === 'agent:another:main') {
+      if (key === anotherSessionKey) {
         return { messages: buildSessionMessages(12, 'another history') };
       }
     }
@@ -134,19 +138,19 @@ function setupStores(options?: {
     error: null,
     pendingApprovalsBySession: {},
     sessions: [
-      { key: 'agent:test:main', displayName: 'agent:test:main' },
-      { key: 'agent:another:main', displayName: 'agent:another:main' },
+      { key: currentSessionKey, displayName: currentSessionKey },
+      { key: anotherSessionKey, displayName: anotherSessionKey },
     ],
-    currentSessionKey: 'agent:test:main',
+    currentSessionKey,
     sessionsByKey: {
-      'agent:test:main': buildSessionRecord({
+      [currentSessionKey]: buildSessionRecord({
         transcript: currentMessages,
         meta: {
           ready: true,
           lastActivityAt: Date.now(),
         },
       }),
-      'agent:another:main': buildSessionRecord({
+      [anotherSessionKey]: buildSessionRecord({
         transcript: anotherLiveMessages,
         meta: {
           ready: true,
@@ -488,6 +492,118 @@ describe('chat 历史投影切换', () => {
 
       await waitFor(() => {
         expect(screen.getByText('session message 1')).toBeInTheDocument();
+      });
+
+      metrics.scrollHeight = 35 * 88;
+      act(() => {
+        triggerResizeObserver?.();
+      });
+
+      await waitFor(() => {
+        expect(metrics.scrollTop).toBe(616);
+      });
+    } finally {
+      restoreLayoutMetrics();
+    }
+  });
+
+  it('history cache 缺少锚点消息时，刷新补齐前后都应持续使用原始 live 锚点', async () => {
+    const currentSessionKey = 'agent:test-history-anchor:main';
+    const anotherSessionKey = 'agent:test-history-anchor:secondary';
+    const currentMessages = buildSessionMessages(35);
+    const cachedHistoryMessages = currentMessages.filter((message) => message.id !== 'session-message-8');
+    setupStores({
+      currentMessages,
+      currentHistoryMessages: cachedHistoryMessages,
+      currentSessionKey,
+      anotherSessionKey,
+    });
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 30 * 88,
+      clientHeight: 320,
+      scrollTop: 176,
+    };
+    const restoreLayoutMetrics = installDynamicLayoutMetrics(viewport, metrics);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+
+      metrics.scrollHeight = 34 * 88;
+      act(() => {
+        triggerResizeObserver?.();
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('session message 1')).toBeInTheDocument();
+        expect(metrics.scrollTop).toBe(528);
+      });
+
+      act(() => {
+        useChatStore.getState().switchSession(anotherSessionKey);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('another live message')).toBeInTheDocument();
+      });
+
+      act(() => {
+        useChatStore.getState().switchSession(currentSessionKey);
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText('session message 1')).toBeNull();
+      });
+
+      metrics.scrollHeight = 30 * 88;
+      metrics.scrollTop = 176;
+
+      let resolveFullHistory: ((value: { messages: typeof currentMessages }) => void) | null = null;
+      const fullHistoryPromise = new Promise<{ messages: typeof currentMessages }>((resolve) => {
+        resolveFullHistory = resolve;
+      });
+      const refreshRpc = vi.fn(async (method: string, params?: unknown) => {
+        if (method === 'sessions.get') {
+          const key = (params as { key?: string } | undefined)?.key;
+          if (key === currentSessionKey) {
+            return fullHistoryPromise;
+          }
+          if (key === anotherSessionKey) {
+            return { messages: buildSessionMessages(12, 'another history') };
+          }
+        }
+        if (method === 'chat.history') {
+          return { messages: [] };
+        }
+        return {};
+      });
+      act(() => {
+        useGatewayStore.setState({
+          status: { state: 'running', port: 18789 },
+          rpc: refreshRpc,
+        } as never);
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'View history' }));
+
+      metrics.scrollHeight = 34 * 88;
+      act(() => {
+        triggerResizeObserver?.();
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText('session message 8')).toBeNull();
+        expect(metrics.scrollTop).toBe(528);
+      });
+
+      await act(async () => {
+        resolveFullHistory?.({ messages: currentMessages });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('session message 8')).toBeInTheDocument();
       });
 
       metrics.scrollHeight = 35 * 88;
