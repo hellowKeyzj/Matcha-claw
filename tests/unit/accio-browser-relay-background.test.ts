@@ -308,7 +308,7 @@ describe('accio browser relay background', () => {
     expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(11)
   })
 
-  it('does not auto-select the only normal window after relay connect', async () => {
+  it('auto-selects the only normal window when relay reports no current selection for a single browser instance', async () => {
     currentTabs = [
       { id: 31, url: 'https://example.com/only', title: 'Only Tab', windowId: 9, active: true },
     ]
@@ -316,16 +316,23 @@ describe('accio browser relay background', () => {
     await loadBackground()
     await flushTasks()
 
-    expect(relayCallbacks.onConnected).toBeTypeOf('function')
-    await relayCallbacks.onConnected?.()
+    expect(relayCallbacks.onControlMessage).toBeTypeOf('function')
+    await relayCallbacks.onControlMessage?.({
+      method: 'Extension.selectionChanged',
+      params: {
+        selectedBrowserInstanceId: null,
+        selectedWindowId: null,
+        browserCount: 1,
+      },
+    })
     await flushTasks()
 
-    expect(trySendToRelay).not.toHaveBeenCalledWith({
+    expect(trySendToRelay).toHaveBeenCalledWith({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 9 },
     })
-    expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
-    expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
+    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(31, { manual: true })
+    expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(31)
   })
 
   it('manual attach selects the tab window and promotes it to current target', async () => {
