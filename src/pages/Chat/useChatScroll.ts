@@ -4,8 +4,10 @@ import { markChatScrollActivity } from './chat-scroll-drain';
 interface UseChatScrollInput {
   enabled: boolean;
   scrollScopeKey: string;
+  scrollActivationKey: string;
   scrollResetKey: string;
   autoFollowSignal: string;
+  scopeRestorePending: boolean;
   tailActivityOpen: boolean;
   viewportRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
@@ -19,7 +21,6 @@ type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
 const SCROLL_IDLE_TIMEOUT_MS = 160;
 const WHEEL_INTENT_WINDOW_MS = 220;
 const INITIAL_ALIGN_RETRY_MS = 150;
-const ANCHOR_RESTORE_RETRY_MS = 150;
 const TAIL_SETTLE_IDLE_MS = 220;
 
 interface ChatViewportMetrics {
@@ -68,6 +69,10 @@ export function computeBottomLockedScrollTopOnResize(
 
 function isBottomLockedPhase(phase: ScrollPhase): boolean {
   return phase === 'initial' || phase === 'following';
+}
+
+function isLiveScrollScope(scopeKey: string): boolean {
+  return scopeKey.endsWith('::live');
 }
 
 function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetrics | null {
@@ -146,8 +151,10 @@ function hasTailResizeDelta(
 export function useChatScroll({
   enabled,
   scrollScopeKey,
+  scrollActivationKey,
   scrollResetKey,
   autoFollowSignal,
+  scopeRestorePending,
   tailActivityOpen,
   viewportRef,
   contentRef,
@@ -158,6 +165,7 @@ export function useChatScroll({
   const [scrollDirection, setScrollDirection] = useState<ScrollDirection>(0);
   const [scrollEventSeq, setScrollEventSeq] = useState(0);
   const isBottomLockedRef = useRef(true);
+  const lastScrollActivationKeyRef = useRef(scrollActivationKey);
   const lastScrollScopeKeyRef = useRef(scrollScopeKey);
   const lastScrollResetKeyRef = useRef(scrollResetKey);
   const programmaticScrollRef = useRef(false);
@@ -169,7 +177,6 @@ export function useChatScroll({
   const initialAlignFrameRef = useRef<number | null>(null);
   const initialAlignRetryTimerRef = useRef<number | null>(null);
   const anchorRestoreFrameRef = useRef<number | null>(null);
-  const anchorRestoreRetryTimerRef = useRef<number | null>(null);
   const scrollPhaseBySessionRef = useRef<Map<string, ScrollPhase>>(
     new Map([[scrollScopeKey, 'initial']]),
   );
@@ -221,12 +228,8 @@ export function useChatScroll({
       if (anchorRestoreFrameRef.current != null && typeof window.cancelAnimationFrame === 'function') {
         window.cancelAnimationFrame(anchorRestoreFrameRef.current);
       }
-      if (anchorRestoreRetryTimerRef.current != null) {
-        window.clearTimeout(anchorRestoreRetryTimerRef.current);
-      }
     }
     anchorRestoreFrameRef.current = null;
-    anchorRestoreRetryTimerRef.current = null;
   }, []);
 
   const clearTailSettleTask = useCallback(() => {
@@ -411,25 +414,15 @@ export function useChatScroll({
     return true;
   }, [enabled, scheduleProgrammaticScrollCleanup, viewportRef]);
 
-  const scheduleAnchorRestoreRetry = useCallback(() => {
-    if (typeof window === 'undefined') {
+  const finishAnchorRestore = useCallback(() => {
+    const pending = readPendingAnchorRestore(scrollScopeKey);
+    if (!pending) {
       return;
     }
-    if (anchorRestoreRetryTimerRef.current != null) {
-      window.clearTimeout(anchorRestoreRetryTimerRef.current);
-    }
-    anchorRestoreRetryTimerRef.current = window.setTimeout(() => {
-      anchorRestoreRetryTimerRef.current = null;
-      if (readScrollPhase(scrollScopeKey) !== 'restoring') {
-        return;
-      }
-      const pending = readPendingAnchorRestore(scrollScopeKey);
-      if (!pending) {
-        return;
-      }
-      restoreViewportAnchor(pending.anchor);
-    }, ANCHOR_RESTORE_RETRY_MS);
-  }, [readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scrollScopeKey]);
+    pendingScopeTransitionRef.current = null;
+    writeScrollPhase(scrollScopeKey, 'detached');
+    syncDetachedViewportAnchor();
+  }, [readPendingAnchorRestore, scrollScopeKey, syncDetachedViewportAnchor, writeScrollPhase]);
 
   const scheduleInitialAlignRetry = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -492,8 +485,10 @@ export function useChatScroll({
     if (!restoreViewportAnchor(pending.anchor)) {
       return;
     }
-    scheduleAnchorRestoreRetry();
-  }, [contentRef, readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scheduleAnchorRestoreRetry, scrollScopeKey]);
+    if (!scopeRestorePending) {
+      finishAnchorRestore();
+    }
+  }, [contentRef, finishAnchorRestore, readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scrollScopeKey, scopeRestorePending]);
 
   const scheduleAnchorRestore = useCallback(() => {
     clearAnchorRestoreSchedule();
@@ -508,12 +503,15 @@ export function useChatScroll({
   }, [clearAnchorRestoreSchedule, runAnchorRestore]);
 
   useLayoutEffect(() => {
+    const activationChanged = lastScrollActivationKeyRef.current !== scrollActivationKey;
+    lastScrollActivationKeyRef.current = scrollActivationKey;
+
     if (!enabled) {
       return;
     }
     const scopeChanged = lastScrollScopeKeyRef.current !== scrollScopeKey;
     const resetChanged = lastScrollResetKeyRef.current !== scrollResetKey;
-    if (!scopeChanged && !resetChanged) {
+    if (!activationChanged && !scopeChanged && !resetChanged) {
       return;
     }
     lastScrollScopeKeyRef.current = scrollScopeKey;
@@ -543,7 +541,7 @@ export function useChatScroll({
       return;
     }
     if (
-      scopeChanged
+      (scopeChanged || activationChanged)
       && pendingTransition
       && pendingTransition.targetScopeKey === scrollScopeKey
       && pendingTransition.mode === 'restore-anchor'
@@ -554,11 +552,17 @@ export function useChatScroll({
       return;
     }
     if (
-      scopeChanged
+      (scopeChanged || activationChanged)
       && pendingTransition
       && pendingTransition.targetScopeKey === scrollScopeKey
       && pendingTransition.mode === 'force-bottom'
     ) {
+      pendingScopeTransitionRef.current = null;
+      writeScrollPhase(scrollScopeKey, 'initial');
+      scheduleInitialAlign();
+      return;
+    }
+    if (activationChanged && isLiveScrollScope(scrollScopeKey)) {
       pendingScopeTransitionRef.current = null;
       writeScrollPhase(scrollScopeKey, 'initial');
       scheduleInitialAlign();
@@ -583,6 +587,7 @@ export function useChatScroll({
     clearTailSettleTask,
     clearDetachedViewportAnchor,
     enabled,
+    scrollActivationKey,
     scrollResetKey,
     scrollScopeKey,
     setBottomLocked,
@@ -646,6 +651,19 @@ export function useChatScroll({
     }
     scheduleInitialAlign();
   }, [contentElement, enabled, readScrollPhase, scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, viewportElement]);
+
+  useLayoutEffect(() => {
+    if (!enabled || scopeRestorePending) {
+      return;
+    }
+    if (readScrollPhase(scrollScopeKey) !== 'restoring') {
+      return;
+    }
+    if (!readPendingAnchorRestore(scrollScopeKey)) {
+      return;
+    }
+    scheduleAnchorRestore();
+  }, [enabled, readPendingAnchorRestore, readScrollPhase, scheduleAnchorRestore, scrollScopeKey, scopeRestorePending]);
 
   useLayoutEffect(() => {
     if (!enabled) {

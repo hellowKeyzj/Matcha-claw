@@ -44,6 +44,7 @@ interface UseChatProjectionResult {
   projectionScopeKey: string;
   isHistoryProjection: boolean;
   loading: boolean;
+  historyTransitionPending: boolean;
   error: string | null;
   messages: RawMessage[];
   enterHistory: () => void;
@@ -105,12 +106,14 @@ export function useChatProjection({
     messages: [],
     error: null,
   });
+  const [historyTransitionPending, setHistoryTransitionPending] = useState(false);
   const historyCacheRef = useRef<Map<string, HistoryCacheEntry>>(globalHistoryCache);
   const projectionCacheRef = useRef<HistoryProjectionCacheEntry | null>(null);
   const requestIdRef = useRef(0);
 
   useEffect(() => {
     requestIdRef.current += 1;
+    setHistoryTransitionPending(false);
     setReadProjection('live');
     setHistoryState({
       sessionKey: currentSessionKey,
@@ -122,6 +125,7 @@ export function useChatProjection({
 
   const returnToLive = useCallback(() => {
     requestIdRef.current += 1;
+    setHistoryTransitionPending(false);
     setReadProjection('live');
     setHistoryState((previous) => (
       previous.sessionKey === currentSessionKey
@@ -134,12 +138,14 @@ export function useChatProjection({
     sessionKey: string,
     requestId: number,
   ) => {
+    setHistoryTransitionPending(true);
     void fetchHistoryMessages(gatewayRpc, sessionKey)
       .then((messages) => {
         historyCacheRef.current.set(sessionKey, { messages });
         if (requestIdRef.current !== requestId) {
           return;
         }
+        setHistoryTransitionPending(false);
         setHistoryState({
           sessionKey,
           status: 'ready',
@@ -151,6 +157,7 @@ export function useChatProjection({
         if (requestIdRef.current !== requestId) {
           return;
         }
+        setHistoryTransitionPending(false);
         setHistoryState((previous) => ({
           sessionKey,
           status: previous.messages.length > 0 ? 'ready' : 'error',
@@ -217,6 +224,7 @@ export function useChatProjection({
     projectionScopeKey: `${currentSessionKey}::${readProjection}`,
     isHistoryProjection,
     loading: isHistoryProjection && historyState.sessionKey === currentSessionKey && historyState.status === 'loading',
+    historyTransitionPending: isHistoryProjection && historyState.sessionKey === currentSessionKey && historyTransitionPending,
     error: isHistoryProjection && historyState.sessionKey === currentSessionKey ? historyState.error : null,
     messages: projectionMessages,
     enterHistory,
