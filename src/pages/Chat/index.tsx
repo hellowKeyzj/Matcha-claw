@@ -192,6 +192,7 @@ export function Chat({ isActive = true }: ChatProps) {
       userAvatarDataUrl={userAvatarDataUrl}
       onEnterHistory={projection.enterHistory}
       viewFullHistoryLabel={t('liveThread.viewFullHistory')}
+      jumpToBottomLabel={t('liveThread.jumpToBottom')}
     />
   );
 

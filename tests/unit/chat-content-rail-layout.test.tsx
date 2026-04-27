@@ -35,6 +35,9 @@ describe('chat content rail layout', () => {
         showHistoryEntry={false}
         onViewHistory={vi.fn()}
         viewFullHistoryLabel="history"
+        showJumpToBottom={false}
+        onJumpToBottom={vi.fn()}
+        jumpToBottomLabel="Jump to bottom"
         showThinking={false}
         assistantAgentId="main"
         assistantAgentName="Main"
@@ -52,6 +55,50 @@ describe('chat content rail layout', () => {
     expect(classNames.some((value) => value.includes('max-w-4xl'))).toBe(false);
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadRail))).toBe(true);
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadViewportPadding))).toBe(true);
+  });
+
+  it('chat list exposes a jump-to-bottom button only when requested', () => {
+    const onJumpToBottom = vi.fn();
+
+    render(
+      <ChatList
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState={false}
+        showBlockingLoading={false}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        items={[{
+          key: 'row:1',
+          row: {
+            kind: 'message',
+            key: 'row:1',
+            message: {
+              id: 'message-1',
+              role: 'assistant',
+              content: 'hello',
+            },
+          },
+        } as never]}
+        showHistoryEntry={false}
+        onViewHistory={vi.fn()}
+        viewFullHistoryLabel="history"
+        showJumpToBottom
+        onJumpToBottom={onJumpToBottom}
+        jumpToBottomLabel="Jump to bottom"
+        showThinking={false}
+        assistantAgentId="main"
+        assistantAgentName="Main"
+        userAvatarImageUrl={null}
+        suppressedToolCardRowKeys={new Set<string>()}
+        onJumpToRowKey={vi.fn()}
+      />,
+    );
+
+    screen.getByRole('button', { name: 'Jump to bottom' }).click();
+    expect(onJumpToBottom).toHaveBeenCalledTimes(1);
   });
 
   it('chat input no longer wraps the composer in a fixed max-width rail', () => {

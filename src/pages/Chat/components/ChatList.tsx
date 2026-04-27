@@ -1,5 +1,7 @@
 import type { RefObject, TouchEventHandler, WheelEventHandler } from 'react';
+import { ArrowDown } from 'lucide-react';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { Button } from '@/components/ui/button';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import type { ChatRenderItem } from '../chat-render-items';
@@ -21,6 +23,9 @@ interface ChatListProps {
   showHistoryEntry: boolean;
   onViewHistory: () => void;
   viewFullHistoryLabel: string;
+  showJumpToBottom: boolean;
+  onJumpToBottom: () => void;
+  jumpToBottomLabel: string;
   showThinking: boolean;
   assistantAgentId: string;
   assistantAgentName: string;
@@ -44,6 +49,9 @@ export function ChatList({
   showHistoryEntry,
   onViewHistory,
   viewFullHistoryLabel,
+  showJumpToBottom,
+  onJumpToBottom,
+  jumpToBottomLabel,
   showThinking,
   assistantAgentId,
   assistantAgentName,
@@ -142,6 +150,19 @@ export function ChatList({
           )}
         </div>
       </div>
+      {showJumpToBottom ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          className="absolute bottom-4 right-4 z-10 h-10 w-10 border-border/70 bg-background/95 text-foreground shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/80"
+          onClick={onJumpToBottom}
+          aria-label={jumpToBottomLabel}
+          title={jumpToBottomLabel}
+        >
+          <ArrowDown className="h-4 w-4" />
+        </Button>
+      ) : null}
     </div>
   );
 }

@@ -22,7 +22,8 @@
         "hideThinking": "思考を非表示"
     },
     "liveThread": {
-        "viewFullHistory": "履歴を見る"
+        "viewFullHistory": "履歴を見る",
+        "jumpToBottom": "一番下へ移動"
     },
     "status": {
         "refreshing": "更新中...",

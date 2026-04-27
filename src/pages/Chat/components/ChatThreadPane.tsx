@@ -62,6 +62,7 @@ interface ChatThreadPaneProps {
   userAvatarDataUrl: string | null;
   onEnterHistory: () => void;
   viewFullHistoryLabel: string;
+  jumpToBottomLabel: string;
 }
 
 export interface ChatThreadPaneHandle {
@@ -87,6 +88,7 @@ interface ChatSessionThreadHostProps {
   mutating: boolean;
   onEnterHistory: () => void;
   viewFullHistoryLabel: string;
+  jumpToBottomLabel: string;
   onRegisterPrepareLiveBottomAlign: (sessionKey: string, prepare: (() => void) | null) => void;
 }
 
@@ -337,6 +339,7 @@ function ChatSessionThreadHost({
     mutating,
     onEnterHistory,
     viewFullHistoryLabel,
+    jumpToBottomLabel,
     onRegisterPrepareLiveBottomAlign,
   }: ChatSessionThreadHostProps) {
   const sessionRecord = useChatStore((state) => state.sessionsByKey[sessionKey]);
@@ -510,6 +513,8 @@ function ChatSessionThreadHost({
     handleViewportTouchMove,
     handleViewportWheel,
     handleViewportScroll,
+    jumpToBottom,
+    isBottomLocked,
     scrollToRowKey,
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
@@ -592,6 +597,9 @@ function ChatSessionThreadHost({
         showHistoryEntry={!isHistoryProjection && sessionKey === currentSessionKey && renderSnapshot.hiddenHistoryCount > 0}
         onViewHistory={handleViewHistory}
         viewFullHistoryLabel={viewFullHistoryLabel}
+        showJumpToBottom={!renderSnapshot.isEmptyState && !renderSnapshot.showBlockingLoading && !isBottomLocked}
+        onJumpToBottom={jumpToBottom}
+        jumpToBottomLabel={jumpToBottomLabel}
         showThinking={showThinking}
         assistantAgentId={assistantAgentId}
         assistantAgentName={assistantAgent?.name || assistantAgentId}
@@ -624,6 +632,7 @@ export const ChatThreadPane = forwardRef<ChatThreadPaneHandle, ChatThreadPanePro
     userAvatarDataUrl,
     onEnterHistory,
     viewFullHistoryLabel,
+    jumpToBottomLabel,
   },
   ref,
 ) {
@@ -731,6 +740,7 @@ export const ChatThreadPane = forwardRef<ChatThreadPaneHandle, ChatThreadPanePro
             mutating={visible ? mutating : false}
             onEnterHistory={onEnterHistory}
             viewFullHistoryLabel={viewFullHistoryLabel}
+            jumpToBottomLabel={jumpToBottomLabel}
             onRegisterPrepareLiveBottomAlign={handleRegisterPrepareLiveBottomAlign}
           />
         );
