@@ -1,9 +1,21 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 
 let playwrightModulePromise: Promise<any> | null = null
 const localRequire = createRequire(import.meta.url)
+
+type PlaywrightPackageJson = {
+  exports?: {
+    '.':
+      | string
+      | {
+        import?: string
+        default?: string
+      }
+  }
+}
 
 function resolveOpenClawRequire() {
   const entryCandidates = [
@@ -59,9 +71,9 @@ function resolveFromPnpmVirtualStore(): string | null {
       })
 
     for (const entry of entries) {
-      const entryPath = path.join(storeDir, entry, 'node_modules', 'playwright-core', 'index.js')
-      if (fs.existsSync(entryPath)) {
-        return entryPath
+      const packageDir = path.join(storeDir, entry, 'node_modules', 'playwright-core')
+      if (fs.existsSync(packageDir)) {
+        return packageDir
       }
     }
   }
@@ -69,7 +81,23 @@ function resolveFromPnpmVirtualStore(): string | null {
   return null
 }
 
-function resolvePlaywrightEntry(): string {
+function readPlaywrightImportEntry(packageDir: string): string {
+  const packageJsonPath = path.join(packageDir, 'package.json')
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as PlaywrightPackageJson
+  const rootExport = packageJson.exports?.['.']
+  const importEntry =
+    typeof rootExport === 'string'
+      ? rootExport
+      : typeof rootExport?.import === 'string'
+        ? rootExport.import
+        : typeof rootExport?.default === 'string'
+          ? rootExport.default
+          : './index.js'
+
+  return path.resolve(packageDir, importEntry)
+}
+
+function resolvePlaywrightPackageDir(): string {
   const requireCandidates = [
     localRequire,
     resolveOpenClawRequire(),
@@ -78,18 +106,37 @@ function resolvePlaywrightEntry(): string {
 
   for (const currentRequire of requireCandidates) {
     try {
-      return currentRequire.resolve('playwright-core')
+      return path.dirname(currentRequire.resolve('playwright-core/package.json'))
     } catch {
       // Try next resolution anchor.
     }
   }
 
-  const virtualStoreEntry = resolveFromPnpmVirtualStore()
-  if (virtualStoreEntry) {
-    return virtualStoreEntry
+  const virtualStorePackageDir = resolveFromPnpmVirtualStore()
+  if (virtualStorePackageDir) {
+    return virtualStorePackageDir
   }
 
   throw new Error(`Unable to resolve playwright-core from plugin runtime, OpenClaw runtime, or pnpm store (cwd=${process.cwd()})`)
+}
+
+export function resolvePlaywrightImportSpecifier(): string {
+  return pathToFileURL(readPlaywrightImportEntry(resolvePlaywrightPackageDir())).href
+}
+
+function normalizePlaywrightRuntime(moduleNamespace: any): any {
+  const runtime =
+    typeof moduleNamespace?.chromium?.connectOverCDP === 'function'
+      ? moduleNamespace
+      : typeof moduleNamespace?.default?.chromium?.connectOverCDP === 'function'
+        ? moduleNamespace.default
+        : null
+
+  if (!runtime) {
+    throw new Error('Failed to load playwright runtime: missing chromium.connectOverCDP')
+  }
+
+  return runtime
 }
 
 export async function loadPlaywrightCore(): Promise<any> {
@@ -98,8 +145,7 @@ export async function loadPlaywrightCore(): Promise<any> {
   }
 
   playwrightModulePromise = (async () => {
-    const playwrightEntry = resolvePlaywrightEntry()
-    return await import(playwrightEntry)
+    return normalizePlaywrightRuntime(await import(resolvePlaywrightImportSpecifier()))
   })()
 
   return await playwrightModulePromise

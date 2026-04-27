@@ -14,17 +14,18 @@ Connect the MatchaClaw agent to your Chrome browser so it can see and interact w
 1. Make sure MatchaClaw is running with browser control enabled
 2. Click the toolbar icon — badge shows **ON** when connected
 3. In the popup, click **Use This Window** for the browser window you want MatchaClaw to control
-4. Keep the page you want to use active in that selected window
+4. Keep the page you want to use visible in that selected window
 5. Send a browser-related query to MatchaClaw
-6. If you do not pass a `targetId`, MatchaClaw will only use that selected window's current active physical page
+6. If you do not pass a `targetId`, MatchaClaw will use that selected window's current attached page; `open` and `focus` also switch the browser window to that page automatically
 
 ## Default Target Semantics
 
 - Each extension connection is one `browserInstanceId` (one Chrome profile)
 - You explicitly choose one `windowId` with **Use This Window**
 - MatchaClaw persists that selection across desktop restarts
-- The default browser target is always: `selectedBrowserInstanceId + selectedWindowId + current active physical page`
-- If that window has no active attached physical page, browser execution fails fast instead of guessing another page
+- The default browser target is always: `selectedBrowserInstanceId + selectedWindowId + current attached page`
+- `open` and `focus` update that current page and bring it to the foreground, so the visible page and the automation page stay the same
+- If that window has no current attached page, browser execution fails fast instead of guessing another page
 - Passing an explicit `targetId` still overrides the default target
 
 ## File Structure
@@ -70,7 +71,7 @@ accio-browser-relay/
 - **Cancellable**: Mid-connection clicks properly abort and clean up
 - **Tab safety**: Agent can only close tabs it created
 - **Selected-window control**: Only the window you select becomes the default control target
-- **Active-page auto-attach**: The selected window's current active page is attached automatically
+- **Current-page auto-attach**: The selected window's current page is attached automatically and kept in sync with browser control
 - **Restart persistence**: The last selected window is restored after MatchaClaw restarts
 
 ## Troubleshooting

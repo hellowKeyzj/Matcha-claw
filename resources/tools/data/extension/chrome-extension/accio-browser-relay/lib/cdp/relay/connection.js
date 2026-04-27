@@ -24,6 +24,15 @@ import { getBrowserInstanceId } from '../../browser-instance.js'
 
 const log = createLogger('relay')
 
+function shouldTraceCdpMethod(method) {
+  return [
+    'Target.createTarget',
+    'Target.attachToTarget',
+    'Target.getTargetInfo',
+    'Target.setAutoAttach',
+  ].includes(method)
+}
+
 // Service Worker 启动时缓存版本号，避免运行期间磁盘 manifest 变化导致不一致
 const LOADED_VERSION = chrome.runtime.getManifest().version
 
@@ -650,10 +659,34 @@ async function onRelayMessage(rawText) {
   if (typeof msg?.id === 'number' && msg.method === 'forwardCDPCommand') {
     const cdpMethod = msg.params?.method || ''
     pushLog('↓', msg.method, cdpMethod)
+    if (shouldTraceCdpMethod(cdpMethod)) {
+      log.info('forwardCDPCommand received from desktop', {
+        id: msg.id,
+        method: cdpMethod,
+        sessionId: typeof msg.params?.sessionId === 'string' ? msg.params.sessionId : null,
+        targetId: typeof msg.params?.params?.targetId === 'string' ? msg.params.params.targetId : null,
+        url: typeof msg.params?.params?.url === 'string' ? msg.params.params.url : null,
+      })
+    }
     try {
       const result = await callbacks.onMessage(msg)
+      if (shouldTraceCdpMethod(cdpMethod)) {
+        log.info('forwardCDPCommand result to desktop', {
+          id: msg.id,
+          method: cdpMethod,
+          resultTargetId: typeof result?.targetId === 'string' ? result.targetId : null,
+          infoTargetId: typeof result?.targetInfo?.targetId === 'string' ? result.targetInfo.targetId : null,
+        })
+      }
       trySendToRelay({ id: msg.id, result })
     } catch (err) {
+      if (shouldTraceCdpMethod(cdpMethod)) {
+        log.warn('forwardCDPCommand failed', {
+          id: msg.id,
+          method: cdpMethod,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
       trySendToRelay({ id: msg.id, error: err instanceof Error ? err.message : String(err) })
     }
   }

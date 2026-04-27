@@ -36,6 +36,7 @@ class BrowserRelayRuntime {
     this.control = new BrowserControlService({
       logger,
       relay: server,
+      stateDir,
     })
   }
 

@@ -16,9 +16,25 @@ import {
   extExtractContent, extMarkElements, extClick, extInput,
 } from '../../content_script/extension-ops.js'
 import { RUNTIME_ENABLE_DELAY, CDP_COMMAND_TIMEOUT, withTimeout } from './utils.js'
+import { createLogger } from '../../logger.js'
 
 const MAX_QUEUE_DEPTH = 100
 const _tabQueues = new Map()
+const log = createLogger('dispatch')
+
+function shouldTraceMethod(method) {
+  return [
+    'Target.createTarget',
+    'Target.attachToTarget',
+    'Target.getTargetInfo',
+    'Target.setAutoAttach',
+    'Page.enable',
+    'Page.getFrameTree',
+    'Page.setLifecycleEventsEnabled',
+    'Runtime.enable',
+    'Log.enable',
+  ].includes(method)
+}
 
 function getTabQueue(tabId) {
   if (!tabId) return null
@@ -71,15 +87,15 @@ export function createDispatcher(mgr) {
 
   const { cdpCreateTarget, cdpCloseTarget, cdpCloseAllAgentTabs, cdpActivateTarget } = createTargetOps(mgr)
 
-  async function cdpRuntimeEnable(debuggee, params) {
+  async function cdpRuntimeEnable(debuggerSession, params) {
     try {
-      await chrome.debugger.sendCommand(debuggee, 'Runtime.disable')
+      await chrome.debugger.sendCommand(debuggerSession, 'Runtime.disable')
       await new Promise((r) => setTimeout(r, RUNTIME_ENABLE_DELAY))
     } catch (err) {
       console.debug('[matchaclaw-relay] Runtime.disable pre-step failed:', err)
     }
     return withTimeout(
-      chrome.debugger.sendCommand(debuggee, 'Runtime.enable', params),
+      chrome.debugger.sendCommand(debuggerSession, 'Runtime.enable', params),
       CDP_COMMAND_TIMEOUT,
       'Runtime.enable',
     )
@@ -92,9 +108,23 @@ export function createDispatcher(mgr) {
     const targetId = typeof params?.targetId === 'string' ? params.targetId : undefined
     const tabId = mgr.resolveTabId(sessionId, targetId)
 
+    if (shouldTraceMethod(method)) {
+      log.info('forwardCDPCommand received', {
+        method,
+        sessionId: sessionId || null,
+        targetId: targetId || null,
+        tabId,
+        url: typeof params?.url === 'string' ? params.url : null,
+      })
+    }
+
     return enqueueForTab(tabId, async () => {
       // ── Target.* commands (no tabId required for createTarget) ──
-      if (method === 'Target.createTarget') return cdpCreateTarget(params)
+      if (method === 'Target.createTarget') {
+        const result = await cdpCreateTarget(params)
+        log.info('forwardCDPCommand Target.createTarget result', result)
+        return result
+      }
       if (method === 'Target.closeAllAgentTabs') return cdpCloseAllAgentTabs()
 
       if (!tabId) throw new Error(`No attached tab for method ${method}`)
@@ -124,9 +154,6 @@ export function createDispatcher(mgr) {
 
       /** @type {chrome.debugger.DebuggerSession} */
       const debuggee = { tabId }
-
-      if (method === 'Runtime.enable') return cdpRuntimeEnable(debuggee, params)
-
       const tabState = mgr.get(tabId)
       const mainSessionId = tabState?.sessionId
       const debuggerSession =
@@ -134,11 +161,23 @@ export function createDispatcher(mgr) {
           ? { ...debuggee, sessionId }
           : debuggee
 
-      return withTimeout(
+      if (method === 'Runtime.enable') return cdpRuntimeEnable(debuggerSession, params)
+
+      const result = await withTimeout(
         chrome.debugger.sendCommand(debuggerSession, method, params),
         CDP_COMMAND_TIMEOUT,
         method,
       )
+      if (shouldTraceMethod(method)) {
+        log.info('forwardCDPCommand forwarded result', {
+          method,
+          sessionId: sessionId || null,
+          tabId,
+          resultTargetId: typeof result?.targetId === 'string' ? result.targetId : null,
+          infoTargetId: typeof result?.targetInfo?.targetId === 'string' ? result.targetInfo.targetId : null,
+        })
+      }
+      return result
     })
   }
 }

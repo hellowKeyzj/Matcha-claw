@@ -67,7 +67,6 @@ const browserRelayToolParameters = {
     target: { type: 'string', enum: ['node', 'sandbox', 'host'] },
     node: { type: 'string' },
     profile: { type: 'string' },
-    targetUrl: { type: 'string' },
     url: { type: 'string' },
     targetId: { type: 'string' },
     connectionMode: { type: 'string', enum: ['relay', 'direct-cdp'] },

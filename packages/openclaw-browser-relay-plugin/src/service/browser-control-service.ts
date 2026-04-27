@@ -13,10 +13,12 @@ import {
 import { BrowserTabState } from '../state/browser-tab-state.js'
 import { PlaywrightSession } from '../playwright/session.js'
 import { PlaywrightActions } from '../playwright/actions.js'
+import { InstalledProfileAutoLauncher } from '../browser-launch/installed-profile-auto-launcher.js'
 
 export type BrowserControlServiceOptions = {
   logger: PluginLogger
   relay: BrowserRelayServer
+  stateDir?: string
 }
 
 type BrowserActionParams = Record<string, unknown>
@@ -105,6 +107,7 @@ export class BrowserControlService {
   private readonly tabState = new BrowserTabState()
   private readonly session: PlaywrightSession
   private readonly actions: PlaywrightActions
+  private readonly autoLauncher: InstalledProfileAutoLauncher
 
   constructor(private readonly options: BrowserControlServiceOptions) {
     this.session = new PlaywrightSession(
@@ -117,9 +120,15 @@ export class BrowserControlService {
       }),
     )
     this.actions = new PlaywrightActions(this.session)
+    this.autoLauncher = new InstalledProfileAutoLauncher({
+      logger: options.logger,
+      relay: options.relay,
+      stateDir: options.stateDir,
+    })
   }
 
   async stop(): Promise<void> {
+    this.autoLauncher.stop()
     await this.session.closeConnections()
     this.tabState.reset()
   }
@@ -148,7 +157,7 @@ export class BrowserControlService {
   }
 
   getStatus(): BrowserActionResult {
-    this.syncRelayExecutionTarget()
+    this.syncRelayCurrentTarget()
     return {
       running: true,
       relayPort: this.options.relay.relayPort,
@@ -165,12 +174,24 @@ export class BrowserControlService {
   }
 
   private async handleRelayOrDirectAction(action: string, params: BrowserActionParams): Promise<BrowserActionResult> {
+    let autoLaunchError: Error | null = null
+    if (!this.options.relay.hasExtensionConnection && this.shouldAutoLaunchRelayAction(action)) {
+      try {
+        await this.autoLauncher.ensureRelayBrowserAvailable()
+      } catch (error) {
+        autoLaunchError = error instanceof Error ? error : new Error(String(error))
+      }
+    }
+
     if (this.options.relay.hasExtensionConnection) {
       return await this.handleRelayAction(action, params)
     }
 
     const directEndpoint = await this.resolveDirectEndpoint()
     if (!directEndpoint) {
+      if (autoLaunchError) {
+        throw autoLaunchError
+      }
       if (action === 'start' || action === 'status' || action === 'profiles') {
         return {
           ok: true,
@@ -194,8 +215,11 @@ export class BrowserControlService {
     return await this.handleDirectCdpAction(action, params, directEndpoint)
   }
 
-  private async handleRelayAction(action: string, params: BrowserActionParams): Promise<BrowserActionResult> {
-    this.syncRelayExecutionTarget()
+  private async handleRelayAction(
+    action: string,
+    params: BrowserActionParams,
+  ): Promise<BrowserActionResult> {
+    this.syncRelayCurrentTarget()
     const attachments = this.options.relay.listAttachments()
     const tabs = this.options.relay.listTabs()
     const relayPort = this.options.relay.relayPort
@@ -263,17 +287,33 @@ export class BrowserControlService {
     }
 
     if (action === 'open') {
-      const targetUrl = asString(params.targetUrl) ?? 'about:blank'
-      const created = await this.options.relay.openTarget(targetUrl)
-      const targetId = String(created.targetId)
+      const requestedUrl = this.resolveOpenUrl(params)
+      const created = await this.options.relay.openTarget(requestedUrl)
+      this.options.logger.warn?.(
+        `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
+      )
+      const attachedTarget = await this.options.relay.waitForAttachedTarget(String(created.targetId))
+      this.options.logger.warn?.(
+        `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}"`,
+      )
+      const targetId = attachedTarget.targetId
       const sessionKey = asString(params.sessionKey)
       this.tabState.registerTab(targetId, {
         retain: asBoolean(params.retain) === true,
         sessionKey,
       })
+      this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
-      this.options.relay.updateTargetUrl(targetId, targetUrl)
-      return { ok: true, targetId, url: targetUrl, title: '' }
+      const openedUrl = attachedTarget.url || requestedUrl
+      this.options.relay.updateTargetUrl(targetId, openedUrl)
+      await this.options.relay.selectExecutionWindowForTargetIfUnset(targetId)
+      return {
+        ok: true,
+        action: 'open',
+        targetId,
+        requestedUrl,
+        url: openedUrl,
+      }
     }
 
     if (action === 'focus') {
@@ -282,6 +322,7 @@ export class BrowserControlService {
         return { ok: false, error: 'targetId is required for action=focus' }
       }
       await this.options.relay.focusTarget(targetId)
+      this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       return { ok: true, targetId }
     }
@@ -360,9 +401,9 @@ export class BrowserControlService {
     }
 
     if (action === 'open') {
-      const targetUrl = asString(params.targetUrl) ?? 'about:blank'
+      const requestedUrl = this.resolveOpenUrl(params)
       const result = await this.session.sendBrowserCdpCommand(cdpUrl, 'Target.createTarget', {
-        url: targetUrl,
+        url: requestedUrl,
       }, 'direct-cdp')
       const targetId = String(result?.targetId ?? '').trim()
       if (!targetId) {
@@ -372,8 +413,15 @@ export class BrowserControlService {
         retain: asBoolean(params.retain) === true,
         sessionKey: asString(params.sessionKey),
       })
+      this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
-      return { ok: true, targetId, url: targetUrl, title: '' }
+      return {
+        ok: true,
+        action: 'open',
+        targetId,
+        requestedUrl,
+        url: requestedUrl,
+      }
     }
 
     if (action === 'focus') {
@@ -383,6 +431,7 @@ export class BrowserControlService {
       }
       const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
       await page.bringToFront()
+      this.tabState.setCurrentTarget(targetId)
       this.tabState.touchTab(targetId)
       return { ok: true, targetId }
     }
@@ -437,6 +486,10 @@ export class BrowserControlService {
     params: BrowserActionParams,
     connectionMode: ConnectionMode,
   ): Promise<BrowserActionResult> {
+    if (connectionMode === 'relay' && !this.options.relay.hasExtensionConnection) {
+      await this.autoLauncher.ensureRelayBrowserAvailable()
+    }
+
     const endpoint = connectionMode === 'direct-cdp'
       ? await this.resolveDirectEndpoint()
       : this.resolveRelayEndpoint()
@@ -450,10 +503,7 @@ export class BrowserControlService {
       }
     }
 
-    const targetId =
-      connectionMode === 'relay'
-        ? this.resolveExecutionTarget(asString(params.targetId))
-        : asString(params.targetId)
+    const targetId = this.resolveCurrentTarget(asString(params.targetId))
     const mode = connectionMode
     const cdpUrl = endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
@@ -463,15 +513,16 @@ export class BrowserControlService {
     }
 
     if (action === 'navigate') {
+      const url = requiredString(params.url, 'url')
       const result = await this.actions.navigate({
         cdpUrl,
         targetId,
         mode,
-        url: requiredString(params.targetUrl, 'targetUrl'),
+        url,
         timeoutMs: asNumber(params.timeoutMs),
         waitUntil: asString(params.waitUntil),
       })
-      return { ok: true, action: 'navigate', targetId, ...result }
+      return { ok: true, action: 'navigate', targetId, requestedUrl: url, ...result }
     }
 
     if (action === 'snapshot') {
@@ -763,6 +814,14 @@ export class BrowserControlService {
     return asString(params.connectionMode) === 'direct-cdp' ? 'direct-cdp' : 'relay'
   }
 
+  private resolveOpenUrl(params: BrowserActionParams): string {
+    return asString(params.url) ?? 'about:blank'
+  }
+
+  private shouldAutoLaunchRelayAction(action: string): boolean {
+    return action === 'start' || action === 'open'
+  }
+
   private resolveRelayEndpoint(): ResolvedCdpEndpoint | null {
     const relayPort = this.options.relay.relayPort
     if (!this.options.relay.hasExtensionConnection || relayPort === null) {
@@ -791,16 +850,17 @@ export class BrowserControlService {
         try {
           const connection = await this.session.connectBrowser(cdpUrl, 'direct-cdp')
           const browser = connection.browser
-          list = browser
+          const discoveredPages = browser
             .contexts()
             .flatMap((context: any) => context.pages())
-            .map((currentPage: any) => ({
-              targetId: currentPage?._delegate?._targetId ?? '',
+          list = (await Promise.all(
+            discoveredPages.map(async (currentPage: any) => ({
+              targetId: await this.session.resolvePageTargetId(currentPage) ?? '',
               url: currentPage.url(),
               title: '',
               type: 'page',
-            }))
-            .filter((entry: { targetId: string }) => entry.targetId)
+            })),
+          )).filter((entry: { targetId: string }) => entry.targetId)
         } catch {
           list = []
         }
@@ -824,28 +884,42 @@ export class BrowserControlService {
     return tabs
   }
 
-  private syncRelayExecutionTarget(): void {
-    const selected = this.options.relay.listAttachments().find((entry) => entry.selected && entry.primary)
-    if (!selected?.targetId || selected.windowId == null || selected.tabId == null) {
-      this.tabState.clearSelectedExecutionTarget()
+  private syncRelayCurrentTarget(): void {
+    const current = this.options.relay.listAttachments().find((entry) => entry.selected && entry.primary)
+    if (!current?.targetId) {
+      this.tabState.clearCurrentTarget()
       return
     }
-    this.tabState.setSelectedExecutionTarget({
-      browserInstanceId: selected.browserInstanceId,
-      windowId: selected.windowId,
-      tabId: selected.tabId,
-      targetId: selected.targetId,
-    })
+    this.tabState.setCurrentTarget(current.targetId)
   }
 
-  private resolveExecutionTarget(explicitTargetId?: string): string {
+  private resolveCurrentTarget(explicitTargetId?: string): string {
     if (explicitTargetId) return explicitTargetId
-    this.syncRelayExecutionTarget()
-    const selected = this.tabState.currentSelectedPhysicalTargetId
-    if (selected) {
-      return selected
+
+    if (this.options.relay.hasExtensionConnection) {
+      this.syncRelayCurrentTarget()
     }
-    throw new Error('No default browser target available. Select a window and keep its active page attached.')
+
+    const currentTargetId = this.tabState.currentTargetId
+    if (!currentTargetId) {
+      throw new Error('No current browser target available. Open or focus a page before using browser actions.')
+    }
+
+    if (!this.options.relay.hasExtensionConnection) {
+      return currentTargetId
+    }
+
+    const attached = this.options.relay.listAttachments().some((entry) => entry.targetId === currentTargetId)
+    if (attached) {
+      return currentTargetId
+    }
+
+    this.tabState.clearCurrentTarget(currentTargetId)
+    this.syncRelayCurrentTarget()
+    if (this.tabState.currentTargetId) {
+      return this.tabState.currentTargetId
+    }
+    throw new Error('No current browser target available. Open or focus a page before using browser actions.')
   }
 }
 
