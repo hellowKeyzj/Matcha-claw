@@ -42,7 +42,7 @@ accio-browser-relay/
 │   │   ├── target-ops.js      #   Target.* commands (create, close, activate tabs)
 │   │   ├── extension-ops.js   #   Extension.* virtual commands (viewport, content, elements, DOM)
 │   │   └── utils.js           #   Shared constants + withTimeout
-│   ├── tab-manager.js         # TabManager class — tab state, discovery, agent tracking, spinner
+│   ├── tab-manager.js         # TabManager class — tab state, discovery, agent tracking
 │   ├── debugger-attach.js     # Low-level chrome.debugger API operations
 │   ├── relay.js               # WebSocket relay connection management
 │   ├── constants.js           # Shared constants and enums
@@ -103,7 +103,6 @@ accio-browser-relay/
   "permissions": [
     "debugger",       // Chrome DevTools Protocol access (core functionality)
     "tabs",           // Query/create/update/remove tabs
-    "tabGroups",      // Manage tab groups (agent tab grouping + spinner)
     "windows",        // Create/focus windows for new tabs
     "activeTab",      // Access the currently active tab
     "scripting",      // Inject scripts for Extension.* commands (content, elements, click, input)

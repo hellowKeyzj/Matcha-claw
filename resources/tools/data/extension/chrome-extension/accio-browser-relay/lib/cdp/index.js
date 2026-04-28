@@ -2,7 +2,7 @@
  * CDP channel — Chrome DevTools Protocol relay infrastructure.
  *
  *   relay/              — WebSocket connection & state machine
- *   tabs/               — Tab lifecycle, discovery, idle detection, tab groups
+ *   tabs/               — Tab lifecycle, discovery, idle detection
  *   commands/           — CDP command routing & Target.* handlers
  *   events/             — CDP event interception (dialogs, security, page lifecycle)
  */

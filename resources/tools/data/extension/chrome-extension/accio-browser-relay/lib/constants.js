@@ -40,18 +40,3 @@ export const STATE_TEXT = {
   [RelayState.DISCONNECTED]: { label: 'Connecting…', detail: 'Relay is enabled. Trying to connect…' },
   [RelayState.CONNECTED]:    { label: 'Connected',   detail: 'Relay is active — agent can control your browser.' },
 }
-
-// ── Settings keys ──
-
-export const SETTINGS_KEYS = Object.freeze({
-  CLOSE_GROUP_ON_DISABLE: 'closeGroupOnDisable',
-})
-
-export async function getSetting(key, defaultValue = false) {
-  const stored = await chrome.storage.local.get([key])
-  return stored[key] ?? defaultValue
-}
-
-export async function setSetting(key, value) {
-  await chrome.storage.local.set({ [key]: value })
-}

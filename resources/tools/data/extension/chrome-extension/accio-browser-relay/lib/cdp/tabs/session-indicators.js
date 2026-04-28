@@ -1,13 +1,10 @@
 /**
- * Session activity indicators — spinner animation & idle tab detection.
+ * Session activity indicators — idle tab detection.
  *
- * Manages the visual "MatchaClaw Agent" tab-group spinner and automatically
- * detaches tabs that haven't received CDP commands for a configurable period.
+ * Automatically detaches tabs that haven't received CDP commands for a
+ * configurable period.
  *
  * Timer strategy (MV3 compatible):
- *   - Spinner uses setInterval (200 ms). This is acceptable because the spinner
- *     only runs while the relay WS is connected, which keeps the SW alive.
- *     When the WS disconnects, stop() is called and the timer is cleared.
  *   - Idle check uses chrome.alarms (30 s) to survive SW suspension.
  */
 
@@ -15,22 +12,14 @@ import { createLogger } from '../../logger.js'
 
 const log = createLogger('indicators')
 
-const SPINNER_FRAMES = ['\u280B', '\u2819', '\u2839', '\u2838', '\u283C', '\u2834', '\u2826', '\u2827', '\u2807', '\u280F']
 const IDLE_DETACH_MS = 5 * 60 * 1000
-const SPINNER_INTERVAL_MS = 200
-const GROUP_TITLE = 'MatchaClaw Agent'
 
 const ALARM_IDLE_CHECK = 'relayIdleCheck'
 
 export class SessionIndicators {
-  /** @type {number|null} */
-  #spinnerTimer = null
-  #spinnerIdx = 0
   /** @type {Map<number, number>} tabId → last CDP command timestamp */
   #lastCommandTime = new Map()
 
-  /** @type {() => number|null} */
-  #getGroupId
   /** @type {() => IterableIterator<[number, {state: string}]>} */
   #getTabEntries
   /** @type {(tabId: number, reason: string) => void} */
@@ -38,12 +27,10 @@ export class SessionIndicators {
 
   /**
    * @param {object} opts
-   * @param {() => number|null} opts.getGroupId — returns current agent group ID
    * @param {() => IterableIterator<[number, {state: string}]>} opts.getTabEntries — returns iterable of [tabId, entry]
    * @param {(tabId: number, reason: string) => void} opts.detachTab — detach callback
    */
-  constructor({ getGroupId, getTabEntries, detachTab }) {
-    this.#getGroupId = getGroupId
+  constructor({ getTabEntries, detachTab }) {
     this.#getTabEntries = getTabEntries
     this.#detachTab = detachTab
   }
@@ -71,17 +58,12 @@ export class SessionIndicators {
 
   start() {
     this.stop()
-    this.#spinnerIdx = 0
-    this.#spinnerTimer = setInterval(() => this.#tickSpinner(), SPINNER_INTERVAL_MS)
-    // 30 s idle check via alarm (survives SW suspension)
     chrome.alarms.create(ALARM_IDLE_CHECK, { periodInMinutes: 0.5 })
   }
 
   stop() {
-    if (this.#spinnerTimer) { clearInterval(this.#spinnerTimer); this.#spinnerTimer = null }
     chrome.alarms.clear(ALARM_IDLE_CHECK)
     this.#lastCommandTime.clear()
-    this.#resetGroupTitle()
   }
 
   /**
@@ -95,20 +77,6 @@ export class SessionIndicators {
       return true
     }
     return false
-  }
-
-  #tickSpinner() {
-    const groupId = this.#getGroupId()
-    if (groupId === null) return
-    const frame = SPINNER_FRAMES[this.#spinnerIdx % SPINNER_FRAMES.length]
-    this.#spinnerIdx++
-    chrome.tabGroups.update(groupId, { title: `${frame} ${GROUP_TITLE}` }).catch(() => {})
-  }
-
-  #resetGroupTitle() {
-    const groupId = this.#getGroupId()
-    if (groupId === null) return
-    chrome.tabGroups.update(groupId, { title: GROUP_TITLE }).catch(() => {})
   }
 
   #checkIdleTabs() {

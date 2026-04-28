@@ -9,7 +9,7 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["debugger", "tabs", "tabGroups", "windows", "activeTab", "scripting", "storage", "alarms", "notifications"],
+  "permissions": ["debugger", "tabs", "windows", "activeTab", "scripting", "storage", "alarms", "notifications"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": {

@@ -24,7 +24,6 @@ const initFromStorage = vi.fn(async () => {})
 const setRelayEnabled = vi.fn(async () => {})
 const handleConnectionAlarm = vi.fn(() => false)
 const resetReconnectBackoff = vi.fn()
-const getSetting = vi.fn(async () => false)
 const getBrowserInstanceId = vi.fn(async () => 'browser-a')
 const isRelayConnected = vi.fn(() => true)
 const isRelayActive = vi.fn(() => true)
@@ -108,10 +107,6 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
     DISCONNECTED: 'disconnected',
     CONNECTED: 'connected',
   },
-  SETTINGS_KEYS: {
-    CLOSE_GROUP_ON_DISABLE: 'closeGroupOnDisable',
-  },
-  getSetting,
 }))
 
 vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/logger.js', () => ({

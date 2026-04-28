@@ -83,7 +83,6 @@ describe('accio browser relay target ops', () => {
     const mgr = {
       retainedTabCount: 0,
       markAgent: vi.fn(),
-      addToAgentGroup: vi.fn(async () => {}),
       selectedWindowId: 9,
       attach: vi.fn(async () => ({
         sessionId: 'cb-tab:browser-a:123',
@@ -164,7 +163,6 @@ describe('accio browser relay target ops', () => {
     const mgr = {
       retainedTabCount: 0,
       markAgent: vi.fn(),
-      addToAgentGroup: vi.fn(async () => {}),
       selectedWindowId: 9,
       attach: vi.fn(async () => ({
         sessionId: 'cb-tab:browser-a:456',

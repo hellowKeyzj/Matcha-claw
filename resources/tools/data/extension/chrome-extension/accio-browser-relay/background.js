@@ -28,7 +28,7 @@ import {
   handleConnectionAlarm,
   resetReconnectBackoff,
 } from './lib/cdp/index.js'
-import { RelayState, SETTINGS_KEYS, getSetting } from './lib/constants.js'
+import { RelayState } from './lib/constants.js'
 import { createLogger, setDebug } from './lib/logger.js'
 import { getBrowserInstanceId } from './lib/browser-instance.js'
 
@@ -283,15 +283,8 @@ initRelay({
   },
   async onShutdown() {
     log.info('onShutdown callback: disabled')
-    let dissolveGroup = false
-    const shouldClose = await getSetting(SETTINGS_KEYS.CLOSE_GROUP_ON_DISABLE)
-    log.info('onShutdown: closeGroupOnDisable setting =', shouldClose)
-    if (shouldClose) {
-      log.info('onShutdown: dissolving agent tab group per user setting')
-      dissolveGroup = true
-    }
-    await mgr.shutdown({ dissolveGroup })
-    log.info('onShutdown: done, dissolveGroup =', dissolveGroup)
+    await mgr.shutdown()
+    log.info('onShutdown: done')
   },
   async onTransportClosed() {
     log.info('onTransportClosed callback')
