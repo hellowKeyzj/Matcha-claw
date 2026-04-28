@@ -26,7 +26,7 @@ type RelayMock = Pick<
   | 'listAttachments'
   | 'listTabs'
   | 'onExtensionConnected'
-  | 'waitForAttachedTarget'
+  | 'resolveReadyTarget'
   | 'selectExecutionWindowForTargetIfUnset'
   | 'updateTargetUrl'
 >
@@ -59,7 +59,7 @@ function createRelayMock(overrides: Omit<RelayMock, 'onExtensionConnected'>): Br
       selectedBrowserInstanceId: null,
       selectedWindowId: null,
     },
-    waitForAttachedTarget: async (targetId: string) => ({
+    resolveReadyTarget: async (targetId: string) => ({
       browserInstanceId: 'browser-a',
       browserName: 'browser-a',
       sessionId: 'browser-a|sid|session-opened',
@@ -69,6 +69,9 @@ function createRelayMock(overrides: Omit<RelayMock, 'onExtensionConnected'>): Br
       active: false,
       title: '',
       url: '',
+      mainFrameUrl: '',
+      readyState: 'complete',
+      executionContextReady: true,
     }),
     selectExecutionWindowForTargetIfUnset: async () => false,
     updateTargetUrl: () => {},
@@ -301,6 +304,120 @@ describe('browser relay service', () => {
         isAgent: true,
       }),
     ])
+
+    extensionWs.close()
+  })
+
+  it('keeps the opened page as current when current-target arrives before window selection finishes', async () => {
+    const relay = await startRelayServer()
+    service = new BrowserControlService({ logger, relay })
+    const snapshot = vi.fn(async (input: Record<string, unknown>) => ({
+      snapshot: 'opened-page',
+      refs: {},
+      stats: { lines: 1, chars: 11, refs: 0, interactive: 0 },
+      pageUrl: 'https://example.com/opened',
+      input,
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
+
+    const port = relay.port
+    const sessionKey = randomBytes(32)
+    const extensionWs = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test' },
+    })
+    await waitForOpen(extensionWs)
+
+    extensionWs.send(
+      JSON.stringify({
+        method: 'Extension.hello',
+        params: {
+          protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
+          encryptedSessionKey: encryptSessionKey(sessionKey),
+        },
+      }),
+    )
+    await waitForMessage(extensionWs)
+
+    const relayCommandPromise = waitForMessage(extensionWs)
+    const openPromise = service.handleRequest({
+      action: 'open',
+      url: 'https://example.com/opened',
+      sessionKey: 'agent:test',
+    })
+
+    const createTargetCommand = JSON.parse(decryptWireMessage(sessionKey, await relayCommandPromise))
+    expect(createTargetCommand.method).toBe('forwardCDPCommand')
+    expect(createTargetCommand.params.method).toBe('Target.createTarget')
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Target.attachedToTarget',
+            sessionId: 'session-opened',
+            params: {
+              sessionId: 'session-opened',
+              tabId: 1,
+              windowId: 1,
+              active: true,
+              targetKey: 'vtab:browser-a:1',
+              targetInfo: {
+                targetId: 'target-opened',
+                type: 'page',
+                title: 'Opened Page',
+                url: 'https://example.com/opened',
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'Extension.currentTargetChanged',
+          params: {
+            sessionId: 'session-opened',
+          },
+        }),
+      ),
+    )
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: createTargetCommand.id,
+          result: { targetId: 'target-opened' },
+        }),
+      ),
+    )
+
+    const openResult = await openPromise
+    expect(openResult).toMatchObject({
+      ok: true,
+      action: 'open',
+      targetId: 'browser-a|tid|target-opened',
+      requestedUrl: 'https://example.com/opened',
+      url: 'https://example.com/opened',
+    })
+
+    const snapshotResult = await service.handleRequest({ action: 'snapshot' })
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({
+      cdpUrl: `http://127.0.0.1:${port}`,
+      targetId: 'browser-a|tid|target-opened',
+      mode: 'relay',
+    }))
+    expect(snapshotResult).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|target-opened',
+      url: 'https://example.com/opened',
+    })
 
     extensionWs.close()
   })
@@ -575,7 +692,7 @@ describe('browser relay service', () => {
         },
         listAttachments: () => [],
         listTabs: () => [],
-        waitForAttachedTarget: async (targetId: string) => ({
+        resolveReadyTarget: async (targetId: string) => ({
           browserInstanceId: 'browser-a',
           browserName: 'browser-a',
           sessionId: 'browser-a|sid|session-opened',
@@ -585,6 +702,9 @@ describe('browser relay service', () => {
           active: true,
           title: 'Opened Page',
           url: 'https://example.com/opened',
+          mainFrameUrl: 'https://example.com/opened',
+          readyState: 'complete',
+          executionContextReady: true,
         }),
         selectExecutionWindowForTargetIfUnset,
       }),
@@ -626,7 +746,7 @@ describe('browser relay service', () => {
         },
         listAttachments: () => [],
         listTabs: () => [],
-        waitForAttachedTarget: async (targetId: string) => ({
+        resolveReadyTarget: async (targetId: string) => ({
           browserInstanceId: 'browser-a',
           browserName: 'browser-a',
           sessionId: 'browser-a|sid|session-opened',
@@ -636,6 +756,9 @@ describe('browser relay service', () => {
           active: true,
           title: 'Opened Page',
           url: 'https://example.com/opened',
+          mainFrameUrl: 'https://example.com/opened',
+          readyState: 'complete',
+          executionContextReady: true,
         }),
         selectExecutionWindowForTargetIfUnset,
       }),
@@ -666,7 +789,10 @@ describe('browser relay service', () => {
 
     expect(result).toMatchObject({
       ok: false,
+      errorCode: 'no_current_target',
       error: 'No current browser target available. Open or focus a page before using browser actions.',
+      recoverable: true,
+      suggestedNextActions: ['tabs', 'open', 'focus'],
     })
   })
 
@@ -717,7 +843,120 @@ describe('browser relay service', () => {
 
     expect(result).toMatchObject({
       ok: false,
+      errorCode: 'no_current_target',
       error: 'No current browser target available. Open or focus a page before using browser actions.',
+      recoverable: true,
+      suggestedNextActions: ['tabs', 'open', 'focus'],
+    })
+  })
+
+  it('does not fall back to a virtual tab when the current physical relay target disappears', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 1,
+            tabId: 11,
+            active: true,
+            sessionId: 'browser-a|sid|page-a',
+            targetKey: 'browser-a|tid|vtab:browser-a:11',
+            targetId: '',
+            title: 'Virtual Page',
+            url: 'https://example.com/virtual',
+            physical: false,
+            ready: false,
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+      }),
+    })
+
+    ;(service as any).tabState.setCurrentTarget('browser-a|tid|old-physical-target')
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'no_current_target',
+      error: 'No current browser target available. Open or focus a page before using browser actions.',
+    })
+  })
+
+  it('returns structured browser-unavailable metadata when tabs has no control channel to query', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: false,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+      }),
+    })
+
+    ;(service as any).resolveDirectEndpoint = async () => null
+
+    const result = await service.handleRequest({ action: 'tabs' })
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'browser_unavailable',
+      error: 'Browser extension not connected and no direct CDP browser detected.',
+      recoverable: true,
+      suggestedNextActions: ['start', 'open'],
+    })
+  })
+
+  it('returns structured stale-snapshot metadata when the requested ref no longer exists', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      }),
+    })
+
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = vi.fn(async () => {
+      throw new Error('Unknown ref "e9". Run a new snapshot and use a ref from that snapshot.')
+    })
+
+    const result = await service.handleRequest({ action: 'snapshot', ref: 'e9' })
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'stale_snapshot_ref',
+      error: 'Unknown ref "e9". Run a new snapshot and use a ref from that snapshot.',
+      recoverable: true,
+      suggestedNextActions: ['snapshot'],
     })
   })
 
