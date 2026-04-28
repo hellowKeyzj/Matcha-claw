@@ -1,4 +1,4 @@
-import { RelayState, STATE_TEXT, RELAY_PORT_OFFSET, clampPort, computeRelayPort, SETTINGS_KEYS, getSetting, setSetting } from '../../lib/constants.js'
+import { RelayState, STATE_TEXT, RELAY_PORT_OFFSET, clampPort, computeRelayPort } from '../../lib/constants.js'
 
 // ── DOM refs ──
 
@@ -260,22 +260,9 @@ setInterval(() => {
   void refreshTabList()
 }, FALLBACK_POLL_MS)
 
-// ── Close group on disable setting ──
-
-const closeGroupToggle = document.getElementById('closeGroupOnDisable')
-
-async function loadCloseGroupSetting() {
-  closeGroupToggle.checked = await getSetting(SETTINGS_KEYS.CLOSE_GROUP_ON_DISABLE, false)
-}
-
-closeGroupToggle.addEventListener('change', () => {
-  void setSetting(SETTINGS_KEYS.CLOSE_GROUP_ON_DISABLE, closeGroupToggle.checked)
-})
-
 // ── Init ──
 
 void loadPort()
-void loadCloseGroupSetting()
 void queryBackgroundStatus()
 void refreshTabList()
 void refreshLogs()

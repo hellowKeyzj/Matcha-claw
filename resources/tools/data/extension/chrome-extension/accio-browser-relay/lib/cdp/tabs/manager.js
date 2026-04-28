@@ -16,15 +16,13 @@
  *   Target.detachedFromTarget      — physical debugger detached (Playwright sees this)
  *
  * Delegates to:
- *   SessionIndicators  — spinner animation + idle tab detection
- *   AgentGroupManager  — Chrome tab group management
+ *   SessionIndicators  — idle tab detection
  */
 
 import { TabType } from '../../constants.js'
 import { createLogger } from '../../logger.js'
 import { attachDebugger, detachDebugger, detachAll } from './debugger-attach.js'
 import { SessionIndicators } from './session-indicators.js'
-import { AgentGroupManager } from './agent-group.js'
 import { cleanupTabQueue, cleanupAllTabQueues } from '../commands/dispatch.js'
 import { interceptEvent } from '../events/index.js'
 
@@ -89,8 +87,6 @@ export class TabManager {
 
   /** @type {SessionIndicators} */
   #indicators
-  /** @type {AgentGroupManager} */
-  #group
 
   /**
    * @param {(payload: any) => void} sendToRelay — fire-and-forget relay send function
@@ -103,9 +99,7 @@ export class TabManager {
     this.#getSelectedWindowId = typeof options.getSelectedWindowId === 'function'
       ? options.getSelectedWindowId
       : () => null
-    this.#group = new AgentGroupManager()
     this.#indicators = new SessionIndicators({
-      getGroupId: () => this.#group.groupId,
       getTabEntries: () => this.#tabs.entries(),
       detachTab: (tabId, reason) => void this.detach(tabId, reason),
     })
@@ -213,9 +207,6 @@ export class TabManager {
           const tabId = Number(id)
           if (Number.isInteger(tabId) && tabId > 0) this.#autoAttachBlocked.add(tabId)
         }
-
-        await this.#group.restore(snapshot.groupId)
-        await this.#restoreAgentGroupMembership(currentById)
       } catch (err) {
         log.warn('restoreState failed:', err)
       }
@@ -294,32 +285,10 @@ export class TabManager {
       const entry = this.#tabs.get(tabId)
       if (entry) this.#emitAttached(entry)
     }
-
-    await this.#restoreAgentGroupMembership(currentById)
     this.#schedulePersist()
   }
 
-  // ── Tab group ──
-
-  async addToAgentGroup(tabId) {
-    await this.#group.addTab(tabId)
-    this.#schedulePersist()
-  }
-
-  async dissolveAgentGroup() {
-    const agentIds = new Set(this.#agentTabs.keys())
-    await this.#group.dissolve(agentIds)
-  }
-
-  /**
-   * Atomic shutdown: optionally dissolve agent group, then clear all state.
-   * Dissolution runs BEFORE clearAll() so that the groupId and agentTabs
-   * are still available for deciding which tabs to close vs ungroup.
-   */
-  async shutdown({ dissolveGroup = false } = {}) {
-    if (dissolveGroup) {
-      await this.dissolveAgentGroup()
-    }
+  async shutdown() {
     return this.clearAll()
   }
 
@@ -711,7 +680,6 @@ export class TabManager {
     void chrome.storage.session.remove(TAB_MANAGER_STATE_KEY).catch(() => {})
     this.#agentTabs.clear()
     this.#retainedCount = 0
-    this.#group.reset()
     this.#indicators.clear()
     cleanupAllTabQueues()
 
@@ -810,9 +778,6 @@ export class TabManager {
         this.#schedulePersist()
         return
       }
-      if (agentType !== undefined && replacementTab) {
-        await this.#group.addTab(addedTabId)
-      }
       if (replacementTab) {
         this.discover(addedTabId, replacementTab.url, replacementTab.title)
       }
@@ -830,10 +795,6 @@ export class TabManager {
       this.deleteAgent(addedTabId)
       this.#schedulePersist()
       return
-    }
-
-    if (agentType !== undefined) {
-      await this.#group.addTab(addedTabId)
     }
 
     if (wasPhysical) {
@@ -909,14 +870,6 @@ export class TabManager {
         windowId: entry.windowId ?? null,
       },
     })
-  }
-
-  async #restoreAgentGroupMembership(currentById) {
-    if (this.#agentTabs.size === 0) return
-    for (const tabId of this.#agentTabs.keys()) {
-      if (!currentById.has(tabId)) continue
-      await this.#group.addTab(tabId)
-    }
   }
 
   async #recoverPhysicalConnection(tabId, entry) {
@@ -1239,7 +1192,6 @@ export class TabManager {
       })),
       agentTabs: [...this.#agentTabs.entries()].map(([tabId, type]) => ({ tabId, type })),
       autoAttachBlocked: [...this.#autoAttachBlocked],
-      groupId: this.#group.groupId,
     }
     await chrome.storage.session.set({ [TAB_MANAGER_STATE_KEY]: snapshot })
   }

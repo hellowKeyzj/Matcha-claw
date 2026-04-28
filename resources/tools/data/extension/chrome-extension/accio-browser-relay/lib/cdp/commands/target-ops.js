@@ -186,9 +186,6 @@ export function createTargetOps(mgr) {
       pendingUrl: tab.url ?? creationUrl,
     })
     mgr.markAgent(tab.id, retain)
-    if (!createInWindow) {
-      await mgr.addToAgentGroup(tab.id)
-    }
     await new Promise((r) => setTimeout(r, TARGET_CREATE_DELAY))
     const attached = await mgr.attach(tab.id, { manual: true })
     if (!attached) {

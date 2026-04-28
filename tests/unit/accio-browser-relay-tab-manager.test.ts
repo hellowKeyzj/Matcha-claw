@@ -6,9 +6,6 @@ const detachAll = vi.fn(async () => [])
 const cleanupTabQueue = vi.fn()
 const cleanupAllTabQueues = vi.fn()
 const interceptEvent = vi.fn(() => ({}))
-const groupRestore = vi.fn()
-const groupAddTab = vi.fn()
-const groupDissolve = vi.fn()
 
 vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/debugger-attach.js', () => ({
   attachDebugger,
@@ -34,33 +31,6 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
     start() {}
     stop() {}
     handleAlarm() { return false }
-  },
-}))
-
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/agent-group.js', () => ({
-  AgentGroupManager: class {
-    currentGroupId: number | null = null
-
-    get groupId() { return this.currentGroupId }
-
-    reset() {
-      this.currentGroupId = null
-    }
-
-    async restore(groupId?: number | null) {
-      this.currentGroupId = Number.isInteger(groupId) ? Number(groupId) : null
-      await groupRestore(groupId)
-    }
-
-    async addTab(tabId: number) {
-      if (this.currentGroupId === null) this.currentGroupId = 9001
-      await groupAddTab(tabId)
-    }
-
-    async dissolve(...args: unknown[]) {
-      this.currentGroupId = null
-      await groupDissolve(...args)
-    }
   },
 }))
 
@@ -98,7 +68,6 @@ type StoredTabManagerState = {
     type: string
   }>
   autoAttachBlocked?: number[]
-  groupId?: number | null
 }
 
 let selectedWindowId = 11
@@ -125,9 +94,6 @@ beforeEach(() => {
 
   attachDebugger.mockResolvedValue({ realTargetId: 'target-1' })
   debuggerSendCommand.mockReset()
-  groupRestore.mockReset()
-  groupAddTab.mockReset()
-  groupDissolve.mockReset()
 
   Object.assign(globalThis, {
     chrome: {
@@ -262,7 +228,6 @@ describe('accio browser relay tab manager', () => {
       ],
       agentTabs: [{ tabId: 2, type: 'agent' }],
       autoAttachBlocked: [],
-      groupId: 77,
     }
 
     debuggerSendCommand.mockImplementation(async ({ tabId }: { tabId: number }) => {
@@ -293,8 +258,6 @@ describe('accio browser relay tab manager', () => {
       targetKey: 'vtab:browser-instance:2',
       targetId: 'target-2',
     })
-    expect(groupRestore).toHaveBeenCalledWith(77)
-    expect(groupAddTab).toHaveBeenCalledWith(2)
     expect(sendToRelay).toHaveBeenCalledWith({
       method: 'forwardCDPEvent',
       params: {
@@ -337,7 +300,7 @@ describe('accio browser relay tab manager', () => {
       },
     })
     const snapshot = sessionState.accio_tabManagerState as StoredTabManagerState | undefined
-    expect(snapshot?.groupId).toBe(77)
+    expect(snapshot?.agentTabs).toEqual([{ tabId: 2, type: 'agent' }])
   })
 
   it('moves tracked state across chrome.tabs.onReplaced and auto-recovers the debugger session', async () => {
@@ -366,7 +329,6 @@ describe('accio browser relay tab manager', () => {
     expect(mgr.get(3)?.sessionId).toBe(attached?.sessionId)
     expect(mgr.isAgent(3)).toBe(true)
     expect(mgr.isAgent(1)).toBe(false)
-    expect(groupAddTab).toHaveBeenCalledWith(3)
 
     attachDebugger.mockResolvedValueOnce({ realTargetId: 'target-3' })
     vi.setSystemTime(new Date('2026-04-25T00:00:01.500Z'))
