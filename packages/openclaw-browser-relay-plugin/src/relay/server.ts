@@ -25,6 +25,7 @@ const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 const SESSION_ID_MARKER = '|sid|'
 const TARGET_ID_MARKER = '|tid|'
 const BROWSER_SESSION_ID_MARKER = '|bsid|'
+const ATTACHED_SESSION_ID_MARKER = '|asid|'
 
 type RelayTargetInfo = {
   targetId: string
@@ -51,6 +52,13 @@ type ConnectedTarget = {
   tabId: number | null
   active: boolean
   physical: boolean
+  mainFrameUrl: string
+  readyState: string
+  executionContextReady: boolean
+  bootstrapPrimed: boolean
+  lastLifecycleEvent: Record<string, unknown> | null
+  lastExecutionContextCreated: Record<string, unknown> | null
+  lastTargetInfoChanged: Record<string, unknown> | null
 }
 
 type PendingExtensionRequest = {
@@ -72,6 +80,18 @@ type CdpClientState = {
 
 type BrowserSession = {
   browserInstanceId: string
+  cdpClient: WebSocket
+}
+
+type AttachedClientSession = {
+  attachSessionId: string
+  browserInstanceId: string
+  cdpClient: WebSocket
+  physicalSessionId: string
+  localPhysicalSessionId: string
+  targetId: string
+  localTargetId: string
+  autoAttached: boolean
 }
 
 type RelayHelloParams = {
@@ -125,6 +145,12 @@ export type AttachedRelayTarget = {
   active: boolean
   title: string
   url: string
+}
+
+export type ReadyRelayTarget = AttachedRelayTarget & {
+  mainFrameUrl: string
+  readyState: string
+  executionContextReady: boolean
 }
 
 function isLoopback(remoteAddress?: string | null): boolean {
@@ -229,6 +255,10 @@ function encodeExternalBrowserSessionId(browserInstanceId: string, localSessionI
   return `${browserInstanceId}${BROWSER_SESSION_ID_MARKER}${localSessionId}`
 }
 
+function encodeExternalAttachedSessionId(browserInstanceId: string, localSessionId: string): string {
+  return `${browserInstanceId}${ATTACHED_SESSION_ID_MARKER}${localSessionId}`
+}
+
 function parseExternalBrowserSessionId(value?: string): { browserInstanceId: string; localSessionId: string } | null {
   if (!value) return null
   const parsed = parseExternalId(value, BROWSER_SESSION_ID_MARKER)
@@ -245,6 +275,19 @@ function ensureExternalTargetId(browserInstanceId: string, targetId: string): st
   return encodeExternalTargetId(browserInstanceId, targetId)
 }
 
+type AttachedSessionNormalizationDirection = 'toExternal' | 'toLocal'
+
+const TARGET_IDENTIFIER_KEYS = new Set(['targetId', 'openerId'])
+const FRAME_IDENTIFIER_KEYS = new Set(['frameId', 'parentFrameId'])
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isInteractiveReadyState(value: string): boolean {
+  return value === 'interactive' || value === 'complete'
+}
+
 export class BrowserRelayServer {
   private readonly requestedPort: number
   private readonly logger: PluginLogger
@@ -258,13 +301,16 @@ export class BrowserRelayServer {
   private cdpClients = new Set<WebSocket>()
   private cdpClientState = new WeakMap<WebSocket, CdpClientState>()
   private browserSessions = new Map<string, BrowserSession>()
+  private attachedClientSessions = new Map<string, AttachedClientSession>()
   private extensionConnectedListeners = new Set<(connection: BrowserRelayExtensionConnection) => void | Promise<void>>()
   private pendingTargetUrls = new Map<string, string>()
+  private pendingOpenReadyHints = new Map<string, { mainFrameUrl: string; readyState: string; executionContextReady: boolean }>()
   private pendingTargetAttachments = new Map<string, Set<PendingTargetAttachmentRequest>>()
   private selectedBrowserInstanceId: string | null = null
   private selectedWindowId: number | null = null
   private actualPort: number | null = null
   private nextBrowserSessionId = 1
+  private nextAttachedSessionId = 1
 
   constructor(options: BrowserRelayServerOptions) {
     this.requestedPort = options.port
@@ -322,6 +368,7 @@ export class BrowserRelayServer {
     selectedBrowser: boolean
     selectedWindow: boolean
     physical: boolean
+    ready: boolean
     selected: boolean
     primary: boolean
   }> {
@@ -339,6 +386,7 @@ export class BrowserRelayServer {
       selectedBrowser: target.browserInstanceId === this.selectedBrowserInstanceId,
       selectedWindow: this.isTargetInSelectedWindow(target),
       physical: target.physical,
+      ready: this.isTargetReady(target),
       selected: this.isTargetInSelectedWindow(target),
       primary: this.getSelectedCurrentTarget()?.sessionId === target.sessionId,
     }))
@@ -356,6 +404,7 @@ export class BrowserRelayServer {
     url: string
     selectedBrowser: boolean
     selectedWindow: boolean
+    ready: boolean
     selected: boolean
     primary: boolean
   }> {
@@ -371,13 +420,16 @@ export class BrowserRelayServer {
       url: target.targetInfo.url ?? '',
       selectedBrowser: target.browserInstanceId === this.selectedBrowserInstanceId,
       selectedWindow: this.isTargetInSelectedWindow(target),
+      ready: this.isTargetReady(target),
       selected: this.isTargetInSelectedWindow(target),
       primary: this.getSelectedCurrentTarget()?.sessionId === target.sessionId,
     }))
   }
 
   getTargetIdForSession(sessionId: string): string | undefined {
-    return this.findTargetBySessionId(sessionId)?.targetId ?? undefined
+    return this.attachedClientSessions.get(sessionId)?.targetId
+      ?? this.findTargetBySessionId(sessionId)?.targetId
+      ?? undefined
   }
 
   getTargetUrl(targetId: string): string | undefined {
@@ -503,10 +555,12 @@ export class BrowserRelayServer {
     }
     this.extensionClients.clear()
     this.pendingTargetUrls.clear()
+    this.pendingOpenReadyHints.clear()
     this.rejectAllPendingTargetAttachments('Relay stopping')
     this.selectedBrowserInstanceId = null
     this.selectedWindowId = null
     this.browserSessions.clear()
+    this.attachedClientSessions.clear()
 
     for (const client of this.cdpClients) {
       client.close(1001, 'server stopping')
@@ -542,10 +596,12 @@ export class BrowserRelayServer {
   private async disposeFailedStart(): Promise<void> {
     this.extensionClients.clear()
     this.pendingTargetUrls.clear()
+    this.pendingOpenReadyHints.clear()
     this.rejectAllPendingTargetAttachments('Relay failed to start')
     this.selectedBrowserInstanceId = null
     this.selectedWindowId = null
     this.browserSessions.clear()
+    this.attachedClientSessions.clear()
     this.cdpClients.clear()
 
     await new Promise<void>((resolve) => {
@@ -579,6 +635,11 @@ export class BrowserRelayServer {
       `[browser-relay] Target.createTarget url="${url}" browserInstanceId=${client.browserInstanceId} rawTargetId=${rawTargetId} externalTargetId=${targetId}`,
     )
     this.pendingTargetUrls.set(targetId, url)
+    this.pendingOpenReadyHints.set(targetId, {
+      mainFrameUrl: url,
+      readyState: 'complete',
+      executionContextReady: true,
+    })
     return { targetId }
   }
 
@@ -611,6 +672,33 @@ export class BrowserRelayServer {
       waiters.add(pending)
       this.pendingTargetAttachments.set(targetId, waiters)
     })
+  }
+
+  async resolveReadyTarget(targetId: string, timeoutMs = TARGET_ATTACH_TIMEOUT_MS): Promise<ReadyRelayTarget> {
+    const startedAt = Date.now()
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const attached = await this.waitForAttachedTarget(targetId, Math.max(100, timeoutMs - (Date.now() - startedAt)))
+      const target = this.findTargetByTargetId(attached.targetId)
+      if (!target?.physical) {
+        await sleep(50)
+        continue
+      }
+
+      this.applyPendingOpenReadyHint(target)
+      if (this.isTargetReady(target)) {
+        return this.toReadyRelayTarget(target)
+      }
+
+      await this.primePhysicalTargetBootstrap(target)
+      if (this.isTargetReady(target)) {
+        return this.toReadyRelayTarget(target)
+      }
+
+      await sleep(50)
+    }
+
+    throw new Error(`Target "${targetId}" is not ready for browser control yet.`)
   }
 
   async focusTarget(targetId: string): Promise<void> {
@@ -1032,15 +1120,21 @@ export class BrowserRelayServer {
 
       try {
         const result = await this.routeCdpCommand({
+          cdpClient: ws,
           method: message.method,
           params: message.params ?? {},
           sessionId: message.sessionId,
         })
 
-        if (!message.sessionId && message.method === 'Target.setAutoAttach') {
+        const browserSession = typeof message.sessionId === 'string' ? this.browserSessions.get(message.sessionId) : null
+        if ((!message.sessionId || browserSession?.cdpClient === ws) && message.method === 'Target.setAutoAttach') {
           this.ensureTargetEventsForClient(ws, 'autoAttach')
         }
-        if (!message.sessionId && message.method === 'Target.setDiscoverTargets' && message.params?.discover === true) {
+        if (
+          (!message.sessionId || browserSession?.cdpClient === ws)
+          && message.method === 'Target.setDiscoverTargets'
+          && message.params?.discover === true
+        ) {
           this.ensureTargetEventsForClient(ws, 'discover')
         }
 
@@ -1057,21 +1151,31 @@ export class BrowserRelayServer {
     })
 
     ws.on('close', () => {
+      this.clearSessionsForCdpClient(ws)
       this.cdpClients.delete(ws)
       this.cdpClientState.delete(ws)
     })
     ws.on('error', () => {
+      this.clearSessionsForCdpClient(ws)
       this.cdpClients.delete(ws)
       this.cdpClientState.delete(ws)
     })
   }
 
   private async routeCdpCommand(input: {
+    cdpClient: WebSocket
     method: string
     params?: Record<string, unknown>
     sessionId?: string
   }): Promise<unknown> {
-    const hasTargetSession = Boolean(input.sessionId && !this.browserSessions.has(input.sessionId))
+    const routedSession = input.sessionId
+      ? this.resolveRoutedSession(input.cdpClient, input.sessionId)
+      : null
+    if (input.sessionId && !routedSession) {
+      throw new Error(`Unknown sessionId: ${input.sessionId}`)
+    }
+    const attachedSession = routedSession?.kind === 'attach' ? routedSession.attachSession : null
+    const browserSession = routedSession?.kind === 'browser' ? routedSession.browserSession : null
     switch (input.method) {
       case 'Browser.getVersion':
         return {
@@ -1083,8 +1187,8 @@ export class BrowserRelayServer {
         }
       case 'Browser.setDownloadBehavior':
       case 'Browser.getWindowForTarget':
-        if (hasTargetSession) {
-          return this.sendToExtensionForExternalSession(input.sessionId!, input.method, input.params ?? {})
+        if (attachedSession) {
+          return this.sendToExtensionForAttachedSession(attachedSession, input.method, input.params ?? {})
         }
         return {}
       case 'Target.setAutoAttach':
@@ -1093,8 +1197,8 @@ export class BrowserRelayServer {
       case 'Log.enable':
       case 'Inspector.enable':
       case 'Performance.enable':
-        if (hasTargetSession) {
-          return this.sendToExtensionForExternalSession(input.sessionId!, input.method, input.params ?? {})
+        if (attachedSession) {
+          return this.sendToExtensionForAttachedSession(attachedSession, input.method, input.params ?? {})
         }
         return {}
       case 'Target.getBrowserContexts':
@@ -1117,7 +1221,6 @@ export class BrowserRelayServer {
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
         }
         if (input.sessionId) {
-          const browserSession = this.browserSessions.get(input.sessionId)
           if (browserSession) {
             const browserTarget = this.getBrowserTargetInfoForBrowser(browserSession.browserInstanceId)
             this.logger.info?.(
@@ -1125,7 +1228,7 @@ export class BrowserRelayServer {
             )
             return { targetInfo: browserTarget }
           }
-          const target = this.findTargetBySessionId(input.sessionId)
+          const target = attachedSession ? this.findTargetByTargetId(attachedSession.targetId) : null
           if (!target) throw new Error('target not found')
           this.logger.info?.(
             `[browser-relay] Target.getTargetInfo by sessionId sessionId=${input.sessionId} resolvedTargetId=${target.targetId ?? 'null'} resolvedUrl="${target.targetInfo.url ?? ''}"`,
@@ -1140,7 +1243,7 @@ export class BrowserRelayServer {
       }
       case 'Target.attachToBrowserTarget': {
         const client = this.resolveClientForDefaultAction()
-        const sessionId = this.allocateBrowserSession(client.browserInstanceId)
+        const sessionId = this.allocateBrowserSession(client.browserInstanceId, input.cdpClient)
         this.logger.info?.(
           `[browser-relay] Target.attachToBrowserTarget browserInstanceId=${client.browserInstanceId} browserSessionId=${sessionId}`,
         )
@@ -1152,21 +1255,31 @@ export class BrowserRelayServer {
         const target = this.findTargetByTargetId(targetId)
         if (!target) throw new Error('target not found')
         if (input.sessionId) {
-          const browserSession = this.browserSessions.get(input.sessionId)
-          if (browserSession && browserSession.browserInstanceId !== target.browserInstanceId) {
+          const routedBrowserInstanceId = browserSession?.browserInstanceId ?? attachedSession?.browserInstanceId ?? null
+          if (routedBrowserInstanceId && routedBrowserInstanceId !== target.browserInstanceId) {
             throw new Error('target belongs to a different browser session')
           }
         }
+        const attachSession = this.allocateAttachedClientSession(target, input.cdpClient, { autoAttached: false })
         this.logger.info?.(
-          `[browser-relay] Target.attachToTarget targetId=${targetId} sessionId=${target.sessionId} url="${target.targetInfo.url ?? ''}"`,
+          `[browser-relay] Target.attachToTarget allocated attachSessionId=${attachSession.attachSessionId} targetId=${targetId} physicalSessionId=${target.sessionId} url="${target.targetInfo.url ?? ''}"`,
         )
-        return { sessionId: target.sessionId }
+        setTimeout(() => {
+          this.replayBootstrapToAttachedSession(attachSession.attachSessionId)
+        }, 0)
+        return { sessionId: attachSession.attachSessionId }
       }
       case 'Target.detachFromTarget': {
         const detachedSessionId = typeof input.params?.sessionId === 'string' ? input.params.sessionId : undefined
         if (detachedSessionId && this.browserSessions.delete(detachedSessionId)) {
           this.logger.info?.(
             `[browser-relay] Target.detachFromTarget browserSessionId=${detachedSessionId}`,
+          )
+          return {}
+        }
+        if (detachedSessionId && this.releaseAttachedClientSession(detachedSessionId)) {
+          this.logger.info?.(
+            `[browser-relay] Target.detachFromTarget released attachSessionId=${detachedSessionId}`,
           )
         }
         return {}
@@ -1195,13 +1308,16 @@ export class BrowserRelayServer {
       }
       case 'Runtime.enable':
       case 'Network.enable':
-        if (!hasTargetSession) return {}
-        return this.sendToExtensionForExternalSession(input.sessionId, input.method, input.params ?? {})
+        if (!attachedSession) return {}
+        return this.sendToExtensionForAttachedSession(attachedSession, input.method, input.params ?? {})
       default:
         if (!input.sessionId) {
           throw new Error(`sessionId is required for method ${input.method}`)
         }
-        return this.sendToExtensionForExternalSession(input.sessionId, input.method, input.params ?? {})
+        if (!attachedSession) {
+          throw new Error(`Unsupported browser-session method ${input.method}`)
+        }
+        return this.sendToExtensionForAttachedSession(attachedSession, input.method, input.params ?? {})
     }
   }
 
@@ -1264,18 +1380,13 @@ export class BrowserRelayServer {
 
     if (message.method === 'Extension.currentTargetChanged') {
       const localSessionId = typeof message.params?.sessionId === 'string' ? message.params.sessionId : ''
-      const externalSessionId = localSessionId
-        ? encodeExternalSessionId(client.browserInstanceId, localSessionId)
-        : null
-      const target = externalSessionId ? client.connectedTargets.get(externalSessionId) ?? null : null
-      client.currentSessionId =
-        target
-        && target.physical
-        && this.selectedBrowserInstanceId === client.browserInstanceId
-        && target.windowId !== null
-        && target.windowId === this.selectedWindowId
-          ? externalSessionId
-          : null
+      if (!localSessionId) {
+        client.currentSessionId = null
+        return
+      }
+      const externalSessionId = encodeExternalSessionId(client.browserInstanceId, localSessionId)
+      const target = client.connectedTargets.get(externalSessionId) ?? null
+      client.currentSessionId = target?.physical ? externalSessionId : null
       return
     }
 
@@ -1303,22 +1414,26 @@ export class BrowserRelayServer {
         await this.reconcileSelection()
         return
       case 'Target.attachedToTarget':
-        this.handleAttachedToTarget(client, eventParams, externalSessionId)
+        this.handleAttachedToTarget(client, eventParams)
         await this.reconcileSelection()
         return
       case 'Target.detachedFromTarget':
-        this.handleDetachedFromTarget(client, eventParams, externalSessionId)
+        this.handleDetachedFromTarget(client, eventParams)
         await this.reconcileSelection()
         return
       case 'Target.targetInfoChanged':
-        this.handleTargetInfoChanged(client, eventParams, externalSessionId)
+        this.handleTargetInfoChanged(client, eventParams)
         await this.reconcileSelection()
         return
       default:
+        if (externalSessionId) {
+          this.recordSessionScopedEvent(externalSessionId, eventMethod, eventParams)
+          this.forwardSessionScopedEvent(externalSessionId, eventMethod, eventParams)
+          return
+        }
         this.broadcastToCdpClients({
           method: eventMethod,
           params: eventParams,
-          sessionId: externalSessionId,
         })
     }
   }
@@ -1353,6 +1468,13 @@ export class BrowserRelayServer {
       tabId: toNullableInteger(eventParams.tabId),
       active: eventParams.active === true,
       physical: false,
+      mainFrameUrl: '',
+      readyState: '',
+      executionContextReady: false,
+      bootstrapPrimed: false,
+      lastLifecycleEvent: null,
+      lastExecutionContextCreated: null,
+      lastTargetInfoChanged: null,
     })
   }
 
@@ -1367,6 +1489,7 @@ export class BrowserRelayServer {
       client.currentSessionId = null
     }
     if (existing.targetId) {
+      this.pendingOpenReadyHints.delete(existing.targetId)
       this.rejectPendingTargetAttachments(
         existing.targetId,
         `Target "${existing.targetId}" was removed before attachment completed.`,
@@ -1391,6 +1514,9 @@ export class BrowserRelayServer {
       ...targetInfo,
       targetId: existing.localTargetId ?? existing.localTargetKey,
     })
+    if (existing.physical && typeof existing.targetInfo.url === 'string' && existing.targetInfo.url) {
+      existing.mainFrameUrl = existing.targetInfo.url
+    }
     existing.windowId = toNullableInteger(eventParams.windowId)
     existing.tabId = toNullableInteger(eventParams.tabId)
     existing.active = eventParams.active === true
@@ -1399,7 +1525,6 @@ export class BrowserRelayServer {
   private handleAttachedToTarget(
     client: ExtensionClient,
     eventParams: Record<string, unknown>,
-    externalSessionId?: string,
   ): void {
     if (!eventParams.targetInfo || typeof eventParams.sessionId !== 'string') return
     const attachedLocalSessionId = eventParams.sessionId
@@ -1430,24 +1555,35 @@ export class BrowserRelayServer {
         tabId: toNullableInteger(eventParams.tabId),
         active: eventParams.active === true,
         physical: true,
+        mainFrameUrl: existing?.mainFrameUrl ?? '',
+        readyState: existing?.readyState ?? '',
+        executionContextReady: existing?.executionContextReady ?? false,
+        bootstrapPrimed: existing?.bootstrapPrimed ?? false,
+        lastLifecycleEvent: existing?.lastLifecycleEvent ?? null,
+        lastExecutionContextCreated: existing?.lastExecutionContextCreated ?? null,
+        lastTargetInfoChanged: existing?.lastTargetInfoChanged ?? {
+          targetInfo: {
+            ...localTargetInfo,
+            targetId: localTargetInfo.targetId,
+          },
+          windowId: toNullableInteger(eventParams.windowId),
+          tabId: toNullableInteger(eventParams.tabId),
+          active: eventParams.active === true,
+        },
       })
+      this.applyPendingOpenReadyHint(client.connectedTargets.get(sessionId)!)
       this.resolvePendingTargetAttachments(normalized.targetId)
     }
-    this.broadcastToCdpClients({
-      method: 'Target.attachedToTarget',
-      params: {
-        ...eventParams,
-        sessionId,
-        targetInfo: normalized,
-      },
-      sessionId: externalSessionId,
+    this.notifyAttachedTargetToAutoAttachClients({
+      physicalSessionId: sessionId,
+      targetInfo: normalized,
+      waitingForDebugger: eventParams.waitingForDebugger === true,
     })
   }
 
   private handleDetachedFromTarget(
     client: ExtensionClient,
     eventParams: Record<string, unknown>,
-    externalSessionId?: string,
   ): void {
     const detachedLocalSessionId = typeof eventParams.sessionId === 'string' ? eventParams.sessionId : ''
     const sessionId = detachedLocalSessionId
@@ -1466,31 +1602,35 @@ export class BrowserRelayServer {
         ...existing.targetInfo,
         targetId: existing.localTargetKey,
       })
+      existing.mainFrameUrl = ''
+      existing.readyState = ''
+      existing.executionContextReady = false
+      existing.bootstrapPrimed = false
+      existing.lastLifecycleEvent = null
+      existing.lastExecutionContextCreated = null
+      existing.lastTargetInfoChanged = null
     }
     if (client.currentSessionId === sessionId) {
       client.currentSessionId = null
     }
     if (detachedTargetId) {
+      this.pendingOpenReadyHints.delete(detachedTargetId)
       this.rejectPendingTargetAttachments(
         detachedTargetId,
         `Target "${detachedTargetId}" was detached before attachment completed.`,
       )
     }
-    this.broadcastToCdpClients({
-      method: 'Target.detachedFromTarget',
-      params: {
-        ...eventParams,
-        ...(sessionId ? { sessionId } : {}),
-        ...(existing?.targetId ? { targetId: existing.targetId } : {}),
-      },
-      sessionId: externalSessionId,
-    })
+    if (sessionId) {
+      this.releaseAttachedClientSessionsForPhysicalSession(sessionId, {
+        targetId: detachedTargetId,
+        reason: typeof eventParams.reason === 'string' ? eventParams.reason : 'target_detached',
+      })
+    }
   }
 
   private handleTargetInfoChanged(
     client: ExtensionClient,
     eventParams: Record<string, unknown>,
-    externalSessionId?: string,
   ): void {
     const changedTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> | undefined
     const localTargetId = changedTargetInfo?.targetId
@@ -1505,6 +1645,16 @@ export class BrowserRelayServer {
         existing.windowId = toNullableInteger(eventParams.windowId)
         existing.tabId = toNullableInteger(eventParams.tabId)
         existing.active = eventParams.active === true
+        existing.lastTargetInfoChanged = {
+          ...eventParams,
+          targetInfo: {
+            ...changedTargetInfo,
+            targetId: localTargetId,
+          },
+        }
+        if (typeof existing.targetInfo.url === 'string' && existing.targetInfo.url) {
+          existing.mainFrameUrl = existing.targetInfo.url
+        }
       }
     }
     this.broadcastToCdpClients({
@@ -1515,7 +1665,6 @@ export class BrowserRelayServer {
           ? { targetInfo: this.normalizeExternalTargetInfo(client, changedTargetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>) }
           : {}),
       },
-      sessionId: externalSessionId,
     })
   }
 
@@ -1541,7 +1690,10 @@ export class BrowserRelayServer {
           ? {
               method: 'Target.attachedToTarget',
               params: {
-                sessionId: target.sessionId,
+                sessionId: this.allocateAttachedClientSession(target, client, {
+                  autoAttached: true,
+                  reuseAutoAttached: true,
+                }).attachSessionId,
                 targetInfo: {
                   ...normalizeTargetInfo(target.targetInfo),
                   attached: true,
@@ -1588,6 +1740,15 @@ export class BrowserRelayServer {
     }
   }
 
+  private toReadyRelayTarget(target: ConnectedTarget): ReadyRelayTarget {
+    return {
+      ...this.toAttachedRelayTarget(target),
+      mainFrameUrl: target.mainFrameUrl,
+      readyState: target.readyState,
+      executionContextReady: target.executionContextReady,
+    }
+  }
+
   private getBrowserTargetInfo(): RelayTargetInfo {
     const selectedClient = this.selectedBrowserInstanceId
       ? this.extensionClients.get(this.selectedBrowserInstanceId) ?? null
@@ -1619,12 +1780,12 @@ export class BrowserRelayServer {
     })
   }
 
-  private allocateBrowserSession(browserInstanceId: string): string {
+  private allocateBrowserSession(browserInstanceId: string, cdpClient: WebSocket): string {
     const sessionId = encodeExternalBrowserSessionId(
       browserInstanceId,
       String(this.nextBrowserSessionId++),
     )
-    this.browserSessions.set(sessionId, { browserInstanceId })
+    this.browserSessions.set(sessionId, { browserInstanceId, cdpClient })
     return sessionId
   }
 
@@ -1637,10 +1798,469 @@ export class BrowserRelayServer {
     }
   }
 
-  private getCurrentTargetForClient(client: ExtensionClient | undefined): ConnectedTarget | null {
-    if (!client?.currentSessionId) return null
-    const target = client.connectedTargets.get(client.currentSessionId)
-    return target && target.physical ? target : null
+  private allocateAttachedClientSession(
+    target: ConnectedTarget,
+    cdpClient: WebSocket,
+    options: { autoAttached: boolean; reuseAutoAttached?: boolean },
+  ): AttachedClientSession {
+    if (!target.targetId || !target.localTargetId) {
+      throw new Error('target is not physically attached')
+    }
+
+    if (options.reuseAutoAttached) {
+      for (const existing of this.attachedClientSessions.values()) {
+        if (
+          existing.cdpClient === cdpClient
+          && existing.physicalSessionId === target.sessionId
+          && existing.autoAttached
+        ) {
+          return existing
+        }
+      }
+    }
+
+    const attachSessionId = encodeExternalAttachedSessionId(
+      target.browserInstanceId,
+      String(this.nextAttachedSessionId++),
+    )
+    const attachedSession: AttachedClientSession = {
+      attachSessionId,
+      browserInstanceId: target.browserInstanceId,
+      cdpClient,
+      physicalSessionId: target.sessionId,
+      localPhysicalSessionId: target.localSessionId,
+      targetId: target.targetId,
+      localTargetId: target.localTargetId,
+      autoAttached: options.autoAttached,
+    }
+    this.attachedClientSessions.set(attachSessionId, attachedSession)
+    return attachedSession
+  }
+
+  private releaseAttachedClientSession(attachSessionId: string): boolean {
+    return this.attachedClientSessions.delete(attachSessionId)
+  }
+
+  private releaseAttachedClientSessionsForPhysicalSession(
+    physicalSessionId: string,
+    options: { targetId: string | null; reason: string },
+  ): void {
+    for (const [attachSessionId, attachedSession] of [...this.attachedClientSessions.entries()]) {
+      if (attachedSession.physicalSessionId !== physicalSessionId) continue
+      this.attachedClientSessions.delete(attachSessionId)
+      this.sendCdpClientEvent(attachedSession.cdpClient, {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: attachSessionId,
+          ...(options.targetId ? { targetId: options.targetId } : {}),
+          reason: options.reason,
+        },
+      })
+    }
+  }
+
+  private releaseAttachedClientSessionsForBrowser(browserInstanceId: string, reason: string): void {
+    for (const [attachSessionId, attachedSession] of [...this.attachedClientSessions.entries()]) {
+      if (attachedSession.browserInstanceId !== browserInstanceId) continue
+      this.attachedClientSessions.delete(attachSessionId)
+      this.sendCdpClientEvent(attachedSession.cdpClient, {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: attachSessionId,
+          targetId: attachedSession.targetId,
+          reason,
+        },
+      })
+    }
+  }
+
+  private deleteAttachedClientSessionsForBrowser(browserInstanceId: string): void {
+    for (const [attachSessionId, attachedSession] of [...this.attachedClientSessions.entries()]) {
+      if (attachedSession.browserInstanceId === browserInstanceId) {
+        this.attachedClientSessions.delete(attachSessionId)
+      }
+    }
+  }
+
+  private clearSessionsForCdpClient(cdpClient: WebSocket): void {
+    for (const [sessionId, browserSession] of [...this.browserSessions.entries()]) {
+      if (browserSession.cdpClient === cdpClient) {
+        this.browserSessions.delete(sessionId)
+      }
+    }
+    for (const [attachSessionId, attachedSession] of [...this.attachedClientSessions.entries()]) {
+      if (attachedSession.cdpClient === cdpClient) {
+        this.attachedClientSessions.delete(attachSessionId)
+      }
+    }
+  }
+
+  private resolveRoutedSession(
+    cdpClient: WebSocket,
+    sessionId: string,
+  ): { kind: 'browser'; browserSession: BrowserSession } | { kind: 'attach'; attachSession: AttachedClientSession } | null {
+    const browserSession = this.browserSessions.get(sessionId)
+    if (browserSession) {
+      if (browserSession.cdpClient !== cdpClient) {
+        throw new Error('Session belongs to a different CDP client')
+      }
+      return { kind: 'browser', browserSession }
+    }
+
+    const attachSession = this.attachedClientSessions.get(sessionId)
+    if (attachSession) {
+      if (attachSession.cdpClient !== cdpClient) {
+        throw new Error('Session belongs to a different CDP client')
+      }
+      return { kind: 'attach', attachSession }
+    }
+
+    return null
+  }
+
+  private sendToExtensionForAttachedSession(
+    attachedSession: AttachedClientSession,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    const client = this.extensionClients.get(attachedSession.browserInstanceId)
+    if (!client) {
+      return Promise.reject(new Error('Target browser instance is not connected.'))
+    }
+    this.logger.info?.(
+      `[browser-relay] route page-session command attachSessionId=${attachedSession.attachSessionId} -> physicalSessionId=${attachedSession.physicalSessionId} method=${method}`,
+    )
+    return this.sendToExtension(
+      client,
+      method,
+      this.normalizeAttachedSessionPayload(attachedSession, method, params, 'toLocal') as Record<string, unknown>,
+      attachedSession.localPhysicalSessionId,
+    ).then((result) => {
+      this.recordSessionScopedResult(attachedSession.physicalSessionId, method, result)
+      if (method === 'Runtime.enable' || method === 'Page.setLifecycleEventsEnabled') {
+        setTimeout(() => {
+          this.replayBootstrapToAttachedSession(attachedSession.attachSessionId, method)
+        }, 0)
+      }
+      return this.normalizeAttachedSessionPayload(attachedSession, method, result, 'toExternal')
+    })
+  }
+
+  private sendCdpClientEvent(client: WebSocket, payload: unknown): void {
+    if (client.readyState !== WebSocket.OPEN) return
+    client.send(JSON.stringify(payload))
+  }
+
+  private notifyAttachedTargetToAutoAttachClients(input: {
+    physicalSessionId: string
+    targetInfo: RelayTargetInfo
+    waitingForDebugger: boolean
+  }): void {
+    const target = this.findTargetBySessionId(input.physicalSessionId)
+    if (!target) return
+
+    for (const cdpClient of this.cdpClients) {
+      const state = this.cdpClientState.get(cdpClient)
+      if (!state?.autoAttachPrimed) continue
+      const attachedSession = this.allocateAttachedClientSession(target, cdpClient, {
+        autoAttached: true,
+        reuseAutoAttached: true,
+      })
+      this.sendCdpClientEvent(cdpClient, {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: attachedSession.attachSessionId,
+          targetInfo: {
+            ...normalizeTargetInfo(input.targetInfo),
+            attached: true,
+          },
+          waitingForDebugger: input.waitingForDebugger,
+        },
+      })
+    }
+  }
+
+  private forwardSessionScopedEvent(
+    physicalSessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    for (const attachedSession of this.attachedClientSessions.values()) {
+      if (attachedSession.physicalSessionId !== physicalSessionId) continue
+      this.sendAttachedSessionEvent(attachedSession, method, params)
+    }
+  }
+
+  private sendAttachedSessionEvent(
+    attachedSession: AttachedClientSession,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    this.sendCdpClientEvent(attachedSession.cdpClient, {
+      method,
+      params: this.normalizeAttachedSessionPayload(attachedSession, method, params, 'toExternal'),
+      sessionId: attachedSession.attachSessionId,
+    })
+  }
+
+  private async primePhysicalTargetBootstrap(target: ConnectedTarget): Promise<void> {
+    if (!target.physical || !target.localSessionId) {
+      return
+    }
+
+    const client = this.extensionClients.get(target.browserInstanceId)
+    if (!client) {
+      throw new Error('Target browser instance is not connected.')
+    }
+
+    this.applyPendingOpenReadyHint(target)
+
+    target.bootstrapPrimed = true
+
+    const frameTree = await this.sendToExtension(client, 'Page.getFrameTree', {}, target.localSessionId).catch(() => null)
+    if (frameTree) {
+      this.recordSessionScopedResult(target.sessionId, 'Page.getFrameTree', frameTree)
+    }
+
+    const readyStateResult = await this.sendToExtension(
+      client,
+      'Runtime.evaluate',
+      {
+        expression: 'document.readyState',
+        returnByValue: true,
+      },
+      target.localSessionId,
+    ).catch(() => null)
+    if (readyStateResult && typeof readyStateResult === 'object') {
+      const readyState = typeof (readyStateResult as Record<string, unknown>).result === 'object'
+        ? typeof ((readyStateResult as Record<string, unknown>).result as Record<string, unknown>).value === 'string'
+          ? String(((readyStateResult as Record<string, unknown>).result as Record<string, unknown>).value)
+          : ''
+        : ''
+      if (readyState) {
+        target.readyState = readyState
+        target.executionContextReady = true
+      }
+    }
+
+    if (!target.mainFrameUrl && typeof target.targetInfo.url === 'string' && target.targetInfo.url) {
+      target.mainFrameUrl = target.targetInfo.url
+    }
+  }
+
+  private applyPendingOpenReadyHint(target: ConnectedTarget): void {
+    if (!target.targetId) {
+      return
+    }
+    const hint = this.pendingOpenReadyHints.get(target.targetId)
+    if (!hint) {
+      return
+    }
+    target.mainFrameUrl = hint.mainFrameUrl
+    target.readyState = hint.readyState
+    target.executionContextReady = hint.executionContextReady
+    if (hint.mainFrameUrl) {
+      target.targetInfo = normalizeTargetInfo({
+        ...target.targetInfo,
+        url: hint.mainFrameUrl,
+        targetId: target.targetId,
+      })
+    }
+    this.pendingOpenReadyHints.delete(target.targetId)
+  }
+
+  private recordSessionScopedResult(
+    physicalSessionId: string,
+    method: string,
+    result: unknown,
+  ): void {
+    const target = this.findTargetBySessionId(physicalSessionId)
+    if (!target?.physical || !result || typeof result !== 'object') {
+      return
+    }
+
+    if (method === 'Page.getFrameTree') {
+      const mainFrame = this.extractFrameTreeMainFrame(result)
+      if (mainFrame) {
+        this.recordMainFrame(target, mainFrame)
+      }
+    }
+  }
+
+  private recordSessionScopedEvent(
+    physicalSessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    const target = this.findTargetBySessionId(physicalSessionId)
+    if (!target?.physical) {
+      return
+    }
+
+    switch (method) {
+      case 'Page.frameNavigated': {
+        const frame = params.frame
+        if (frame && typeof frame === 'object') {
+          this.recordMainFrame(target, frame)
+        }
+        return
+      }
+      case 'Page.navigatedWithinDocument': {
+        const frameId = typeof params.frameId === 'string' ? params.frameId : ''
+        if (frameId && frameId === target.localTargetId) {
+          const url = typeof params.url === 'string' ? params.url : ''
+          if (url) {
+            target.mainFrameUrl = url
+            target.targetInfo = normalizeTargetInfo({
+              ...target.targetInfo,
+              url,
+              targetId: target.targetId ?? target.targetInfo.targetId,
+            })
+          }
+        }
+        return
+      }
+      case 'Page.frameStartedLoading':
+      case 'Page.frameStartedNavigating': {
+        const frameId = typeof params.frameId === 'string' ? params.frameId : ''
+        if (!frameId || frameId !== target.localTargetId) {
+          return
+        }
+        target.readyState = ''
+        target.executionContextReady = false
+        target.lastLifecycleEvent = null
+        target.lastExecutionContextCreated = null
+        return
+      }
+      case 'Page.lifecycleEvent': {
+        const frameId = typeof params.frameId === 'string' ? params.frameId : ''
+        if (!frameId || frameId !== target.localTargetId) {
+          return
+        }
+        target.lastLifecycleEvent = { ...params }
+        const name = typeof params.name === 'string' ? params.name : ''
+        if (name === 'DOMContentLoaded') {
+          target.readyState = 'interactive'
+        } else if (name === 'load') {
+          target.readyState = 'complete'
+        }
+        return
+      }
+      case 'Runtime.executionContextCreated': {
+        const context = params.context
+        if (!context || typeof context !== 'object') {
+          return
+        }
+        const auxData = (context as Record<string, unknown>).auxData
+        const frameId = auxData && typeof auxData === 'object'
+          ? typeof (auxData as Record<string, unknown>).frameId === 'string'
+            ? String((auxData as Record<string, unknown>).frameId)
+            : ''
+          : ''
+        if (frameId && frameId !== target.localTargetId) {
+          return
+        }
+        target.executionContextReady = true
+        target.lastExecutionContextCreated = { ...params }
+        return
+      }
+      default:
+        return
+    }
+  }
+
+  private recordMainFrame(target: ConnectedTarget, frame: unknown): void {
+    if (!frame || typeof frame !== 'object') {
+      return
+    }
+
+    const frameRecord = frame as Record<string, unknown>
+    const frameId = typeof frameRecord.id === 'string' ? frameRecord.id : ''
+    if (frameId && frameId !== target.localTargetId) {
+      return
+    }
+
+    const url = typeof frameRecord.url === 'string' ? frameRecord.url : ''
+    if (!url) {
+      return
+    }
+
+    target.mainFrameUrl = url
+    target.targetInfo = normalizeTargetInfo({
+      ...target.targetInfo,
+      url,
+      targetId: target.targetId ?? target.targetInfo.targetId,
+    })
+  }
+
+  private extractFrameTreeMainFrame(result: unknown): Record<string, unknown> | null {
+    if (!result || typeof result !== 'object') {
+      return null
+    }
+    const frameTree = (result as Record<string, unknown>).frameTree
+    if (!frameTree || typeof frameTree !== 'object') {
+      return null
+    }
+    const frame = (frameTree as Record<string, unknown>).frame
+    return frame && typeof frame === 'object' ? frame as Record<string, unknown> : null
+  }
+
+  private replayBootstrapToAttachedSession(
+    attachSessionId: string,
+    triggerMethod?: string,
+  ): void {
+    const attachedSession = this.attachedClientSessions.get(attachSessionId)
+    if (!attachedSession) {
+      return
+    }
+
+    const target = this.findTargetByTargetId(attachedSession.targetId)
+    if (!target?.physical) {
+      return
+    }
+
+    if (!triggerMethod && target.lastTargetInfoChanged) {
+      this.sendAttachedSessionEvent(attachedSession, 'Target.targetInfoChanged', target.lastTargetInfoChanged)
+    }
+    if (triggerMethod === 'Page.setLifecycleEventsEnabled' && target.lastLifecycleEvent) {
+      this.sendAttachedSessionEvent(attachedSession, 'Page.lifecycleEvent', target.lastLifecycleEvent)
+    }
+    if (triggerMethod === 'Runtime.enable' && target.lastExecutionContextCreated) {
+      this.sendAttachedSessionEvent(attachedSession, 'Runtime.executionContextCreated', target.lastExecutionContextCreated)
+    }
+  }
+
+  private isTargetReady(target: ConnectedTarget): boolean {
+    return target.physical
+      && Boolean(target.targetId)
+      && Boolean(target.mainFrameUrl)
+      && target.executionContextReady
+      && isInteractiveReadyState(target.readyState)
+  }
+
+  private getCurrentTargetForWindow(
+    client: ExtensionClient | undefined,
+    windowId: number | null,
+  ): ConnectedTarget | null {
+    if (!client || windowId === null) return null
+
+    if (client.currentSessionId) {
+      const current = client.connectedTargets.get(client.currentSessionId)
+      if (current?.physical && current.windowId === windowId) {
+        return current
+      }
+    }
+
+    const physicalTargets = [...client.connectedTargets.values()].filter((target) => (
+      target.physical
+      && target.windowId === windowId
+    ))
+    const activeTargets = physicalTargets.filter((target) => target.active)
+    if (activeTargets.length > 0) {
+      return activeTargets[0]
+    }
+
+    return physicalTargets.length === 1 ? physicalTargets[0] : null
   }
 
   private getKnownWindowIdsForClient(client: ExtensionClient): number[] {
@@ -1724,8 +2344,10 @@ export class BrowserRelayServer {
     if (!this.selectedBrowserInstanceId || this.selectedWindowId === null) {
       return null
     }
-    const target = this.getCurrentTargetForClient(this.extensionClients.get(this.selectedBrowserInstanceId))
-    return target && this.isTargetInSelectedWindow(target) ? target : null
+    return this.getCurrentTargetForWindow(
+      this.extensionClients.get(this.selectedBrowserInstanceId),
+      this.selectedWindowId,
+    )
   }
 
   private isTargetInSelectedWindow(target: ConnectedTarget): boolean {
@@ -1808,22 +2430,6 @@ export class BrowserRelayServer {
       localTargetId: parsed.localTargetId,
       localSessionId: target.localSessionId,
     }
-  }
-
-  private sendToExtensionForExternalSession(
-    sessionId: string,
-    method: string,
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    const parsed = parseExternalSessionId(sessionId)
-    if (!parsed) {
-      return Promise.reject(new Error('Invalid sessionId'))
-    }
-    const client = this.extensionClients.get(parsed.browserInstanceId)
-    if (!client) {
-      return Promise.reject(new Error('Target browser instance is not connected.'))
-    }
-    return this.sendToExtension(client, method, params, parsed.localSessionId)
   }
 
   private sendToExtension(
@@ -1936,17 +2542,9 @@ export class BrowserRelayServer {
       client.currentSessionId = null
     }
     if (broadcastDetach) {
-      for (const target of client.connectedTargets.values()) {
-        if (!target.physical) continue
-        this.broadcastToCdpClients({
-          method: 'Target.detachedFromTarget',
-          params: {
-            sessionId: target.sessionId,
-            targetId: target.targetId,
-            reason: 'browser_disconnected',
-          },
-        })
-      }
+      this.releaseAttachedClientSessionsForBrowser(client.browserInstanceId, 'browser_disconnected')
+    } else {
+      this.deleteAttachedClientSessionsForBrowser(client.browserInstanceId)
     }
     client.connectedTargets.clear()
   }
@@ -1970,6 +2568,143 @@ export class BrowserRelayServer {
     return {
       ...record,
       targetId: encodeExternalTargetId(client.browserInstanceId, localTargetId),
+    }
+  }
+
+  private normalizeAttachedSessionPayload(
+    attachedSession: AttachedClientSession,
+    method: string,
+    payload: unknown,
+    direction: AttachedSessionNormalizationDirection,
+  ): unknown {
+    if (!payload || typeof payload !== 'object') {
+      return payload
+    }
+
+    const normalized = this.normalizeAttachedSessionIdentifiers(attachedSession, payload, direction)
+    if (!normalized || typeof normalized !== 'object') {
+      return normalized
+    }
+
+    const record = normalized as Record<string, unknown>
+    if ((method === 'Page.getFrameTree' || method === 'Page.getResourceTree') && record.frameTree) {
+      return {
+        ...record,
+        frameTree: this.normalizeAttachedSessionFrameTree(attachedSession, record.frameTree, direction),
+      }
+    }
+    if (method === 'Page.frameNavigated' && record.frame) {
+      return {
+        ...record,
+        frame: this.normalizeAttachedSessionFrame(attachedSession, record.frame, direction),
+      }
+    }
+
+    return record
+  }
+
+  private normalizeAttachedSessionIdentifiers(
+    attachedSession: AttachedClientSession,
+    value: unknown,
+    direction: AttachedSessionNormalizationDirection,
+    parentKey?: string,
+  ): unknown {
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.normalizeAttachedSessionIdentifiers(attachedSession, entry, direction, parentKey))
+    }
+
+    if (typeof value === 'string' && parentKey) {
+      return this.normalizeAttachedSessionIdentifier(attachedSession, parentKey, value, direction)
+    }
+
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const record = value as Record<string, unknown>
+    const normalized: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(record)) {
+      normalized[key] = this.normalizeAttachedSessionIdentifiers(attachedSession, entry, direction, key)
+    }
+    return normalized
+  }
+
+  private normalizeAttachedSessionIdentifier(
+    attachedSession: AttachedClientSession,
+    key: string,
+    value: string,
+    direction: AttachedSessionNormalizationDirection,
+  ): string {
+    if (TARGET_IDENTIFIER_KEYS.has(key)) {
+      if (direction === 'toExternal') {
+        return ensureExternalTargetId(attachedSession.browserInstanceId, value)
+      }
+      const parsed = parseExternalTargetId(value)
+      if (parsed?.browserInstanceId === attachedSession.browserInstanceId) {
+        return parsed.localTargetId
+      }
+      return value
+    }
+
+    if (FRAME_IDENTIFIER_KEYS.has(key)) {
+      return this.normalizeAttachedSessionMainFrameId(attachedSession, value, direction)
+    }
+
+    return value
+  }
+
+  private normalizeAttachedSessionMainFrameId(
+    attachedSession: AttachedClientSession,
+    value: string,
+    direction: AttachedSessionNormalizationDirection,
+  ): string {
+    if (direction === 'toExternal') {
+      return value === attachedSession.localTargetId ? attachedSession.targetId : value
+    }
+    return value === attachedSession.targetId ? attachedSession.localTargetId : value
+  }
+
+  private normalizeAttachedSessionFrameTree(
+    attachedSession: AttachedClientSession,
+    value: unknown,
+    direction: AttachedSessionNormalizationDirection,
+  ): unknown {
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const record = value as Record<string, unknown>
+    return {
+      ...record,
+      ...(record.frame ? { frame: this.normalizeAttachedSessionFrame(attachedSession, record.frame, direction) } : {}),
+      ...(Array.isArray(record.childFrames)
+        ? {
+            childFrames: record.childFrames.map((child) => (
+              this.normalizeAttachedSessionFrameTree(attachedSession, child, direction)
+            )),
+          }
+        : {}),
+    }
+  }
+
+  private normalizeAttachedSessionFrame(
+    attachedSession: AttachedClientSession,
+    value: unknown,
+    direction: AttachedSessionNormalizationDirection,
+  ): unknown {
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const record = value as Record<string, unknown>
+    return {
+      ...record,
+      ...(typeof record.id === 'string'
+        ? { id: this.normalizeAttachedSessionMainFrameId(attachedSession, record.id, direction) }
+        : {}),
+      ...(typeof record.parentId === 'string'
+        ? { parentId: this.normalizeAttachedSessionMainFrameId(attachedSession, record.parentId, direction) }
+        : {}),
     }
   }
 

@@ -1,7 +1,7 @@
 import type { PluginLogger } from 'openclaw/plugin-sdk'
 import path from 'node:path'
 import fs from 'node:fs/promises'
-import { BrowserRelayServer } from '../relay/server.js'
+import { BrowserRelayServer, type ReadyRelayTarget } from '../relay/server.js'
 import {
   discoverChromeInstancesLight,
   getDirectCdpVersion,
@@ -23,10 +23,35 @@ export type BrowserControlServiceOptions = {
 
 type BrowserActionParams = Record<string, unknown>
 type ConnectionMode = 'relay' | 'direct-cdp'
+type BrowserActionErrorCode =
+  | 'invalid_request'
+  | 'unsupported_action'
+  | 'browser_unavailable'
+  | 'direct_cdp_unavailable'
+  | 'no_current_target'
+  | 'stale_snapshot_ref'
+  | 'target_closed'
+  | 'browser_closed'
+  | 'page_context_destroyed'
+  | 'browser_not_ready'
+  | 'target_attach_timeout'
+  | 'browser_auto_launch_unavailable'
+  | 'browser_auto_launch_failed'
+  | 'protocol_error'
 
 type BrowserActionResult = Record<string, unknown> & {
   ok?: boolean
   error?: string
+  errorCode?: BrowserActionErrorCode
+  recoverable?: boolean
+  retryable?: boolean
+  suggestedNextActions?: string[]
+}
+
+type BrowserActionErrorOptions = {
+  recoverable?: boolean
+  retryable?: boolean
+  suggestedNextActions?: string[]
 }
 
 function asString(value: unknown): string | undefined {
@@ -103,6 +128,21 @@ function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+function createErrorResult(
+  errorCode: BrowserActionErrorCode,
+  error: string,
+  options: BrowserActionErrorOptions = {},
+): BrowserActionResult {
+  return {
+    ok: false,
+    error,
+    errorCode,
+    ...(options.recoverable !== undefined ? { recoverable: options.recoverable } : {}),
+    ...(options.retryable !== undefined ? { retryable: options.retryable } : {}),
+    ...(options.suggestedNextActions?.length ? { suggestedNextActions: options.suggestedNextActions } : {}),
+  }
+}
+
 export class BrowserControlService {
   private readonly tabState = new BrowserTabState()
   private readonly session: PlaywrightSession
@@ -136,7 +176,7 @@ export class BrowserControlService {
   async handleRequest(params: BrowserActionParams): Promise<BrowserActionResult> {
     const action = (asString(params.action) ?? '').toLowerCase()
     if (!action) {
-      return { ok: false, error: 'action is required' }
+      return createErrorResult('invalid_request', 'action is required')
     }
 
     try {
@@ -149,10 +189,7 @@ export class BrowserControlService {
         this.resolveConnectionMode(params),
       )
     } catch (error) {
-      return {
-        ok: false,
-        error: this.session.mapActionError(error),
-      }
+      return this.classifyActionError(error, { action, connectionMode: this.resolveConnectionMode(params) })
     }
   }
 
@@ -206,10 +243,14 @@ export class BrowserControlService {
           relayPort: this.options.relay.relayPort,
         }
       }
-      return {
-        ok: false,
-        error: 'Browser extension not connected and no direct CDP browser detected.'
-      }
+      return createErrorResult(
+        'browser_unavailable',
+        'Browser extension not connected and no direct CDP browser detected.',
+        {
+          recoverable: true,
+          suggestedNextActions: ['start', 'open'],
+        },
+      )
     }
 
     return await this.handleDirectCdpAction(action, params, directEndpoint)
@@ -292,9 +333,9 @@ export class BrowserControlService {
       this.options.logger.warn?.(
         `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
       )
-      const attachedTarget = await this.options.relay.waitForAttachedTarget(String(created.targetId))
+      const attachedTarget = await this.options.relay.resolveReadyTarget(String(created.targetId))
       this.options.logger.warn?.(
-        `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}"`,
+        `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}" readyState="${attachedTarget.readyState}" mainFrameUrl="${attachedTarget.mainFrameUrl}"`,
       )
       const targetId = attachedTarget.targetId
       const sessionKey = asString(params.sessionKey)
@@ -319,7 +360,7 @@ export class BrowserControlService {
     if (action === 'focus') {
       const targetId = asString(params.targetId)
       if (!targetId) {
-        return { ok: false, error: 'targetId is required for action=focus' }
+        return createErrorResult('invalid_request', 'targetId is required for action=focus')
       }
       await this.options.relay.focusTarget(targetId)
       this.tabState.setCurrentTarget(targetId)
@@ -330,7 +371,7 @@ export class BrowserControlService {
     if (action === 'close') {
       const targetId = asString(params.targetId)
       if (!targetId) {
-        return { ok: false, error: 'targetId is required for action=close' }
+        return createErrorResult('invalid_request', 'targetId is required for action=close')
       }
       await this.options.relay.closeTarget(targetId)
       this.tabState.closeTab(targetId)
@@ -340,11 +381,11 @@ export class BrowserControlService {
     if (action === 'console') {
       const targetId = asString(params.targetId)
       if (!targetId) {
-        return { ok: false, error: 'targetId is required for action=console' }
+        return createErrorResult('invalid_request', 'targetId is required for action=console')
       }
       const expression = asString(params.expression)
       if (!expression) {
-        return { ok: false, error: 'expression is required for action=console' }
+        return createErrorResult('invalid_request', 'expression is required for action=console')
       }
       const result = await this.options.relay.evaluate(targetId, expression)
       return { ok: true, targetId, result }
@@ -407,7 +448,11 @@ export class BrowserControlService {
       }, 'direct-cdp')
       const targetId = String(result?.targetId ?? '').trim()
       if (!targetId) {
-        return { ok: false, error: 'Target.createTarget returned no targetId' }
+        return createErrorResult('protocol_error', 'Target.createTarget returned no targetId', {
+          recoverable: true,
+          retryable: true,
+          suggestedNextActions: ['open'],
+        })
       }
       this.tabState.registerTab(targetId, {
         retain: asBoolean(params.retain) === true,
@@ -427,7 +472,7 @@ export class BrowserControlService {
     if (action === 'focus') {
       const targetId = asString(params.targetId)
       if (!targetId) {
-        return { ok: false, error: 'targetId is required for action=focus' }
+        return createErrorResult('invalid_request', 'targetId is required for action=focus')
       }
       const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
       await page.bringToFront()
@@ -439,7 +484,7 @@ export class BrowserControlService {
     if (action === 'close') {
       const targetId = asString(params.targetId)
       if (!targetId) {
-        return { ok: false, error: 'targetId is required for action=close' }
+        return createErrorResult('invalid_request', 'targetId is required for action=close')
       }
       const page = await this.session.getPageForTargetId({ cdpUrl, targetId, mode: 'direct-cdp' })
       await page.close()
@@ -451,7 +496,7 @@ export class BrowserControlService {
       const targetId = asString(params.targetId)
       const expression = asString(params.expression)
       if (!targetId || !expression) {
-        return { ok: false, error: 'targetId and expression are required for action=console' }
+        return createErrorResult('invalid_request', 'targetId and expression are required for action=console')
       }
       const result = await this.actions.evaluate({
         cdpUrl,
@@ -478,7 +523,7 @@ export class BrowserControlService {
       return { ok: true, closed, retained: this.tabState.retainedTabCount }
     }
 
-    return { ok: false, error: `Unsupported direct CDP action: ${action}` }
+    return createErrorResult('unsupported_action', `Unsupported direct CDP action: ${action}`)
   }
 
   private async handlePlaywrightAction(
@@ -494,19 +539,30 @@ export class BrowserControlService {
       ? await this.resolveDirectEndpoint()
       : this.resolveRelayEndpoint()
     if (!endpoint) {
-      return {
-        ok: false,
-        error:
-          connectionMode === 'direct-cdp'
-            ? 'No direct CDP browser detected. Start Chrome with remote debugging enabled before using direct-cdp mode.'
-            : 'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
-      }
+      return connectionMode === 'direct-cdp'
+        ? createErrorResult(
+          'direct_cdp_unavailable',
+          'No direct CDP browser detected. Start Chrome with remote debugging enabled before using direct-cdp mode.',
+          {
+            recoverable: true,
+          },
+        )
+        : createErrorResult(
+          'browser_unavailable',
+          'Browser extension not connected. Start the managed browser or connect an extension-backed browser first.',
+          {
+            recoverable: true,
+            suggestedNextActions: ['start', 'open'],
+          },
+        )
     }
 
-    const targetId = this.resolveCurrentTarget(asString(params.targetId))
     const mode = connectionMode
     const cdpUrl = endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
+    const targetId = mode === 'relay'
+      ? await this.resolveRelayExecutionTarget(asString(params.targetId))
+      : this.resolveDirectExecutionTarget(asString(params.targetId))
 
     if (targetId) {
       this.tabState.touchTab(targetId)
@@ -623,7 +679,7 @@ export class BrowserControlService {
     if (action === 'cookies') {
       const operation = asString(params.operation) as 'get' | 'set' | 'clear' | undefined
       if (!operation || !['get', 'set', 'clear'].includes(operation)) {
-        return { ok: false, error: 'operation must be get, set, or clear for action=cookies' }
+        return createErrorResult('invalid_request', 'operation must be get, set, or clear for action=cookies')
       }
       return { ok: true, data: await this.actions.cookies({ cdpUrl, targetId, mode, operation, cookies: Array.isArray(params.cookies) ? (params.cookies as any[]) : undefined }) }
     }
@@ -632,7 +688,7 @@ export class BrowserControlService {
       const storageType = asString(params.storageType) === 'session' ? 'session' : 'local'
       const operation = asString(params.operation) as 'get' | 'set' | 'clear' | undefined
       if (!operation || !['get', 'set', 'clear'].includes(operation)) {
-        return { ok: false, error: 'operation must be get, set, or clear for action=storage' }
+        return createErrorResult('invalid_request', 'operation must be get, set, or clear for action=storage')
       }
       return { ok: true, data: await this.actions.storage({ cdpUrl, targetId, mode, storageType, operation, key: asString(params.key), value: asString(params.value) }) }
     }
@@ -651,13 +707,13 @@ export class BrowserControlService {
     if (action === 'upload') {
       const paths = asStringArray(params.paths)
       if (!paths?.length) {
-        return { ok: false, error: 'paths is required for action=upload' }
+        return createErrorResult('invalid_request', 'paths is required for action=upload')
       }
       const resolvedPaths = paths
         .map((entry) => resolvePathWithinWorkspace(entry, workspaceDir))
         .filter((entry): entry is string => Boolean(entry))
       if (!resolvedPaths.length) {
-        return { ok: false, error: 'No valid upload paths after validation' }
+        return createErrorResult('invalid_request', 'No valid upload paths after validation')
       }
       await this.actions.setInputFiles({
         cdpUrl,
@@ -700,7 +756,7 @@ export class BrowserControlService {
       return await this.handleActRequest(params, cdpUrl, targetId, mode)
     }
 
-    return { ok: false, error: `Unsupported browser action: ${action}` }
+    return createErrorResult('unsupported_action', `Unsupported browser action: ${action}`)
   }
 
   private async handleActRequest(
@@ -711,13 +767,13 @@ export class BrowserControlService {
   ): Promise<BrowserActionResult> {
     const request = params.request
     if (!request || typeof request !== 'object') {
-      return { ok: false, error: 'request is required for action=act' }
+      return createErrorResult('invalid_request', 'request is required for action=act')
     }
 
     const payload = request as Record<string, unknown>
     const kind = asString(payload.kind) ?? (asString(payload.fn) || asString(payload.expression) ? 'evaluate' : undefined)
     if (!kind) {
-      return { ok: false, error: 'request.kind is required' }
+      return createErrorResult('invalid_request', 'request.kind is required')
     }
 
     const targetId = asString(payload.targetId) ?? defaultTargetId
@@ -806,7 +862,7 @@ export class BrowserControlService {
           }),
         }
       default:
-        return { ok: false, error: `unsupported act kind: ${kind}` }
+        return createErrorResult('unsupported_action', `unsupported act kind: ${kind}`)
     }
   }
 
@@ -893,33 +949,143 @@ export class BrowserControlService {
     this.tabState.setCurrentTarget(current.targetId)
   }
 
-  private resolveCurrentTarget(explicitTargetId?: string): string {
-    if (explicitTargetId) return explicitTargetId
+  private async resolveRelayExecutionTarget(explicitTargetId?: string): Promise<string> {
+    const readyTarget = explicitTargetId
+      ? await this.options.relay.resolveReadyTarget(explicitTargetId)
+      : await this.resolveCurrentRelayReadyTarget()
+    this.tabState.setCurrentTarget(readyTarget.targetId)
+    return readyTarget.targetId
+  }
 
-    if (this.options.relay.hasExtensionConnection) {
-      this.syncRelayCurrentTarget()
+  private async resolveCurrentRelayReadyTarget(): Promise<ReadyRelayTarget> {
+    this.syncRelayCurrentTarget()
+    const currentTargetId = this.tabState.currentTargetId
+    if (!currentTargetId) {
+      throw new Error('No current browser target available. Open or focus a page before using browser actions.')
     }
+    return await this.options.relay.resolveReadyTarget(currentTargetId)
+  }
+
+  private resolveDirectExecutionTarget(explicitTargetId?: string): string {
+    if (explicitTargetId) return explicitTargetId
 
     const currentTargetId = this.tabState.currentTargetId
     if (!currentTargetId) {
       throw new Error('No current browser target available. Open or focus a page before using browser actions.')
     }
+    return currentTargetId
+  }
 
-    if (!this.options.relay.hasExtensionConnection) {
-      return currentTargetId
+  private classifyActionError(
+    error: unknown,
+    context: { action: string; connectionMode: ConnectionMode },
+  ): BrowserActionResult {
+    const originalMessage = error instanceof Error ? error.message : String(error)
+    const mappedMessage = this.session.mapActionError(error)
+    const combinedMessage = `${originalMessage}\n${mappedMessage}`
+
+    if (combinedMessage.includes('No current browser target available.')) {
+      return createErrorResult('no_current_target', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['tabs', 'open', 'focus'],
+      })
     }
 
-    const attached = this.options.relay.listAttachments().some((entry) => entry.targetId === currentTargetId)
-    if (attached) {
-      return currentTargetId
+    if (combinedMessage.includes('Unknown ref "')) {
+      return createErrorResult('stale_snapshot_ref', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['snapshot'],
+      })
     }
 
-    this.tabState.clearCurrentTarget(currentTargetId)
-    this.syncRelayCurrentTarget()
-    if (this.tabState.currentTargetId) {
-      return this.tabState.currentTargetId
+    if (combinedMessage.includes('Timed out waiting for target "') && combinedMessage.includes('" to become attached.')) {
+      return createErrorResult('target_attach_timeout', mappedMessage, {
+        recoverable: true,
+        retryable: true,
+        suggestedNextActions: ['open'],
+      })
     }
-    throw new Error('No current browser target available. Open or focus a page before using browser actions.')
+
+    if (combinedMessage.includes('Target closed') || combinedMessage.includes('Target page, context or browser has been closed')) {
+      return createErrorResult('target_closed', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['tabs', 'open', 'focus'],
+      })
+    }
+
+    if (combinedMessage.includes('Browser has been closed') || combinedMessage.includes('Browser closed')) {
+      return createErrorResult('browser_closed', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['start', 'open'],
+      })
+    }
+
+    if (combinedMessage.includes('Execution context was destroyed')) {
+      return createErrorResult('page_context_destroyed', mappedMessage, {
+        recoverable: true,
+        retryable: true,
+      })
+    }
+
+    if (
+      combinedMessage.includes('connectOverCDP') && combinedMessage.includes('Timeout')
+      || combinedMessage.includes('CDP WebSocket connection timed out')
+      || combinedMessage.includes('CDP WebSocket error')
+      || combinedMessage.includes('HTTP endpoint is not reachable')
+      || combinedMessage.includes('CDP endpoint is not reachable')
+      || combinedMessage.includes('is not ready for browser control yet')
+    ) {
+      return createErrorResult('browser_not_ready', mappedMessage, {
+        recoverable: true,
+        retryable: true,
+      })
+    }
+
+    if (combinedMessage.includes('Target browser instance is not connected.')) {
+      return createErrorResult('browser_unavailable', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['tabs', 'open'],
+      })
+    }
+
+    if (combinedMessage.includes('No usable Chrome profile with MatchaClaw Browser Relay enabled was found.')) {
+      return createErrorResult('browser_auto_launch_unavailable', mappedMessage)
+    }
+
+    if (combinedMessage.includes('MatchaClaw Browser Relay did not reconnect.')) {
+      return createErrorResult('browser_auto_launch_failed', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['start', 'open'],
+      })
+    }
+
+    if (
+      combinedMessage.includes('Browser extension not connected and no direct CDP browser detected.')
+      || combinedMessage.includes('Chrome extension not connected')
+      || (combinedMessage.includes('Browser extension not connected.') && context.connectionMode === 'relay')
+      || (combinedMessage.includes('No CDP endpoint available') && context.connectionMode === 'relay')
+    ) {
+      return createErrorResult('browser_unavailable', mappedMessage, {
+        recoverable: true,
+        suggestedNextActions: ['start', 'open'],
+      })
+    }
+
+    if (
+      combinedMessage.includes('No direct CDP browser detected.')
+      || (combinedMessage.includes('No CDP endpoint available') && context.connectionMode === 'direct-cdp')
+      || combinedMessage.includes('Direct CDP auto-connect already attempted.')
+    ) {
+      return createErrorResult('direct_cdp_unavailable', mappedMessage, {
+        recoverable: true,
+      })
+    }
+
+    if (originalMessage.endsWith(' is required') || originalMessage.includes(' are required')) {
+      return createErrorResult('invalid_request', mappedMessage)
+    }
+
+    return createErrorResult('protocol_error', mappedMessage)
   }
 }
 

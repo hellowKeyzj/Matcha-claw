@@ -64,9 +64,29 @@ function waitForOpen(ws: WebSocket): Promise<void> {
 
 function waitForMessage(ws: WebSocket): Promise<string> {
   return new Promise((resolve, reject) => {
-    ws.once('message', (data) => resolve(data.toString()))
-    ws.once('error', reject)
+    const onMessage = (data: any) => {
+      ws.off('error', onError)
+      resolve(data.toString())
+    }
+    const onError = (error: Error) => {
+      ws.off('message', onMessage)
+      reject(error)
+    }
+    ws.once('message', onMessage)
+    ws.once('error', onError)
   })
+}
+
+async function waitForJsonMessageMatching(
+  ws: WebSocket,
+  predicate: (message: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  while (true) {
+    const message = JSON.parse(await waitForMessage(ws)) as Record<string, unknown>
+    if (predicate(message)) {
+      return message
+    }
+  }
 }
 
 let server: BrowserRelayServer | null = null
@@ -653,50 +673,34 @@ describe('openclaw browser relay plugin', () => {
       },
     }))
     const pageAttachResponse = JSON.parse(await waitForMessage(cdpWs))
-    expect(pageAttachResponse.result).toMatchObject({
-      sessionId: 'browser-a|sid|page-a',
-    })
+    expect(pageAttachResponse.result?.sessionId).toMatch(/^browser-a\|asid\|/)
+    const attachSessionId = pageAttachResponse.result.sessionId
 
     cdpWs.send(JSON.stringify({
       id: 3,
-      sessionId: browserSessionId,
-      method: 'Target.getTargetInfo',
-      params: {},
+      method: 'Target.detachFromTarget',
+      params: {
+        sessionId: attachSessionId,
+      },
     }))
-    const browserInfoResponse = JSON.parse(await waitForMessage(cdpWs))
-    expect(browserInfoResponse.result?.targetInfo).toMatchObject({
-      type: 'browser',
-      title: 'browser-a',
-    })
+    const detachResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 3)
+    expect(detachResponse.result).toEqual({})
 
     cdpWs.send(JSON.stringify({
       id: 4,
-      sessionId: 'browser-a|sid|page-a',
-      method: 'Target.getTargetInfo',
-      params: {},
-    }))
-    const pageInfoResponse = JSON.parse(await waitForMessage(cdpWs))
-    expect(pageInfoResponse.result?.targetInfo).toMatchObject({
-      targetId: 'browser-a|tid|target-a',
-      title: 'Page A',
-      url: 'https://a.example.com',
-    })
-
-    cdpWs.send(JSON.stringify({
-      id: 5,
       method: 'Target.detachFromTarget',
       params: {
         sessionId: browserSessionId,
       },
     }))
-    const detachResponse = JSON.parse(await waitForMessage(cdpWs))
-    expect(detachResponse.result).toEqual({})
+    const detachBrowserResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 4)
+    expect(detachBrowserResponse.result).toEqual({})
 
     cdpWs.close()
     extensionWs.close()
   })
 
-  it('forwards page-session bootstrap commands to the extension instead of swallowing them in relay mode', async () => {
+  it('routes attach-session bootstrap commands and page events through the physical page session', async () => {
     await startRelayServer()
 
     const port = server!.port
@@ -751,7 +755,19 @@ describe('openclaw browser relay plugin', () => {
 
     cdpWs.send(JSON.stringify({
       id: 1,
-      sessionId: 'browser-a|sid|page-a',
+      method: 'Target.attachToTarget',
+      params: {
+        targetId: 'browser-a|tid|target-a',
+        flatten: true,
+      },
+    }))
+    const firstAttachResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 1)
+    expect(firstAttachResponse.result?.sessionId).toMatch(/^browser-a\|asid\|/)
+    const firstAttachSessionId = firstAttachResponse.result.sessionId
+
+    cdpWs.send(JSON.stringify({
+      id: 2,
+      sessionId: firstAttachSessionId,
       method: 'Page.enable',
       params: {},
     }))
@@ -774,34 +790,114 @@ describe('openclaw browser relay plugin', () => {
       ),
     )
 
-    const pageEnableResponse = JSON.parse(await waitForMessage(cdpWs))
+    const pageEnableResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 2)
     expect(pageEnableResponse).toMatchObject({
-      id: 1,
-      sessionId: 'browser-a|sid|page-a',
+      id: 2,
+      sessionId: firstAttachSessionId,
       result: {},
     })
 
     cdpWs.send(JSON.stringify({
-      id: 2,
-      sessionId: 'browser-a|sid|page-a',
-      method: 'Target.setAutoAttach',
-      params: {
-        autoAttach: true,
-        waitForDebuggerOnStart: true,
-        flatten: true,
-      },
+      id: 3,
+      sessionId: firstAttachSessionId,
+      method: 'Page.getFrameTree',
+      params: {},
     }))
 
-    const autoAttachCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
-    expect(autoAttachCommand).toMatchObject({
+    const frameTreeCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    expect(frameTreeCommand).toMatchObject({
       method: 'forwardCDPCommand',
       params: {
         sessionId: 'page-a',
-        method: 'Target.setAutoAttach',
+        method: 'Page.getFrameTree',
+      },
+    })
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: frameTreeCommand.id,
+          result: {
+            frameTree: {
+              frame: {
+                id: 'target-a',
+                url: 'https://a.example.com',
+                securityOrigin: 'https://a.example.com',
+                mimeType: 'text/html',
+              },
+            },
+          },
+        }),
+      ),
+    )
+
+    const frameTreeResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 3)
+    expect(frameTreeResponse).toMatchObject({
+      id: 3,
+      sessionId: firstAttachSessionId,
+      result: {
+        frameTree: {
+          frame: {
+            id: 'browser-a|tid|target-a',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })
+
+    cdpWs.send(JSON.stringify({
+      id: 4,
+      sessionId: firstAttachSessionId,
+      method: 'Runtime.enable',
+      params: {},
+    }))
+
+    const runtimeEnableCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    expect(runtimeEnableCommand).toMatchObject({
+      method: 'forwardCDPCommand',
+      params: {
+        sessionId: 'page-a',
+        method: 'Runtime.enable',
+      },
+    })
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: runtimeEnableCommand.id,
+          result: {},
+        }),
+      ),
+    )
+
+    const runtimeEnableResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 4)
+    expect(runtimeEnableResponse).toMatchObject({
+      id: 4,
+      sessionId: firstAttachSessionId,
+      result: {},
+    })
+
+    cdpWs.send(JSON.stringify({
+      id: 5,
+      sessionId: firstAttachSessionId,
+      method: 'Page.createIsolatedWorld',
+      params: {
+        frameId: 'browser-a|tid|target-a',
+        worldName: 'playwright',
+        grantUniveralAccess: true,
+      },
+    }))
+
+    const createWorldCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    expect(createWorldCommand).toMatchObject({
+      method: 'forwardCDPCommand',
+      params: {
+        sessionId: 'page-a',
+        method: 'Page.createIsolatedWorld',
         params: {
-          autoAttach: true,
-          waitForDebuggerOnStart: true,
-          flatten: true,
+          frameId: 'target-a',
+          worldName: 'playwright',
+          grantUniveralAccess: true,
         },
       },
     })
@@ -809,17 +905,177 @@ describe('openclaw browser relay plugin', () => {
       encryptWireMessage(
         sessionKey,
         JSON.stringify({
-          id: autoAttachCommand.id,
-          result: {},
+          id: createWorldCommand.id,
+          result: {
+            executionContextId: 101,
+          },
         }),
       ),
     )
 
-    const autoAttachResponse = JSON.parse(await waitForMessage(cdpWs))
-    expect(autoAttachResponse).toMatchObject({
-      id: 2,
-      sessionId: 'browser-a|sid|page-a',
+    const createWorldResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 5)
+    expect(createWorldResponse).toMatchObject({
+      id: 5,
+      sessionId: firstAttachSessionId,
+      result: {
+        executionContextId: 101,
+      },
+    })
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            sessionId: 'page-a',
+            method: 'Runtime.executionContextCreated',
+            params: {
+              context: {
+                id: 1,
+                origin: 'https://a.example.com',
+                name: '',
+                auxData: {
+                  frameId: 'target-a',
+                  isDefault: true,
+                  type: 'default',
+                },
+              },
+            },
+          },
+        }),
+      ),
+    )
+    const firstRuntimeEvent = await waitForJsonMessageMatching(
+      cdpWs,
+      (message) => message.method === 'Runtime.executionContextCreated' && (message.params as any)?.context?.id === 1,
+    )
+    expect(firstRuntimeEvent).toMatchObject({
+      method: 'Runtime.executionContextCreated',
+      sessionId: firstAttachSessionId,
+      params: {
+        context: {
+          id: 1,
+          auxData: {
+            frameId: 'browser-a|tid|target-a',
+          },
+        },
+      },
+    })
+
+    cdpWs.send(JSON.stringify({
+      id: 6,
+      method: 'Target.attachToTarget',
+      params: {
+        targetId: 'browser-a|tid|target-a',
+        flatten: true,
+      },
+    }))
+    const secondAttachResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 6)
+    expect(secondAttachResponse.result?.sessionId).toMatch(/^browser-a\|asid\|/)
+    const secondAttachSessionId = secondAttachResponse.result.sessionId
+    expect(secondAttachSessionId).not.toBe(firstAttachSessionId)
+
+    const duplicatedRuntimeEvents = await new Promise<Array<Record<string, unknown>>>((resolve, reject) => {
+      const collected: Array<Record<string, unknown>> = []
+      const timer = setTimeout(() => {
+        cdpWs.off('message', onMessage)
+        reject(new Error('Timed out waiting for duplicated runtime events'))
+      }, 1_000)
+      const onMessage = (data: any) => {
+        const message = JSON.parse(data.toString()) as Record<string, any>
+        if (message.method !== 'Runtime.executionContextCreated') return
+        if (message.params?.context?.id !== 2) return
+        collected.push(message)
+        if (collected.length < 2) return
+        clearTimeout(timer)
+        cdpWs.off('message', onMessage)
+        resolve(collected)
+      }
+
+      cdpWs.on('message', onMessage)
+      extensionWs.send(
+        encryptWireMessage(
+          sessionKey,
+          JSON.stringify({
+            method: 'forwardCDPEvent',
+            params: {
+              sessionId: 'page-a',
+              method: 'Runtime.executionContextCreated',
+              params: {
+                context: {
+                  id: 2,
+                  origin: 'https://a.example.com',
+                  name: '',
+                  auxData: {
+                    frameId: 'target-a',
+                    isDefault: true,
+                    type: 'default',
+                  },
+                },
+              },
+            },
+          }),
+        ),
+      )
+    })
+    const [secondRuntimeEvent, thirdRuntimeEvent] = duplicatedRuntimeEvents
+    expect(
+      [secondRuntimeEvent.sessionId, thirdRuntimeEvent.sessionId].sort(),
+    ).toEqual([firstAttachSessionId, secondAttachSessionId].sort())
+
+    cdpWs.send(JSON.stringify({
+      id: 7,
+      method: 'Target.detachFromTarget',
+      params: {
+        sessionId: firstAttachSessionId,
+      },
+    }))
+    const detachFirstAttachResponse = await waitForJsonMessageMatching(cdpWs, (message) => message.id === 7)
+    expect(detachFirstAttachResponse).toMatchObject({
+      id: 7,
       result: {},
+    })
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            sessionId: 'page-a',
+            method: 'Runtime.executionContextCreated',
+            params: {
+              context: {
+                id: 3,
+                origin: 'https://a.example.com',
+                name: '',
+                auxData: {
+                  frameId: 'target-a',
+                  isDefault: true,
+                  type: 'default',
+                },
+              },
+            },
+          },
+        }),
+      ),
+    )
+    const remainingRuntimeEvent = await waitForJsonMessageMatching(
+      cdpWs,
+      (message) => message.method === 'Runtime.executionContextCreated' && (message.params as any)?.context?.id === 3,
+    )
+    expect(remainingRuntimeEvent).toMatchObject({
+      method: 'Runtime.executionContextCreated',
+      sessionId: secondAttachSessionId,
+      params: {
+        context: {
+          id: 3,
+          auxData: {
+            frameId: 'browser-a|tid|target-a',
+          },
+        },
+      },
     })
 
     cdpWs.close()

@@ -150,4 +150,27 @@ describe('browser relay tool', () => {
     expect(typeof result.details?.path).toBe('string')
     await expect(fs.access(String(result.details?.path))).resolves.toBeUndefined()
   })
+
+  it('passes through structured browser error metadata on failure', async () => {
+    const tool = createBrowserRelayTool({}, () => ({
+      handleRequest: async () => ({
+        ok: false,
+        error: 'Browser extension not connected and no direct CDP browser detected.',
+        errorCode: 'browser_unavailable',
+        recoverable: true,
+        suggestedNextActions: ['start', 'open'],
+      }),
+    }))
+
+    const result = await tool.execute('tool-call-6', { action: 'tabs' })
+
+    expect(result.content[0]).toMatchObject({ type: 'text' })
+    expect(result.content[0]?.text).toContain('"errorCode": "browser_unavailable"')
+    expect(result.details).toMatchObject({
+      ok: false,
+      errorCode: 'browser_unavailable',
+      recoverable: true,
+      suggestedNextActions: ['start', 'open'],
+    })
+  })
 })

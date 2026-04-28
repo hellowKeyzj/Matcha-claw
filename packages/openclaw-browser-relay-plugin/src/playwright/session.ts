@@ -302,9 +302,6 @@ export class PlaywrightSession {
       this.pageStateInitialized.delete(page)
       this.targetIdCache.delete(page)
       this.targetIdByPage.delete(page)
-      if (targetId) {
-        this.tabState.closeTab(targetId)
-      }
     })
 
     return state
@@ -450,10 +447,12 @@ export class PlaywrightSession {
       throw new Error('targetId is required')
     }
 
-    const existing = await this.findExistingPage(input)
+    const mode = input.mode ?? this.getActiveConnectionMode() ?? 'relay'
+
+    const existing = await this.findExistingPage({ ...input, mode })
     if (existing) {
       this.logger.warn?.(
-        `[browser-playwright] resolved page immediately targetId=${input.targetId} mode=${input.mode ?? 'auto'} pageUrl="${safePageUrl(existing)}"`,
+        `[browser-playwright] resolved page immediately targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(existing)}"`,
       )
       await this.logPageSnapshot('getPageForTargetId resolved immediately', existing, input.targetId)
       return existing
@@ -461,30 +460,33 @@ export class PlaywrightSession {
 
     const retries = 3
     for (let attempt = 0; attempt < retries; attempt += 1) {
-      if (attempt === 0 && (input.mode ?? this.getActiveConnectionMode()) === 'relay') {
-        try {
-          await this.sendBrowserCdpCommand(input.cdpUrl, 'Target.setAutoAttach', {
-            autoAttach: true,
-            waitForDebuggerOnStart: false,
-            flatten: true,
-          }, input.mode)
-        } catch {
-          // noop
-        }
-      }
-
       await sleep(Math.min(2_000, 600 * (attempt + 1)))
-      const retried = await this.findExistingPage(input)
+      const retried = await this.findExistingPage({ ...input, mode })
       if (retried) {
         this.logger.warn?.(
-          `[browser-playwright] resolved page after retry targetId=${input.targetId} attempt=${attempt + 1} mode=${input.mode ?? 'auto'} pageUrl="${safePageUrl(retried)}"`,
+          `[browser-playwright] resolved page after retry targetId=${input.targetId} attempt=${attempt + 1} mode=${mode} pageUrl="${safePageUrl(retried)}"`,
         )
         await this.logPageSnapshot('getPageForTargetId resolved after retry', retried, input.targetId)
         return retried
       }
     }
 
-    const connection = await this.connectBrowser(input.cdpUrl, input.mode)
+    if (mode === 'relay') {
+      this.logger.warn?.(
+        `[browser-playwright] rebuilding relay projection after page miss targetId=${input.targetId}`,
+      )
+      await this.closeConnections('relay')
+      const rebuilt = await this.findExistingPage({ ...input, mode })
+      if (rebuilt) {
+        this.logger.warn?.(
+          `[browser-playwright] resolved page after relay rebuild targetId=${input.targetId} mode=${mode} pageUrl="${safePageUrl(rebuilt)}"`,
+        )
+        await this.logPageSnapshot('getPageForTargetId resolved after relay rebuild', rebuilt, input.targetId)
+        return rebuilt
+      }
+    }
+
+    const connection = await this.connectBrowser(input.cdpUrl, mode)
     const pages = connection.browser.contexts().flatMap((context: any) => context.pages())
     const pageSummaries = await Promise.all(
       pages.map(async (page: any, index: number) => {
@@ -493,7 +495,7 @@ export class PlaywrightSession {
       }),
     )
     this.logger.warn?.(
-      `[browser-playwright] failed to resolve page targetId=${input.targetId} mode=${input.mode ?? 'auto'} openPages=${pageSummaries.join('; ')}`,
+      `[browser-playwright] failed to resolve page targetId=${input.targetId} mode=${mode} openPages=${pageSummaries.join('; ')}`,
     )
     throw new Error(
       `Page not found for targetId="${input.targetId}" after retries. There are ${pages.length} open page(s): ${pages.map((page: any) => page.url()).join(', ')}`,
@@ -611,8 +613,7 @@ export class PlaywrightSession {
     }
 
     try {
-      const session = await page.context().newCDPSession(page)
-      try {
+      return await this.withTemporaryPageSession(page, async (session) => {
         const info = await session.send('Target.getTargetInfo')
         const targetId = String(info?.targetInfo?.targetId ?? '').trim()
         if (targetId) {
@@ -624,16 +625,21 @@ export class PlaywrightSession {
           return targetId
         }
         return null
-      } finally {
-        if (this.getActiveConnectionMode() !== 'relay') {
-          await session.detach().catch(() => {})
-        }
-      }
+      })
     } catch (error) {
       this.logger.warn?.(
         `[browser-playwright] resolveTargetId failed pageUrl="${safePageUrl(page)}" error=${error instanceof Error ? error.message : String(error)}`,
       )
       return null
+    }
+  }
+
+  private async withTemporaryPageSession<T>(page: any, callback: (session: any) => Promise<T>): Promise<T> {
+    const session = await page.context().newCDPSession(page)
+    try {
+      return await callback(session)
+    } finally {
+      await session.detach().catch(() => {})
     }
   }
 
