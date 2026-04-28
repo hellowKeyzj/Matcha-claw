@@ -271,6 +271,14 @@ export function normalizeAssistantFinalTextForDedup(content: unknown): string {
     .trim();
 }
 
+function resolveSessionLabelCandidateFromUserMessage(content: unknown): string {
+  return normalizeSessionLabelText(cleanGatewayUserText(getMessageText(content)));
+}
+
+function resolveSessionLabelCandidateFromAssistantMessage(content: unknown): string {
+  return normalizeSessionLabelText(normalizeAssistantFinalTextForDedup(content));
+}
+
 export function createIntermediateToolTurnSnapshot(
   message: RawMessage,
   id: string,
@@ -311,20 +319,22 @@ export function sanitizeIntermediateToolFillerMessage(
 }
 
 export function resolveSessionLabelFromMessages(messages: RawMessage[]): string | null {
-  for (const message of messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
     if (message.role !== 'user') {
       continue;
     }
-    const candidate = normalizeSessionLabelText(getMessageText(message.content));
+    const candidate = resolveSessionLabelCandidateFromUserMessage(message.content);
     if (candidate) {
       return candidate;
     }
   }
-  for (const message of messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
     if (message.role !== 'assistant') {
       continue;
     }
-    const candidate = normalizeSessionLabelText(getMessageText(message.content));
+    const candidate = resolveSessionLabelCandidateFromAssistantMessage(message.content);
     if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
       return candidate;
     }

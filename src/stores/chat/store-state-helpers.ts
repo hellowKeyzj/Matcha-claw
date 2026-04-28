@@ -5,10 +5,18 @@ import type {
   ChatSessionMetaState,
   ChatSessionRecord,
   ChatSessionRuntimeState,
+  ChatSessionViewportState,
   ChatStoreState,
   RawMessage,
   ToolStatus,
 } from './types';
+import { selectStreamingRenderMessage } from './stream-overlay-message';
+import {
+  appendViewportMessage,
+  createViewportWindowState,
+  syncViewportMessages,
+  upsertViewportMessage,
+} from './viewport-state';
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 export function toMs(ts: number): number {
@@ -234,6 +242,19 @@ const EMPTY_MESSAGES: RawMessage[] = [];
 const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
 const EMPTY_PENDING_TOOL_IMAGES: AttachedFileMeta[] = [];
 const EMPTY_APPROVALS: ApprovalItem[] = [];
+const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
+  messages: EMPTY_MESSAGES,
+  totalMessageCount: 0,
+  windowStartOffset: 0,
+  windowEndOffset: 0,
+  hasMore: false,
+  hasNewer: false,
+  isLoadingMore: false,
+  isLoadingNewer: false,
+  isAtLatest: true,
+  anchorRestore: null,
+  lastVisibleMessageId: null,
+};
 
 export function createEmptySessionRuntime(): ChatSessionRuntimeState {
   return {
@@ -265,6 +286,10 @@ export function createEmptySessionRecord(): ChatSessionRecord {
     meta: createEmptySessionMeta(),
     runtime: createEmptySessionRuntime(),
   };
+}
+
+export function createEmptySessionViewportState(): ChatSessionViewportState {
+  return EMPTY_VIEWPORT_STATE;
 }
 
 export function resolveSessionRuntime(session: ChatSessionRecord | undefined): ChatSessionRuntimeState {
@@ -310,6 +335,13 @@ export function getSessionMeta(state: Pick<ChatStoreState, 'sessionsByKey'>, ses
 
 export function getSessionRuntime(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionRuntimeState {
   return resolveSessionRuntime(state.sessionsByKey[sessionKey]);
+}
+
+export function getSessionViewportState(
+  state: Pick<ChatStoreState, 'viewportBySession'>,
+  sessionKey: string,
+): ChatSessionViewportState {
+  return state.viewportBySession?.[sessionKey] ?? EMPTY_VIEWPORT_STATE;
 }
 
 export function upsertSessionRecord(
@@ -411,6 +443,21 @@ export function patchCurrentSessionTranscript(
   return patchSessionTranscript(state, state.currentSessionKey, transcript);
 }
 
+export function patchSessionViewportState(
+  state: Pick<ChatStoreState, 'viewportBySession'>,
+  sessionKey: string,
+  viewport: ChatSessionViewportState,
+): Record<string, ChatSessionViewportState> {
+  const current = state.viewportBySession ?? {};
+  if (current[sessionKey] === viewport) {
+    return current;
+  }
+  return {
+    ...current,
+    [sessionKey]: viewport,
+  };
+}
+
 export function removeSessionRecord(
   state: Pick<ChatStoreState, 'sessionsByKey'>,
   sessionKey: string,
@@ -420,6 +467,46 @@ export function removeSessionRecord(
   );
 }
 
+export function removeSessionViewportState(
+  state: Pick<ChatStoreState, 'viewportBySession'>,
+  sessionKey: string,
+): Record<string, ChatSessionViewportState> {
+  return Object.fromEntries(
+    Object.entries(state.viewportBySession ?? {}).filter(([key]) => key !== sessionKey),
+  );
+}
+
+export function buildTranscriptBackedViewportState(
+  state: Pick<ChatStoreState, 'viewportBySession'>,
+  sessionKey: string,
+  transcript: RawMessage[],
+  runtime: ChatSessionRuntimeState,
+): ChatSessionViewportState {
+  const baseViewport = state.viewportBySession?.[sessionKey];
+  let nextViewport = !baseViewport
+    ? createViewportWindowState({
+      messages: transcript,
+      totalMessageCount: transcript.length,
+      windowStartOffset: 0,
+      windowEndOffset: transcript.length,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    })
+    : syncViewportMessages(baseViewport, transcript);
+
+  const pendingUserMessage = runtime.pendingUserMessage?.message ?? null;
+  if (pendingUserMessage) {
+    nextViewport = appendViewportMessage(nextViewport, pendingUserMessage);
+  }
+
+  const streamingMessage = selectStreamingRenderMessage(runtime);
+  if (streamingMessage) {
+    nextViewport = upsertViewportMessage(nextViewport, streamingMessage);
+  }
+
+  return nextViewport;
+}
 export function getPendingApprovals(
   state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
   sessionKey: string,

@@ -1,0 +1,226 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import Chat from '@/pages/Chat';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { useChatStore } from '@/stores/chat';
+import { useGatewayStore } from '@/stores/gateway';
+import { useSubagentsStore } from '@/stores/subagents';
+import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+function buildSessionMessages(count: number, prefix = 'session message') {
+  return Array.from({ length: count }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `${prefix} ${index + 1}`,
+    timestamp: index + 1,
+    id: `${prefix.replace(/\s+/g, '-')}-${index + 1}`,
+  }));
+}
+
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    transcript: overrides?.transcript ?? base.transcript,
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+  };
+}
+
+function renderChat() {
+  return render(
+    <MemoryRouter initialEntries={['/']}>
+      <TooltipProvider>
+        <Chat />
+      </TooltipProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe('chat viewport window', () => {
+  beforeEach(() => {
+    (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
+  });
+
+  it('renders viewport messages directly and exposes load older when more history exists', async () => {
+    const currentSessionKey = 'agent:test:main';
+    const allMessages = buildSessionMessages(35);
+    const viewportMessages = allMessages.slice(-20);
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: vi.fn().mockResolvedValue({}),
+    } as never);
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+      ],
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+      updateAgent: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    useTaskInboxStore.setState({
+      tasks: [],
+      loading: false,
+      initialized: true,
+      error: null,
+      workspaceDirs: [],
+      workspaceLabel: null,
+      submittingTaskIds: [],
+      init: vi.fn().mockResolvedValue(undefined),
+      refreshTasks: vi.fn().mockResolvedValue(undefined),
+      submitDecision: vi.fn().mockResolvedValue(undefined),
+      submitFreeText: vi.fn().mockResolvedValue(undefined),
+      openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
+      handleGatewayNotification: vi.fn(),
+      clearError: vi.fn(),
+    } as never);
+    useChatStore.setState({
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
+      error: null,
+      showThinking: true,
+      currentSessionKey,
+      viewportBySession: {
+        [currentSessionKey]: createViewportWindowState({
+          ...createEmptySessionViewportState(),
+          messages: viewportMessages,
+          totalMessageCount: allMessages.length,
+          windowStartOffset: 15,
+          windowEndOffset: 35,
+          hasMore: true,
+          hasNewer: false,
+          isAtLatest: true,
+        }),
+      },
+      pendingApprovalsBySession: {},
+      sessions: [
+        { key: currentSessionKey, displayName: currentSessionKey },
+      ],
+      sessionsByKey: {
+        [currentSessionKey]: buildSessionRecord({
+          transcript: viewportMessages,
+          meta: {
+            ready: true,
+            lastActivityAt: Date.now(),
+          },
+        }),
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadOlderMessages: vi.fn().mockResolvedValue(undefined),
+      jumpToLatest: vi.fn().mockResolvedValue(undefined),
+      trimTopMessages: vi.fn(),
+      setViewportLastVisibleMessageId: vi.fn(),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderChat();
+
+    expect(screen.queryByText('session message 1')).toBeNull();
+    expect(screen.getByText('session message 16')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Load older messages' })).toBeInTheDocument();
+  });
+
+  it('jumps to latest before sending when the viewport is detached from the newest window', async () => {
+    const currentSessionKey = 'agent:test:main';
+    const jumpToLatest = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: vi.fn().mockResolvedValue({}),
+    } as never);
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'test', name: 'Test Agent', workspace: '.', isDefault: false, createdAt: 1, updatedAt: 1 },
+      ],
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+      updateAgent: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    useTaskInboxStore.setState({
+      tasks: [],
+      loading: false,
+      initialized: true,
+      error: null,
+      workspaceDirs: [],
+      workspaceLabel: null,
+      submittingTaskIds: [],
+      init: vi.fn().mockResolvedValue(undefined),
+      refreshTasks: vi.fn().mockResolvedValue(undefined),
+      submitDecision: vi.fn().mockResolvedValue(undefined),
+      submitFreeText: vi.fn().mockResolvedValue(undefined),
+      openTaskSession: vi.fn().mockReturnValue({ switched: false, reason: 'task_not_found' }),
+      handleGatewayNotification: vi.fn(),
+      clearError: vi.fn(),
+    } as never);
+    useChatStore.setState({
+      snapshotReady: true,
+      initialLoading: false,
+      refreshing: false,
+      mutating: false,
+      error: null,
+      showThinking: true,
+      currentSessionKey,
+      viewportBySession: {
+        [currentSessionKey]: createViewportWindowState({
+          messages: buildSessionMessages(10),
+          totalMessageCount: 20,
+          windowStartOffset: 0,
+          windowEndOffset: 10,
+          hasMore: false,
+          hasNewer: true,
+          isAtLatest: false,
+        }),
+      },
+      pendingApprovalsBySession: {},
+      sessions: [
+        { key: currentSessionKey, displayName: currentSessionKey },
+      ],
+      sessionsByKey: {
+        [currentSessionKey]: buildSessionRecord({
+          transcript: buildSessionMessages(10),
+          meta: {
+            ready: true,
+            lastActivityAt: Date.now(),
+          },
+        }),
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadOlderMessages: vi.fn().mockResolvedValue(undefined),
+      jumpToLatest,
+      trimTopMessages: vi.fn(),
+      setViewportLastVisibleMessageId: vi.fn(),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      sendMessage,
+    } as never);
+
+    const { container } = renderChat();
+    fireEvent.change(
+      screen.getByPlaceholderText('Message (Type / to see skills, Enter to send, Shift+Enter for new line)'),
+      { target: { value: 'reply from detached viewport' } },
+    );
+    fireEvent.click(container.querySelector('button[title="Send"]') as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(jumpToLatest).toHaveBeenCalledWith(currentSessionKey);
+    });
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith('reply from detached viewport', undefined);
+    });
+  });
+});

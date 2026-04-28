@@ -3,8 +3,7 @@ import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 
 const createFetchHistoryWindowMock = vi.fn();
-const runActiveHistoryPipelineMock = vi.fn();
-const runQuietHistoryPipelineMock = vi.fn();
+const loadHistoryWindowMock = vi.fn();
 const createApplyLoadedMessagesPipelineMock = vi.fn();
 const handleHistoryLoadFailureMock = vi.fn();
 const beginHistoryLoadUiStateMock = vi.fn();
@@ -13,8 +12,7 @@ const finalizeHistoryLoadUiStateMock = vi.fn();
 
 vi.mock('@/stores/chat/history-fetch-helpers', () => ({
   createFetchHistoryWindow: (...args: unknown[]) => createFetchHistoryWindowMock(...args),
-  runActiveHistoryPipeline: (...args: unknown[]) => runActiveHistoryPipelineMock(...args),
-  runQuietHistoryPipeline: (...args: unknown[]) => runQuietHistoryPipelineMock(...args),
+  loadHistoryWindow: (...args: unknown[]) => loadHistoryWindowMock(...args),
 }));
 
 vi.mock('@/stores/chat/history-apply-pipeline', () => ({
@@ -42,7 +40,6 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
     historyFingerprintBySession: new Map<string, string>(),
-    historyProbeFingerprintBySession: new Map<string, string>(),
     historyQuickFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
   };
@@ -71,8 +68,7 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
 describe('chat history load execution', () => {
   beforeEach(() => {
     createFetchHistoryWindowMock.mockReset();
-    runActiveHistoryPipelineMock.mockReset();
-    runQuietHistoryPipelineMock.mockReset();
+    loadHistoryWindowMock.mockReset();
     createApplyLoadedMessagesPipelineMock.mockReset();
     handleHistoryLoadFailureMock.mockReset();
     beginHistoryLoadUiStateMock.mockReset();
@@ -83,12 +79,11 @@ describe('chat history load execution', () => {
     createApplyLoadedMessagesPipelineMock.mockReturnValue(vi.fn(async () => {}));
     createHistoryLoadAbortGuardMock.mockReturnValue(() => false);
     beginHistoryLoadUiStateMock.mockReturnValue(null);
-    runActiveHistoryPipelineMock.mockResolvedValue(undefined);
-    runQuietHistoryPipelineMock.mockResolvedValue(undefined);
+    loadHistoryWindowMock.mockResolvedValue(undefined);
     handleHistoryLoadFailureMock.mockResolvedValue(undefined);
   });
 
-  it('runs active pipeline and finalizes loading state', async () => {
+  it('runs window loader for active requests and finalizes loading state', async () => {
     const { createHistoryLoadExecutor } = await import('@/stores/chat/history-load-execution');
     const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:main' });
     const historyRuntime = createHistoryRuntimeHarness();
@@ -98,7 +93,6 @@ describe('chat history load execution', () => {
       get,
       historyRuntime,
       loadingTimeoutMs: 1000,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await executor.execute({
@@ -107,12 +101,16 @@ describe('chat history load execution', () => {
       scope: 'foreground',
     });
 
-    expect(runActiveHistoryPipelineMock).toHaveBeenCalledTimes(1);
-    expect(runQuietHistoryPipelineMock).not.toHaveBeenCalled();
+    expect(loadHistoryWindowMock).toHaveBeenCalledTimes(1);
+    expect(loadHistoryWindowMock.mock.calls[0]?.[0]).toMatchObject({
+      mode: 'active',
+      scope: 'foreground',
+      requestedSessionKey: 'agent:main:main',
+    });
     expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
   });
 
-  it('runs quiet pipeline when requested', async () => {
+  it('passes quiet mode through the same window loader', async () => {
     const { createHistoryLoadExecutor } = await import('@/stores/chat/history-load-execution');
     const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:main' });
     const historyRuntime = createHistoryRuntimeHarness();
@@ -122,7 +120,6 @@ describe('chat history load execution', () => {
       get,
       historyRuntime,
       loadingTimeoutMs: 1000,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await executor.execute({
@@ -131,23 +128,26 @@ describe('chat history load execution', () => {
       scope: 'foreground',
     });
 
-    expect(runQuietHistoryPipelineMock).toHaveBeenCalledTimes(1);
-    expect(runActiveHistoryPipelineMock).not.toHaveBeenCalled();
+    expect(loadHistoryWindowMock).toHaveBeenCalledTimes(1);
+    expect(loadHistoryWindowMock.mock.calls[0]?.[0]).toMatchObject({
+      mode: 'quiet',
+      scope: 'foreground',
+      requestedSessionKey: 'agent:main:main',
+    });
     expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
   });
 
-  it('recovers through failure helper when pipeline throws', async () => {
+  it('recovers through failure helper when window loader throws', async () => {
     const { createHistoryLoadExecutor } = await import('@/stores/chat/history-load-execution');
     const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:main' });
     const historyRuntime = createHistoryRuntimeHarness();
-    runActiveHistoryPipelineMock.mockRejectedValueOnce(new Error('pipeline failed'));
+    loadHistoryWindowMock.mockRejectedValueOnce(new Error('window failed'));
 
     const executor = createHistoryLoadExecutor({
       set,
       get,
       historyRuntime,
       loadingTimeoutMs: 1000,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await executor.execute({
@@ -160,38 +160,11 @@ describe('chat history load execution', () => {
     expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
   });
 
-  it('uses injected pipeline strategy instead of default active/quiet runners', async () => {
-    const { createHistoryLoadExecutor } = await import('@/stores/chat/history-load-execution');
-    const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:main' });
-    const historyRuntime = createHistoryRuntimeHarness();
-    const strategySpy = vi.fn(async () => {});
-
-    const executor = createHistoryLoadExecutor({
-      set,
-      get,
-      historyRuntime,
-      loadingTimeoutMs: 1000,
-      optimisticUserReconcileWindowMs: 15_000,
-      pipelineStrategy: strategySpy,
-    });
-
-    await executor.execute({
-      sessionKey: 'agent:main:main',
-      mode: 'active',
-      scope: 'foreground',
-    });
-
-    expect(strategySpy).toHaveBeenCalledTimes(1);
-    expect(runActiveHistoryPipelineMock).not.toHaveBeenCalled();
-    expect(runQuietHistoryPipelineMock).not.toHaveBeenCalled();
-    expect(finalizeHistoryLoadUiStateMock).toHaveBeenCalledTimes(1);
-  });
-
   it('treats abort error as aborted outcome without failure recovery', async () => {
     const { createHistoryLoadExecutor } = await import('@/stores/chat/history-load-execution');
     const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:main' });
     const historyRuntime = createHistoryRuntimeHarness();
-    const strategySpy = vi.fn(async () => {
+    loadHistoryWindowMock.mockImplementationOnce(async () => {
       const error = new Error('history aborted');
       error.name = 'AbortError';
       throw error;
@@ -202,8 +175,6 @@ describe('chat history load execution', () => {
       get,
       historyRuntime,
       loadingTimeoutMs: 1000,
-      optimisticUserReconcileWindowMs: 15_000,
-      pipelineStrategy: strategySpy,
     });
 
     await executor.execute({

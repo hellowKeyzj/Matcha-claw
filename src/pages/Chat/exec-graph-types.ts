@@ -1,5 +1,5 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
-import type { ExecutionGraphData } from './chat-row-model';
+import type { RawMessage } from '@/stores/chat';
+import type { ExecutionGraphData } from './execution-graph-model';
 import type { TaskStep } from './task-viz';
 
 export const SUBAGENT_HISTORY_LIMIT = 200;
@@ -47,10 +47,6 @@ export interface SessionExecutionCache {
   messagesRef: RawMessage[];
   agentsRef: ExecutionGraphAgent[];
   subagentHistoryRevision: number;
-  streamingMessageRef: unknown | null;
-  streamingToolsRef: ToolStatus[];
-  sending: boolean;
-  pendingFinal: boolean;
   showThinking: boolean;
   executionGraphs: ExecutionGraphData[];
   suppressedToolCardRowKeys: Set<string>;

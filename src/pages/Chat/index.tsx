@@ -5,22 +5,18 @@
  * are in the toolbar; messages render with markdown + streaming.
  */
 import { useCallback, useMemo, useRef } from 'react';
-import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useShallow } from 'zustand/react/shallow';
-import { useChatStore } from '@/stores/chat';
-import { selectChatLiveThreadHostKeys } from '@/stores/chat/selectors';
 import { ChatShell } from './components/ChatShell';
+import { AgentSkillConfigDialog } from './components/AgentSkillConfigDialog';
 import { ChatOffline } from './components/ChatOffline';
-import { ChatThreadPane, type ChatThreadPaneHandle } from './components/ChatThreadPane';
+import { ChatViewportStage } from './components/ChatViewportStage';
+import { ChatViewportPane, type ChatViewportPaneHandle } from './components/ChatViewportPane';
 import { useInboxLayout } from './useInboxLayout';
 import { useChatActivation } from './useChatActivation';
 import { useSkillConfig } from './useSkillConfig';
 import { useChatView } from './useChatView';
 import { useChatPageModel } from './useChatPageModel';
-import { useChatShellProps } from './useChatShellProps';
-import { useChatProjection } from './useChatProjection';
 
 interface ChatProps {
   isActive?: boolean;
@@ -30,7 +26,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const { t } = useTranslation('chat');
   const location = useLocation();
   const navigate = useNavigate();
-  const liveSessionHostKeys = useChatStore(useShallow(selectChatLiveThreadHostKeys));
   const {
     isGatewayRunning,
     gatewayRpc,
@@ -51,7 +46,8 @@ export function Chat({ isActive = true }: ChatProps) {
     waitingApproval,
   } = useChatPageModel();
   const {
-    canonicalMessages,
+    viewportMessages,
+    viewport,
     currentSessionKey,
     currentSessionReady,
     currentSessionHasActivity,
@@ -65,7 +61,6 @@ export function Chat({ isActive = true }: ChatProps) {
   } = viewState;
   const {
     sending,
-    pendingUserMessage,
     streamingMessage,
     streamingTools,
     currentPendingApprovals,
@@ -73,6 +68,9 @@ export function Chat({ isActive = true }: ChatProps) {
   const {
     resolveApproval,
     loadHistory,
+    loadOlderMessages,
+    jumpToLatest,
+    trimTopMessages,
     loadSessions,
     switchSession,
     openAgentConversation,
@@ -83,7 +81,7 @@ export function Chat({ isActive = true }: ChatProps) {
   } = actions;
 
   const chatLayoutRef = useRef<HTMLDivElement>(null);
-  const threadPaneRef = useRef<ChatThreadPaneHandle>(null);
+  const viewportPaneRef = useRef<ChatViewportPaneHandle>(null);
   const activation = useChatActivation({
     isActive,
     isGatewayRunning,
@@ -95,11 +93,6 @@ export function Chat({ isActive = true }: ChatProps) {
     loadSessions,
     loadHistory,
     cleanupEmptySession,
-  });
-  const projection = useChatProjection({
-    currentSessionKey,
-    liveMessages: canonicalMessages,
-    gatewayRpc,
   });
 
   const {
@@ -114,44 +107,35 @@ export function Chat({ isActive = true }: ChatProps) {
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
   ) => {
-    if (projection.isHistoryProjection) {
-      threadPaneRef.current?.prepareCurrentLiveBottomAlign();
-      flushSync(() => {
-        projection.returnToLive();
-      });
+    if (!viewport.isAtLatest) {
+      viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
+      await jumpToLatest(currentSessionKey);
     }
     await sendMessage(text, attachments);
-  }, [projection, sendMessage]);
+  }, [currentSessionKey, jumpToLatest, sendMessage, viewport.isAtLatest]);
 
   const inputRowCount = useMemo(() => {
-    const historyMessageCount = projection.messages.length;
-    if (projection.isHistoryProjection) {
-      return historyMessageCount;
-    }
-    let runtimeRowCount = historyMessageCount;
-    if (pendingUserMessage) {
-      runtimeRowCount += 1;
-    }
-    if (streamingMessage || streamingTools.length > 0) {
-      runtimeRowCount += 1;
-    }
-    return runtimeRowCount;
-  }, [pendingUserMessage, projection, streamingMessage, streamingTools.length]);
+    const needsStatusRow = (
+      sending
+      && !waitingApproval
+      && !streamingMessage
+      && streamingTools.length === 0
+    );
+    return viewportMessages.length + (needsStatusRow ? 1 : 0);
+  }, [sending, streamingMessage, streamingTools.length, viewportMessages.length, waitingApproval]);
 
   const liveView = useChatView({
     currentSessionKey,
     currentSessionReady,
     currentSessionHasActivity,
     rowCount: inputRowCount,
-    sending: projection.isHistoryProjection ? false : sending,
+    sending,
     initialLoading,
     refreshing,
     mutating,
   });
-  const showBackgroundStatus = projection.isHistoryProjection ? false : liveView.showBackgroundStatus;
-  const isEmptyState = projection.isHistoryProjection
-    ? projection.messages.length === 0 && !projection.loading
-    : liveView.isEmptyState;
+  const showBackgroundStatus = liveView.showBackgroundStatus;
+  const isEmptyState = liveView.isEmptyState;
 
   const {
     open: skillConfigOpen,
@@ -172,65 +156,44 @@ export function Chat({ isActive = true }: ChatProps) {
     updateAgent,
   });
 
-  const threadPanel = (
-    <ChatThreadPane
-      ref={threadPaneRef}
+  const viewportPane = (
+    <ChatViewportPane
+      ref={viewportPaneRef}
       isActive={activation.workspaceActive}
       currentSessionKey={currentSessionKey}
-      liveSessionHostKeys={liveSessionHostKeys}
-      readProjection={projection.readProjection}
-      historyMessages={projection.messages}
-      historyLoading={projection.loading}
-      historyTransitionPending={projection.historyTransitionPending}
+      viewport={viewport}
       agents={agents}
       isGatewayRunning={isGatewayRunning}
       gatewayRpc={gatewayRpc}
       initialLoading={initialLoading}
       refreshing={refreshing}
       mutating={mutating}
+      currentSessionReady={currentSessionReady}
+      currentSessionHasActivity={currentSessionHasActivity}
+      sending={sending}
+      pendingFinal={Boolean(runtimeState.pendingFinal)}
+      waitingApproval={waitingApproval}
       showThinking={showThinking}
+      streamingMessage={streamingMessage}
+      streamingTools={streamingTools}
       userAvatarDataUrl={userAvatarDataUrl}
-      onEnterHistory={projection.enterHistory}
-      viewFullHistoryLabel={t('liveThread.viewFullHistory')}
+      assistantAgentId={currentAgentId}
+      assistantAgentName={currentAgent?.name || currentAgentId}
+      assistantAvatarSeed={currentAgent?.avatarSeed}
+      assistantAvatarStyle={currentAgent?.avatarStyle}
+      onLoadOlder={() => {
+        void loadOlderMessages(currentSessionKey).then(() => {
+          trimTopMessages(currentSessionKey, 120);
+        });
+      }}
+      loadOlderLabel={t('liveThread.loadOlder')}
+      onJumpToLatest={() => {
+        void jumpToLatest(currentSessionKey);
+      }}
+      jumpToLatestLabel={t('liveThread.jumpToLatest')}
       jumpToBottomLabel={t('liveThread.jumpToBottom')}
     />
   );
-
-  const chatShellProps = useChatShellProps({
-    t,
-    chatLayoutRef,
-    taskInboxCollapsed,
-    setTaskInboxCollapsed,
-    taskInboxWidth,
-    taskInboxResizerWidth,
-    startTaskInboxResize,
-    showBackgroundStatus,
-    refreshing,
-    hasCurrentAgent: Boolean(currentAgent),
-    openSkillConfigDialog,
-    threadPanel,
-    isEmptyState,
-    error: projection.error ?? error,
-    clearError,
-    waitingApproval: projection.isHistoryProjection ? false : waitingApproval,
-    isHistoryProjection: projection.isHistoryProjection,
-    currentPendingApprovals,
-    resolveApproval,
-    sendMessage: handleSendMessage,
-    abortRun,
-    isGatewayRunning,
-    sending,
-    skillConfigOpen,
-    currentAgentName: currentAgent?.name || '',
-    currentAgentId,
-    availableSkillOptions,
-    skillConfigSkillsLoading,
-    selectedSkillIds,
-    skillConfigSaving,
-    toggleSkillConfigSelection,
-    closeSkillConfigDialog,
-    saveSkillConfig,
-  });
 
   if (!isGatewayRunning) {
     return (
@@ -241,8 +204,68 @@ export function Chat({ isActive = true }: ChatProps) {
     );
   }
 
+  const stagePanel = (
+    <ChatViewportStage
+      headerProps={{
+        showBackgroundStatus,
+        refreshing,
+        hasCurrentAgent: Boolean(currentAgent),
+        onOpenSkillConfig: openSkillConfigDialog,
+        skillConfigLabel: t('toolbar.skillConfig'),
+        statusRefreshingLabel: t('status.refreshing'),
+        statusMutatingLabel: t('status.mutating'),
+      }}
+      viewportPane={viewportPane}
+      errorBannerProps={error ? {
+        error,
+        dismissLabel: t('common:actions.dismiss'),
+        onDismiss: clearError,
+      } : null}
+      approvalDockProps={waitingApproval ? {
+        waitingLabel: t('approval.waitingLabel'),
+        approvals: currentPendingApprovals,
+        onResolve: (id, decision) => {
+          void resolveApproval(id, decision);
+        },
+      } : null}
+      inputProps={{
+        layout: isEmptyState ? 'hero' : 'dock',
+        onSend: handleSendMessage,
+        onStop: abortRun,
+        disabled: !isGatewayRunning,
+        sending,
+        approvalWaiting: waitingApproval,
+      }}
+    />
+  );
+
   return (
-    <ChatShell {...chatShellProps} />
+    <>
+      <ChatShell
+        chatLayoutRef={chatLayoutRef}
+        taskInboxCollapsed={taskInboxCollapsed}
+        taskInboxWidth={taskInboxWidth}
+        taskInboxResizerWidth={taskInboxResizerWidth}
+        onTaskInboxResizeStart={startTaskInboxResize}
+        onToggleTaskInbox={() => {
+          setTaskInboxCollapsed((prev) => !prev);
+        }}
+        stagePanel={stagePanel}
+      />
+      <AgentSkillConfigDialog
+        open={skillConfigOpen}
+        title={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}
+        skillOptions={availableSkillOptions}
+        skillsLoading={skillConfigSkillsLoading}
+        selectedSkillIds={selectedSkillIds}
+        submitting={skillConfigSaving}
+        onToggleSkill={toggleSkillConfigSelection}
+        onClose={closeSkillConfigDialog}
+        onSubmit={() => {
+          void saveSkillConfig();
+        }}
+      />
+    </>
   );
 }
 

@@ -28,7 +28,6 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
     historyFingerprintBySession: new Map<string, string>(),
-    historyProbeFingerprintBySession: new Map<string, string>(),
     historyQuickFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
   };
@@ -87,7 +86,6 @@ describe('chat history failure helpers', () => {
 
     expect(applyLoadedMessages).toHaveBeenCalledWith(fallbackMessages, null);
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
-    expect(historyRuntime.historyProbeFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
 
   it('writes empty fallback snapshot and error when non-quiet and no fallback data', async () => {
@@ -117,7 +115,6 @@ describe('chat history failure helpers', () => {
     expect(state.sessionsByKey[requestedSessionKey]?.meta.ready).toBe(true);
     expect(state.error).toBe('load failed');
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
-    expect(historyRuntime.historyProbeFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyQuickFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });

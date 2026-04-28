@@ -67,6 +67,48 @@ interface ChatInputProps {
   layout?: 'dock' | 'hero';
 }
 
+function resolveInputPlaceholder(
+  disabled: boolean,
+  approvalWaiting: boolean,
+  translate: (key: string) => string,
+): string {
+  if (disabled) {
+    return translate('input.gatewayDisconnectedPlaceholder');
+  }
+  if (approvalWaiting) {
+    return translate('input.approvalWaitingPlaceholder');
+  }
+  return translate('input.messagePlaceholder');
+}
+
+function resolveInputStatusText(
+  disabled: boolean,
+  approvalWaiting: boolean,
+  selectedSkillCount: number,
+  attachmentCount: number,
+  translate: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (disabled) {
+    return translate('input.gatewayDisconnectedPlaceholder');
+  }
+  if (approvalWaiting) {
+    return translate('input.approvalWaitingPlaceholder');
+  }
+  if (selectedSkillCount > 1) {
+    return translate('input.skillsActive', { count: selectedSkillCount });
+  }
+  if (selectedSkillCount === 1) {
+    return translate('input.skillActive', { count: selectedSkillCount });
+  }
+  if (attachmentCount > 1) {
+    return translate('input.attachmentsReady', { count: attachmentCount });
+  }
+  if (attachmentCount === 1) {
+    return translate('input.attachmentReady', { count: attachmentCount });
+  }
+  return null;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 function FileIcon({ mimeType, className }: { mimeType: string; className?: string }) {
@@ -714,12 +756,20 @@ export const ChatInput = memo(function ChatInput({
     [stageBufferFiles],
   );
 
+  const placeholderText = resolveInputPlaceholder(disabled, approvalWaiting, t);
+  const statusText = resolveInputStatusText(
+    disabled,
+    approvalWaiting,
+    selectedSkills.length,
+    attachments.length,
+    t,
+  );
+
   return (
     <div
       className={cn(
-        layout === 'hero'
-          ? 'w-full px-2 pb-3 pt-3 md:px-4'
-          : 'border-t border-border/70 px-2 pb-3 pt-3 md:px-4',
+        'w-full',
+        layout === 'hero' ? 'py-1' : '',
       )}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -737,7 +787,7 @@ export const ChatInput = memo(function ChatInput({
           )}
         >
           <div className="relative min-w-0">
-            <div className="px-2 pt-1">
+            <div className="px-2 pt-1.5">
               {attachments.length > 0 && (
                 <div className="mb-3 flex flex-wrap gap-2">
                   {attachments.map((attachment) => (
@@ -755,13 +805,13 @@ export const ChatInput = memo(function ChatInput({
                   {selectedSkills.map((skill) => (
                     <span
                       key={skill.id}
-                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-medium text-foreground"
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/60 bg-background/80 px-2.5 py-1 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm"
                     >
                       <span>{skill.icon}</span>
                       <span className="truncate">{skill.name}</span>
                       <button
                         type="button"
-                        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground"
+                        className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background/90 hover:text-foreground"
                         onMouseDown={(event) => {
                           event.preventDefault();
                           setSelectedSkills((prev) => prev.filter((item) => item.id !== skill.id));
@@ -792,14 +842,11 @@ export const ChatInput = memo(function ChatInput({
                   isComposingRef.current = false;
                 }}
                 onPaste={handlePaste}
-                placeholder={disabled
-                  ? t('input.gatewayDisconnectedPlaceholder')
-                  : approvalWaiting
-                    ? t('input.approvalWaitingPlaceholder')
-                    : t('input.messagePlaceholder')}
+                placeholder={placeholderText}
                 disabled={disabled}
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputTextarea,
+                  'placeholder:text-muted-foreground/70',
                   layout === 'hero' && CHAT_LAYOUT_TOKENS.inputTextareaHeroMinHeight,
                 )}
                 rows={1}
@@ -808,7 +855,7 @@ export const ChatInput = memo(function ChatInput({
             {mentionOpen && mentionItems.length > 0 && (
               <div
                 role="listbox"
-                className="absolute bottom-full z-50 mb-1 max-h-48 w-full overflow-y-auto rounded-md border bg-background p-1 shadow-md"
+                className="absolute bottom-full z-50 mb-2 max-h-48 w-full overflow-y-auto rounded-2xl border border-border/60 bg-background/95 p-1.5 shadow-[0_16px_50px_rgba(15,23,42,0.12)] backdrop-blur-xl"
               >
                 {mentionItems.map((item, index) => {
                   const isActive = index === mentionActiveIndex;
@@ -818,9 +865,9 @@ export const ChatInput = memo(function ChatInput({
                       type="button"
                       role="option"
                       aria-selected={isActive}
-                      className={cn(
-                        'flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs',
-                        isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted',
+                  className={cn(
+                        'flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-xs transition-colors',
+                        isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/70',
                       )}
                       onMouseDown={(event) => {
                         event.preventDefault();
@@ -837,10 +884,10 @@ export const ChatInput = memo(function ChatInput({
             {slashOpen && (
               <div
                 role="listbox"
-                className="absolute bottom-full z-40 mb-1 max-h-56 w-full overflow-y-auto rounded-md border bg-background p-1 shadow-md"
+                className="absolute bottom-full z-40 mb-2 max-h-56 w-full overflow-y-auto rounded-2xl border border-border/60 bg-background/95 p-1.5 shadow-[0_16px_50px_rgba(15,23,42,0.12)] backdrop-blur-xl"
               >
                 {slashItems.length === 0 ? (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground">No matched skill</div>
+                  <div className="px-2.5 py-2 text-xs text-muted-foreground">No matched skill</div>
                 ) : (
                   slashItems.map((item, index) => {
                     const isActive = index === slashActiveIndex;
@@ -854,8 +901,8 @@ export const ChatInput = memo(function ChatInput({
                         role="option"
                         aria-selected={isActive}
                         className={cn(
-                          'flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs',
-                          isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted',
+                          'flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-xs transition-colors',
+                          isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/70',
                         )}
                         onMouseDown={(event) => {
                           event.preventDefault();
@@ -873,34 +920,47 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
-          <div className={CHAT_LAYOUT_TOKENS.inputActionsRow}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={CHAT_LAYOUT_TOKENS.inputAttachButton}
-              onClick={pickFiles}
-              disabled={disabled || sending || approvalWaiting}
-              aria-label="Attach files"
-              title="Attach files"
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
+          <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-2')}>
+            <div className="min-h-[18px] min-w-0 flex-1 px-0.5 text-[11px] text-muted-foreground/78">
+              {statusText ? (
+                <span className="block truncate">{statusText}</span>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  CHAT_LAYOUT_TOKENS.inputAttachButton,
+                  'rounded-full border border-border/55 bg-background/66 text-muted-foreground shadow-sm hover:bg-background/86 hover:text-foreground',
+                )}
+                onClick={pickFiles}
+                disabled={disabled || sending || approvalWaiting}
+                aria-label="Attach files"
+                title="Attach files"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
 
-            <Button
-              onClick={sending ? handleStop : handleSend}
-              disabled={sending ? !canStop : !canSend}
-              size="icon"
-              className={CHAT_LAYOUT_TOKENS.inputSendButton}
-              variant={sending ? 'destructive' : 'default'}
-              aria-label={sending ? 'Stop' : 'Send'}
-              title={sending ? 'Stop' : 'Send'}
-            >
-              {sending ? (
-                <Square className="h-4 w-4" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </Button>
+              <Button
+                onClick={sending ? handleStop : handleSend}
+                disabled={sending ? !canStop : !canSend}
+                size="icon"
+                className={cn(
+                  CHAT_LAYOUT_TOKENS.inputSendButton,
+                  'rounded-full shadow-[0_10px_25px_rgba(15,23,42,0.12)]',
+                )}
+                variant={sending ? 'destructive' : 'default'}
+                aria-label={sending ? 'Stop' : 'Send'}
+                title={sending ? 'Stop' : 'Send'}
+              >
+                {sending ? (
+                  <Square className="h-4 w-4" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
           </div>
         </div>
         {hasFailedAttachments && (
@@ -967,7 +1027,7 @@ function AttachmentChip({
   }
 
   return (
-    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/70 bg-muted/35 pr-1 shadow-sm">
+    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/60 bg-background/80 pr-1 shadow-sm backdrop-blur-sm">
       {canOpen ? (
         <button
           type="button"

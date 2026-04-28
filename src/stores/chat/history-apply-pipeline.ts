@@ -2,7 +2,6 @@ import {
   resolveSessionLabelFromMessages,
 } from './message-helpers';
 import { prewarmAssistantMarkdownBodies } from '@/lib/chat-markdown-body';
-import { EMPTY_EXECUTION_GRAPHS } from '@/pages/Chat/exec-graph-types';
 import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
 import {
   hasPendingPreviewLoads,
@@ -31,6 +30,7 @@ import {
   buildQuickRawHistoryFingerprint,
   getSessionRuntime,
   getSessionTranscript,
+  getSessionViewportState,
   nowMs,
   patchSessionMeta,
   toMs,
@@ -40,13 +40,13 @@ import {
   throwIfHistoryLoadAborted,
 } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
+import type { HistoryWindowResult } from './history-fetch-helpers';
 import type {
   ChatHistoryLoadMode,
   ChatHistoryLoadScope,
   ChatStoreState,
   RawMessage,
 } from './types';
-import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -64,12 +64,18 @@ interface CreateApplyLoadedMessagesInput {
   scope: ChatHistoryLoadScope;
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
-  optimisticUserReconcileWindowMs?: number;
 }
 
 export function createApplyLoadedMessagesPipeline(
   input: CreateApplyLoadedMessagesInput,
-): (rawMessages: RawMessage[], thinkingLevel: string | null) => Promise<void> {
+): {
+  (window: HistoryWindowResult): Promise<void>;
+  (
+    rawMessages: RawMessage[],
+    thinkingLevel: string | null,
+    window?: Partial<HistoryWindowResult>,
+  ): Promise<void>;
+} {
   const {
     set,
     get,
@@ -82,11 +88,29 @@ export function createApplyLoadedMessagesPipeline(
   } = input;
   const isForeground = scope === 'foreground';
 
-  return async (rawMessages: RawMessage[], thinkingLevel: string | null) => {
+  return async (
+    windowOrRawMessages: HistoryWindowResult | RawMessage[],
+    thinkingLevel?: string | null,
+    partialWindow?: Partial<HistoryWindowResult>,
+  ) => {
+    const window = Array.isArray(windowOrRawMessages)
+      ? {
+          rawMessages: windowOrRawMessages,
+          canonicalRawMessages: partialWindow?.canonicalRawMessages ?? windowOrRawMessages,
+          thinkingLevel: thinkingLevel ?? null,
+          totalMessageCount: partialWindow?.totalMessageCount ?? windowOrRawMessages.length,
+          windowStartOffset: partialWindow?.windowStartOffset ?? 0,
+          windowEndOffset: partialWindow?.windowEndOffset ?? windowOrRawMessages.length,
+          hasMore: partialWindow?.hasMore ?? false,
+          hasNewer: partialWindow?.hasNewer ?? false,
+          isAtLatest: partialWindow?.isAtLatest ?? true,
+        } satisfies HistoryWindowResult
+      : windowOrRawMessages;
     const applyStartedAt = nowMs();
+    const canonicalRawMessages = window.canonicalRawMessages ?? window.rawMessages;
     let outcome: 'applied' | 'quick_skip' | 'aborted' = 'applied';
     try {
-      const quickFingerprint = buildQuickRawHistoryFingerprint(rawMessages, thinkingLevel);
+      const quickFingerprint = buildQuickRawHistoryFingerprint(canonicalRawMessages, window.thinkingLevel);
       const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
       const currentStateForQuickPath = get();
       const currentTranscript = getSessionTranscript(currentStateForQuickPath, requestedSessionKey);
@@ -96,14 +120,15 @@ export function createApplyLoadedMessagesPipeline(
       const canSkipWithQuickFingerprint = (
         previousQuickFingerprint === quickFingerprint
         && (currentTranscript.length > 0 || hasReadySnapshot)
-        && (currentMeta?.thinkingLevel ?? null) === thinkingLevel
+        && (currentMeta?.thinkingLevel ?? null) === window.thinkingLevel
       );
       if (canSkipWithQuickFingerprint) {
         outcome = 'quick_skip';
         if (!historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)) {
+          const currentViewport = getSessionViewportState(currentStateForQuickPath, requestedSessionKey);
           historyRuntime.historyRenderFingerprintBySession.set(
             requestedSessionKey,
-            buildRenderMessagesFingerprint(currentTranscript),
+            buildRenderMessagesFingerprint(currentViewport.messages),
           );
         }
         if (isForeground && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
@@ -134,12 +159,12 @@ export function createApplyLoadedMessagesPipeline(
       throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
 
       const normalizeStartedAt = nowMs();
-      const normalizedMessages = await normalizeHistoryMessages(rawMessages, { abortSignal });
+      const normalizedMessages = await normalizeHistoryMessages(canonicalRawMessages, { abortSignal });
       trackUiTiming('chat.history_apply_normalize', Math.max(0, nowMs() - normalizeStartedAt), {
         sessionKey: requestedSessionKey,
         mode,
         scope,
-        rows: rawMessages.length,
+        rows: canonicalRawMessages.length,
       });
       if (shouldAbortHistoryProcessing()) {
         outcome = 'aborted';
@@ -189,7 +214,10 @@ export function createApplyLoadedMessagesPipeline(
         : '';
       const lastMsg = finalMessages[finalMessages.length - 1];
       const lastAt = lastMsg?.timestamp ? toMs(lastMsg.timestamp) : null;
-      const renderFingerprint = buildRenderMessagesFingerprint(finalMessages);
+      const viewportWindowStart = Math.min(Math.max(window.windowStartOffset, 0), finalMessages.length);
+      const viewportWindowEnd = Math.min(Math.max(window.windowEndOffset, viewportWindowStart), finalMessages.length);
+      const viewportMessages = finalMessages.slice(viewportWindowStart, viewportWindowEnd);
+      const renderFingerprint = buildRenderMessagesFingerprint(viewportMessages);
       const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
 
       const activityRuntimeState = get();
@@ -217,7 +245,14 @@ export function createApplyLoadedMessagesPipeline(
           requestedSessionKey,
           scope,
           finalMessages,
-          thinkingLevel,
+          viewportMessages,
+          thinkingLevel: window.thinkingLevel,
+          totalMessageCount: window.totalMessageCount,
+          windowStartOffset: viewportWindowStart,
+          windowEndOffset: viewportWindowEnd,
+          hasMore: window.hasMore,
+          hasNewer: window.hasNewer,
+          isAtLatest: window.isAtLatest,
           resolvedLabel,
           lastAt,
           previousRenderFingerprint,
@@ -232,25 +267,24 @@ export function createApplyLoadedMessagesPipeline(
         sessionKey: requestedSessionKey,
         mode,
         scope,
-        rows: finalMessages.length,
+        rows: viewportMessages.length,
         changed: didMessageListChange,
       });
       historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
-      const liveMessages = projectLiveThreadMessages(finalMessages).messages;
-      prewarmAssistantMarkdownBodies(liveMessages, 'settled');
-      prewarmStaticRowsForMessages(requestedSessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
+      prewarmAssistantMarkdownBodies(viewportMessages, 'settled');
+      prewarmStaticRowsForMessages(requestedSessionKey, viewportMessages);
 
       if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
         maybeTrackFinalToHistoryVisible(requestedSessionKey, {
-          rowCount: finalMessages.length,
+          rowCount: viewportMessages.length,
           changed: didMessageListChange,
         });
         finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
         clearHistoryPoll();
       }
 
-      if ((didMessageListChange || scope === 'background') && hasPendingPreviewLoads(finalMessages)) {
-        void loadMissingPreviews(finalMessages).then((updated) => {
+      if ((didMessageListChange || scope === 'background') && hasPendingPreviewLoads(viewportMessages)) {
+        void loadMissingPreviews(viewportMessages).then((updated) => {
           if (!updated) {
             return;
           }
@@ -260,7 +294,7 @@ export function createApplyLoadedMessagesPipeline(
           set((state) => buildHistoryPreviewHydrationPatch(
             state,
             requestedSessionKey,
-            finalMessages,
+            viewportMessages,
           ));
         });
       }
@@ -275,7 +309,7 @@ export function createApplyLoadedMessagesPipeline(
         mode,
         scope,
         outcome,
-        rawRows: rawMessages.length,
+        rawRows: canonicalRawMessages.length,
       });
     }
   };

@@ -1,13 +1,17 @@
 import { reduceRuntimeOverlay } from './overlay-reducer';
 import {
+  getSessionViewportState,
   getSessionRuntime,
-  patchSessionRuntime,
+  patchSessionRecord,
+  patchSessionViewportState,
 } from './store-state-helpers';
+import { selectStreamingRenderMessage } from './stream-overlay-message';
 import type {
   AssistantMessageOverlay,
   ChatSessionRuntimeState,
   ChatStoreState,
 } from './types';
+import { upsertViewportMessage } from './viewport-state';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -94,9 +98,11 @@ function setScheduledRafId(set: ChatStoreSetFn, get: ChatStoreGetFn, rafId: numb
     return;
   }
   set((current) => ({
-    sessionsByKey: patchSessionRuntime(current, sessionKey, {
-      ...runtime,
-      ...runtimePatch,
+    sessionsByKey: patchSessionRecord(current, sessionKey, {
+      runtime: {
+        ...runtime,
+        ...runtimePatch,
+      },
     }),
   }));
 }
@@ -153,11 +159,29 @@ function runTick(set: ChatStoreSetFn, get: ChatStoreGetFn): void {
     rafId: null,
   });
   if (runtimePatch !== currentRuntime) {
+    const nextRuntime = {
+      ...currentRuntime,
+      ...runtimePatch,
+    };
+    const streamingMessage = selectStreamingRenderMessage(nextRuntime);
     set((current) => ({
-      sessionsByKey: patchSessionRuntime(current, sessionKey, {
-        ...currentRuntime,
-        ...runtimePatch,
+      sessionsByKey: patchSessionRecord(current, sessionKey, {
+        runtime: {
+          ...nextRuntime,
+        },
       }),
+      ...(streamingMessage
+        ? {
+            viewportBySession: patchSessionViewportState(
+              current,
+              sessionKey,
+              upsertViewportMessage(
+                getSessionViewportState(current, sessionKey),
+                streamingMessage,
+              ),
+            ),
+          }
+        : {}),
     }));
   }
 }

@@ -37,6 +37,7 @@ import type { TeamMailboxMessage } from '@/features/teams/api/runtime-client';
 import { useTranslation } from 'react-i18next';
 import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
+import { inferUntitledSessionLabel } from './useAgentSessionsPaneViewModel';
 
 interface NavItemProps {
   to: string;
@@ -237,16 +238,21 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
   const deferredSessionsByKey = useDeferredValue(sessionsByKey);
   const deferredChatSessions = useDeferredValue(chatSessions);
-  const deferredSessionLabels = useMemo(() => {
+  const deferredSessionTitles = useMemo(() => {
     const next: Record<string, string> = {};
+    const sessionByKey = new Map(
+      deferredChatSessions.map((session) => [session.key, session] as const),
+    );
     for (const [sessionKey, record] of Object.entries(deferredSessionsByKey)) {
       const label = record.meta.label?.trim();
       if (label) {
         next[sessionKey] = label;
+        continue;
       }
+      next[sessionKey] = inferUntitledSessionLabel(sessionByKey.get(sessionKey) ?? { key: sessionKey }, t);
     }
     return next;
-  }, [deferredSessionsByKey]);
+  }, [deferredChatSessions, deferredSessionsByKey, t]);
 
   const teamMailboxCards = useMemo(() => {
     const cards: PendingBlockerCard[] = [];
@@ -278,9 +284,6 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   }, [deferredMailboxByTeamId, deferredTeams, i18n.language, t]);
 
   const approvalCards = useMemo(() => {
-    const sessionDisplayNameByKey = new Map(
-      deferredChatSessions.map((session) => [session.key, session.displayName || session.key]),
-    );
     const cards: PendingBlockerCard[] = [];
     let approvalCardsCount = 0;
     const approvalTitlePrefix = t('sidebar.pendingBlockerTypeApproval');
@@ -291,8 +294,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
         break;
       }
       const approvals = approvalItems ?? EMPTY_APPROVAL_ITEMS;
-      const sessionLabel = deferredSessionLabels[sessionKey]
-        || sessionDisplayNameByKey.get(sessionKey)
+      const sessionLabel = deferredSessionTitles[sessionKey]
         || sessionKey;
       let variants = approvalCardsCacheByApprovalsRef.get(approvals);
       if (!variants) {
@@ -325,9 +327,8 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     }
     return cards;
   }, [
-    deferredChatSessions,
     deferredPendingApprovalsBySession,
-    deferredSessionLabels,
+    deferredSessionTitles,
     i18n.language,
     t,
   ]);

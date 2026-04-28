@@ -19,7 +19,6 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
     historyFingerprintBySession: new Map<string, string>(),
-    historyProbeFingerprintBySession: new Map<string, string>(),
     historyQuickFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
   };

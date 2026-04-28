@@ -37,27 +37,27 @@ export function ChatImageLightbox({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/76 backdrop-blur-md"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={fileName}
-        className="flex max-w-[90vw] flex-col items-center gap-3"
+        className="flex max-w-[92vw] flex-col items-center gap-4"
         onClick={(event) => event.stopPropagation()}
       >
         <img
           src={src}
           alt={fileName}
-          className="max-h-[85vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+          className="max-h-[84vh] max-w-[92vw] rounded-[20px] object-contain shadow-2xl"
         />
-        <div className="flex items-center gap-2">
+        <div className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/28 px-2 py-2 text-white shadow-lg backdrop-blur-xl">
           {filePath && (
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 bg-white/10 text-white hover:bg-white/20"
+              className="h-8 w-8 rounded-full bg-white/10 text-white hover:bg-white/18"
               onClick={handleShowInFolder}
               title="在文件夹中显示"
             >
@@ -67,7 +67,7 @@ export function ChatImageLightbox({
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 bg-white/10 text-white hover:bg-white/20"
+            className="h-8 w-8 rounded-full bg-white/10 text-white hover:bg-white/18"
             onClick={onClose}
             title="关闭"
           >

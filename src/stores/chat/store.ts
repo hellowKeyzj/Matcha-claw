@@ -5,7 +5,6 @@
  */
 import { create } from 'zustand';
 import { createIdleResourceState } from '@/lib/resource-state';
-import { readHistoryLoadPipelineStrategyKeyFromSettings } from './history-pipeline-settings';
 import {
   createStoreApprovalActions,
 } from './approval-actions';
@@ -24,7 +23,7 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord } from './store-state-helpers';
+import { createEmptySessionRecord, createEmptySessionViewportState } from './store-state-helpers';
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
@@ -37,6 +36,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     currentSessionKey: DEFAULT_SESSION_KEY,
     sessionsByKey: {
       [DEFAULT_SESSION_KEY]: createEmptySessionRecord(),
+    },
+    viewportBySession: {
+      [DEFAULT_SESSION_KEY]: createEmptySessionViewportState(),
     },
     pendingApprovalsBySession: {},
     snapshotReady: false,
@@ -61,7 +63,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       set,
       get,
       historyRuntime,
-      readPipelineStrategyKey: readHistoryLoadPipelineStrategyKeyFromSettings,
     }),
 
     ...createStoreApprovalActions({

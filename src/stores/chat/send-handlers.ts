@@ -9,8 +9,10 @@ import {
 } from './timers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import {
+  getSessionViewportState,
   getSessionRuntime,
   patchSessionRecord,
+  patchSessionViewportState,
   resolveSessionRecord,
 } from './store-state-helpers';
 import type {
@@ -18,6 +20,10 @@ import type {
   ChatStoreState,
   PendingUserMessageOverlay,
 } from './types';
+import {
+  appendViewportMessage,
+  removeViewportMessageById,
+} from './viewport-state';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -87,6 +93,14 @@ export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
           ? record.runtime
           : { ...record.runtime, ...runtimePatch },
       }),
+      viewportBySession: patchSessionViewportState(
+        state,
+        sessionKey,
+        appendViewportMessage(
+          getSessionViewportState(state, sessionKey),
+          pendingUserMessage.message,
+        ),
+      ),
     };
   });
 }
@@ -153,12 +167,17 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
         error: NO_RESPONSE_RECEIVED_ERROR,
         clearRun: true,
       });
+      const nextViewport = removeViewportMessageById(
+        getSessionViewportState(current, current.currentSessionKey),
+        currentRuntime.pendingUserMessage?.message.id,
+      );
       return {
         sessionsByKey: patchSessionRecord(current, current.currentSessionKey, {
           runtime: runtimePatch === currentRuntime
             ? currentRuntime
             : { ...currentRuntime, ...runtimePatch },
         }),
+        viewportBySession: patchSessionViewportState(current, current.currentSessionKey, nextViewport),
       };
     });
   };
@@ -222,11 +241,16 @@ export function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams)
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
     const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_failed', error });
+    const nextViewport = removeViewportMessageById(
+      getSessionViewportState(state, state.currentSessionKey),
+      runtime.pendingUserMessage?.message.id,
+    );
     return {
       error,
       sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
+      viewportBySession: patchSessionViewportState(state, state.currentSessionKey, nextViewport),
     };
   });
 }

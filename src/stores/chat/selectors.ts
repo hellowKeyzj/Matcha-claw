@@ -1,10 +1,12 @@
 import { type ApprovalItem, type ChatSession, type ChatStoreState } from '@/stores/chat';
+import { resolveSessionLabelFromMessages } from './message-helpers';
 import { readSessionsFromState } from './session-helpers';
 import {
   getPendingApprovals,
   getSessionMeta,
   getSessionRuntime,
   getSessionTranscript,
+  getSessionViewportState,
 } from './store-state-helpers';
 import { selectStreamingRenderMessage } from './stream-overlay-message';
 
@@ -14,6 +16,7 @@ const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
 export interface AgentSessionsPaneSessionEntry {
   session: ChatSession;
   label: string | null;
+  titlePreview: string | null;
   lastActivityAt: number | null;
   ready: boolean;
 }
@@ -21,7 +24,6 @@ export interface AgentSessionsPaneSessionEntry {
 let cachedAgentPaneSessionEntries: AgentSessionsPaneSessionEntry[] = [];
 let cachedAgentPaneSessionEntryByKey = new Map<string, AgentSessionsPaneSessionEntry>();
 let cachedAgentSessionsPaneState: ReturnType<typeof buildAgentSessionsPaneState> | null = null;
-let cachedLiveThreadHostKeys: string[] = [];
 
 function normalizeAgentPaneSessionLabel(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -46,19 +48,30 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
   for (let index = 0; index < sessions.length; index += 1) {
     const session = sessions[index];
     const meta = state.sessionsByKey[session.key]?.meta;
+    const runtime = getSessionRuntime(state, session.key);
+    const transcript = getSessionTranscript(state, session.key);
+    const viewport = getSessionViewportState(state, session.key);
     const label = normalizeAgentPaneSessionLabel(meta?.label);
+    const pendingUserPreview = runtime.pendingUserMessage
+      ? resolveSessionLabelFromMessages([runtime.pendingUserMessage.message])
+      : null;
+    const titlePreview = pendingUserPreview
+      ?? resolveSessionLabelFromMessages(transcript)
+      ?? resolveSessionLabelFromMessages(viewport.messages);
     const lastActivityAt = typeof meta?.lastActivityAt === 'number' ? meta.lastActivityAt : null;
     const ready = Boolean(meta?.ready);
     const previousEntry = cachedAgentPaneSessionEntryByKey.get(session.key);
     const nextEntry = previousEntry
       && previousEntry.session === session
       && previousEntry.label === label
+      && previousEntry.titlePreview === titlePreview
       && previousEntry.lastActivityAt === lastActivityAt
       && previousEntry.ready === ready
       ? previousEntry
       : {
           session,
           label,
+          titlePreview,
           lastActivityAt,
           ready,
         };
@@ -124,8 +137,10 @@ export function selectViewLayerState(state: ChatStoreState) {
 export function selectChatPageSessionState(state: ChatStoreState) {
   const currentSessionKey = state.currentSessionKey;
   const currentSessionMeta = selectSessionMeta(state, currentSessionKey);
+  const viewportWindow = getSessionViewportState(state, currentSessionKey);
   return {
-    canonicalMessages: selectCanonicalTranscript(state, currentSessionKey),
+    viewportMessages: viewportWindow.messages,
+    viewport: viewportWindow,
     currentSessionKey,
     currentSessionReady: Boolean(currentSessionMeta.ready),
     currentSessionHasActivity: typeof currentSessionMeta.lastActivityAt === 'number',
@@ -167,6 +182,10 @@ export function selectChatPageActions(state: ChatStoreState) {
   return {
     resolveApproval: state.resolveApproval,
     loadHistory: state.loadHistory,
+    loadOlderMessages: state.loadOlderMessages,
+    jumpToLatest: state.jumpToLatest,
+    trimTopMessages: state.trimTopMessages,
+    setViewportLastVisibleMessageId: state.setViewportLastVisibleMessageId,
     loadSessions: state.loadSessions,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
@@ -220,33 +239,4 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
   }
   cachedAgentSessionsPaneState = buildAgentSessionsPaneState(state, sessionEntries);
   return cachedAgentSessionsPaneState;
-}
-
-export function selectChatLiveThreadHostKeys(state: ChatStoreState): string[] {
-  const currentSessionKey = state.currentSessionKey;
-  const nextSessionKeys = [currentSessionKey];
-
-  for (const session of readSessionsFromState(state)) {
-    const sessionKey = session.key;
-    if (!sessionKey || sessionKey === currentSessionKey) {
-      continue;
-    }
-    const record = state.sessionsByKey[sessionKey];
-    if (!record) {
-      continue;
-    }
-    if (record.meta.ready || record.transcript.length > 0) {
-      nextSessionKeys.push(sessionKey);
-    }
-  }
-
-  if (
-    cachedLiveThreadHostKeys.length === nextSessionKeys.length
-    && cachedLiveThreadHostKeys.every((sessionKey, index) => sessionKey === nextSessionKeys[index])
-  ) {
-    return cachedLiveThreadHostKeys;
-  }
-
-  cachedLiveThreadHostKeys = nextSessionKeys;
-  return cachedLiveThreadHostKeys;
 }

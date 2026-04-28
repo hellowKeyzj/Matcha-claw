@@ -6,16 +6,24 @@ import {
   getSessionMeta,
   getSessionRuntime,
   getSessionTranscript,
+  getSessionViewportState,
   mergeMessageReferences,
   patchSessionRecord,
+  patchSessionViewportState,
   toMs,
 } from './store-state-helpers';
+import { selectStreamingRenderMessage } from './stream-overlay-message';
 import type {
   ChatHistoryLoadScope,
   PendingUserMessageOverlay,
   ChatStoreState,
   RawMessage,
 } from './types';
+import {
+  appendViewportMessage,
+  syncViewportMessages,
+  upsertViewportMessage,
+} from './viewport-state';
 
 interface ResolveHistoryActivityFlagsInput {
   normalizedMessages: RawMessage[];
@@ -75,7 +83,14 @@ interface BuildHistoryApplyPatchInput {
   requestedSessionKey: string;
   scope: ChatHistoryLoadScope;
   finalMessages: RawMessage[];
+  viewportMessages: RawMessage[];
   thinkingLevel: string | null;
+  totalMessageCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isAtLatest: boolean;
   resolvedLabel: string | null;
   lastAt: number | null;
   previousRenderFingerprint: string | null;
@@ -160,9 +175,13 @@ export function buildHistoryApplyPatch(
   const nextTranscript = areMessagesEquivalent(currentTranscript, input.finalMessages)
     ? currentTranscript
     : mergeMessageReferences(currentTranscript, input.finalMessages);
+  const currentViewport = getSessionViewportState(state, input.requestedSessionKey);
+  const nextViewportMessages = areMessagesEquivalent(currentViewport.messages, input.viewportMessages)
+    ? currentViewport.messages
+    : mergeMessageReferences(currentViewport.messages, input.viewportMessages);
   const didMessageListChange = (
     input.previousRenderFingerprint !== input.renderFingerprint
-    || nextTranscript !== currentTranscript
+    || nextViewportMessages !== currentViewport.messages
   );
   const currentMeta = getSessionMeta(state, input.requestedSessionKey);
   const currentRuntime = getSessionRuntime(state, input.requestedSessionKey);
@@ -222,11 +241,39 @@ export function buildHistoryApplyPatch(
     nextTranscript !== currentTranscript
     || didMetaChange
     || resolvedRuntime !== currentRuntime
+    || nextViewportMessages !== currentViewport.messages
   ) {
-    patch.sessionsByKey = patchSessionRecord(state, input.requestedSessionKey, {
-      transcript: nextTranscript,
-      meta: nextMeta,
-      runtime: resolvedRuntime,
+    const nextViewport = {
+      ...currentViewport,
+      messages: nextViewportMessages,
+      totalMessageCount: input.totalMessageCount,
+      windowStartOffset: input.windowStartOffset,
+      windowEndOffset: input.windowEndOffset,
+      hasMore: input.hasMore,
+      hasNewer: input.hasNewer,
+      isLoadingMore: false,
+      isLoadingNewer: false,
+      isAtLatest: input.isAtLatest,
+      anchorRestore: null,
+    };
+    const viewportWithPendingUser = nextPendingUserMessage
+      ? appendViewportMessage(nextViewport, nextPendingUserMessage.message)
+      : nextViewport;
+    const streamingMessage = selectStreamingRenderMessage(resolvedRuntime);
+    const resolvedViewport = streamingMessage
+      ? upsertViewportMessage(viewportWithPendingUser, streamingMessage)
+      : viewportWithPendingUser;
+    Object.assign(patch, {
+      sessionsByKey: patchSessionRecord(state, input.requestedSessionKey, {
+        transcript: nextTranscript,
+        meta: nextMeta,
+        runtime: resolvedRuntime,
+      }),
+      viewportBySession: patchSessionViewportState(
+        state,
+        input.requestedSessionKey,
+        resolvedViewport,
+      ),
     });
     changed = true;
   }
@@ -240,20 +287,25 @@ export function buildHistoryApplyPatch(
 export function buildHistoryPreviewHydrationPatch(
   state: ChatStoreState,
   requestedSessionKey: string,
-  finalMessages: RawMessage[],
+  viewportMessages: RawMessage[],
 ): Partial<ChatStoreState> | ChatStoreState {
-  const hydratedMessages = finalMessages.map((message) => (
+  const hydratedMessages = viewportMessages.map((message) => (
     message._attachedFiles
       ? { ...message, _attachedFiles: message._attachedFiles.map((file) => ({ ...file })) }
       : message
   ));
-  const currentTranscript = getSessionTranscript(state, requestedSessionKey);
-  if (currentTranscript !== finalMessages) {
+  const currentViewport = getSessionViewportState(state, requestedSessionKey);
+  if (currentViewport.messages !== viewportMessages) {
     return state;
   }
   return {
-    sessionsByKey: patchSessionRecord(state, requestedSessionKey, {
-      transcript: hydratedMessages,
-    }),
+    viewportBySession: patchSessionViewportState(
+      state,
+      requestedSessionKey,
+      syncViewportMessages(
+        currentViewport,
+        hydratedMessages,
+      ),
+    ),
   };
 }

@@ -1,7 +1,6 @@
 import { renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useRowsPipeline } from '@/pages/Chat/useRowsPipeline';
-import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
+import { useViewportListItems } from '@/pages/Chat/viewport-list-items';
 import type { RawMessage } from '@/stores/chat';
 
 vi.mock('@/lib/idle-ready', () => ({
@@ -24,28 +23,25 @@ function buildMessages(count: number): RawMessage[] {
   }));
 }
 
-describe('useRowsPipeline live projection timing', () => {
+describe('useViewportListItems live list timing', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
-  it('uses one stable live projection immediately and does not replay a staged first-paint tail', () => {
+  it('builds one stable viewport list immediately and updates it without staged tail replay', () => {
     const sessionPipelineCostRef = {
       current: {
-        sessionKey: 'agent:main:main::live',
-        rowSliceMs: 0,
+        sessionKey: 'agent:main:main::latest',
         staticRowsMs: 0,
         runtimeRowsMs: 0,
       },
     };
     const initialMessages = buildMessages(40);
     const initialProps = {
-      projectionScopeKey: 'agent:main:main::live',
-      rowSessionKey: 'agent:main:main',
-      canonicalMessages: initialMessages,
-      projectionMessages: [] as RawMessage[],
-      isHistoryProjection: false,
+      scopeKey: 'agent:main:main::latest',
+      sessionKey: 'agent:main:main',
+      messages: initialMessages,
       agents: [],
       isGatewayRunning: true,
       gatewayRpc: vi.fn(),
@@ -55,17 +51,14 @@ describe('useRowsPipeline live projection timing', () => {
       showThinking: false,
       streamingMessage: null,
       streamingTools: [],
-      streamingTimestamp: 0,
       sessionPipelineCostRef,
     };
 
-    const { result, rerender } = renderHook((props: typeof initialProps) => useRowsPipeline(props), {
+    const { result, rerender } = renderHook((props: typeof initialProps) => useViewportListItems(props), {
       initialProps,
     });
 
-    const initialLiveProjection = projectLiveThreadMessages(initialMessages);
-    expect(result.current.hiddenHistoryCount).toBe(initialLiveProjection.hiddenRenderableCount);
-    expect(result.current.chatRows.filter((row) => row.kind === 'message')).toHaveLength(initialLiveProjection.messages.length);
+    expect(result.current.items.filter((item) => item.kind === 'message')).toHaveLength(initialMessages.length);
 
     const nextMessages = [...initialMessages, {
       id: 'message-41',
@@ -73,14 +66,12 @@ describe('useRowsPipeline live projection timing', () => {
       content: 'message 41',
       timestamp: 41,
     }];
-    const nextLiveProjection = projectLiveThreadMessages(nextMessages);
 
     rerender({
       ...initialProps,
-      canonicalMessages: nextMessages,
+      messages: nextMessages,
     });
 
-    expect(result.current.hiddenHistoryCount).toBe(nextLiveProjection.hiddenRenderableCount);
-    expect(result.current.chatRows.filter((row) => row.kind === 'message')).toHaveLength(nextLiveProjection.messages.length);
+    expect(result.current.items.filter((item) => item.kind === 'message')).toHaveLength(nextMessages.length);
   });
 });

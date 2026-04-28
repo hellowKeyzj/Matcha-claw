@@ -140,7 +140,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Tool use cards */}
         {visibleTools.length > 0 && (
-          <div className="space-y-1">
+          <div className="space-y-1.5">
             {visibleTools.map((tool, i) => (
               <ToolCard key={tool.id || i} name={tool.name} input={tool.input} />
             ))}
@@ -150,7 +150,7 @@ export const ChatMessage = memo(function ChatMessage({
         {/* Images — rendered ABOVE text bubble for user messages */}
         {/* Images from content blocks (Gateway session data / channel push photos) */}
         {isUser && images.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2.5">
             {images.map((img, i) => {
               const src = imageSrc(img);
               if (!src) return null;
@@ -168,7 +168,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* File attachments — images above text for user, file cards below */}
         {isUser && attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2.5">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
               // Skip image attachments if we already have images from content blocks
@@ -208,7 +208,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Images from content blocks — assistant messages (below text) */}
         {!isUser && images.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2.5">
             {images.map((img, i) => {
               const src = imageSrc(img);
               if (!src) return null;
@@ -226,7 +226,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* File attachments — assistant messages (below text) */}
         {!isUser && attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2.5">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
               if (isImage && images.length > 0) return null;
@@ -254,9 +254,11 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Hover row for user messages — timestamp only */}
         {isUser && message.timestamp && (
-          <span className="text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-200 select-none">
-            {formatTimestamp(message.timestamp)}
-          </span>
+          <div className="flex w-full justify-end">
+            <span className="inline-flex items-center rounded-full border border-border/50 bg-background/72 px-2 py-0.5 text-[11px] text-muted-foreground opacity-0 shadow-sm transition-opacity duration-200 select-none group-hover:opacity-100">
+              {formatTimestamp(message.timestamp)}
+            </span>
+          </div>
         )}
 
         {/* Hover row for assistant messages — only when there is real text content */}
@@ -310,9 +312,7 @@ function MessageShell({
           isUser
             ? CHAT_LAYOUT_TOKENS.messageAvatarUserOrder
             : CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
-          isUser
-            ? 'bg-primary text-primary-foreground'
-            : 'bg-gradient-to-br from-indigo-500 to-purple-600 text-white',
+          'border border-border/60 bg-background/85 text-foreground shadow-sm backdrop-blur-sm',
         )}
       >
         {isUser ? (
@@ -370,7 +370,7 @@ function ToolStatusBar({
   }>;
 }) {
   return (
-    <div className="w-full space-y-1">
+    <div className="w-full space-y-1.5">
       {tools.map((tool) => {
         const duration = formatDuration(tool.durationMs);
         const isRunning = tool.status === 'running';
@@ -379,20 +379,20 @@ function ToolStatusBar({
           <div
             key={tool.toolCallId || tool.id || tool.name}
             className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors',
-              isRunning && 'border-primary/30 bg-primary/5 text-foreground',
-              !isRunning && !isError && 'border-border/50 bg-muted/20 text-muted-foreground',
-              isError && 'border-destructive/30 bg-destructive/5 text-destructive',
+              'flex items-center gap-2 rounded-[18px] border px-3 py-2 text-xs shadow-sm backdrop-blur-sm transition-colors',
+              isRunning && 'border-primary/20 bg-background/78 text-foreground',
+              !isRunning && !isError && 'border-border/45 bg-background/68 text-muted-foreground',
+              isError && 'border-destructive/20 bg-background/78 text-destructive',
             )}
           >
             {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
             {!isRunning && !isError && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
             {isError && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
             <Wrench className="h-3 w-3 shrink-0 opacity-60" />
-            <span className="font-mono text-[12px] font-medium">{tool.name}</span>
-            {duration && <span className="text-[11px] opacity-60">{duration}</span>}
+            <span className="font-mono text-[11px] font-medium tracking-[-0.01em]">{tool.name}</span>
+            {duration && <span className="text-[10px] opacity-60">{duration}</span>}
             {tool.summary && (
-              <span className="truncate text-[11px] opacity-70">{tool.summary}</span>
+              <span className="truncate text-[10px] opacity-70">{tool.summary}</span>
             )}
           </div>
         );
@@ -413,18 +413,20 @@ const AssistantHoverBar = memo(function AssistantHoverBar({ text, timestamp }: {
   }, [text]);
 
   return (
-    <div className="flex items-center justify-between w-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 select-none px-1">
-      <span className="text-xs text-muted-foreground">
-        {timestamp ? formatTimestamp(timestamp) : ''}
-      </span>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-6 w-6"
-        onClick={copyContent}
-      >
-        {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
-      </Button>
+    <div className="flex w-full justify-start opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
+      <div className="inline-flex items-center gap-1 rounded-full border border-border/45 bg-background/68 px-1.5 py-0.5 shadow-sm backdrop-blur-sm">
+        <span className="px-1 text-[11px] text-muted-foreground">
+          {timestamp ? formatTimestamp(timestamp) : ''}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 rounded-full"
+          onClick={copyContent}
+        >
+          {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+        </Button>
+      </div>
     </div>
   );
 });
@@ -447,13 +449,13 @@ const MessageBody = memo(function MessageBody({
       <div
         className={CHAT_LAYOUT_TOKENS.userBubble}
       >
-        <p className="whitespace-pre-wrap break-words break-all text-sm">{text}</p>
+        <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.6]">{text}</p>
       </div>
     );
   }
 
   return (
-      <AssistantMessageBody
+    <AssistantMessageBody
       text={text}
       message={message}
       isStreaming={isStreaming}
@@ -542,13 +544,13 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
     <div
       data-chat-body-mode="full"
       className={cn(
+        CHAT_LAYOUT_TOKENS.assistantSurface,
         'relative',
-        'w-full bg-transparent px-0 py-0',
       )}
     >
-      <div className="space-y-3">
+      <div className="space-y-3.5 text-[14px] leading-[1.75] text-foreground">
         {!resolvedMarkdownBody && (
-          <p className="whitespace-pre-wrap break-words break-all text-sm text-foreground">{text}</p>
+          <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.75] text-foreground">{text}</p>
         )}
         {renderNodes.map((node) => {
           if (node.kind === 'csv') {
@@ -576,7 +578,7 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
           return (
             <div
               key={node.key}
-              className="prose prose-sm dark:prose-invert max-w-none break-words"
+              className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-3 prose-headings:mt-5 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:rounded-2xl prose-pre:border prose-pre:border-border/60 prose-pre:bg-background/92 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/70 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/82 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
               onClick={handleMarkdownClick}
               dangerouslySetInnerHTML={{ __html: node.html }}
             />
@@ -602,18 +604,18 @@ function ThinkingBlock({ content }: { content: string }) {
   }), [content, thinkingCacheKey]);
 
   return (
-    <div className="w-full rounded-lg border border-border/50 bg-muted/30 text-sm">
+    <div className="w-full rounded-[18px] border border-border/45 bg-background/62 text-sm shadow-sm backdrop-blur-sm">
       <button
-        className="flex items-center gap-2 w-full px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        <span className="font-medium">Thinking</span>
+        <span className="text-[11px] font-medium uppercase tracking-[0.12em]">Thinking</span>
       </button>
       {expanded && (
         <div className="px-3 pb-3 text-muted-foreground">
           <div
-            className="prose prose-sm dark:prose-invert max-w-none opacity-75"
+            className="prose prose-sm dark:prose-invert max-w-none opacity-80 prose-p:leading-6"
             dangerouslySetInnerHTML={{ __html: renderResult.fullHtml }}
           />
         </div>
@@ -655,7 +657,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
         type="button"
         onClick={handleOpen}
         title="Open file"
-        className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 bg-muted/30 max-w-[220px] text-left cursor-pointer hover:bg-muted/50 transition-colors"
+        className="flex max-w-[220px] items-center gap-2 rounded-[18px] border border-border/50 bg-background/72 px-3 py-2 text-left shadow-sm backdrop-blur-sm transition-colors hover:bg-background/88"
       >
         <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
         <div className="min-w-0 overflow-hidden">
@@ -669,7 +671,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 bg-muted/30 max-w-[220px]">
+    <div className="flex max-w-[220px] items-center gap-2 rounded-[18px] border border-border/50 bg-background/72 px-3 py-2 shadow-sm backdrop-blur-sm">
       <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 overflow-hidden">
         <p className="text-xs font-medium truncate">{file.fileName}</p>
@@ -694,7 +696,7 @@ function ImageThumbnail({
 }) {
   return (
     <div
-      className="relative w-36 h-36 rounded-xl border overflow-hidden bg-muted group/img cursor-zoom-in"
+      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[20px] border border-border/50 bg-background/72 shadow-sm backdrop-blur-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="w-full h-full object-cover" />
@@ -718,7 +720,7 @@ function ImagePreviewCard({
 }) {
   return (
     <div
-      className="relative max-w-xs rounded-lg border overflow-hidden group/img cursor-zoom-in"
+      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[20px] border border-border/50 bg-background/68 shadow-sm backdrop-blur-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="block w-full" />
@@ -735,18 +737,18 @@ const ToolCard = memo(function ToolCard({ name, input }: { name: string; input: 
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="rounded-lg border border-border/50 bg-muted/20 text-sm">
+    <div className="rounded-[18px] border border-border/45 bg-background/62 text-sm shadow-sm backdrop-blur-sm">
       <button
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-muted-foreground hover:text-foreground transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
       >
         <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />
         <Wrench className="h-3 w-3 shrink-0 opacity-60" />
-        <span className="font-mono text-xs">{name}</span>
+        <span className="font-mono text-[11px]">{name}</span>
         {expanded ? <ChevronDown className="h-3 w-3 ml-auto" /> : <ChevronRight className="h-3 w-3 ml-auto" />}
       </button>
       {expanded && input != null && (
-        <pre className="px-3 pb-2 text-xs text-muted-foreground overflow-x-auto">
+        <pre className="overflow-x-auto px-3 pb-3 text-[11px] text-muted-foreground">
           {typeof input === 'string' ? input : JSON.stringify(input, null, 2) as string}
         </pre>
       )}

@@ -1,16 +1,9 @@
 import {
   CHAT_HISTORY_LOADING_TIMEOUT_MS,
 } from './history-fetch-helpers';
-import { trackUiEvent } from '@/lib/telemetry';
 import {
   createHistoryLoadExecutor,
 } from './history-load-execution';
-import {
-  readHistoryLoadPipelineStrategyKey,
-  resolveHistoryLoadPipelineStrategyKey,
-  resolveHistoryLoadPipelineStrategy,
-} from './history-pipeline-strategies';
-import type { HistoryLoadPipelineStrategy } from './history-pipeline-types';
 import type { StoreHistoryCache } from './history-cache';
 import type {
   ChatHistoryLoadRequest,
@@ -28,9 +21,6 @@ interface CreateStoreHistoryActionsInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
-  pipelineStrategy?: HistoryLoadPipelineStrategy;
-  pipelineStrategyKey?: string | null;
-  readPipelineStrategyKey?: () => string | null | undefined;
 }
 
 type StoreHistoryActions = Pick<ChatStoreState, 'loadHistory'>;
@@ -42,46 +32,7 @@ export function createStoreHistoryActions(
     set,
     get,
     historyRuntime,
-    pipelineStrategy,
-    pipelineStrategyKey,
-    readPipelineStrategyKey,
   } = input;
-
-  function resolvePipelineStrategySelection(): {
-    strategy: HistoryLoadPipelineStrategy;
-    strategyKey: string;
-    source: 'injected' | 'input' | 'dynamic' | 'storage' | 'fallback';
-  } {
-    if (pipelineStrategy) {
-      return {
-        strategy: pipelineStrategy,
-        strategyKey: 'custom',
-        source: 'injected',
-      };
-    }
-
-    let source: 'input' | 'dynamic' | 'storage' | 'fallback' = 'fallback';
-    let rawKey: string | null | undefined = pipelineStrategyKey;
-    if (rawKey != null) {
-      source = 'input';
-    } else {
-      rawKey = readPipelineStrategyKey?.();
-      if (rawKey != null) {
-        source = 'dynamic';
-      } else {
-        rawKey = readHistoryLoadPipelineStrategyKey();
-        if (rawKey != null) {
-          source = 'storage';
-        }
-      }
-    }
-
-    return {
-      strategy: resolveHistoryLoadPipelineStrategy(rawKey),
-      strategyKey: resolveHistoryLoadPipelineStrategyKey(rawKey),
-      source,
-    };
-  }
 
   return {
     loadHistory: (request: ChatHistoryLoadRequest) => {
@@ -93,22 +44,11 @@ export function createStoreHistoryActions(
         ...request,
         sessionKey: normalizedSessionKey,
       };
-      const selection = resolvePipelineStrategySelection();
-      trackUiEvent('chat.history_load_strategy_selected', {
-        sessionKey: normalizedRequest.sessionKey,
-        mode: normalizedRequest.mode,
-        scope: normalizedRequest.scope,
-        reason: normalizedRequest.reason ?? '',
-        strategy: selection.strategyKey,
-        source: selection.source,
-      });
       return createHistoryLoadExecutor({
         set,
         get,
         historyRuntime,
         loadingTimeoutMs: CHAT_HISTORY_LOADING_TIMEOUT_MS,
-        pipelineStrategy: selection.strategy,
-        pipelineStrategyLabel: selection.strategyKey,
       }).execute(normalizedRequest);
     },
   };

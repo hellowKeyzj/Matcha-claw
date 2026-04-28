@@ -53,6 +53,8 @@ describe('chat message avatar', () => {
     expect(contentShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageContentColumn);
     expect(contentShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageContentAssistantOrder);
     expect(contentShell?.className).not.toContain('max-w-[80%]');
+    const body = container.querySelector('[data-chat-body-mode="full"]') as HTMLElement | null;
+    expect(body?.className).toContain(CHAT_LAYOUT_TOKENS.assistantSurface);
   });
 
   it('user message renders custom avatar image when provided', () => {
@@ -79,5 +81,24 @@ describe('chat message avatar', () => {
     expect(shell?.className).toContain(CHAT_LAYOUT_TOKENS.messageShellUserColumns);
     expect(avatarShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageAvatarUserOrder);
     expect(contentShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageContentUserOrder);
+  });
+
+  it('renders user content as a light asymmetric card instead of the old secondary bubble', () => {
+    const message: RawMessage = {
+      role: 'user',
+      content: 'bubble-check',
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+      />,
+    );
+
+    const bubble = screen.getByText('bubble-check').parentElement as HTMLElement | null;
+    expect(bubble?.className).toContain(CHAT_LAYOUT_TOKENS.userBubble);
+    expect(CHAT_LAYOUT_TOKENS.userBubble).toContain('rounded-tr-md');
+    expect(CHAT_LAYOUT_TOKENS.userBubble).not.toContain('bg-secondary');
   });
 });

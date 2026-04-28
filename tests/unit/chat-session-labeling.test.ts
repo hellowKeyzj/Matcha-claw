@@ -104,42 +104,53 @@ describe('chat session labeling', () => {
     expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBeNull();
   });
 
-  it('loadHistory 返回时若会话已切换，应丢弃过期结果', async () => {
-    let resolveHistory!: (value: { messages: RawMessage[] }) => void;
-    const rpcMock = vi.fn(async (method: string) => {
-      if (method === 'chat.history') {
-        return await new Promise<{ messages: RawMessage[] }>((resolve) => {
-          resolveHistory = resolve;
-        });
-      }
-      return {};
-    });
-
-    useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
-      rpc: rpcMock,
-    } as never);
-
-    const loadPromise = loadCurrentHistory();
-    useChatStore.setState({
-      currentSessionKey: 'agent:beta:session-2',
-      sessionsByKey: {
-        ...useChatStore.getState().sessionsByKey,
-        'agent:beta:session-2': buildSessionRecord({
-          transcript: [{ role: 'assistant', content: 'beta session content' }],
-        }),
+  it('会话标题应跟随最新一条用户输入，而不是停留在最早一条', async () => {
+    setupGatewayRpc([
+      {
+        role: 'user',
+        content: '第一条输入',
+        timestamp: 1_800_000_000,
       },
-    } as never);
+      {
+        role: 'assistant',
+        content: '收到',
+        timestamp: 1_800_000_001,
+      },
+      {
+        role: 'user',
+        content: '最后一条输入',
+        timestamp: 1_800_000_002,
+      },
+    ]);
 
-    await Promise.resolve();
-    resolveHistory({
-      messages: [{ role: 'assistant', content: 'alpha session content' }],
-    });
-    await loadPromise;
+    await loadCurrentHistory();
 
     const state = useChatStore.getState();
-    expect(state.currentSessionKey).toBe('agent:beta:session-2');
-    expect(state.sessionsByKey['agent:beta:session-2']?.transcript).toEqual([{ role: 'assistant', content: 'beta session content' }]);
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('最后一条输入');
+  });
+
+  it('gateway 注入的 Sender metadata 前缀不应污染会话标题', async () => {
+    setupGatewayRpc([
+      {
+        role: 'user',
+        content: [
+          'Sender (untrusted metadata):',
+          '```json',
+          '{',
+          '  "label": "MatchaClaw Runtime Host",',
+          '  "id": "gateway-client"',
+          '}',
+          '```',
+          '[Tue 2026-04-14 00:11 GMT+8]真正的用户问题',
+        ].join('\n'),
+        timestamp: 1_800_000_010,
+      },
+    ]);
+
+    await loadCurrentHistory();
+
+    const state = useChatStore.getState();
+    expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('真正的用户问题');
   });
 
   it('sending 期间 loadHistory 若已包含同语义用户消息，不应再追加 optimistic 用户消息', async () => {
@@ -195,7 +206,7 @@ describe('chat session labeling', () => {
     expect(userMessages).toHaveLength(1);
   });
 
-  it('loadSessions 仅使用 sessions.list 元数据，不触发 chat.history 扇出请求', async () => {
+  it('loadSessions 会用 sessions.get 补齐缺失标题，但不会退回 displayName', async () => {
     const rpcMock = vi.fn(async (method: string) => {
       if (method === 'sessions.list') {
         return {
@@ -213,6 +224,17 @@ describe('chat session labeling', () => {
           ],
         };
       }
+      if (method === 'sessions.get') {
+        return {
+          messages: [
+            {
+              role: 'user',
+              content: 'Session 2 latest user title',
+              timestamp: 1_800_000_112,
+            },
+          ],
+        };
+      }
       return {};
     });
 
@@ -223,14 +245,95 @@ describe('chat session labeling', () => {
 
     await useChatStore.getState().loadSessions();
 
-    expect(rpcMock).toHaveBeenCalledTimes(1);
     expect(rpcMock).toHaveBeenCalledWith('sessions.list', {});
+    expect(rpcMock).toHaveBeenCalledWith('sessions.get', {
+      key: 'agent:alpha:session-2',
+      limit: 200,
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith('chat.history', expect.anything());
     const state = useChatStore.getState();
     expect(state.sessionsResource.status).toBe('ready');
     expect(state.sessionsByKey['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话标题');
-    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.label).toBe('Alpha Session 2');
+    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.label).toBe('Session 2 latest user title');
     expect(state.sessionsByKey['agent:alpha:session-1']?.meta.lastActivityAt).toBe(1_800_000_111_000);
     expect(state.sessionsByKey['agent:alpha:session-2']?.meta.lastActivityAt).toBe(Date.parse('2026-04-10T14:20:00.000Z'));
+  });
+
+  it('loadSessions 不应把 displayName 提升成正式会话标题', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            {
+              key: 'agent:alpha:session-2',
+              displayName: 'MatchaClaw Runtime Host',
+              updatedAt: '2026-04-10T14:20:00.000Z',
+            },
+          ],
+        };
+      }
+      if (method === 'sessions.get') {
+        return {
+          messages: [],
+        };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().loadSessions();
+
+    const state = useChatStore.getState();
+    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.label).toBeNull();
+  });
+
+  it('loadSessions 在 sessions.get 失败时会回退到 chat.history 生成标题', async () => {
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            {
+              key: 'agent:alpha:session-2',
+              displayName: 'MatchaClaw Runtime Host',
+              updatedAt: '2026-04-10T14:20:00.000Z',
+            },
+          ],
+        };
+      }
+      if (method === 'sessions.get') {
+        throw new Error('sessions.get failed');
+      }
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              role: 'user',
+              content: 'history fallback title',
+              timestamp: 1_800_000_113,
+            },
+          ],
+        };
+      }
+      return {};
+    });
+
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
+
+    await useChatStore.getState().loadSessions();
+
+    const state = useChatStore.getState();
+    expect(rpcMock).toHaveBeenCalledWith('chat.history', {
+      sessionKey: 'agent:alpha:session-2',
+      limit: 200,
+    });
+    expect(state.sessionsByKey['agent:alpha:session-2']?.meta.label).toBe('history fallback title');
   });
 
   it('loadSessions 即使改写 currentSessionKey，也不应触发 chat.history', async () => {
@@ -431,7 +534,7 @@ describe('chat session labeling', () => {
 
     expect(rpcMock).toHaveBeenCalledWith('sessions.get', {
       key: 'agent:alpha:session-1',
-      limit: 10,
+      limit: 200,
     });
     expect(rpcMock).not.toHaveBeenCalledWith('chat.history', expect.anything());
     const state = useChatStore.getState();

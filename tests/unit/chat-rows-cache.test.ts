@@ -1,6 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { EMPTY_EXECUTION_GRAPHS } from '@/pages/Chat/exec-graph-types';
-import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
 import {
   getOrBuildStaticRowsCacheEntry,
   prewarmStaticRowsForMessages,
@@ -17,23 +15,22 @@ function buildMessages(count: number): RawMessage[] {
 }
 
 describe('chat rows cache', () => {
-  it('returns the same live projection object for the same transcript reference', () => {
+  it('returns the same static rows cache entry for the same message reference', () => {
     const messages = buildMessages(40);
 
-    const firstProjection = projectLiveThreadMessages(messages);
-    const secondProjection = projectLiveThreadMessages(messages);
+    const firstEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', messages);
+    const secondEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', messages);
 
-    expect(secondProjection).toBe(firstProjection);
-    expect(secondProjection.messages).toBe(firstProjection.messages);
+    expect(secondEntry).toBe(firstEntry);
+    expect(secondEntry.rows).toBe(firstEntry.rows);
   });
 
   it('reuses prewarmed static rows on later reads', () => {
     const sessionKey = 'agent:cache:main';
     const transcript = buildMessages(12);
-    const liveMessages = projectLiveThreadMessages(transcript).messages;
 
-    const prewarmed = prewarmStaticRowsForMessages(sessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
-    const reused = getOrBuildStaticRowsCacheEntry(sessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
+    const prewarmed = prewarmStaticRowsForMessages(sessionKey, transcript);
+    const reused = getOrBuildStaticRowsCacheEntry(sessionKey, transcript);
 
     expect(reused).toBe(prewarmed);
     expect(reused.rows).toBe(prewarmed.rows);

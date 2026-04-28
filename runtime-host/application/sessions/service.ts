@@ -1,5 +1,6 @@
 import { access, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { SessionFileResolver } from './session-file-resolver';
 
 interface SessionsServiceDeps {
   getOpenClawConfigDir: () => string;
@@ -23,71 +24,20 @@ export class SessionsService {
       };
     }
 
-    const parts = sessionKey.split(':');
-    if (parts.length < 3) {
-      return {
-        status: 400,
-        data: { success: false, error: `sessionKey has too few parts: ${sessionKey}` },
-      };
-    }
-
-    const agentId = parts[1];
-    const sessionsDir = join(this.deps.getOpenClawConfigDir(), 'agents', agentId, 'sessions');
-    const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-    const sessionsJson = JSON.parse(await readFile(sessionsJsonPath, 'utf8'));
-
-    let uuidFileName: string | undefined;
-    let resolvedSrcPath: string | undefined;
-
-    if (isRecord(sessionsJson) && Array.isArray(sessionsJson.sessions)) {
-      const entry = sessionsJson.sessions.find((session) => {
-        if (!isRecord(session)) {
-          return false;
-        }
-        return session.key === sessionKey || session.sessionKey === sessionKey;
-      });
-      if (isRecord(entry)) {
-        uuidFileName = entry.file || entry.fileName || entry.path;
-        if (!uuidFileName && typeof entry.id === 'string') {
-          uuidFileName = `${entry.id}.jsonl`;
-        }
-      }
-    }
-
-    if (!uuidFileName && !resolvedSrcPath && isRecord(sessionsJson) && sessionsJson[sessionKey] != null) {
-      const entry = sessionsJson[sessionKey];
-      if (typeof entry === 'string') {
-        uuidFileName = entry;
-      } else if (isRecord(entry)) {
-        const absFile = entry.sessionFile || entry.file || entry.fileName || entry.path;
-        if (typeof absFile === 'string' && absFile.trim()) {
-          if (absFile.includes(':\\') || absFile.startsWith('/')) {
-            resolvedSrcPath = absFile;
-          } else {
-            uuidFileName = absFile;
-          }
-        } else {
-          const uuidVal = entry.id || entry.sessionId;
-          if (typeof uuidVal === 'string' && uuidVal.trim()) {
-            uuidFileName = uuidVal.endsWith('.jsonl') ? uuidVal : `${uuidVal}.jsonl`;
-          }
-        }
-      }
-    }
-
-    if (!uuidFileName && !resolvedSrcPath) {
+    const fileResolver = new SessionFileResolver({
+      getOpenClawConfigDir: this.deps.getOpenClawConfigDir,
+    });
+    const resolution = await fileResolver.resolve(sessionKey);
+    if (!resolution) {
       return {
         status: 404,
         data: { success: false, error: `Cannot resolve file for session: ${sessionKey}` },
       };
     }
 
-    if (!resolvedSrcPath) {
-      const normalizedFileName = String(uuidFileName).endsWith('.jsonl')
-        ? String(uuidFileName)
-        : `${String(uuidFileName)}.jsonl`;
-      resolvedSrcPath = join(sessionsDir, normalizedFileName);
-    }
+    const { sessionsDir, transcriptPath: resolvedSrcPath } = resolution;
+    const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+    const sessionsJson = JSON.parse(await readFile(sessionsJsonPath, 'utf8'));
 
     try {
       await access(resolvedSrcPath);

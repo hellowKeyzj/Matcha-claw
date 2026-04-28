@@ -131,6 +131,24 @@ export interface ChatSessionRecord {
   runtime: ChatSessionRuntimeState;
 }
 
+export interface ChatViewportAnchorRestore {
+  messageId: string;
+}
+
+export interface ChatSessionViewportState {
+  messages: RawMessage[];
+  totalMessageCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isLoadingMore: boolean;
+  isLoadingNewer: boolean;
+  isAtLatest: boolean;
+  anchorRestore: ChatViewportAnchorRestore | null;
+  lastVisibleMessageId: string | null;
+}
+
 export interface ChatViewState {
   snapshotReady: boolean;
   initialLoading: boolean;
@@ -144,6 +162,7 @@ export interface ChatViewState {
 export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
   sessionsByKey: Record<string, ChatSessionRecord>;
+  viewportBySession: Record<string, ChatSessionViewportState>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
   sessions?: ChatSession[];
 }
@@ -174,6 +193,10 @@ export interface ChatStoreActions {
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
+  loadOlderMessages: (sessionKey?: string) => Promise<void>;
+  jumpToLatest: (sessionKey?: string) => Promise<void>;
+  trimTopMessages: (sessionKey?: string, keep?: number) => void;
+  setViewportLastVisibleMessageId: (messageId: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
   handleApprovalRequested: (payload: Record<string, unknown>) => void;
@@ -194,6 +217,7 @@ export type ChatStoreState = ChatStoreBaseState & ChatStoreActions;
 export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
   'sessionsByKey',
+  'viewportBySession',
   'pendingApprovalsBySession',
   'snapshotReady',
   'initialLoading',

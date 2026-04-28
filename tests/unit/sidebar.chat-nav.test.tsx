@@ -316,4 +316,33 @@ describe('sidebar chat nav', () => {
       expect(screen.getByTestId('location-echo')).toHaveTextContent('/?session=agent%3Aanalytics%3Amain');
     });
   });
+
+  it('chat approval blocker cache should not depend on session displayName fallback', () => {
+    setupSidebarState();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [
+        { key: 'agent:main:main', displayName: 'MatchaClaw Runtime Host' },
+      ],
+      sessionsByKey: {
+        'agent:main:main': createSessionRecord({ ready: true, label: null }),
+      },
+      pendingApprovalsBySession: {
+        'agent:main:main': [
+          {
+            id: 'approval-chat-1',
+            sessionKey: 'agent:main:main',
+            runId: 'run-chat-1',
+            toolName: 'browser.fetch',
+            createdAtMs: Date.now(),
+          },
+        ],
+      },
+    } as never);
+
+    mountSidebar('/dashboard');
+
+    expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
+    expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
+  });
 });

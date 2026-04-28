@@ -2,6 +2,8 @@ import { createApplyLoadedMessagesPipeline } from './history-apply-pipeline';
 import { trackUiTiming } from '@/lib/telemetry';
 import {
   createFetchHistoryWindow,
+  type HistoryWindowResult,
+  loadHistoryWindow,
 } from './history-fetch-helpers';
 import { readSessionsFromState } from './session-helpers';
 import { handleHistoryLoadFailure } from './history-failure-helpers';
@@ -15,24 +17,21 @@ import {
   finalizeHistoryLoadUiState,
 } from './history-loading-helpers';
 import { nowMs } from './store-state-helpers';
-import { defaultHistoryLoadPipelineStrategy } from './history-pipeline-strategies';
-import type {
-  ChatStoreGetFn,
-  ChatStoreSetFn,
-  HistoryLoadPipelineContext,
-  HistoryLoadPipelineStrategy,
-} from './history-pipeline-types';
 import type { StoreHistoryCache } from './history-cache';
-import type { ChatHistoryLoadRequest } from './types';
+import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
+
+type ChatStoreSetFn = (
+  partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+  replace?: false,
+) => void;
+
+type ChatStoreGetFn = () => ChatStoreState;
 
 export interface HistoryLoadExecutionDeps {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
-  optimisticUserReconcileWindowMs?: number;
-  pipelineStrategy?: HistoryLoadPipelineStrategy;
-  pipelineStrategyLabel?: string;
 }
 
 interface CreateHistoryLoadExecutionContextInput {
@@ -40,11 +39,20 @@ interface CreateHistoryLoadExecutionContextInput {
   request: ChatHistoryLoadRequest;
 }
 
-interface HistoryLoadExecutionContext extends HistoryLoadPipelineContext {
+interface HistoryLoadExecutionContext {
+  set: ChatStoreSetFn;
+  get: ChatStoreGetFn;
+  historyRuntime: StoreHistoryCache;
+  mode: ChatHistoryLoadRequest['mode'];
+  scope: ChatHistoryLoadRequest['scope'];
+  requestedSessionKey: string;
+  abortSignal: AbortSignal;
+  isAborted: () => boolean;
+  fetchHistoryWindow: (limit: number) => Promise<HistoryWindowResult>;
+  applyLoadedMessages: (window: HistoryWindowResult) => Promise<void>;
   historyLoadRunId: number;
   abortController: AbortController;
   loadingSafetyTimer: ReturnType<typeof setTimeout> | null;
-  pipelineStrategy: HistoryLoadPipelineStrategy;
 }
 
 function createHistoryLoadExecutionContext(
@@ -59,7 +67,6 @@ function createHistoryLoadExecutionContext(
     get,
     historyRuntime,
     loadingTimeoutMs,
-    pipelineStrategy = defaultHistoryLoadPipelineStrategy,
   } = deps;
 
   const requestedSessionKey = request.sessionKey;
@@ -119,7 +126,7 @@ function createHistoryLoadExecutionContext(
     shouldAbortHistoryProcessing,
   });
 
-  const pipelineContext: HistoryLoadPipelineContext = {
+  return {
     set,
     get,
     historyRuntime,
@@ -130,19 +137,17 @@ function createHistoryLoadExecutionContext(
     isAborted,
     fetchHistoryWindow,
     applyLoadedMessages,
-  };
-
-  return {
-    ...pipelineContext,
     historyLoadRunId,
     abortController,
     loadingSafetyTimer,
-    pipelineStrategy,
   };
 }
 
 async function runHistoryLoadExecution(context: HistoryLoadExecutionContext): Promise<void> {
-  await context.pipelineStrategy(context);
+  await loadHistoryWindow({
+    ...context,
+    getState: context.get,
+  });
 }
 
 async function recoverHistoryLoadExecution(
@@ -221,11 +226,8 @@ export function createHistoryLoadExecutor(deps: HistoryLoadExecutionDeps): Histo
           mode: executionContext.mode,
           scope: executionContext.scope,
           outcome,
-          strategy: deps.pipelineStrategyLabel ?? 'default',
         });
       }
     },
   };
 }
-
-export type { HistoryLoadPipelineContext, HistoryLoadPipelineStrategy } from './history-pipeline-types';

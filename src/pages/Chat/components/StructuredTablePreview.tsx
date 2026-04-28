@@ -28,12 +28,12 @@ export const StructuredTablePreview = memo(function StructuredTablePreview({
   }, [copyText]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card/70 shadow-sm">
+    <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/68 shadow-sm backdrop-blur-sm">
       {copyText ? (
-        <div className="flex items-center justify-end border-b border-border/60 px-2 py-1">
+        <div className="flex items-center justify-end border-b border-border/45 px-2 py-1.5">
           <button
             type="button"
-            className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent text-muted-foreground transition-colors hover:border-border/40 hover:bg-background/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
             aria-label={copyAriaLabel}
             onClick={handleCopy}
           >
@@ -42,13 +42,13 @@ export const StructuredTablePreview = memo(function StructuredTablePreview({
         </div>
       ) : null}
       <div className="max-h-[28rem] overflow-auto">
-        <table className="min-w-full border-collapse text-left text-xs">
-          <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+        <table className="min-w-full border-collapse text-left text-[11px]">
+          <thead className="sticky top-0 bg-background/92 backdrop-blur">
             <tr>
               {normalizedHeader.map((cell, index) => (
                 <th
                   key={`head:${index}`}
-                  className="border-b border-r border-border/60 px-3 py-2 font-semibold text-foreground last:border-r-0"
+                  className="border-b border-r border-border/45 px-3 py-2.5 font-semibold tracking-[-0.01em] text-foreground last:border-r-0"
                 >
                   {cell}
                 </th>
@@ -57,13 +57,13 @@ export const StructuredTablePreview = memo(function StructuredTablePreview({
           </thead>
           <tbody>
             {normalizedBodyRows.map((row, rowIndex) => (
-              <tr key={`row:${rowIndex}`} className="odd:bg-muted/10">
+              <tr key={`row:${rowIndex}`} className="odd:bg-background/36">
                 {row.map((cell, cellIndex) => (
                   <td
                     key={`cell:${rowIndex}:${cellIndex}`}
-                    className="border-b border-r border-border/40 px-3 py-2 align-top text-foreground/90 last:border-r-0"
+                    className="border-b border-r border-border/30 px-3 py-2.5 align-top text-foreground/90 last:border-r-0"
                   >
-                    <span className="break-words">{cell}</span>
+                    <span className="break-words leading-6">{cell}</span>
                   </td>
                 ))}
               </tr>

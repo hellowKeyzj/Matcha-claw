@@ -1,18 +1,16 @@
 import type { RawMessage } from '@/stores/chat';
 import {
   appendMessageRows,
-  buildStaticChatRowsWithMeta,
+  buildMessageRowsWithMeta,
   canAppendMessageList,
   canPrependMessageList,
   prependMessageRows,
   type ChatRow,
-  type ExecutionGraphData,
 } from './chat-row-model';
 import { getSessionCacheValue, rememberSessionCacheValue } from './chat-session-cache';
 
 export interface SessionStaticRowsCacheEntry {
   messagesRef: RawMessage[];
-  executionGraphsRef: ExecutionGraphData[];
   rows: ChatRow[];
   renderableCount: number;
 }
@@ -28,13 +26,11 @@ const globalStaticRowsCache = new Map<string, SessionStaticRowsCacheEntry>();
 function buildStaticRowsCacheEntry(
   sessionKey: string,
   rowSourceMessages: RawMessage[],
-  executionGraphs: ExecutionGraphData[],
 ): SessionStaticRowsCacheEntry {
   const previousCache = getSessionCacheValue(globalStaticRowsCache, sessionKey);
   if (
     previousCache
     && previousCache.messagesRef === rowSourceMessages
-    && previousCache.executionGraphsRef === executionGraphs
   ) {
     return previousCache;
   }
@@ -43,12 +39,10 @@ function buildStaticRowsCacheEntry(
   let renderableCount: number;
   const canIncrementalAppend = Boolean(
     previousCache
-    && previousCache.executionGraphsRef === executionGraphs
     && canAppendMessageList(previousCache.messagesRef, rowSourceMessages),
   );
   const canIncrementalPrepend = Boolean(
     previousCache
-    && previousCache.executionGraphsRef === executionGraphs
     && canPrependMessageList(previousCache.messagesRef, rowSourceMessages),
   );
 
@@ -73,10 +67,9 @@ function buildStaticRowsCacheEntry(
     rows = prepended.rows;
     renderableCount = prepended.renderableCount;
   } else {
-    const built = buildStaticChatRowsWithMeta({
+    const built = buildMessageRowsWithMeta({
       sessionKey,
       messages: rowSourceMessages,
-      executionGraphs,
     });
     rows = built.rows;
     renderableCount = built.renderableCount;
@@ -84,7 +77,6 @@ function buildStaticRowsCacheEntry(
 
   const nextEntry = {
     messagesRef: rowSourceMessages,
-    executionGraphsRef: executionGraphs,
     rows,
     renderableCount,
   } satisfies SessionStaticRowsCacheEntry;
@@ -95,13 +87,11 @@ function buildStaticRowsCacheEntry(
 export function peekStaticRowsCacheEntry(
   sessionKey: string,
   rowSourceMessages: RawMessage[],
-  executionGraphs: ExecutionGraphData[],
 ): SessionStaticRowsCacheEntry | undefined {
   const cached = getSessionCacheValue(globalStaticRowsCache, sessionKey);
   if (
     cached
     && cached.messagesRef === rowSourceMessages
-    && cached.executionGraphsRef === executionGraphs
   ) {
     return cached;
   }
@@ -111,17 +101,15 @@ export function peekStaticRowsCacheEntry(
 export function getOrBuildStaticRowsCacheEntry(
   sessionKey: string,
   rowSourceMessages: RawMessage[],
-  executionGraphs: ExecutionGraphData[],
 ): SessionStaticRowsCacheEntry {
-  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages, executionGraphs);
+  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages);
 }
 
 export function prewarmStaticRowsForMessages(
   sessionKey: string,
   rowSourceMessages: RawMessage[],
-  executionGraphs: ExecutionGraphData[],
 ): SessionStaticRowsCacheEntry {
-  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages, executionGraphs);
+  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages);
 }
 
 export function getStaticRowsCacheStats(): StaticRowsCacheStats {

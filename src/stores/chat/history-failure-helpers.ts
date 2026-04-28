@@ -1,5 +1,6 @@
 import {
   CHAT_HISTORY_FULL_LIMIT,
+  type HistoryWindowResult,
   loadCronFallbackMessages,
 } from './history-fetch-helpers';
 import {
@@ -13,7 +14,6 @@ import type {
   ChatHistoryLoadMode,
   ChatHistoryLoadScope,
   ChatStoreState,
-  RawMessage,
 } from './types';
 
 type ChatStoreSetFn = (
@@ -31,7 +31,7 @@ interface HandleHistoryLoadFailureInput {
   scope: ChatHistoryLoadScope;
   historyRuntime: StoreHistoryCache;
   error: unknown;
-  applyLoadedMessages: (rawMessages: RawMessage[], thinkingLevel: string | null) => Promise<void>;
+  applyLoadedMessages: (window: HistoryWindowResult) => Promise<void>;
 }
 
 export async function handleHistoryLoadFailure(
@@ -56,8 +56,17 @@ export async function handleHistoryLoadFailure(
   if (fallbackMessages.length > 0) {
     const fallbackFingerprint = buildHistoryFingerprint(fallbackMessages, null);
     historyRuntime.historyFingerprintBySession.set(requestedSessionKey, fallbackFingerprint);
-    historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, fallbackFingerprint);
-    await applyLoadedMessages(fallbackMessages, null);
+    await applyLoadedMessages({
+      rawMessages: fallbackMessages,
+      canonicalRawMessages: fallbackMessages,
+      thinkingLevel: null,
+      totalMessageCount: fallbackMessages.length,
+      windowStartOffset: 0,
+      windowEndOffset: fallbackMessages.length,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    });
     return;
   }
 
@@ -67,7 +76,6 @@ export async function handleHistoryLoadFailure(
 
   const emptyFingerprint = buildHistoryFingerprint([], null);
   historyRuntime.historyFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
-  historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, emptyFingerprint);
   historyRuntime.historyQuickFingerprintBySession.set(requestedSessionKey, buildQuickRawHistoryFingerprint([], null));
   historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, buildRenderMessagesFingerprint([]));
   if (scope === 'background') {
