@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyStoreSendStart, buildPendingUserMessageOverlay } from '@/stores/chat/send-handlers';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
   transcript?: RawMessage[];
@@ -29,7 +30,7 @@ function createSessionRecord(input?: {
 }
 
 describe('chat send handlers', () => {
-  it('stores pending user overlay without writing optimistic user into canonical transcript', () => {
+  it('stores pending user overlay, writes it into viewport, and keeps canonical transcript clean', () => {
     const sessionKey = 'agent:main:session-1';
     const nowMs = 1_700_000_000_000;
     const pendingUserMessage = buildPendingUserMessageOverlay({
@@ -42,6 +43,9 @@ describe('chat send handlers', () => {
       currentSessionKey: sessionKey,
       sessionsByKey: {
         [sessionKey]: createSessionRecord(),
+      },
+      viewportBySession: {
+        [sessionKey]: createViewportWindowState(),
       },
     } as ChatStoreState;
 
@@ -64,5 +68,6 @@ describe('chat send handlers', () => {
     expect(record.meta.label).toBe('hello world');
     expect(record.runtime.pendingUserMessage).toEqual(pendingUserMessage);
     expect(record.runtime.lastUserMessageAt).toBe(nowMs);
+    expect(state.viewportBySession[sessionKey]?.messages.map((message) => message.id)).toEqual(['user-local-1']);
   });
 });

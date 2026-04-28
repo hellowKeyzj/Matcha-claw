@@ -1,27 +1,30 @@
-import type { ChatRow } from './chat-row-model';
+import type { ViewportListItem } from './viewport-list-items';
 import { extractText } from './message-utils';
 
 function resolveTailRowSignalPart(
-  row: ChatRow | null,
+  item: ViewportListItem | null,
 ): string {
-  if (!row) {
+  if (!item) {
     return '0||';
   }
-  if (row.kind !== 'message') {
-    return [row.key, row.kind, '1'].join('|');
+  if (item.kind === 'execution_graph') {
+    return [item.key, item.kind, '1'].join('|');
   }
-  const hasContent = extractText(row.message).trim().length > 0 ? '1' : '0';
-  return [row.key, typeof row.message.id === 'string' ? row.message.id : '', hasContent].join('|');
+  if (item.kind !== 'message') {
+    return [item.key, item.kind, '1'].join('|');
+  }
+  const hasContent = extractText(item.row.message).trim().length > 0 ? '1' : '0';
+  return [item.key, typeof item.row.message.id === 'string' ? item.row.message.id : '', hasContent].join('|');
 }
 
-export function buildChatAutoFollowSignal(chatRows: ChatRow[]): string {
+export function buildChatAutoFollowSignal(items: ViewportListItem[]): string {
   let rowCount = 0;
-  let tailRow: ChatRow | null = null;
+  let tailItem: ViewportListItem | null = null;
 
-  for (const row of chatRows) {
+  for (const item of items) {
     rowCount += 1;
-    tailRow = row;
+    tailItem = item;
   }
 
-  return `${rowCount}|${resolveTailRowSignalPart(tailRow)}`;
+  return `${rowCount}|${resolveTailRowSignalPart(tailItem)}`;
 }

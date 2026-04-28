@@ -3,6 +3,7 @@ interface LocalDispatchResponse {
   data: unknown;
 }
 import { SessionsService } from '../../application/sessions/service';
+import { SessionWindowService } from '../../application/sessions/window-service';
 
 interface SessionRouteDeps {
   getOpenClawConfigDir: () => string;
@@ -15,13 +16,29 @@ export async function handleSessionRoute(
   payload: unknown,
   deps: SessionRouteDeps,
 ): Promise<LocalDispatchResponse | null> {
+  const sessionDeps = {
+    getOpenClawConfigDir: deps.getOpenClawConfigDir,
+  };
+  const service = new SessionsService({
+    ...sessionDeps,
+    resolveDeletedPath: deps.resolveDeletedPath,
+  });
+  const windowService = new SessionWindowService(sessionDeps);
+
+  if (method === 'POST' && routePath === '/api/sessions/window') {
+    try {
+      return await windowService.getWindow(payload);
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
+
   if (!(method === 'POST' && routePath === '/api/sessions/delete')) {
     return null;
   }
-  const service = new SessionsService({
-    getOpenClawConfigDir: deps.getOpenClawConfigDir,
-    resolveDeletedPath: deps.resolveDeletedPath,
-  });
 
   try {
     return await service.delete(payload);

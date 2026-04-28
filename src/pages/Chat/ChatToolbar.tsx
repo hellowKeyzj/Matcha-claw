@@ -19,13 +19,13 @@ export const ChatToolbar = memo(function ChatToolbar() {
   const refreshBusy = initialLoading || refreshing;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8"
+            className="h-8 w-8 rounded-full border border-border/40 bg-background/70 text-muted-foreground shadow-none hover:bg-background/84 hover:text-foreground"
             onClick={() => refresh()}
             disabled={refreshBusy}
           >
@@ -43,8 +43,8 @@ export const ChatToolbar = memo(function ChatToolbar() {
             variant="ghost"
             size="icon"
             className={cn(
-              'h-8 w-8',
-              showThinking && 'bg-secondary text-foreground',
+              'h-8 w-8 rounded-full border border-border/40 bg-background/70 text-muted-foreground shadow-none hover:bg-background/84 hover:text-foreground',
+              showThinking && 'bg-secondary/62 text-foreground',
             )}
             onClick={toggleThinking}
           >

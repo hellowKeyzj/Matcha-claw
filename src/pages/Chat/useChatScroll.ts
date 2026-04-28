@@ -14,11 +14,9 @@ interface UseChatScrollInput {
   stickyBottomThresholdPx: number;
 }
 
-type ScrollDirection = -1 | 0 | 1;
 type ScrollPhase = 'initial' | 'following' | 'restoring' | 'detached';
 type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
 
-const SCROLL_IDLE_TIMEOUT_MS = 160;
 const WHEEL_INTENT_WINDOW_MS = 220;
 const INITIAL_ALIGN_RETRY_MS = 150;
 const TAIL_SETTLE_IDLE_MS = 220;
@@ -161,16 +159,12 @@ export function useChatScroll({
   stickyBottomThresholdPx,
 }: UseChatScrollInput) {
   const [isBottomLocked, setIsBottomLocked] = useState(true);
-  const [isUserScrolling, setIsUserScrolling] = useState(false);
-  const [scrollDirection, setScrollDirection] = useState<ScrollDirection>(0);
-  const [scrollEventSeq, setScrollEventSeq] = useState(0);
   const isBottomLockedRef = useRef(true);
   const lastScrollActivationKeyRef = useRef(scrollActivationKey);
   const lastScrollScopeKeyRef = useRef(scrollScopeKey);
   const lastScrollResetKeyRef = useRef(scrollResetKey);
   const programmaticScrollRef = useRef(false);
   const lastUserScrollTopRef = useRef<number | null>(null);
-  const scrollIdleTimerRef = useRef<number | null>(null);
   const pointerScrollActiveRef = useRef(false);
   const touchScrollActiveRef = useRef(false);
   const wheelIntentUntilRef = useRef(0);
@@ -200,14 +194,6 @@ export function useChatScroll({
       return performance.now();
     }
     return Date.now();
-  }, []);
-
-  const clearScrollIdleTimer = useCallback(() => {
-    if (scrollIdleTimerRef.current == null || typeof window === 'undefined') {
-      return;
-    }
-    window.clearTimeout(scrollIdleTimerRef.current);
-    scrollIdleTimerRef.current = null;
   }, []);
 
   const clearInitialAlignSchedule = useCallback(() => {
@@ -312,22 +298,9 @@ export function useChatScroll({
     }
   }, [clearDetachedViewportAnchor, scrollScopeKey, setBottomLocked]);
 
-  const markUserScrollActivity = useCallback((directionHint: ScrollDirection = 0) => {
+  const markUserScrollActivity = useCallback(() => {
     markChatScrollActivity();
-    setIsUserScrolling(true);
-    setScrollEventSeq((value) => value + 1);
-    if (directionHint !== 0) {
-      setScrollDirection(directionHint);
-    }
-    clearScrollIdleTimer();
-    if (typeof window === 'undefined') {
-      return;
-    }
-    scrollIdleTimerRef.current = window.setTimeout(() => {
-      scrollIdleTimerRef.current = null;
-      setIsUserScrolling(false);
-    }, SCROLL_IDLE_TIMEOUT_MS);
-  }, [clearScrollIdleTimer]);
+  }, []);
 
   const markWheelIntent = useCallback(() => {
     wheelIntentUntilRef.current = nowMs() + WHEEL_INTENT_WINDOW_MS;
@@ -516,7 +489,6 @@ export function useChatScroll({
     }
     lastScrollScopeKeyRef.current = scrollScopeKey;
     lastScrollResetKeyRef.current = scrollResetKey;
-    clearScrollIdleTimer();
     clearInitialAlignSchedule();
     clearAnchorRestoreSchedule();
     lastUserScrollTopRef.current = null;
@@ -526,9 +498,6 @@ export function useChatScroll({
     tailActivityOpenRef.current = tailActivityOpen;
     clearTailSettleTask();
     clearDetachedViewportAnchor();
-    setIsUserScrolling(false);
-    setScrollDirection(0);
-    setScrollEventSeq(0);
     lastFollowViewportHeightRef.current = null;
     lastFollowViewportWidthRef.current = null;
     lastFollowScrollHeightRef.current = null;
@@ -580,7 +549,6 @@ export function useChatScroll({
     }
   }, [
     clearInitialAlignSchedule,
-    clearScrollIdleTimer,
     clearAnchorRestoreSchedule,
     scheduleInitialAlign,
     scheduleAnchorRestore,
@@ -787,23 +755,13 @@ export function useChatScroll({
     if (programmaticScrollRef.current) {
       return;
     }
-    const previousScrollTop = lastUserScrollTopRef.current;
-    let directionHint: ScrollDirection = 0;
-    if (previousScrollTop != null) {
-      const delta = metrics.scrollTop - previousScrollTop;
-      if (delta > 0) {
-        directionHint = 1;
-      } else if (delta < 0) {
-        directionHint = -1;
-      }
-    }
     lastUserScrollTopRef.current = metrics.scrollTop;
 
     if (!hasActiveUserScrollIntent()) {
       return;
     }
 
-    markUserScrollActivity(directionHint);
+    markUserScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
     if (isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       writeScrollPhase(scrollScopeKey, 'following');
@@ -833,10 +791,10 @@ export function useChatScroll({
       return;
     }
     touchScrollActiveRef.current = true;
-    markUserScrollActivity(scrollDirection === 0 ? -1 : scrollDirection);
+    markUserScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
     writeScrollPhase(scrollScopeKey, 'detached');
-  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, scrollDirection, scrollScopeKey, writeScrollPhase]);
+  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, scrollScopeKey, writeScrollPhase]);
 
   const handleViewportWheel = useCallback((event?: { deltaY?: number }) => {
     if (!enabled) {
@@ -844,13 +802,7 @@ export function useChatScroll({
     }
     markWheelIntent();
     const deltaY = event?.deltaY ?? 0;
-    let directionHint: ScrollDirection = 0;
-    if (deltaY < 0) {
-      directionHint = -1;
-    } else if (deltaY > 0) {
-      directionHint = 1;
-    }
-    markUserScrollActivity(directionHint);
+    markUserScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
     if (deltaY < 0) {
       writeScrollPhase(scrollScopeKey, 'detached');
@@ -887,12 +839,11 @@ export function useChatScroll({
 
   useLayoutEffect(() => {
     return () => {
-      clearScrollIdleTimer();
       clearInitialAlignSchedule();
       clearAnchorRestoreSchedule();
       clearTailSettleTask();
     };
-  }, [clearAnchorRestoreSchedule, clearInitialAlignSchedule, clearScrollIdleTimer, clearTailSettleTask]);
+  }, [clearAnchorRestoreSchedule, clearInitialAlignSchedule, clearTailSettleTask]);
 
   useLayoutEffect(() => {
     if (typeof window === 'undefined') {
@@ -946,9 +897,5 @@ export function useChatScroll({
     },
     jumpToBottom,
     isBottomLocked,
-    isUserScrolling,
-    scrollIdle: !isUserScrolling,
-    scrollDirection,
-    scrollEventSeq,
   };
 }

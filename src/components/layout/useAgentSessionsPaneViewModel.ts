@@ -463,14 +463,14 @@ export function useAgentSessionsPaneViewModel(
 
   const resolveSessionTitle = useMemo(() => {
     return (entry: AgentSessionsPaneSessionEntry): string => {
-      const session = entry.session;
-      const topicTitle = entry.label?.trim();
-      if (topicTitle) {
-        return normalizeSessionTitle(topicTitle);
+      const previewTitle = entry.titlePreview?.trim();
+      if (previewTitle) {
+        return normalizeSessionTitle(previewTitle);
       }
-      const explicit = (session.displayName || session.label || '').trim();
-      if (explicit && explicit !== session.key) {
-        return normalizeSessionTitle(explicit);
+      const session = entry.session;
+      const persistedLabel = entry.label?.trim();
+      if (persistedLabel) {
+        return normalizeSessionTitle(persistedLabel);
       }
       return inferUntitledSessionLabel(session, input.t);
     };

@@ -8,6 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom } from '@/pages/Chat/useChatScroll';
 
 let triggerResizeObserver: (() => void) | null = null;
@@ -114,6 +115,28 @@ function setupCommonStores() {
           approvalStatus: 'idle',
         },
       },
+    },
+    viewportBySession: {
+      [sessionKey]: createViewportWindowState({
+        messages: [
+          {
+            role: 'user',
+            content: 'hello',
+            timestamp: now / 1000,
+            id: 'user-1',
+          },
+          {
+            role: 'assistant',
+            content: 'first chunk',
+            timestamp: now / 1000,
+            id: 'assistant-1',
+          },
+        ],
+        totalMessageCount: 2,
+        windowStartOffset: 0,
+        windowEndOffset: 2,
+        isAtLatest: true,
+      }),
     },
     snapshotReady: true,
     initialLoading: false,

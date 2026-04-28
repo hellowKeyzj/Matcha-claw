@@ -1,18 +1,12 @@
 import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
-import { trackUiEvent } from '@/lib/telemetry';
 import { useChatStore } from '@/stores/chat';
-import {
-  readSessionsFromState,
-  resolveSessionActivityMs,
-} from '@/stores/chat/session-helpers';
-import { getSessionMeta, getSessionTranscript } from '@/stores/chat/store-state-helpers';
+import { getSessionTranscript } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
 const SUBAGENTS_SNAPSHOT_TTL_MS = 15_000;
 const HISTORY_IDLE_LOAD_TIMEOUT_MS = 1000;
-const HISTORY_PREWARM_MAX_SESSIONS = 6;
 const RESOURCE_RETRY_DELAY_MS = 1500;
 const RESOURCE_RETRY_MAX_ATTEMPTS = 2;
 
@@ -43,35 +37,6 @@ function cancelIdleTask(handle: IdleTaskHandle): void {
   clearTimeout(handle);
 }
 
-function collectSessionPrewarmTargets(limit: number): string[] {
-  const state = useChatStore.getState();
-  const currentSessionKey = state.currentSessionKey;
-  const rankedSessionKeys = readSessionsFromState(state)
-    .filter((session) => session.key && session.key !== currentSessionKey)
-    .filter((session) => {
-      const meta = getSessionMeta(state, session.key);
-      if (meta.ready) {
-        return false;
-      }
-      return getSessionTranscript(state, session.key).length === 0;
-    })
-    .sort((left, right) => (
-      resolveSessionActivityMs(right, state.sessionsByKey) - resolveSessionActivityMs(left, state.sessionsByKey)
-    ))
-    .map((session) => session.key);
-  return rankedSessionKeys.slice(0, limit);
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (typeof error === 'string') {
-    return error;
-  }
-  return 'unknown_error';
-}
-
 interface UseChatInitInput {
   isActive: boolean;
   isGatewayRunning: boolean;
@@ -100,7 +65,6 @@ export function useChatInit(input: UseChatInitInput): void {
   } = input;
 
   const initialHistoryIdleHandleRef = useRef<IdleTaskHandle | null>(null);
-  const historyPrewarmIdleHandleRef = useRef<IdleTaskHandle | null>(null);
   const agentsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -138,53 +102,6 @@ export function useChatInit(input: UseChatInitInput): void {
           }
         });
       }, RESOURCE_RETRY_DELAY_MS);
-    };
-    const scheduleSessionHistoryPrewarm = () => {
-      const sessionKeys = collectSessionPrewarmTargets(HISTORY_PREWARM_MAX_SESSIONS);
-      trackUiEvent('chat.history_prewarm_plan', {
-        currentSessionKey: useChatStore.getState().currentSessionKey,
-        targetCount: sessionKeys.length,
-        targets: sessionKeys,
-      });
-      if (sessionKeys.length === 0) {
-        return;
-      }
-      let cursor = 0;
-      const runNext = () => {
-        if (cancelled || cursor >= sessionKeys.length) {
-          historyPrewarmIdleHandleRef.current = null;
-          return;
-        }
-        const sessionKey = sessionKeys[cursor];
-        const queueIndex = cursor + 1;
-        cursor += 1;
-        trackUiEvent('chat.history_prewarm_dispatch', {
-          sessionKey,
-          queueIndex,
-          plannedCount: sessionKeys.length,
-        });
-        void loadHistory({
-          sessionKey,
-          mode: 'quiet',
-          scope: 'background',
-          reason: 'chat_init_session_prewarm',
-        }).then(() => {
-          trackUiEvent('chat.history_prewarm_done', {
-            sessionKey,
-            queueIndex,
-            plannedCount: sessionKeys.length,
-          });
-        }).catch((error: unknown) => {
-          trackUiEvent('chat.history_prewarm_failed', {
-            sessionKey,
-            queueIndex,
-            plannedCount: sessionKeys.length,
-            error: toErrorMessage(error),
-          });
-        });
-        historyPrewarmIdleHandleRef.current = scheduleIdleTask(runNext, HISTORY_IDLE_LOAD_TIMEOUT_MS);
-      };
-      historyPrewarmIdleHandleRef.current = scheduleIdleTask(runNext, HISTORY_IDLE_LOAD_TIMEOUT_MS);
     };
     const hasExistingMessages = getSessionTranscript(
       useChatStore.getState(),
@@ -229,7 +146,6 @@ export function useChatInit(input: UseChatInitInput): void {
       }
       if (cancelled) return;
       if (switchedViaQueryParam) {
-        scheduleSessionHistoryPrewarm();
         return;
       }
       if (hasExistingMessages) {
@@ -244,7 +160,6 @@ export function useChatInit(input: UseChatInitInput): void {
             scope: 'foreground',
             reason: 'chat_init_snapshot_quiet_refresh',
           });
-          scheduleSessionHistoryPrewarm();
         });
         return;
       }
@@ -254,9 +169,6 @@ export function useChatInit(input: UseChatInitInput): void {
         scope: 'foreground',
         reason: 'chat_init_cold_start',
       });
-      if (!cancelled) {
-        scheduleSessionHistoryPrewarm();
-      }
     })();
 
     return () => {
@@ -264,10 +176,6 @@ export function useChatInit(input: UseChatInitInput): void {
       if (initialHistoryIdleHandleRef.current != null) {
         cancelIdleTask(initialHistoryIdleHandleRef.current);
         initialHistoryIdleHandleRef.current = null;
-      }
-      if (historyPrewarmIdleHandleRef.current != null) {
-        cancelIdleTask(historyPrewarmIdleHandleRef.current);
-        historyPrewarmIdleHandleRef.current = null;
       }
       if (agentsRetryTimerRef.current != null) {
         clearTimeout(agentsRetryTimerRef.current);

@@ -9,21 +9,8 @@ vi.mock('@/components/layout/VerticalPaneResizer', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/ChatInput', () => ({
-  ChatInput: () => <div data-testid="chat-input" />,
-}));
-
 vi.mock('@/pages/Chat/components/AgentSkillConfigDialog', () => ({
   AgentSkillConfigDialog: () => null,
-}));
-
-vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
-  ChatHeaderBar: () => <div data-testid="chat-header" />,
-}));
-
-vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
-  ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
-  ChatErrorBanner: () => <div data-testid="chat-error-banner" />,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -83,12 +70,7 @@ describe('chat shell layout model', () => {
         taskInboxResizerWidth={6}
         onTaskInboxResizeStart={vi.fn()}
         onToggleTaskInbox={vi.fn()}
-        headerProps={{} as never}
-        threadPanel={<div data-testid="thread-panel" />}
-        errorBannerProps={null}
-        approvalDockProps={null}
-        inputProps={{} as never}
-        skillDialogProps={{} as never}
+        stagePanel={<div data-testid="chat-stage" />}
       />,
     );
 
@@ -112,5 +94,23 @@ describe('chat shell layout model', () => {
     expect(screen.getByTestId('chat-task-inbox-panel').className).toContain('border-l');
     expect(screen.getByTestId('chat-task-inbox-panel').className).not.toContain('border-t');
     expect(screen.getByTestId('chat-task-inbox-panel').className).not.toContain('xl:');
+  });
+
+  it('renders the composer inside an absolute bottom overlay instead of document flow', () => {
+    const { container } = render(
+      <ChatShell
+        chatLayoutRef={{ current: null }}
+        taskInboxCollapsed={false}
+        taskInboxWidth={360}
+        taskInboxResizerWidth={6}
+        onTaskInboxResizeStart={vi.fn()}
+        onToggleTaskInbox={vi.fn()}
+        stagePanel={<div data-testid="chat-stage" />}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-stage')).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="chat-header"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')).toBeNull();
   });
 });

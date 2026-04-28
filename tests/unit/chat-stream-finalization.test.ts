@@ -17,7 +17,6 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
     historyFingerprintBySession: new Map<string, string>(),
-    historyProbeFingerprintBySession: new Map<string, string>(),
     historyQuickFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
   };
@@ -257,7 +256,6 @@ describe('chat stream finalization identity', () => {
       scope: 'foreground',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await applyLoadedMessages(rawMessages, null);
@@ -318,7 +316,6 @@ describe('chat stream finalization identity', () => {
       scope: 'foreground',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await applyLoadedMessages(rawMessages, null);
@@ -840,7 +837,6 @@ describe('chat stream finalization identity', () => {
       scope: 'foreground',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await applyLoadedMessages([
@@ -916,7 +912,6 @@ describe('chat stream finalization identity', () => {
       scope: 'background',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await applyLoadedMessages([
@@ -992,7 +987,6 @@ describe('chat stream finalization identity', () => {
       scope: 'background',
       abortSignal: new AbortController().signal,
       shouldAbortHistoryProcessing: () => false,
-      optimisticUserReconcileWindowMs: 15_000,
     });
 
     await applyLoadedMessages([

@@ -1,11 +1,11 @@
 import { getAttachmentImageCacheStats } from '@/stores/chat/attachment-helpers';
 import { useChatStore, type AttachedFileMeta, type ChatStoreState, type RawMessage } from '@/stores/chat';
-import { getRenderItemsCacheStats } from '@/pages/Chat/chat-render-items';
 import { getExecutionGraphCacheStats } from '@/pages/Chat/exec-graph-cache';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
-import { getChatProjectionCacheStats } from '@/pages/Chat/useChatProjection';
 import { getStaticRowsCacheStats } from '@/pages/Chat/useRows';
+import { getViewportListItemsCacheStats } from '@/pages/Chat/viewport-list-items';
 import { hostApiFetch } from './host-api';
+import { getChatViewportCacheStats } from '@/stores/chat/viewport-state';
 
 interface RendererHeapMemoryStats {
   usedJsHeapSize: number;
@@ -40,9 +40,9 @@ export interface ChatStoreMemorySummary {
 
 export interface ChatRendererCacheSummary {
   markdownRender: ReturnType<typeof getMarkdownRenderCacheStats>;
-  historyProjection: ReturnType<typeof getChatProjectionCacheStats>;
+  viewportWindow: ReturnType<typeof getChatViewportCacheStats>;
   staticRows: ReturnType<typeof getStaticRowsCacheStats>;
-  renderItems: ReturnType<typeof getRenderItemsCacheStats>;
+  viewportListItems: ReturnType<typeof getViewportListItemsCacheStats>;
   executionGraphs: ReturnType<typeof getExecutionGraphCacheStats>;
   attachmentImage: ReturnType<typeof getAttachmentImageCacheStats>;
 }
@@ -306,9 +306,9 @@ export function collectRendererChatMemoryDiagnostics(): {
     chatStore: summarizeChatStoreMemory(state),
     caches: {
       markdownRender: getMarkdownRenderCacheStats(),
-      historyProjection: getChatProjectionCacheStats(),
+      viewportWindow: getChatViewportCacheStats(),
       staticRows: getStaticRowsCacheStats(),
-      renderItems: getRenderItemsCacheStats(),
+      viewportListItems: getViewportListItemsCacheStats(),
       executionGraphs: getExecutionGraphCacheStats(),
       attachmentImage: getAttachmentImageCacheStats(),
     },

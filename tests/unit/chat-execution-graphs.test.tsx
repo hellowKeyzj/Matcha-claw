@@ -88,11 +88,7 @@ function buildProps(messages: RawMessage[]) {
     agents: [{ id: 'coder', name: 'Coder' }],
     isGatewayRunning: true,
     gatewayRpc: vi.fn(() => new Promise<Record<string, unknown>>(() => {})),
-    sending: false,
-    pendingFinal: false,
     showThinking: true,
-    streamingMessage: null,
-    streamingTools: [],
   };
 }
 
@@ -148,7 +144,7 @@ describe('useExecutionGraphs incremental compute', () => {
     }));
   });
 
-  it('reuses exact cache when inputs are semantically equal but refs change', async () => {
+  it('does not restart the graph pipeline for token-only runtime changes when messages are unchanged', async () => {
     vi.useFakeTimers();
     const initialProps = buildProps(BASE_MESSAGES);
     const { rerender } = renderHook((props: ReturnType<typeof buildProps>) => useExecutionGraphs(props), {
@@ -165,10 +161,23 @@ describe('useExecutionGraphs incremental compute', () => {
     ).length;
     expect(initialPipelineCalls).toBeGreaterThan(0);
 
-    rerender({
+    const nextProps = {
       ...buildProps(BASE_MESSAGES),
-      streamingTools: [],
-    });
+      sending: true,
+      pendingFinal: true,
+      streamingMessage: {
+        id: 'assistant-live',
+        role: 'assistant',
+        content: 'still streaming',
+        timestamp: 999,
+      },
+      streamingTools: [{
+        name: 'shell',
+        status: 'running' as const,
+        updatedAt: 999,
+      }],
+    };
+    rerender(nextProps);
 
     await act(async () => {
       vi.runOnlyPendingTimers();

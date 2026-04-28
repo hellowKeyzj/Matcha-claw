@@ -142,13 +142,13 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
     return (
       <aside
         data-testid="chat-task-inbox-panel"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-card"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-background/58 backdrop-blur-sm"
       >
         <div className="flex flex-1 flex-col items-center gap-2 px-1 py-3">
           <span className="px-1 text-xs text-muted-foreground [writing-mode:vertical-rl]">
             {t('taskInbox.title')}
           </span>
-          <span className="rounded-md border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
+          <span className="rounded-md border border-border/50 bg-background/82 px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-sm">
             {unfinishedCount}
           </span>
         </div>
@@ -164,8 +164,8 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
   }
 
   return (
-    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-card">
-      <div className="px-4 py-3">
+    <aside data-testid="chat-task-inbox-panel" className="relative flex h-full min-h-0 flex-col overflow-hidden border-l [border-left-color:var(--divider-line)] bg-background/58 backdrop-blur-sm">
+      <div className="border-b border-border/30 px-4 py-3">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-semibold">{t('taskInbox.title')}</p>
@@ -176,7 +176,7 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8"
+            className="h-8 w-8 rounded-full border border-border/45 bg-background/72 text-muted-foreground shadow-none hover:bg-background/88 hover:text-foreground"
             onClick={() => void refreshTasks()}
             disabled={!isGatewayRunning || loading}
             title={t('taskInbox.refresh')}
@@ -193,13 +193,13 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
 
       <div className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
         {!isGatewayRunning ? (
-          <div className="rounded-md border border-yellow-400/60 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950/20 dark:text-yellow-200">
+          <div className="rounded-xl border border-yellow-400/45 bg-yellow-50/72 px-3 py-2 text-xs text-yellow-800 backdrop-blur-sm dark:border-yellow-700/60 dark:bg-yellow-950/20 dark:text-yellow-200">
             {t('taskInbox.gatewayStopped')}
           </div>
         ) : null}
 
         {error ? (
-          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="rounded-xl border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive backdrop-blur-sm">
             <div className="flex items-start gap-2">
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <div className="min-w-0 flex-1">
@@ -217,19 +217,19 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
         ) : null}
 
         {!loading && initialized && tasks.length === 0 ? (
-          <p className="rounded-md border bg-background px-3 py-6 text-center text-sm text-muted-foreground">
+          <p className="rounded-[18px] border border-border/45 bg-background/76 px-3 py-6 text-center text-sm text-muted-foreground shadow-sm backdrop-blur-sm">
             {t('taskInbox.empty')}
           </p>
         ) : null}
 
         {tasks.map((task) => {
           return (
-            <Card key={`${task.id}-${task.workspaceDir || 'default'}`} className="bg-background/95">
+            <Card key={`${task.id}-${task.workspaceDir || 'default'}`} className="border-border/45 bg-background/80 shadow-sm backdrop-blur-sm">
               <CardContent className="space-y-3 p-3">
                 <button
                   type="button"
                   onClick={() => handleOpenSession(task.id)}
-                  className="w-full space-y-3 rounded-md p-1 text-left transition-colors hover:bg-accent/20"
+                  className="w-full space-y-3 rounded-xl p-1.5 text-left transition-colors hover:bg-accent/18"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
@@ -249,7 +249,7 @@ export const TaskInboxPanel = memo(function TaskInboxPanel({ collapsed = false, 
                 <Button
                   variant="outline"
                   size="sm"
-                  className="w-full"
+                  className="w-full rounded-full border-border/45 bg-background/86 shadow-none hover:bg-background"
                   onClick={() => handleOpenSession(task.id)}
                 >
                   {t('taskInbox.openSession')}

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { RawMessage, ToolStatus } from '@/stores/chat';
+import type { RawMessage } from '@/stores/chat';
 import {
   canAppendMessageList,
-  type ExecutionGraphData,
 } from './chat-row-model';
+import type { ExecutionGraphData } from './execution-graph-model';
 import {
   EMPTY_ANCHOR_GRAPH_MAP,
   EMPTY_EXECUTION_GRAPHS,
@@ -33,7 +33,6 @@ import { buildCompletionAnchors, buildMessageKeyIndex } from './exec-graph-index
 import {
   buildGraphSignaturesByAnchor,
   findFirstChangedCompletionAnchorIndex,
-  buildStreamingSignature,
   findFirstChangedAnchorIndex,
 } from './exec-graph-signature';
 import {
@@ -114,55 +113,6 @@ function areAgentsEquivalent(
   return true;
 }
 
-function areStreamingToolsEquivalent(
-  left: ReadonlyArray<ToolStatus>,
-  right: ReadonlyArray<ToolStatus>,
-): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-  for (let index = 0; index < left.length; index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (
-      (a.id ?? '') !== (b.id ?? '')
-      || (a.toolCallId ?? '') !== (b.toolCallId ?? '')
-      || a.name !== b.name
-      || a.status !== b.status
-      || (a.durationMs ?? null) !== (b.durationMs ?? null)
-      || (a.summary ?? '') !== (b.summary ?? '')
-      || a.updatedAt !== b.updatedAt
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function isStreamingStateEquivalent(
-  previous: {
-    sending: boolean;
-    streamingMessageRef: unknown | null;
-    streamingToolsRef: ToolStatus[];
-  },
-  current: {
-    sending: boolean;
-    streamingMessage: unknown | null;
-    streamingTools: ToolStatus[];
-  },
-): boolean {
-  if (!previous.sending && !current.sending) {
-    return true;
-  }
-  return (
-    previous.streamingMessageRef === current.streamingMessage
-    && areStreamingToolsEquivalent(previous.streamingToolsRef, current.streamingTools)
-  );
-}
-
 interface UseExecutionGraphsInput {
   enabled: boolean;
   messages: RawMessage[];
@@ -170,11 +120,7 @@ interface UseExecutionGraphsInput {
   agents: ExecutionGraphAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
-  sending: boolean;
-  pendingFinal: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
-  streamingTools: ToolStatus[];
 }
 export function useExecutionGraphs({
   enabled,
@@ -183,11 +129,7 @@ export function useExecutionGraphs({
   agents,
   isGatewayRunning,
   gatewayRpc,
-  sending,
-  pendingFinal,
   showThinking,
-  streamingMessage,
-  streamingTools,
 }: UseExecutionGraphsInput): {
   executionGraphs: ExecutionGraphData[];
   suppressedToolCardRowKeys: Set<string>;
@@ -302,22 +244,12 @@ export function useExecutionGraphs({
     }
 
     const cache = globalSessionExecutionCache.get(currentSessionKey);
-    const hasEquivalentStreamingState = cache
-      ? isStreamingStateEquivalent(cache, {
-        sending,
-        streamingMessage,
-        streamingTools,
-      })
-      : false;
     const hasExactCache = Boolean(
       cache
       && cache.messagesRef === messages
       && areAgentsEquivalent(cache.agentsRef, agents)
       && cache.subagentHistoryRevision === subagentHistoryRevision
-      && cache.sending === sending
-      && cache.pendingFinal === pendingFinal
       && cache.showThinking === showThinking
-      && hasEquivalentStreamingState,
     );
     if (hasExactCache && cache) {
       scheduleRenderState({
@@ -380,10 +312,6 @@ export function useExecutionGraphs({
         messagesRef: messages,
         agentsRef: agents,
         subagentHistoryRevision,
-        streamingMessageRef: streamingMessage,
-        streamingToolsRef: streamingTools,
-        sending,
-        pendingFinal,
         showThinking,
         executionGraphs: EMPTY_EXECUTION_GRAPHS,
         suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
@@ -417,14 +345,7 @@ export function useExecutionGraphs({
       && canAppendMessageList(previousCache.messagesRef, messages)
       && areAgentsEquivalent(previousCache.agentsRef, agents)
       && previousCache.subagentHistoryRevision === subagentHistoryRevision
-      && previousCache.sending === sending
-      && previousCache.pendingFinal === pendingFinal
       && previousCache.showThinking === showThinking
-      && isStreamingStateEquivalent(previousCache, {
-        sending,
-        streamingMessage,
-        streamingTools,
-      })
       && previousCache.graphByAnchor.length === anchors.anchors.length
       && areAnchorsEqual(previousCache.anchors.anchors, anchors.anchors)
       && !hasOpenAnchors(anchors.anchors)
@@ -436,10 +357,6 @@ export function useExecutionGraphs({
         messagesRef: messages,
         agentsRef: agents,
         subagentHistoryRevision,
-        streamingMessageRef: streamingMessage,
-        streamingToolsRef: streamingTools,
-        sending,
-        pendingFinal,
         showThinking,
         keyIndex,
         anchors,
@@ -462,12 +379,8 @@ export function useExecutionGraphs({
     }
 
     const agentNameById = new Map(agents.map((agent) => [agent.id, agent.name || agent.id] as const));
-    const streamingSignature = buildStreamingSignature(streamingMessage, streamingTools);
     const canReuseSignaturePrefix = Boolean(
       previousCache
-      && !sending
-      && !previousCache.sending
-      && previousCache.pendingFinal === pendingFinal
       && previousCache.showThinking === showThinking
       && previousCache.subagentHistoryRevision === subagentHistoryRevision
       && areAgentsEquivalent(previousCache.agentsRef, agents)
@@ -478,10 +391,7 @@ export function useExecutionGraphs({
     const graphSignaturesByAnchor = buildGraphSignaturesByAnchor({
       anchors: anchors.anchors,
       currentSessionKey,
-      sending,
-      pendingFinal,
       showThinking,
-      streamingSignature,
       subagentHistoryBySession: subagentHistoryBySessionRef.current,
       agentNameById,
       startIndex: reusableSignaturePrefix,
@@ -502,10 +412,6 @@ export function useExecutionGraphs({
         messagesRef: messages,
         agentsRef: agents,
         subagentHistoryRevision,
-        streamingMessageRef: streamingMessage,
-        streamingToolsRef: streamingTools,
-        sending,
-        pendingFinal,
         showThinking,
         keyIndex,
         anchors,
@@ -609,10 +515,6 @@ export function useExecutionGraphs({
         messagesRef: messages,
         agentsRef: agents,
         subagentHistoryRevision,
-        streamingMessageRef: streamingMessage,
-        streamingToolsRef: streamingTools,
-        sending,
-        pendingFinal,
         showThinking,
         executionGraphs: finalExecutionGraphs,
         suppressedToolCardRowKeys: finalSuppressedKeys,
@@ -690,12 +592,7 @@ export function useExecutionGraphs({
             keyIndex,
             messages,
             currentSessionKey,
-            sending,
-            pendingFinal,
             showThinking,
-            streamingMessage,
-            streamingTools,
-            streamingSignature,
             subagentHistoryBySession: subagentHistoryBySessionRef.current,
             agentNameById,
             previousGraphCache,
@@ -766,13 +663,9 @@ export function useExecutionGraphs({
     fetchMissingSubagentHistories,
     isGatewayRunning,
     messages,
-    pendingFinal,
     cancelScheduledRenderState,
-    sending,
     scheduleRenderState,
     showThinking,
-    streamingMessage,
-    streamingTools,
     subagentHistoryRevision,
   ]);
 

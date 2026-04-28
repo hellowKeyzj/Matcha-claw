@@ -12,7 +12,11 @@
     "input": {
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
         "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）",
-        "approvalWaitingPlaceholder": "承認待ちです..."
+        "approvalWaitingPlaceholder": "承認待ちです...",
+        "skillActive": "スキル {{count}} 件を使用中",
+        "skillsActive": "スキル {{count}} 件を使用中",
+        "attachmentReady": "添付 {{count}} 件を追加済み",
+        "attachmentsReady": "添付 {{count}} 件を追加済み"
     },
     "noLogs": "（ログはまだありません）",
     "toolbar": {
@@ -22,7 +26,8 @@
         "hideThinking": "思考を非表示"
     },
     "liveThread": {
-        "viewFullHistory": "履歴を見る",
+        "loadOlder": "以前のメッセージを読み込む",
+        "jumpToLatest": "最新メッセージへ戻る",
         "jumpToBottom": "一番下へ移動"
     },
     "status": {

@@ -3,7 +3,6 @@ import type { RawMessage, ToolStatus } from '@/stores/chat';
 import {
   appendRuntimeChatRows,
   type ChatRow,
-  type ExecutionGraphData,
 } from './chat-row-model';
 import {
   getOrBuildStaticRowsCacheEntry,
@@ -13,15 +12,12 @@ import {
 interface UseChatRowsInput {
   currentSessionKey: string;
   rowSourceMessages: RawMessage[];
-  executionGraphs: ExecutionGraphData[];
   sending: boolean;
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  pendingUserMessage?: RawMessage | null;
   streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
-  streamingTimestamp: number;
 }
 
 interface UseChatRowsResult {
@@ -43,35 +39,32 @@ export function useChatRows(
   const {
     currentSessionKey,
     rowSourceMessages,
-    executionGraphs,
     sending,
     pendingFinal,
     waitingApproval,
     showThinking,
-    pendingUserMessage,
     streamingMessage,
     streamingTools,
-    streamingTimestamp,
   } = input;
 
   const staticRowsResult = useMemo(
     () => {
       const startedAt = nowMs();
-      const cached = peekStaticRowsCacheEntry(currentSessionKey, rowSourceMessages, executionGraphs);
+      const cached = peekStaticRowsCacheEntry(currentSessionKey, rowSourceMessages);
       if (cached) {
         return {
           rows: cached.rows,
           costMs: Math.max(0, nowMs() - startedAt),
         };
       }
-      const next = getOrBuildStaticRowsCacheEntry(currentSessionKey, rowSourceMessages, executionGraphs);
+      const next = getOrBuildStaticRowsCacheEntry(currentSessionKey, rowSourceMessages);
 
       return {
         rows: next.rows,
         costMs: Math.max(0, nowMs() - startedAt),
       };
     },
-    [currentSessionKey, executionGraphs, rowSourceMessages],
+    [currentSessionKey, rowSourceMessages],
   );
 
   const runtimeRowsResult = useMemo(
@@ -84,10 +77,8 @@ export function useChatRows(
         pendingFinal,
         waitingApproval,
         showThinking,
-        pendingUserMessage,
         streamingMessage,
         streamingTools,
-        streamingTimestamp,
       });
       return {
         rows,
@@ -97,12 +88,10 @@ export function useChatRows(
     [
       currentSessionKey,
       pendingFinal,
-      pendingUserMessage,
       sending,
       showThinking,
       staticRowsResult.rows,
       streamingMessage,
-      streamingTimestamp,
       streamingTools,
       waitingApproval,
     ],

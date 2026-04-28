@@ -184,7 +184,7 @@ describe('chat selectors layering', () => {
       ],
       sessionsByKey: {
         'agent:main:main': {
-          transcript: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+          transcript: [{ role: 'tool_result', content: 'hello', id: 'm1' }],
           meta: {
             label: 'Main',
             lastActivityAt: 1_700_000_000_000,
@@ -212,7 +212,7 @@ describe('chat selectors layering', () => {
       sessionsByKey: {
         'agent:main:main': {
           ...baseState.sessionsByKey['agent:main:main'],
-          transcript: [{ role: 'assistant', content: 'hello again', id: 'm2' }],
+          transcript: [{ role: 'tool_result', content: 'hello again', id: 'm2' }],
         },
       },
     });
@@ -222,6 +222,57 @@ describe('chat selectors layering', () => {
 
     expect(secondPane.sessionEntries).toBe(firstPane.sessionEntries);
     expect(secondPane).toBe(firstPane);
+  });
+
+  it('session pane selector should refresh session entries when the latest user preview changes', () => {
+    const baseState = makeState({
+      sessions: [
+        { key: 'agent:main:main', displayName: 'main' },
+      ],
+      sessionsByKey: {
+        'agent:main:main': {
+          transcript: [{ role: 'user', content: 'old title', id: 'u1' }],
+          meta: {
+            label: 'Main',
+            lastActivityAt: 1_700_000_000_000,
+            ready: true,
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessage: null,
+            streamRuntime: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+        },
+      },
+    });
+    const nextState = makeState({
+      ...baseState,
+      sessions: baseState.sessions,
+      sessionsByKey: {
+        'agent:main:main': {
+          ...baseState.sessionsByKey['agent:main:main'],
+          transcript: [
+            { role: 'user', content: 'old title', id: 'u1' },
+            { role: 'assistant', content: 'answer', id: 'a1' },
+            { role: 'user', content: 'new title', id: 'u2' },
+          ],
+        },
+      },
+    });
+
+    const firstPane = selectAgentSessionsPaneState(baseState);
+    const secondPane = selectAgentSessionsPaneState(nextState);
+
+    expect(secondPane.sessionEntries).not.toBe(firstPane.sessionEntries);
+    expect(secondPane.sessionEntries[0]?.titlePreview).toBe('new title');
   });
 
   it('chat input selector only exposes current session key', () => {

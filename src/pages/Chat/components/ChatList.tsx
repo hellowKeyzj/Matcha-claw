@@ -4,11 +4,11 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
-import type { ChatRenderItem } from '../chat-render-items';
+import { ChatMessage } from '../ChatMessage';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
-import { WelcomeScreen } from './ChatStates';
-import { ChatRowItem } from './ChatRowItem';
-import type { ChatRow } from '../chat-row-model';
+import { ExecutionGraphCard } from '../ExecutionGraphCard';
+import type { ViewportListItem } from '../viewport-list-items';
+import { ActivityIndicator, TypingIndicator, WelcomeScreen } from './ChatStates';
 
 interface ChatListProps {
   messagesViewportRef: RefObject<HTMLDivElement | null>;
@@ -19,13 +19,14 @@ interface ChatListProps {
   onScroll: () => void;
   onTouchMove: TouchEventHandler<HTMLDivElement>;
   onWheel: WheelEventHandler<HTMLDivElement>;
-  items: ChatRenderItem[];
-  showHistoryEntry: boolean;
-  onViewHistory: () => void;
-  viewFullHistoryLabel: string;
+  items: ViewportListItem[];
+  showLoadOlder: boolean;
+  isLoadingOlder: boolean;
+  onLoadOlder: () => void;
+  loadOlderLabel: string;
   showJumpToBottom: boolean;
-  onJumpToBottom: () => void;
-  jumpToBottomLabel: string;
+  onJumpAction: () => void;
+  jumpActionLabel: string;
   showThinking: boolean;
   assistantAgentId: string;
   assistantAgentName: string;
@@ -46,12 +47,13 @@ export function ChatList({
   onTouchMove,
   onWheel,
   items,
-  showHistoryEntry,
-  onViewHistory,
-  viewFullHistoryLabel,
+  showLoadOlder,
+  isLoadingOlder,
+  onLoadOlder,
+  loadOlderLabel,
   showJumpToBottom,
-  onJumpToBottom,
-  jumpToBottomLabel,
+  onJumpAction,
+  jumpActionLabel,
   showThinking,
   assistantAgentId,
   assistantAgentName,
@@ -61,7 +63,17 @@ export function ChatList({
   suppressedToolCardRowKeys,
   onJumpToRowKey,
 }: ChatListProps) {
-  const getRowDataAttributes = (row: ChatRow) => {
+  const showLoadOlderButton = showLoadOlder || isLoadingOlder;
+
+  const getItemDataAttributes = (item: ViewportListItem) => {
+    if (item.kind === 'execution_graph') {
+      return {
+        'data-chat-row-key': item.key,
+        'data-chat-row-kind': item.kind,
+      };
+    }
+
+    const { row } = item;
     if (row.kind !== 'message') {
       return {
         'data-chat-row-key': row.key,
@@ -85,11 +97,11 @@ export function ChatList({
   };
 
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
       <div
         ref={messagesViewportRef}
         className={cn(
-          `h-full overflow-y-auto ${CHAT_LAYOUT_TOKENS.threadViewportPadding}`,
+          `min-h-0 flex-1 overflow-y-auto ${CHAT_LAYOUT_TOKENS.threadViewportPadding}`,
           isEmptyState && 'px-6 py-10 md:px-10 md:py-14',
         )}
         style={{ overflowAnchor: 'none' }}
@@ -107,61 +119,96 @@ export function ChatList({
             <WelcomeScreen />
           ) : (
             <div
-              ref={messageContentRef}
               className="w-full"
-              style={{ overflowAnchor: 'none' }}
             >
-              {showHistoryEntry ? (
-                <div className="mb-4 flex justify-center">
-                  <button
+              {showLoadOlderButton ? (
+                <div
+                  data-testid="chat-load-older-rail"
+                  className={CHAT_LAYOUT_TOKENS.threadTopAffordanceRail}
+                >
+                  <Button
                     type="button"
-                    className="text-sm font-medium text-foreground underline decoration-border underline-offset-4 transition-colors hover:text-primary"
-                    onClick={onViewHistory}
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 rounded-full border border-border/55 bg-background/82 px-4 text-xs text-muted-foreground shadow-sm backdrop-blur-sm hover:bg-background/92 hover:text-foreground"
+                    onClick={onLoadOlder}
+                    disabled={isLoadingOlder}
                   >
-                    {viewFullHistoryLabel}
-                  </button>
+                    {isLoadingOlder ? <LoadingSpinner size="sm" /> : null}
+                    {loadOlderLabel}
+                  </Button>
                 </div>
               ) : null}
+              <div
+                ref={messageContentRef}
+                data-testid="chat-message-stack"
+                className={cn('w-full', CHAT_LAYOUT_TOKENS.threadMessageStackPaddingTop)}
+                style={{ overflowAnchor: 'none' }}
+              >
               {items.map((item, index) => (
                 <div
                   key={item.key}
                   data-index={index}
-                  className="w-full pb-4"
+                  className="w-full pb-6 last:pb-0"
                 >
                   <div
-                    {...getRowDataAttributes(item.row)}
+                    {...getItemDataAttributes(item)}
                     className="w-full"
                   >
-                    <ChatRowItem
-                      row={item.row}
-                      showThinking={showThinking}
-                      assistantAgentId={assistantAgentId}
-                      assistantAgentName={assistantAgentName}
-                      assistantAvatarSeed={assistantAvatarSeed}
-                      assistantAvatarStyle={assistantAvatarStyle}
-                      userAvatarImageUrl={userAvatarImageUrl}
-                      suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-                      onJumpToRowKey={onJumpToRowKey}
-                    />
+                    {item.kind === 'execution_graph' ? (
+                      <ExecutionGraphCard
+                        agentLabel={item.graph.agentLabel}
+                        sessionLabel={item.graph.sessionLabel}
+                        steps={item.graph.steps}
+                        active={item.graph.active}
+                        onJumpToTrigger={() => onJumpToRowKey(item.graph.triggerMessageKey)}
+                        onJumpToReply={() => onJumpToRowKey(item.graph.replyMessageKey)}
+                      />
+                    ) : item.kind === 'message' ? (
+                      <ChatMessage
+                        message={item.row.message}
+                        showThinking={showThinking}
+                        isStreaming={item.row.isStreaming}
+                        streamingTools={item.row.streamingTools}
+                        suppressToolCards={suppressedToolCardRowKeys.has(item.row.key)}
+                        assistantAgentId={assistantAgentId}
+                        assistantAgentName={assistantAgentName}
+                        assistantAvatarSeed={assistantAvatarSeed}
+                        assistantAvatarStyle={assistantAvatarStyle}
+                        userAvatarImageUrl={userAvatarImageUrl}
+                      />
+                    ) : item.kind === 'activity' ? (
+                      <ActivityIndicator />
+                    ) : (
+                      <TypingIndicator />
+                    )}
                   </div>
                 </div>
               ))}
+              </div>
             </div>
           )}
         </div>
       </div>
       {showJumpToBottom ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          className="absolute bottom-4 right-4 z-10 h-10 w-10 border-border/70 bg-background/95 text-foreground shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/80"
-          onClick={onJumpToBottom}
-          aria-label={jumpToBottomLabel}
-          title={jumpToBottomLabel}
-        >
-          <ArrowDown className="h-4 w-4" />
-        </Button>
+        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-10 px-3 md:bottom-40 md:px-4">
+          <div className={CHAT_LAYOUT_TOKENS.stageFloatingRail}>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className={cn(
+                'pointer-events-auto h-9 w-9 rounded-full border-border/55 bg-background/88 text-foreground shadow-[0_10px_26px_rgba(15,23,42,0.10)] transition-transform hover:-translate-y-0.5 backdrop-blur-xl supports-[backdrop-filter]:bg-background/78',
+                showLoadOlderButton && 'translate-y-1',
+              )}
+              onClick={onJumpAction}
+              aria-label={jumpActionLabel}
+              title={jumpActionLabel}
+            >
+              <ArrowDown className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
       ) : null}
     </div>
   );

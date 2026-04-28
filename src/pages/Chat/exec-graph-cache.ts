@@ -1,5 +1,5 @@
 import type { RawMessage } from '@/stores/chat';
-import type { ExecutionGraphData } from './chat-row-model';
+import type { ExecutionGraphData } from './execution-graph-model';
 import {
   EMPTY_EXECUTION_GRAPHS,
   EMPTY_SUPPRESSED_KEYS,

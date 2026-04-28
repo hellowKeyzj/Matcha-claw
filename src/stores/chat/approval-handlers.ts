@@ -43,8 +43,8 @@ export function buildSyncPendingApprovalsPatch(
   return {
     pendingApprovalsBySession: nextApprovals,
     ...(runtimePatch === currentRuntime
-      ? {}
-      : {
+        ? {}
+        : {
           sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),
@@ -84,8 +84,8 @@ export function buildApprovalRequestedPatch(
   return {
     pendingApprovalsBySession: nextApprovals,
     ...(runtimePatch === currentRuntime
-      ? {}
-      : {
+        ? {}
+        : {
           sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),
@@ -139,8 +139,8 @@ export function buildApprovalResolvedPatch(
   return {
     pendingApprovalsBySession: nextApprovals,
     ...(runtimePatch === currentRuntime
-      ? {}
-      : {
+        ? {}
+        : {
           sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),

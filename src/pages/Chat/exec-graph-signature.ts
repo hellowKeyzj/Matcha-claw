@@ -1,4 +1,4 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
+import type { RawMessage } from '@/stores/chat';
 import {
   EMPTY_MESSAGES,
   type CompletionEventAnchor,
@@ -20,34 +20,11 @@ export function buildHistoryFingerprint(messages: RawMessage[]): string {
   ].join('|');
 }
 
-export function buildStreamingSignature(
-  streamingMessage: unknown | null,
-  streamingTools: ToolStatus[],
-): string {
-  const messageObj = streamingMessage && typeof streamingMessage === 'object'
-    ? streamingMessage as Record<string, unknown>
-    : null;
-  const messageSignature = messageObj
-    ? [
-        String(messageObj.id ?? ''),
-        String(messageObj.role ?? ''),
-        String(messageObj.timestamp ?? ''),
-      ].join(':')
-    : String(streamingMessage ?? '');
-  const toolsSignature = streamingTools
-    .map((tool) => `${tool.toolCallId ?? tool.id ?? tool.name}:${tool.status}:${tool.updatedAt}`)
-    .join(',');
-  return `${messageSignature}|${toolsSignature}`;
-}
-
 function buildGraphSignature(input: {
   anchor: CompletionEventAnchor;
   agentLabel: string;
-  includeStreaming: boolean;
   currentSessionKey: string;
   showThinking: boolean;
-  pendingFinal: boolean;
-  streamingSignature: string;
   subagentHistoryFingerprint: string;
 }): string {
   const { anchor } = input;
@@ -60,10 +37,7 @@ function buildGraphSignature(input: {
     anchor.sessionId ?? '',
     anchor.agentId ?? '',
     input.agentLabel,
-    input.includeStreaming ? '1' : '0',
     input.showThinking ? '1' : '0',
-    input.pendingFinal ? '1' : '0',
-    input.includeStreaming ? input.streamingSignature : '',
     input.subagentHistoryFingerprint,
   ].join('|');
 }
@@ -103,16 +77,12 @@ export function findFirstChangedCompletionAnchorIndex(
 export function buildGraphSignaturesByAnchor(input: {
   anchors: CompletionEventAnchor[];
   currentSessionKey: string;
-  sending: boolean;
-  pendingFinal: boolean;
   showThinking: boolean;
-  streamingSignature: string;
   subagentHistoryBySession: Map<string, RawMessage[]>;
   agentNameById: Map<string, string>;
   startIndex?: number;
   previousSignatures?: string[];
 }): string[] {
-  const lastAnchorIndex = input.anchors.length - 1;
   const maxStartIndex = Math.max(0, Math.min(input.anchors.length, input.startIndex ?? 0));
   const previousSignatures = input.previousSignatures ?? [];
   const startIndex = Math.min(maxStartIndex, previousSignatures.length);
@@ -122,7 +92,6 @@ export function buildGraphSignaturesByAnchor(input: {
     : [];
   for (let anchorIndex = startIndex; anchorIndex < input.anchors.length; anchorIndex += 1) {
     const anchor = input.anchors[anchorIndex];
-    const includeStreaming = input.sending && anchorIndex === lastAnchorIndex;
     const sessionFingerprint = (() => {
       const cached = subagentFingerprintBySession.get(anchor.sessionKey);
       if (cached) {
@@ -140,11 +109,8 @@ export function buildGraphSignaturesByAnchor(input: {
     signatures.push(buildGraphSignature({
       anchor,
       agentLabel: resolvedAgentName,
-      includeStreaming,
       currentSessionKey: input.currentSessionKey,
       showThinking: input.showThinking,
-      pendingFinal: input.pendingFinal,
-      streamingSignature: input.streamingSignature,
       subagentHistoryFingerprint: sessionFingerprint,
     }));
   }

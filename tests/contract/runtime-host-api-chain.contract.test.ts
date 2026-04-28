@@ -283,4 +283,81 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(usage[0]?.totalTokens).toBe(15);
     expect(usage[0]?.provider).toBe('openai');
   });
+
+  it('sessions/window 通过 runtime-host 返回真实消息窗口', async () => {
+    const sessionsDir = join(harness.paths.openclawConfigDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(
+      join(sessionsDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [
+          { key: 'agent:main:session-window', id: 'session-window' },
+        ],
+      }, null, 2),
+      'utf8',
+    );
+    writeFileSync(
+      join(sessionsDir, 'session-window.jsonl'),
+      [
+        JSON.stringify({
+          timestamp: '2026-04-06T10:00:00.000Z',
+          message: { role: 'user', id: 'm1', content: 'hello-1' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-04-06T10:01:00.000Z',
+          message: { role: 'assistant', id: 'm2', content: 'hello-2' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-04-06T10:02:00.000Z',
+          message: { role: 'user', id: 'm3', content: 'hello-3' },
+        }),
+        JSON.stringify({
+          timestamp: '2026-04-06T10:03:00.000Z',
+          message: { role: 'assistant', id: 'm4', content: 'hello-4' },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const latest = await harness.dispatchOk<{
+      messages: Array<{ id: string }>;
+      totalMessageCount: number;
+      windowStartOffset: number;
+      windowEndOffset: number;
+      hasMore: boolean;
+      hasNewer: boolean;
+      isAtLatest: boolean;
+    }>('POST', '/api/sessions/window', {
+      sessionKey: 'agent:main:session-window',
+      mode: 'latest',
+      limit: 2,
+    });
+    expect(latest.totalMessageCount).toBe(4);
+    expect(latest.windowStartOffset).toBe(2);
+    expect(latest.windowEndOffset).toBe(4);
+    expect(latest.hasMore).toBe(true);
+    expect(latest.hasNewer).toBe(false);
+    expect(latest.isAtLatest).toBe(true);
+    expect(latest.messages.map((message) => message.id)).toEqual(['m3', 'm4']);
+
+    const older = await harness.dispatchOk<{
+      messages: Array<{ id: string }>;
+      windowStartOffset: number;
+      windowEndOffset: number;
+      hasMore: boolean;
+      hasNewer: boolean;
+      isAtLatest: boolean;
+    }>('POST', '/api/sessions/window', {
+      sessionKey: 'agent:main:session-window',
+      mode: 'older',
+      limit: 2,
+      offset: latest.windowStartOffset,
+    });
+    expect(older.windowStartOffset).toBe(0);
+    expect(older.windowEndOffset).toBe(2);
+    expect(older.hasMore).toBe(false);
+    expect(older.hasNewer).toBe(true);
+    expect(older.isAtLatest).toBe(false);
+    expect(older.messages.map((message) => message.id)).toEqual(['m1', 'm2']);
+  });
 });

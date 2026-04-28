@@ -2,6 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => {
+      if (typeof options?.count === 'number') {
+        return `${key}:${String(options.count)}`;
+      }
+      return key;
+    },
+  }),
+}));
+
 type SkillMock = {
   id: string;
   name: string;

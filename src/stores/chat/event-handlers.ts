@@ -1,8 +1,6 @@
 import { collectToolResultPendingFiles } from './attachment-helpers';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import { EMPTY_EXECUTION_GRAPHS } from '@/pages/Chat/exec-graph-types';
 import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
-import { projectLiveThreadMessages } from '@/pages/Chat/live-thread-projection';
 import {
   buildAuthoritativeUserCommitPatch,
   buildErrorStreamSnapshot,
@@ -23,7 +21,13 @@ import {
 } from './event-helpers';
 import { isToolOnlyMessage } from './message-helpers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
-import { getSessionRuntime, getSessionTranscript, patchSessionRecord } from './store-state-helpers';
+import {
+  buildTranscriptBackedViewportState,
+  getSessionRuntime,
+  getSessionTranscript,
+  patchSessionRecord,
+  patchSessionViewportState,
+} from './store-state-helpers';
 import type { ChatStoreState, RawMessage } from './types';
 
 export type ChatStoreSetFn = (
@@ -37,8 +41,7 @@ function prewarmCurrentSessionRows(
   sessionKey: string,
   transcript: RawMessage[],
 ): void {
-  const liveMessages = projectLiveThreadMessages(transcript).messages;
-  prewarmStaticRowsForMessages(sessionKey, liveMessages, EMPTY_EXECUTION_GRAPHS);
+  prewarmStaticRowsForMessages(sessionKey, transcript);
 }
 
 interface StoreToolSnapshotAdapter {
@@ -194,11 +197,20 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
     `error-snap-${Date.now()}`,
   );
   if (snapshot) {
-    set((state) => ({
-      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
-        transcript: [...getSessionTranscript(state, currentSessionKey), snapshot],
-      }),
-    }));
+    set((state) => {
+      const nextTranscript = [...getSessionTranscript(state, currentSessionKey), snapshot];
+      const runtime = getSessionRuntime(state, currentSessionKey);
+      return {
+        sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+          transcript: nextTranscript,
+        }),
+        viewportBySession: patchSessionViewportState(
+          state,
+          currentSessionKey,
+          buildTranscriptBackedViewportState(state, currentSessionKey, nextTranscript, runtime),
+        ),
+      };
+    });
     prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
   }
 

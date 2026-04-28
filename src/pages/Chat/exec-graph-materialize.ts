@@ -1,5 +1,5 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
-import type { ExecutionGraphData } from './chat-row-model';
+import type { RawMessage } from '@/stores/chat';
+import type { ExecutionGraphData } from './execution-graph-model';
 import { deriveTaskSteps, type TaskStep } from './task-viz';
 import {
   EMPTY_MESSAGES,
@@ -19,12 +19,7 @@ export interface MaterializeExecutionGraphAtIndexInput {
   keyIndex: MessageKeyIndexSnapshot;
   messages: RawMessage[];
   currentSessionKey: string;
-  sending: boolean;
-  pendingFinal: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
-  streamingTools: ToolStatus[];
-  streamingSignature: string;
   subagentHistoryBySession: Map<string, RawMessage[]>;
   agentNameById: Map<string, string>;
   previousGraphCache: Map<string, ExecutionGraphData>;
@@ -61,11 +56,7 @@ function buildMainStepsSignature(input: {
   currentSessionKey: string;
   start: number;
   endExclusive: number;
-  includeStreaming: boolean;
   showThinking: boolean;
-  sending: boolean;
-  pendingFinal: boolean;
-  streamingSignature: string;
   rangeFingerprint: string;
 }): string {
   return [
@@ -74,10 +65,6 @@ function buildMainStepsSignature(input: {
     input.endExclusive,
     input.rangeFingerprint,
     input.showThinking ? '1' : '0',
-    input.includeStreaming ? '1' : '0',
-    input.includeStreaming ? (input.sending ? '1' : '0') : '0',
-    input.includeStreaming ? (input.pendingFinal ? '1' : '0') : '0',
-    input.includeStreaming ? input.streamingSignature : '',
   ].join('|');
 }
 
@@ -133,12 +120,7 @@ export function materializeExecutionGraphAtIndex({
   keyIndex,
   messages,
   currentSessionKey,
-  sending,
-  pendingFinal,
   showThinking,
-  streamingMessage,
-  streamingTools,
-  streamingSignature,
   subagentHistoryBySession,
   agentNameById,
   previousGraphCache,
@@ -159,7 +141,6 @@ export function materializeExecutionGraphAtIndex({
     return null;
   }
 
-  const includeStreaming = sending && anchorIndex === anchors.length - 1;
   const subagentMessages = subagentHistoryBySession.get(anchor.sessionKey) ?? EMPTY_MESSAGES;
   const resolvedAgentName = anchor.agentId
     ? (agentNameById.get(anchor.agentId) || anchor.agentId)
@@ -183,11 +164,7 @@ export function materializeExecutionGraphAtIndex({
     currentSessionKey,
     start: mainStart,
     endExclusive: mainEnd,
-    includeStreaming,
     showThinking,
-    sending,
-    pendingFinal,
-    streamingSignature,
     rangeFingerprint: mainRangeFingerprint,
   });
   const mainSteps = (() => {
@@ -198,10 +175,10 @@ export function materializeExecutionGraphAtIndex({
     const mainMessages = messages.slice(mainStart, mainEnd);
     const computedSteps = deriveTaskSteps({
       messages: mainMessages,
-      streamingMessage: includeStreaming ? streamingMessage : null,
-      streamingTools: includeStreaming ? streamingTools : [],
-      sending: includeStreaming ? sending : false,
-      pendingFinal: includeStreaming ? pendingFinal : false,
+      streamingMessage: null,
+      streamingTools: [],
+      sending: false,
+      pendingFinal: false,
       showThinking,
     });
     writeTaskStepsCache(
@@ -286,7 +263,7 @@ export function materializeExecutionGraphAtIndex({
     agentLabel: resolvedAgentName,
     sessionLabel: anchor.sessionId || anchor.sessionKey,
     steps: steps.slice(0, 32),
-    active: includeStreaming,
+    active: anchor.replyIndex == null,
     suppressToolCardMessageKeys,
   };
   executionGraphs.push(graph);

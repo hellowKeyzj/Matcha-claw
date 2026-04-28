@@ -12,7 +12,11 @@
     "input": {
         "gatewayDisconnectedPlaceholder": "Gateway not connected...",
         "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
-        "approvalWaitingPlaceholder": "Waiting for approval..."
+        "approvalWaitingPlaceholder": "Waiting for approval...",
+        "skillActive": "{{count}} skill active",
+        "skillsActive": "{{count}} skills active",
+        "attachmentReady": "{{count}} attachment ready",
+        "attachmentsReady": "{{count}} attachments ready"
     },
     "noLogs": "(No logs available yet)",
     "toolbar": {
@@ -22,7 +26,8 @@
         "hideThinking": "Hide thinking"
     },
     "liveThread": {
-        "viewFullHistory": "View history",
+        "loadOlder": "Load older messages",
+        "jumpToLatest": "Jump to latest",
         "jumpToBottom": "Jump to bottom"
     },
     "status": {

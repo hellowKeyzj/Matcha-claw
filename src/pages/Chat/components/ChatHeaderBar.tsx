@@ -20,9 +20,9 @@ export function ChatHeaderBar({
   statusMutatingLabel: string;
 }) {
   return (
-    <div className="flex shrink-0 items-center justify-end px-2 py-2 md:px-4">
+    <div className="inline-flex items-center gap-1.5 rounded-full border border-border/45 bg-background/58 p-1.5 shadow-[0_10px_30px_rgba(15,23,42,0.055)] backdrop-blur-xl">
       {showBackgroundStatus && (
-        <div className="mr-2 inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs text-muted-foreground">
+        <div className="inline-flex items-center gap-1 rounded-full border border-border/45 bg-background/78 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
           <Loader2 className="h-3 w-3 animate-spin" />
           <span>{refreshing ? statusRefreshingLabel : statusMutatingLabel}</span>
         </div>
@@ -30,8 +30,8 @@ export function ChatHeaderBar({
       <Button
         type="button"
         size="sm"
-        variant="outline"
-        className="mr-2 h-8"
+        variant="ghost"
+        className="h-8 rounded-full border border-border/40 bg-background/70 px-3 text-xs text-muted-foreground shadow-none hover:bg-background/84 hover:text-foreground"
         disabled={!hasCurrentAgent}
         onClick={onOpenSkillConfig}
       >

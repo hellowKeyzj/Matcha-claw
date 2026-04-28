@@ -19,8 +19,16 @@ import {
   resetToolSnapshotTxnState,
 } from './tool-snapshot-txn';
 import { maybeTrackSendToFirstToken } from './telemetry';
-import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
+import {
+  getSessionRuntime,
+  getSessionTranscript,
+  getSessionViewportState,
+  patchSessionRecord,
+  patchSessionViewportState,
+} from './store-state-helpers';
+import { selectStreamingRenderMessage } from './stream-overlay-message';
 import type { ChatStoreState, RawMessage } from './types';
+import { removeViewportMessageById, upsertViewportMessage } from './viewport-state';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -156,10 +164,24 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
       message: (message as RawMessage | undefined) ?? null,
       updates,
     });
+    const nextRuntime = runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch };
+    const streamingMessage = selectStreamingRenderMessage(nextRuntime);
     return {
       sessionsByKey: patchSessionRecord(state, currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        runtime: nextRuntime,
       }),
+      ...(streamingMessage
+        ? {
+            viewportBySession: patchSessionViewportState(
+              state,
+              currentSessionKey,
+              upsertViewportMessage(
+                getSessionViewportState(state, currentSessionKey),
+                streamingMessage,
+              ),
+            ),
+          }
+        : {}),
     };
   });
   armToolSnapshotTxnState(
@@ -228,11 +250,28 @@ export function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInpu
   onFinishAbortedTelemetry();
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
+    const overlayMessageId = runtime.assistantOverlay?.messageId ?? null;
+    const transcript = getSessionTranscript(state, state.currentSessionKey);
+    const transcriptHasOverlayMessage = overlayMessageId
+      ? transcript.some((message) => message.id === overlayMessageId)
+      : false;
     const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_aborted' });
     return {
       sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
+      ...(!transcriptHasOverlayMessage && overlayMessageId
+        ? {
+            viewportBySession: patchSessionViewportState(
+              state,
+              state.currentSessionKey,
+              removeViewportMessageById(
+                getSessionViewportState(state, state.currentSessionKey),
+                overlayMessageId,
+              ),
+            ),
+          }
+        : {}),
     };
   });
 }
@@ -260,10 +299,24 @@ export function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInpu
         message: message as RawMessage,
         updates,
       });
+      const nextRuntime = runtimePatch === currentRuntime ? currentRuntime : { ...currentRuntime, ...runtimePatch };
+      const streamingMessage = selectStreamingRenderMessage(nextRuntime);
       return {
         sessionsByKey: patchSessionRecord(state, sessionKey, {
-          runtime: runtimePatch === currentRuntime ? currentRuntime : { ...currentRuntime, ...runtimePatch },
+          runtime: nextRuntime,
         }),
+        ...(streamingMessage
+          ? {
+              viewportBySession: patchSessionViewportState(
+                state,
+                sessionKey,
+                upsertViewportMessage(
+                  getSessionViewportState(state, sessionKey),
+                  streamingMessage,
+                ),
+              ),
+            }
+          : {}),
       };
     });
   }

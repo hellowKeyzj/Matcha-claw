@@ -48,6 +48,28 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
+export interface HostSessionWindowMessage {
+  role: 'user' | 'assistant' | 'system' | 'toolresult' | 'tool_result';
+  content: unknown;
+  timestamp?: number;
+  id?: string;
+  toolCallId?: string;
+  toolName?: string;
+  details?: unknown;
+  isError?: boolean;
+}
+
+export interface HostSessionWindowPayload {
+  messages: HostSessionWindowMessage[];
+  canonicalMessages?: HostSessionWindowMessage[];
+  totalMessageCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isAtLatest: boolean;
+}
+
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
   if (headers instanceof Headers) return Object.fromEntries(headers.entries());
@@ -227,5 +249,20 @@ export async function hostUvCheck(): Promise<boolean> {
 export async function hostUvInstallAll(): Promise<{ success: boolean; error?: string }> {
   return hostApiFetch('/api/toolchain/uv/install', {
     method: 'POST',
+  });
+}
+
+export async function hostSessionWindowFetch(
+  payload: {
+    sessionKey: string;
+    mode?: 'latest' | 'older' | 'newer';
+    limit?: number;
+    offset?: number;
+    includeCanonical?: boolean;
+  },
+): Promise<HostSessionWindowPayload> {
+  return hostApiFetch('/api/sessions/window', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }

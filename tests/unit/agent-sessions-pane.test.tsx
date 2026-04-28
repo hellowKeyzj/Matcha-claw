@@ -323,6 +323,69 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
   });
 
+  it('会话标题优先显示最新一条用户输入，而不是旧 label', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-2',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+      ],
+      sessionsByKey: {
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({
+          ready: true,
+          label: '旧标题',
+          lastActivityAt: now,
+          transcript: [
+            { role: 'user', content: '第一条输入', id: 'u1', timestamp: 1 },
+            { role: 'assistant', content: '收到', id: 'a1', timestamp: 2 },
+            { role: 'user', content: '最新输入标题', id: 'u2', timestamp: 3 },
+          ],
+        }),
+      },
+      sessionsResource: readyResource,
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('最新输入标题')).toBeInTheDocument();
+    expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
+  });
+
+  it('会话列表不应把 displayName 当成正式标题 fallback', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-1710000000000',
+      sessions: [
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-1710000000000', displayName: 'MatchaClaw Runtime Host' },
+      ],
+      sessionsByKey: {
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-1710000000000': createSessionRecord({
+          ready: true,
+          label: null,
+          lastActivityAt: now,
+          transcript: [],
+        }),
+      },
+      sessionsResource: readyResource,
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
+  });
+
   it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',

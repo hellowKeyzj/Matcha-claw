@@ -9,9 +9,11 @@ import {
 import { reduceRuntimeOverlay } from './overlay-reducer';
 import { upsertToolStatuses } from './event-helpers';
 import {
+  buildTranscriptBackedViewportState,
   getSessionRuntime,
   getSessionTranscript,
   patchSessionRecord,
+  patchSessionViewportState,
 } from './store-state-helpers';
 import type {
   AttachedFileMeta,
@@ -22,6 +24,25 @@ import type {
 } from './types';
 
 type RuntimeStateLike = ChatStoreState;
+
+function buildTranscriptViewportPatch(
+  state: RuntimeStateLike,
+  sessionKey: string,
+  transcript: RawMessage[],
+  runtime: ReturnType<typeof getSessionRuntime>,
+): Pick<ChatStoreState, 'sessionsByKey' | 'viewportBySession'> {
+  return {
+    sessionsByKey: patchSessionRecord(state, sessionKey, {
+      transcript,
+      runtime,
+    }),
+    viewportBySession: patchSessionViewportState(
+      state,
+      sessionKey,
+      buildTranscriptBackedViewportState(state, sessionKey, transcript, runtime),
+    ),
+  };
+}
 
 export function hasAssistantSemanticDuplicate(
   messages: RawMessage[],
@@ -207,10 +228,12 @@ export function buildAuthoritativeUserCommitPatch(
     };
   }
   return {
-    sessionsByKey: patchSessionRecord(state, sessionKey, {
-      transcript: [...transcript, nextMessage],
-      runtime: matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
-    }),
+    ...buildTranscriptViewportPatch(
+      state,
+      sessionKey,
+      [...transcript, nextMessage],
+      matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
+    ),
   };
 }
 
@@ -267,28 +290,29 @@ export function buildFinalMessageCommitPatch(
       messageWithImages,
     );
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
-        transcript: mergedTranscript,
-        runtime: nextRuntime,
-      }),
+      ...buildTranscriptViewportPatch(state, sessionKey, mergedTranscript, nextRuntime),
     };
   }
 
   if (messageWithImages.role === 'user' && pendingUserMessage && matchesPendingUserMessage(pendingUserMessage, messageWithImages)) {
     const mergedPendingUser = mergePendingUserMessage(pendingUserMessage, messageWithImages);
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
-        transcript: [...transcript, mergedPendingUser],
-        runtime: { ...nextRuntime, pendingUserMessage: null },
-      }),
+      ...buildTranscriptViewportPatch(
+        state,
+        sessionKey,
+        [...transcript, mergedPendingUser],
+        { ...nextRuntime, pendingUserMessage: null },
+      ),
     };
   }
 
   return {
-    sessionsByKey: patchSessionRecord(state, sessionKey, {
-      transcript: [...transcriptWithCommittedUser, messageWithImages],
-      runtime: nextRuntime,
-    }),
+    ...buildTranscriptViewportPatch(
+      state,
+      sessionKey,
+      [...transcriptWithCommittedUser, messageWithImages],
+      nextRuntime,
+    ),
   };
 }
 
@@ -609,12 +633,14 @@ export function buildToolResultFinalPatch(
     streamingTools: nextStreamingTools,
   });
   return {
-    sessionsByKey: patchSessionRecord(state, sessionKey, {
-      transcript: snapshotMessages.length > 0
+    ...buildTranscriptViewportPatch(
+      state,
+      sessionKey,
+      snapshotMessages.length > 0
         ? [...transcript, ...snapshotMessages]
         : transcript,
-      runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-    }),
+      runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+    ),
   };
 }
 

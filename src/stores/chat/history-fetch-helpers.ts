@@ -1,22 +1,18 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostSessionWindowFetch, type HostSessionWindowPayload } from '@/lib/host-api';
 import { trackUiTiming } from '@/lib/telemetry';
 import { useGatewayStore } from '../gateway';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './cron-session-utils';
 import { resolveSessionThinkingLevelFromList } from './session-helpers';
 import {
   buildHistoryFingerprint,
-  buildQuickRawHistoryFingerprint,
-  getSessionMeta,
-  getSessionTranscript,
   nowMs,
-  patchSessionMeta,
 } from './store-state-helpers';
 import {
-  isHistoryLoadAbortError,
   throwIfHistoryLoadAborted,
 } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type {
+  ChatHistoryLoadMode,
   ChatHistoryLoadScope,
   ChatSession,
   ChatStoreState,
@@ -24,19 +20,18 @@ import type {
 } from './types';
 
 export const CHAT_HISTORY_FULL_LIMIT = 200;
-export const CHAT_HISTORY_ACTIVE_PROBE_LIMIT = 10;
-export const CHAT_HISTORY_QUIET_PROBE_LIMIT = 64;
-export const CHAT_HISTORY_QUIET_FULL_LIMIT = 120;
 export const CHAT_HISTORY_LOADING_TIMEOUT_MS = 15_000;
-
-type ChatStoreSetFn = (
-  partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
-  replace?: false,
-) => void;
 
 export interface HistoryWindowResult {
   rawMessages: RawMessage[];
+  canonicalRawMessages: RawMessage[] | null;
   thinkingLevel: string | null;
+  totalMessageCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isAtLatest: boolean;
 }
 
 interface CreateFetchHistoryWindowInput {
@@ -44,54 +39,54 @@ interface CreateFetchHistoryWindowInput {
   getSessions: () => ChatSession[];
 }
 
+async function fetchGatewayHistoryFallback(
+  requestedSessionKey: string,
+  limit: number,
+): Promise<RawMessage[]> {
+  let rawMessages = await loadCronFallbackMessages(requestedSessionKey, limit);
+  if (rawMessages.length > 0) {
+    return rawMessages;
+  }
+
+  try {
+    const sessionsGetData = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+      'sessions.get',
+      { key: requestedSessionKey, limit },
+    );
+    if (Array.isArray(sessionsGetData?.messages)) {
+      rawMessages = sessionsGetData.messages as RawMessage[];
+    }
+  } catch {
+    void 0;
+  }
+
+  if (rawMessages.length > 0) {
+    return rawMessages;
+  }
+
+  try {
+    const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+      'chat.history',
+      { sessionKey: requestedSessionKey, limit },
+    );
+    rawMessages = Array.isArray(data?.messages) ? data.messages as RawMessage[] : [];
+  } catch {
+    void 0;
+  }
+
+  return rawMessages;
+}
+
 interface RunHistoryPipelineInput {
-  set: ChatStoreSetFn;
   getState: () => ChatStoreState;
+  mode: ChatHistoryLoadMode;
   scope: ChatHistoryLoadScope;
   requestedSessionKey: string;
   historyRuntime: StoreHistoryCache;
   abortSignal: AbortSignal;
   isAborted: () => boolean;
   fetchHistoryWindow: (limit: number) => Promise<HistoryWindowResult>;
-  applyLoadedMessages: (rawMessages: RawMessage[], thinkingLevel: string | null) => Promise<void>;
-}
-
-interface ProbeShortCircuitInput {
-  set: ChatStoreSetFn;
-  getState: () => ChatStoreState;
-  requestedSessionKey: string;
-  historyRuntime: StoreHistoryCache;
-  probeFingerprint: string;
-}
-
-function canShortCircuitByProbe(input: ProbeShortCircuitInput): boolean {
-  const {
-    set,
-    getState,
-    requestedSessionKey,
-    historyRuntime,
-    probeFingerprint,
-  } = input;
-  const previousProbeFingerprint = historyRuntime.historyProbeFingerprintBySession.get(requestedSessionKey) ?? null;
-  historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, probeFingerprint);
-
-  const state = getState();
-  const hasKnownFullSnapshot = historyRuntime.historyFingerprintBySession.has(requestedSessionKey);
-  const hasRenderableMessages = getSessionTranscript(state, requestedSessionKey).length > 0;
-  const canShortCircuit = (
-    previousProbeFingerprint === probeFingerprint
-    && hasKnownFullSnapshot
-    && hasRenderableMessages
-  );
-  if (!canShortCircuit) {
-    return false;
-  }
-  if (!getSessionMeta(state, requestedSessionKey).ready) {
-    set((current) => ({
-      sessionsByKey: patchSessionMeta(current, requestedSessionKey, { ready: true }),
-    }));
-  }
-  return true;
+  applyLoadedMessages: (window: HistoryWindowResult) => Promise<void>;
 }
 
 function shouldSkipByForegroundSessionMismatch(
@@ -142,39 +137,76 @@ export function createFetchHistoryWindow(
 
   return async (limit: number): Promise<HistoryWindowResult> => {
     try {
-      const sessionsGetData = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-        'sessions.get',
-        { key: requestedSessionKey, limit },
-      );
-      if (Array.isArray(sessionsGetData?.messages)) {
-        let rawMessages = sessionsGetData.messages as RawMessage[];
-        const thinkingLevel = resolveSessionThinkingLevelFromList(getSessions(), requestedSessionKey);
-        if (rawMessages.length === 0) {
-          rawMessages = await loadCronFallbackMessages(requestedSessionKey, limit);
-        }
-        return { rawMessages, thinkingLevel };
+      const data = await hostSessionWindowFetch({
+        sessionKey: requestedSessionKey,
+        mode: 'latest',
+        limit,
+        includeCanonical: true,
+      });
+      const resolvedWindow: HistoryWindowResult = {
+        rawMessages: data.messages as RawMessage[],
+        canonicalRawMessages: Array.isArray(data.canonicalMessages)
+          ? data.canonicalMessages as RawMessage[]
+          : null,
+        thinkingLevel: resolveSessionThinkingLevelFromList(getSessions(), requestedSessionKey),
+        totalMessageCount: data.totalMessageCount,
+        windowStartOffset: data.windowStartOffset,
+        windowEndOffset: data.windowEndOffset,
+        hasMore: data.hasMore,
+        hasNewer: data.hasNewer,
+        isAtLatest: data.isAtLatest,
+      };
+      if (data.totalMessageCount > 0 || data.messages.length > 0) {
+        return resolvedWindow;
       }
-    } catch {
-      // Ignore and fall back to chat.history for backward compatibility.
-    }
 
-    const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-      'chat.history',
-      { sessionKey: requestedSessionKey, limit },
-    );
-    let rawMessages = Array.isArray(data?.messages) ? data.messages as RawMessage[] : [];
-    const thinkingLevel = data?.thinkingLevel ? String(data.thinkingLevel) : null;
-    if (rawMessages.length === 0) {
-      rawMessages = await loadCronFallbackMessages(requestedSessionKey, limit);
+      const fallbackMessages = await fetchGatewayHistoryFallback(requestedSessionKey, limit);
+      if (fallbackMessages.length === 0) {
+        return resolvedWindow;
+      }
+
+      return {
+        rawMessages: fallbackMessages,
+        canonicalRawMessages: fallbackMessages,
+        thinkingLevel: resolveSessionThinkingLevelFromList(getSessions(), requestedSessionKey),
+        totalMessageCount: fallbackMessages.length,
+        windowStartOffset: 0,
+        windowEndOffset: fallbackMessages.length,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      };
+    } catch {
+      const rawMessages = await fetchGatewayHistoryFallback(requestedSessionKey, limit);
+      const fallbackWindow: HostSessionWindowPayload = {
+        messages: rawMessages,
+        canonicalMessages: rawMessages,
+        totalMessageCount: rawMessages.length,
+        windowStartOffset: 0,
+        windowEndOffset: rawMessages.length,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      };
+      return {
+        rawMessages,
+        canonicalRawMessages: rawMessages,
+        thinkingLevel: resolveSessionThinkingLevelFromList(getSessions(), requestedSessionKey),
+        totalMessageCount: rawMessages.length || fallbackWindow.totalMessageCount,
+        windowStartOffset: 0,
+        windowEndOffset: rawMessages.length || fallbackWindow.windowEndOffset,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      };
     }
-    return { rawMessages, thinkingLevel };
   };
 }
 
-export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): Promise<void> {
+export async function loadHistoryWindow(input: RunHistoryPipelineInput): Promise<void> {
   const {
-    set,
     getState,
+    mode,
     scope,
     requestedSessionKey,
     historyRuntime,
@@ -185,144 +217,20 @@ export async function runQuietHistoryPipeline(input: RunHistoryPipelineInput): P
   } = input;
 
   throwIfHistoryLoadAborted(abortSignal, isAborted);
-  const probe = await measureHistoryStep('chat.history_fetch_probe', {
-    mode: 'quiet',
+  const window = await measureHistoryStep('chat.history_fetch_window', {
+    mode,
     sessionKey: requestedSessionKey,
-    limit: CHAT_HISTORY_QUIET_PROBE_LIMIT,
-  }, async () => fetchHistoryWindow(CHAT_HISTORY_QUIET_PROBE_LIMIT));
+    limit: CHAT_HISTORY_FULL_LIMIT,
+  }, async () => fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT));
   throwIfHistoryLoadAborted(abortSignal, isAborted);
   if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
     return;
   }
-  const probeFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
-  const probeQuickFingerprint = buildQuickRawHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
-  if (canShortCircuitByProbe({
-    set,
-    getState,
-    requestedSessionKey,
-    historyRuntime,
-    probeFingerprint,
-  })) {
-    return;
-  }
-
-  const shouldUseProbeAsFinal = probe.rawMessages.length < CHAT_HISTORY_QUIET_PROBE_LIMIT;
-  if (shouldUseProbeAsFinal) {
-    const fullFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
-    historyRuntime.historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
-    await measureHistoryStep('chat.history_apply_probe', {
-      mode: 'quiet',
-      sessionKey: requestedSessionKey,
-      rows: probe.rawMessages.length,
-      usedAsFinal: true,
-    }, async () => applyLoadedMessages(probe.rawMessages, probe.thinkingLevel));
-    return;
-  }
-
-  throwIfHistoryLoadAborted(abortSignal, isAborted);
-  const full = await measureHistoryStep('chat.history_fetch_full', {
-    mode: 'quiet',
+  const fingerprint = buildHistoryFingerprint(window.canonicalRawMessages ?? window.rawMessages, window.thinkingLevel);
+  historyRuntime.historyFingerprintBySession.set(requestedSessionKey, fingerprint);
+  await measureHistoryStep('chat.history_apply_window', {
+    mode,
     sessionKey: requestedSessionKey,
-    limit: CHAT_HISTORY_QUIET_FULL_LIMIT,
-  }, async () => fetchHistoryWindow(CHAT_HISTORY_QUIET_FULL_LIMIT));
-  throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
-    return;
-  }
-  const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
-  const fullQuickFingerprint = buildQuickRawHistoryFingerprint(full.rawMessages, full.thinkingLevel);
-  const shouldSkipRedundantFullApply = (
-    fullFingerprint === probeFingerprint
-    && fullQuickFingerprint === probeQuickFingerprint
-  );
-  historyRuntime.historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
-  historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, fullFingerprint);
-  if (shouldSkipRedundantFullApply) {
-    return;
-  }
-  await measureHistoryStep('chat.history_apply_full', {
-    mode: 'quiet',
-    sessionKey: requestedSessionKey,
-    rows: full.rawMessages.length,
-  }, async () => applyLoadedMessages(full.rawMessages, full.thinkingLevel));
-}
-
-export async function runActiveHistoryPipeline(input: RunHistoryPipelineInput): Promise<void> {
-  const {
-    scope,
-    requestedSessionKey,
-    historyRuntime,
-    abortSignal,
-    isAborted,
-    fetchHistoryWindow,
-    applyLoadedMessages,
-    getState,
-  } = input;
-
-  throwIfHistoryLoadAborted(abortSignal, isAborted);
-  const probe = await measureHistoryStep('chat.history_fetch_probe', {
-    mode: 'active',
-    sessionKey: requestedSessionKey,
-    limit: CHAT_HISTORY_ACTIVE_PROBE_LIMIT,
-  }, async () => fetchHistoryWindow(CHAT_HISTORY_ACTIVE_PROBE_LIMIT));
-  throwIfHistoryLoadAborted(abortSignal, isAborted);
-  if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
-    return;
-  }
-  const probeFingerprint = buildHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
-  const probeQuickFingerprint = buildQuickRawHistoryFingerprint(probe.rawMessages, probe.thinkingLevel);
-  if (canShortCircuitByProbe({
-    set: input.set,
-    getState,
-    requestedSessionKey,
-    historyRuntime,
-    probeFingerprint,
-  })) {
-    return;
-  }
-  historyRuntime.historyFingerprintBySession.set(requestedSessionKey, probeFingerprint);
-  historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, probeFingerprint);
-  await measureHistoryStep('chat.history_apply_probe', {
-    mode: 'active',
-    sessionKey: requestedSessionKey,
-    rows: probe.rawMessages.length,
-    usedAsFinal: probe.rawMessages.length < CHAT_HISTORY_ACTIVE_PROBE_LIMIT,
-  }, async () => applyLoadedMessages(probe.rawMessages, probe.thinkingLevel));
-
-  if (probe.rawMessages.length < CHAT_HISTORY_ACTIVE_PROBE_LIMIT) {
-    return;
-  }
-
-  try {
-    throwIfHistoryLoadAborted(abortSignal, isAborted);
-    const full = await measureHistoryStep('chat.history_fetch_full', {
-      mode: 'active',
-      sessionKey: requestedSessionKey,
-      limit: CHAT_HISTORY_FULL_LIMIT,
-    }, async () => fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT));
-    throwIfHistoryLoadAborted(abortSignal, isAborted);
-    if (shouldSkipByForegroundSessionMismatch(scope, getState(), requestedSessionKey)) {
-      return;
-    }
-    const fullFingerprint = buildHistoryFingerprint(full.rawMessages, full.thinkingLevel);
-    const fullQuickFingerprint = buildQuickRawHistoryFingerprint(full.rawMessages, full.thinkingLevel);
-    const shouldSkipRedundantFullApply = (
-      fullFingerprint === probeFingerprint
-      && fullQuickFingerprint === probeQuickFingerprint
-    );
-    historyRuntime.historyFingerprintBySession.set(requestedSessionKey, fullFingerprint);
-    historyRuntime.historyProbeFingerprintBySession.set(requestedSessionKey, fullFingerprint);
-    if (shouldSkipRedundantFullApply) {
-      return;
-    }
-    await measureHistoryStep('chat.history_apply_full', {
-      mode: 'active',
-      sessionKey: requestedSessionKey,
-      rows: full.rawMessages.length,
-    }, async () => applyLoadedMessages(full.rawMessages, full.thinkingLevel));
-  } catch (fullErr) {
-    if (isHistoryLoadAbortError(fullErr)) {
-      throw fullErr;
-    }
-  }
+    rows: window.rawMessages.length,
+  }, async () => applyLoadedMessages(window));
 }

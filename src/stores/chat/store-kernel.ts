@@ -17,7 +17,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
   let mutatingCounter = 0;
 
   const historyFingerprintBySession = new Map<string, string>();
-  const historyProbeFingerprintBySession = new Map<string, string>();
   const historyQuickFingerprintBySession = new Map<string, string>();
   const historyRenderFingerprintBySession = new Map<string, string>();
   const historyLoadAbortControllerBySession = new Map<string, AbortController>();
@@ -57,7 +56,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
       }
     },
     historyFingerprintBySession,
-    historyProbeFingerprintBySession,
     historyQuickFingerprintBySession,
     historyRenderFingerprintBySession,
   };
@@ -68,5 +66,4 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
     historyRuntime,
   };
 }
-
 
