@@ -17,6 +17,55 @@ const logger = {
   debug: () => {},
 }
 
+type BufferedSocketState = {
+  messages: string[]
+  waiters: Array<{
+    resolve: (message: string) => void
+    reject: (error: Error) => void
+  }>
+}
+
+const bufferedSocketStates = new WeakMap<WebSocket, BufferedSocketState>()
+
+function ensureBufferedSocket(ws: WebSocket): BufferedSocketState {
+  const existing = bufferedSocketStates.get(ws)
+  if (existing) {
+    return existing
+  }
+
+  const state: BufferedSocketState = {
+    messages: [],
+    waiters: [],
+  }
+
+  ws.on('message', (data) => {
+    const message = data.toString()
+    const waiter = state.waiters.shift()
+    if (waiter) {
+      waiter.resolve(message)
+      return
+    }
+    state.messages.push(message)
+  })
+
+  ws.on('error', (error) => {
+    const normalized = error instanceof Error ? error : new Error(String(error))
+    while (state.waiters.length > 0) {
+      state.waiters.shift()?.reject(normalized)
+    }
+  })
+
+  ws.on('close', () => {
+    const error = new Error('WebSocket closed before the expected message arrived')
+    while (state.waiters.length > 0) {
+      state.waiters.shift()?.reject(error)
+    }
+  })
+
+  bufferedSocketStates.set(ws, state)
+  return state
+}
+
 type RelayMock = Pick<
   BrowserRelayServer,
   | 'hasExtensionConnection'
@@ -109,6 +158,7 @@ function decryptWireMessage(sessionKey: Buffer, wireMessage: string): string {
 }
 
 function waitForOpen(ws: WebSocket): Promise<void> {
+  ensureBufferedSocket(ws)
   return new Promise((resolve, reject) => {
     ws.once('open', () => resolve())
     ws.once('error', reject)
@@ -116,10 +166,28 @@ function waitForOpen(ws: WebSocket): Promise<void> {
 }
 
 function waitForMessage(ws: WebSocket): Promise<string> {
+  const state = ensureBufferedSocket(ws)
+  const buffered = state.messages.shift()
+  if (buffered !== undefined) {
+    return Promise.resolve(buffered)
+  }
+
   return new Promise((resolve, reject) => {
-    ws.once('message', (data) => resolve(data.toString()))
-    ws.once('error', reject)
+    state.waiters.push({ resolve, reject })
   })
+}
+
+async function waitForEncryptedJsonMessageMatching(
+  ws: WebSocket,
+  sessionKey: Buffer,
+  predicate: (message: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  while (true) {
+    const message = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(ws))) as Record<string, unknown>
+    if (predicate(message)) {
+      return message
+    }
+  }
 }
 
 let server: BrowserRelayServer | null = null
@@ -187,16 +255,25 @@ describe('browser relay service', () => {
         }),
       ),
     )
-    await waitForMessage(extensionWs)
+    await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 1,
+    )
 
-    const relayCommandPromise = waitForMessage(extensionWs)
+    const relayCommandPromise = waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand',
+    )
     const openPromise = service.handleRequest({
       action: 'open',
       url: 'https://example.com/opened',
       sessionKey: 'agent:test',
     })
 
-    const createTargetCommand = JSON.parse(decryptWireMessage(sessionKey, await relayCommandPromise))
+    const createTargetCommand = await relayCommandPromise
     expect(createTargetCommand.method).toBe('forwardCDPCommand')
     expect(createTargetCommand.params.method).toBe('Target.createTarget')
 
@@ -339,14 +416,18 @@ describe('browser relay service', () => {
     )
     await waitForMessage(extensionWs)
 
-    const relayCommandPromise = waitForMessage(extensionWs)
+    const relayCommandPromise = waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand',
+    )
     const openPromise = service.handleRequest({
       action: 'open',
       url: 'https://example.com/opened',
       sessionKey: 'agent:test',
     })
 
-    const createTargetCommand = JSON.parse(decryptWireMessage(sessionKey, await relayCommandPromise))
+    const createTargetCommand = await relayCommandPromise
     expect(createTargetCommand.method).toBe('forwardCDPCommand')
     expect(createTargetCommand.params.method).toBe('Target.createTarget')
 
@@ -628,6 +709,120 @@ describe('browser relay service', () => {
     })
   })
 
+  it('keeps act evaluate shorthand working without request.kind', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      }),
+    })
+
+    const evaluate = vi.fn(async () => ({ value: 'ok' }))
+    ;(service as any).actions.evaluate = evaluate
+
+    const result = await service.handleRequest({
+      action: 'act',
+      request: {
+        expression: '() => document.title',
+      },
+    })
+
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|page-target',
+      mode: 'relay',
+      fnBody: '() => document.title',
+    }))
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'act.evaluate',
+      targetId: 'browser-a|tid|page-target',
+      result: { value: 'ok' },
+    })
+  })
+
+  it('keeps act missing-kind errors as invalid_request when evaluate shorthand does not apply', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+      }),
+    })
+
+    const result = await service.handleRequest({
+      action: 'act',
+      request: {
+        ref: 'e1',
+      },
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'invalid_request',
+      error: 'request.kind is required',
+    })
+  })
+
+  it('keeps missing action errors as invalid_request', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+      }),
+    })
+
+    const result = await service.handleRequest({} as never)
+
+    expect(result).toMatchObject({
+      ok: false,
+      errorCode: 'invalid_request',
+      error: 'action is required',
+    })
+  })
+
   it('opens direct-cdp targets with the requested url and does not perform a follow-up Playwright navigation', async () => {
     service = new BrowserControlService({
       logger,
@@ -714,7 +909,7 @@ describe('browser relay service', () => {
       targetId: `browser-a|tid|opened:${url}`,
     })
 
-    const result = await (service as any).handleRelayAction('open', { action: 'open', url: 'https://example.com/opened' })
+    const result = await (service as any).handleRelayAction({ action: 'open', url: 'https://example.com/opened' })
 
     expect(selectExecutionWindowForTargetIfUnset).toHaveBeenCalledWith('browser-a|tid|opened:https://example.com/opened')
     expect(result).toMatchObject({
@@ -768,7 +963,7 @@ describe('browser relay service', () => {
       targetId: `browser-a|tid|opened:${url}`,
     })
 
-    await (service as any).handleRelayAction('open', { action: 'open', url: 'https://example.com/opened' })
+    await (service as any).handleRelayAction({ action: 'open', url: 'https://example.com/opened' })
 
     expect(selectExecutionWindowForTargetIfUnset).toHaveBeenCalledWith('browser-a|tid|opened:https://example.com/opened')
   })

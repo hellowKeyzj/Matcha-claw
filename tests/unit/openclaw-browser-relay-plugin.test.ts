@@ -26,6 +26,55 @@ const logger = {
   error: () => {},
 }
 
+type BufferedSocketState = {
+  messages: string[]
+  waiters: Array<{
+    resolve: (message: string) => void
+    reject: (error: Error) => void
+  }>
+}
+
+const bufferedSocketStates = new WeakMap<WebSocket, BufferedSocketState>()
+
+function ensureBufferedSocket(ws: WebSocket): BufferedSocketState {
+  const existing = bufferedSocketStates.get(ws)
+  if (existing) {
+    return existing
+  }
+
+  const state: BufferedSocketState = {
+    messages: [],
+    waiters: [],
+  }
+
+  ws.on('message', (data) => {
+    const message = data.toString()
+    const waiter = state.waiters.shift()
+    if (waiter) {
+      waiter.resolve(message)
+      return
+    }
+    state.messages.push(message)
+  })
+
+  ws.on('error', (error) => {
+    const normalized = error instanceof Error ? error : new Error(String(error))
+    while (state.waiters.length > 0) {
+      state.waiters.shift()?.reject(normalized)
+    }
+  })
+
+  ws.on('close', () => {
+    const error = new Error('WebSocket closed before the expected message arrived')
+    while (state.waiters.length > 0) {
+      state.waiters.shift()?.reject(error)
+    }
+  })
+
+  bufferedSocketStates.set(ws, state)
+  return state
+}
+
 function encryptSessionKey(sessionKey: Buffer): string {
   return publicEncrypt(
     {
@@ -56,6 +105,7 @@ function decryptWireMessage(sessionKey: Buffer, wireMessage: string): string {
 }
 
 function waitForOpen(ws: WebSocket): Promise<void> {
+  ensureBufferedSocket(ws)
   return new Promise((resolve, reject) => {
     ws.once('open', () => resolve())
     ws.once('error', reject)
@@ -63,17 +113,14 @@ function waitForOpen(ws: WebSocket): Promise<void> {
 }
 
 function waitForMessage(ws: WebSocket): Promise<string> {
+  const state = ensureBufferedSocket(ws)
+  const buffered = state.messages.shift()
+  if (buffered !== undefined) {
+    return Promise.resolve(buffered)
+  }
+
   return new Promise((resolve, reject) => {
-    const onMessage = (data: any) => {
-      ws.off('error', onError)
-      resolve(data.toString())
-    }
-    const onError = (error: Error) => {
-      ws.off('message', onMessage)
-      reject(error)
-    }
-    ws.once('message', onMessage)
-    ws.once('error', onError)
+    state.waiters.push({ resolve, reject })
   })
 }
 
@@ -83,6 +130,19 @@ async function waitForJsonMessageMatching(
 ): Promise<Record<string, unknown>> {
   while (true) {
     const message = JSON.parse(await waitForMessage(ws)) as Record<string, unknown>
+    if (predicate(message)) {
+      return message
+    }
+  }
+}
+
+async function waitForEncryptedJsonMessageMatching(
+  ws: WebSocket,
+  sessionKey: Buffer,
+  predicate: (message: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
+  while (true) {
+    const message = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(ws))) as Record<string, unknown>
     if (predicate(message)) {
       return message
     }
@@ -384,10 +444,14 @@ describe('openclaw browser relay plugin', () => {
     )
     await waitForMessage(extensionWs)
 
-    const relayCommandPromise = waitForMessage(extensionWs)
+    const relayCommandPromise = waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand',
+    )
     const openTargetPromise = server!.openTarget('https://example.com/opened')
 
-    const createTargetCommand = JSON.parse(decryptWireMessage(sessionKey, await relayCommandPromise))
+    const createTargetCommand = await relayCommandPromise
     expect(createTargetCommand.params.method).toBe('Target.createTarget')
 
     extensionWs.send(
@@ -772,7 +836,12 @@ describe('openclaw browser relay plugin', () => {
       params: {},
     }))
 
-    const pageEnableCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    const pageEnableCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Page.enable',
+    )
     expect(pageEnableCommand).toMatchObject({
       method: 'forwardCDPCommand',
       params: {
@@ -804,7 +873,12 @@ describe('openclaw browser relay plugin', () => {
       params: {},
     }))
 
-    const frameTreeCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    const frameTreeCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Page.getFrameTree',
+    )
     expect(frameTreeCommand).toMatchObject({
       method: 'forwardCDPCommand',
       params: {
@@ -852,7 +926,12 @@ describe('openclaw browser relay plugin', () => {
       params: {},
     }))
 
-    const runtimeEnableCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    const runtimeEnableCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Runtime.enable',
+    )
     expect(runtimeEnableCommand).toMatchObject({
       method: 'forwardCDPCommand',
       params: {
@@ -888,7 +967,12 @@ describe('openclaw browser relay plugin', () => {
       },
     }))
 
-    const createWorldCommand = JSON.parse(decryptWireMessage(sessionKey, await waitForMessage(extensionWs)))
+    const createWorldCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Page.createIsolatedWorld',
+    )
     expect(createWorldCommand).toMatchObject({
       method: 'forwardCDPCommand',
       params: {
@@ -1386,7 +1470,12 @@ describe('openclaw browser relay plugin', () => {
       },
     })))
 
-    const selectionChanged1 = waitForMessage(extension)
+    const selectionChanged1 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 1,
+    )
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 1 },
@@ -1402,7 +1491,12 @@ describe('openclaw browser relay plugin', () => {
 
     expect(server!.resolveSelectedSessionId()).toBe('browser-a|sid|page-a')
 
-    const selectionChanged2 = waitForMessage(extension)
+    const selectionChanged2 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 2,
+    )
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 2 },
@@ -1480,7 +1574,12 @@ describe('openclaw browser relay plugin', () => {
         },
       },
     })))
-    const selectionChanged = waitForMessage(extension)
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 1,
+    )
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 1 },
@@ -1530,7 +1629,12 @@ describe('openclaw browser relay plugin', () => {
 
     await firstHelloAckPromise
 
-    const selectionChanged = waitForMessage(firstExtension)
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      firstExtension,
+      firstSessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 7,
+    )
     firstExtension.send(encryptWireMessage(firstSessionKey, JSON.stringify({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 7 },
@@ -1658,9 +1762,15 @@ describe('openclaw browser relay plugin', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20))
 
-    const selectionChanged = waitForMessage(extension)
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-open'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 5,
+    )
     await expect(server!.selectExecutionWindowForTargetIfUnset('browser-open|tid|target-open')).resolves.toBe(true)
-    const selectionPayload = JSON.parse(decryptWireMessage(sessionKey, await selectionChanged))
+    const selectionPayload = await selectionChanged
     expect(selectionPayload).toMatchObject({
       method: 'Extension.selectionChanged',
       params: {
@@ -1736,9 +1846,15 @@ describe('openclaw browser relay plugin', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20))
 
-    const selectionChanged = waitForMessage(extension)
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-multi'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 6,
+    )
     await expect(server!.selectExecutionWindowForTargetIfUnset('browser-multi|tid|target-a')).resolves.toBe(true)
-    const selectionPayload = JSON.parse(decryptWireMessage(sessionKey, await selectionChanged))
+    const selectionPayload = await selectionChanged
     expect(selectionPayload).toMatchObject({
       method: 'Extension.selectionChanged',
       params: {

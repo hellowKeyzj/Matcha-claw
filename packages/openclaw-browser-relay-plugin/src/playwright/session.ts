@@ -105,6 +105,19 @@ function isPageCloseLikeError(error: unknown): boolean {
   ].some((fragment) => message.includes(fragment))
 }
 
+function findRequestEntryById(
+  requests: PageState['requests'],
+  requestId: string,
+): PageState['requests'][number] | undefined {
+  for (let index = requests.length - 1; index >= 0; index -= 1) {
+    const entry = requests[index]
+    if (entry.id === requestId) {
+      return entry
+    }
+  }
+  return undefined
+}
+
 export class PlaywrightSession {
   private relayConnection: BrowserConnection | null = null
   private directConnection: BrowserConnection | null = null
@@ -252,7 +265,7 @@ export class PlaywrightSession {
     page.on('response', (response: any) => {
       const requestId = state.requestIds.get(response.request())
       if (!requestId) return
-      const current = state.requests.findLast((entry) => entry.id === requestId)
+      const current = findRequestEntryById(state.requests, requestId)
       if (!current) return
       current.status = response.status()
       current.ok = response.ok()
@@ -261,7 +274,7 @@ export class PlaywrightSession {
     page.on('requestfailed', (request: any) => {
       const requestId = state.requestIds.get(request)
       if (!requestId) return
-      const current = state.requests.findLast((entry) => entry.id === requestId)
+      const current = findRequestEntryById(state.requests, requestId)
       if (!current) return
       current.ok = false
       current.failureText = request.failure()?.errorText
