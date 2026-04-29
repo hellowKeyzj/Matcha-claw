@@ -6,6 +6,7 @@ const hoisted = vi.hoisted(() => ({
   handleGatewayRoutesMock: vi.fn(async () => false),
   handleRuntimeHostInternalRoutesMock: vi.fn(async () => false),
   handleFileRoutesMock: vi.fn(async () => false),
+  handleSkillRoutesMock: vi.fn(async () => false),
   handleDiagnosticsRoutesMock: vi.fn(async () => false),
   handleLogRoutesMock: vi.fn(async () => false),
   handleRuntimeHostProxyRoutesMock: vi.fn(async () => false),
@@ -26,6 +27,10 @@ vi.mock('../../electron/api/routes/runtime-host-internal', () => ({
 
 vi.mock('../../electron/api/routes/files', () => ({
   handleFileRoutes: (...args: unknown[]) => hoisted.handleFileRoutesMock(...args),
+}));
+
+vi.mock('../../electron/api/routes/skills', () => ({
+  handleSkillRoutes: (...args: unknown[]) => hoisted.handleSkillRoutesMock(...args),
 }));
 
 vi.mock('../../electron/api/routes/diagnostics', () => ({

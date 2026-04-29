@@ -115,7 +115,7 @@ The Scheduled Tasks form supports external delivery configuration with separate 
 WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints: you must explicitly set both recipient target (`delivery.to`) and sender account (`delivery.accountId`).
 
 ### 🧩 Extensible Skill System
-Extend your AI agents with pre-built skills. Browse, install, and manage skills through the integrated skill panel—no package managers required.
+Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
 ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `self-improving-agent`, `tavily-search`, `brave-web-search`, `bocha-skill`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
 Environment variables for bundled search skills:
