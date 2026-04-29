@@ -119,12 +119,14 @@ async function readRelayOwnerRecord(stateDir?: string): Promise<RelayOwnerRecord
     const filePath = getRelayOwnerFilePath(stateDir)
     const raw = await readFile(filePath, 'utf8')
     const parsed = JSON.parse(raw) as Partial<RelayOwnerRecord>
-    if (!Number.isInteger(parsed.pid) || !Number.isInteger(parsed.port)) {
+    const pid = typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) ? parsed.pid : null
+    const port = typeof parsed.port === 'number' && Number.isInteger(parsed.port) ? parsed.port : null
+    if (pid === null || port === null) {
       return null
     }
     return {
-      pid: parsed.pid,
-      port: parsed.port,
+      pid,
+      port,
       startedAtMs: typeof parsed.startedAtMs === 'number' && Number.isFinite(parsed.startedAtMs) ? parsed.startedAtMs : null,
       command: typeof parsed.command === 'string' ? parsed.command.trim() : '',
     }

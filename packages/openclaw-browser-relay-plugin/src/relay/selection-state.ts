@@ -26,7 +26,7 @@ export async function readRelaySelection(stateDir?: string): Promise<RelaySelect
     }
     return {
       selectedBrowserInstanceId: parsed.selectedBrowserInstanceId.trim(),
-      selectedWindowId: parsed.selectedWindowId,
+      selectedWindowId: parsed.selectedWindowId ?? null,
     }
   } catch {
     return null

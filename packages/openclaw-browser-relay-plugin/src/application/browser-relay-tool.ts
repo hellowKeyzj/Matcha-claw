@@ -3,60 +3,22 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { imageResultFromFile, wrapExternalContent } from 'openclaw/plugin-sdk/browser-support'
+import {
+  browserRequestKinds,
+  browserToolActions,
+  type BrowserActionParams,
+} from '../browser-action-contract.js'
 
 type BrowserRelayToolContext = {
   sessionKey?: string
   workspaceDir?: string
 }
 
-type BrowserRelayToolParams = Record<string, unknown>
+type BrowserRelayToolParams = BrowserActionParams
 
 type BrowserRelayControl = {
-  handleRequest: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
+  handleRequest: (params: BrowserActionParams) => Promise<Record<string, unknown>>
 }
-
-const browserToolActions = [
-  'open',
-  'close',
-  'stop',
-  'start',
-  'status',
-  'console',
-  'focus',
-  'snapshot',
-  'navigate',
-  'profiles',
-  'dialog',
-  'tabs',
-  'screenshot',
-  'pdf',
-  'upload',
-  'act',
-  'scroll',
-  'errors',
-  'requests',
-  'cookies',
-  'storage',
-  'highlight',
-  'closeagenttabs',
-  'close_agent_tabs',
-] as const
-
-const browserRequestKinds = [
-  'select',
-  'type',
-  'fill',
-  'close',
-  'resize',
-  'wait',
-  'hover',
-  'click',
-  'press',
-  'drag',
-  'evaluate',
-  'scroll',
-  'scrollIntoView',
-] as const
 
 const browserRelayToolParameters = {
   type: 'object',
@@ -117,32 +79,6 @@ const browserRelayToolParameters = {
     scrollDirection: { type: 'string' },
     scrollAmount: { type: 'number' },
     waitUntil: { type: 'string' },
-    kind: { type: 'string', enum: [...browserRequestKinds] },
-    doubleClick: { type: 'boolean' },
-    button: { type: 'string' },
-    modifiers: { type: 'array', items: { type: 'string' } },
-    text: { type: 'string' },
-    submit: { type: 'boolean' },
-    slowly: { type: 'boolean' },
-    clearFirst: { type: 'boolean' },
-    keyPress: { type: 'string' },
-    delayMs: { type: 'number' },
-    startRef: { type: 'string' },
-    endRef: { type: 'string' },
-    values: { type: 'array', items: { type: 'string' } },
-    fields: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: true,
-      },
-    },
-    width: { type: 'number' },
-    height: { type: 'number' },
-    timeMs: { type: 'number' },
-    textGone: { type: 'string' },
-    loadState: { type: 'string' },
-    fn: { type: 'string' },
     request: {
       type: 'object',
       additionalProperties: true,
@@ -341,6 +277,7 @@ async function formatRelayToolResult(
   result: Record<string, unknown>,
 ) {
   const action = asString(params.action)?.toLowerCase()
+  const consoleExpression = 'expression' in params ? asString(params.expression) : undefined
   if (result.ok === false) {
     return {
       content: [{ type: 'text' as const, text: asJsonText(result) }],
@@ -356,7 +293,7 @@ async function formatRelayToolResult(
     return await formatSnapshotResult(result)
   }
 
-  if (action === 'console' && !asString(params.expression) && Array.isArray(result.messages)) {
+  if (action === 'console' && !consoleExpression && Array.isArray(result.messages)) {
     return formatConsoleResult(result)
   }
 

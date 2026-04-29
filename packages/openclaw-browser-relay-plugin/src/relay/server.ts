@@ -1,7 +1,7 @@
 import type { PluginLogger } from 'openclaw/plugin-sdk'
 import { createCipheriv, createDecipheriv, privateDecrypt, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { WebSocketServer, type RawData, type WebSocket } from 'ws'
+import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import { RELAY_PRIVATE_KEY_PEM } from './keypair.js'
 import {
   claimRelayPortOwnership,
@@ -181,6 +181,14 @@ function normalizeTargetInfo(raw: Partial<RelayTargetInfo> & Pick<RelayTargetInf
     browserContextId: raw.browserContextId ?? 'default',
     canAccessOpener: raw.canAccessOpener ?? false,
   }
+}
+
+function readTargetIdFromResult(result: unknown): string {
+  if (!result || typeof result !== 'object') {
+    return ''
+  }
+  const targetId = (result as { targetId?: unknown }).targetId
+  return typeof targetId === 'string' ? targetId : ''
 }
 
 function writeJson(res: ServerResponse, statusCode: number, data: unknown, headers?: Record<string, string>): void {
@@ -444,7 +452,7 @@ export class BrowserRelayServer {
     existing.targetInfo = normalizeTargetInfo({
       ...existing.targetInfo,
       url,
-      targetId: existing.targetId,
+      targetId: existing.targetId ?? existing.targetInfo.targetId,
     })
   }
 
@@ -628,7 +636,7 @@ export class BrowserRelayServer {
   async openTarget(url: string): Promise<{ targetId: string }> {
     const client = this.resolveClientForDefaultAction()
     const result = await this.sendToExtension(client, 'Target.createTarget', { url })
-    const rawTargetId = typeof result?.targetId === 'string' ? result.targetId : ''
+    const rawTargetId = readTargetIdFromResult(result)
     if (!rawTargetId) throw new Error('Target.createTarget returned no targetId')
     const targetId = ensureExternalTargetId(client.browserInstanceId, rawTargetId)
     this.logger.info(
@@ -1287,7 +1295,7 @@ export class BrowserRelayServer {
       case 'Target.createTarget': {
         const client = this.resolveClientForDefaultAction()
         const result = await this.sendToExtension(client, input.method, input.params ?? {})
-        const rawTargetId = typeof result?.targetId === 'string' ? result.targetId : ''
+        const rawTargetId = readTargetIdFromResult(result)
         const externalTargetId = rawTargetId
           ? ensureExternalTargetId(client.browserInstanceId, rawTargetId)
           : ''

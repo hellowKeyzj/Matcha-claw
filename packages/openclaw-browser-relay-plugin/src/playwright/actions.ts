@@ -1,6 +1,8 @@
 import type { PlaywrightSession } from './session.js'
 import { parseRoleSnapshot } from './role-refs.js'
 
+type BrowserStorageHandle = 'localStorage' | 'sessionStorage'
+
 function requiredString(value: unknown, field: string): string {
   const normalized = typeof value === 'string' ? value.trim() : ''
   if (!normalized) {
@@ -198,7 +200,7 @@ export class PlaywrightActions {
     const direction = input.direction ?? 'down'
     const amount = typeof input.amount === 'number' && Number.isFinite(input.amount) ? input.amount : 0
 
-    return await page.evaluate(({ direction, amount }) => {
+    return await page.evaluate(({ direction, amount }: { direction: string; amount: number }) => {
       const delta = amount > 0 ? amount : window.innerHeight * 0.75
       if (direction === 'up') window.scrollBy(0, -delta)
       else if (direction === 'down') window.scrollBy(0, delta)
@@ -519,14 +521,16 @@ export class PlaywrightActions {
 
   async storage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; storageType: 'local' | 'session'; operation: 'get' | 'set' | 'clear'; key?: string; value?: string }): Promise<unknown> {
     const page = await this.session.getPageForTargetId(input)
-    const storageName = input.storageType === 'session' ? 'sessionStorage' : 'localStorage'
+    const storageName: BrowserStorageHandle = input.storageType === 'session' ? 'sessionStorage' : 'localStorage'
     if (input.operation === 'get') {
       if (input.key) {
-        return await page.evaluate(([targetStorage, key]) => globalThis[targetStorage]?.getItem(key), [storageName, input.key])
+        return await page.evaluate(
+          ([targetStorage, key]: [BrowserStorageHandle, string]) => window[targetStorage].getItem(key),
+          [storageName, input.key],
+        )
       }
-      return await page.evaluate((targetStorage) => {
-        const storage = globalThis[targetStorage]
-        if (!storage) return {}
+      return await page.evaluate((targetStorage: BrowserStorageHandle) => {
+        const storage = window[targetStorage]
         const result: Record<string, string> = {}
         for (let index = 0; index < storage.length; index += 1) {
           const key = storage.key(index)
@@ -541,10 +545,13 @@ export class PlaywrightActions {
       if (!input.key) {
         throw new Error('key is required for storage set')
       }
-      await page.evaluate(([targetStorage, key, value]) => globalThis[targetStorage]?.setItem(key, value), [storageName, input.key, input.value ?? ''])
+      await page.evaluate(
+        ([targetStorage, key, value]: [BrowserStorageHandle, string, string]) => window[targetStorage].setItem(key, value),
+        [storageName, input.key, input.value ?? ''],
+      )
       return { ok: true }
     }
-    await page.evaluate((targetStorage) => globalThis[targetStorage]?.clear(), storageName)
+    await page.evaluate((targetStorage: BrowserStorageHandle) => window[targetStorage].clear(), storageName)
     return { ok: true }
   }
 
