@@ -1,11 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { Skills } from '@/pages/Skills';
 
 const fetchSkillsMock = vi.fn(async () => {});
-const invokeIpcMock = vi.fn(async (channel: string, payload?: { path?: string }) => {
-  if (channel === 'hostapi:fetch' && payload?.path === '/api/openclaw/skills-dir') {
+const invokeIpcMock = vi.fn(async (channel: string) => {
+  if (channel === 'hostapi:fetch') {
     return {
       ok: true,
       data: {
@@ -87,6 +87,16 @@ describe('skills page fetch behavior', () => {
   beforeEach(() => {
     invokeIpcMock.mockClear();
     fetchSkillsMock.mockClear();
+    skillsState.skills = [];
+    skillsState.snapshotReady = false;
+    skillsState.initialLoading = false;
+    skillsState.refreshing = false;
+    skillsState.mutating = false;
+    skillsState.error = null;
+    skillsState.searchResults = [];
+    skillsState.searching = false;
+    skillsState.searchError = null;
+    skillsState.installing = {};
   });
 
   it('skills 已存在时不重复触发 fetchSkills', async () => {
@@ -165,5 +175,34 @@ describe('skills page fetch behavior', () => {
     expect(screen.queryByText('Missing Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('Unknown Skill')).not.toBeInTheDocument();
     expect(screen.queryByText('filter.eligible')).not.toBeInTheDocument();
+  });
+
+  it('市场卡片描述使用与已安装列表一致的两行省略样式', async () => {
+    skillsState.skills = [];
+    skillsState.searchResults = [{
+      slug: 'meeting-helper',
+      name: 'Meeting Helper',
+      description: 'This is a long marketplace description that should clamp consistently with the installed skill cards.',
+      version: '1.0.0',
+      author: 'matchaclaw',
+    }];
+    skillsState.snapshotReady = true;
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
+
+    await screen.findByPlaceholderText('searchMarketplace');
+
+    const description = await screen.findByText(
+      'This is a long marketplace description that should clamp consistently with the installed skill cards.',
+    );
+
+    expect(description).toHaveClass('line-clamp-2');
+    expect(description).toHaveClass('leading-6');
   });
 });
