@@ -51,6 +51,7 @@ import { useTranslation } from 'react-i18next';
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
+const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'line-clamp-2 text-sm leading-6 text-muted-foreground';
 
 function buildMarketplaceSkillUrl(slug: string) {
   return `${CLAWHUB_MARKETPLACE_PRIMARY_URL}/s/${slug}`;
@@ -562,7 +563,7 @@ function MarketplaceSkillCard({
         </div>
       </CardHeader>
       <CardContent className="flex flex-1 flex-col">
-        <p className="mb-3 min-h-[3rem] text-sm text-muted-foreground line-clamp-2">
+        <p className={cn('mb-3 min-h-[3rem]', SKILL_CARD_DESCRIPTION_CLASS_NAME)}>
           {skill.description}
         </p>
         <div className="mt-auto flex min-h-4 items-center gap-4 text-xs text-muted-foreground">
@@ -784,7 +785,7 @@ const SkillGridCard = memo(function SkillGridCard({
         </div>
       </CardHeader>
       <CardContent>
-        <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
+        <p className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>
           {skillDescription}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
