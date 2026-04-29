@@ -11,6 +11,7 @@ import { handleLogRoutes } from './routes/logs';
 import { handleFileRoutes } from './routes/files';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
 import { handleRuntimeHostProxyRoutes } from './routes/runtime-host-proxy';
+import { handleSkillRoutes } from './routes/skills';
 import { isMainOwnedRoute } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 
@@ -27,6 +28,7 @@ const mainOwnedHandlers: RouteHandler[] = [
   handleAppRoutes,
   handleGatewayRoutes,
   handleFileRoutes,
+  handleSkillRoutes,
   handleDiagnosticsRoutes,
   handleLogRoutes,
 ];

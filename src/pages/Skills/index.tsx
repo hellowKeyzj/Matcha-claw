@@ -27,6 +27,7 @@ import {
   ChevronDown,
   FolderOpen,
   Copy,
+  Upload,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -680,6 +681,154 @@ function MarketplaceSkillDetailDialog({
   );
 }
 
+interface LocalSkillUploadDialogProps {
+  open: boolean;
+  importing: boolean;
+  autoEnable: boolean;
+  selectedSourceName: string;
+  selectedSourcePath: string;
+  onClose: () => void;
+  onChooseSource: () => void;
+  onDropSourcePath: (path: string) => void;
+  onAutoEnableChange: (checked: boolean) => void;
+  onImport: () => void;
+}
+
+function LocalSkillUploadDialog({
+  open,
+  importing,
+  autoEnable,
+  selectedSourceName,
+  selectedSourcePath,
+  onClose,
+  onChooseSource,
+  onDropSourcePath,
+  onAutoEnableChange,
+  onImport,
+}: LocalSkillUploadDialogProps) {
+  const { t } = useTranslation('skills');
+  const [dragActive, setDragActive] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setDragActive(false);
+    }
+  }, [open]);
+
+  if (!open) {
+    return null;
+  }
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragActive(false);
+    const droppedPaths = Array.from(event.dataTransfer.files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => typeof path === 'string' && path.trim().length > 0);
+    if (droppedPaths.length === 0) {
+      return;
+    }
+    onDropSourcePath(droppedPaths[0]);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <Card
+        className="w-full max-w-[30rem] rounded-[1.5rem] border border-border/80 bg-card shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-4">
+          <div>
+            <CardTitle className="text-xl">{t('marketplace.uploadDialog.title')}</CardTitle>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose} disabled={importing}>
+            <X className="h-4 w-4" />
+          </Button>
+        </CardHeader>
+
+        <CardContent className="space-y-5">
+          <div
+            role="button"
+            tabIndex={0}
+            className={cn(
+              'rounded-[1.25rem] border border-dashed px-6 py-8 text-center transition-colors',
+              dragActive
+                ? 'border-primary bg-primary/5'
+                : 'border-border/70 bg-muted/15 hover:border-primary/50 hover:bg-muted/30',
+            )}
+            onClick={onChooseSource}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onChooseSource();
+              }
+            }}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              setDragActive(false);
+            }}
+            onDrop={handleDrop}
+          >
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted/50 text-muted-foreground">
+              <Upload className="h-5 w-5" />
+            </div>
+            {selectedSourceName ? (
+              <div className="mt-4 space-y-1">
+                <p className="text-base font-medium text-foreground">{selectedSourceName}</p>
+                <p className="break-all text-xs text-muted-foreground">{selectedSourcePath}</p>
+                <p className="pt-1 text-sm text-muted-foreground">{t('marketplace.uploadDialog.replace')}</p>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-1">
+                <p className="text-base font-medium text-foreground">{t('marketplace.uploadDialog.empty')}</p>
+                <p className="text-sm text-muted-foreground">{t('marketplace.uploadDialog.hint')}</p>
+              </div>
+            )}
+          </div>
+
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-border text-primary"
+              checked={autoEnable}
+              onChange={(event) => onAutoEnableChange(event.target.checked)}
+              disabled={importing}
+            />
+            <span>{t('marketplace.uploadDialog.autoEnable')}</span>
+          </label>
+
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-foreground">{t('marketplace.uploadDialog.requirementsTitle')}</h3>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+              <li>{t('marketplace.uploadDialog.requirementDirectoryZip')}</li>
+              <li>{t('marketplace.uploadDialog.requirementMarkdown')}</li>
+            </ul>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={onClose} disabled={importing}>
+              {t('common:actions.cancel', 'Cancel')}
+            </Button>
+            <Button onClick={onImport} disabled={!selectedSourcePath || importing} className="gap-2">
+              {importing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {t('marketplace.uploadDialog.confirm')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 interface SkillGridCardViewModel {
   skillId: string;
   skillName: string;
@@ -840,6 +989,10 @@ export function Skills() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [searchQuery, setSearchQuery] = useState('');
   const [marketplaceQuery, setMarketplaceQuery] = useState('');
+  const [localSkillDialogOpen, setLocalSkillDialogOpen] = useState(false);
+  const [localSkillSourcePath, setLocalSkillSourcePath] = useState('');
+  const [localSkillAutoEnable, setLocalSkillAutoEnable] = useState(false);
+  const [localSkillImporting, setLocalSkillImporting] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
   const [activeTab, setActiveTab] = useState('all');
@@ -1098,6 +1251,82 @@ export function Skills() {
       .then((dir) => setSkillsDirPath(dir as string))
       .catch(console.error);
   }, []);
+
+  const localSkillSourceName = useMemo(() => {
+    if (!localSkillSourcePath) {
+      return '';
+    }
+    return localSkillSourcePath.split(/[\\/]/).pop() || localSkillSourcePath;
+  }, [localSkillSourcePath]);
+
+  const resetLocalSkillDialog = useCallback(() => {
+    setLocalSkillDialogOpen(false);
+    setLocalSkillSourcePath('');
+    setLocalSkillAutoEnable(false);
+    setLocalSkillImporting(false);
+  }, []);
+
+  const handleChooseLocalSkillSource = useCallback(async () => {
+    try {
+      const result = await invokeIpc<{ canceled: boolean; filePaths?: string[] }>('dialog:open', {
+        properties: ['openFile', 'openDirectory'],
+        filters: [
+          {
+            name: t('marketplace.uploadDialog.skillSourceFilter'),
+            extensions: ['zip', 'md'],
+          },
+          {
+            name: t('marketplace.uploadDialog.allFilesFilter'),
+            extensions: ['*'],
+          },
+        ],
+      });
+      if (result.canceled || !result.filePaths?.length) {
+        return;
+      }
+      setLocalSkillSourcePath(result.filePaths[0]);
+    } catch (error) {
+      toast.error(t('toast.failedImportLocalSkill') + ': ' + String(error));
+    }
+  }, [t]);
+
+  const handleImportLocalSkill = useCallback(async () => {
+    if (localSkillImporting || !localSkillSourcePath.trim()) {
+      return;
+    }
+
+    setLocalSkillImporting(true);
+    try {
+      const result = await hostApiFetch<{
+        success: boolean;
+        skillKey: string;
+        installedPath: string;
+        sourceKind: 'directory' | 'zip' | 'markdown';
+      }>('/api/skills/import-local', {
+        method: 'POST',
+        body: JSON.stringify({ sourcePath: localSkillSourcePath }),
+      });
+
+      await fetchSkills({ force: true });
+
+      if (localSkillAutoEnable) {
+        try {
+          await enableSkill(result.skillKey);
+          toast.success(t('toast.importedLocalSkillEnabled', { name: result.skillKey }));
+        } catch (error) {
+          toast.warning(t('toast.importedLocalSkillEnableFailed', { name: result.skillKey }) + ': ' + String(error));
+        }
+      } else {
+        toast.success(t('toast.importedLocalSkill', { name: result.skillKey }));
+      }
+
+      resetLocalSkillDialog();
+    } catch (error) {
+      toast.error(t('toast.failedImportLocalSkill') + ': ' + String(error));
+    } finally {
+      setLocalSkillImporting(false);
+    }
+  }, [enableSkill, fetchSkills, localSkillAutoEnable, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
 
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
@@ -1382,15 +1611,7 @@ export function Skills() {
                 </div>
               </CardContent>
             </Card>
-            <Card className="border-info/30 bg-info/5">
-              <CardContent className="py-3 text-sm flex items-start gap-3 text-muted-foreground">
-                <div className="flex items-start gap-2">
-                  <Download className="h-4 w-4 mt-0.5 shrink-0" />
-                  <span>{t('marketplace.manualInstallHint', { path: skillsDirPath })}</span>
-                </div>
-              </CardContent>
-            </Card>
-            <div className="flex gap-4">
+            <div className="flex flex-col gap-3 md:flex-row">
               <form onSubmit={handleMarketplaceSearch} className="flex-1 flex gap-2">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
@@ -1415,6 +1636,15 @@ export function Skills() {
                   <span>{searching ? t('marketplace.searching') : t('searchButton')}</span>
                 </Button>
               </form>
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2 md:min-w-[124px]"
+                onClick={() => setLocalSkillDialogOpen(true)}
+              >
+                <Upload className="h-4 w-4" />
+                {t('marketplace.uploadSkill')}
+              </Button>
             </div>
 
             {searchError && (
@@ -1510,6 +1740,23 @@ export function Skills() {
           onClose={() => setSelectedMarketplaceSkill(null)}
         />
       )}
+
+      <LocalSkillUploadDialog
+        open={localSkillDialogOpen}
+        importing={localSkillImporting}
+        autoEnable={localSkillAutoEnable}
+        selectedSourceName={localSkillSourceName}
+        selectedSourcePath={localSkillSourcePath}
+        onClose={() => {
+          if (!localSkillImporting) {
+            resetLocalSkillDialog();
+          }
+        }}
+        onChooseSource={() => { void handleChooseLocalSkillSource(); }}
+        onDropSourcePath={setLocalSkillSourcePath}
+        onAutoEnableChange={setLocalSkillAutoEnable}
+        onImport={() => { void handleImportLocalSkill(); }}
+      />
     </div>
   );
 }

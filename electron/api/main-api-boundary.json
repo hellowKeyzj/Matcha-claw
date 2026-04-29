@@ -5,6 +5,7 @@
     "files.ts",
     "gateway.ts",
     "logs.ts",
+    "skills.ts",
     "runtime-host-internal.ts",
     "runtime-host.ts",
     "runtime-host-proxy.ts"
@@ -22,6 +23,7 @@
     "/api/files/stage-buffer",
     "/api/files/thumbnails",
     "/api/files/save-image",
+    "/api/skills/import-local",
     "/api/diagnostics/collect",
     "/api/diagnostics/memory",
     "/api/logs",
