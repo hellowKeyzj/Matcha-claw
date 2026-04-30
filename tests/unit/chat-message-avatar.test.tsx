@@ -61,7 +61,7 @@ describe('chat message avatar', () => {
     expect(contentShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageContentColumn);
     expect(contentShell?.className).toContain(CHAT_LAYOUT_TOKENS.messageContentAssistantOrder);
     expect(contentShell?.className).not.toContain('max-w-[80%]');
-    const body = container.querySelector('[data-chat-body-mode="full"]') as HTMLElement | null;
+    const body = container.querySelector('[data-chat-body-mode="settled"]') as HTMLElement | null;
     expect(body?.className).toContain(CHAT_LAYOUT_TOKENS.assistantSurface);
   });
 

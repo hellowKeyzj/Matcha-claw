@@ -3,6 +3,7 @@ import {
   appendMessageRows,
   buildMessageRowsWithMeta,
   canAppendMessageList,
+  patchMessageRows,
   canPrependMessageList,
   prependMessageRows,
   type ChatMessageRow,
@@ -45,6 +46,10 @@ function buildStaticRowsCacheEntry(
     previousCache
     && canPrependMessageList(previousCache.messagesRef, rowSourceMessages),
   );
+  const canPatchInPlace = Boolean(
+    previousCache
+    && previousCache.messagesRef.length === rowSourceMessages.length,
+  );
 
   if (canIncrementalAppend && previousCache) {
     const appended = appendMessageRows(
@@ -66,6 +71,24 @@ function buildStaticRowsCacheEntry(
     );
     rows = prepended.rows;
     renderableCount = prepended.renderableCount;
+  } else if (canPatchInPlace && previousCache) {
+    const patched = patchMessageRows(
+      sessionKey,
+      previousCache.rows,
+      previousCache.messagesRef,
+      rowSourceMessages,
+    );
+    if (patched) {
+      rows = patched.rows;
+      renderableCount = patched.renderableCount;
+    } else {
+      const built = buildMessageRowsWithMeta({
+        sessionKey,
+        messages: rowSourceMessages,
+      });
+      rows = built.rows;
+      renderableCount = built.renderableCount;
+    }
   } else {
     const built = buildMessageRowsWithMeta({
       sessionKey,

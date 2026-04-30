@@ -22,10 +22,10 @@ describe('chat row model', () => {
       role: 'assistant',
       text: 'a1',
     });
-    expect(rows[0]).not.toHaveProperty('thinking');
-    expect(rows[0]).not.toHaveProperty('toolUses');
-    expect(rows[0]).not.toHaveProperty('images');
-    expect(rows[0]).not.toHaveProperty('attachedFiles');
+    expect(rows[0]?.messageView.thinking).toBeNull();
+    expect(rows[0]?.messageView.toolUses).toEqual([]);
+    expect(rows[0]?.messageView.images).toEqual([]);
+    expect(rows[0]?.messageView.attachedFiles).toEqual([]);
   });
 
   it('keeps the same row key for one assistant entity from streaming to final commit', () => {

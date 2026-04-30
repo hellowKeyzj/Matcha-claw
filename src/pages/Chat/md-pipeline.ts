@@ -11,29 +11,10 @@ const MARKDOWN_PROCESS_METRIC_MIN_CHARS = 256;
 const MARKDOWN_PROCESS_METRIC_MIN_DURATION_MS = 2;
 const FILEHINT_HOST = 'matchaclaw.local';
 const FILEHINT_PATH_PREFIX = '/__filehint__/';
-export type MarkdownRenderMode = 'streaming' | 'settled';
 
 export interface MarkdownBodyRenderResult {
   fullHtml: string;
-  nodes: MarkdownRenderNode[];
 }
-
-export type MarkdownRenderNode =
-  | {
-      kind: 'html';
-      key: string;
-      html: string;
-    }
-  | {
-      kind: 'csv';
-      key: string;
-      csv: string;
-    }
-  | {
-      kind: 'markdown_table';
-      key: string;
-      rows: string[][];
-    };
 
 interface MarkdownBodyRenderCacheEntry {
   value: MarkdownBodyRenderResult;
@@ -49,16 +30,12 @@ export interface MarkdownRenderCacheStats {
   totalBytes: number;
 }
 
-function createMarkdownRenderer(mode: MarkdownRenderMode): MarkdownIt {
+function createMarkdownRenderer(): MarkdownIt {
   const renderer = new MarkdownIt({
     html: false,
     breaks: true,
     linkify: false,
   });
-
-  if (mode === 'streaming') {
-    renderer.disable(['table']);
-  }
 
   const defaultLinkOpenRenderer = renderer.renderer.rules.link_open
     ?? ((tokens: Token[], idx: number, options: any, _env: unknown, self: Renderer) => self.renderToken(tokens, idx, options));
@@ -79,8 +56,7 @@ function createMarkdownRenderer(mode: MarkdownRenderMode): MarkdownIt {
   return renderer;
 }
 
-const settledMd = createMarkdownRenderer('settled');
-const streamingMd = createMarkdownRenderer('streaming');
+const markdownRenderer = createMarkdownRenderer();
 
 function nowMonotonicMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
@@ -196,7 +172,7 @@ export function getMarkdownRenderCacheStats(): MarkdownRenderCacheStats {
 function rememberRenderedMarkdown(cacheKey: string, value: MarkdownBodyRenderResult): void {
   const now = Date.now();
   pruneMarkdownRenderCache(now);
-  const bytes = (value.fullHtml.length * 2) + (JSON.stringify(value.nodes).length * 2) + 64;
+  const bytes = (value.fullHtml.length * 2) + 64;
   const previous = markdownBodyRenderCache.get(cacheKey);
   if (previous) {
     markdownBodyRenderCache.delete(cacheKey);
@@ -224,261 +200,8 @@ function rememberRenderedMarkdown(cacheKey: string, value: MarkdownBodyRenderRes
   }
 }
 
-function renderMarkdownHtml(markdown: string, mode: MarkdownRenderMode): string {
-  const renderer = mode === 'streaming' ? streamingMd : settledMd;
-  return renderer.render(rewriteFileHintHrefs(markdown));
-}
-
-const CSV_FENCE_RE = /```csv[^\n\r]*\r?\n([\s\S]*?)\r?\n```/gim;
-
-function parseCsvLine(line: string): string[] | null {
-  const columns: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    if (inQuotes) {
-      if (char === '"') {
-        if (line[index + 1] === '"') {
-          current += '"';
-          index += 1;
-        } else {
-          inQuotes = false;
-        }
-        continue;
-      }
-      current += char;
-      continue;
-    }
-
-    if (char === '"') {
-      inQuotes = true;
-      continue;
-    }
-    if (char === ',') {
-      columns.push(current);
-      current = '';
-      continue;
-    }
-    current += char;
-  }
-
-  if (inQuotes) {
-    return null;
-  }
-
-  columns.push(current);
-  return columns;
-}
-
-function looksLikePlainCsvLine(line: string, expectedColumns?: number): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (
-    trimmed.startsWith('```')
-    || trimmed.startsWith('|')
-    || trimmed.startsWith('>')
-    || /^#{1,6}\s/.test(trimmed)
-    || /^[-*+]\s/.test(trimmed)
-    || /^\d+\.\s/.test(trimmed)
-  ) {
-    return false;
-  }
-
-  const columns = parseCsvLine(trimmed);
-  if (!columns || columns.length < 3) {
-    return false;
-  }
-  if (typeof expectedColumns === 'number' && columns.length !== expectedColumns) {
-    return false;
-  }
-  return columns.some((column) => column.trim().length > 0);
-}
-
-function parseMarkdownTableRow(line: string): string[] | null {
-  const trimmed = line.trim();
-  if (!trimmed.includes('|')) {
-    return null;
-  }
-  const normalized = trimmed.replace(/^\|/, '').replace(/\|$/, '');
-  const columns = normalized.split('|').map((column) => column.trim().replace(/\\\|/g, '|'));
-  if (columns.length < 2) {
-    return null;
-  }
-  return columns;
-}
-
-function isMarkdownTableDividerLine(line: string, expectedColumns: number): boolean {
-  const columns = parseMarkdownTableRow(line);
-  if (!columns || columns.length !== expectedColumns) {
-    return false;
-  }
-  return columns.every((column) => /^:?-{3,}:?$/.test(column));
-}
-
-function looksLikeMarkdownTableHeaderLine(line: string): boolean {
-  const columns = parseMarkdownTableRow(line);
-  return Boolean(columns && columns.length >= 2 && columns.some((column) => column.length > 0));
-}
-
-function buildNodesFromPlainSegment(markdown: string, keyBase: number): MarkdownRenderNode[] {
-  const lines = markdown.split(/\r?\n/);
-  const nodes: MarkdownRenderNode[] = [];
-  const htmlBuffer: string[] = [];
-
-  const flushHtmlBuffer = (lineIndex: number) => {
-    const htmlChunk = htmlBuffer.join('\n');
-    htmlBuffer.length = 0;
-    if (!htmlChunk.trim()) {
-      return;
-    }
-    nodes.push({
-      kind: 'html',
-      key: `html:${keyBase}:${lineIndex}`,
-      html: renderMarkdownHtml(htmlChunk, 'settled'),
-    });
-  };
-
-  let lineIndex = 0;
-  while (lineIndex < lines.length) {
-    const line = lines[lineIndex];
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith('```')) {
-      const fenceStart = lineIndex;
-      htmlBuffer.push(line);
-      lineIndex += 1;
-      while (lineIndex < lines.length) {
-        htmlBuffer.push(lines[lineIndex]);
-        if (lines[lineIndex].trim().startsWith('```')) {
-          lineIndex += 1;
-          break;
-        }
-        lineIndex += 1;
-      }
-      void fenceStart;
-      continue;
-    }
-
-    if (
-      looksLikeMarkdownTableHeaderLine(line)
-      && lineIndex + 1 < lines.length
-    ) {
-      const headerColumns = parseMarkdownTableRow(line);
-      const expectedColumns = headerColumns?.length ?? 0;
-      if (expectedColumns >= 2 && isMarkdownTableDividerLine(lines[lineIndex + 1], expectedColumns)) {
-        const bodyRows: string[][] = [];
-        let nextLineIndex = lineIndex + 2;
-        while (nextLineIndex < lines.length) {
-          const currentRow = parseMarkdownTableRow(lines[nextLineIndex]);
-          if (!currentRow || currentRow.length !== expectedColumns) {
-            break;
-          }
-          bodyRows.push(currentRow);
-          nextLineIndex += 1;
-        }
-
-        if (bodyRows.length > 0) {
-          flushHtmlBuffer(lineIndex);
-          nodes.push({
-            kind: 'markdown_table',
-            key: `markdown-table:${keyBase}:${lineIndex}`,
-            rows: [headerColumns!, ...bodyRows],
-          });
-          lineIndex = nextLineIndex;
-          continue;
-        }
-      }
-    }
-
-    if (!looksLikePlainCsvLine(line)) {
-      htmlBuffer.push(line);
-      lineIndex += 1;
-      continue;
-    }
-
-    const firstColumns = parseCsvLine(trimmed);
-    const expectedColumns = firstColumns?.length;
-    if (!expectedColumns || expectedColumns < 3) {
-      htmlBuffer.push(line);
-      lineIndex += 1;
-      continue;
-    }
-
-    const csvLines: string[] = [trimmed];
-    let nextLineIndex = lineIndex + 1;
-    while (nextLineIndex < lines.length && looksLikePlainCsvLine(lines[nextLineIndex], expectedColumns)) {
-      csvLines.push(lines[nextLineIndex].trim());
-      nextLineIndex += 1;
-    }
-
-    if (csvLines.length < 3) {
-      htmlBuffer.push(line);
-      lineIndex += 1;
-      continue;
-    }
-
-    flushHtmlBuffer(lineIndex);
-    nodes.push({
-      kind: 'csv',
-      key: `csv:${keyBase}:${lineIndex}`,
-      csv: csvLines.join('\n'),
-    });
-    lineIndex = nextLineIndex;
-  }
-
-  flushHtmlBuffer(lines.length);
-  return nodes;
-}
-
-function buildMarkdownRenderNodes(markdown: string): MarkdownRenderNode[] {
-  const nodes: MarkdownRenderNode[] = [];
-  let lastIndex = 0;
-
-  for (const match of markdown.matchAll(CSV_FENCE_RE)) {
-    const matchIndex = typeof match.index === 'number' ? match.index : -1;
-    if (matchIndex < 0) {
-      continue;
-    }
-
-    const htmlChunk = markdown.slice(lastIndex, matchIndex);
-    if (htmlChunk.trim().length > 0) {
-      nodes.push(...buildNodesFromPlainSegment(htmlChunk, lastIndex));
-    }
-
-    nodes.push({
-      kind: 'csv',
-      key: `csv:${matchIndex}`,
-      csv: match[1] ?? '',
-    });
-    lastIndex = matchIndex + match[0].length;
-  }
-
-  const trailingHtmlChunk = markdown.slice(lastIndex);
-  if (trailingHtmlChunk.trim().length > 0) {
-    nodes.push(...buildNodesFromPlainSegment(trailingHtmlChunk, lastIndex));
-  }
-
-  if (nodes.length === 0) {
-    return [{
-      kind: 'html',
-      key: 'html:0',
-      html: renderMarkdownHtml(markdown, 'settled'),
-    }];
-  }
-
-  return nodes;
-}
-
-function buildStreamingRenderNodes(markdown: string): MarkdownRenderNode[] {
-  return [{
-    kind: 'html',
-    key: 'html:0',
-    html: renderMarkdownHtml(markdown, 'streaming'),
-  }];
+function renderMarkdownHtml(markdown: string): string {
+  return markdownRenderer.render(rewriteFileHintHrefs(markdown));
 }
 
 function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
@@ -497,7 +220,7 @@ function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
 
 export function getOrBuildMarkdownBody(
   cacheKey: string,
-  input: { markdown: string; mode?: MarkdownRenderMode },
+  input: { markdown: string },
 ): MarkdownBodyRenderResult {
   const cached = getRenderedMarkdownFromCache(cacheKey);
   if (cached) {
@@ -505,12 +228,8 @@ export function getOrBuildMarkdownBody(
   }
 
   const startedAt = nowMonotonicMs();
-  const renderMode = input.mode ?? 'settled';
   const next = {
-    fullHtml: renderMarkdownHtml(input.markdown, renderMode),
-    nodes: renderMode === 'streaming'
-      ? buildStreamingRenderNodes(input.markdown)
-      : buildMarkdownRenderNodes(input.markdown),
+    fullHtml: renderMarkdownHtml(input.markdown),
   } satisfies MarkdownBodyRenderResult;
   rememberRenderedMarkdown(cacheKey, next);
   trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt));
@@ -519,7 +238,7 @@ export function getOrBuildMarkdownBody(
 
 export function prewarmMarkdownBody(
   cacheKey: string,
-  input: { markdown: string; mode?: MarkdownRenderMode },
+  input: { markdown: string },
 ): MarkdownBodyRenderResult {
   return getOrBuildMarkdownBody(cacheKey, input);
 }

@@ -1,4 +1,5 @@
 import {
+  resolveSessionLabelFromMessages,
   extractUserMessageClientId,
   createIntermediateToolTurnSnapshot,
   hasAssistantToolCall,
@@ -10,9 +11,11 @@ import { reduceSessionRuntime } from './runtime-state-reducer';
 import { upsertToolStatuses } from './event-helpers';
 import {
   buildTranscriptBackedViewportState,
+  getSessionMeta,
   getSessionMessages,
   getSessionRuntime,
   patchSessionRecord,
+  toMs,
 } from './store-state-helpers';
 import type {
   AttachedFileMeta,
@@ -307,36 +310,32 @@ export function buildFinalMessageCommitPatch(
     ? duplicateMessageIndexById
     : assistantSemanticDuplicateIndex;
 
-  if (existingMessageIndex >= 0) {
-    const mergedMessages = [...messagesWithCommittedUser];
-    mergedMessages[existingMessageIndex] = mergeCommittedMessage(
-      messagesWithCommittedUser[existingMessageIndex]!,
-      messageWithImages,
-    );
-    return {
-      ...buildTranscriptViewportPatch(state, sessionKey, mergedMessages, nextRuntime),
-    };
-  }
+  const nextMessages = existingMessageIndex >= 0
+    ? messagesWithCommittedUser.map((message, index) => (
+        index === existingMessageIndex
+          ? mergeCommittedMessage(message, messageWithImages)
+          : message
+      ))
+    : [...messagesWithCommittedUser, messageWithImages];
 
-  if (messageWithImages.role === 'user' && pendingUserMessage && matchesPendingUserMessage(pendingUserMessage, messageWithImages)) {
-    const mergedPendingUser = mergePendingUserMessage(pendingUserMessage, messageWithImages);
-    return {
-      ...buildTranscriptViewportPatch(
-        state,
-        sessionKey,
-        [...messages, mergedPendingUser],
-        { ...nextRuntime, pendingUserMessage: null },
-      ),
-    };
-  }
+  const currentMeta = getSessionMeta(state, sessionKey);
+  const nextLabel = sessionKey.endsWith(':main')
+    ? currentMeta.label
+    : (resolveSessionLabelFromMessages(nextMessages) ?? currentMeta.label);
+  const nextLastActivityAt = typeof finalMessage.timestamp === 'number'
+    ? toMs(finalMessage.timestamp)
+    : currentMeta.lastActivityAt;
 
   return {
-    ...buildTranscriptViewportPatch(
-      state,
-      sessionKey,
-      [...messagesWithCommittedUser, messageWithImages],
-      nextRuntime,
-    ),
+    loadedSessions: patchSessionRecord(state, sessionKey, {
+      meta: {
+        ...currentMeta,
+        label: nextLabel,
+        lastActivityAt: nextLastActivityAt,
+      },
+      runtime: nextRuntime,
+      window: buildTranscriptBackedViewportState(state, sessionKey, nextMessages, nextRuntime),
+    }),
   };
 }
 

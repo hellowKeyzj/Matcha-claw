@@ -5,7 +5,6 @@ import {
   peekRenderedMarkdownBody,
   prewarmMarkdownBody,
   type MarkdownBodyRenderResult,
-  type MarkdownRenderMode,
 } from '@/pages/Chat/md-pipeline';
 import { extractText } from '@/pages/Chat/message-utils';
 import {
@@ -25,7 +24,6 @@ export function getMessageAttachedFiles(message: RawMessage): AttachedFileMeta[]
 
 export function buildAssistantMarkdownCacheKey(
   message: RawMessage,
-  mode: MarkdownRenderMode,
 ): string {
   const text = extractText(message);
   const attachedFiles = getMessageAttachedFiles(message);
@@ -36,12 +34,11 @@ export function buildAssistantMarkdownCacheKey(
     text,
     attachedFiles,
   });
-  return `${baseCacheKey}|${mode}`;
+  return baseCacheKey;
 }
 
 function buildAssistantMarkdownBodyInput(
   message: RawMessage,
-  mode: MarkdownRenderMode,
 ): PreparedAssistantMarkdownBodyInput {
   const text = extractText(message);
   const attachedFiles = getMessageAttachedFiles(message);
@@ -52,62 +49,56 @@ function buildAssistantMarkdownBodyInput(
   );
 
   return {
-    cacheKey: buildAssistantMarkdownCacheKey(message, mode),
+    cacheKey: buildAssistantMarkdownCacheKey(message),
     markdown,
   };
 }
 
 export function peekAssistantMarkdownBody(
   message: RawMessage,
-  mode: MarkdownRenderMode,
 ): MarkdownBodyRenderResult | undefined {
-  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(message, mode));
+  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(message));
 }
 
 export function prewarmAssistantMarkdownBody(
   message: RawMessage,
-  mode: MarkdownRenderMode,
 ): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(message, mode);
+  const cached = peekAssistantMarkdownBody(message);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(message, mode);
+  const input = buildAssistantMarkdownBodyInput(message);
   if (!input.markdown.trim()) {
     return undefined;
   }
   return prewarmMarkdownBody(input.cacheKey, {
     markdown: input.markdown,
-    mode,
   });
 }
 
 export function prewarmAssistantMarkdownBodies(
   messages: RawMessage[],
-  mode: MarkdownRenderMode,
 ): void {
   for (const message of messages) {
     if (message.role !== 'assistant') {
       continue;
     }
-    prewarmAssistantMarkdownBody(message, mode);
+    prewarmAssistantMarkdownBody(message);
   }
 }
 
 export function getOrBuildAssistantMarkdownBody(
   message: RawMessage,
-  mode: MarkdownRenderMode,
 ): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(message, mode);
+  const cached = peekAssistantMarkdownBody(message);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(message, mode);
+  const input = buildAssistantMarkdownBodyInput(message);
   if (!input.markdown.trim()) {
     return undefined;
   }
   return getOrBuildMarkdownBody(input.cacheKey, {
     markdown: input.markdown,
-    mode,
   });
 }

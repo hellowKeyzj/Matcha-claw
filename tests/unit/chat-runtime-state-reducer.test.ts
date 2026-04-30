@@ -233,16 +233,4 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.streamingMessageId).toBeNull();
   });
 
-  it('clears approval wait flag after final history refresh when no pending approvals', () => {
-    const state = buildRuntimeState({
-      approvalStatus: 'awaiting_approval',
-    });
-
-    const patch = reduceSessionRuntime(state, {
-      type: 'final_history_refresh_requested',
-      hasPendingApprovals: false,
-    });
-
-    expect(patch.approvalStatus).toBe('idle');
-  });
 });

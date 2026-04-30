@@ -17,7 +17,6 @@ import {
 import { trackUiTiming } from '@/lib/telemetry';
 import {
   finishChatRunTelemetry,
-  maybeTrackFinalToHistoryVisible,
 } from './telemetry';
 import { clearHistoryPoll } from './timers';
 import {
@@ -330,14 +329,10 @@ export function createApplyLoadedMessagesPipeline(
         changed: didMessageListChange,
       });
       historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
-      prewarmAssistantMarkdownBodies(viewportMessages, 'settled');
+      prewarmAssistantMarkdownBodies(viewportMessages);
       prewarmStaticRowsForMessages(requestedSessionKey, viewportMessages);
 
       if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
-        maybeTrackFinalToHistoryVisible(requestedSessionKey, {
-          rowCount: viewportMessages.length,
-          changed: didMessageListChange,
-        });
         finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
         clearHistoryPoll();
       }
