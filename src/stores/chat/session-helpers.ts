@@ -1,18 +1,16 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
 import {
   getSessionMeta,
+  getSessionMessages,
   getSessionRecord,
   getSessionRuntime,
   toMs,
 } from './store-state-helpers';
 
 export function readSessionsFromState(
-  state: Pick<ChatStoreState, 'sessionsResource'> & { sessions?: ChatSession[] },
+  state: Pick<ChatStoreState, 'sessionMetasResource'>,
 ): ChatSession[] {
-  if (Array.isArray(state.sessionsResource.data)) {
-    return state.sessionsResource.data;
-  }
-  return Array.isArray(state.sessions) ? state.sessions : [];
+  return Array.isArray(state.sessionMetasResource.data) ? state.sessionMetasResource.data : [];
 }
 
 export function resolveSessionThinkingLevelFromList(
@@ -64,7 +62,7 @@ export function normalizeTaskInboxSessionKey(sessionKey: string | undefined, fal
 }
 
 export function buildTaskInboxBridgeState(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   defaultSessionKey: string,
 ): TaskInboxChatBridgeState {
   const sessionKey = normalizeTaskInboxSessionKey(state.currentSessionKey, defaultSessionKey);
@@ -87,9 +85,9 @@ export function parseSessionTimestampMs(sessionKey: string): number | null {
 
 export function resolveSessionActivityMs(
   session: ChatSession,
-  sessionsByKey: ChatStoreState['sessionsByKey'],
+  loadedSessions: ChatStoreState['loadedSessions'],
 ): number {
-  const fromStore = getSessionMeta({ sessionsByKey }, session.key).lastActivityAt;
+  const fromStore = getSessionMeta({ loadedSessions }, session.key).lastActivityAt;
   if (typeof fromStore === 'number' && Number.isFinite(fromStore)) {
     return fromStore;
   }
@@ -102,7 +100,7 @@ export function resolveSessionActivityMs(
 export function resolvePreferredSessionKeyForAgent(
   agentId: string,
   sessions: ChatSession[],
-  sessionsByKey: ChatStoreState['sessionsByKey'],
+  loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
   const canonicalKey = `agent:${agentId}:main`;
   const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
@@ -113,8 +111,8 @@ export function resolvePreferredSessionKeyForAgent(
     return canonicalKey;
   }
   const sorted = [...owned].sort((left, right) => {
-    const leftActivity = resolveSessionActivityMs(left, sessionsByKey);
-    const rightActivity = resolveSessionActivityMs(right, sessionsByKey);
+    const leftActivity = resolveSessionActivityMs(left, loadedSessions);
+    const rightActivity = resolveSessionActivityMs(right, loadedSessions);
     if (leftActivity !== rightActivity) {
       return rightActivity - leftActivity;
     }
@@ -125,7 +123,7 @@ export function resolvePreferredSessionKeyForAgent(
 
 export function shouldKeepMissingCurrentSession(
   sessionKey: string,
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   backendSessionCount: number,
 ): boolean {
   if (!sessionKey) {
@@ -135,15 +133,15 @@ export function shouldKeepMissingCurrentSession(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
-  const hasMessages = record.transcript.length > 0;
+  const hasMessages = record.window.messages.length > 0;
   const hasLabel = Boolean(record.meta.label);
   const hasActivity = Boolean(record.meta.lastActivityAt);
-  const hasRuntime = Object.prototype.hasOwnProperty.call(state.sessionsByKey, sessionKey);
+  const hasRuntime = Object.prototype.hasOwnProperty.call(state.loadedSessions, sessionKey);
   if (!sessionKey.endsWith(':main')) {
     // Keep only local draft sessions (created but still truly empty).
     return !hasMessages && !hasLabel && !hasActivity && hasRuntime;
   }
-  return hasMessages || hasLabel || hasActivity || hasRuntime;
+  return hasMessages || hasLabel || hasActivity;
 }
 
 export function parseSessionUpdatedAtMs(value: unknown): number | undefined {
@@ -161,11 +159,13 @@ export function parseSessionUpdatedAtMs(value: unknown): number | undefined {
 
 export function isTrulyEmptyNonMainSession(
   currentSessionKey: string,
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
 ): boolean {
+  const messages = getSessionMessages(state, currentSessionKey);
   const record = getSessionRecord(state, currentSessionKey);
   return !currentSessionKey.endsWith(':main')
-    && record.transcript.length === 0
+    && messages.length === 0
     && !record.meta.lastActivityAt
     && !record.meta.label;
 }
+

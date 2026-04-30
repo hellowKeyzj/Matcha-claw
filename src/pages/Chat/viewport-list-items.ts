@@ -31,7 +31,6 @@ interface UseViewportListItemsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   sessionPipelineCostRef: MutableRefObject<SessionPipelineCost>;
 }
@@ -192,7 +191,6 @@ export function useViewportListItems(input: UseViewportListItemsInput): {
     pendingFinal,
     waitingApproval,
     showThinking,
-    streamingMessage,
     streamingTools,
     sessionPipelineCostRef,
   } = input;
@@ -234,7 +232,6 @@ export function useViewportListItems(input: UseViewportListItemsInput): {
     pendingFinal,
     waitingApproval,
     showThinking,
-    streamingMessage,
     streamingTools,
   });
 

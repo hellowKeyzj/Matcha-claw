@@ -4,10 +4,7 @@ import { markChatScrollActivity } from './chat-scroll-drain';
 interface UseChatScrollInput {
   enabled: boolean;
   scrollScopeKey: string;
-  scrollActivationKey: string;
-  scrollResetKey: string;
   autoFollowSignal: string;
-  scopeRestorePending: boolean;
   tailActivityOpen: boolean;
   viewportRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
@@ -20,6 +17,8 @@ type ScopeTransitionMode = 'restore-anchor' | 'force-bottom';
 const WHEEL_INTENT_WINDOW_MS = 220;
 const INITIAL_ALIGN_RETRY_MS = 150;
 const TAIL_SETTLE_IDLE_MS = 220;
+const FOLLOW_PULSE_FRAMES_IDLE = 2;
+const FOLLOW_PULSE_FRAMES_TAIL = 6;
 
 interface ChatViewportMetrics {
   scrollHeight: number;
@@ -45,9 +44,16 @@ interface PendingScopeTransition {
   anchor?: ViewportAnchor;
 }
 
-interface PendingAnchorRestore extends PendingScopeTransition {
-  mode: 'restore-anchor';
-  anchor: ViewportAnchor;
+interface FollowSnapshot {
+  viewportHeight: number | null;
+  viewportWidth: number | null;
+  scrollHeight: number | null;
+  tailMetrics: TailMessageMetrics | null;
+}
+
+interface FollowPulseController {
+  frameId: number | null;
+  framesRemaining: number;
 }
 
 export function isChatViewportNearBottom(
@@ -69,10 +75,6 @@ function isBottomLockedPhase(phase: ScrollPhase): boolean {
   return phase === 'initial' || phase === 'following';
 }
 
-function isLiveScrollScope(scopeKey: string): boolean {
-  return scopeKey.endsWith('::live');
-}
-
 function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetrics | null {
   if (!viewport) {
     return null;
@@ -85,11 +87,14 @@ function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetri
   };
 }
 
-function hasRenderableChatRows(content: HTMLDivElement | null): boolean {
-  if (!content) {
-    return false;
+function hasRenderableChatRows(
+  content: HTMLDivElement | null,
+  viewport: HTMLDivElement | null,
+): boolean {
+  if (content?.querySelector('[data-chat-row-key]') != null) {
+    return true;
   }
-  return content.querySelector('[data-chat-row-key]') != null;
+  return viewport?.querySelector('[data-chat-row-key]') != null;
 }
 
 function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor | null {
@@ -149,51 +154,81 @@ function hasTailResizeDelta(
 export function useChatScroll({
   enabled,
   scrollScopeKey,
-  scrollActivationKey,
-  scrollResetKey,
   autoFollowSignal,
-  scopeRestorePending,
   tailActivityOpen,
   viewportRef,
   contentRef,
   stickyBottomThresholdPx,
 }: UseChatScrollInput) {
   const [isBottomLocked, setIsBottomLocked] = useState(true);
-  const isBottomLockedRef = useRef(true);
-  const lastScrollActivationKeyRef = useRef(scrollActivationKey);
-  const lastScrollScopeKeyRef = useRef(scrollScopeKey);
-  const lastScrollResetKeyRef = useRef(scrollResetKey);
-  const programmaticScrollRef = useRef(false);
-  const lastUserScrollTopRef = useRef<number | null>(null);
-  const pointerScrollActiveRef = useRef(false);
-  const touchScrollActiveRef = useRef(false);
-  const wheelIntentUntilRef = useRef(0);
-  const initialAlignFrameRef = useRef<number | null>(null);
-  const initialAlignRetryTimerRef = useRef<number | null>(null);
-  const anchorRestoreFrameRef = useRef<number | null>(null);
-  const scrollPhaseBySessionRef = useRef<Map<string, ScrollPhase>>(
+  const lastScopeKeyRef = useRef(scrollScopeKey);
+  const scrollPhaseByScopeRef = useRef<Map<string, ScrollPhase>>(
     new Map([[scrollScopeKey, 'initial']]),
   );
   const pendingScopeTransitionRef = useRef<PendingScopeTransition | null>(null);
   const detachedViewportAnchorRef = useRef<ViewportAnchor | null>(null);
-  const lastFollowViewportHeightRef = useRef<number | null>(null);
-  const lastFollowViewportWidthRef = useRef<number | null>(null);
-  const lastFollowScrollHeightRef = useRef<number | null>(null);
-  const lastFollowTailMetricsRef = useRef<TailMessageMetrics | null>(null);
-  const tailSettleTimerRef = useRef<number | null>(null);
-  const tailSettlePendingRef = useRef(false);
-  const tailActivityOpenRef = useRef(tailActivityOpen);
-
-  const setBottomLocked = useCallback((next: boolean) => {
-    isBottomLockedRef.current = next;
-    setIsBottomLocked(next);
-  }, []);
+  const followSnapshotRef = useRef<FollowSnapshot>({
+    viewportHeight: null,
+    viewportWidth: null,
+    scrollHeight: null,
+    tailMetrics: null,
+  });
+  const followPulseRef = useRef<FollowPulseController>({
+    frameId: null,
+    framesRemaining: 0,
+  });
+  const programmaticScrollRef = useRef(false);
+  const pointerScrollActiveRef = useRef(false);
+  const touchScrollActiveRef = useRef(false);
+  const wheelIntentUntilRef = useRef(0);
+  const tailFollowUntilRef = useRef(0);
+  const tailFollowTimerRef = useRef<number | null>(null);
+  const previousTailActivityOpenRef = useRef(tailActivityOpen);
+  const initialAlignFrameRef = useRef<number | null>(null);
+  const initialAlignRetryTimerRef = useRef<number | null>(null);
+  const anchorRestoreFrameRef = useRef<number | null>(null);
 
   const nowMs = useCallback(() => {
     if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
       return performance.now();
     }
     return Date.now();
+  }, []);
+
+  const readScrollPhase = useCallback((scopeKey: string): ScrollPhase => {
+    return scrollPhaseByScopeRef.current.get(scopeKey) ?? 'initial';
+  }, []);
+
+  const setScrollPhase = useCallback((scopeKey: string, nextPhase: ScrollPhase) => {
+    scrollPhaseByScopeRef.current.set(scopeKey, nextPhase);
+    if (scopeKey === scrollScopeKey) {
+      setIsBottomLocked(isBottomLockedPhase(nextPhase));
+      if (nextPhase !== 'detached') {
+        detachedViewportAnchorRef.current = null;
+      }
+    }
+  }, [scrollScopeKey]);
+
+  const readPendingAnchorRestore = useCallback((scopeKey: string): ViewportAnchor | null => {
+    const pending = pendingScopeTransitionRef.current;
+    if (
+      !pending
+      || pending.targetScopeKey !== scopeKey
+      || pending.mode !== 'restore-anchor'
+      || !pending.anchor
+    ) {
+      return null;
+    }
+    return pending.anchor;
+  }, []);
+
+  const clearFollowPulse = useCallback(() => {
+    const pulse = followPulseRef.current;
+    if (pulse.frameId != null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(pulse.frameId);
+    }
+    pulse.frameId = null;
+    pulse.framesRemaining = 0;
   }, []);
 
   const clearInitialAlignSchedule = useCallback(() => {
@@ -210,71 +245,47 @@ export function useChatScroll({
   }, []);
 
   const clearAnchorRestoreSchedule = useCallback(() => {
-    if (typeof window !== 'undefined') {
-      if (anchorRestoreFrameRef.current != null && typeof window.cancelAnimationFrame === 'function') {
-        window.cancelAnimationFrame(anchorRestoreFrameRef.current);
-      }
+    if (typeof window !== 'undefined' && anchorRestoreFrameRef.current != null && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(anchorRestoreFrameRef.current);
     }
     anchorRestoreFrameRef.current = null;
   }, []);
 
-  const clearTailSettleTask = useCallback(() => {
-    tailSettlePendingRef.current = false;
-    if (tailSettleTimerRef.current == null || typeof window === 'undefined') {
+  const clearTailFollowWindow = useCallback(() => {
+    tailFollowUntilRef.current = 0;
+    if (tailFollowTimerRef.current == null || typeof window === 'undefined') {
       return;
     }
-    window.clearTimeout(tailSettleTimerRef.current);
-    tailSettleTimerRef.current = null;
+    window.clearTimeout(tailFollowTimerRef.current);
+    tailFollowTimerRef.current = null;
   }, []);
 
-  const armTailSettleTask = useCallback(() => {
-    tailSettlePendingRef.current = true;
+  const armTailFollowWindow = useCallback(() => {
+    tailFollowUntilRef.current = nowMs() + TAIL_SETTLE_IDLE_MS;
     if (typeof window === 'undefined') {
       return;
     }
-    if (tailSettleTimerRef.current != null) {
-      window.clearTimeout(tailSettleTimerRef.current);
+    if (tailFollowTimerRef.current != null) {
+      window.clearTimeout(tailFollowTimerRef.current);
     }
-    tailSettleTimerRef.current = window.setTimeout(() => {
-      tailSettleTimerRef.current = null;
-      tailSettlePendingRef.current = false;
+    tailFollowTimerRef.current = window.setTimeout(() => {
+      tailFollowUntilRef.current = 0;
+      tailFollowTimerRef.current = null;
     }, TAIL_SETTLE_IDLE_MS);
-  }, []);
+  }, [nowMs]);
 
-  const readScrollPhase = useCallback((sessionKey: string): ScrollPhase => {
-    return scrollPhaseBySessionRef.current.get(sessionKey) ?? 'initial';
-  }, []);
-
-  const readPendingAnchorRestore = useCallback((scopeKey: string): PendingAnchorRestore | null => {
-    const pending = pendingScopeTransitionRef.current;
-    if (
-      !pending
-      || pending.targetScopeKey !== scopeKey
-      || pending.mode !== 'restore-anchor'
-      || !pending.anchor
-    ) {
-      return null;
-    }
-    return pending as PendingAnchorRestore;
-  }, []);
+  const hasTailFollowWork = useCallback(() => {
+    return tailActivityOpen || tailFollowUntilRef.current > nowMs();
+  }, [nowMs, tailActivityOpen]);
 
   const cancelAnchorRestoreForScope = useCallback((scopeKey: string) => {
-    const pending = readPendingAnchorRestore(scopeKey);
-    if (!pending) {
+    const anchor = readPendingAnchorRestore(scopeKey);
+    if (!anchor) {
       return;
     }
     pendingScopeTransitionRef.current = null;
     clearAnchorRestoreSchedule();
   }, [clearAnchorRestoreSchedule, readPendingAnchorRestore]);
-
-  const clearDetachedViewportAnchor = useCallback(() => {
-    detachedViewportAnchorRef.current = null;
-  }, []);
-
-  const syncDetachedViewportAnchor = useCallback(() => {
-    detachedViewportAnchorRef.current = sampleViewportAnchor(viewportRef.current);
-    return detachedViewportAnchorRef.current;
-  }, [viewportRef]);
 
   const scheduleProgrammaticScrollCleanup = useCallback((onComplete?: () => void) => {
     const complete = () => {
@@ -288,60 +299,34 @@ export function useChatScroll({
     setTimeout(complete, 16);
   }, []);
 
-  const writeScrollPhase = useCallback((sessionKey: string, nextPhase: ScrollPhase) => {
-    scrollPhaseBySessionRef.current.set(sessionKey, nextPhase);
-    if (sessionKey === scrollScopeKey) {
-      setBottomLocked(isBottomLockedPhase(nextPhase));
-      if (nextPhase !== 'detached') {
-        clearDetachedViewportAnchor();
-      }
-    }
-  }, [clearDetachedViewportAnchor, scrollScopeKey, setBottomLocked]);
-
-  const markUserScrollActivity = useCallback(() => {
-    markChatScrollActivity();
-  }, []);
-
-  const markWheelIntent = useCallback(() => {
-    wheelIntentUntilRef.current = nowMs() + WHEEL_INTENT_WINDOW_MS;
-  }, [nowMs]);
-
-  const hasActiveUserScrollIntent = useCallback(() => {
-    if (pointerScrollActiveRef.current || touchScrollActiveRef.current) {
-      return true;
-    }
-    return wheelIntentUntilRef.current > nowMs();
-  }, [nowMs]);
-
   const scrollToBottom = useCallback(() => {
     if (!enabled) {
       return;
     }
     const viewport = viewportRef.current;
-    if (!viewport) {
-      return;
-    }
     const metrics = readViewportMetrics(viewport);
-    if (!metrics) {
+    if (!viewport || !metrics) {
       return;
     }
-    const nextScrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
     programmaticScrollRef.current = true;
-    viewport.scrollTop = nextScrollTop;
+    viewport.scrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
     scheduleProgrammaticScrollCleanup();
   }, [enabled, scheduleProgrammaticScrollCleanup, viewportRef]);
 
-  const syncFollowResizeSnapshot = useCallback(() => {
+  const syncFollowSnapshot = useCallback(() => {
     const viewport = viewportRef.current;
-    lastFollowViewportHeightRef.current = viewport?.clientHeight ?? null;
-    lastFollowViewportWidthRef.current = viewport?.clientWidth ?? null;
-    lastFollowScrollHeightRef.current = viewport?.scrollHeight ?? null;
-    lastFollowTailMetricsRef.current = sampleTailMessageMetrics(viewport);
+    followSnapshotRef.current = {
+      viewportHeight: viewport?.clientHeight ?? null,
+      viewportWidth: viewport?.clientWidth ?? null,
+      scrollHeight: viewport?.scrollHeight ?? null,
+      tailMetrics: sampleTailMessageMetrics(viewport),
+    };
   }, [viewportRef]);
 
-  const hasTailFollowWork = useCallback(() => (
-    tailActivityOpenRef.current || tailSettlePendingRef.current
-  ), []);
+  const syncDetachedViewportAnchor = useCallback(() => {
+    detachedViewportAnchorRef.current = sampleViewportAnchor(viewportRef.current);
+    return detachedViewportAnchorRef.current;
+  }, [viewportRef]);
 
   const restoreViewportAnchor = useCallback((anchor: ViewportAnchor) => {
     if (!enabled) {
@@ -380,57 +365,78 @@ export function useChatScroll({
     }
     const viewportRect = viewport.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    const delta = (targetRect.top - viewportRect.top) - anchor.offsetWithinViewport;
     programmaticScrollRef.current = true;
-    viewport.scrollTop += delta;
+    viewport.scrollTop += (targetRect.top - viewportRect.top) - anchor.offsetWithinViewport;
     scheduleProgrammaticScrollCleanup();
     return true;
   }, [enabled, scheduleProgrammaticScrollCleanup, viewportRef]);
 
-  const finishAnchorRestore = useCallback(() => {
-    const pending = readPendingAnchorRestore(scrollScopeKey);
-    if (!pending) {
+  const syncScrollContainerState = useCallback(() => {
+    const viewport = viewportRef.current;
+    const syncContainer = viewport?.closest<HTMLElement>('.chat-scroll-sync');
+    if (!syncContainer) {
       return;
     }
-    pendingScopeTransitionRef.current = null;
-    writeScrollPhase(scrollScopeKey, 'detached');
-    syncDetachedViewportAnchor();
-  }, [readPendingAnchorRestore, scrollScopeKey, syncDetachedViewportAnchor, writeScrollPhase]);
+    const phase = readScrollPhase(scrollScopeKey);
+    const metrics = readViewportMetrics(viewport);
+    syncContainer.dataset.chatScrollPhase = phase;
+    syncContainer.dataset.chatScrollLocked = isBottomLockedPhase(phase) ? 'true' : 'false';
+    syncContainer.dataset.chatScrollOverflow = (
+      metrics != null && metrics.scrollHeight > metrics.clientHeight
+    ) ? 'true' : 'false';
+    syncContainer.dataset.chatScrollScope = scrollScopeKey;
+  }, [readScrollPhase, scrollScopeKey, viewportRef]);
 
-  const scheduleInitialAlignRetry = useCallback(() => {
-    if (typeof window === 'undefined') {
-      return;
+  const markWheelIntent = useCallback(() => {
+    wheelIntentUntilRef.current = nowMs() + WHEEL_INTENT_WINDOW_MS;
+  }, [nowMs]);
+
+  const hasActiveUserScrollIntent = useCallback(() => {
+    if (pointerScrollActiveRef.current || touchScrollActiveRef.current) {
+      return true;
     }
-    if (initialAlignRetryTimerRef.current != null) {
-      window.clearTimeout(initialAlignRetryTimerRef.current);
-    }
-    initialAlignRetryTimerRef.current = window.setTimeout(() => {
-      initialAlignRetryTimerRef.current = null;
-      if (readScrollPhase(scrollScopeKey) !== 'following') {
-        return;
-      }
-      const metrics = readViewportMetrics(viewportRef.current);
-      if (!metrics) {
-        return;
-      }
-      if (!isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
-        scrollToBottom();
-      }
-      setBottomLocked(true);
-    }, INITIAL_ALIGN_RETRY_MS);
-  }, [readScrollPhase, scrollScopeKey, scrollToBottom, setBottomLocked, stickyBottomThresholdPx, viewportRef]);
+    return wheelIntentUntilRef.current > nowMs();
+  }, [nowMs]);
 
   const runInitialAlign = useCallback(() => {
     if (readScrollPhase(scrollScopeKey) !== 'initial') {
       return;
     }
-    if (!hasRenderableChatRows(contentRef.current)) {
+    if (!hasRenderableChatRows(contentRef.current, viewportRef.current)) {
       return;
     }
     scrollToBottom();
-    writeScrollPhase(scrollScopeKey, 'following');
-    scheduleInitialAlignRetry();
-  }, [contentRef, readScrollPhase, scheduleInitialAlignRetry, scrollScopeKey, scrollToBottom, writeScrollPhase]);
+    setScrollPhase(scrollScopeKey, 'following');
+    syncFollowSnapshot();
+    if (typeof window !== 'undefined') {
+      if (initialAlignRetryTimerRef.current != null) {
+        window.clearTimeout(initialAlignRetryTimerRef.current);
+      }
+      initialAlignRetryTimerRef.current = window.setTimeout(() => {
+        initialAlignRetryTimerRef.current = null;
+        if (readScrollPhase(scrollScopeKey) !== 'following') {
+          return;
+        }
+        const metrics = readViewportMetrics(viewportRef.current);
+        if (!metrics) {
+          return;
+        }
+        if (!isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
+          scrollToBottom();
+        }
+        setIsBottomLocked(true);
+      }, INITIAL_ALIGN_RETRY_MS);
+    }
+  }, [
+    contentRef,
+    readScrollPhase,
+    scrollScopeKey,
+    scrollToBottom,
+    setScrollPhase,
+    stickyBottomThresholdPx,
+    syncFollowSnapshot,
+    viewportRef,
+  ]);
 
   const scheduleInitialAlign = useCallback(() => {
     clearInitialAlignSchedule();
@@ -444,24 +450,29 @@ export function useChatScroll({
     runInitialAlign();
   }, [clearInitialAlignSchedule, runInitialAlign]);
 
+  const finishAnchorRestore = useCallback(() => {
+    pendingScopeTransitionRef.current = null;
+    setScrollPhase(scrollScopeKey, 'detached');
+    syncDetachedViewportAnchor();
+  }, [scrollScopeKey, setScrollPhase, syncDetachedViewportAnchor]);
+
   const runAnchorRestore = useCallback(() => {
-    if (readScrollPhase(scrollScopeKey) !== 'restoring') {
+    const anchor = readPendingAnchorRestore(scrollScopeKey);
+    if (!anchor || !hasRenderableChatRows(contentRef.current, viewportRef.current)) {
       return;
     }
-    const pending = readPendingAnchorRestore(scrollScopeKey);
-    if (!pending) {
+    if (!restoreViewportAnchor(anchor)) {
       return;
     }
-    if (!hasRenderableChatRows(contentRef.current)) {
-      return;
-    }
-    if (!restoreViewportAnchor(pending.anchor)) {
-      return;
-    }
-    if (!scopeRestorePending) {
-      finishAnchorRestore();
-    }
-  }, [contentRef, finishAnchorRestore, readPendingAnchorRestore, readScrollPhase, restoreViewportAnchor, scrollScopeKey, scopeRestorePending]);
+    finishAnchorRestore();
+  }, [
+    contentRef,
+    finishAnchorRestore,
+    readPendingAnchorRestore,
+    restoreViewportAnchor,
+    scrollScopeKey,
+    viewportRef,
+  ]);
 
   const scheduleAnchorRestore = useCallback(() => {
     clearAnchorRestoreSchedule();
@@ -475,208 +486,275 @@ export function useChatScroll({
     runAnchorRestore();
   }, [clearAnchorRestoreSchedule, runAnchorRestore]);
 
-  useLayoutEffect(() => {
-    const activationChanged = lastScrollActivationKeyRef.current !== scrollActivationKey;
-    lastScrollActivationKeyRef.current = scrollActivationKey;
+  const activatePendingTransitionForCurrentScope = useCallback(() => {
+    const pending = pendingScopeTransitionRef.current;
+    if (!pending || pending.targetScopeKey !== scrollScopeKey) {
+      return false;
+    }
+    if (pending.mode === 'restore-anchor' && pending.anchor) {
+      setScrollPhase(scrollScopeKey, 'restoring');
+      scheduleAnchorRestore();
+      return true;
+    }
+    pendingScopeTransitionRef.current = null;
+    setScrollPhase(scrollScopeKey, 'initial');
+    scheduleInitialAlign();
+    return true;
+  }, [scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, setScrollPhase]);
 
-    if (!enabled) {
+  const runFollowPulseStep = useCallback(() => {
+    if (activatePendingTransitionForCurrentScope()) {
       return;
     }
-    const scopeChanged = lastScrollScopeKeyRef.current !== scrollScopeKey;
-    const resetChanged = lastScrollResetKeyRef.current !== scrollResetKey;
-    if (!activationChanged && !scopeChanged && !resetChanged) {
-      return;
-    }
-    lastScrollScopeKeyRef.current = scrollScopeKey;
-    lastScrollResetKeyRef.current = scrollResetKey;
-    clearInitialAlignSchedule();
-    clearAnchorRestoreSchedule();
-    lastUserScrollTopRef.current = null;
-    pointerScrollActiveRef.current = false;
-    touchScrollActiveRef.current = false;
-    wheelIntentUntilRef.current = 0;
-    tailActivityOpenRef.current = tailActivityOpen;
-    clearTailSettleTask();
-    clearDetachedViewportAnchor();
-    lastFollowViewportHeightRef.current = null;
-    lastFollowViewportWidthRef.current = null;
-    lastFollowScrollHeightRef.current = null;
-    lastFollowTailMetricsRef.current = null;
-    const pendingTransition = pendingScopeTransitionRef.current;
-    if (resetChanged) {
-      pendingScopeTransitionRef.current = null;
-      writeScrollPhase(scrollScopeKey, 'initial');
-      scheduleInitialAlign();
-      return;
-    }
-    if (
-      (scopeChanged || activationChanged)
-      && pendingTransition
-      && pendingTransition.targetScopeKey === scrollScopeKey
-      && pendingTransition.mode === 'restore-anchor'
-      && pendingTransition.anchor
-    ) {
-      writeScrollPhase(scrollScopeKey, 'restoring');
+    const phase = readScrollPhase(scrollScopeKey);
+    if (phase === 'restoring') {
       scheduleAnchorRestore();
       return;
     }
-    if (
-      (scopeChanged || activationChanged)
-      && pendingTransition
-      && pendingTransition.targetScopeKey === scrollScopeKey
-      && pendingTransition.mode === 'force-bottom'
-    ) {
-      pendingScopeTransitionRef.current = null;
-      writeScrollPhase(scrollScopeKey, 'initial');
+    if (phase === 'initial') {
       scheduleInitialAlign();
       return;
     }
-    if (activationChanged && isLiveScrollScope(scrollScopeKey)) {
-      pendingScopeTransitionRef.current = null;
-      writeScrollPhase(scrollScopeKey, 'initial');
+    if (phase !== 'following') {
+      return;
+    }
+    scrollToBottom();
+    syncFollowSnapshot();
+  }, [
+    activatePendingTransitionForCurrentScope,
+    readScrollPhase,
+    scheduleAnchorRestore,
+    scheduleInitialAlign,
+    scrollScopeKey,
+    scrollToBottom,
+    syncFollowSnapshot,
+  ]);
+
+  const scheduleFollowPulse = useCallback((requestedFrames: number) => {
+    const pulse = followPulseRef.current;
+    pulse.framesRemaining = Math.max(pulse.framesRemaining, requestedFrames);
+    if (pulse.frameId != null) {
+      return;
+    }
+    const runFrame = () => {
+      pulse.frameId = null;
+      runFollowPulseStep();
+      if (
+        pulse.framesRemaining > 0
+        && typeof window !== 'undefined'
+        && typeof window.requestAnimationFrame === 'function'
+      ) {
+        pulse.framesRemaining -= 1;
+        pulse.frameId = window.requestAnimationFrame(runFrame);
+      } else {
+        pulse.framesRemaining = 0;
+      }
+    };
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      pulse.frameId = window.requestAnimationFrame(runFrame);
+      return;
+    }
+    runFrame();
+  }, [runFollowPulseStep]);
+
+  useLayoutEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    const scopeChanged = lastScopeKeyRef.current !== scrollScopeKey;
+    lastScopeKeyRef.current = scrollScopeKey;
+    if (!scopeChanged) {
+      return;
+    }
+    clearInitialAlignSchedule();
+    clearAnchorRestoreSchedule();
+    clearFollowPulse();
+    clearTailFollowWindow();
+    pointerScrollActiveRef.current = false;
+    touchScrollActiveRef.current = false;
+    wheelIntentUntilRef.current = 0;
+    followSnapshotRef.current = {
+      viewportHeight: null,
+      viewportWidth: null,
+      scrollHeight: null,
+      tailMetrics: null,
+    };
+
+    if (activatePendingTransitionForCurrentScope()) {
+      return;
+    }
+
+    if (!scrollPhaseByScopeRef.current.has(scrollScopeKey)) {
+      setScrollPhase(scrollScopeKey, 'initial');
       scheduleInitialAlign();
       return;
     }
-    const existingPhase = scrollPhaseBySessionRef.current.get(scrollScopeKey);
-    if (existingPhase == null) {
-      writeScrollPhase(scrollScopeKey, 'initial');
-      scheduleInitialAlign();
-      return;
-    }
-    setBottomLocked(isBottomLockedPhase(existingPhase));
+
+    const existingPhase = readScrollPhase(scrollScopeKey);
+    setIsBottomLocked(isBottomLockedPhase(existingPhase));
     if (existingPhase === 'initial') {
+      runInitialAlign();
+      if (readScrollPhase(scrollScopeKey) !== 'initial') {
+        return;
+      }
       scheduleInitialAlign();
     }
   }, [
-    clearInitialAlignSchedule,
+    activatePendingTransitionForCurrentScope,
     clearAnchorRestoreSchedule,
-    scheduleInitialAlign,
-    scheduleAnchorRestore,
-    clearTailSettleTask,
-    clearDetachedViewportAnchor,
+    clearFollowPulse,
+    clearInitialAlignSchedule,
+    clearTailFollowWindow,
     enabled,
-    scrollActivationKey,
-    scrollResetKey,
+    readScrollPhase,
+    runInitialAlign,
+    scheduleInitialAlign,
     scrollScopeKey,
-    setBottomLocked,
-    tailActivityOpen,
-    writeScrollPhase,
+    setScrollPhase,
   ]);
 
   useLayoutEffect(() => {
     if (!enabled) {
       return;
     }
-    const previousTailActivityOpen = tailActivityOpenRef.current;
-    tailActivityOpenRef.current = tailActivityOpen;
+    const previousTailActivityOpen = previousTailActivityOpenRef.current;
+    previousTailActivityOpenRef.current = tailActivityOpen;
 
     if (readScrollPhase(scrollScopeKey) !== 'following') {
       if (tailActivityOpen) {
-        clearTailSettleTask();
+        clearTailFollowWindow();
       }
       return;
     }
 
     if (tailActivityOpen) {
-      clearTailSettleTask();
-      scrollToBottom();
-      syncFollowResizeSnapshot();
+      clearTailFollowWindow();
+      scheduleFollowPulse(FOLLOW_PULSE_FRAMES_IDLE);
       return;
     }
 
     if (previousTailActivityOpen) {
-      armTailSettleTask();
+      armTailFollowWindow();
+      scheduleFollowPulse(FOLLOW_PULSE_FRAMES_TAIL);
     }
   }, [
-    armTailSettleTask,
-    clearTailSettleTask,
-    readScrollPhase,
-    scrollScopeKey,
-    scrollToBottom,
-    syncFollowResizeSnapshot,
+    armTailFollowWindow,
+    clearTailFollowWindow,
     enabled,
+    readScrollPhase,
+    scheduleFollowPulse,
+    scrollScopeKey,
     tailActivityOpen,
   ]);
 
-  const viewportElement = viewportRef.current;
-  const contentElement = contentRef.current;
-
   useLayoutEffect(() => {
     if (!enabled) {
       return;
     }
-    const pendingTransition = pendingScopeTransitionRef.current;
-    if (
-      pendingTransition
-      && pendingTransition.targetScopeKey === scrollScopeKey
-      && pendingTransition.mode === 'restore-anchor'
-    ) {
+    if (activatePendingTransitionForCurrentScope()) {
+      return;
+    }
+    const phase = readScrollPhase(scrollScopeKey);
+    if (phase === 'restoring') {
       scheduleAnchorRestore();
       return;
     }
-    if (readScrollPhase(scrollScopeKey) !== 'initial') {
+    if (phase === 'initial') {
+      runInitialAlign();
+      if (readScrollPhase(scrollScopeKey) !== 'initial') {
+        return;
+      }
+      scheduleInitialAlign();
       return;
     }
-    scheduleInitialAlign();
-  }, [contentElement, enabled, readScrollPhase, scheduleAnchorRestore, scheduleInitialAlign, scrollScopeKey, viewportElement]);
+    if (phase === 'following') {
+      scheduleFollowPulse(hasTailFollowWork() ? FOLLOW_PULSE_FRAMES_TAIL : FOLLOW_PULSE_FRAMES_IDLE);
+    }
+  }, [
+    activatePendingTransitionForCurrentScope,
+    autoFollowSignal,
+    enabled,
+    hasTailFollowWork,
+    readScrollPhase,
+    scheduleAnchorRestore,
+    scheduleFollowPulse,
+    scheduleInitialAlign,
+    runInitialAlign,
+    scrollScopeKey,
+  ]);
 
   useLayoutEffect(() => {
-    if (!enabled || scopeRestorePending) {
+    if (!enabled || !hasRenderableChatRows(contentRef.current, viewportRef.current)) {
       return;
     }
-    if (readScrollPhase(scrollScopeKey) !== 'restoring') {
+    const phase = readScrollPhase(scrollScopeKey);
+    if (phase === 'initial') {
+      runInitialAlign();
       return;
     }
-    if (!readPendingAnchorRestore(scrollScopeKey)) {
-      return;
+    if (phase === 'restoring') {
+      scheduleAnchorRestore();
     }
-    scheduleAnchorRestore();
-  }, [enabled, readPendingAnchorRestore, readScrollPhase, scheduleAnchorRestore, scrollScopeKey, scopeRestorePending]);
+  });
 
   useLayoutEffect(() => {
     if (!enabled) {
       return;
     }
-    if (readScrollPhase(scrollScopeKey) !== 'following') {
-      return;
-    }
-    scrollToBottom();
-    syncFollowResizeSnapshot();
-    if (!tailActivityOpenRef.current) {
-      armTailSettleTask();
-    }
-  }, [armTailSettleTask, autoFollowSignal, enabled, readScrollPhase, scrollScopeKey, scrollToBottom, syncFollowResizeSnapshot]);
+    syncScrollContainerState();
+  }, [autoFollowSignal, enabled, isBottomLocked, scrollScopeKey, syncScrollContainerState, tailActivityOpen]);
 
   useLayoutEffect(() => {
     if (!enabled) {
       return;
     }
-    syncFollowResizeSnapshot();
-  }, [contentElement, enabled, scrollScopeKey, syncFollowResizeSnapshot, viewportElement]);
+    syncFollowSnapshot();
+  }, [contentRef.current, enabled, scrollScopeKey, syncFollowSnapshot, viewportRef.current]);
+
+  useLayoutEffect(() => {
+    if (!enabled || !isBottomLocked) {
+      return;
+    }
+    const content = contentRef.current;
+    if (!content || typeof MutationObserver !== 'function') {
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      scheduleFollowPulse(hasTailFollowWork() ? FOLLOW_PULSE_FRAMES_TAIL : FOLLOW_PULSE_FRAMES_IDLE);
+    });
+    observer.observe(content, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => {
+      observer.disconnect();
+    };
+  }, [contentRef, enabled, hasTailFollowWork, isBottomLocked, scheduleFollowPulse]);
 
   useLayoutEffect(() => {
     if (!enabled) {
       return;
     }
-    const viewport = viewportElement;
-    const content = contentElement;
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
     if (typeof ResizeObserver !== 'function' || (!viewport && !content)) {
       return;
     }
     const observer = new ResizeObserver(() => {
-      const pendingTransition = readPendingAnchorRestore(scrollScopeKey);
-      if (pendingTransition) {
-        scheduleAnchorRestore();
+      if (activatePendingTransitionForCurrentScope()) {
         return;
       }
       const phase = readScrollPhase(scrollScopeKey);
       if (phase === 'initial') {
         scheduleInitialAlign();
-        syncFollowResizeSnapshot();
+        syncFollowSnapshot();
+        syncScrollContainerState();
         return;
       }
       if (phase === 'restoring') {
         scheduleAnchorRestore();
+        syncScrollContainerState();
         return;
       }
       if (phase === 'detached') {
@@ -684,42 +762,11 @@ export function useChatScroll({
         if (anchor) {
           restoreViewportAnchor(anchor);
         }
+        syncFollowSnapshot();
+        syncScrollContainerState();
         return;
       }
-      const viewportMetrics = readViewportMetrics(viewportRef.current);
-      const scrollHeight = viewportMetrics?.scrollHeight ?? null;
-      const scrollHeightChanged = (
-        scrollHeight != null
-        && lastFollowScrollHeightRef.current != null
-        && scrollHeight !== lastFollowScrollHeightRef.current
-      );
-      const viewportHeight = viewportRef.current?.clientHeight ?? null;
-      const viewportHeightChanged = (
-        viewportHeight != null
-        && lastFollowViewportHeightRef.current != null
-        && viewportHeight !== lastFollowViewportHeightRef.current
-      );
-      const viewportWidth = viewportRef.current?.clientWidth ?? null;
-      const viewportWidthChanged = (
-        viewportWidth != null
-        && lastFollowViewportWidthRef.current != null
-        && viewportWidth !== lastFollowViewportWidthRef.current
-      );
-      const nextTailMetrics = sampleTailMessageMetrics(viewportRef.current);
-      const tailMetricsChanged = hasTailResizeDelta(lastFollowTailMetricsRef.current, nextTailMetrics);
-      lastFollowViewportHeightRef.current = viewportHeight;
-      lastFollowViewportWidthRef.current = viewportWidth;
-      lastFollowScrollHeightRef.current = scrollHeight;
-      lastFollowTailMetricsRef.current = nextTailMetrics;
-      const layoutChanged = viewportHeightChanged || viewportWidthChanged;
-      const tailFollowChanged = hasTailFollowWork() && (scrollHeightChanged || tailMetricsChanged);
-      if (phase === 'following' && (layoutChanged || tailFollowChanged)) {
-        scrollToBottom();
-        syncFollowResizeSnapshot();
-        if (tailFollowChanged && !tailActivityOpenRef.current) {
-          armTailSettleTask();
-        }
-      }
+      syncScrollContainerState();
     });
     if (viewport) {
       observer.observe(viewport);
@@ -729,121 +776,222 @@ export function useChatScroll({
     }
     return () => observer.disconnect();
   }, [
-    contentElement,
+    activatePendingTransitionForCurrentScope,
+    contentRef,
+    enabled,
     readScrollPhase,
+    restoreViewportAnchor,
     scheduleAnchorRestore,
-    armTailSettleTask,
-    hasTailFollowWork,
-    syncDetachedViewportAnchor,
     scheduleInitialAlign,
     scrollScopeKey,
-    scrollToBottom,
-    syncFollowResizeSnapshot,
-    enabled,
-    viewportElement,
+    syncDetachedViewportAnchor,
+    syncFollowSnapshot,
+    syncScrollContainerState,
     viewportRef,
   ]);
+
+  useLayoutEffect(() => {
+    if (!enabled || !isBottomLocked) {
+      return;
+    }
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (typeof ResizeObserver !== 'function' || (!viewport && !content)) {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (activatePendingTransitionForCurrentScope()) {
+        return;
+      }
+      if (readScrollPhase(scrollScopeKey) !== 'following') {
+        return;
+      }
+
+      const viewportMetrics = readViewportMetrics(viewportRef.current);
+      const nextSnapshot: FollowSnapshot = {
+        viewportHeight: viewportRef.current?.clientHeight ?? null,
+        viewportWidth: viewportRef.current?.clientWidth ?? null,
+        scrollHeight: viewportMetrics?.scrollHeight ?? null,
+        tailMetrics: sampleTailMessageMetrics(viewportRef.current),
+      };
+      const previousSnapshot = followSnapshotRef.current;
+      const viewportHeightChanged = (
+        nextSnapshot.viewportHeight != null
+        && previousSnapshot.viewportHeight != null
+        && nextSnapshot.viewportHeight !== previousSnapshot.viewportHeight
+      );
+      const viewportWidthChanged = (
+        nextSnapshot.viewportWidth != null
+        && previousSnapshot.viewportWidth != null
+        && nextSnapshot.viewportWidth !== previousSnapshot.viewportWidth
+      );
+      const scrollHeightChanged = (
+        nextSnapshot.scrollHeight != null
+        && previousSnapshot.scrollHeight != null
+        && nextSnapshot.scrollHeight !== previousSnapshot.scrollHeight
+      );
+      const tailMetricsChanged = hasTailResizeDelta(previousSnapshot.tailMetrics, nextSnapshot.tailMetrics);
+      followSnapshotRef.current = nextSnapshot;
+
+      const layoutChanged = viewportHeightChanged || viewportWidthChanged;
+      const tailFollowChanged = hasTailFollowWork() && (scrollHeightChanged || tailMetricsChanged);
+      if (layoutChanged || tailFollowChanged) {
+        scheduleFollowPulse(tailFollowChanged ? FOLLOW_PULSE_FRAMES_TAIL : FOLLOW_PULSE_FRAMES_IDLE);
+      }
+      syncScrollContainerState();
+    });
+    if (viewport) {
+      observer.observe(viewport);
+    }
+    if (content) {
+      observer.observe(content);
+    }
+    return () => observer.disconnect();
+  }, [
+    activatePendingTransitionForCurrentScope,
+    contentRef,
+    enabled,
+    hasTailFollowWork,
+    isBottomLocked,
+    readScrollPhase,
+    scheduleFollowPulse,
+    scrollScopeKey,
+    syncScrollContainerState,
+    viewportRef,
+  ]);
+
+  useLayoutEffect(() => {
+    if (enabled && isBottomLocked) {
+      return;
+    }
+    clearFollowPulse();
+  }, [clearFollowPulse, enabled, isBottomLocked]);
 
   const handleViewportScroll = useCallback(() => {
     if (!enabled) {
       return;
     }
     const metrics = readViewportMetrics(viewportRef.current);
-    if (!metrics) {
+    if (!metrics || programmaticScrollRef.current) {
       return;
     }
-    if (programmaticScrollRef.current) {
+    if (isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
+      setScrollPhase(scrollScopeKey, 'following');
+      if (!hasActiveUserScrollIntent()) {
+        return;
+      }
+      markChatScrollActivity();
+      cancelAnchorRestoreForScope(scrollScopeKey);
       return;
     }
-    lastUserScrollTopRef.current = metrics.scrollTop;
-
     if (!hasActiveUserScrollIntent()) {
       return;
     }
-
-    markUserScrollActivity();
+    markChatScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
-    if (isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
-      writeScrollPhase(scrollScopeKey, 'following');
-      return;
-    }
-    writeScrollPhase(scrollScopeKey, 'detached');
+    setScrollPhase(scrollScopeKey, 'detached');
     syncDetachedViewportAnchor();
-  }, [enabled, hasActiveUserScrollIntent, markUserScrollActivity, scrollScopeKey, stickyBottomThresholdPx, syncDetachedViewportAnchor, viewportRef, writeScrollPhase]);
+  }, [
+    cancelAnchorRestoreForScope,
+    enabled,
+    hasActiveUserScrollIntent,
+    scrollScopeKey,
+    setScrollPhase,
+    stickyBottomThresholdPx,
+    syncDetachedViewportAnchor,
+    viewportRef,
+  ]);
 
   const handleViewportPointerDown = useCallback(() => {
     if (!enabled) {
       return;
     }
+    programmaticScrollRef.current = false;
     pointerScrollActiveRef.current = true;
     const metrics = readViewportMetrics(viewportRef.current);
-    if (!metrics) {
+    if (!metrics || isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
       return;
     }
-    if (!isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
-      cancelAnchorRestoreForScope(scrollScopeKey);
-      writeScrollPhase(scrollScopeKey, 'detached');
-    }
-  }, [cancelAnchorRestoreForScope, enabled, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+    cancelAnchorRestoreForScope(scrollScopeKey);
+    setScrollPhase(scrollScopeKey, 'detached');
+  }, [
+    cancelAnchorRestoreForScope,
+    enabled,
+    scrollScopeKey,
+    setScrollPhase,
+    stickyBottomThresholdPx,
+    viewportRef,
+  ]);
 
   const handleViewportTouchMove = useCallback<TouchEventHandler<HTMLDivElement>>(() => {
     if (!enabled) {
       return;
     }
+    programmaticScrollRef.current = false;
     touchScrollActiveRef.current = true;
-    markUserScrollActivity();
+    markChatScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
-    writeScrollPhase(scrollScopeKey, 'detached');
-  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, scrollScopeKey, writeScrollPhase]);
+    setScrollPhase(scrollScopeKey, 'detached');
+  }, [cancelAnchorRestoreForScope, enabled, scrollScopeKey, setScrollPhase]);
 
   const handleViewportWheel = useCallback((event?: { deltaY?: number }) => {
     if (!enabled) {
       return;
     }
+    programmaticScrollRef.current = false;
     markWheelIntent();
-    const deltaY = event?.deltaY ?? 0;
-    markUserScrollActivity();
+    markChatScrollActivity();
     cancelAnchorRestoreForScope(scrollScopeKey);
-    if (deltaY < 0) {
-      writeScrollPhase(scrollScopeKey, 'detached');
+    if ((event?.deltaY ?? 0) < 0) {
+      setScrollPhase(scrollScopeKey, 'detached');
       return;
     }
     const metrics = readViewportMetrics(viewportRef.current);
     if (metrics && isChatViewportNearBottom(metrics, stickyBottomThresholdPx)) {
-      writeScrollPhase(scrollScopeKey, 'following');
+      setScrollPhase(scrollScopeKey, 'following');
     }
-  }, [cancelAnchorRestoreForScope, enabled, markUserScrollActivity, markWheelIntent, scrollScopeKey, stickyBottomThresholdPx, viewportRef, writeScrollPhase]);
+  }, [
+    cancelAnchorRestoreForScope,
+    enabled,
+    markWheelIntent,
+    scrollScopeKey,
+    setScrollPhase,
+    stickyBottomThresholdPx,
+    viewportRef,
+  ]);
 
   const jumpToBottom = useCallback(() => {
     if (!enabled) {
       return;
     }
     cancelAnchorRestoreForScope(scrollScopeKey);
-    clearTailSettleTask();
-    writeScrollPhase(scrollScopeKey, 'following');
+    clearTailFollowWindow();
+    setScrollPhase(scrollScopeKey, 'following');
     scrollToBottom();
-    syncFollowResizeSnapshot();
-    if (!tailActivityOpenRef.current) {
-      armTailSettleTask();
+    syncFollowSnapshot();
+    if (!tailActivityOpen) {
+      armTailFollowWindow();
     }
   }, [
-    armTailSettleTask,
+    armTailFollowWindow,
     cancelAnchorRestoreForScope,
-    clearTailSettleTask,
+    clearTailFollowWindow,
     enabled,
     scrollScopeKey,
     scrollToBottom,
-    syncFollowResizeSnapshot,
-    writeScrollPhase,
+    setScrollPhase,
+    syncFollowSnapshot,
+    tailActivityOpen,
   ]);
 
   useLayoutEffect(() => {
     return () => {
       clearInitialAlignSchedule();
       clearAnchorRestoreSchedule();
-      clearTailSettleTask();
+      clearFollowPulse();
+      clearTailFollowWindow();
     };
-  }, [clearAnchorRestoreSchedule, clearInitialAlignSchedule, clearTailSettleTask]);
+  }, [clearAnchorRestoreSchedule, clearFollowPulse, clearInitialAlignSchedule, clearTailFollowWindow]);
 
   useLayoutEffect(() => {
     if (typeof window === 'undefined') {
@@ -873,7 +1021,7 @@ export function useChatScroll({
     handleViewportTouchMove,
     handleViewportWheel,
     prepareScopeAnchorRestore: (nextScopeKey: string) => {
-      if (!nextScopeKey || nextScopeKey === scrollScopeKey) {
+      if (!nextScopeKey) {
         return;
       }
       const anchor = sampleViewportAnchor(viewportRef.current);
@@ -887,13 +1035,16 @@ export function useChatScroll({
       };
     },
     prepareScopeBottomAlign: (nextScopeKey: string) => {
-      if (!nextScopeKey || nextScopeKey === scrollScopeKey) {
+      if (!nextScopeKey) {
         return;
       }
       pendingScopeTransitionRef.current = {
         targetScopeKey: nextScopeKey,
         mode: 'force-bottom',
       };
+      if (nextScopeKey === scrollScopeKey) {
+        void activatePendingTransitionForCurrentScope();
+      }
     },
     jumpToBottom,
     isBottomLocked,

@@ -8,9 +8,10 @@ import {
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from '@/stores/chat';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
+  messages?: RawMessage[];
   label?: string | null;
   lastActivityAt?: number | null;
   runtime?: {
@@ -19,8 +20,8 @@ function createSessionRecord(input?: {
     activeRunId?: string | null;
   };
 }) {
+  const messages = input?.messages ?? [];
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: input?.label ?? null,
       lastActivityAt: input?.lastActivityAt ?? null,
@@ -32,13 +33,18 @@ function createSessionRecord(input?: {
       pendingFinal: input?.runtime?.pendingFinal ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      streamingMessage: null,
-      streamRuntime: null,
       streamingTools: [],
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle' as const,
     },
+    window: createViewportWindowState({
+      messages,
+      totalMessageCount: messages.length,
+      windowStartOffset: 0,
+      windowEndOffset: messages.length,
+      isAtLatest: true,
+    }),
   };
 }
 
@@ -79,9 +85,9 @@ describe('chat session helpers', () => {
     const keepMain = shouldKeepMissingCurrentSession(
       'agent:main:main',
       {
-        sessionsByKey: {
+        loadedSessions: {
           'agent:main:main': createSessionRecord({
-            transcript: [{ role: 'user', content: 'hi' }],
+            messages: [{ role: 'user', content: 'hi' }],
           }),
         },
       } as never,
@@ -92,7 +98,7 @@ describe('chat session helpers', () => {
     const dropMissingDraft = shouldKeepMissingCurrentSession(
       'agent:foo:session-1',
       {
-        sessionsByKey: {},
+        loadedSessions: {},
       } as never,
       2,
     );
@@ -101,7 +107,7 @@ describe('chat session helpers', () => {
     const keepLocalEmptyDraft = shouldKeepMissingCurrentSession(
       'agent:foo:session-2',
       {
-        sessionsByKey: {
+        loadedSessions: {
           'agent:foo:session-2': createSessionRecord(),
         },
       } as never,
@@ -115,7 +121,7 @@ describe('chat session helpers', () => {
     const bridge = buildTaskInboxBridgeState(
       {
         currentSessionKey: 'agent:foo:main',
-        sessionsByKey: {
+        loadedSessions: {
           'agent:foo:main': createSessionRecord(),
         },
       } as never,
@@ -128,3 +134,4 @@ describe('chat session helpers', () => {
     });
   });
 });
+

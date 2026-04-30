@@ -1,5 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { SessionFileResolver } from './session-file-resolver';
+import {
+  parseTranscriptMessages,
+  type SessionTranscriptMessage,
+} from './transcript-utils';
 
 type SessionWindowMode = 'latest' | 'older' | 'newer';
 
@@ -13,26 +17,6 @@ interface SessionWindowPayload {
   limit?: unknown;
   offset?: unknown;
   includeCanonical?: unknown;
-}
-
-interface TranscriptMessageShape {
-  role?: unknown;
-  content?: unknown;
-  timestamp?: unknown;
-  id?: unknown;
-  toolCallId?: unknown;
-  tool_call_id?: unknown;
-  toolName?: unknown;
-  tool_name?: unknown;
-  name?: unknown;
-  details?: unknown;
-  isError?: unknown;
-  is_error?: unknown;
-}
-
-interface TranscriptLineShape {
-  timestamp?: unknown;
-  message?: TranscriptMessageShape;
 }
 
 interface SessionWindowMessage {
@@ -102,83 +86,17 @@ function normalizeIncludeCanonical(value: unknown): boolean {
   return value === true;
 }
 
-function normalizeRole(value: unknown): SessionWindowMessage['role'] | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized === 'user'
-    || normalized === 'assistant'
-    || normalized === 'system'
-    || normalized === 'toolresult'
-    || normalized === 'tool_result'
-  ) {
-    return normalized;
-  }
-  return null;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined;
-}
-
-function normalizeOptionalBoolean(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined;
-}
-
-function normalizeTimestamp(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber)) {
-      return asNumber;
-    }
-    const asDate = Date.parse(value);
-    if (Number.isFinite(asDate)) {
-      return asDate;
-    }
-  }
-  return undefined;
-}
-
-function parseTranscriptMessages(content: string): SessionWindowMessage[] {
-  const lines = content.split(/\r?\n/).filter(Boolean);
-  const messages: SessionWindowMessage[] = [];
-
-  for (const line of lines) {
-    let parsed: TranscriptLineShape;
-    try {
-      parsed = JSON.parse(line) as TranscriptLineShape;
-    } catch {
-      continue;
-    }
-    if (!isRecord(parsed.message)) {
-      continue;
-    }
-
-    const role = normalizeRole(parsed.message.role);
-    if (!role) {
-      continue;
-    }
-
-    messages.push({
-      role,
-      content: Object.prototype.hasOwnProperty.call(parsed.message, 'content')
-        ? parsed.message.content
-        : '',
-      timestamp: normalizeTimestamp(parsed.timestamp ?? parsed.message.timestamp),
-      id: normalizeOptionalString(parsed.message.id),
-      toolCallId: normalizeOptionalString(parsed.message.toolCallId ?? parsed.message.tool_call_id),
-      toolName: normalizeOptionalString(parsed.message.toolName ?? parsed.message.tool_name ?? parsed.message.name),
-      details: parsed.message.details,
-      isError: normalizeOptionalBoolean(parsed.message.isError ?? parsed.message.is_error),
-    });
-  }
-
-  return messages;
+function toSessionWindowMessages(messages: SessionTranscriptMessage[]): SessionWindowMessage[] {
+  return messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    timestamp: message.timestamp,
+    id: message.id,
+    toolCallId: message.toolCallId,
+    toolName: message.toolName,
+    details: message.details,
+    isError: message.isError,
+  }));
 }
 
 function buildWindowRange(input: {
@@ -246,7 +164,7 @@ export class SessionWindowService {
     }
 
     const content = await readFile(resolution.transcriptPath, 'utf8');
-    const allMessages = parseTranscriptMessages(content);
+    const allMessages = toSessionWindowMessages(parseTranscriptMessages(content));
     const totalMessageCount = allMessages.length;
     const { start, end } = buildWindowRange({
       totalMessageCount,

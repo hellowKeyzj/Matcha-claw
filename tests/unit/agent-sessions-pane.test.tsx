@@ -7,6 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import type { RawMessage } from '@/stores/chat';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const readyResource = {
   status: 'ready' as const,
@@ -15,14 +16,21 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
+function buildReadysessionMetasResource(data: Array<{ key: string; displayName: string }>) {
+  return {
+    ...readyResource,
+    data,
+  };
+}
+
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
+  messages?: RawMessage[];
   label?: string | null;
   lastActivityAt?: number | null;
   ready?: boolean;
 }) {
+  const messages = input?.messages ?? [];
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: input?.label ?? null,
       lastActivityAt: input?.lastActivityAt ?? null,
@@ -33,14 +41,19 @@ function createSessionRecord(input?: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingMessage: null,
-      streamRuntime: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle' as const,
     },
+    window: createViewportWindowState({
+      messages,
+      totalMessageCount: messages.length,
+      windowStartOffset: 0,
+      windowEndOffset: messages.length,
+      isAtLatest: true,
+    }),
   };
 }
 
@@ -59,7 +72,7 @@ function setupBaseState() {
     loadAgents: vi.fn().mockResolvedValue(undefined),
   } as never);
   useChatStore.setState({
-    sessionsResource: readyResource,
+    sessionMetasResource: readyResource,
   } as never);
 }
 
@@ -80,21 +93,21 @@ describe('agent sessions pane', () => {
 
   it('将 agent 列表放在上方，会话历史在下方统一展示', async () => {
     const now = Date.now();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+      { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
+      { key: 'agent:test:main', displayName: 'agent:test:main' },
+      { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+    ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:main:session-1': createSessionRecord({ ready: true, label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
         'agent:test:main': createSessionRecord({ ready: true }),
         'agent:test:session-2': createSessionRecord({ ready: true, label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -113,17 +126,17 @@ describe('agent sessions pane', () => {
 
   it('点击某个 agent 的新会话按钮，应按对应 agent 创建', async () => {
     const newSession = vi.fn();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+      { key: 'agent:test:main', displayName: 'agent:test:main' },
+    ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:test:main': createSessionRecord({ ready: true }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession,
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -136,18 +149,57 @@ describe('agent sessions pane', () => {
     expect(newSession).toHaveBeenCalledWith('test');
   });
 
+  it('点击历史会话项时，应立即切换 current session，不走额外导航链路', () => {
+    const switchSession = vi.fn();
+    const now = Date.now();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+      { key: 'agent:test:main', displayName: 'agent:test:main' },
+      { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+    ];
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({
+          ready: true,
+          label: '测试Agent会话',
+          lastActivityAt: now,
+        }),
+      },
+      switchSession,
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    const sessionTitle = screen.getByText('测试Agent会话');
+    const sessionButton = sessionTitle.closest('button');
+    expect(sessionButton).toBeTruthy();
+    if (!sessionButton) {
+      return;
+    }
+    fireEvent.click(sessionButton);
+
+    expect(switchSession).toHaveBeenCalledWith('agent:test:session-2');
+  });
+
   it('点击无历史会话的 agent 行，应走 agent 打开动作而不是切到伪 main 会话', () => {
     const switchSession = vi.fn();
     const openAgentConversation = vi.fn();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+    ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
       },
-      sessionsResource: readyResource,
       switchSession,
       newSession: vi.fn(),
       openAgentConversation,
@@ -165,14 +217,15 @@ describe('agent sessions pane', () => {
   it('可删除会话并触发 deleteSession', async () => {
     const deleteSession = vi.fn().mockResolvedValue(undefined);
     const now = Date.now();
+    const sessions = [
+      { key: 'agent:main:main', displayName: 'agent:main:main' },
+      { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
+    ];
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:main:session-1', displayName: 'agent:main:session-1' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:main:session-1': createSessionRecord({
           ready: true,
@@ -180,7 +233,6 @@ describe('agent sessions pane', () => {
           lastActivityAt: now - 1 * 24 * 60 * 60 * 1000,
         }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession,
@@ -213,11 +265,11 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:agent-1:main',
-      sessions: Array.from({ length: 14 }, (_, index) => ({
+      sessionMetasResource: buildReadysessionMetasResource(Array.from({ length: 14 }, (_, index) => ({
         key: index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`,
         displayName: `agent:agent-1:session-${index}`,
-      })),
-      sessionsByKey: Object.fromEntries(
+      }))),
+      loadedSessions: Object.fromEntries(
         Array.from({ length: 14 }, (_, index) => {
           const key = index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`;
           return [
@@ -230,7 +282,6 @@ describe('agent sessions pane', () => {
           ] as const;
         }),
       ),
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -263,15 +314,14 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
+      sessionMetasResource: buildReadysessionMetasResource([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
-      sessionsByKey: {
+      ]),
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:test:main': createSessionRecord({ ready: true }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -298,11 +348,11 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:test:main',
-      sessions: [
+      sessionMetasResource: buildReadysessionMetasResource([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
-      ],
-      sessionsByKey: {
+      ]),
+      loadedSessions: {
         'agent:test:main': createSessionRecord({ ready: true }),
         'agent:test:session-2': createSessionRecord({
           ready: true,
@@ -310,7 +360,6 @@ describe('agent sessions pane', () => {
           lastActivityAt: Date.now(),
         }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -327,24 +376,23 @@ describe('agent sessions pane', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-2',
-      sessions: [
+      sessionMetasResource: buildReadysessionMetasResource([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
-      ],
-      sessionsByKey: {
+      ]),
+      loadedSessions: {
         'agent:test:main': createSessionRecord({ ready: true }),
         'agent:test:session-2': createSessionRecord({
           ready: true,
           label: '旧标题',
           lastActivityAt: now,
-          transcript: [
+          messages: [
             { role: 'user', content: '第一条输入', id: 'u1', timestamp: 1 },
             { role: 'assistant', content: '收到', id: 'a1', timestamp: 2 },
             { role: 'user', content: '最新输入标题', id: 'u2', timestamp: 3 },
           ],
         }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -361,20 +409,19 @@ describe('agent sessions pane', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-1710000000000',
-      sessions: [
+      sessionMetasResource: buildReadysessionMetasResource([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-1710000000000', displayName: 'MatchaClaw Runtime Host' },
-      ],
-      sessionsByKey: {
+      ]),
+      loadedSessions: {
         'agent:test:main': createSessionRecord({ ready: true }),
         'agent:test:session-1710000000000': createSessionRecord({
           ready: true,
           label: null,
           lastActivityAt: now,
-          transcript: [],
+          messages: [],
         }),
       },
-      sessionsResource: readyResource,
       switchSession: vi.fn(),
       newSession: vi.fn(),
       deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -389,9 +436,8 @@ describe('agent sessions pane', () => {
   it('会话资源加载中时，不应阻塞 agent 列表渲染', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [],
-      sessionsByKey: {},
-      sessionsResource: {
+      loadedSessions: {},
+      sessionMetasResource: {
         status: 'loading',
         error: null,
         hasLoadedOnce: false,
@@ -413,9 +459,8 @@ describe('agent sessions pane', () => {
   it('session 资源失败时，不应阻塞 agent 列表渲染', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [],
-      sessionsByKey: {},
-      sessionsResource: {
+      loadedSessions: {},
+      sessionMetasResource: {
         status: 'error',
         error: 'sessions failed',
         hasLoadedOnce: false,
@@ -434,3 +479,5 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId('session-list-error')).toHaveTextContent('sessions failed');
   });
 });
+
+

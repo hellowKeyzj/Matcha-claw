@@ -8,7 +8,7 @@ import {
   buildToolResultFinalPatch,
 } from './finalize-helpers';
 import { requestFinalHistoryRefresh } from './final-history-refresh';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -23,12 +23,12 @@ import { isToolOnlyMessage } from './message-helpers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import {
   buildTranscriptBackedViewportState,
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   patchSessionRecord,
-  patchSessionViewportState,
 } from './store-state-helpers';
 import type { ChatStoreState, RawMessage } from './types';
+import { findCurrentStreamingMessage } from './streaming-message';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -39,9 +39,9 @@ export type ChatStoreGetFn = () => ChatStoreState;
 
 function prewarmCurrentSessionRows(
   sessionKey: string,
-  transcript: RawMessage[],
+  messages: RawMessage[],
 ): void {
-  prewarmStaticRowsForMessages(sessionKey, transcript);
+  prewarmStaticRowsForMessages(sessionKey, messages);
 }
 
 interface StoreToolSnapshotAdapter {
@@ -84,12 +84,12 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     snapshot.reset();
     set((state) => {
       const runtime = getSessionRuntime(state, currentSessionKey);
-      const runtimePatch = reduceRuntimeOverlay(runtime, {
+      const runtimePatch = reduceSessionRuntime(runtime, {
         type: 'final_without_message',
         completedSignal: Boolean(eventRunId),
       });
       return {
-        sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+        loadedSessions: patchSessionRecord(state, currentSessionKey, {
           runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
         }),
       };
@@ -106,9 +106,12 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   const updates = collectToolUpdates(finalMsg, resolvedState);
   if (isToolResultRole(finalMsg.role)) {
     const currentRuntime = getSessionRuntime(get(), currentSessionKey);
-    const currentStreamForPath = currentRuntime.assistantOverlay?.sourceMessage ?? null;
+    const currentStreamForPath = findCurrentStreamingMessage(
+      getSessionMessages(get(), currentSessionKey),
+      currentRuntime.streamingMessageId,
+    );
     const toolFiles = collectToolResultPendingFiles(finalMsg, currentStreamForPath);
-    const currentStreamForSnapshot = currentRuntime.assistantOverlay?.sourceMessage ?? null;
+    const currentStreamForSnapshot = currentStreamForPath;
     snapshot.armIfIdle(currentSessionKey, eventRunId, currentStreamForSnapshot);
     const toolSnapshot = snapshot.consume(currentSessionKey, eventRunId);
     set((state) => buildToolResultFinalPatch({
@@ -118,7 +121,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       updates,
       toolFiles,
     }));
-    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
     return;
   }
 
@@ -128,7 +131,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       state,
       finalMessage: finalMsg,
     }));
-    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
     return;
   }
 
@@ -140,8 +143,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   }
   const fallbackRole = typeof finalMsg.role === 'string' ? finalMsg.role : 'assistant';
   const currentRuntime = getSessionRuntime(get(), currentSessionKey);
-  const overlayMessageId = currentRuntime.assistantOverlay?.messageId ?? null;
-  const msgId = overlayMessageId || finalMsg.id || (toolOnly
+  const msgId = currentRuntime.streamingMessageId || finalMsg.id || (toolOnly
     ? `run-${eventRunId}-tool-${Date.now()}`
     : `run-${eventRunId}-${fallbackRole}`);
 
@@ -153,7 +155,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     hasOutput,
     toolOnly,
   }));
-  prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
+  prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
 
   if (hasOutput && !toolOnly) {
     prewarmAssistantMarkdownBody({
@@ -190,36 +192,34 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   onFinishFailedTelemetry(errorMsg);
 
   const currentRuntime = getSessionRuntime(get(), currentSessionKey);
-  const currentStream = currentRuntime.assistantOverlay?.sourceMessage ?? null;
+  const currentStream = findCurrentStreamingMessage(
+    getSessionMessages(get(), currentSessionKey),
+    currentRuntime.streamingMessageId,
+  );
   const snapshot = buildErrorStreamSnapshot(
-    getSessionTranscript(get(), currentSessionKey),
+    getSessionMessages(get(), currentSessionKey),
     currentStream,
     `error-snap-${Date.now()}`,
   );
   if (snapshot) {
     set((state) => {
-      const nextTranscript = [...getSessionTranscript(state, currentSessionKey), snapshot];
+      const nextMessages = [...getSessionMessages(state, currentSessionKey), snapshot];
       const runtime = getSessionRuntime(state, currentSessionKey);
       return {
-        sessionsByKey: patchSessionRecord(state, currentSessionKey, {
-          transcript: nextTranscript,
+        loadedSessions: patchSessionRecord(state, currentSessionKey, {
+          window: buildTranscriptBackedViewportState(state, currentSessionKey, nextMessages, runtime),
         }),
-        viewportBySession: patchSessionViewportState(
-          state,
-          currentSessionKey,
-          buildTranscriptBackedViewportState(state, currentSessionKey, nextTranscript, runtime),
-        ),
       };
     });
-    prewarmCurrentSessionRows(currentSessionKey, getSessionTranscript(get(), currentSessionKey));
+    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
   }
 
   set((state) => {
     const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'event_error', error: errorMsg });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'event_error', error: errorMsg });
     return {
       error: errorMsg,
-      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -236,9 +236,9 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
         clearHistoryPoll();
         set((current) => {
           const currentRuntimeState = getSessionRuntime(current, current.currentSessionKey);
-          const runtimePatch = reduceRuntimeOverlay(currentRuntimeState, { type: 'error_recovery_timeout' });
+          const runtimePatch = reduceSessionRuntime(currentRuntimeState, { type: 'error_recovery_timeout' });
           return {
-            sessionsByKey: patchSessionRecord(current, current.currentSessionKey, {
+            loadedSessions: patchSessionRecord(current, current.currentSessionKey, {
               runtime: runtimePatch === currentRuntimeState ? currentRuntimeState : { ...currentRuntimeState, ...runtimePatch },
             }),
           };
@@ -257,11 +257,12 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   clearHistoryPoll();
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'error_recovery_timeout' });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'error_recovery_timeout' });
     return {
-      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
   });
 }
+

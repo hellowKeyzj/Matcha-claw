@@ -33,7 +33,6 @@ export function createViewportWindowState(
     isLoadingMore: Boolean(partial.isLoadingMore),
     isLoadingNewer: Boolean(partial.isLoadingNewer),
     isAtLatest: partial.isAtLatest ?? (windowEndOffset >= totalMessageCount),
-    anchorRestore: partial.anchorRestore ?? null,
     lastVisibleMessageId: partial.lastVisibleMessageId ?? null,
   };
 }
@@ -72,7 +71,6 @@ export function syncViewportMessages(
     hasMore?: boolean;
     hasNewer?: boolean;
     isAtLatest?: boolean;
-    anchorRestore?: ChatSessionViewportState['anchorRestore'];
   },
 ): ChatViewportWindow {
   return createViewportWindowState({
@@ -85,7 +83,6 @@ export function syncViewportMessages(
     hasMore: options?.hasMore ?? viewport.hasMore,
     hasNewer: options?.hasNewer ?? viewport.hasNewer,
     isAtLatest: options?.isAtLatest ?? viewport.isAtLatest,
-    anchorRestore: options?.anchorRestore ?? viewport.anchorRestore,
   });
 }
 

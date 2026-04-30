@@ -35,7 +35,7 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionsByKey: {
+    loadedSessions: {
       'agent:main:main': createEmptySessionRecord(),
     },
     ...overrides,
@@ -215,3 +215,4 @@ describe('chat history fetch pipeline helpers', () => {
     expect(applyLoadedMessages).not.toHaveBeenCalled();
   });
 });
+

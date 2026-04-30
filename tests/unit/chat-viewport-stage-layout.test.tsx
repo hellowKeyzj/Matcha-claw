@@ -2,28 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ChatViewportStage } from '@/pages/Chat/components/ChatViewportStage';
 
-vi.mock('@/pages/Chat/ChatInput', () => ({
-  ChatInput: () => <div data-testid="chat-input" />,
-}));
-
-vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
-  ChatHeaderBar: () => <div data-testid="chat-header" />,
-}));
-
-vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
-  ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
-  ChatErrorBanner: () => <div data-testid="chat-error-banner" />,
-}));
-
 describe('chat viewport stage layout', () => {
   it('owns the header, viewport panel, runtime dock, and floating composer as one stage', () => {
     const { container } = render(
       <ChatViewportStage
-        headerProps={{} as never}
+        header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBannerProps={{ error: 'boom', dismissLabel: 'dismiss', onDismiss: vi.fn() }}
-        approvalDockProps={{ waitingLabel: 'waiting', approvals: [], onResolve: vi.fn() }}
-        inputProps={{} as never}
+        errorBanner={<div data-testid="chat-error-banner" />}
+        approvalDock={<div data-testid="chat-approval-dock" />}
+        input={<div data-testid="chat-input" />}
       />,
     );
 
@@ -33,6 +20,9 @@ describe('chat viewport stage layout', () => {
     expect(screen.getByTestId('chat-stage-backdrop').className).toContain('inset-0');
     expect(screen.getByTestId('chat-stage-header-overlay').className).toContain('absolute');
     expect(screen.getByTestId('chat-stage-header-overlay').className).toContain('top-0');
+    expect(screen.getByTestId('chat-stage-bottom-fade').className).toContain('absolute');
+    expect(screen.getByTestId('chat-stage-bottom-fade').className).toContain('bottom-0');
+    expect(screen.getByTestId('chat-stage-bottom-fade').className).toContain('right-[var(--chat-scrollbar-gutter)]');
     expect(container.querySelector('[data-testid="chat-error-banner"]')).toBeInTheDocument();
     expect(container.querySelector('[data-testid="chat-approval-dock"]')).toBeInTheDocument();
 

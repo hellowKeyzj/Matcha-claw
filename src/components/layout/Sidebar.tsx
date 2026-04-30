@@ -232,18 +232,18 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const teams = useTeamsStore((state) => state.teams);
   const mailboxByTeamId = useTeamsStore((state) => state.mailboxByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const { pendingApprovalsBySession, sessionsByKey, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
+  const { pendingApprovalsBySession, loadedSessions, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
   const deferredTeams = useDeferredValue(teams);
   const deferredMailboxByTeamId = useDeferredValue(mailboxByTeamId);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
-  const deferredSessionsByKey = useDeferredValue(sessionsByKey);
+  const deferredloadedSessions = useDeferredValue(loadedSessions);
   const deferredChatSessions = useDeferredValue(chatSessions);
   const deferredSessionTitles = useMemo(() => {
     const next: Record<string, string> = {};
     const sessionByKey = new Map(
       deferredChatSessions.map((session) => [session.key, session] as const),
     );
-    for (const [sessionKey, record] of Object.entries(deferredSessionsByKey)) {
+    for (const [sessionKey, record] of Object.entries(deferredloadedSessions)) {
       const label = record.meta.label?.trim();
       if (label) {
         next[sessionKey] = label;
@@ -252,7 +252,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
       next[sessionKey] = inferUntitledSessionLabel(sessionByKey.get(sessionKey) ?? { key: sessionKey }, t);
     }
     return next;
-  }, [deferredChatSessions, deferredSessionsByKey, t]);
+  }, [deferredChatSessions, deferredloadedSessions, t]);
 
   const teamMailboxCards = useMemo(() => {
     const cards: PendingBlockerCard[] = [];
@@ -550,8 +550,8 @@ export function Sidebar({
         <button
           type="button"
           onClick={() => {
-            const { currentSessionKey, sessionsByKey } = useChatStore.getState();
-            const hasMessages = (sessionsByKey[currentSessionKey]?.transcript.length ?? 0) > 0;
+            const { currentSessionKey, loadedSessions } = useChatStore.getState();
+            const hasMessages = (loadedSessions[currentSessionKey]?.window.messages.length ?? 0) > 0;
             if (isOnChat && hasMessages) {
               newSession();
             }
@@ -608,3 +608,4 @@ export function Sidebar({
     </aside>
   );
 }
+

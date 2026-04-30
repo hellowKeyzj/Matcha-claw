@@ -27,7 +27,13 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness() {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessions: [],
+    sessionMetasResource: {
+      status: 'ready' as const,
+      data: [],
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
   } as ChatStoreState;
 
   const set = (
@@ -96,3 +102,4 @@ describe('chat history store actions', () => {
     expect(createHistoryLoadExecutorMock).not.toHaveBeenCalled();
   });
 });
+

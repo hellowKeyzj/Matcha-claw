@@ -1,5 +1,6 @@
 import { getAttachmentImageCacheStats } from '@/stores/chat/attachment-helpers';
 import { useChatStore, type AttachedFileMeta, type ChatStoreState, type RawMessage } from '@/stores/chat';
+import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
 import { getExecutionGraphCacheStats } from '@/pages/Chat/exec-graph-cache';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRowsCacheStats } from '@/pages/Chat/useRows';
@@ -19,7 +20,7 @@ interface ChatSessionMemorySummary {
   attachedFileCount: number;
   previewCharCount: number;
   contentCharCount: number;
-  overlayCharCount: number;
+  runtimeStateCharCount: number;
   approxRetainedBytes: number;
   ready: boolean;
   lastActivityAt: number | null;
@@ -33,7 +34,7 @@ export interface ChatStoreMemorySummary {
   totalPreviewCharCount: number;
   totalDataUrlPreviewCharCount: number;
   totalContentCharCount: number;
-  totalOverlayCharCount: number;
+  totalRuntimeStateCharCount: number;
   approxRetainedBytes: number;
   largestSessions: ChatSessionMemorySummary[];
 }
@@ -173,8 +174,8 @@ function estimateMessageChars(message: RawMessage): {
   };
 }
 
-function estimateOverlayChars(state: ChatStoreState, sessionKey: string): number {
-  const runtime = state.sessionsByKey[sessionKey]?.runtime;
+function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): number {
+  const runtime = state.loadedSessions[sessionKey]?.runtime;
   if (!runtime) {
     return 0;
   }
@@ -185,15 +186,8 @@ function estimateOverlayChars(state: ChatStoreState, sessionKey: string): number
     total += estimateMessageChars(pendingUserMessage).approxChars;
   }
 
-  const assistantOverlay = runtime.assistantOverlay;
-  if (assistantOverlay) {
-    total += assistantOverlay.committedText.length;
-    total += assistantOverlay.targetText.length;
-    total += assistantOverlay.messageId.length;
-    total += assistantOverlay.runId.length;
-    if (assistantOverlay.sourceMessage) {
-      total += estimateMessageChars(assistantOverlay.sourceMessage).approxChars;
-    }
+  if (runtime.streamingMessageId) {
+    total += runtime.streamingMessageId.length;
   }
 
   total += runtime.streamingTools.length * 64;
@@ -202,7 +196,7 @@ function estimateOverlayChars(state: ChatStoreState, sessionKey: string): number
 }
 
 export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemorySummary {
-  const sessions = Object.entries(state.sessionsByKey);
+  const sessions = Object.entries(state.loadedSessions);
   const sessionSummaries: ChatSessionMemorySummary[] = [];
   let readySessionCount = 0;
   let totalMessageCount = 0;
@@ -210,18 +204,18 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   let totalPreviewCharCount = 0;
   let totalDataUrlPreviewCharCount = 0;
   let totalContentCharCount = 0;
-  let totalOverlayCharCount = 0;
+  let totalRuntimeStateCharCount = 0;
   let approxRetainedBytes = 0;
 
   for (const [sessionKey, record] of sessions) {
-    const transcript = Array.isArray(record.transcript) ? record.transcript : [];
+    const messages = Array.isArray(record.window?.messages) ? record.window.messages : [];
     let sessionContentChars = 0;
     let sessionAttachedFileCount = 0;
     let sessionPreviewCharCount = 0;
     let sessionDataUrlPreviewCharCount = 0;
     let sessionApproxChars = 0;
 
-    for (const message of transcript) {
+    for (const message of messages) {
       const stats = estimateMessageChars(message);
       sessionContentChars += stats.contentChars;
       sessionAttachedFileCount += stats.attachedFileCount;
@@ -230,29 +224,29 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
       sessionApproxChars += stats.approxChars;
     }
 
-    const overlayCharCount = estimateOverlayChars(state, sessionKey);
-    const sessionApproxBytes = (sessionApproxChars + overlayCharCount) * 2;
+    const runtimeStateCharCount = estimateRuntimeStateChars(state, sessionKey);
+    const sessionApproxBytes = (sessionApproxChars + runtimeStateCharCount) * 2;
     sessionSummaries.push({
       sessionKey,
-      messageCount: transcript.length,
+      messageCount: messages.length,
       attachedFileCount: sessionAttachedFileCount,
       previewCharCount: sessionPreviewCharCount,
       contentCharCount: sessionContentChars,
-      overlayCharCount,
+      runtimeStateCharCount,
       approxRetainedBytes: sessionApproxBytes,
-      ready: Boolean(record.meta.ready),
+      ready: isSessionHistoryReady(record.meta.historyStatus),
       lastActivityAt: record.meta.lastActivityAt ?? null,
     });
 
-    if (record.meta.ready) {
+    if (isSessionHistoryReady(record.meta.historyStatus)) {
       readySessionCount += 1;
     }
-    totalMessageCount += transcript.length;
+    totalMessageCount += messages.length;
     totalAttachedFileCount += sessionAttachedFileCount;
     totalPreviewCharCount += sessionPreviewCharCount;
     totalDataUrlPreviewCharCount += sessionDataUrlPreviewCharCount;
     totalContentCharCount += sessionContentChars;
-    totalOverlayCharCount += overlayCharCount;
+    totalRuntimeStateCharCount += runtimeStateCharCount;
     approxRetainedBytes += sessionApproxBytes;
   }
 
@@ -266,7 +260,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     totalPreviewCharCount,
     totalDataUrlPreviewCharCount,
     totalContentCharCount,
-    totalOverlayCharCount,
+    totalRuntimeStateCharCount,
     approxRetainedBytes,
     largestSessions: sessionSummaries.slice(0, 5),
   };
@@ -333,3 +327,4 @@ export function installChatMemoryDiagnosticsDebugApi(target: Window): void {
     collectMemoryDiagnostics: collectAppMemoryDiagnostics,
   };
 }
+

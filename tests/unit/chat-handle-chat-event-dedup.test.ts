@@ -1,15 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
-import { disposeActiveStreamPacer } from '@/stores/chat/stream-pacer';
 import { resetToolSnapshotTxnState } from '@/stores/chat/tool-snapshot-txn';
-import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
-    transcript: overrides?.transcript ?? base.transcript,
     meta: {
       ...base.meta,
       ...overrides?.meta,
@@ -18,6 +16,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    window: overrides?.window ?? base.window,
   };
 }
 
@@ -37,11 +36,18 @@ function extractAssistantText(message: RawMessage): string {
 }
 
 function getAssistantMessages(): RawMessage[] {
-  return (useChatStore.getState().sessionsByKey['agent:main:main']?.transcript ?? []).filter((message) => message.role === 'assistant');
+  return (useChatStore.getState().loadedSessions['agent:main:main']?.window.messages ?? []).filter((message) => message.role === 'assistant');
 }
 
-function getStreamingOverlay() {
-  return useChatStore.getState().sessionsByKey['agent:main:main']?.runtime.assistantOverlay ?? null;
+function getStreamingMessage(): RawMessage | null {
+  const state = useChatStore.getState();
+  const record = state.loadedSessions['agent:main:main'];
+  const streamingMessageId = record?.runtime.streamingMessageId ?? null;
+  const messages = record?.window.messages ?? [];
+  if (streamingMessageId) {
+    return messages.find((message) => message.id === streamingMessageId) ?? null;
+  }
+  return messages.find((message) => message.role === 'assistant' && message.streaming) ?? null;
 }
 
 async function drainStreamPacer(): Promise<void> {
@@ -56,9 +62,15 @@ function resetChatState(partial: Record<string, unknown> = {}): void {
     mutating: false,
     error: null,
     pendingApprovalsBySession: {},
-    sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+    sessionMetasResource: {
+      status: 'ready',
+      data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
     currentSessionKey: 'agent:main:main',
-    sessionsByKey: {
+    loadedSessions: {
       'agent:main:main': buildSessionRecord({
         meta: {
           ready: true,
@@ -79,7 +91,6 @@ function resetChatState(partial: Record<string, unknown> = {}): void {
 
 describe('chat.handleChatEvent 工具回合快照去重', () => {
   beforeEach(() => {
-    disposeActiveStreamPacer();
     resetToolSnapshotTxnState();
     vi.useRealTimers();
     useGatewayStore.setState({
@@ -90,7 +101,6 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
   });
 
   afterEach(() => {
-    disposeActiveStreamPacer();
     resetToolSnapshotTxnState();
     vi.useRealTimers();
   });
@@ -98,8 +108,28 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
   it('工具回合快照带有自然语言文本时，后续最终回复不应再出现同文案重复两条', async () => {
     vi.useFakeTimers();
     resetChatState({
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          window: createViewportWindowState({
+            messages: [{
+              role: 'assistant',
+              id: 'stream-tool-turn',
+              streaming: true,
+              content: [
+                { type: 'text', text: '在。' },
+                {
+                  type: 'tool_use',
+                  id: 'tool-call-1',
+                  name: 'task_decision',
+                  input: { decision: 'direct' },
+                },
+              ],
+            }],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            isAtLatest: true,
+          }),
           meta: {
             ready: true,
           },
@@ -108,25 +138,7 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
             activeRunId: 'run-1',
             runPhase: 'streaming',
             lastUserMessageAt: Date.now(),
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'stream-tool-turn',
-              sourceMessage: {
-                role: 'assistant',
-                id: 'stream-tool-turn',
-                content: [
-                  { type: 'text', text: '在。' },
-                  {
-                    type: 'tool_use',
-                    id: 'tool-call-1',
-                    name: 'task_decision',
-                    input: { decision: 'direct' },
-                  },
-                ],
-              },
-              committedText: '在。',
-              targetText: '在。',
-            }),
+            streamingMessageId: 'stream-tool-turn',
           },
         }),
       },
@@ -171,9 +183,9 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     ]);
   });
 
-  it('tool-only delta 不生成可见 streamView 时，toolresult final 也不能丢工具回合快照', () => {
+  it('tool-only delta 写入单条 streaming assistant 后，toolresult final 也不能丢工具回合快照', () => {
     resetChatState({
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
           meta: {
             ready: true,
@@ -205,7 +217,10 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
       },
     });
 
-    expect(getStreamingOverlay()).toBeNull();
+    expect(getStreamingMessage()).toMatchObject({
+      id: 'stream-tool-turn',
+      streaming: true,
+    });
 
     useChatStore.getState().handleChatEvent({
       state: 'final',
@@ -230,10 +245,50 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     ]);
   });
 
+  it('delta 流式期间直接更新 transcript 里的单条 assistant message', () => {
+    resetChatState({
+      loadedSessions: {
+        'agent:main:main': buildSessionRecord({
+          meta: {
+            ready: true,
+          },
+          runtime: {
+            sending: true,
+            activeRunId: 'run-streaming-only',
+            runPhase: 'submitted',
+            lastUserMessageAt: Date.now(),
+          },
+        }),
+      },
+    });
+
+    useChatStore.getState().handleChatEvent({
+      state: 'delta',
+      runId: 'run-streaming-only',
+      sessionKey: 'agent:main:main',
+      message: {
+        role: 'assistant',
+        id: 'assistant-stream-1',
+        content: 'hello world',
+      },
+    });
+
+    expect(useChatStore.getState().loadedSessions['agent:main:main']?.window.messages).toMatchObject([{
+      role: 'assistant',
+      id: 'assistant-stream-1',
+      content: 'hello world',
+      streaming: true,
+    }]);
+    expect(getStreamingMessage()).toMatchObject({
+      id: 'assistant-stream-1',
+      content: 'hello world',
+    });
+  });
+
   it('authoritative user final 到达时，应与 pending user overlay 合并而不是新增一条', () => {
     const sentAtMs = Date.now();
     resetChatState({
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
           meta: {
             ready: true,
@@ -270,17 +325,29 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
       },
     });
 
-    const userMessages = (useChatStore.getState().sessionsByKey['agent:main:main']?.transcript ?? []).filter((message) => message.role === 'user');
+    const userMessages = (useChatStore.getState().loadedSessions['agent:main:main']?.window.messages ?? []).filter((message) => message.role === 'user');
     expect(userMessages).toHaveLength(1);
     expect(userMessages[0]?.id).toBe('optimistic-user-1');
-    expect(useChatStore.getState().sessionsByKey['agent:main:main']?.runtime.pendingUserMessage).toBeNull();
+    expect(useChatStore.getState().loadedSessions['agent:main:main']?.runtime.pendingUserMessage).toBeNull();
   });
 
   it('toolresult final 不应把纯文本 streaming assistant 快照进 messages，避免后续 assistant final 重复', async () => {
     vi.useFakeTimers();
     resetChatState({
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          window: createViewportWindowState({
+            messages: [{
+              role: 'assistant',
+              id: 'stream-plain-assistant',
+              content: '好的，我来处理。',
+              streaming: true,
+            }],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            isAtLatest: true,
+          }),
           meta: {
             ready: true,
           },
@@ -289,17 +356,7 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
             activeRunId: 'run-toolresult-no-toolcall',
             runPhase: 'streaming',
             lastUserMessageAt: Date.now(),
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-toolresult-no-toolcall',
-              messageId: 'stream-plain-assistant',
-              sourceMessage: {
-                role: 'assistant',
-                id: 'stream-plain-assistant',
-                content: '好的，我来处理。',
-              },
-              committedText: '好的，我来处理。',
-              targetText: '好的，我来处理。',
-            }),
+            streamingMessageId: 'stream-plain-assistant',
           },
         }),
       },
@@ -339,17 +396,24 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     expect(assistantMessages[0]?.id).toBe('assistant-final-no-dup');
   });
 
-  it('同一轮 assistant final 文本一致但 id 不同，应按语义去重并保留 overlay row id', () => {
+  it('同一轮 assistant final 文本一致但 id 不同，应按语义去重并保留本地 streaming message id', () => {
     resetChatState({
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
-          transcript: [
-            {
-              role: 'assistant',
-              id: 'assistant-existing',
-              content: '你好呀，我在。',
-            },
-          ],
+          window: createViewportWindowState({
+            messages: [
+              {
+                role: 'assistant',
+                id: 'stream-assistant',
+                content: '你好呀，我在。',
+                streaming: true,
+              },
+            ],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            isAtLatest: true,
+          }),
           meta: {
             ready: true,
           },
@@ -359,18 +423,7 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
             runPhase: 'streaming',
             pendingFinal: true,
             lastUserMessageAt: Date.now(),
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-assistant-semantic-dedup',
-              messageId: 'stream-assistant',
-              sourceMessage: {
-                role: 'assistant',
-                id: 'stream-assistant',
-                content: '你好呀，我在。',
-              },
-              committedText: '你好呀，我在。',
-              targetText: '你好呀，我在。',
-              status: 'finalizing',
-            }),
+            streamingMessageId: 'stream-assistant',
           },
         }),
       },
@@ -395,3 +448,5 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     expect(assistantMessages[0]?.id).toBe('stream-assistant');
   });
 });
+
+

@@ -24,8 +24,8 @@ describe('chat floating overlays layout', () => {
     );
 
     let root = container.firstElementChild?.firstElementChild as HTMLElement | null;
-    expect(root?.className).toContain('rounded-[20px]');
-    expect(root?.className).toContain('bg-background/82');
+    expect(root?.className).toContain('rounded-[22px]');
+    expect(root?.className).toContain('bg-background/92');
     expect(root?.className).toContain('backdrop-blur-xl');
 
     rerender(
@@ -37,8 +37,8 @@ describe('chat floating overlays layout', () => {
     );
 
     root = container.firstElementChild?.firstElementChild as HTMLElement | null;
-    expect(root?.className).toContain('rounded-[20px]');
-    expect(root?.className).toContain('bg-background/82');
+    expect(root?.className).toContain('rounded-[22px]');
+    expect(root?.className).toContain('bg-background/92');
     expect(root?.className).toContain('backdrop-blur-xl');
   });
 

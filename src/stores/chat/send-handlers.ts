@@ -1,5 +1,5 @@
 import { resolveSessionLabelFromMessages } from './message-helpers';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -12,7 +12,6 @@ import {
   getSessionViewportState,
   getSessionRuntime,
   patchSessionRecord,
-  patchSessionViewportState,
   resolveSessionRecord,
 } from './store-state-helpers';
 import type {
@@ -73,17 +72,21 @@ interface ApplyStoreSendStartParams {
 export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
   const { set, sessionKey, pendingUserMessage, nowMs } = params;
   set((state) => {
-    const record = resolveSessionRecord(state.sessionsByKey[sessionKey]);
+    const record = resolveSessionRecord(state.loadedSessions[sessionKey]);
     const nextSessionLabel = sessionKey.endsWith(':main')
       ? ''
-      : resolveSessionLabelFromMessages([...record.transcript, pendingUserMessage.message]);
-    const runtimePatch = reduceRuntimeOverlay(record.runtime, {
+      : resolveSessionLabelFromMessages([...record.window.messages, pendingUserMessage.message]);
+    const runtimePatch = reduceSessionRuntime(record.runtime, {
       type: 'send_submitted',
       nowMs,
       pendingUserMessage,
     });
+    const nextWindow = appendViewportMessage(
+      getSessionViewportState(state, sessionKey),
+      pendingUserMessage.message,
+    );
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
         meta: {
           ...record.meta,
           label: nextSessionLabel || record.meta.label,
@@ -92,15 +95,8 @@ export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
         runtime: runtimePatch === record.runtime
           ? record.runtime
           : { ...record.runtime, ...runtimePatch },
+        window: nextWindow,
       }),
-      viewportBySession: patchSessionViewportState(
-        state,
-        sessionKey,
-        appendViewportMessage(
-          getSessionViewportState(state, sessionKey),
-          pendingUserMessage.message,
-        ),
-      ),
     };
   });
 }
@@ -162,7 +158,7 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
     onSafetyTimeout();
     set((current) => {
       const currentRuntime = getSessionRuntime(current, current.currentSessionKey);
-      const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+      const runtimePatch = reduceSessionRuntime(currentRuntime, {
         type: 'send_failed',
         error: NO_RESPONSE_RECEIVED_ERROR,
         clearRun: true,
@@ -172,12 +168,12 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
         currentRuntime.pendingUserMessage?.message.id,
       );
       return {
-        sessionsByKey: patchSessionRecord(current, current.currentSessionKey, {
+        loadedSessions: patchSessionRecord(current, current.currentSessionKey, {
           runtime: runtimePatch === currentRuntime
             ? currentRuntime
             : { ...currentRuntime, ...runtimePatch },
+          window: nextViewport,
         }),
-        viewportBySession: patchSessionViewportState(current, current.currentSessionKey, nextViewport),
       };
     });
   };
@@ -219,9 +215,9 @@ export function hasStoreApprovalEvidence(
 export function commitStoreSendWaitingApproval(set: ChatStoreSetFn): void {
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_waiting_approval' });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_waiting_approval' });
     return {
-      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -240,17 +236,17 @@ export function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams)
   onTelemetryFailure?.();
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_failed', error });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_failed', error });
     const nextViewport = removeViewportMessageById(
       getSessionViewportState(state, state.currentSessionKey),
       runtime.pendingUserMessage?.message.id,
     );
     return {
       error,
-      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        window: nextViewport,
       }),
-      viewportBySession: patchSessionViewportState(state, state.currentSessionKey, nextViewport),
     };
   });
 }
@@ -264,11 +260,12 @@ export function commitStoreRunIdBound(params: CommitStoreRunIdBoundParams): void
   const { set, runId } = params;
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'send_run_bound', runId });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_run_bound', runId });
     return {
-      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
   });
 }
+

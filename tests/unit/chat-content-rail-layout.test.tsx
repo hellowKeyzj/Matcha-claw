@@ -66,6 +66,7 @@ describe('chat content rail layout', () => {
     expect(viewport?.className).toContain('min-h-0');
     expect(viewport?.className).toContain('flex-1');
     expect(viewport?.className).toContain('overflow-y-auto');
+    expect(viewport).toHaveStyle({ scrollbarGutter: 'stable' });
     const classNames = Array.from(container.querySelectorAll<HTMLElement>('div'))
       .map((node) => node.className)
       .filter((value): value is string => typeof value === 'string');
@@ -168,7 +169,9 @@ describe('chat content rail layout', () => {
     expect(onJumpToBottom).toHaveBeenCalledTimes(1);
     const floatingRail = jumpButton.parentElement as HTMLElement | null;
     expect(floatingRail?.className).toContain('max-w-[56rem]');
-    expect((floatingRail?.parentElement as HTMLElement | null)?.className).toContain('inset-x-0');
+    const jumpRail = floatingRail?.parentElement as HTMLElement | null;
+    expect(jumpRail?.className).toContain('inset-x-0');
+    expect(jumpRail?.style.bottom).toContain('--chat-composer-safe-offset');
   });
 
   it('chat list renders non-message viewport items directly without a row forwarding layer', () => {
@@ -228,5 +231,42 @@ describe('chat content rail layout', () => {
     expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('backdrop-blur');
     expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('shadow-');
     expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('empty state stays on the same viewport rail instead of switching to a dedicated hero rail', () => {
+    const { container } = render(
+      <ChatList
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState
+        showBlockingLoading={false}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        items={[]}
+        showLoadOlder={false}
+        isLoadingOlder={false}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        showJumpToBottom={false}
+        onJumpAction={vi.fn()}
+        jumpActionLabel="Jump to bottom"
+        showThinking={false}
+        assistantAgentId="main"
+        assistantAgentName="Main"
+        userAvatarImageUrl={null}
+        suppressedToolCardRowKeys={new Set<string>()}
+        onJumpToRowKey={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-welcome-screen')).toBeInTheDocument();
+    const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLElement | null;
+    expect(viewport?.className).toContain(CHAT_LAYOUT_TOKENS.threadViewportPadding);
+    const classNames = Array.from(container.querySelectorAll<HTMLElement>('div'))
+      .map((node) => node.className)
+      .filter((value): value is string => typeof value === 'string');
+    expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadRail))).toBe(true);
   });
 });

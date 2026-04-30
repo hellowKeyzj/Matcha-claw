@@ -1,18 +1,16 @@
 import { hasNonToolAssistantContent } from './event-helpers';
-import { normalizeAssistantFinalTextForDedup } from './message-helpers';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
   areMessagesEquivalent,
   getSessionMeta,
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   getSessionViewportState,
   mergeMessageReferences,
   patchSessionRecord,
   patchSessionViewportState,
   toMs,
 } from './store-state-helpers';
-import { selectStreamingRenderMessage } from './stream-overlay-message';
 import type {
   ChatHistoryLoadScope,
   PendingUserMessageOverlay,
@@ -22,7 +20,6 @@ import type {
 import {
   appendViewportMessage,
   syncViewportMessages,
-  upsertViewportMessage,
 } from './viewport-state';
 
 interface ResolveHistoryActivityFlagsInput {
@@ -120,39 +117,6 @@ function resolveNextPendingUserMessage(input: {
   return pendingUserMessage ?? null;
 }
 
-function shouldClearSettledAssistantOverlay(
-  currentRuntime: ReturnType<typeof getSessionRuntime>,
-  nextTranscript: RawMessage[],
-  isCurrentSession: boolean,
-): boolean {
-  if (!isCurrentSession) {
-    return false;
-  }
-  const overlay = currentRuntime.assistantOverlay;
-  if (!overlay || currentRuntime.sending || currentRuntime.pendingFinal || currentRuntime.activeRunId != null) {
-    return false;
-  }
-
-  const overlayMessageId = overlay.messageId.trim();
-  const overlayText = normalizeAssistantFinalTextForDedup(overlay.targetText || overlay.committedText);
-  if (!overlayText) {
-    return false;
-  }
-
-  const matchedTranscriptMessage = [...nextTranscript].reverse().find((message) => (
-    message.role === 'assistant'
-    && (
-      (overlayMessageId && message.id === overlayMessageId)
-      || normalizeAssistantFinalTextForDedup(message.content) === overlayText
-    )
-  ));
-  if (!matchedTranscriptMessage) {
-    return false;
-  }
-
-  return normalizeAssistantFinalTextForDedup(matchedTranscriptMessage.content) === overlayText;
-}
-
 export function buildHistoryApplyPatch(
   state: ChatStoreState,
   input: BuildHistoryApplyPatchInput,
@@ -161,20 +125,10 @@ export function buildHistoryApplyPatch(
   let changed = false;
   const isCurrentSession = state.currentSessionKey === input.requestedSessionKey;
 
-  if (!state.snapshotReady) {
-    patch.snapshotReady = true;
-    changed = true;
-  }
-  if (isCurrentSession && (state.initialLoading || state.refreshing)) {
-    patch.initialLoading = false;
-    patch.refreshing = false;
-    changed = true;
-  }
-
-  const currentTranscript = getSessionTranscript(state, input.requestedSessionKey);
-  const nextTranscript = areMessagesEquivalent(currentTranscript, input.finalMessages)
-    ? currentTranscript
-    : mergeMessageReferences(currentTranscript, input.finalMessages);
+  const currentMessages = getSessionMessages(state, input.requestedSessionKey);
+  const nextMessages = areMessagesEquivalent(currentMessages, input.finalMessages)
+    ? currentMessages
+    : mergeMessageReferences(currentMessages, input.finalMessages);
   const currentViewport = getSessionViewportState(state, input.requestedSessionKey);
   const nextViewportMessages = areMessagesEquivalent(currentViewport.messages, input.viewportMessages)
     ? currentViewport.messages
@@ -192,7 +146,7 @@ export function buildHistoryApplyPatch(
     || input.flags.hasRecentAssistantActivity
     || input.flags.hasRecentFinalAssistantMessage
   ))
-    ? reduceRuntimeOverlay(currentRuntime, {
+    ? reduceSessionRuntime(currentRuntime, {
         type: 'history_snapshot',
         hasRecentAssistantActivity: input.flags.hasRecentAssistantActivity,
         hasRecentFinalAssistantMessage: input.flags.hasRecentFinalAssistantMessage,
@@ -201,7 +155,7 @@ export function buildHistoryApplyPatch(
 
   const nextMeta = {
     ...currentMeta,
-    ready: true,
+    historyStatus: 'ready' as const,
     thinkingLevel: input.thinkingLevel,
     label: input.resolvedLabel ?? currentMeta.label,
     lastActivityAt: input.lastAt ?? currentMeta.lastActivityAt,
@@ -209,11 +163,6 @@ export function buildHistoryApplyPatch(
   const nextRuntime = runtimePatch === currentRuntime
     ? currentRuntime
     : { ...currentRuntime, ...runtimePatch };
-  const shouldClearAssistantOverlay = shouldClearSettledAssistantOverlay(
-    nextRuntime,
-    nextTranscript,
-    isCurrentSession,
-  );
   const nextPendingUserMessage = isCurrentSession
     ? resolveNextPendingUserMessage({
         currentRuntime,
@@ -223,22 +172,17 @@ export function buildHistoryApplyPatch(
     : (nextRuntime.pendingUserMessage ?? null);
   const shouldPatchPendingUser = isCurrentSession
     && nextRuntime.pendingUserMessage !== nextPendingUserMessage;
-  let resolvedRuntime = shouldPatchPendingUser
+  const resolvedRuntime = shouldPatchPendingUser
     ? { ...nextRuntime, pendingUserMessage: nextPendingUserMessage }
     : nextRuntime;
-  if (shouldClearAssistantOverlay) {
-    resolvedRuntime = resolvedRuntime.assistantOverlay == null
-      ? resolvedRuntime
-      : { ...resolvedRuntime, assistantOverlay: null };
-  }
   const didMetaChange = (
-    nextMeta.ready !== currentMeta.ready
+    nextMeta.historyStatus !== currentMeta.historyStatus
     || nextMeta.thinkingLevel !== currentMeta.thinkingLevel
     || nextMeta.label !== currentMeta.label
     || nextMeta.lastActivityAt !== currentMeta.lastActivityAt
   );
   if (
-    nextTranscript !== currentTranscript
+    nextMessages !== currentMessages
     || didMetaChange
     || resolvedRuntime !== currentRuntime
     || nextViewportMessages !== currentViewport.messages
@@ -254,26 +198,16 @@ export function buildHistoryApplyPatch(
       isLoadingMore: false,
       isLoadingNewer: false,
       isAtLatest: input.isAtLatest,
-      anchorRestore: null,
     };
     const viewportWithPendingUser = nextPendingUserMessage
       ? appendViewportMessage(nextViewport, nextPendingUserMessage.message)
       : nextViewport;
-    const streamingMessage = selectStreamingRenderMessage(resolvedRuntime);
-    const resolvedViewport = streamingMessage
-      ? upsertViewportMessage(viewportWithPendingUser, streamingMessage)
-      : viewportWithPendingUser;
     Object.assign(patch, {
-      sessionsByKey: patchSessionRecord(state, input.requestedSessionKey, {
-        transcript: nextTranscript,
+      loadedSessions: patchSessionRecord(state, input.requestedSessionKey, {
         meta: nextMeta,
         runtime: resolvedRuntime,
+        window: viewportWithPendingUser,
       }),
-      viewportBySession: patchSessionViewportState(
-        state,
-        input.requestedSessionKey,
-        resolvedViewport,
-      ),
     });
     changed = true;
   }
@@ -299,7 +233,7 @@ export function buildHistoryPreviewHydrationPatch(
     return state;
   }
   return {
-    viewportBySession: patchSessionViewportState(
+    loadedSessions: patchSessionViewportState(
       state,
       requestedSessionKey,
       syncViewportMessages(
@@ -309,3 +243,4 @@ export function buildHistoryPreviewHydrationPatch(
     ),
   };
 }
+

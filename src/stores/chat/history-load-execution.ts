@@ -184,6 +184,7 @@ function finalizeHistoryLoadExecution(context: HistoryLoadExecutionContext): voi
   finalizeHistoryLoadUiState({
     set: context.set,
     scope: context.scope,
+    requestedSessionKey: context.requestedSessionKey,
     historyLoadRunId: context.historyLoadRunId,
     historyRuntime: context.historyRuntime,
     loadingSafetyTimer: context.loadingSafetyTimer,

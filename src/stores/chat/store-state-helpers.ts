@@ -2,6 +2,7 @@ import type {
   ApprovalItem,
   AttachedFileMeta,
   ChatSession,
+  ChatSessionHistoryStatus,
   ChatSessionMetaState,
   ChatSessionRecord,
   ChatSessionRuntimeState,
@@ -10,12 +11,10 @@ import type {
   RawMessage,
   ToolStatus,
 } from './types';
-import { selectStreamingRenderMessage } from './stream-overlay-message';
 import {
   appendViewportMessage,
   createViewportWindowState,
   syncViewportMessages,
-  upsertViewportMessage,
 } from './viewport-state';
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
@@ -252,7 +251,6 @@ const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
   isLoadingMore: false,
   isLoadingNewer: false,
   isAtLatest: true,
-  anchorRestore: null,
   lastVisibleMessageId: null,
 };
 
@@ -262,7 +260,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     activeRunId: null,
     runPhase: 'idle',
     pendingUserMessage: null,
-    assistantOverlay: null,
+    streamingMessageId: null,
     streamingTools: EMPTY_STREAMING_TOOLS,
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -275,16 +273,20 @@ export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
     label: null,
     lastActivityAt: null,
-    ready: false,
+    historyStatus: 'idle',
     thinkingLevel: null,
   };
 }
 
+export function isSessionHistoryReady(status: ChatSessionHistoryStatus | null | undefined): boolean {
+  return status === 'ready';
+}
+
 export function createEmptySessionRecord(): ChatSessionRecord {
   return {
-    transcript: EMPTY_MESSAGES,
     meta: createEmptySessionMeta(),
     runtime: createEmptySessionRuntime(),
+    window: createEmptySessionViewportState(),
   };
 }
 
@@ -307,7 +309,7 @@ export function resolveSessionMeta(session: ChatSessionRecord | undefined): Chat
 }
 
 export function resolveSessionTranscript(session: ChatSessionRecord | undefined): RawMessage[] {
-  return Array.isArray(session?.transcript) ? session!.transcript : EMPTY_MESSAGES;
+  return Array.isArray(session?.window?.messages) ? session.window.messages : EMPTY_MESSAGES;
 }
 
 export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
@@ -315,70 +317,74 @@ export function resolveSessionRecord(session: ChatSessionRecord | undefined): Ch
     return createEmptySessionRecord();
   }
   return {
-    transcript: resolveSessionTranscript(session),
     meta: resolveSessionMeta(session),
     runtime: resolveSessionRuntime(session),
+    window: resolveSessionViewportState(session),
   };
 }
 
-export function getSessionRecord(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionRecord {
-  return resolveSessionRecord(state.sessionsByKey[sessionKey]);
+export function resolveSessionViewportState(session: ChatSessionRecord | undefined): ChatSessionViewportState {
+  return session?.window ?? EMPTY_VIEWPORT_STATE;
 }
 
-export function getSessionTranscript(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): RawMessage[] {
-  return resolveSessionTranscript(state.sessionsByKey[sessionKey]);
+export function getSessionRecord(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionRecord {
+  return resolveSessionRecord(state.loadedSessions[sessionKey]);
 }
 
-export function getSessionMeta(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionMetaState {
-  return resolveSessionMeta(state.sessionsByKey[sessionKey]);
+export function getSessionMessages(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): RawMessage[] {
+  return resolveSessionTranscript(state.loadedSessions[sessionKey]);
 }
 
-export function getSessionRuntime(state: Pick<ChatStoreState, 'sessionsByKey'>, sessionKey: string): ChatSessionRuntimeState {
-  return resolveSessionRuntime(state.sessionsByKey[sessionKey]);
+export function getSessionMeta(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionMetaState {
+  return resolveSessionMeta(state.loadedSessions[sessionKey]);
+}
+
+export function getSessionRuntime(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionRuntimeState {
+  return resolveSessionRuntime(state.loadedSessions[sessionKey]);
 }
 
 export function getSessionViewportState(
-  state: Pick<ChatStoreState, 'viewportBySession'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
 ): ChatSessionViewportState {
-  return state.viewportBySession?.[sessionKey] ?? EMPTY_VIEWPORT_STATE;
+  return resolveSessionViewportState(state.loadedSessions[sessionKey]);
 }
 
 export function upsertSessionRecord(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   nextRecord: ChatSessionRecord,
 ): Record<string, ChatSessionRecord> {
   return {
-    ...state.sessionsByKey,
+    ...state.loadedSessions,
     [sessionKey]: nextRecord,
   };
 }
 
 export function patchSessionRecord(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   patch: Partial<ChatSessionRecord>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   return {
-    ...state.sessionsByKey,
+    ...state.loadedSessions,
     [sessionKey]: {
-      transcript: patch.transcript ?? current.transcript,
       meta: patch.meta ?? current.meta,
       runtime: patch.runtime ?? current.runtime,
+      window: patch.window ?? current.window,
     },
   };
 }
 
 export function patchSessionMeta(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   patch: Partial<ChatSessionMetaState>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   return {
-    ...state.sessionsByKey,
+    ...state.loadedSessions,
     [sessionKey]: {
       ...current,
       meta: {
@@ -390,20 +396,20 @@ export function patchSessionMeta(
 }
 
 export function patchCurrentSessionMeta(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   patch: Partial<ChatSessionMetaState>,
 ): Record<string, ChatSessionRecord> {
   return patchSessionMeta(state, state.currentSessionKey, patch);
 }
 
 export function patchSessionRuntime(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   patch: Partial<ChatSessionRuntimeState>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   return {
-    ...state.sessionsByKey,
+    ...state.loadedSessions,
     [sessionKey]: {
       ...current,
       runtime: {
@@ -415,94 +421,90 @@ export function patchSessionRuntime(
 }
 
 export function patchCurrentSessionRuntime(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   patch: Partial<ChatSessionRuntimeState>,
 ): Record<string, ChatSessionRecord> {
   return patchSessionRuntime(state, state.currentSessionKey, patch);
 }
 
 export function patchSessionTranscript(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-  transcript: RawMessage[],
+  messages: RawMessage[],
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   return {
-    ...state.sessionsByKey,
+    ...state.loadedSessions,
     [sessionKey]: {
       ...current,
-      transcript,
+      window: syncViewportMessages(current.window, messages),
     },
   };
 }
 
 export function patchCurrentSessionTranscript(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'sessionsByKey'>,
-  transcript: RawMessage[],
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
+  messages: RawMessage[],
 ): Record<string, ChatSessionRecord> {
-  return patchSessionTranscript(state, state.currentSessionKey, transcript);
+  return patchSessionTranscript(state, state.currentSessionKey, messages);
 }
 
 export function patchSessionViewportState(
-  state: Pick<ChatStoreState, 'viewportBySession'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   viewport: ChatSessionViewportState,
-): Record<string, ChatSessionViewportState> {
-  const current = state.viewportBySession ?? {};
-  if (current[sessionKey] === viewport) {
-    return current;
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  if (current.window === viewport) {
+    return state.loadedSessions;
   }
   return {
-    ...current,
-    [sessionKey]: viewport,
+    ...state.loadedSessions,
+    [sessionKey]: {
+      ...current,
+      window: viewport,
+    },
   };
 }
 
 export function removeSessionRecord(
-  state: Pick<ChatStoreState, 'sessionsByKey'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
 ): Record<string, ChatSessionRecord> {
   return Object.fromEntries(
-    Object.entries(state.sessionsByKey).filter(([key]) => key !== sessionKey),
+    Object.entries(state.loadedSessions).filter(([key]) => key !== sessionKey),
   );
 }
 
 export function removeSessionViewportState(
-  state: Pick<ChatStoreState, 'viewportBySession'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-): Record<string, ChatSessionViewportState> {
-  return Object.fromEntries(
-    Object.entries(state.viewportBySession ?? {}).filter(([key]) => key !== sessionKey),
-  );
+): Record<string, ChatSessionRecord> {
+  return removeSessionRecord(state, sessionKey);
 }
 
 export function buildTranscriptBackedViewportState(
-  state: Pick<ChatStoreState, 'viewportBySession'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-  transcript: RawMessage[],
+  messages: RawMessage[],
   runtime: ChatSessionRuntimeState,
 ): ChatSessionViewportState {
-  const baseViewport = state.viewportBySession?.[sessionKey];
+  const baseViewport = state.loadedSessions?.[sessionKey]?.window;
   let nextViewport = !baseViewport
     ? createViewportWindowState({
-      messages: transcript,
-      totalMessageCount: transcript.length,
+      messages,
+      totalMessageCount: messages.length,
       windowStartOffset: 0,
-      windowEndOffset: transcript.length,
+      windowEndOffset: messages.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
     })
-    : syncViewportMessages(baseViewport, transcript);
+    : syncViewportMessages(baseViewport, messages);
 
   const pendingUserMessage = runtime.pendingUserMessage?.message ?? null;
   if (pendingUserMessage) {
     nextViewport = appendViewportMessage(nextViewport, pendingUserMessage);
-  }
-
-  const streamingMessage = selectStreamingRenderMessage(runtime);
-  if (streamingMessage) {
-    nextViewport = upsertViewportMessage(nextViewport, streamingMessage);
   }
 
   return nextViewport;
@@ -529,3 +531,4 @@ export function isRecoverableChatSendTimeout(errorMessage: string): boolean {
     || normalized.includes('Gateway RPC timeout: chat.send')
   );
 }
+

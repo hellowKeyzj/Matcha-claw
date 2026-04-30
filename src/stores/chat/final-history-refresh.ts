@@ -1,5 +1,5 @@
 import { clearHistoryPoll } from './timers';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type { ChatStoreState } from './types';
 
@@ -21,12 +21,12 @@ export function requestFinalHistoryRefresh(
   const hasPendingApprovals = (get().pendingApprovalsBySession[sessionKey] ?? []).length > 0;
   set((state) => {
     const runtime = getSessionRuntime(state, sessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, {
+    const runtimePatch = reduceSessionRuntime(runtime, {
       type: 'final_history_refresh_requested',
       hasPendingApprovals,
     });
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -38,3 +38,4 @@ export function requestFinalHistoryRefresh(
     reason: 'final_event_reconcile',
   });
 }
+

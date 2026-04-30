@@ -3,8 +3,8 @@ import { createStoreEventActions } from '@/stores/chat/event-actions';
 import { handleStoreFinalEvent } from '@/stores/chat/event-handlers';
 import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-apply-pipeline';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import { selectStreamingRenderMessage, createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import { findCurrentStreamingMessage } from '@/stores/chat/streaming-message';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -23,11 +23,10 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
-  runtime?: Partial<ChatStoreState['sessionsByKey'][string]['runtime']>;
+  messages?: RawMessage[];
+  runtime?: Partial<ChatStoreState['loadedSessions'][string]['runtime']>;
 }) {
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: null,
       lastActivityAt: Date.now(),
@@ -38,7 +37,7 @@ function createSessionRecord(input?: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      assistantOverlay: null,
+      streamingMessageId: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
@@ -46,35 +45,42 @@ function createSessionRecord(input?: {
       approvalStatus: 'idle' as const,
       ...input?.runtime,
     },
+    window: createViewportWindowState({
+      messages: input?.messages ?? [],
+      totalMessageCount: input?.messages?.length ?? 0,
+      windowStartOffset: 0,
+      windowEndOffset: input?.messages?.length ?? 0,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    }),
+  };
+}
+
+function createStreamingAssistantMessage(id: string, content: RawMessage['content'], timestamp: number): RawMessage {
+  return {
+    id,
+    role: 'assistant',
+    content,
+    timestamp,
+    streaming: true,
   };
 }
 
 describe('chat stream finalization identity', () => {
-  it('commits assistant final immediately with the existing overlay message id', () => {
+  it('commits assistant final immediately with the existing streaming message id', () => {
     const sessionKey = 'agent:main:main';
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
           runtime: {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming',
             lastUserMessageAt: sentAtMs,
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'assistant-local-1',
-              sourceMessage: {
-                id: 'assistant-local-1',
-                role: 'assistant',
-                content: 'hello',
-                timestamp: sentAtMs / 1000,
-              },
-              committedText: 'hello',
-              targetText: 'hello',
-              status: 'streaming',
-            }),
+            streamingMessageId: 'assistant-local-1',
           },
         }),
       },
@@ -113,45 +119,36 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    const transcript = state.sessionsByKey[sessionKey]!.transcript;
-    const runtime = state.sessionsByKey[sessionKey]!.runtime;
+    const transcript = state.loadedSessions[sessionKey]!.window.messages;
+    const runtime = state.loadedSessions[sessionKey]!.runtime;
     expect(transcript).toHaveLength(1);
     expect(transcript[0]).toMatchObject({
       id: 'assistant-local-1',
       role: 'assistant',
       content: 'hello world',
+      streaming: false,
     });
-    expect(runtime.assistantOverlay).toBeNull();
-    expect(selectStreamingRenderMessage(runtime)).toBeNull();
+    expect(runtime.streamingMessageId).toBeNull();
     expect(runtime.sending).toBe(false);
     expect(runtime.pendingFinal).toBe(false);
   });
 
-  it('commits the final assistant message into transcript with the existing overlay message id', () => {
+  it('commits the final assistant message into transcript with the existing streaming message id', () => {
     const sessionKey = 'agent:main:main';
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
+          messages: [
+            createStreamingAssistantMessage('assistant-local-1', 'hello world', sentAtMs / 1000),
+          ],
           runtime: {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming',
             lastUserMessageAt: sentAtMs,
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'assistant-local-1',
-              sourceMessage: {
-                id: 'assistant-local-1',
-                role: 'assistant',
-                content: 'hello world',
-                timestamp: sentAtMs / 1000,
-              },
-              committedText: 'hello world',
-              targetText: 'hello world',
-              status: 'streaming',
-            }),
+            streamingMessageId: 'assistant-local-1',
           },
         }),
       },
@@ -190,12 +187,12 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    const transcript = state.sessionsByKey[sessionKey]!.transcript;
-    const runtime = state.sessionsByKey[sessionKey]!.runtime;
+    const transcript = state.loadedSessions[sessionKey]!.window.messages;
+    const runtime = state.loadedSessions[sessionKey]!.runtime;
     expect(transcript).toHaveLength(1);
     expect(transcript[0]?.id).toBe('assistant-local-1');
     expect(transcript[0]?.content).toBe('hello world');
-    expect(runtime.assistantOverlay).toBeNull();
+    expect(runtime.streamingMessageId).toBeNull();
     expect(state.loadHistory).toHaveBeenCalledWith({
       sessionKey,
       mode: 'quiet',
@@ -222,9 +219,9 @@ describe('chat stream finalization identity', () => {
 
     let state = {
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createSessionRecord({
-          transcript: currentMessages,
+          messages: currentMessages,
           runtime: {
             sending: false,
             activeRunId: null,
@@ -260,8 +257,8 @@ describe('chat stream finalization identity', () => {
 
     await applyLoadedMessages(rawMessages, null);
 
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript).toHaveLength(1);
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?.id).toBe('assistant-local-1');
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages).toHaveLength(1);
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages[0]?.id).toBe('assistant-local-1');
   });
 
   it('treats reply_to colon prefix as assistant metadata during history reconcile', async () => {
@@ -282,9 +279,9 @@ describe('chat stream finalization identity', () => {
 
     let state = {
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createSessionRecord({
-          transcript: currentMessages,
+          messages: currentMessages,
           runtime: {
             sending: false,
             activeRunId: null,
@@ -320,72 +317,53 @@ describe('chat stream finalization identity', () => {
 
     await applyLoadedMessages(rawMessages, null);
 
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript).toHaveLength(1);
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?.id).toBe('assistant-local-1');
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?.content).toBe('[[reply_to:f4a00548-42a8-4826-8e45-0a655d7c6414]]好，我继续。');
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages).toHaveLength(1);
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages[0]?.id).toBe('assistant-local-1');
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages[0]?.content).toBe('[[reply_to:f4a00548-42a8-4826-8e45-0a655d7c6414]]好，我继续。');
   });
 
-  it('keeps the raw streaming source message for tool turns while render projection strips tool blocks', () => {
-    const runtime = createSessionRecord({
+  it('keeps the raw streaming message blocks for tool turns inside the transcript message', () => {
+    const record = createSessionRecord({
+      messages: [
+        createStreamingAssistantMessage(
+          'assistant-local-1',
+          [
+            { type: 'text', text: 'hello world' },
+            { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: '/tmp/a.ts' } },
+          ],
+          1_700_000_000,
+        ),
+      ],
       runtime: {
         sending: true,
         activeRunId: 'run-1',
         runPhase: 'streaming',
         lastUserMessageAt: 1_700_000_000_000,
-        assistantOverlay: createAssistantOverlay({
-          runId: 'run-1',
-          messageId: 'assistant-local-1',
-          sourceMessage: {
-            id: 'assistant-local-1',
-            role: 'assistant',
-            content: [
-              { type: 'text', text: 'hello world' },
-              { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: '/tmp/a.ts' } },
-            ],
-            timestamp: 1_700_000_000,
-          },
-          committedText: 'hello',
-          targetText: 'hello world',
-          status: 'streaming',
-        }),
+        streamingMessageId: 'assistant-local-1',
       },
-    }).runtime;
+    });
 
-    expect(Array.isArray(runtime.assistantOverlay?.sourceMessage?.content)).toBe(true);
-    expect((runtime.assistantOverlay?.sourceMessage?.content as Array<{ type: string }>).some((block) => block.type === 'tool_use')).toBe(true);
-
-    const renderMessage = selectStreamingRenderMessage(runtime);
-    expect(renderMessage?.id).toBe('assistant-local-1');
-    expect(renderMessage?.content).toEqual([
-      { type: 'text', text: 'hello' },
-    ]);
+    const streamingMessage = findCurrentStreamingMessage(record.window.messages, record.runtime.streamingMessageId);
+    expect(Array.isArray(streamingMessage?.content)).toBe(true);
+    expect((streamingMessage?.content as Array<{ type: string }>).some((block) => block.type === 'tool_use')).toBe(true);
   });
 
-  it('returns a stable render message reference while overlay state is unchanged', () => {
-    const runtime = createSessionRecord({
+  it('returns the same streaming transcript message reference while runtime state is unchanged', () => {
+    const record = createSessionRecord({
+      messages: [
+        createStreamingAssistantMessage('assistant-local-1', 'hello world', 1_700_000_000),
+      ],
       runtime: {
         sending: true,
         activeRunId: 'run-1',
         runPhase: 'streaming',
         lastUserMessageAt: 1_700_000_000_000,
-        assistantOverlay: createAssistantOverlay({
-          runId: 'run-1',
-          messageId: 'assistant-local-1',
-          sourceMessage: {
-            id: 'assistant-local-1',
-            role: 'assistant',
-            content: 'hello world',
-            timestamp: 1_700_000_000,
-          },
-          committedText: 'hello',
-          targetText: 'hello world',
-          status: 'streaming',
-        }),
+        streamingMessageId: 'assistant-local-1',
       },
-    }).runtime;
+    });
 
-    const first = selectStreamingRenderMessage(runtime);
-    const second = selectStreamingRenderMessage(runtime);
+    const first = findCurrentStreamingMessage(record.window.messages, record.runtime.streamingMessageId);
+    const second = findCurrentStreamingMessage(record.window.messages, record.runtime.streamingMessageId);
 
     expect(second).toBe(first);
   });
@@ -394,7 +372,7 @@ describe('chat stream finalization identity', () => {
     const sessionKey = 'agent:main:main';
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
           runtime: {
             sending: true,
@@ -449,10 +427,10 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage).toBeNull();
-    expect(state.sessionsByKey[sessionKey]?.runtime.runPhase).toBe('submitted');
-    expect(state.sessionsByKey[sessionKey]?.transcript).toHaveLength(1);
-    expect(state.sessionsByKey[sessionKey]?.transcript[0]?.id).toBe('user-local-1');
+    expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
+    expect(state.loadedSessions[sessionKey]?.runtime.runPhase).toBe('submitted');
+    expect(state.loadedSessions[sessionKey]?.window.messages).toHaveLength(1);
+    expect(state.loadedSessions[sessionKey]?.window.messages[0]?.id).toBe('user-local-1');
   });
 
   it('clears pending user overlay when assistant final is committed', () => {
@@ -460,7 +438,7 @@ describe('chat stream finalization identity', () => {
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
           runtime: {
             sending: true,
@@ -477,19 +455,7 @@ describe('chat stream finalization identity', () => {
                 timestamp: sentAtMs / 1000,
               },
             },
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'assistant-local-1',
-              sourceMessage: {
-                id: 'assistant-local-1',
-                role: 'assistant',
-                content: 'hello',
-                timestamp: sentAtMs / 1000,
-              },
-              committedText: 'hello',
-              targetText: 'hello',
-              status: 'streaming',
-            }),
+            streamingMessageId: 'assistant-local-1',
           },
         }),
       },
@@ -528,7 +494,7 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage).toBeNull();
+    expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
   });
 
   it('commits pending user and assistant final together so the current turn never disappears', () => {
@@ -536,13 +502,15 @@ describe('chat stream finalization identity', () => {
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
-          transcript: [{
+          messages: [{
             id: 'assistant-prev-1',
             role: 'assistant',
             content: 'previous',
             timestamp: (sentAtMs - 1000) / 1000,
+          }, {
+            ...createStreamingAssistantMessage('assistant-local-1', 'hello', sentAtMs / 1000),
           }],
           runtime: {
             sending: true,
@@ -559,19 +527,7 @@ describe('chat stream finalization identity', () => {
                 timestamp: sentAtMs / 1000,
               },
             },
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'assistant-local-1',
-              sourceMessage: {
-                id: 'assistant-local-1',
-                role: 'assistant',
-                content: 'hello',
-                timestamp: sentAtMs / 1000,
-              },
-              committedText: 'hello',
-              targetText: 'hello',
-              status: 'streaming',
-            }),
+            streamingMessageId: 'assistant-local-1',
           },
         }),
       },
@@ -610,8 +566,8 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage).toBeNull();
-    expect(state.sessionsByKey[sessionKey]?.transcript.map((message) => message.id)).toEqual([
+    expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
+    expect(state.loadedSessions[sessionKey]?.window.messages.map((message) => message.id)).toEqual([
       'assistant-prev-1',
       'user-local-1',
       'assistant-local-1',
@@ -623,7 +579,7 @@ describe('chat stream finalization identity', () => {
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
           runtime: {
             sending: true,
@@ -667,10 +623,10 @@ describe('chat stream finalization identity', () => {
       },
     });
 
-    expect(state.sessionsByKey[sessionKey]?.transcript).toHaveLength(0);
-    expect(state.sessionsByKey[sessionKey]?.runtime.sending).toBe(true);
-    expect(state.sessionsByKey[sessionKey]?.runtime.activeRunId).toBe('run-active');
-    expect(state.sessionsByKey[sessionKey]?.runtime.pendingUserMessage?.clientMessageId).toBe('user-local-1');
+    expect(state.loadedSessions[sessionKey]?.window.messages).toHaveLength(0);
+    expect(state.loadedSessions[sessionKey]?.runtime.sending).toBe(true);
+    expect(state.loadedSessions[sessionKey]?.runtime.activeRunId).toBe('run-active');
+    expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage?.clientMessageId).toBe('user-local-1');
     expect(state.loadHistory).toHaveBeenCalledWith({
       sessionKey,
       mode: 'quiet',
@@ -690,13 +646,10 @@ describe('chat stream finalization identity', () => {
     };
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord({
-          transcript: [{
-            id: 'gateway-final-1',
-            role: 'assistant',
-            content: 'hello world',
-            timestamp: sentAtMs / 1000,
+          messages: [{
+            ...createStreamingAssistantMessage('assistant-local-1', 'hello world', sentAtMs / 1000),
           }],
           runtime: {
             sending: true,
@@ -704,19 +657,7 @@ describe('chat stream finalization identity', () => {
             runPhase: 'streaming',
             lastUserMessageAt: sentAtMs,
             pendingToolImages: [pendingImage],
-            assistantOverlay: createAssistantOverlay({
-              runId: 'run-1',
-              messageId: 'assistant-local-1',
-              sourceMessage: {
-                id: 'assistant-local-1',
-                role: 'assistant',
-                content: 'hello world',
-                timestamp: sentAtMs / 1000,
-              },
-              committedText: 'hello world',
-              targetText: 'hello world',
-              status: 'streaming',
-            }),
+            streamingMessageId: 'assistant-local-1',
           },
         }),
       },
@@ -755,7 +696,7 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    const transcript = state.sessionsByKey[sessionKey]!.transcript;
+    const transcript = state.loadedSessions[sessionKey]!.window.messages;
     expect(transcript).toHaveLength(1);
     expect(transcript[0]).toMatchObject({
       id: 'assistant-local-1',
@@ -770,7 +711,7 @@ describe('chat stream finalization identity', () => {
     const historyRuntime = createHistoryRuntimeHarness();
     let state = {
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createSessionRecord({
           runtime: {
             sending: true,
@@ -826,7 +767,7 @@ describe('chat stream finalization identity', () => {
       onBeginFinalToHistory: () => {},
     });
 
-    expect(state.sessionsByKey[requestedSessionKey]?.runtime.pendingUserMessage?.clientMessageId).toBe('user-local-1');
+    expect(state.loadedSessions[requestedSessionKey]?.runtime.pendingUserMessage?.clientMessageId).toBe('user-local-1');
 
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set,
@@ -848,10 +789,10 @@ describe('chat stream finalization identity', () => {
       },
     ], null);
 
-    expect(state.sessionsByKey[requestedSessionKey]?.runtime.pendingUserMessage).toBeNull();
-    expect(state.sessionsByKey[requestedSessionKey]?.runtime.runPhase).toBe('done');
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript).toHaveLength(1);
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?.id).toBe('assistant-final-1');
+    expect(state.loadedSessions[requestedSessionKey]?.runtime.pendingUserMessage).toBeNull();
+    expect(state.loadedSessions[requestedSessionKey]?.runtime.runPhase).toBe('done');
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages).toHaveLength(1);
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages[0]?.id).toBe('assistant-final-1');
   });
 
   it('preserves the committed local user turn when history final arrives before canonical user writeback', async () => {
@@ -859,9 +800,9 @@ describe('chat stream finalization identity', () => {
     const historyRuntime = createHistoryRuntimeHarness();
     let state = {
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createSessionRecord({
-          transcript: [
+          messages: [
             {
               id: 'user-local-1',
               role: 'user',
@@ -923,11 +864,11 @@ describe('chat stream finalization identity', () => {
       },
     ], null);
 
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript.map((message) => message.id)).toEqual([
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages.map((message) => message.id)).toEqual([
       'user-local-1',
       'assistant-local-1',
     ]);
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript[0]?._attachedFiles).toEqual([{
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages[0]?._attachedFiles).toEqual([{
       fileName: 'a.png',
       mimeType: 'image/png',
       fileSize: 1,
@@ -940,9 +881,9 @@ describe('chat stream finalization identity', () => {
     const historyRuntime = createHistoryRuntimeHarness();
     let state = {
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createSessionRecord({
-          transcript: [
+          messages: [
             {
               id: 'user-local-1',
               role: 'user',
@@ -1004,9 +945,11 @@ describe('chat stream finalization identity', () => {
       },
     ], null);
 
-    expect(state.sessionsByKey[requestedSessionKey]?.transcript.map((message) => message.id)).toEqual([
+    expect(state.loadedSessions[requestedSessionKey]?.window.messages.map((message) => message.id)).toEqual([
       'user-local-1',
       'assistant-local-1',
     ]);
   });
 });
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
+

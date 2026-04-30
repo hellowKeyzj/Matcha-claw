@@ -19,7 +19,6 @@ describe('chat row pipeline hook', () => {
       pendingFinal: false,
       waitingApproval: false,
       showThinking: false,
-      streamingMessage: null,
       streamingTools: [],
     }));
 
@@ -41,7 +40,6 @@ describe('chat row pipeline hook', () => {
       pendingFinal: false,
       waitingApproval: false,
       showThinking: false,
-      streamingMessage: null,
       streamingTools: [],
     }));
 
@@ -55,15 +53,9 @@ describe('chat row pipeline hook', () => {
       sessionKey,
       messages: [
         { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
-        { role: 'assistant', content: 'hello', timestamp: 2, id: 'assistant-1' },
+        { role: 'assistant', content: 'hello', timestamp: 2, id: 'assistant-1', streaming: true },
       ],
     });
-    const streamingMessage: RawMessage = {
-      role: 'assistant',
-      content: 'hello',
-      timestamp: 2,
-      id: 'assistant-1',
-    };
 
     const rowsDuringStreaming = appendRuntimeChatRows({
       sessionKey,
@@ -72,7 +64,6 @@ describe('chat row pipeline hook', () => {
       pendingFinal: false,
       waitingApproval: false,
       showThinking: false,
-      streamingMessage,
       streamingTools: [],
     });
     const streamingRow = rowsDuringStreaming[rowsDuringStreaming.length - 1];
@@ -96,7 +87,7 @@ describe('chat row pipeline hook', () => {
     });
   });
 
-  it('patches the matching canonical assistant row instead of appending a second row during final handoff', () => {
+  it('does not append a duplicate runtime row once the assistant transcript message already exists', () => {
     const sessionKey = 'agent:main:main';
     const baseRows = buildStaticChatRows({
       sessionKey,
@@ -105,12 +96,6 @@ describe('chat row pipeline hook', () => {
         { role: 'assistant', content: 'hello world', timestamp: 2, id: 'assistant-1' },
       ],
     });
-    const streamingMessage: RawMessage = {
-      role: 'assistant',
-      content: 'hello world',
-      timestamp: 2,
-      id: 'assistant-1',
-    };
 
     const rows = appendRuntimeChatRows({
       sessionKey,
@@ -119,7 +104,6 @@ describe('chat row pipeline hook', () => {
       pendingFinal: false,
       waitingApproval: false,
       showThinking: false,
-      streamingMessage,
       streamingTools: [],
     });
 
@@ -129,6 +113,38 @@ describe('chat row pipeline hook', () => {
       key: 'session:agent:main:main|id:assistant-1',
       message: {
         id: 'assistant-1',
+        content: 'hello world',
+      },
+    });
+  });
+
+  it('decorates the transcript assistant row while streaming is active', () => {
+    const sessionKey = 'agent:main:main';
+    const baseRows = buildStaticChatRows({
+      sessionKey,
+      messages: [
+        { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
+        { role: 'assistant', content: 'hello world', timestamp: 2, id: 'assistant-stream-1', streaming: true },
+      ],
+    });
+
+    const rows = appendRuntimeChatRows({
+      sessionKey,
+      baseRows,
+      sending: true,
+      pendingFinal: false,
+      waitingApproval: false,
+      showThinking: false,
+      streamingTools: [],
+    });
+
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({
+      kind: 'message',
+      key: 'session:agent:main:main|id:assistant-stream-1',
+      isStreaming: true,
+      message: {
+        id: 'assistant-stream-1',
         content: 'hello world',
       },
     });
@@ -145,7 +161,6 @@ describe('chat row pipeline hook', () => {
       pendingFinal: false,
       waitingApproval: false,
       showThinking: false,
-      streamingMessage: null,
       streamingTools: [],
     });
 

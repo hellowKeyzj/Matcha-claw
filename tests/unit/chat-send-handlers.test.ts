@@ -4,10 +4,9 @@ import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
+  messages?: RawMessage[];
 }) {
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: null,
       lastActivityAt: null,
@@ -19,18 +18,27 @@ function createSessionRecord(input?: {
       activeRunId: null,
       runPhase: 'idle' as const,
       pendingUserMessage: null,
-      assistantOverlay: null,
+      streamingMessageId: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle' as const,
     },
+    window: createViewportWindowState({
+      messages: input?.messages ?? [],
+      totalMessageCount: input?.messages?.length ?? 0,
+      windowStartOffset: 0,
+      windowEndOffset: input?.messages?.length ?? 0,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    }),
   };
 }
 
 describe('chat send handlers', () => {
-  it('stores pending user overlay, writes it into viewport, and keeps canonical transcript clean', () => {
+  it('stores pending user overlay and appends it into the active session window', () => {
     const sessionKey = 'agent:main:session-1';
     const nowMs = 1_700_000_000_000;
     const pendingUserMessage = buildPendingUserMessageOverlay({
@@ -41,11 +49,8 @@ describe('chat send handlers', () => {
 
     let state = {
       currentSessionKey: sessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [sessionKey]: createSessionRecord(),
-      },
-      viewportBySession: {
-        [sessionKey]: createViewportWindowState(),
       },
     } as ChatStoreState;
 
@@ -63,11 +68,11 @@ describe('chat send handlers', () => {
       nowMs,
     });
 
-    const record = state.sessionsByKey[sessionKey]!;
-    expect(record.transcript).toEqual([]);
+    const record = state.loadedSessions[sessionKey]!;
     expect(record.meta.label).toBe('hello world');
     expect(record.runtime.pendingUserMessage).toEqual(pendingUserMessage);
     expect(record.runtime.lastUserMessageAt).toBe(nowMs);
-    expect(state.viewportBySession[sessionKey]?.messages.map((message) => message.id)).toEqual(['user-local-1']);
+    expect(record.window.messages.map((message) => message.id)).toEqual(['user-local-1']);
   });
 });
+

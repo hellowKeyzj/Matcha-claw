@@ -1,51 +1,58 @@
 import { describe, expect, it } from 'vitest';
 import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
 import { useChatStore, type ChatStoreState } from '@/stores/chat';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createStateWithSessions(
-  sessionsByKey: ChatStoreState['sessionsByKey'],
+  loadedSessions: ChatStoreState['loadedSessions'],
 ): ChatStoreState {
   return {
     ...useChatStore.getInitialState(),
-    sessionsByKey,
+    loadedSessions,
   };
 }
 
 describe('chat memory diagnostics', () => {
-  it('summarizes transcript, preview, and overlay memory by session', () => {
+  it('summarizes window, preview, and runtime-state memory by session', () => {
     const state = createStateWithSessions({
       'agent:main:main': {
-        transcript: [
-          {
-            role: 'user',
-            id: 'user-1',
-            timestamp: 1,
-            content: 'hello world',
-            _attachedFiles: [
-              {
-                fileName: 'shot.png',
-                mimeType: 'image/png',
-                fileSize: 12,
-                preview: 'data:image/png;base64,AAAA',
-                filePath: 'C:/shot.png',
-              },
-            ],
-          },
-          {
-            role: 'assistant',
-            id: 'assistant-1',
-            timestamp: 2,
-            content: [{ type: 'text', text: 'answer body' }],
-          },
-        ],
+        window: createViewportWindowState({
+          messages: [
+            {
+              role: 'user',
+              id: 'user-1',
+              timestamp: 1,
+              content: 'hello world',
+              _attachedFiles: [
+                {
+                  fileName: 'shot.png',
+                  mimeType: 'image/png',
+                  fileSize: 12,
+                  preview: 'data:image/png;base64,AAAA',
+                  filePath: 'C:/shot.png',
+                },
+              ],
+            },
+            {
+              role: 'assistant',
+              id: 'assistant-1',
+              timestamp: 2,
+              content: [{ type: 'text', text: 'answer body' }],
+            },
+          ],
+          totalMessageCount: 2,
+          windowStartOffset: 0,
+          windowEndOffset: 2,
+          isAtLatest: true,
+        }),
         meta: {
           label: 'main',
           lastActivityAt: 2000,
-          ready: true,
+          historyStatus: 'ready',
           thinkingLevel: null,
         },
         runtime: {
-          ...useChatStore.getInitialState().sessionsByKey['agent:main:main']!.runtime,
+          ...useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
           pendingUserMessage: {
             clientMessageId: 'pending-user',
             createdAtMs: 3000,
@@ -56,38 +63,31 @@ describe('chat memory diagnostics', () => {
               content: 'pending content',
             },
           },
-          assistantOverlay: {
-            runId: 'run-1',
-            messageId: 'overlay-1',
-            committedText: 'abc',
-            targetText: 'abcdef',
-            status: 'streaming',
-            rafId: null,
-            sourceMessage: {
-              role: 'assistant',
-              id: 'overlay-source',
-              timestamp: 4,
-              content: 'stream source',
-            },
-          },
+          streamingMessageId: 'overlay-1',
         },
       },
       'agent:other:main': {
-        transcript: [
-          {
-            role: 'assistant',
-            id: 'assistant-2',
-            timestamp: 5,
-            content: 'short',
-          },
-        ],
+        window: createViewportWindowState({
+          messages: [
+            {
+              role: 'assistant',
+              id: 'assistant-2',
+              timestamp: 5,
+              content: 'short',
+            },
+          ],
+          totalMessageCount: 1,
+          windowStartOffset: 0,
+          windowEndOffset: 1,
+          isAtLatest: true,
+        }),
         meta: {
           label: 'other',
           lastActivityAt: 1000,
-          ready: false,
+          historyStatus: 'idle',
           thinkingLevel: null,
         },
-        runtime: useChatStore.getInitialState().sessionsByKey['agent:main:main']!.runtime,
+        runtime: useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
       },
     });
 
@@ -99,11 +99,12 @@ describe('chat memory diagnostics', () => {
     expect(summary.totalAttachedFileCount).toBe(1);
     expect(summary.totalPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
     expect(summary.totalDataUrlPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
-    expect(summary.totalOverlayCharCount).toBeGreaterThan(0);
+    expect(summary.totalRuntimeStateCharCount).toBeGreaterThan(0);
     expect(summary.approxRetainedBytes).toBeGreaterThan(0);
     expect(summary.largestSessions[0]?.sessionKey).toBe('agent:main:main');
     expect(summary.largestSessions[0]?.messageCount).toBe(2);
     expect(summary.largestSessions[0]?.attachedFileCount).toBe(1);
-    expect(summary.largestSessions[0]?.overlayCharCount).toBeGreaterThan(0);
+    expect(summary.largestSessions[0]?.runtimeStateCharCount).toBeGreaterThan(0);
   });
 });
+

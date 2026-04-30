@@ -28,7 +28,6 @@ function buildMessages(count: number, prefix = 'message') {
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
-    transcript: overrides?.transcript ?? base.transcript,
     meta: {
       ...base.meta,
       ...overrides?.meta,
@@ -37,6 +36,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    window: overrides?.window ?? base.window,
   };
 }
 
@@ -86,43 +86,34 @@ function setupChatSessions() {
   } as never);
 
   useChatStore.setState({
-    snapshotReady: true,
-    initialLoading: false,
-    refreshing: false,
+    foregroundHistorySessionKey: null,
     mutating: false,
     error: null,
     showThinking: true,
     currentSessionKey,
-    viewportBySession: {
-      [currentSessionKey]: createViewportWindowState({
-        ...createEmptySessionViewportState(),
-        messages: currentMessages,
-        totalMessageCount: currentMessages.length,
-        windowStartOffset: 0,
-        windowEndOffset: currentMessages.length,
-        hasMore: false,
-        hasNewer: false,
-        isAtLatest: true,
-      }),
-      [anotherSessionKey]: createViewportWindowState({
-        ...createEmptySessionViewportState(),
-        messages: anotherMessages,
-        totalMessageCount: anotherMessages.length,
-        windowStartOffset: 0,
-        windowEndOffset: anotherMessages.length,
-        hasMore: false,
-        hasNewer: false,
-        isAtLatest: true,
-      }),
-    },
     pendingApprovalsBySession: {},
-    sessions: [
-      { key: currentSessionKey, displayName: currentSessionKey },
-      { key: anotherSessionKey, displayName: anotherSessionKey },
-    ],
-    sessionsByKey: {
+    sessionMetasResource: {
+      status: 'ready',
+      data: [
+        { key: currentSessionKey, displayName: currentSessionKey },
+        { key: anotherSessionKey, displayName: anotherSessionKey },
+      ],
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
+    loadedSessions: {
       [currentSessionKey]: buildSessionRecord({
-        transcript: currentMessages,
+        window: createViewportWindowState({
+          ...createEmptySessionViewportState(),
+          messages: currentMessages,
+          totalMessageCount: currentMessages.length,
+          windowStartOffset: 0,
+          windowEndOffset: currentMessages.length,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        }),
         meta: {
           ready: true,
           lastActivityAt: Date.now(),
@@ -134,7 +125,16 @@ function setupChatSessions() {
         },
       }),
       [anotherSessionKey]: buildSessionRecord({
-        transcript: anotherMessages,
+        window: createViewportWindowState({
+          ...createEmptySessionViewportState(),
+          messages: anotherMessages,
+          totalMessageCount: anotherMessages.length,
+          windowStartOffset: 0,
+          windowEndOffset: anotherMessages.length,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        }),
         meta: {
           ready: true,
           lastActivityAt: Date.now() - 1000,
@@ -176,8 +176,8 @@ describe('chat 会话切换 UX', () => {
       expect(screen.getByText('current 1')).toBeInTheDocument();
     });
 
-    const record = useChatStore.getState().sessionsByKey[currentSessionKey];
-    expect(record?.transcript).toHaveLength(12);
+    const record = useChatStore.getState().loadedSessions[currentSessionKey];
+    expect(record?.window.messages).toHaveLength(12);
     expect(record?.runtime.activeRunId).toBe('run-current');
     expect(record?.runtime.sending).toBe(true);
   });
@@ -212,3 +212,5 @@ describe('chat 会话切换 UX', () => {
     expect(screen.getByText('current 11')).toBeInTheDocument();
   });
 });
+
+

@@ -1,9 +1,6 @@
 import {
-  syncActiveStreamPacer,
-} from './stream-pacer';
-import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+  reduceSessionRuntime,
+} from './runtime-state-reducer';
 import {
   clearHistoryPoll,
   setLastChatEventAt,
@@ -82,16 +79,13 @@ export function createStoreEventActions(
         // show loading/streaming in the app when this session has an active run.
         set((state) => {
           const runtime = getSessionRuntime(state, currentSessionKey);
-          const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_started', runId });
+          const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_started', runId });
           return {
-            sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+            loadedSessions: patchSessionRecord(state, currentSessionKey, {
               runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
             }),
           };
         });
-        if (kind !== 'delta') {
-          syncActiveStreamPacer(set, get);
-        }
       }
       const eventRunId = runId || (canRuntimeEventReuseActiveRunId(kind) ? (activeRunId || '') : '');
 
@@ -102,7 +96,6 @@ export function createStoreEventActions(
           scope: 'foreground',
           reason: `unbound_${kind}_event_reconcile`,
         });
-        syncActiveStreamPacer(set, get);
         return;
       }
 
@@ -184,7 +177,7 @@ export function createStoreEventActions(
           break;
         }
       }
-      syncActiveStreamPacer(set, get);
     },
   };
 }
+

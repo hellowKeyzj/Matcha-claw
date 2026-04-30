@@ -36,12 +36,10 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionsByKey: {
+    loadedSessions: {
       'agent:main:main': createEmptySessionRecord(),
     },
-    initialLoading: true,
-    refreshing: true,
-    snapshotReady: false,
+    foregroundHistorySessionKey: 'agent:main:main',
     error: null,
   } as ChatStoreState;
   state = { ...state, ...overrides } as ChatStoreState;
@@ -84,11 +82,21 @@ describe('chat history failure helpers', () => {
       applyLoadedMessages,
     });
 
-    expect(applyLoadedMessages).toHaveBeenCalledWith(fallbackMessages, null);
+    expect(applyLoadedMessages).toHaveBeenCalledWith({
+      rawMessages: fallbackMessages,
+      canonicalRawMessages: fallbackMessages,
+      thinkingLevel: null,
+      totalMessageCount: fallbackMessages.length,
+      windowStartOffset: 0,
+      windowEndOffset: fallbackMessages.length,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    });
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
 
-  it('writes empty fallback snapshot and error when non-quiet and no fallback data', async () => {
+  it('marks the session history as error and exposes the error when non-quiet and no fallback data', async () => {
     const { handleHistoryLoadFailure } = await import('@/stores/chat/history-failure-helpers');
     const historyRuntime = createHistoryRuntimeHarness();
     const requestedSessionKey = 'agent:main:main';
@@ -109,13 +117,11 @@ describe('chat history failure helpers', () => {
 
     const state = get();
     expect(applyLoadedMessages).not.toHaveBeenCalled();
-    expect(state.snapshotReady).toBe(true);
-    expect(state.initialLoading).toBe(false);
-    expect(state.refreshing).toBe(false);
-    expect(state.sessionsByKey[requestedSessionKey]?.meta.ready).toBe(true);
+    expect(state.loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
     expect(state.error).toBe('load failed');
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyQuickFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
 });
+

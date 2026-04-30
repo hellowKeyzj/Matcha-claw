@@ -82,11 +82,8 @@ export async function handleHistoryLoadFailure(
     return;
   }
   set({
-    snapshotReady: true,
-    initialLoading: false,
-    refreshing: false,
-    sessionsByKey: patchSessionMeta(get(), requestedSessionKey, {
-      ready: true,
+    loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
+      historyStatus: 'error',
     }),
     error: error instanceof Error ? error.message : String(error),
   });

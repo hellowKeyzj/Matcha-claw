@@ -11,6 +11,7 @@ export type {
   RawMessage,
   ContentBlock,
   ChatSession,
+  ChatSessionHistoryStatus,
   ToolStatus,
   PendingUserMessageOverlay,
   ApprovalStatus,
