@@ -125,7 +125,7 @@ ClawX はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）
 
 ### 🔐 セキュアなプロバイダー統合
 複数のAIプロバイダー（OpenAI、Anthropicなど）に接続でき、資格情報はシステムのネイティブキーチェーンに安全に保存されます。OpenAI は API キーとブラウザ OAuth（Codex サブスクリプション）の両方に対応しています。
-OpenAI 互換ゲートウェイを **Custom** プロバイダーで使う場合は、**設定 → Models → Provider 編集** で `User-Agent` を指定できます。
+OpenAI 互換ゲートウェイを **Custom** プロバイダーで使う場合は、**設定 → Models → Provider 編集** でモデル単位の `Context Window` と `Max Tokens` を設定できます。
 
 ### 🌐 Browser Relay のウィンドウ単位デフォルトターゲット
 Browser Relay を有効にすると、各 Chrome profile は 1 つの browser instance として接続されますが、既定の browser 制御ターゲットは **ウィンドウ** 単位で選びます。拡張のポップアップで **Use This Window** を押すと、その選択はデスクトップ再起動後も復元され、既定の browser 操作はそのウィンドウの現在 attach 済みページに対して実行されます。`open` と `focus` もそのページを前面に出すため、ユーザーに見えているページと自動化が操作するページが一致します。該当ウィンドウに attach 済みの現在ページがなければ、別タブを推測せず即座にエラーにします。

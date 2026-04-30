@@ -252,6 +252,8 @@ describe('subagents store', () => {
           label: 'Custom A',
           authMode: 'api_key',
           model: 'gpt-4o-mini',
+          contextWindow: 200000,
+          maxTokens: 64000,
           enabled: true,
           isDefault: false,
           createdAt: '2026-01-01T00:00:00.000Z',
@@ -312,10 +314,36 @@ describe('subagents store', () => {
     await useSubagentsStore.getState().loadAvailableModels();
 
     expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'custom-12345678/gpt-4o-mini', provider: 'custom-12345678' },
-      { id: 'ollama-87654321/qwen3:latest', provider: 'ollama-87654321' },
-      { id: 'ollama-87654321/llama3.1:8b', provider: 'ollama-87654321' },
-      { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+      {
+        id: 'custom-12345678/gpt-4o-mini',
+        provider: 'custom-12345678',
+        providerLabel: 'Custom A',
+        modelLabel: 'gpt-4o-mini',
+        displayLabel: 'Custom A / gpt-4o-mini',
+        contextWindow: 200000,
+        maxTokens: 64000,
+      },
+      {
+        id: 'ollama-87654321/qwen3:latest',
+        provider: 'ollama-87654321',
+        providerLabel: 'Local Ollama',
+        modelLabel: 'qwen3:latest',
+        displayLabel: 'Local Ollama / qwen3:latest',
+      },
+      {
+        id: 'ollama-87654321/llama3.1:8b',
+        provider: 'ollama-87654321',
+        providerLabel: 'Local Ollama',
+        modelLabel: 'llama3.1:8b',
+        displayLabel: 'Local Ollama / llama3.1:8b',
+      },
+      {
+        id: 'openai/gpt-4.1-mini',
+        provider: 'openai',
+        providerLabel: 'OpenAI',
+        modelLabel: 'gpt-4.1-mini',
+        displayLabel: 'OpenAI / gpt-4.1-mini',
+      },
     ]);
   });
 
@@ -354,7 +382,13 @@ describe('subagents store', () => {
     await useSubagentsStore.getState().loadAvailableModels();
 
     expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+      {
+        id: 'openai/gpt-4.1-mini',
+        provider: 'openai',
+        providerLabel: 'OpenAI',
+        modelLabel: 'gpt-4.1-mini',
+        displayLabel: 'OpenAI / gpt-4.1-mini',
+      },
     ]);
     expect(hostApiFetchMock).not.toHaveBeenCalled();
   });
@@ -391,7 +425,13 @@ describe('subagents store', () => {
     await useSubagentsStore.getState().loadAvailableModels();
 
     expect(useSubagentsStore.getState().availableModels).toEqual([
-      { id: 'openai-codex/gpt-5.4', provider: 'openai-codex' },
+      {
+        id: 'openai-codex/gpt-5.4',
+        provider: 'openai-codex',
+        providerLabel: 'OpenAI Browser',
+        modelLabel: 'gpt-5.4',
+        displayLabel: 'OpenAI Browser / gpt-5.4',
+      },
     ]);
   });
 

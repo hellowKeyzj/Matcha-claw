@@ -46,6 +46,8 @@ export interface ProviderConfig {
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackProviderIds?: string[];
   enabled: boolean;
@@ -110,6 +112,8 @@ export interface ProviderAccount {
   apiProtocol?: 'openai-completions' | 'openai-responses' | 'anthropic-messages';
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackAccountIds?: string[];
   enabled: boolean;

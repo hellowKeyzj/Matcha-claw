@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import i18n from '@/i18n';
 import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
 
@@ -98,5 +98,50 @@ describe('providers settings edit flow', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
 
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('编辑态不再显示 User-Agent，并且回退配置默认折叠', () => {
+    render(<ProvidersSettings />);
+
+    fireEvent.click(screen.getByTitle('Edit API key'));
+
+    expect(screen.queryByLabelText('User-Agent')).toBeNull();
+    expect(screen.getByLabelText('Context Window')).toBeInTheDocument();
+    expect(screen.getByLabelText('Max Tokens')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Fallback Model IDs')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Fallback Settings' }));
+
+    expect(screen.getByLabelText('Fallback Model IDs')).toBeInTheDocument();
+  });
+
+  it('新增自定义 provider 时支持填写 Context Window 和 Max Tokens', async () => {
+    render(<ProvidersSettings />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
+    fireEvent.click(within(dialog).getAllByText('Custom')[0]!);
+
+    expect(screen.queryByLabelText('User-Agent')).toBeNull();
+    expect(screen.getByLabelText('Context Window')).toBeInTheDocument();
+    expect(screen.getByLabelText('Max Tokens')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-custom' } });
+    fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'claude-sonnet-4.5' } });
+    fireEvent.change(screen.getByLabelText('Context Window'), { target: { value: '200000' } });
+    fireEvent.change(screen.getByLabelText('Max Tokens'), { target: { value: '64000' } });
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add AI Provider' })).getByRole('button', { name: 'Add Provider' }));
+
+    await waitFor(() => {
+      expect(providerStoreState.createAccount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          vendorId: 'custom',
+          model: 'claude-sonnet-4.5',
+          contextWindow: 200000,
+          maxTokens: 64000,
+        }),
+        'sk-custom',
+      );
+    });
   });
 });

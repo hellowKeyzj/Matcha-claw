@@ -190,6 +190,8 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
       apiProtocol: 'openai-completions',
       headers: { 'User-Agent': 'MatchaClaw/1.0' },
       model: 'my-model',
+      contextWindow: 200000,
+      maxTokens: 64000,
       fallbackModels: ['backup-model'],
       enabled: true,
       isDefault: false,
@@ -211,11 +213,22 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
     expect(saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('custom-12345678', 'sk-custom');
     expect(syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
       'custom-12345678',
-      'my-model',
       expect.objectContaining({
         baseUrl: 'https://api.example.com/v1',
         api: 'openai-completions',
         headers: { 'User-Agent': 'MatchaClaw/1.0' },
+        models: [
+          {
+            id: 'my-model',
+            name: 'my-model',
+            contextWindow: 200000,
+            maxTokens: 64000,
+          },
+          {
+            id: 'backup-model',
+            name: 'backup-model',
+          },
+        ],
       }),
     );
     expect(setOpenClawDefaultModelWithOverrideMock).toHaveBeenCalledWith(
@@ -225,6 +238,18 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
         baseUrl: 'https://api.example.com/v1',
         api: 'openai-completions',
         headers: { 'User-Agent': 'MatchaClaw/1.0' },
+        models: [
+          {
+            id: 'my-model',
+            name: 'my-model',
+            contextWindow: 200000,
+            maxTokens: 64000,
+          },
+          {
+            id: 'backup-model',
+            name: 'backup-model',
+          },
+        ],
       }),
       ['custom-12345678/backup-model'],
     );
@@ -274,11 +299,16 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
     expect(result.status).toBe(200);
     expect(syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
       'custom-87654321',
-      'gpt-5.4',
       expect.objectContaining({
         baseUrl: 'https://custom.example.com/v1',
         api: 'openai-completions',
         headers: { 'x-foo': 'bar' },
+        models: [
+          {
+            id: 'gpt-5.4',
+            name: 'gpt-5.4',
+          },
+        ],
       }),
     );
     expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
