@@ -115,8 +115,20 @@ describe('subagents page', () => {
         },
       ],
       availableModels: [
-        { id: 'gpt-4.1-mini', provider: 'openai' },
-        { id: 'claude-3-7-sonnet', provider: 'anthropic' },
+        {
+          id: 'gpt-4.1-mini',
+          provider: 'openai',
+          providerLabel: 'OpenAI',
+          modelLabel: 'gpt-4.1-mini',
+          displayLabel: 'OpenAI / gpt-4.1-mini',
+        },
+        {
+          id: 'claude-3-7-sonnet',
+          provider: 'anthropic',
+          providerLabel: 'Anthropic',
+          modelLabel: 'claude-3-7-sonnet',
+          displayLabel: 'Anthropic / claude-3-7-sonnet',
+        },
       ],
       modelsLoading: false,
       agentsResource: {
@@ -164,6 +176,8 @@ describe('subagents page', () => {
     expect(screen.getByTestId('subagent-card-grid')).toBeInTheDocument();
     expect(screen.getByText('Alpha')).toBeInTheDocument();
     expect(screen.getByText('agent-alpha')).toBeInTheDocument();
+    expect(screen.getByText('gpt-main')).toBeInTheDocument();
+    expect(screen.getByText('gpt-4o-mini')).toBeInTheDocument();
     expect(screen.getByTestId('agent-avatar-main')).toBeInTheDocument();
     expect(screen.getByTestId('agent-avatar-agent-alpha')).toBeInTheDocument();
   });
@@ -422,7 +436,13 @@ describe('subagents page', () => {
         },
       ],
       availableModels: [
-        { id: 'openai/gpt-4.1-mini', provider: 'openai' },
+        {
+          id: 'openai/gpt-4.1-mini',
+          provider: 'openai',
+          providerLabel: 'OpenAI',
+          modelLabel: 'gpt-4.1-mini',
+          displayLabel: 'OpenAI / gpt-4.1-mini',
+        },
       ],
       modelsLoading: false,
     });
@@ -434,6 +454,162 @@ describe('subagents page', () => {
     expect(screen.queryByRole('option', { name: 'legacy/removed-model' })).toBeNull();
     expect(modelSelect).toHaveValue('openai/gpt-4.1-mini');
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  it('编辑子 Agent 时模型下拉优先显示 provider 自定义名称', () => {
+    useSubagentsStore.setState({
+      availableModels: [
+        {
+          id: 'custom-12345678/gpt-4o-mini',
+          provider: 'custom-12345678',
+          providerLabel: '自定义',
+          modelLabel: 'gpt-4o-mini',
+          displayLabel: '自定义 / gpt-4o-mini',
+        },
+      ],
+      modelsLoading: false,
+    });
+
+    renderSubagentsPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit agent-alpha' }));
+
+    expect(
+      screen.getByRole('option', { name: '自定义 / gpt-4o-mini' })
+    ).toBeInTheDocument();
+  });
+
+  it('Agent 卡片优先显示统一模型展示文案，找不到映射时回退原始模型 id', () => {
+    useSubagentsStore.setState({
+      agents: [
+        {
+          id: 'main',
+          name: 'Main',
+          workspace: '/home/dev/.openclaw/workspace',
+          model: 'custom-12345678/gpt-4o-mini',
+          avatarSeed: 'agent:main',
+          avatarStyle: 'pixelArt',
+          isDefault: true,
+        },
+        {
+          id: 'agent-alpha',
+          name: 'Alpha',
+          workspace: '/home/dev/.openclaw/workspace-subagents/alpha',
+          model: 'legacy/removed-model',
+          avatarSeed: 'agent:agent-alpha',
+          avatarStyle: 'bottts',
+          isDefault: false,
+        },
+      ],
+      availableModels: [
+        {
+          id: 'custom-12345678/gpt-4o-mini',
+          provider: 'custom-12345678',
+          providerLabel: '前端专家',
+          modelLabel: 'gpt-4o-mini',
+          displayLabel: '前端专家 / gpt-4o-mini',
+        },
+      ],
+    });
+
+    renderSubagentsPage();
+
+    expect(screen.getByText('前端专家 / gpt-4o-mini')).toBeInTheDocument();
+    expect(screen.getByText('legacy/removed-model')).toBeInTheDocument();
+  });
+
+  it('模板加载弹窗里的模型下拉也使用统一展示文案', async () => {
+    useSubagentsStore.setState({
+      availableModels: [
+        {
+          id: 'custom-12345678/gpt-4o-mini',
+          provider: 'custom-12345678',
+          providerLabel: '前端专家',
+          modelLabel: 'gpt-4o-mini',
+          displayLabel: '前端专家 / gpt-4o-mini',
+        },
+      ],
+      modelsLoading: false,
+    });
+
+    const invoke = vi.mocked(window.electron.ipcRenderer.invoke);
+    invoke.mockImplementation(async (channel, payload) => {
+      const path = (payload as { path?: string } | undefined)?.path;
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              templates: [
+                {
+                  id: 'brand-guardian',
+                  name: 'Brand Guardian',
+                  summary: 'Brand guard template',
+                  files: ['AGENTS.md'],
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/subagent-templates/brand-guardian') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              sourceDir: '/repo/integrations/openclaw',
+              template: {
+                id: 'brand-guardian',
+                name: 'Brand Guardian',
+                summary: 'Brand guard template',
+                files: ['AGENTS.md'],
+                fileContents: {
+                  'AGENTS.md': 'agents',
+                },
+              },
+            },
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/workspace-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: '/home/dev/.openclaw/workspace',
+          },
+        };
+      }
+      if (channel === 'hostapi:fetch' && path === '/api/openclaw/config-dir') {
+        return {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: '/home/dev/.openclaw',
+          },
+        };
+      }
+      return undefined;
+    });
+
+    renderSubagentsPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Template Library' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load Template' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Load Template: Brand Guardian' })).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole('option', { name: '前端专家 / gpt-4o-mini' })
+    ).toBeInTheDocument();
   });
 
   it('does not render set-default action buttons', () => {

@@ -169,6 +169,13 @@ export function SubAgents() {
   const applyingDraft = managedAgentId ? Boolean(draftApplyingByAgent[managedAgentId]) : false;
   const draftRawOutput = managedAgentId ? (draftRawOutputByAgent[managedAgentId] ?? '') : '';
   const hasAvailableModels = availableModels.length > 0;
+  const modelDisplayLabelById = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const model of availableModels) {
+      labels.set(model.id, model.displayLabel);
+    }
+    return labels;
+  }, [availableModels]);
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
   const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'control_connecting' || gatewayState === 'reconnecting';
@@ -698,6 +705,7 @@ export function SubAgents() {
             <SubagentCard
               key={agent.id}
               agent={agent}
+              modelLabel={agent.model?.trim() ? (modelDisplayLabelById.get(agent.model.trim()) ?? agent.model.trim()) : undefined}
               editLocked={false}
               deleteLocked={Boolean(agent.isDefault)}
               manageLocked={false}

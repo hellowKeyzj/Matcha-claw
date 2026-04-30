@@ -33,9 +33,8 @@ function enableMainAppRoutes() {
   } as never);
   useChatStore.setState({
     messages: [],
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

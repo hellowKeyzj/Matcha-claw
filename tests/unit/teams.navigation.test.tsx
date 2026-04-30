@@ -35,9 +35,8 @@ function enableMainAppRoutes() {
     selectAgent: vi.fn(),
   } as never);
   useChatStore.setState({
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

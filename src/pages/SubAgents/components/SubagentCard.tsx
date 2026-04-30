@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 interface SubagentCardProps {
   agent: SubagentSummary;
+  modelLabel?: string;
   editLocked?: boolean;
   deleteLocked?: boolean;
   manageLocked?: boolean;
@@ -17,6 +18,7 @@ interface SubagentCardProps {
 
 export function SubagentCard({
   agent,
+  modelLabel,
   editLocked = false,
   deleteLocked = false,
   manageLocked = false,
@@ -48,7 +50,7 @@ export function SubagentCard({
             )}
           </div>
           <p className="text-xs text-muted-foreground">{agent.id}</p>
-          <p className="text-sm">{agent.model ?? t('card.modelFallback')}</p>
+          <p className="text-sm">{modelLabel ?? t('card.modelFallback')}</p>
         </div>
       </div>
 

@@ -133,7 +133,7 @@ export function SubagentTemplateLoadDialog({
               </option>
               {resolvedModelOptions.map((model) => (
                 <option key={model.id} value={model.id}>
-                  {model.provider ? `${model.id} (${model.provider})` : model.id}
+                  {model.displayLabel}
                 </option>
               ))}
             </Select>
