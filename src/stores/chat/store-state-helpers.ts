@@ -272,6 +272,8 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
     label: null,
+    displayName: null,
+    model: null,
     lastActivityAt: null,
     historyStatus: 'idle',
     thinkingLevel: null,

@@ -1,32 +1,15 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { extractImages, extractText, extractThinking, extractToolUse } from './message-utils';
+import type { RawMessage } from '@/stores/chat';
+import { extractText } from './message-utils';
 
-export type ChatRow =
-  | {
-    key: string;
-    kind: 'message';
-    message: RawMessage;
-    isStreaming?: boolean;
-    streamingTools?: ToolStatus[];
-  }
-  | {
-    key: string;
-    kind: 'activity';
-  }
-  | {
-    key: string;
-    kind: 'typing';
-  };
-
-interface BuildChatRowsInput {
-  sessionKey: string;
-  messages: RawMessage[];
-  sending: boolean;
-  pendingFinal: boolean;
-  waitingApproval: boolean;
-  showThinking: boolean;
-  streamingTools: ToolStatus[];
+export interface ChatMessageRow {
+  key: string;
+  kind: 'message';
+  message: RawMessage;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
 }
+
+export type ChatRow = ChatMessageRow;
 
 interface BuildStaticChatRowsInput {
   sessionKey: string;
@@ -34,22 +17,8 @@ interface BuildStaticChatRowsInput {
 }
 
 interface BuildStaticChatRowsResult {
-  rows: ChatRow[];
+  rows: ChatMessageRow[];
   renderableCount: number;
-}
-
-interface AppendRuntimeChatRowsInput {
-  sessionKey: string;
-  baseRows: ChatRow[];
-  sending: boolean;
-  pendingFinal: boolean;
-  waitingApproval: boolean;
-  showThinking: boolean;
-  streamingTools: ToolStatus[];
-}
-
-function resolveRuntimeRowKey(sessionKey: string): string {
-  return `runtime:${sessionKey}`;
 }
 
 const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
@@ -104,6 +73,33 @@ export function isRenderableChatMessage(message: RawMessage): boolean {
   return role !== 'toolresult' && role !== 'tool_result';
 }
 
+function resolveRenderableMessageRole(message: RawMessage): ChatMessageRow['role'] {
+  return message.role === 'user' || message.role === 'system' ? message.role : 'assistant';
+}
+
+function buildMessageRow(
+  sessionKey: string,
+  message: RawMessage,
+  renderableIndex: number,
+  usedRowKeys: Set<string>,
+): ChatMessageRow {
+  const baseKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
+  let messageRowKey = baseKey;
+  let duplicateOrdinal = 1;
+  while (usedRowKeys.has(messageRowKey)) {
+    messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+    duplicateOrdinal += 1;
+  }
+  usedRowKeys.add(messageRowKey);
+  return {
+    key: messageRowKey,
+    kind: 'message',
+    message,
+    role: resolveRenderableMessageRole(message),
+    text: extractText(message),
+  };
+}
+
 export function canAppendMessageList(
   previous: RawMessage[],
   next: RawMessage[],
@@ -137,12 +133,12 @@ export function canPrependMessageList(
 
 export function appendMessageRows(
   sessionKey: string,
-  baseRows: ChatRow[],
+  baseRows: ChatMessageRow[],
   messages: RawMessage[],
   fromIndex: number,
   startRenderableIndex: number,
 ): {
-  rows: ChatRow[];
+  rows: ChatMessageRow[];
   renderableCount: number;
 } {
   if (fromIndex >= messages.length) {
@@ -160,19 +156,7 @@ export function appendMessageRows(
     if (!isRenderableChatMessage(message)) {
       continue;
     }
-    const baseKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
-    let messageRowKey = baseKey;
-    let duplicateOrdinal = 1;
-    while (usedRowKeys.has(messageRowKey)) {
-      messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-      duplicateOrdinal += 1;
-    }
-    usedRowKeys.add(messageRowKey);
-    rows.push({
-      key: messageRowKey,
-      kind: 'message',
-      message,
-    });
+    rows.push(buildMessageRow(sessionKey, message, renderableIndex, usedRowKeys));
     renderableIndex += 1;
   }
 
@@ -184,12 +168,12 @@ export function appendMessageRows(
 
 export function prependMessageRows(
   sessionKey: string,
-  baseRows: ChatRow[],
+  baseRows: ChatMessageRow[],
   messages: RawMessage[],
   toIndexExclusive: number,
   startRenderableCount: number,
 ): {
-  rows: ChatRow[];
+  rows: ChatMessageRow[];
   renderableCount: number;
 } {
   if (toIndexExclusive <= 0) {
@@ -199,7 +183,7 @@ export function prependMessageRows(
     };
   }
 
-  const prependedRows: ChatRow[] = [];
+  const prependedRows: ChatMessageRow[] = [];
   const usedRowKeys = new Set(baseRows.map((row) => row.key));
   let prependedRenderableCount = 0;
   for (let index = 0; index < toIndexExclusive; index += 1) {
@@ -207,19 +191,7 @@ export function prependMessageRows(
     if (!isRenderableChatMessage(message)) {
       continue;
     }
-    const baseKey = resolveMessageRowKey(sessionKey, message, prependedRenderableCount);
-    let messageRowKey = baseKey;
-    let duplicateOrdinal = 1;
-    while (usedRowKeys.has(messageRowKey)) {
-      messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-      duplicateOrdinal += 1;
-    }
-    usedRowKeys.add(messageRowKey);
-    prependedRows.push({
-      key: messageRowKey,
-      kind: 'message',
-      message,
-    });
+    prependedRows.push(buildMessageRow(sessionKey, message, prependedRenderableCount, usedRowKeys));
     prependedRenderableCount += 1;
   }
 
@@ -257,7 +229,7 @@ export function resolveMessageRowKey(sessionKey: string, message: RawMessage, _i
 export function buildStaticChatRows({
   sessionKey,
   messages,
-}: BuildStaticChatRowsInput): ChatRow[] {
+}: BuildStaticChatRowsInput): ChatMessageRow[] {
   return buildMessageRowsWithMeta({
     sessionKey,
     messages,
@@ -268,118 +240,18 @@ export function buildMessageRowsWithMeta({
   sessionKey,
   messages,
 }: Pick<BuildStaticChatRowsInput, 'sessionKey' | 'messages'>): BuildStaticChatRowsResult {
-  const rows: ChatRow[] = [];
+  const rows: ChatMessageRow[] = [];
   const usedRowKeys = new Set<string>();
   let renderableCount = 0;
   for (const message of messages) {
     if (!isRenderableChatMessage(message)) {
       continue;
     }
-    const baseKey = resolveMessageRowKey(sessionKey, message, renderableCount);
-    let messageRowKey = baseKey;
-    let duplicateOrdinal = 1;
-    while (usedRowKeys.has(messageRowKey)) {
-      messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-      duplicateOrdinal += 1;
-    }
-    usedRowKeys.add(messageRowKey);
-    rows.push({
-      key: messageRowKey,
-      kind: 'message',
-      message,
-    });
+    rows.push(buildMessageRow(sessionKey, message, renderableCount, usedRowKeys));
     renderableCount += 1;
   }
   return {
     rows,
     renderableCount,
   };
-}
-
-export function appendRuntimeChatRows({
-  sessionKey,
-  baseRows,
-  sending,
-  pendingFinal,
-  waitingApproval,
-  showThinking,
-  streamingTools,
-}: AppendRuntimeChatRowsInput): ChatRow[] {
-  let rows = baseRows;
-  const ensureMutableRows = () => {
-    if (rows === baseRows) {
-      rows = [...baseRows];
-    }
-    return rows;
-  };
-
-  const tailMessageRow = [...baseRows].reverse().find((row) => row.kind === 'message' && row.message.streaming);
-  const streamMsg = tailMessageRow?.kind === 'message' ? tailMessageRow.message : null;
-  const streamText = streamMsg ? extractText(streamMsg) : '';
-  const streamThinking = streamMsg ? extractThinking(streamMsg) : null;
-  const streamTools = streamMsg ? extractToolUse(streamMsg) : [];
-  const streamImages = streamMsg ? extractImages(streamMsg) : [];
-
-  const hasStreamText = streamText.trim().length > 0;
-  const hasStreamThinking = showThinking && !!streamThinking && streamThinking.trim().length > 0;
-  const hasStreamTools = streamTools.length > 0;
-  const hasStreamImages = streamImages.length > 0;
-  const hasStreamToolStatus = streamingTools.length > 0;
-  const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
-  const shouldDecorateStreaming = sending && hasAnyStreamContent && streamMsg;
-
-  if (shouldDecorateStreaming) {
-    const nextRows = ensureMutableRows();
-    const targetIndex = nextRows.findIndex((row) => row.kind === 'message' && row.message === streamMsg);
-    if (targetIndex >= 0) {
-      const matchingRow = nextRows[targetIndex];
-      if (matchingRow?.kind === 'message') {
-        nextRows[targetIndex] = {
-          ...matchingRow,
-          isStreaming: true,
-          streamingTools,
-        };
-      }
-    }
-  }
-
-  if (sending && pendingFinal && !waitingApproval && !shouldDecorateStreaming && !streamMsg && !hasStreamToolStatus) {
-    ensureMutableRows().push({
-      key: resolveRuntimeRowKey(sessionKey),
-      kind: 'activity',
-    });
-  }
-
-  if (sending && !pendingFinal && !waitingApproval && !hasAnyStreamContent && !streamMsg && !hasStreamToolStatus) {
-    ensureMutableRows().push({
-      key: resolveRuntimeRowKey(sessionKey),
-      kind: 'typing',
-    });
-  }
-
-  return rows;
-}
-
-export function buildChatRows({
-  sessionKey,
-  messages,
-  sending,
-  pendingFinal,
-  waitingApproval,
-  showThinking,
-  streamingTools,
-}: BuildChatRowsInput): ChatRow[] {
-  const baseRows = buildStaticChatRows({
-    sessionKey,
-    messages,
-  });
-  return appendRuntimeChatRows({
-    sessionKey,
-    baseRows,
-    sending,
-    pendingFinal,
-    waitingApproval,
-    showThinking,
-    streamingTools,
-  });
 }

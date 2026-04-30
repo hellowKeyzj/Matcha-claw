@@ -9,7 +9,6 @@ import {
   EMPTY_EXECUTION_GRAPHS,
   EMPTY_GRAPH_SIGNATURES,
   EMPTY_MESSAGES,
-  EMPTY_SUPPRESSED_KEYS,
   EXECUTION_GRAPH_BATCH_SIZE,
   EXECUTION_GRAPH_FIRST_BATCH_SIZE,
   EXECUTION_GRAPH_IDLE_MIN_BUDGET_MS,
@@ -26,7 +25,6 @@ import {
   rememberSessionExecutionCache,
   scheduleIdleCallback,
   snapshotExecutionGraphs,
-  snapshotSuppressedToolCardRowKeys,
 } from './exec-graph-cache';
 import { getIsChatScrollDraining } from './chat-scroll-drain';
 import { buildCompletionAnchors, buildMessageKeyIndex } from './exec-graph-index';
@@ -130,10 +128,7 @@ export function useExecutionGraphs({
   isGatewayRunning,
   gatewayRpc,
   showThinking,
-}: UseExecutionGraphsInput): {
-  executionGraphs: ExecutionGraphData[];
-  suppressedToolCardRowKeys: Set<string>;
-} {
+}: UseExecutionGraphsInput): ExecutionGraphData[] {
   const subagentHistoryBySessionRef = useRef<Map<string, RawMessage[]>>(globalSubagentHistoryBySession);
   const [subagentHistoryRevision, setSubagentHistoryRevision] = useState(0);
   const subagentHistoryLoadingRef = useRef<Set<string>>(new Set());
@@ -143,11 +138,9 @@ export function useExecutionGraphs({
   const [renderState, setRenderState] = useState<{
     sessionKey: string;
     executionGraphs: ExecutionGraphData[];
-    suppressedToolCardRowKeys: Set<string>;
   }>({
     sessionKey: currentSessionKey,
     executionGraphs: EMPTY_EXECUTION_GRAPHS,
-    suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
   });
   const cancelScheduledRenderState = useMemo(() => (
     () => {
@@ -161,7 +154,6 @@ export function useExecutionGraphs({
     (next: {
       sessionKey: string;
       executionGraphs: ExecutionGraphData[];
-      suppressedToolCardRowKeys: Set<string>;
     }) => {
       cancelScheduledRenderState();
       renderStateTimerRef.current = setTimeout(() => {
@@ -170,7 +162,6 @@ export function useExecutionGraphs({
           if (
             previous.sessionKey === next.sessionKey
             && previous.executionGraphs === next.executionGraphs
-            && previous.suppressedToolCardRowKeys === next.suppressedToolCardRowKeys
           ) {
             return previous;
           }
@@ -255,7 +246,6 @@ export function useExecutionGraphs({
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: cache.executionGraphs,
-        suppressedToolCardRowKeys: cache.suppressedToolCardRowKeys,
       });
       return;
     }
@@ -264,13 +254,11 @@ export function useExecutionGraphs({
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: cache.executionGraphs,
-        suppressedToolCardRowKeys: cache.suppressedToolCardRowKeys,
       });
     } else {
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: EMPTY_EXECUTION_GRAPHS,
-        suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
       });
     }
 
@@ -314,7 +302,6 @@ export function useExecutionGraphs({
         subagentHistoryRevision,
         showThinking,
         executionGraphs: EMPTY_EXECUTION_GRAPHS,
-        suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
         keyIndex,
         anchors,
         graphSignaturesByAnchor: EMPTY_GRAPH_SIGNATURES,
@@ -327,7 +314,6 @@ export function useExecutionGraphs({
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: nextCache.executionGraphs,
-        suppressedToolCardRowKeys: nextCache.suppressedToolCardRowKeys,
       });
       finalizePipelineMetric('empty');
       return () => {
@@ -365,7 +351,6 @@ export function useExecutionGraphs({
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: nextCache.executionGraphs,
-        suppressedToolCardRowKeys: nextCache.suppressedToolCardRowKeys,
       });
       finalizePipelineMetric('completed', { graphCount: nextCache.executionGraphs.length });
       return () => {
@@ -421,7 +406,6 @@ export function useExecutionGraphs({
       scheduleRenderState({
         sessionKey: currentSessionKey,
         executionGraphs: nextCache.executionGraphs,
-        suppressedToolCardRowKeys: nextCache.suppressedToolCardRowKeys,
       });
       finalizePipelineMetric('completed', { graphCount: nextCache.executionGraphs.length });
       return () => {
@@ -439,7 +423,6 @@ export function useExecutionGraphs({
     const nextGraphCache = new Map<string, ExecutionGraphData>();
     const graphByAnchor: Array<ExecutionGraphData | null> = new Array(anchors.anchors.length).fill(null);
     const executionGraphs: ExecutionGraphData[] = [];
-    const suppressedToolCardRowKeys = new Set<string>();
     const previousGraphByAnchor = previousCache?.graphByAnchor ?? [];
     const previousGraphSignaturesByAnchor = previousCache?.graphSignaturesByAnchor ?? [];
     const reusableAnchorCount = Math.min(firstChangedAnchorIndex, previousGraphByAnchor.length);
@@ -469,55 +452,40 @@ export function useExecutionGraphs({
       if (signature) {
         nextGraphCache.set(signature, cachedGraph);
       }
-      for (const key of cachedGraph.suppressToolCardMessageKeys || []) {
-        suppressedToolCardRowKeys.add(key);
-      }
     }
 
     let cursor = firstChangedAnchorIndex;
     let firstBatch = true;
     let publishedGraphCount = executionGraphs.length;
-    let publishedSuppressedCount = suppressedToolCardRowKeys.size;
 
     const publishProgress = () => {
-      if (
-        executionGraphs.length === publishedGraphCount
-        && suppressedToolCardRowKeys.size === publishedSuppressedCount
-      ) {
+      if (executionGraphs.length === publishedGraphCount) {
         return;
       }
       publishedGraphCount = executionGraphs.length;
-      publishedSuppressedCount = suppressedToolCardRowKeys.size;
       const executionGraphsSnapshot = snapshotExecutionGraphs(executionGraphs);
-      const suppressedSnapshot = snapshotSuppressedToolCardRowKeys(suppressedToolCardRowKeys);
       setRenderState((previous) => {
         if (previous.sessionKey !== currentSessionKey) {
           return previous;
         }
-        if (
-          previous.executionGraphs === executionGraphsSnapshot
-          && previous.suppressedToolCardRowKeys === suppressedSnapshot
-        ) {
+        if (previous.executionGraphs === executionGraphsSnapshot) {
           return previous;
         }
         return {
           sessionKey: currentSessionKey,
           executionGraphs: executionGraphsSnapshot,
-          suppressedToolCardRowKeys: suppressedSnapshot,
         };
       });
     };
 
     const commitFinalState = () => {
       const finalExecutionGraphs = snapshotExecutionGraphs(executionGraphs);
-      const finalSuppressedKeys = snapshotSuppressedToolCardRowKeys(suppressedToolCardRowKeys);
       const nextCache: SessionExecutionCache = {
         messagesRef: messages,
         agentsRef: agents,
         subagentHistoryRevision,
         showThinking,
         executionGraphs: finalExecutionGraphs,
-        suppressedToolCardRowKeys: finalSuppressedKeys,
         keyIndex,
         anchors,
         graphSignaturesByAnchor,
@@ -531,16 +499,12 @@ export function useExecutionGraphs({
         if (previous.sessionKey !== currentSessionKey) {
           return previous;
         }
-        if (
-          previous.executionGraphs === finalExecutionGraphs
-          && previous.suppressedToolCardRowKeys === finalSuppressedKeys
-        ) {
+        if (previous.executionGraphs === finalExecutionGraphs) {
           return previous;
         }
         return {
           sessionKey: currentSessionKey,
           executionGraphs: finalExecutionGraphs,
-          suppressedToolCardRowKeys: finalSuppressedKeys,
         };
       });
       finalizePipelineMetric('completed', { graphCount: finalExecutionGraphs.length });
@@ -572,9 +536,6 @@ export function useExecutionGraphs({
               if (signature) {
                 nextGraphCache.set(signature, cachedGraph);
               }
-              for (const key of cachedGraph.suppressToolCardMessageKeys || []) {
-                suppressedToolCardRowKeys.add(key);
-              }
             }
             cursor += 1;
             processedAnchors += 1;
@@ -600,7 +561,6 @@ export function useExecutionGraphs({
             mainStepsCacheBySignature,
             childStepsCacheBySignature,
             executionGraphs,
-            suppressedToolCardRowKeys,
           });
           if (relatedSessionKey) {
             relatedSubagentSessionKeys.add(relatedSessionKey);
@@ -670,28 +630,16 @@ export function useExecutionGraphs({
   ]);
 
   if (!enabled || !isGatewayRunning) {
-    return {
-      executionGraphs: EMPTY_EXECUTION_GRAPHS,
-      suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
-    };
+    return EMPTY_EXECUTION_GRAPHS;
   }
 
   if (renderState.sessionKey !== currentSessionKey) {
     const immediateCache = globalSessionExecutionCache.get(currentSessionKey);
     if (immediateCache) {
-      return {
-        executionGraphs: immediateCache.executionGraphs,
-        suppressedToolCardRowKeys: immediateCache.suppressedToolCardRowKeys,
-      };
+      return immediateCache.executionGraphs;
     }
-    return {
-      executionGraphs: EMPTY_EXECUTION_GRAPHS,
-      suppressedToolCardRowKeys: EMPTY_SUPPRESSED_KEYS,
-    };
+    return EMPTY_EXECUTION_GRAPHS;
   }
 
-  return {
-    executionGraphs: renderState.executionGraphs,
-    suppressedToolCardRowKeys: renderState.suppressedToolCardRowKeys,
-  };
+  return renderState.executionGraphs;
 }

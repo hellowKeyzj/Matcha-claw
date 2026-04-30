@@ -3,6 +3,7 @@ import {
   buildTaskInboxBridgeState,
   normalizeTaskInboxSessionKey,
   parseSessionUpdatedAtMs,
+  readSessionsFromState,
   resolvePreferredSessionKeyForAgent,
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
@@ -14,6 +15,7 @@ function createSessionRecord(input?: {
   messages?: RawMessage[];
   label?: string | null;
   lastActivityAt?: number | null;
+  thinkingLevel?: string | null;
   runtime?: {
     sending?: boolean;
     pendingFinal?: boolean;
@@ -24,9 +26,11 @@ function createSessionRecord(input?: {
   return {
     meta: {
       label: input?.label ?? null,
+      displayName: null,
+      model: null,
       lastActivityAt: input?.lastActivityAt ?? null,
-      ready: false,
-      thinkingLevel: null,
+      historyStatus: 'idle',
+      thinkingLevel: input?.thinkingLevel ?? null,
     },
     runtime: {
       sending: input?.runtime?.sending ?? false,
@@ -55,6 +59,45 @@ describe('chat session helpers', () => {
       'agent:main:main',
     )).toBe('high');
     expect(resolveSessionThinkingLevelFromList([], 'agent:main:main')).toBeNull();
+  });
+
+  it('reads session collection directly from loaded session records and prefers local meta', () => {
+    const sessions = readSessionsFromState({
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          label: '新标题',
+          lastActivityAt: 1_800_000_000_000,
+          thinkingLevel: 'low',
+        }),
+        'agent:test:session-1': createSessionRecord({
+          label: '本地草稿',
+          lastActivityAt: 1_900_000_000_000,
+        }),
+      },
+    } as never);
+
+    expect(sessions.map((session) => session.key)).toEqual([
+      'agent:test:session-1',
+      'agent:main:main',
+    ]);
+    expect(sessions[0]?.label).toBe('本地草稿');
+    expect(sessions[1]?.label).toBe('新标题');
+    expect(sessions[1]?.thinkingLevel).toBe('low');
+  });
+
+  it('prefers loaded viewport transcript title over stale stored label', () => {
+    const sessions = readSessionsFromState({
+      loadedSessions: {
+        'agent:test:session-1': createSessionRecord({
+          label: '本地旧标题',
+          messages: [
+            { role: 'user', content: '真正正文标题', timestamp: 1_800_000_001 },
+          ],
+        }),
+      },
+    } as never);
+
+    expect(sessions[0]?.label).toBe('真正正文标题');
   });
 
   it('parses session updatedAt in seconds/ms/iso formats', () => {

@@ -14,8 +14,6 @@ import type { RawMessage } from '@/stores/chat';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
-let triggerMutationObserver: (() => void) | null = null;
-let mutationObserverCallbacks: Array<() => void> = [];
 
 class ResizeObserverStub {
   private readonly trigger: () => void;
@@ -39,32 +37,6 @@ class ResizeObserverStub {
 
   disconnect() {
     resizeObserverCallbacks = resizeObserverCallbacks.filter((callback) => callback !== this.trigger);
-  }
-}
-
-class MutationObserverStub {
-  private readonly trigger: () => void;
-
-  constructor(callback: MutationCallback) {
-    this.trigger = () => {
-      callback([], this as unknown as MutationObserver);
-    };
-    mutationObserverCallbacks.push(this.trigger);
-    triggerMutationObserver = () => {
-      act(() => {
-        for (const observerCallback of [...mutationObserverCallbacks]) {
-          observerCallback();
-        }
-      });
-    };
-  }
-
-  observe() {}
-  disconnect() {
-    mutationObserverCallbacks = mutationObserverCallbacks.filter((callback) => callback !== this.trigger);
-  }
-  takeRecords() {
-    return [];
   }
 }
 
@@ -167,9 +139,8 @@ function setupCommonStores() {
     pendingApprovalsBySession: {},
     currentSessionKey: sessionKey,
     showThinking: true,
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [{ key: sessionKey, displayName: sessionKey }],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: now,
@@ -267,10 +238,7 @@ describe('chat 主线程滚动锁', () => {
   beforeEach(() => {
     resizeObserverCallbacks = [];
     triggerResizeObserver = null;
-    mutationObserverCallbacks = [];
-    triggerMutationObserver = null;
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
-    (globalThis as unknown as { MutationObserver: typeof MutationObserver }).MutationObserver = MutationObserverStub as unknown as typeof MutationObserver;
     setupCommonStores();
   });
 
@@ -573,7 +541,105 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('脱离锁底后应断开内容 follow pulse 监听，回到底部后再恢复', async () => {
+  it('连续上滑查看旧消息时，不应在 wheel/scroll 热路径里同步反复采样阅读锚点', async () => {
+    useChatStore.setState({
+      loadedSessions: {
+        'agent:test:main': buildSessionRecord({
+          window: createViewportWindowState({
+            messages: [
+              {
+                role: 'user',
+                content: 'message-1',
+                timestamp: 1,
+                id: 'user-1',
+              },
+              {
+                role: 'assistant',
+                content: 'message-2',
+                timestamp: 2,
+                id: 'assistant-1',
+              },
+              {
+                role: 'assistant',
+                content: 'message-3',
+                timestamp: 3,
+                id: 'assistant-2',
+              },
+            ],
+            totalMessageCount: 3,
+            windowStartOffset: 0,
+            windowEndOffset: 3,
+            isAtLatest: true,
+          }),
+          meta: {
+            ready: true,
+            lastActivityAt: Date.now(),
+          },
+        }),
+      },
+    } as never);
+
+    const { container } = renderChat();
+    const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    const metrics = {
+      scrollHeight: 300,
+      clientHeight: 100,
+      clientWidth: 400,
+      scrollTop: 200,
+    };
+    installViewportMetrics(viewport, metrics);
+    installViewportRect(viewport, metrics);
+
+    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
+    let anchorRowReadCount = 0;
+    let offsetTop = 0;
+    for (const [index, element] of rowElements.entries()) {
+      const rowTop = offsetTop;
+      const rowHeight = [80, 120, 100][index] ?? 80;
+      offsetTop += rowHeight;
+      Object.defineProperty(element, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => {
+          if (index === 1) {
+            anchorRowReadCount += 1;
+          }
+          return DOMRect.fromRect({
+            x: 0,
+            y: rowTop - metrics.scrollTop,
+            width: metrics.clientWidth,
+            height: rowHeight,
+          });
+        },
+      });
+    }
+
+    await waitFor(() => {
+      expect(metrics.scrollTop).toBe(200);
+    });
+
+    anchorRowReadCount = 0;
+    act(() => {
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 170;
+      fireEvent.scroll(viewport);
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 130;
+      fireEvent.scroll(viewport);
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 90;
+      fireEvent.scroll(viewport);
+    });
+
+    expect(anchorRowReadCount).toBeLessThanOrEqual(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+
+    expect(anchorRowReadCount).toBeGreaterThan(0);
+  });
+
+  it('滚动控制器不再依赖 MutationObserver follow pulse', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
     const metrics = {
@@ -583,20 +649,14 @@ describe('chat 主线程滚动锁', () => {
     };
     installViewportMetrics(viewport, metrics);
 
-    let followPulseObserverCount = 0;
     await waitFor(() => {
-      expect(mutationObserverCallbacks.length).toBeGreaterThan(0);
-      followPulseObserverCount = mutationObserverCallbacks.length;
+      expect(resizeObserverCallbacks.length).toBeGreaterThan(0);
     });
 
     act(() => {
       fireEvent.wheel(viewport, { deltaY: -120 });
       metrics.scrollTop = 420;
       fireEvent.scroll(viewport);
-    });
-
-    await waitFor(() => {
-      expect(mutationObserverCallbacks.length).toBeLessThan(followPulseObserverCount);
     });
 
     act(() => {
@@ -606,7 +666,7 @@ describe('chat 主线程滚动锁', () => {
     });
 
     await waitFor(() => {
-      expect(mutationObserverCallbacks.length).toBe(followPulseObserverCount);
+      expect(resizeObserverCallbacks.length).toBeGreaterThan(0);
     });
   });
 
@@ -1206,7 +1266,7 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('锁底时内容 DOM 持续变动，也应继续贴底', async () => {
+  it('锁底时尾部内容继续增高，也应继续贴底', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
     const metrics = {
@@ -1222,7 +1282,7 @@ describe('chat 主线程滚动锁', () => {
 
     act(() => {
       metrics.scrollHeight = 1220;
-      triggerMutationObserver?.();
+      triggerResizeObserver?.();
     });
 
     await waitFor(() => {

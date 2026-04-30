@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import type { RawMessage } from '@/stores/chat';
 
@@ -9,6 +10,13 @@ const invokeIpcMock = vi.fn();
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
+
+function buildRow(message: RawMessage) {
+  return buildStaticChatRows({
+    sessionKey: 'agent:test:main',
+    messages: [message],
+  })[0]!;
+}
 
 describe('chat message links', () => {
   beforeEach(() => {
@@ -32,7 +40,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(message, 'settled');
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     fireEvent.click(screen.getByRole('link', { name: 'TOOLS.md' }));
 
@@ -56,7 +64,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(message, 'settled');
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
 
@@ -69,7 +77,7 @@ describe('chat message links', () => {
       content: '[TOOLS.md](TOOLS.md)',
     };
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     expect(screen.queryByRole('button', { name: 'TOOLS.md' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'TOOLS.md' })).toBeNull();
@@ -83,7 +91,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(message, 'settled');
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     const link = screen.getByRole('link', { name: 'OpenAI' });
     expect(link).toHaveAttribute('href', 'https://openai.com');
@@ -107,7 +115,7 @@ describe('chat message links', () => {
       ],
     };
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
@@ -128,7 +136,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(message, 'settled');
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
@@ -142,9 +150,8 @@ describe('chat message links', () => {
 
     render(
       <ChatMessage
-        message={message}
+        row={buildRow(message)}
         showThinking={false}
-        isStreaming
       />,
     );
 
@@ -160,7 +167,7 @@ describe('chat message links', () => {
       content,
     };
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
     expect(screen.queryByText(content)).toBeNull();
@@ -175,15 +182,14 @@ describe('chat message links', () => {
 
     const view = render(
       <ChatMessage
-        message={message}
+        row={buildRow({ ...message, streaming: true })}
         showThinking={false}
-        isStreaming
       />,
     );
 
     expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
 
-    view.rerender(<ChatMessage message={message} showThinking={false} />);
+    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
     expect(screen.queryByText(content)).toBeNull();
@@ -202,9 +208,8 @@ describe('chat message links', () => {
 
     const view = render(
       <ChatMessage
-        message={message}
+        row={buildRow({ ...message, streaming: true })}
         showThinking={false}
-        isStreaming
       />,
     );
 
@@ -213,7 +218,7 @@ describe('chat message links', () => {
     )).length).toBeGreaterThan(0);
     expect(screen.queryByRole('table')).toBeNull();
 
-    view.rerender(<ChatMessage message={message} showThinking={false} />);
+    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     await waitFor(() => {
       expect(screen.getByRole('table')).toBeInTheDocument();
@@ -234,9 +239,8 @@ describe('chat message links', () => {
 
     const view = render(
       <ChatMessage
-        message={message}
+        row={buildRow({ ...message, streaming: true })}
         showThinking={false}
-        isStreaming
       />,
     );
 
@@ -245,7 +249,7 @@ describe('chat message links', () => {
     )).length).toBeGreaterThan(0);
     expect(screen.queryByRole('table')).toBeNull();
 
-    view.rerender(<ChatMessage message={message} showThinking={false} />);
+    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     await waitFor(() => {
       expect(screen.getByRole('table')).toBeInTheDocument();
@@ -268,7 +272,7 @@ describe('chat message links', () => {
       ].join('\n'),
     };
 
-    render(<ChatMessage message={message} showThinking={false} />);
+    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
     await waitFor(() => {
       expect(screen.getByText('下面是可导入的 CSV：')).toBeInTheDocument();

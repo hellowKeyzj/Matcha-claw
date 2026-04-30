@@ -105,12 +105,8 @@ describe('chat 左侧点击链路回归', () => {
       mutating: false,
       error: null,
       pendingApprovalsBySession: {},
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'agent:main:main' },
-          { key: 'agent:another:main', displayName: 'agent:another:main' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

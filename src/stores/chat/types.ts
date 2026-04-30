@@ -1,4 +1,4 @@
-import type { ResourceStateMeta } from '@/lib/resource-state';
+import type { ResourceStatusState } from '@/lib/resource-state';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -112,6 +112,8 @@ export interface ChatSessionRuntimeState {
 
 export interface ChatSessionMetaState {
   label: string | null;
+  displayName?: string | null;
+  model?: string | null;
   lastActivityAt: number | null;
   historyStatus: ChatSessionHistoryStatus;
   thinkingLevel: string | null;
@@ -138,7 +140,7 @@ export interface ChatSessionViewportState {
 
 export interface ChatViewState {
   foregroundHistorySessionKey: string | null;
-  sessionMetasResource: ResourceStateMeta<ChatSession[]>;
+  sessionCatalogStatus: ResourceStatusState;
   mutating: boolean;
   error: string | null;
   showThinking: boolean;
@@ -202,7 +204,7 @@ export const CHAT_BASE_STATE_KEYS = [
   'loadedSessions',
   'pendingApprovalsBySession',
   'foregroundHistorySessionKey',
-  'sessionMetasResource',
+  'sessionCatalogStatus',
   'mutating',
   'error',
   'showThinking',

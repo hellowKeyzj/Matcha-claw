@@ -30,12 +30,12 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   const {
     refresh,
     foregroundHistorySessionKey,
-    sessionMetasResource,
+    sessionsLoading,
     showThinking,
     toggleThinking,
   } = useChatStore(useShallow(selectChatToolbarState));
   const { t } = useTranslation('chat');
-  const refreshBusy = foregroundHistorySessionKey != null || sessionMetasResource.status === 'loading';
+  const refreshBusy = foregroundHistorySessionKey != null || sessionsLoading;
 
   return (
     <div className="flex items-start justify-end gap-2">

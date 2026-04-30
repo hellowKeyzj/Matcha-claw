@@ -27,7 +27,6 @@ export interface MaterializeExecutionGraphAtIndexInput {
   mainStepsCacheBySignature: Map<string, TaskStep[]>;
   childStepsCacheBySignature: Map<string, TaskStep[]>;
   executionGraphs: ExecutionGraphData[];
-  suppressedToolCardRowKeys: Set<string>;
 }
 
 function buildMessageRangeFingerprint(
@@ -128,7 +127,6 @@ export function materializeExecutionGraphAtIndex({
   mainStepsCacheBySignature,
   childStepsCacheBySignature,
   executionGraphs,
-  suppressedToolCardRowKeys,
 }: MaterializeExecutionGraphAtIndexInput): string | null {
   const anchor = anchors[anchorIndex];
   if (!anchor) {
@@ -150,9 +148,6 @@ export function materializeExecutionGraphAtIndex({
     executionGraphs.push(cached);
     nextGraphCache.set(graphSignature, cached);
     graphByAnchor[anchorIndex] = cached;
-    for (const key of cached.suppressToolCardMessageKeys || []) {
-      suppressedToolCardRowKeys.add(key);
-    }
     return anchor.sessionKey;
   }
 
@@ -252,7 +247,6 @@ export function materializeExecutionGraphAtIndex({
       continue;
     }
     suppressToolCardMessageKeys.push(key);
-    suppressedToolCardRowKeys.add(key);
   }
 
   const graph: ExecutionGraphData = {

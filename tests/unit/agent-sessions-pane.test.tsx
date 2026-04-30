@@ -16,10 +16,9 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
-function buildReadysessionMetasResource(data: Array<{ key: string; displayName: string }>) {
+function buildReadySessionCatalogStatus(_sessions: Array<{ key: string; displayName: string }>) {
   return {
     ...readyResource,
-    data,
   };
 }
 
@@ -72,7 +71,7 @@ function setupBaseState() {
     loadAgents: vi.fn().mockResolvedValue(undefined),
   } as never);
   useChatStore.setState({
-    sessionMetasResource: readyResource,
+    sessionCatalogStatus: readyResource,
   } as never);
 }
 
@@ -101,7 +100,7 @@ describe('agent sessions pane', () => {
     ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:main:session-1': createSessionRecord({ ready: true, label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
@@ -132,7 +131,7 @@ describe('agent sessions pane', () => {
     ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:test:main': createSessionRecord({ ready: true }),
@@ -159,7 +158,7 @@ describe('agent sessions pane', () => {
     ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:test:main': createSessionRecord({ ready: true }),
@@ -196,7 +195,7 @@ describe('agent sessions pane', () => {
     ];
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
       },
@@ -224,7 +223,7 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource(sessions),
+      sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:main:session-1': createSessionRecord({
@@ -265,7 +264,7 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:agent-1:main',
-      sessionMetasResource: buildReadysessionMetasResource(Array.from({ length: 14 }, (_, index) => ({
+      sessionCatalogStatus: buildReadySessionCatalogStatus(Array.from({ length: 14 }, (_, index) => ({
         key: index === 0 ? 'agent:agent-1:main' : `agent:agent-1:session-${index}`,
         displayName: `agent:agent-1:session-${index}`,
       }))),
@@ -314,7 +313,7 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: buildReadysessionMetasResource([
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:main:main', displayName: 'agent:main:main' },
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ]),
@@ -348,7 +347,7 @@ describe('agent sessions pane', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:test:main',
-      sessionMetasResource: buildReadysessionMetasResource([
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
@@ -372,11 +371,60 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
   });
 
-  it('会话标题优先显示最新一条用户输入，而不是旧 label', () => {
+  it('会话标题优先显示发送中的本地用户预览，而不是旧 label', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-2',
-      sessionMetasResource: buildReadysessionMetasResource([
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
+      ]),
+      loadedSessions: {
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({
+          ready: true,
+          label: '旧标题',
+          lastActivityAt: now,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    useChatStore.setState({
+      loadedSessions: {
+        ...useChatStore.getState().loadedSessions,
+        'agent:test:session-2': {
+          ...useChatStore.getState().loadedSessions['agent:test:session-2'],
+          runtime: {
+            ...useChatStore.getState().loadedSessions['agent:test:session-2'].runtime,
+            pendingUserMessage: {
+              clientMessageId: 'optimistic-user-1',
+              createdAtMs: now,
+              message: {
+                role: 'user',
+                content: '最新输入标题',
+                id: 'optimistic-user-1',
+                timestamp: now / 1000,
+              },
+            },
+          },
+        },
+      },
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('最新输入标题')).toBeInTheDocument();
+    expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
+  });
+
+  it('会话标题在窗口正文已加载时，应优先跟正文最新标题走，而不是停留在旧 label', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-2',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
@@ -387,9 +435,12 @@ describe('agent sessions pane', () => {
           label: '旧标题',
           lastActivityAt: now,
           messages: [
-            { role: 'user', content: '第一条输入', id: 'u1', timestamp: 1 },
-            { role: 'assistant', content: '收到', id: 'a1', timestamp: 2 },
-            { role: 'user', content: '最新输入标题', id: 'u2', timestamp: 3 },
+            {
+              role: 'user',
+              content: '正文里的新标题',
+              id: 'user-1',
+              timestamp: now / 1000,
+            },
           ],
         }),
       },
@@ -401,7 +452,7 @@ describe('agent sessions pane', () => {
 
     renderPane();
 
-    expect(screen.getByText('最新输入标题')).toBeInTheDocument();
+    expect(screen.getByText('正文里的新标题')).toBeInTheDocument();
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
   });
 
@@ -409,7 +460,7 @@ describe('agent sessions pane', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-1710000000000',
-      sessionMetasResource: buildReadysessionMetasResource([
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
         { key: 'agent:test:main', displayName: 'agent:test:main' },
         { key: 'agent:test:session-1710000000000', displayName: 'MatchaClaw Runtime Host' },
       ]),
@@ -437,7 +488,7 @@ describe('agent sessions pane', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       loadedSessions: {},
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'loading',
         error: null,
         hasLoadedOnce: false,
@@ -460,7 +511,7 @@ describe('agent sessions pane', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       loadedSessions: {},
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'error',
         error: 'sessions failed',
         hasLoadedOnce: false,
@@ -478,6 +529,35 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId('agent-item-test')).toBeInTheDocument();
     expect(screen.getByTestId('session-list-error')).toHaveTextContent('sessions failed');
   });
+
+  it('只要 loadedSessions 已经有会话集合，session resource loading/error 都不应覆盖正文来源的会话列表', () => {
+    const now = Date.now();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessionCatalogStatus: {
+        status: 'loading',
+        error: 'sessions failed',
+        hasLoadedOnce: false,
+        lastLoadedAt: null,
+      },
+      loadedSessions: {
+        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:session-2': createSessionRecord({
+          ready: true,
+          label: '正文来源会话',
+          lastActivityAt: now,
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.queryByTestId('session-list-loading')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-list-error')).not.toBeInTheDocument();
+    expect(screen.getByText('正文来源会话')).toBeInTheDocument();
+  });
 });
-
-

@@ -372,7 +372,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const {
     sessionEntries,
-    sessionMetasResource,
+    sessionsLoading,
+    sessionsLoadedOnce,
+    sessionsError,
     currentSessionKey,
     switchSession,
     openAgentConversation,
@@ -392,7 +394,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     agents,
     agentsResource,
     sessionEntries,
-    sessionMetasResource,
+    sessionsLoading,
+    sessionsLoadedOnce,
+    sessionsError,
     currentSessionKey,
     locale: i18n.language,
     t,

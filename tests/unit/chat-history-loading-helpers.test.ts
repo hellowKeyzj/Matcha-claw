@@ -128,6 +128,7 @@ describe('chat history loading helpers', () => {
 
     const timer = beginHistoryLoadUiState({
       set: harness.set,
+      get: harness.get,
       requestedSessionKey,
       mode: 'active',
       scope: 'foreground',

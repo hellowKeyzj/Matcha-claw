@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Sparkles, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -9,8 +9,9 @@ interface ExecutionGraphCardProps {
   sessionLabel: string;
   steps: TaskStep[];
   active: boolean;
-  onJumpToTrigger?: () => void;
-  onJumpToReply?: () => void;
+  triggerMessageKey?: string;
+  replyMessageKey?: string;
+  onJumpToRowKey?: (rowKey?: string) => void;
 }
 
 function GraphStatusIcon({ status }: { status: TaskStep['status'] }) {
@@ -67,15 +68,22 @@ function StepDetailCard({ step }: { step: TaskStep }) {
   );
 }
 
-export function ExecutionGraphCard({
+export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   agentLabel,
   sessionLabel,
   steps,
   active,
-  onJumpToTrigger,
-  onJumpToReply,
+  triggerMessageKey,
+  replyMessageKey,
+  onJumpToRowKey,
 }: ExecutionGraphCardProps) {
   const { t } = useTranslation('chat');
+  const handleJumpToTrigger = useCallback(() => {
+    onJumpToRowKey?.(triggerMessageKey);
+  }, [onJumpToRowKey, triggerMessageKey]);
+  const handleJumpToReply = useCallback(() => {
+    onJumpToRowKey?.(replyMessageKey);
+  }, [onJumpToRowKey, replyMessageKey]);
 
   return (
     <div
@@ -106,7 +114,7 @@ export function ExecutionGraphCard({
         <button
           type="button"
           data-testid="chat-execution-jump-trigger"
-          onClick={onJumpToTrigger}
+          onClick={handleJumpToTrigger}
           className="flex items-center gap-2 text-[12px] text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowUp className="h-3.5 w-3.5" />
@@ -172,7 +180,7 @@ export function ExecutionGraphCard({
                 <button
                   type="button"
                   data-testid="chat-execution-jump-reply"
-                  onClick={onJumpToReply}
+                  onClick={handleJumpToReply}
                   className="flex items-center gap-2 pl-11 text-[12px] text-muted-foreground hover:text-foreground transition-colors"
                 >
                   <ArrowDown className="h-3.5 w-3.5" />
@@ -185,4 +193,4 @@ export function ExecutionGraphCard({
       </div>
     </div>
   );
-}
+});

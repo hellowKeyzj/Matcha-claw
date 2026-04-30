@@ -3,8 +3,7 @@ import { useChatStore, type AttachedFileMeta, type ChatStoreState, type RawMessa
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
 import { getExecutionGraphCacheStats } from '@/pages/Chat/exec-graph-cache';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
-import { getStaticRowsCacheStats } from '@/pages/Chat/useRows';
-import { getViewportListItemsCacheStats } from '@/pages/Chat/viewport-list-items';
+import { getStaticRowsCacheStats } from '@/pages/Chat/chat-rows-cache';
 import { hostApiFetch } from './host-api';
 import { getChatViewportCacheStats } from '@/stores/chat/viewport-state';
 
@@ -43,7 +42,6 @@ export interface ChatRendererCacheSummary {
   markdownRender: ReturnType<typeof getMarkdownRenderCacheStats>;
   viewportWindow: ReturnType<typeof getChatViewportCacheStats>;
   staticRows: ReturnType<typeof getStaticRowsCacheStats>;
-  viewportListItems: ReturnType<typeof getViewportListItemsCacheStats>;
   executionGraphs: ReturnType<typeof getExecutionGraphCacheStats>;
   attachmentImage: ReturnType<typeof getAttachmentImageCacheStats>;
 }
@@ -302,7 +300,6 @@ export function collectRendererChatMemoryDiagnostics(): {
       markdownRender: getMarkdownRenderCacheStats(),
       viewportWindow: getChatViewportCacheStats(),
       staticRows: getStaticRowsCacheStats(),
-      viewportListItems: getViewportListItemsCacheStats(),
       executionGraphs: getExecutionGraphCacheStats(),
       attachmentImage: getAttachmentImageCacheStats(),
     },

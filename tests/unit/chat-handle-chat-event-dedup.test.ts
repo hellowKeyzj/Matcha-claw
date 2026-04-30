@@ -62,9 +62,8 @@ function resetChatState(partial: Record<string, unknown> = {}): void {
     mutating: false,
     error: null,
     pendingApprovalsBySession: {},
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

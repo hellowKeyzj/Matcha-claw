@@ -94,11 +94,8 @@ describe('chat viewport window', () => {
       showThinking: true,
       currentSessionKey,
       pendingApprovalsBySession: {},
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: currentSessionKey, displayName: currentSessionKey },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -175,11 +172,8 @@ describe('chat viewport window', () => {
       showThinking: true,
       currentSessionKey,
       pendingApprovalsBySession: {},
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: currentSessionKey, displayName: currentSessionKey },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

@@ -1,13 +1,13 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { buildChatAutoFollowSignal } from '../chat-auto-follow';
+import { createChatScrollChromeStore } from '../chat-scroll-chrome-store';
+import { useChatRenderModel } from '../chat-render-model';
 import { useChatScroll } from '../useChatScroll';
 import { useChatView } from '../useChatView';
-import { useViewportListItems } from '../viewport-list-items';
 import { ChatList } from './ChatList';
-import type { ToolStatus } from '@/stores/chat';
 import type {
-  ChatSessionHistoryStatus,
+  ChatSessionRecord,
   ChatSessionViewportState,
 } from '@/stores/chat/types';
 
@@ -21,17 +21,12 @@ interface ThreadAgent {
 interface ChatViewportPaneProps {
   isActive: boolean;
   currentSessionKey: string;
-  viewport: ChatSessionViewportState;
+  currentSession: ChatSessionRecord;
   agents: ThreadAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
-  currentSessionStatus: ChatSessionHistoryStatus;
   errorMessage: string | null;
-  sending: boolean;
-  pendingFinal: boolean;
-  waitingApproval: boolean;
   showThinking: boolean;
-  streamingTools: ToolStatus[];
   userAvatarDataUrl: string | null;
   assistantAgentId: string;
   assistantAgentName: string;
@@ -50,21 +45,22 @@ export interface ChatViewportPaneHandle {
 
 const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
 
+interface ChatViewportCommandShell {
+  loadOlder: () => void;
+  jumpToRowKey: (rowKey?: string) => void;
+  prepareLatestBottomAlign: () => void;
+}
+
 export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportPaneProps>(function ChatViewportPane(
   {
     isActive,
     currentSessionKey,
-    viewport,
+    currentSession,
     agents,
     isGatewayRunning,
     gatewayRpc,
-    currentSessionStatus,
     errorMessage,
-    sending,
-    pendingFinal,
-    waitingApproval,
     showThinking,
-    streamingTools,
     userAvatarDataUrl,
     assistantAgentId,
     assistantAgentName,
@@ -78,54 +74,54 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
   },
   ref,
 ) {
-  const scopeKey = currentSessionKey;
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
-  const sessionPipelineCostRef = useRef({
-    sessionKey: scopeKey,
-    staticRowsMs: 0,
-    runtimeRowsMs: 0,
-  });
-
-  const effectiveSending = sending;
-  const effectivePendingFinal = pendingFinal;
-  const effectiveWaitingApproval = waitingApproval;
-  const effectiveStreamingTools = streamingTools;
+  const scrollChromeStoreRef = useRef<ReturnType<typeof createChatScrollChromeStore> | null>(null);
+  const currentSessionKeyRef = useRef(currentSessionKey);
+  const onLoadOlderRef = useRef(onLoadOlder);
+  const viewport: ChatSessionViewportState = currentSession.window;
+  const runtime = currentSession.runtime;
+  if (scrollChromeStoreRef.current == null) {
+    scrollChromeStoreRef.current = createChatScrollChromeStore({
+      isBottomLocked: true,
+      visible: false,
+      isAtLatest: viewport.isAtLatest,
+      jumpActionLabel: viewport.isAtLatest ? jumpToBottomLabel : jumpToLatestLabel,
+    });
+  }
+  const scrollChromeStore = scrollChromeStoreRef.current;
 
   const {
-    items,
-    suppressedToolCardRowKeys,
-  } = useViewportListItems({
-    scopeKey,
+    rows,
+    executionGraphSlots,
+    pendingAssistantShell,
+  } = useChatRenderModel({
     sessionKey: currentSessionKey,
     messages: viewport.messages,
+    runtime,
     agents,
     isGatewayRunning,
     gatewayRpc,
-    sending: effectiveSending,
-    pendingFinal: effectivePendingFinal,
-    waitingApproval: effectiveWaitingApproval,
     showThinking,
-    streamingTools: effectiveStreamingTools,
-    sessionPipelineCostRef,
   });
 
   const liveView = useChatView({
-    currentSessionStatus,
-    rowCount: items.length,
-    sending: effectiveSending,
+    currentSessionStatus: currentSession.meta.historyStatus,
+    rowCount: rows.length,
+    sending: runtime.sending,
     refreshing: false,
     mutating: false,
   });
   const showBlockingLoading = liveView.showBlockingLoading;
   const showBlockingError = liveView.showBlockingError;
   const isEmptyState = liveView.isEmptyState;
+  const canShowScrollChrome = !isEmptyState && !showBlockingLoading && !showBlockingError;
 
-  const autoFollowSignal = buildChatAutoFollowSignal(items);
+  const autoFollowSignal = buildChatAutoFollowSignal(rows);
   const tailActivityOpen = (
-    effectiveSending
-    || effectivePendingFinal
-    || effectiveStreamingTools.length > 0
+    runtime.sending
+    || runtime.pendingFinal
+    || runtime.streamingTools.length > 0
   );
 
   const {
@@ -136,38 +132,82 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
     prepareScopeAnchorRestore,
     prepareScopeBottomAlign,
     jumpToBottom,
-    isBottomLocked,
   } = useChatScroll({
     enabled: isActive,
-    scrollScopeKey: scopeKey,
+    scrollScopeKey: currentSessionKey,
     autoFollowSignal,
     tailActivityOpen,
+    setScrollChromeBottomLocked: scrollChromeStore.setBottomLocked,
     viewportRef: messagesViewportRef,
     contentRef: messageContentRef,
     stickyBottomThresholdPx: CHAT_BOTTOM_FOLLOW_THRESHOLD_PX,
   });
 
-  const scrollToRowKey = useCallback((rowKey?: string) => {
-    if (!rowKey) {
-      return;
-    }
-    const viewportNode = messagesViewportRef.current;
-    if (!viewportNode) {
-      return;
-    }
-    const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-row-key]'))
-      .find((element) => element.dataset.chatRowKey === rowKey);
-    if (!target) {
-      return;
-    }
-    target.scrollIntoView({ block: 'start', behavior: 'auto' });
-  }, []);
+  currentSessionKeyRef.current = currentSessionKey;
+  onLoadOlderRef.current = onLoadOlder;
+
+  const viewportCommandShellRef = useRef<ChatViewportCommandShell | null>(null);
+  if (viewportCommandShellRef.current == null) {
+    viewportCommandShellRef.current = {
+      loadOlder: () => {
+        const sessionKey = currentSessionKeyRef.current;
+        if (!sessionKey) {
+          return;
+        }
+        prepareScopeAnchorRestore(sessionKey);
+        onLoadOlderRef.current();
+      },
+      jumpToRowKey: (rowKey?: string) => {
+        if (!rowKey) {
+          return;
+        }
+        const viewportNode = messagesViewportRef.current;
+        if (!viewportNode) {
+          return;
+        }
+        const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-row-key]'))
+          .find((element) => element.dataset.chatRowKey === rowKey);
+        if (!target) {
+          return;
+        }
+        target.scrollIntoView({ block: 'start', behavior: 'auto' });
+      },
+      prepareLatestBottomAlign: () => {
+        const sessionKey = currentSessionKeyRef.current;
+        if (!sessionKey) {
+          return;
+        }
+        prepareScopeBottomAlign(sessionKey);
+      },
+    };
+  }
+  const viewportCommandShell = viewportCommandShellRef.current;
+
+  useLayoutEffect(() => {
+    scrollChromeStore.setChromeState({
+      visible: canShowScrollChrome,
+      isAtLatest: viewport.isAtLatest,
+      jumpActionLabel: viewport.isAtLatest ? jumpToBottomLabel : jumpToLatestLabel,
+    });
+    scrollChromeStore.setJumpHandlers({
+      jumpToBottom,
+      jumpToLatest: onJumpToLatest,
+    });
+  }, [
+    canShowScrollChrome,
+    jumpToBottom,
+    jumpToBottomLabel,
+    jumpToLatestLabel,
+    onJumpToLatest,
+    scrollChromeStore,
+    viewport.isAtLatest,
+  ]);
 
   useImperativeHandle(ref, () => ({
     prepareCurrentLatestBottomAlign: () => {
-      prepareScopeBottomAlign(currentSessionKey);
+      viewportCommandShell.prepareLatestBottomAlign();
     },
-  }), [currentSessionKey, prepareScopeBottomAlign]);
+  }), [viewportCommandShell]);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -182,25 +222,22 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
         onScroll={handleViewportScroll}
         onTouchMove={handleViewportTouchMove}
         onWheel={handleViewportWheel}
-        items={items}
+        rows={rows}
         showLoadOlder={viewport.hasMore || viewport.isLoadingMore}
         isLoadingOlder={viewport.isLoadingMore}
-        onLoadOlder={() => {
-          prepareScopeAnchorRestore(currentSessionKey);
-          onLoadOlder();
-        }}
+        onLoadOlder={viewportCommandShell.loadOlder}
         loadOlderLabel={loadOlderLabel}
-        showJumpToBottom={!isEmptyState && !showBlockingLoading && !showBlockingError && (!isBottomLocked || !viewport.isAtLatest)}
-        onJumpAction={viewport.isAtLatest ? jumpToBottom : onJumpToLatest}
-        jumpActionLabel={viewport.isAtLatest ? jumpToBottomLabel : jumpToLatestLabel}
+        scrollChromeStore={scrollChromeStore}
         showThinking={showThinking}
+        streamingTools={runtime.streamingTools}
         assistantAgentId={assistantAgentId}
         assistantAgentName={assistantAgentName}
         assistantAvatarSeed={assistantAvatarSeed}
         assistantAvatarStyle={assistantAvatarStyle}
         userAvatarImageUrl={userAvatarDataUrl}
-        suppressedToolCardRowKeys={suppressedToolCardRowKeys}
-        onJumpToRowKey={scrollToRowKey}
+        executionGraphSlots={executionGraphSlots}
+        pendingAssistantShell={pendingAssistantShell}
+        onJumpToRowKey={viewportCommandShell.jumpToRowKey}
       />
     </div>
   );

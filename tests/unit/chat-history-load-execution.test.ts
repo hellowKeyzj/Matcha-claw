@@ -48,9 +48,8 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready' as const,
-      data: [],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

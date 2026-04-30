@@ -33,9 +33,8 @@ function resetChatStoreState() {
     snapshotReady: false,
     initialLoading: false,
     refreshing: false,
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'idle',
-      data: [{ key: 'agent:alpha:session-1', displayName: 'agent:alpha:session-1' }],
       error: null,
       hasLoadedOnce: false,
       lastLoadedAt: null,
@@ -239,7 +238,7 @@ describe('chat session labeling', () => {
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/list');
     const state = useChatStore.getState();
-    expect(state.sessionMetasResource.status).toBe('ready');
+    expect(state.sessionCatalogStatus.status).toBe('ready');
     expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话标题');
     expect(state.loadedSessions['agent:alpha:session-2']?.meta.label).toBeNull();
     expect(state.loadedSessions['agent:alpha:session-1']?.meta.lastActivityAt).toBe(1_800_000_111_000);
@@ -315,16 +314,15 @@ describe('chat session labeling', () => {
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/list');
     const state = useChatStore.getState();
-    expect(state.sessionMetasResource.status).toBe('ready');
+    expect(state.sessionCatalogStatus.status).toBe('ready');
     expect(state.currentSessionKey).toBe('agent:alpha:session-1');
     expect(state.loadedSessions['agent:alpha:session-1']?.meta.label).toBe('Alpha 会话');
   });
 
   it('loadSessions 首次失败后应明确进入 error 状态，便于侧栏独立收口', async () => {
     useChatStore.setState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'idle',
-        data: [],
         error: null,
         hasLoadedOnce: false,
         lastLoadedAt: null,
@@ -336,18 +334,17 @@ describe('chat session labeling', () => {
     await useChatStore.getState().loadSessions();
 
     const state = useChatStore.getState();
-    expect(state.sessionMetasResource.status).toBe('error');
-    expect(state.sessionMetasResource.error).toBe('sessions list failed');
-    expect(state.sessionMetasResource.hasLoadedOnce).toBe(false);
+    expect(state.sessionCatalogStatus.status).toBe('error');
+    expect(state.sessionCatalogStatus.error).toBe('sessions list failed');
+    expect(state.sessionCatalogStatus.hasLoadedOnce).toBe(false);
   });
 
   it('loadSessions 不应保留无本地痕迹且后端不存在的 canonical main 会话 key', async () => {
     resetChatStoreState();
     useChatStore.setState({
       currentSessionKey: 'agent:feedback:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'idle',
-        data: [],
         error: null,
         hasLoadedOnce: false,
         lastLoadedAt: null,
@@ -369,7 +366,7 @@ describe('chat session labeling', () => {
 
     const state = useChatStore.getState();
     expect(state.currentSessionKey).toBe('agent:main:main');
-    expect(state.sessionMetasResource.data.some((session) => session.key === 'agent:feedback:main')).toBe(false);
+    expect(state.sessionCatalogStatus.status).toBe('ready');
   });
 
   it('loadHistory 进行中切换会话时，应在安全超时后自动清理 foregroundHistorySessionKey', async () => {
@@ -414,14 +411,8 @@ describe('chat session labeling', () => {
   it('loadHistory 优先使用 sessions.get，避免触发 chat.history', async () => {
     resetChatStoreState();
     useChatStore.setState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          {
-            key: 'agent:alpha:session-1',
-            thinkingLevel: 'high',
-          },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

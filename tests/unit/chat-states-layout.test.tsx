@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { ActivityIndicator, TypingIndicator, WelcomeScreen } from '@/pages/Chat/components/ChatStates';
+import { WelcomeScreen } from '@/pages/Chat/components/ChatStates';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -20,24 +20,5 @@ describe('chat states layout', () => {
 
     expect(cards.some((className) => className.includes('backdrop-blur-sm'))).toBe(true);
     expect(cards.some((className) => className.includes('shadow-'))).toBe(true);
-  });
-
-  it('typing and activity indicators use the new light surface instead of gradient bubbles', () => {
-    const { container, rerender } = render(<TypingIndicator />);
-
-    let classNames = Array.from(container.querySelectorAll('div'))
-      .map((node) => node.className)
-      .filter((className): className is string => typeof className === 'string');
-
-    expect(classNames.some((className) => className.includes('bg-gradient-to-br'))).toBe(false);
-    expect(classNames.some((className) => className.includes('backdrop-blur-sm'))).toBe(true);
-
-    rerender(<ActivityIndicator />);
-    classNames = Array.from(container.querySelectorAll('div'))
-      .map((node) => node.className)
-      .filter((className): className is string => typeof className === 'string');
-
-    expect(classNames.some((className) => className.includes('bg-gradient-to-br'))).toBe(false);
-    expect(classNames.some((className) => className.includes('backdrop-blur-sm'))).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/stores/chat';
+import { hasSessionCatalogLoaded } from '@/stores/chat/session-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
@@ -95,8 +96,7 @@ export function useChatInit(input: UseChatInitInput): void {
           return;
         }
         void loadSessions().finally(() => {
-          const { sessionMetasResource } = useChatStore.getState();
-          if (!sessionMetasResource.hasLoadedOnce) {
+          if (!hasSessionCatalogLoaded(useChatStore.getState())) {
             scheduleSessionsRetry(attempt + 1);
           }
         });
@@ -121,8 +121,7 @@ export function useChatInit(input: UseChatInitInput): void {
         return !agentsResource.hasLoadedOnce;
       };
       const shouldRetrySessionsAfterLoad = () => {
-        const { sessionMetasResource } = useChatStore.getState();
-        return !sessionMetasResource.hasLoadedOnce;
+        return !hasSessionCatalogLoaded(useChatStore.getState());
       };
       const shouldLoadAgents = (
         !subagentsState.agentsResource.hasLoadedOnce

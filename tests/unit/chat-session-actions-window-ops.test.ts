@@ -71,9 +71,8 @@ function createStateHarness(input: {
       },
     },
     pendingApprovalsBySession: {},
-    sessionMetasResource: {
-      data: [],
-      loading: false,
+    sessionCatalogStatus: {
+      status: 'ready' as const,
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: null,
@@ -308,6 +307,65 @@ describe('chat session window ops', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('switchSession marks a cold target session as loading before foreground history reconcile', () => {
+    const currentSessionKey = 'agent:test:session-1';
+    const targetSessionKey = 'agent:test:session-2';
+    let state = {
+      currentSessionKey,
+      loadedSessions: {
+        [currentSessionKey]: {
+          ...createEmptySessionRecord(),
+          meta: {
+            ...createEmptySessionRecord().meta,
+            historyStatus: 'ready' as const,
+          },
+          window: createViewportWindowState({
+            ...createEmptySessionViewportState(),
+            messages: buildMessages(2),
+            totalMessageCount: 2,
+            windowStartOffset: 0,
+            windowEndOffset: 2,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          }),
+        },
+        [targetSessionKey]: createEmptySessionRecord(),
+      },
+      pendingApprovalsBySession: {},
+      sessionCatalogStatus: {
+        status: 'ready' as const,
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: null,
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const actions = createStoreSessionActions({
+      set,
+      get,
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      defaultCanonicalPrefix: 'agent:test',
+      defaultSessionKey: currentSessionKey,
+      historyRuntime: createHistoryRuntimeHarness(),
+    });
+
+    actions.switchSession(targetSessionKey);
+
+    expect(state.currentSessionKey).toBe(targetSessionKey);
+    expect(state.loadedSessions[targetSessionKey]?.meta.historyStatus).toBe('loading');
   });
 
 });
