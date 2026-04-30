@@ -9,7 +9,13 @@ describe('subagents crud', () => {
     vi.mocked(window.electron.ipcRenderer.invoke).mockReset();
     useSubagentsStore.setState({
       agents: [{ id: 'main', workspace: '/home/dev/.openclaw/workspace', isDefault: true }],
-      availableModels: [{ id: 'gpt-4.1-mini', provider: 'openai' }],
+      availableModels: [{
+        id: 'gpt-4.1-mini',
+        provider: 'openai',
+        providerLabel: 'OpenAI',
+        modelLabel: 'gpt-4.1-mini',
+        displayLabel: 'OpenAI / gpt-4.1-mini',
+      }],
       modelsLoading: false,
       snapshotReady: true,
       initialLoading: false,
