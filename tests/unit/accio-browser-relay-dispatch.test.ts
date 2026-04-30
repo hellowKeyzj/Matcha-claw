@@ -10,7 +10,7 @@ const setCookie = vi.fn()
 const removeCookie = vi.fn()
 const getTab = vi.fn()
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/target-ops.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/target-ops.js', () => ({
   createTargetOps: () => ({
     cdpCreateTarget,
     cdpCloseTarget,
@@ -19,7 +19,7 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
   }),
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/content_script/extension-ops.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/content_script/extension-ops.js', () => ({
   extGetViewportInfo: vi.fn(),
   extEnsureZoom: vi.fn(),
   extCaptureViewport: vi.fn(),
@@ -52,7 +52,7 @@ describe('accio browser relay dispatch', () => {
   it('routes Runtime.enable through the addressed child session instead of always using the root tab session', async () => {
     sendCommand.mockResolvedValue({})
 
-    const { createDispatcher } = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/dispatch.js')
+    const { createDispatcher } = await import('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/dispatch.js')
     const mgr = {
       resolveTabId: vi.fn(() => 7),
       ensureAttached: vi.fn(async () => true),
@@ -88,7 +88,7 @@ describe('accio browser relay dispatch', () => {
     ])
     removeCookie.mockResolvedValue({})
 
-    const { createDispatcher } = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/dispatch.js')
+    const { createDispatcher } = await import('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/dispatch.js')
     const mgr = {
       resolveTabId: vi.fn(() => 7),
       ensureAttached: vi.fn(async () => true),

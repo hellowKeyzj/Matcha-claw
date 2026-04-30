@@ -106,7 +106,7 @@ describe('accio browser relay popup', () => {
       },
     })
 
-    await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/pages/scripts/popup.js')
+    await import('../../resources/tools/data/extension/chrome-extension/browser-relay/pages/scripts/popup.js')
     await flushUi()
 
     const windowButtons = [...document.querySelectorAll<HTMLButtonElement>('.window-select-button')]

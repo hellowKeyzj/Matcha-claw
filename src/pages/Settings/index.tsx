@@ -1363,7 +1363,7 @@ export function Settings() {
                       <p className="text-lg font-semibold">{t('gateway.browser.steps.openFolderTitle')}</p>
                       <p className="text-sm text-muted-foreground">{t('gateway.browser.steps.openFolderBody')}</p>
                       <div className="rounded-lg border border-border bg-background/60 px-3 py-2 font-mono text-sm break-all">
-                        {browserRelayInfo?.relativeDir ?? 'resources/tools/data/extension/chrome-extension/accio-browser-relay'}
+                        {browserRelayInfo?.relativeDir ?? 'resources/tools/data/extension/chrome-extension/browser-relay'}
                       </div>
                       {browserRelayInfo?.extensionDir ? (
                         <p className="text-xs text-muted-foreground break-all">

@@ -125,7 +125,7 @@ describe('discoverInstalledBrowserRelayProfiles', () => {
         extensions: {
           settings: {
             relayabc: {
-              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'accio-browser-relay'),
+              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'browser-relay'),
               location: 4,
             },
           },
@@ -208,7 +208,7 @@ describe('discoverInstalledBrowserRelayProfiles', () => {
         extensions: {
           settings: {
             badrelay: {
-              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'accio-browser-relay'),
+              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'browser-relay'),
               location: 4,
               disable_reasons: [1],
             },
@@ -225,7 +225,7 @@ describe('discoverInstalledBrowserRelayProfiles', () => {
         extensions: {
           settings: {
             relayoff: {
-              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'accio-browser-relay'),
+              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'browser-relay'),
               location: 4,
             },
           },
@@ -241,7 +241,7 @@ describe('discoverInstalledBrowserRelayProfiles', () => {
         extensions: {
           settings: {
             relayok: {
-              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'accio-browser-relay'),
+              path: path.join('E:', 'code', 'Matcha-claw', 'resources', 'tools', 'data', 'extension', 'chrome-extension', 'browser-relay'),
               location: 4,
             },
           },

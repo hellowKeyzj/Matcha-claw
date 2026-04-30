@@ -28,7 +28,7 @@ describe('accio browser relay background source', () => {
       'data',
       'extension',
       'chrome-extension',
-      'accio-browser-relay',
+      'browser-relay',
       'background.js',
     )
     const sourceText = await readFile(filePath, 'utf8')

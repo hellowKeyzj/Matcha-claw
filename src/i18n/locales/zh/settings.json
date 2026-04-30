@@ -256,7 +256,7 @@
         "openFolderTitle": "打开扩展文件夹",
         "openFolderBody": "找到包含浏览器扩展文件的目录。开发环境下可以直接使用下面这条仓库路径；打包后可用“定位扩展目录”直接打开。",
         "installTitle": "把扩展文件夹拖入 Chrome",
-        "installBody": "将 accio-browser-relay 文件夹拖到 chrome://extensions 页面，Chrome 会立刻完成安装。",
+        "installBody": "将 browser-relay 文件夹拖到 chrome://extensions 页面，Chrome 会立刻完成安装。",
         "installHint": "如果无法拖拽，也可以点击“加载已解压的扩展程序”，然后选择这个扩展目录。"
       }
     }

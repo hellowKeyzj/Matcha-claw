@@ -79,7 +79,7 @@ describe('accio browser relay target ops', () => {
       return {}
     })
 
-    const { createTargetOps } = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/target-ops.js')
+    const { createTargetOps } = await import('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/target-ops.js')
     const mgr = {
       retainedTabCount: 0,
       markAgent: vi.fn(),
@@ -159,7 +159,7 @@ describe('accio browser relay target ops', () => {
       return {}
     })
 
-    const { createTargetOps } = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/target-ops.js')
+    const { createTargetOps } = await import('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/target-ops.js')
     const mgr = {
       retainedTabCount: 0,
       markAgent: vi.fn(),

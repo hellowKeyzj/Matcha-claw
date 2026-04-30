@@ -136,6 +136,7 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
+          pnpm run build:runtime-host-process
           pnpm run build:vite
           pnpm exec zx scripts/bundle-openclaw.mjs
           pnpm exec zx scripts/bundle-openclaw-plugins.mjs
@@ -165,14 +166,14 @@ jobs:
         if: matrix.platform == 'win'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --win --publish never
+        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --win --publish never
 
       # Linux specific steps
       - name: Build Linux
         if: matrix.platform == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
+        run: pnpm run build:runtime-host-process && pnpm run build:vite && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
