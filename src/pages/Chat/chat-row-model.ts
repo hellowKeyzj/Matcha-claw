@@ -1,4 +1,7 @@
 import type { RawMessage } from '@/stores/chat';
+import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import type { ChatMessageView } from './chat-message-view';
+import { getOrBuildChatMessageView } from './chat-message-view';
 import { extractText } from './message-utils';
 
 export interface ChatMessageRow {
@@ -7,6 +10,8 @@ export interface ChatMessageRow {
   message: RawMessage;
   role: 'user' | 'assistant' | 'system';
   text: string;
+  messageView: ChatMessageView;
+  assistantMarkdownHtml: string | null;
 }
 
 export type ChatRow = ChatMessageRow;
@@ -77,6 +82,26 @@ function resolveRenderableMessageRole(message: RawMessage): ChatMessageRow['role
   return message.role === 'user' || message.role === 'system' ? message.role : 'assistant';
 }
 
+function createMessageRow(
+  key: string,
+  message: RawMessage,
+  role: ChatMessageRow['role'],
+  text: string,
+): ChatMessageRow {
+  const messageView = getOrBuildChatMessageView(message);
+  return {
+    key,
+    kind: 'message',
+    message,
+    role,
+    text,
+    messageView,
+    assistantMarkdownHtml: role === 'assistant'
+      ? (getOrBuildAssistantMarkdownBody(message)?.fullHtml ?? null)
+      : null,
+  };
+}
+
 function buildMessageRow(
   sessionKey: string,
   message: RawMessage,
@@ -91,13 +116,9 @@ function buildMessageRow(
     duplicateOrdinal += 1;
   }
   usedRowKeys.add(messageRowKey);
-  return {
-    key: messageRowKey,
-    kind: 'message',
-    message,
-    role: resolveRenderableMessageRole(message),
-    text: extractText(message),
-  };
+  const text = extractText(message);
+  const role = resolveRenderableMessageRole(message);
+  return createMessageRow(messageRowKey, message, role, text);
 }
 
 export function canAppendMessageList(
@@ -198,6 +219,77 @@ export function prependMessageRows(
   return {
     rows: prependedRows.length > 0 ? [...prependedRows, ...baseRows] : baseRows,
     renderableCount: startRenderableCount + prependedRenderableCount,
+  };
+}
+
+export function patchMessageRows(
+  sessionKey: string,
+  baseRows: ChatMessageRow[],
+  previousMessages: RawMessage[],
+  nextMessages: RawMessage[],
+): {
+  rows: ChatMessageRow[];
+  renderableCount: number;
+} | null {
+  if (previousMessages.length !== nextMessages.length) {
+    return null;
+  }
+
+  const usedRowKeys = new Set<string>();
+  const nextRows: ChatMessageRow[] = [];
+  let renderableIndex = 0;
+  let previousRenderableIndex = 0;
+
+  for (let index = 0; index < nextMessages.length; index += 1) {
+    const previousMessage = previousMessages[index];
+    const nextMessage = nextMessages[index];
+    const previousRenderable = isRenderableChatMessage(previousMessage);
+    const nextRenderable = isRenderableChatMessage(nextMessage);
+
+    if (previousRenderable !== nextRenderable) {
+      return null;
+    }
+    if (!nextRenderable) {
+      continue;
+    }
+
+    const previousRow = baseRows[previousRenderableIndex];
+    if (!previousRow) {
+      return null;
+    }
+
+    const baseKey = resolveMessageRowKey(sessionKey, nextMessage, renderableIndex);
+    let nextRowKey = baseKey;
+    let duplicateOrdinal = 1;
+    while (usedRowKeys.has(nextRowKey)) {
+      nextRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+      duplicateOrdinal += 1;
+    }
+    usedRowKeys.add(nextRowKey);
+
+    if (previousRow.key !== nextRowKey) {
+      return null;
+    }
+
+    if (previousMessage === nextMessage) {
+      nextRows.push(previousRow);
+    } else {
+      const role = resolveRenderableMessageRole(nextMessage);
+      const text = extractText(nextMessage);
+      nextRows.push(createMessageRow(nextRowKey, nextMessage, role, text));
+    }
+
+    previousRenderableIndex += 1;
+    renderableIndex += 1;
+  }
+
+  if (previousRenderableIndex !== baseRows.length) {
+    return null;
+  }
+
+  return {
+    rows: nextRows,
+    renderableCount: renderableIndex,
   };
 }
 

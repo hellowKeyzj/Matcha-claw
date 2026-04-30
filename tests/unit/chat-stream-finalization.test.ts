@@ -116,7 +116,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     const transcript = state.loadedSessions[sessionKey]!.window.messages;
@@ -133,8 +132,8 @@ describe('chat stream finalization identity', () => {
     expect(runtime.pendingFinal).toBe(false);
   });
 
-  it('commits the final assistant message into transcript with the existing streaming message id', () => {
-    const sessionKey = 'agent:main:main';
+  it('commits the final assistant message once and updates local session meta without forcing a background history reconcile', () => {
+    const sessionKey = 'agent:main:session-2';
     const sentAtMs = Date.now();
     let state = {
       currentSessionKey: sessionKey,
@@ -173,6 +172,7 @@ describe('chat stream finalization identity', () => {
           id: 'gateway-final-1',
           role: 'assistant',
           content: 'hello world',
+          timestamp: 123,
         },
       },
       resolvedState: 'final',
@@ -184,21 +184,18 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     const transcript = state.loadedSessions[sessionKey]!.window.messages;
+    const meta = state.loadedSessions[sessionKey]!.meta;
     const runtime = state.loadedSessions[sessionKey]!.runtime;
     expect(transcript).toHaveLength(1);
     expect(transcript[0]?.id).toBe('assistant-local-1');
     expect(transcript[0]?.content).toBe('hello world');
+    expect(meta.label).toBe('hello world');
+    expect(meta.lastActivityAt).toBe(123000);
     expect(runtime.streamingMessageId).toBeNull();
-    expect(state.loadHistory).toHaveBeenCalledWith({
-      sessionKey,
-      mode: 'quiet',
-      scope: 'background',
-      reason: 'final_event_reconcile',
-    });
+    expect(state.loadHistory).not.toHaveBeenCalled();
   });
 
   it('preserves the local assistant id when final history refresh writes back the canonical transcript', async () => {
@@ -424,7 +421,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
@@ -491,7 +487,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
@@ -563,7 +558,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     expect(state.loadedSessions[sessionKey]?.runtime.pendingUserMessage).toBeNull();
@@ -693,7 +687,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     const transcript = state.loadedSessions[sessionKey]!.window.messages;
@@ -764,7 +757,6 @@ describe('chat stream finalization identity', () => {
         consume: () => null,
       },
       onMaybeTrackFirstTokenFinal: () => {},
-      onBeginFinalToHistory: () => {},
     });
 
     expect(state.loadedSessions[requestedSessionKey]?.runtime.pendingUserMessage?.clientMessageId).toBe('user-local-1');
@@ -952,4 +944,5 @@ describe('chat stream finalization identity', () => {
   });
 });
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+
 

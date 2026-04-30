@@ -21,7 +21,6 @@ import {
   shouldIgnoreRuntimeEvent,
 } from './event-routing';
 import {
-  beginFinalToHistoryTelemetry,
   bindChatRunIdTelemetry,
   finishChatRunTelemetry,
 } from './telemetry';
@@ -130,9 +129,6 @@ export function createStoreEventActions(
             message,
             currentSessionKey,
             eventRunId,
-            onBeginFinalToHistory: () => {
-              beginFinalToHistoryTelemetry(currentSessionKey);
-            },
           });
           break;
         }

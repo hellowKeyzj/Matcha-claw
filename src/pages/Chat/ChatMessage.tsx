@@ -1,7 +1,6 @@
-import { useMemo, useState, memo } from 'react';
+import { useState, memo } from 'react';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ChatMessageRow } from './chat-row-model';
-import { getOrBuildChatMessageView } from './chat-message-view';
 import { AssistantMessageBody } from './assistant-message-body';
 import { MessageShell } from './chat-message-shell';
 import { UserMessageBody } from './user-message-body';
@@ -29,7 +28,7 @@ export const ChatMessage = memo(function ChatMessage({
   streamingTools = [],
 }: ChatMessageProps) {
   const { message } = row;
-  const messageView = useMemo(() => getOrBuildChatMessageView(message), [message]);
+  const { messageView } = row;
   const isUser = row.role === 'user';
   const isStreaming = Boolean(message.streaming);
   const hasText = row.text.trim().length > 0;
@@ -76,7 +75,7 @@ export const ChatMessage = memo(function ChatMessage({
           ) : (
             <AssistantMessageBody
               text={row.text}
-              message={message}
+              markdownHtml={row.assistantMarkdownHtml}
               isStreaming={isStreaming}
             />
           )
@@ -84,7 +83,7 @@ export const ChatMessage = memo(function ChatMessage({
         {!hasText && !isUser && isStreaming && (
           <AssistantMessageBody
             text=""
-            message={message}
+            markdownHtml={row.assistantMarkdownHtml}
             isStreaming
           />
         )}

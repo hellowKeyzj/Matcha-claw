@@ -79,6 +79,8 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
   const scrollChromeStoreRef = useRef<ReturnType<typeof createChatScrollChromeStore> | null>(null);
   const currentSessionKeyRef = useRef(currentSessionKey);
   const onLoadOlderRef = useRef(onLoadOlder);
+  const prepareScopeAnchorRestoreRef = useRef<((nextScopeKey: string) => void) | null>(null);
+  const prepareScopeBottomAlignRef = useRef<((nextScopeKey: string) => void) | null>(null);
   const viewport: ChatSessionViewportState = currentSession.window;
   const runtime = currentSession.runtime;
   if (scrollChromeStoreRef.current == null) {
@@ -145,6 +147,8 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
 
   currentSessionKeyRef.current = currentSessionKey;
   onLoadOlderRef.current = onLoadOlder;
+  prepareScopeAnchorRestoreRef.current = prepareScopeAnchorRestore;
+  prepareScopeBottomAlignRef.current = prepareScopeBottomAlign;
 
   const viewportCommandShellRef = useRef<ChatViewportCommandShell | null>(null);
   if (viewportCommandShellRef.current == null) {
@@ -154,7 +158,7 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
         if (!sessionKey) {
           return;
         }
-        prepareScopeAnchorRestore(sessionKey);
+        prepareScopeAnchorRestoreRef.current?.(sessionKey);
         onLoadOlderRef.current();
       },
       jumpToRowKey: (rowKey?: string) => {
@@ -177,7 +181,7 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
         if (!sessionKey) {
           return;
         }
-        prepareScopeBottomAlign(sessionKey);
+        prepareScopeBottomAlignRef.current?.(sessionKey);
       },
     };
   }

@@ -52,9 +52,7 @@ interface RuntimeEventDispatchBaseInput {
   eventRunId: string;
 }
 
-interface RuntimeEventFinalDispatchInput extends RuntimeEventDispatchBaseInput {
-  onBeginFinalToHistory: () => void;
-}
+type RuntimeEventFinalDispatchInput = RuntimeEventDispatchBaseInput;
 
 interface RuntimeEventErrorDispatchInput extends RuntimeEventDispatchBaseInput {
   onFinishFailedTelemetry: (errorMsg: string) => void;
@@ -229,7 +227,6 @@ export function handleRuntimeFinalEvent(input: RuntimeEventFinalDispatchInput): 
     event,
     currentSessionKey,
     eventRunId,
-    onBeginFinalToHistory,
   } = input;
 
   handleStoreFinalEvent({
@@ -252,7 +249,6 @@ export function handleRuntimeFinalEvent(input: RuntimeEventFinalDispatchInput): 
     onMaybeTrackFirstTokenFinal: () => {
       maybeTrackSendToFirstToken(currentSessionKey, 'final');
     },
-    onBeginFinalToHistory,
   });
 }
 

@@ -4,7 +4,6 @@ interface ChatRunTelemetryState {
   startedAt: number;
   runId: string | null;
   firstTokenTracked: boolean;
-  finalEventAt: number | null;
 }
 
 const chatRunTelemetryBySession = new Map<string, ChatRunTelemetryState>();
@@ -24,7 +23,6 @@ export function beginChatRunTelemetry(
     startedAt: nowTelemetryMs(),
     runId: null,
     firstTokenTracked: false,
-    finalEventAt: null,
   });
   trackUiEvent('chat.send_submitted', {
     sessionKey,
@@ -68,39 +66,6 @@ export function maybeTrackSendToFirstToken(
   chatRunTelemetryBySession.set(sessionKey, {
     ...current,
     firstTokenTracked: true,
-  });
-}
-
-export function beginFinalToHistoryTelemetry(sessionKey: string): void {
-  const current = chatRunTelemetryBySession.get(sessionKey);
-  if (!current) {
-    return;
-  }
-  chatRunTelemetryBySession.set(sessionKey, {
-    ...current,
-    finalEventAt: nowTelemetryMs(),
-  });
-}
-
-export function maybeTrackFinalToHistoryVisible(
-  sessionKey: string,
-  payload: { rowCount: number; changed: boolean },
-): void {
-  const current = chatRunTelemetryBySession.get(sessionKey);
-  if (!current || current.finalEventAt == null) {
-    return;
-  }
-  const durationMs = Math.max(0, nowTelemetryMs() - current.finalEventAt);
-  trackUiTiming('chat.final_to_history_visible', durationMs, {
-    sessionKey,
-    rowCount: payload.rowCount,
-    messageListChanged: payload.changed,
-    hadFirstToken: current.firstTokenTracked,
-    hasRunId: Boolean(current.runId),
-  });
-  chatRunTelemetryBySession.set(sessionKey, {
-    ...current,
-    finalEventAt: null,
   });
 }
 

@@ -213,7 +213,7 @@ function buildViewportFromWindowPayload(
 }
 
 function prewarmViewportWindow(sessionKey: string, messages: RawMessage[]): void {
-  prewarmAssistantMarkdownBodies(messages, 'settled');
+  prewarmAssistantMarkdownBodies(messages);
   prewarmStaticRowsForMessages(sessionKey, messages);
 }
 

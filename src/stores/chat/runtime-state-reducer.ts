@@ -92,11 +92,6 @@ interface RuntimeEventErrorClearedAction {
   type: 'event_error_cleared';
 }
 
-interface RuntimeFinalHistoryRefreshRequestedAction {
-  type: 'final_history_refresh_requested';
-  hasPendingApprovals: boolean;
-}
-
 interface RuntimeRunAbortedAction {
   type: 'run_aborted';
 }
@@ -138,7 +133,6 @@ export type RuntimeStateAction =
   | RuntimeDeltaReceivedAction
   | RuntimeStreamDeltaQueuedAction
   | RuntimeEventErrorClearedAction
-  | RuntimeFinalHistoryRefreshRequestedAction
   | RuntimeRunAbortedAction
   | RuntimeEventErrorAction
   | RuntimeErrorRecoveryTimeoutAction
@@ -363,15 +357,6 @@ export function reduceSessionRuntime(
 
     case 'event_error_cleared': {
       return state;
-    }
-
-    case 'final_history_refresh_requested': {
-      if (action.hasPendingApprovals || state.approvalStatus === 'idle') {
-        return state;
-      }
-      return {
-        approvalStatus: 'idle',
-      };
     }
 
     case 'run_aborted': {

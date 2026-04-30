@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
@@ -38,7 +38,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(message, 'settled');
+    prewarmAssistantMarkdownBody(message);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -62,7 +62,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(message, 'settled');
+    prewarmAssistantMarkdownBody(message);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -89,7 +89,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
-    prewarmAssistantMarkdownBody(message, 'settled');
+    prewarmAssistantMarkdownBody(message);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -134,7 +134,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: longMarkdown,
     };
-    prewarmAssistantMarkdownBody(message, 'settled');
+    prewarmAssistantMarkdownBody(message);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -195,7 +195,29 @@ describe('chat message links', () => {
     expect(screen.queryByText(content)).toBeNull();
   });
 
-  it('assistant streaming plain csv should not switch into structured preview before settle', async () => {
+  it('assistant streaming text keeps a single body skeleton when settling', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'stream body',
+    };
+
+    const view = render(
+      <ChatMessage
+        row={buildRow({ ...message, streaming: true })}
+        showThinking={false}
+      />,
+    );
+
+    const streamingBody = view.container.querySelector('[data-chat-body-mode=\"streaming\"] > div');
+    expect(streamingBody?.children).toHaveLength(1);
+
+    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
+
+    const settledBody = view.container.querySelector('[data-chat-body-mode=\"settled\"] > div');
+    expect(settledBody?.children).toHaveLength(1);
+  });
+
+  it('assistant streaming plain csv should keep the same markdown body after settle', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -220,13 +242,13 @@ describe('chat message links', () => {
 
     view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
-    await waitFor(() => {
-      expect(screen.getByRole('table')).toBeInTheDocument();
-    });
-    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+    expect(screen.getAllByText((_, element) => (
+      element?.textContent?.includes('Task,Week,Owner,Status') ?? false
+    )).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('table')).toBeNull();
   });
 
-  it('assistant streaming markdown table should not switch into structured preview before settle', async () => {
+  it('assistant streaming markdown table should keep the same markdown body after settle', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -244,43 +266,14 @@ describe('chat message links', () => {
       />,
     );
 
-    expect(screen.getAllByText((_, element) => (
-      element?.textContent?.includes('| Task | Owner | Status |') ?? false
-    )).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.getByRole('table')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
 
     view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
-    await waitFor(() => {
-      expect(screen.getByRole('table')).toBeInTheDocument();
-    });
+    expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
-  });
-
-  it('renders fenced csv blocks as table preview while preserving surrounding markdown', async () => {
-    const message: RawMessage = {
-      role: 'assistant',
-      content: [
-        '下面是可导入的 CSV：',
-        '```csv',
-        'Task,Owner,Status',
-        'Build UI,Ada,Done',
-        'Fix scroll,Bob,Doing',
-        '```',
-        '',
-        '[OpenAI](https://openai.com)',
-      ].join('\n'),
-    };
-
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
-
-    await waitFor(() => {
-      expect(screen.getByText('下面是可导入的 CSV：')).toBeInTheDocument();
-      expect(screen.getByRole('table')).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'OpenAI' })).toHaveAttribute('href', 'https://openai.com');
-    });
-    expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
-    expect(screen.getByText('Build UI')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '复制 CSV' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
   });
 });

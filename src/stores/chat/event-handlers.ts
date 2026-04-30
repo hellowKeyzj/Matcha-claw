@@ -7,7 +7,6 @@ import {
   buildFinalMessageCommitPatch,
   buildToolResultFinalPatch,
 } from './finalize-helpers';
-import { requestFinalHistoryRefresh } from './final-history-refresh';
 import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
   clearErrorRecoveryTimer,
@@ -59,7 +58,6 @@ interface HandleStoreFinalEventParams {
   eventRunId: string;
   snapshot: StoreToolSnapshotAdapter;
   onMaybeTrackFirstTokenFinal: () => void;
-  onBeginFinalToHistory: () => void;
 }
 
 export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void {
@@ -72,7 +70,6 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     eventRunId,
     snapshot,
     onMaybeTrackFirstTokenFinal,
-    onBeginFinalToHistory,
   } = params;
 
   void resolvedState;
@@ -161,11 +158,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     prewarmAssistantMarkdownBody({
       ...finalMsg,
       id: msgId,
-    }, 'settled');
-  }
-
-  if (hasOutput && !toolOnly) {
-    requestFinalHistoryRefresh(set, get, onBeginFinalToHistory);
+    });
   }
 }
 

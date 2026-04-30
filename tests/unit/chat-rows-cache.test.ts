@@ -35,4 +35,39 @@ describe('chat rows cache', () => {
     expect(reused).toBe(prewarmed);
     expect(reused.rows).toBe(prewarmed.rows);
   });
+
+  it('same-length message updates should only rebuild the changed row', () => {
+    const sessionKey = 'agent:cache:main';
+    const initialMessages: RawMessage[] = [
+      {
+        id: 'user-1',
+        role: 'user',
+        content: 'hello',
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'first chunk',
+        timestamp: 2,
+        streaming: true,
+      },
+    ];
+
+    const firstEntry = getOrBuildStaticRowsCacheEntry(sessionKey, initialMessages);
+    const nextMessages: RawMessage[] = [
+      initialMessages[0]!,
+      {
+        ...initialMessages[1]!,
+        content: 'first chunk second chunk',
+        streaming: false,
+      },
+    ];
+
+    const secondEntry = getOrBuildStaticRowsCacheEntry(sessionKey, nextMessages);
+
+    expect(secondEntry.rows[0]).toBe(firstEntry.rows[0]);
+    expect(secondEntry.rows[1]).not.toBe(firstEntry.rows[1]);
+    expect(secondEntry.rows[1]?.key).toBe(firstEntry.rows[1]?.key);
+  });
 });

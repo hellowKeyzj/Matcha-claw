@@ -29,7 +29,6 @@ describe('chat markdown pipeline cache', () => {
 
     prewarmMarkdownBody(cacheKey, {
       markdown,
-      mode: 'settled',
     });
 
     expect(peekRenderedMarkdownBody(cacheKey)).toBeDefined();
@@ -38,7 +37,6 @@ describe('chat markdown pipeline cache', () => {
 
     const renderResult = getOrBuildMarkdownBody(cacheKey, {
       markdown,
-      mode: 'settled',
     });
 
     expect(renderResult.fullHtml).toContain('https://openai.com');
@@ -62,12 +60,12 @@ describe('chat markdown pipeline cache', () => {
       }],
     };
 
-    prewarmAssistantMarkdownBody(message, 'settled');
+    prewarmAssistantMarkdownBody(message);
 
     clearUiTelemetry();
 
-    const cached = peekAssistantMarkdownBody(message, 'settled')
-      ?? getOrBuildAssistantMarkdownBody(message, 'settled');
+    const cached = peekAssistantMarkdownBody(message)
+      ?? getOrBuildAssistantMarkdownBody(message);
 
     expect(cached?.fullHtml).toContain('matchaclaw.local');
     expect(
