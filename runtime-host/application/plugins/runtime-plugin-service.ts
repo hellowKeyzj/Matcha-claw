@@ -1,7 +1,12 @@
 import { access, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RuntimeHostCatalogPlugin } from '../../bootstrap/runtime-config';
-import { getOpenClawConfigDir } from '../../api/storage/paths';
+import { normalizePluginIds } from '../../bootstrap/runtime-config';
+import {
+  getOpenClawConfigDir,
+  readOpenClawConfigJson,
+  writeOpenClawConfigJson,
+} from '../../api/storage/paths';
 import { createPluginManifestLoader } from '../../plugin-engine/plugin-manifest-loader';
 import {
   discoverPluginCatalogLocal,
@@ -14,9 +19,19 @@ import {
   type ManagedOpenClawPluginDefinition,
 } from './managed-plugin-definitions';
 import {
+  applyManuallyManagedPluginIdsToOpenClawConfig,
   readEnabledPluginIdsFromOpenClawConfig,
-  syncEnabledPluginIdsToOpenClawConfig,
+  resolveEffectivePluginIdsForConfig,
 } from '../openclaw/openclaw-plugin-config-service';
+import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
+import { isChannelDerivedPluginId } from '../channels/channel-plugin-bindings';
+import {
+  applyPluginStartupConfigLifecycles,
+  applyPluginTransitionConfigLifecycles,
+  runPluginStartupSideEffectLifecycles,
+  runPluginTransitionSideEffectLifecycles,
+} from './plugin-lifecycle-registry';
+import type { RuntimePluginTransitionLifecycleState } from './plugin-lifecycle-types';
 
 interface ManagedRegistryPluginSnapshot extends RuntimeHostCatalogPlugin {
   readonly sourceDir: string;
@@ -25,6 +40,64 @@ interface ManagedRegistryPluginSnapshot extends RuntimeHostCatalogPlugin {
 
 function pathExists(pathname: string): Promise<boolean> {
   return access(pathname).then(() => true).catch(() => false);
+}
+
+function normalizeManualPluginIds(pluginIds: readonly string[]): string[] {
+  return normalizePluginIds(pluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+}
+
+function computeTransitionLifecycleState(
+  previousEnabledPluginIds: readonly string[],
+  nextEnabledPluginIds: readonly string[],
+): RuntimePluginTransitionLifecycleState {
+  const previousEnabledSet = new Set(previousEnabledPluginIds);
+  const nextEnabledSet = new Set(nextEnabledPluginIds);
+
+  return {
+    previousEnabledPluginIds,
+    nextEnabledPluginIds,
+    newlyEnabledPluginIds: nextEnabledPluginIds.filter((pluginId) => !previousEnabledSet.has(pluginId)),
+    newlyDisabledPluginIds: previousEnabledPluginIds.filter((pluginId) => !nextEnabledSet.has(pluginId)),
+  };
+}
+
+async function syncRuntimeEnabledPluginIds(
+  manualPluginIds: readonly string[],
+  previousEnabledPluginIds: readonly string[],
+): Promise<RuntimePluginTransitionLifecycleState> {
+  let transitionState: RuntimePluginTransitionLifecycleState = {
+    previousEnabledPluginIds,
+    nextEnabledPluginIds: previousEnabledPluginIds,
+    newlyEnabledPluginIds: [],
+    newlyDisabledPluginIds: [],
+  };
+
+  await withOpenClawConfigLock(async () => {
+    let nextConfig = await applyManuallyManagedPluginIdsToOpenClawConfig(
+      readOpenClawConfigJson(),
+      manualPluginIds,
+    );
+    const nextEnabledPluginIds = resolveEffectivePluginIdsForConfig(nextConfig, manualPluginIds);
+    transitionState = computeTransitionLifecycleState(previousEnabledPluginIds, nextEnabledPluginIds);
+    nextConfig = await applyPluginTransitionConfigLifecycles(nextConfig, transitionState);
+    await writeOpenClawConfigJson(nextConfig);
+  });
+
+  await runPluginTransitionSideEffectLifecycles(transitionState);
+  return transitionState;
+}
+
+async function reconcileStartupPluginLifecycles(enabledPluginIds: readonly string[]): Promise<void> {
+  await withOpenClawConfigLock(async () => {
+    const currentConfig = readOpenClawConfigJson();
+    const previousSerialized = JSON.stringify(currentConfig);
+    const nextConfig = await applyPluginStartupConfigLifecycles(currentConfig, enabledPluginIds);
+    if (JSON.stringify(nextConfig) !== previousSerialized) {
+      await writeOpenClawConfigJson(nextConfig);
+    }
+  });
+
+  await runPluginStartupSideEffectLifecycles(enabledPluginIds);
 }
 
 function getManagedRegistryRoots(): string[] {
@@ -228,6 +301,7 @@ export async function ensureConfiguredManagedPluginsInstalled(): Promise<string[
   for (const pluginId of enabledPluginIds) {
     await ensureManagedPluginInstalled(pluginId);
   }
+  await reconcileStartupPluginLifecycles(enabledPluginIds);
   return enabledPluginIds;
 }
 
@@ -237,18 +311,21 @@ export async function ensureRuntimePluginEnabled(pluginId: string): Promise<stri
     return readEnabledPluginIdsFromOpenClawConfig();
   }
 
-  await ensureManagedPluginInstalled(normalizedPluginId);
-
   const currentEnabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
   const nextEnabledPluginIds = currentEnabledPluginIds.includes(normalizedPluginId)
     ? currentEnabledPluginIds
     : [...currentEnabledPluginIds, normalizedPluginId];
-  return await syncEnabledPluginIdsToOpenClawConfig(nextEnabledPluginIds);
+  return await setRuntimeEnabledPluginIds(nextEnabledPluginIds);
 }
 
 export async function setRuntimeEnabledPluginIds(pluginIds: readonly string[]): Promise<string[]> {
-  for (const pluginId of pluginIds) {
+  const previousEnabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
+  const normalizedManualPluginIds = normalizeManualPluginIds(pluginIds);
+
+  for (const pluginId of normalizedManualPluginIds) {
     await ensureManagedPluginInstalled(pluginId);
   }
-  return await syncEnabledPluginIdsToOpenClawConfig(pluginIds);
+
+  const transitionState = await syncRuntimeEnabledPluginIds(normalizedManualPluginIds, previousEnabledPluginIds);
+  return [...transitionState.nextEnabledPluginIds];
 }
