@@ -84,6 +84,8 @@ Building AI agents shouldn't require mastering the command line. MatchaClaw was 
 | Multiple AI providers | Unified provider configuration panel |
 | Skill/plugin installation | Built-in skill marketplace and management |
 
+When you enable a managed plugin from the Plugins page, MatchaClaw now applies that plugin's backend-owned default setup in the same lifecycle pass. For example, enabling `memory-lancedb-pro` automatically binds the memory slot and defaults its embedding backend to local MiniLM without requiring manual `openclaw.json` edits.
+
 ### OpenClaw Inside
 
 MatchaClaw is built directly upon the official **OpenClaw** core. Instead of requiring a separate installation, we embed the runtime within the application to provide a seamless "battery-included" experience.

@@ -85,6 +85,8 @@ MatchaClaw 预置了最佳实践的模型供应商配置，原生支持 Windows 
 | 多 AI 供应商切换 | 统一的供应商配置面板 |
 | 技能/插件安装复杂 | 内置技能市场与管理界面 |
 
+现在从插件页启用托管插件时，MatchaClaw 会在同一条后端生命周期里补齐该插件自己的默认初始化配置。比如启用 `memory-lancedb-pro` 时，会自动绑定默认记忆插槽，并把 embedding 默认切到本地 MiniLM，无需再手改 `openclaw.json`。
+
 ### 内置 OpenClaw 核心
 
 MatchaClaw 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们将运行时嵌入应用内部，提供开箱即用的无缝体验。
