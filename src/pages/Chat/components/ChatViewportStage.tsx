@@ -1,5 +1,12 @@
-import { useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
+
+const CHAT_THREAD_BOTTOM_GAP_PX = 12;
+
+const CHAT_STAGE_CSS_VARS = {
+  '--chat-composer-safe-offset': '0px',
+  '--chat-thread-bottom-padding': `${CHAT_THREAD_BOTTOM_GAP_PX}px`,
+} as CSSProperties;
 
 interface ChatViewportStageProps {
   header: ReactNode;
@@ -29,6 +36,7 @@ export function ChatViewportStage({
     const syncComposerOffset = () => {
       const composerHeight = Math.ceil(composerNode.getBoundingClientRect().height);
       stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
+      stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
     };
 
     syncComposerOffset();
@@ -36,6 +44,7 @@ export function ChatViewportStage({
     if (typeof ResizeObserver !== 'function') {
       return () => {
         stageNode.style.removeProperty('--chat-composer-safe-offset');
+        stageNode.style.removeProperty('--chat-thread-bottom-padding');
       };
     }
 
@@ -47,6 +56,7 @@ export function ChatViewportStage({
     return () => {
       observer.disconnect();
       stageNode.style.removeProperty('--chat-composer-safe-offset');
+      stageNode.style.removeProperty('--chat-thread-bottom-padding');
     };
   }, []);
 
@@ -54,6 +64,7 @@ export function ChatViewportStage({
     <div
       ref={stageRef}
       className={`${CHAT_LAYOUT_TOKENS.stageSurface} chat-scroll-sync`}
+      style={CHAT_STAGE_CSS_VARS}
     >
       <div
         data-testid="chat-stage-backdrop"

@@ -4,7 +4,7 @@
  * Communicates with OpenClaw Gateway via renderer WebSocket RPC.
  */
 import { create } from 'zustand';
-import { createIdleResourceState } from '@/lib/resource-state';
+import { createIdleResourceStatusState } from '@/lib/resource-state';
 import {
   createStoreApprovalActions,
 } from './approval-actions';
@@ -36,7 +36,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     pendingApprovalsBySession: {},
     foregroundHistorySessionKey: null,
-    sessionMetasResource: createIdleResourceState([]),
+    sessionCatalogStatus: createIdleResourceStatusState(),
     mutating: false,
     error: null,
     showThinking: true,

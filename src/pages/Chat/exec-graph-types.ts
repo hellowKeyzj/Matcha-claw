@@ -49,7 +49,6 @@ export interface SessionExecutionCache {
   subagentHistoryRevision: number;
   showThinking: boolean;
   executionGraphs: ExecutionGraphData[];
-  suppressedToolCardRowKeys: Set<string>;
   keyIndex: MessageKeyIndexSnapshot;
   anchors: AnchorsSnapshot;
   graphSignaturesByAnchor: string[];

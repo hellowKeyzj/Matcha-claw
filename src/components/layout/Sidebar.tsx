@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
+import { resolveSessionListLabel } from '@/stores/chat/session-helpers';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
@@ -243,8 +244,8 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     const sessionByKey = new Map(
       deferredChatSessions.map((session) => [session.key, session] as const),
     );
-    for (const [sessionKey, record] of Object.entries(deferredloadedSessions)) {
-      const label = record.meta.label?.trim();
+    for (const sessionKey of Object.keys(deferredloadedSessions)) {
+      const label = resolveSessionListLabel({ loadedSessions: deferredloadedSessions }, sessionKey, sessionByKey.get(sessionKey)?.label ?? null);
       if (label) {
         next[sessionKey] = label;
         continue;
@@ -608,4 +609,3 @@ export function Sidebar({
     </aside>
   );
 }
-

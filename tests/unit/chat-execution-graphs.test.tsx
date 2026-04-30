@@ -112,7 +112,7 @@ describe('useExecutionGraphs incremental compute', () => {
       await Promise.resolve();
     });
 
-    expect(result.current.executionGraphs.length).toBe(1);
+    expect(result.current.length).toBe(1);
     const initialDeriveCalls = deriveSpy.mock.calls.length;
     expect(initialDeriveCalls).toBeGreaterThan(0);
 
@@ -131,7 +131,7 @@ describe('useExecutionGraphs incremental compute', () => {
       await Promise.resolve();
     });
 
-    expect(result.current.executionGraphs.length).toBe(1);
+    expect(result.current.length).toBe(1);
     expect(deriveSpy.mock.calls.length).toBe(initialDeriveCalls);
     expect(trackUiTimingMock).toHaveBeenCalled();
     const [eventName, durationMs, payload] = trackUiTimingMock.mock.calls[trackUiTimingMock.mock.calls.length - 1];
@@ -213,7 +213,7 @@ describe('useExecutionGraphs incremental compute', () => {
         await Promise.resolve();
       }
     });
-    expect(result.current.executionGraphs.length).toBe(2);
+    expect(result.current.length).toBe(2);
 
     rerender({
       ...initialProps,
@@ -230,7 +230,7 @@ describe('useExecutionGraphs incremental compute', () => {
       }
     });
 
-    expect(result.current.executionGraphs.length).toBe(2);
+    expect(result.current.length).toBe(2);
     const pipelineCalls = trackUiTimingMock.mock.calls.filter(
       ([event]) => event === 'chat.exec_graph_pipeline',
     );

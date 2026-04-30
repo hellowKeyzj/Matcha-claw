@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import type { RawMessage } from '@/stores/chat';
+
+function buildRow(message: RawMessage) {
+  return buildStaticChatRows({
+    sessionKey: 'agent:test:main',
+    messages: [message],
+  })[0]!;
+}
 
 describe('chat message avatar', () => {
   it('assistant message renders generated agent avatar', () => {
@@ -13,7 +21,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        message={message}
+        row={buildRow(message)}
         showThinking={false}
         assistantAgentId="writer"
         assistantAgentName="Writer"
@@ -36,7 +44,7 @@ describe('chat message avatar', () => {
 
     const { container } = render(
       <ChatMessage
-        message={message}
+        row={buildRow(message)}
         showThinking={false}
         assistantAgentId="writer"
         assistantAgentName="Writer"
@@ -66,7 +74,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        message={message}
+        row={buildRow(message)}
         showThinking={false}
         userAvatarImageUrl={avatarDataUrl}
       />,
@@ -91,7 +99,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        message={message}
+        row={buildRow(message)}
         showThinking={false}
       />,
     );

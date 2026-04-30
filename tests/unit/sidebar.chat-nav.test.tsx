@@ -161,9 +161,8 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -194,9 +193,8 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -305,12 +303,8 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'agent:main:main' },
-          { key: 'agent:analytics:main', displayName: 'agent:analytics:main' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -345,11 +339,8 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'MatchaClaw Runtime Host' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

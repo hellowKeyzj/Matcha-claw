@@ -1,11 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   selectAgentSessionsPaneState,
+  selectChatPageState,
   selectChatInputSessionKey,
   selectChatPageActions,
-  selectChatPageRuntimeState,
-  selectChatPageSessionState,
-  selectChatPageViewState,
   selectSessionRuntime,
   selectSidebarPendingBlockersState,
   selectSnapshotLayerState,
@@ -48,9 +46,8 @@ function makeState(overrides: Record<string, unknown> = {}) {
     currentSessionKey: 'agent:main:main',
     pendingApprovalsBySession: {},
     foregroundHistorySessionKey: null,
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [{ key: 'agent:main:main', displayName: 'main' }],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,
@@ -121,10 +118,12 @@ describe('chat selectors layering', () => {
     expect(runtime.sending).toBe(true);
     expect(view.error).toBe('boom');
     expect(view.foregroundHistorySessionKey).toBe('agent:main:main');
-    expect(view.sessionMetasResource.status).toBe('ready');
+    expect(view.sessionsLoading).toBe(false);
+    expect(view.sessionsLoadedOnce).toBe(true);
+    expect(view.sessionsError).toBeNull();
   });
 
-  it('chat page selectors split into session/runtime/view/actions surfaces', () => {
+  it('chat page selector reads the current session record as a single surface', () => {
     const state = makeState({
       currentSessionKey: 'agent:a:main',
       loadedSessions: {
@@ -153,26 +152,25 @@ describe('chat selectors layering', () => {
         'agent:a:main': [{ id: 'ap-1', sessionKey: 'agent:a:main', createdAtMs: 1 }],
         'agent:b:main': [{ id: 'ap-2', sessionKey: 'agent:b:main', createdAtMs: 2 }],
       },
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:a:main', displayName: 'a' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
       },
     });
 
-    const session = selectChatPageSessionState(state);
-    const runtime = selectChatPageRuntimeState(state);
-    const view = selectChatPageViewState(state);
+    const chatPage = selectChatPageState(state);
     const actions = selectChatPageActions(state);
 
-    expect(session.currentSessionStatus).toBe('ready');
-    expect('currentSessionHasActivity' in session).toBe(false);
-    expect(runtime.currentPendingApprovals).toHaveLength(1);
-    expect(runtime.currentPendingApprovals[0]?.id).toBe('ap-1');
-    expect(view.showThinking).toBe(true);
-    expect(view.foregroundHistorySessionKey).toBeNull();
+    expect(chatPage.currentSessionKey).toBe('agent:a:main');
+    expect(chatPage.currentSession.meta.historyStatus).toBe('ready');
+    expect(chatPage.currentSession.window.messages).toHaveLength(0);
+    expect(chatPage.currentPendingApprovals).toHaveLength(1);
+    expect(chatPage.currentPendingApprovals[0]?.id).toBe('ap-1');
+    expect(chatPage.showThinking).toBe(true);
+    expect(chatPage.foregroundHistorySessionKey).toBeNull();
+    expect((chatPage as Record<string, unknown>).sessionCatalogStatus).toBeUndefined();
     expect(actions.sendMessage).toBe(state.sendMessage);
   });
 
@@ -181,12 +179,58 @@ describe('chat selectors layering', () => {
       pendingApprovalsBySession: {
         'agent:main:main': [{ id: 'ap-1', sessionKey: 'agent:main:main', createdAtMs: 1 }],
       },
-      sessionMetasResource: {
+      loadedSessions: {
+        'agent:main:main': {
+          meta: {
+            label: 'Main',
+            lastActivityAt: 1_700_000_000_000,
+            historyStatus: 'ready',
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessageId: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+          window: createViewportWindowState({
+            messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          }),
+        },
+        'agent:foo:main': {
+          meta: {
+            label: 'Foo',
+            lastActivityAt: 1_699_000_000_000,
+            historyStatus: 'idle',
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessageId: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+          window: createViewportWindowState(),
+        },
+      },
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'main' },
-          { key: 'agent:foo:main', displayName: 'foo' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -199,17 +243,16 @@ describe('chat selectors layering', () => {
     expect(Object.keys(sidebar.pendingApprovalsBySession)).toEqual(['agent:main:main']);
     expect(sidebar.chatSessions).toHaveLength(2);
     expect(pane.sessionEntries).toHaveLength(2);
-    expect(pane.sessionMetasResource.status).toBe('ready');
+    expect(pane.sessionsLoading).toBe(false);
+    expect(pane.sessionsLoadedOnce).toBe(true);
+    expect(pane.sessionsError).toBeNull();
     expect(pane.currentSessionKey).toBe('agent:main:main');
   });
 
   it('session pane selector should keep stable session entry references when only transcript changes', () => {
     const baseState = makeState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'main' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -247,7 +290,7 @@ describe('chat selectors layering', () => {
     });
     const nextState = makeState({
       ...baseState,
-      sessionMetasResource: baseState.sessionMetasResource,
+      sessionCatalogStatus: baseState.sessionCatalogStatus,
       loadedSessions: {
         'agent:main:main': {
           ...baseState.loadedSessions['agent:main:main'],
@@ -271,13 +314,10 @@ describe('chat selectors layering', () => {
     expect(secondPane).toBe(firstPane);
   });
 
-  it('session pane selector should refresh session entries when the latest user preview changes', () => {
+  it('session pane selector should refresh session entries when the pending user preview changes', () => {
     const baseState = makeState({
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:main:main', displayName: 'main' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -315,19 +355,84 @@ describe('chat selectors layering', () => {
     });
     const nextState = makeState({
       ...baseState,
-      sessionMetasResource: baseState.sessionMetasResource,
+      sessionCatalogStatus: baseState.sessionCatalogStatus,
+      loadedSessions: {
+        'agent:main:main': {
+          ...baseState.loadedSessions['agent:main:main'],
+          runtime: {
+            ...baseState.loadedSessions['agent:main:main'].runtime,
+            pendingUserMessage: {
+              clientMessageId: 'optimistic-user-1',
+              createdAtMs: 1_700_000_001_000,
+              message: {
+                role: 'user',
+                content: 'new title',
+                id: 'optimistic-user-1',
+                timestamp: 1_700_000_001,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const firstPane = selectAgentSessionsPaneState(baseState);
+    const secondPane = selectAgentSessionsPaneState(nextState);
+
+    expect(secondPane.sessionEntries).not.toBe(firstPane.sessionEntries);
+    expect(secondPane.sessionEntries[0]?.title).toBe('new title');
+  });
+
+  it('session pane selector should refresh session title when loaded viewport title changes', () => {
+    const baseState = makeState({
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': {
+          meta: {
+            label: '旧标题',
+            lastActivityAt: 1_700_000_000_000,
+            historyStatus: 'ready',
+            thinkingLevel: null,
+          },
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'idle',
+            streamingMessageId: null,
+            streamingTools: [],
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            pendingToolImages: [],
+            approvalStatus: 'idle',
+          },
+          window: createViewportWindowState({
+            messages: [{ role: 'user', content: '旧正文标题', id: 'u1' }],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          }),
+        },
+      },
+    });
+    const nextState = makeState({
+      ...baseState,
+      sessionCatalogStatus: baseState.sessionCatalogStatus,
       loadedSessions: {
         'agent:main:main': {
           ...baseState.loadedSessions['agent:main:main'],
           window: createViewportWindowState({
-            messages: [
-            { role: 'user', content: 'old title', id: 'u1' },
-            { role: 'assistant', content: 'answer', id: 'a1' },
-            { role: 'user', content: 'new title', id: 'u2' },
-            ],
-            totalMessageCount: 3,
+            messages: [{ role: 'user', content: '新正文标题', id: 'u2' }],
+            totalMessageCount: 1,
             windowStartOffset: 0,
-            windowEndOffset: 3,
+            windowEndOffset: 1,
             hasMore: false,
             hasNewer: false,
             isAtLatest: true,
@@ -339,8 +444,9 @@ describe('chat selectors layering', () => {
     const firstPane = selectAgentSessionsPaneState(baseState);
     const secondPane = selectAgentSessionsPaneState(nextState);
 
+    expect(firstPane.sessionEntries[0]?.title).toBe('旧正文标题');
+    expect(secondPane.sessionEntries[0]?.title).toBe('新正文标题');
     expect(secondPane.sessionEntries).not.toBe(firstPane.sessionEntries);
-    expect(secondPane.sessionEntries[0]?.titlePreview).toBe('new title');
   });
 
   it('chat input selector only exposes current session key', () => {

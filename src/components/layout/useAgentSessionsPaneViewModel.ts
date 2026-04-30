@@ -371,7 +371,9 @@ interface UseAgentSessionsPaneViewModelInput {
   agents: SidebarAgentSummary[];
   agentsResource: ResourceStateMeta;
   sessionEntries: AgentSessionsPaneSessionEntry[];
-  sessionMetasResource: ResourceStateMeta;
+  sessionsLoading: boolean;
+  sessionsLoadedOnce: boolean;
+  sessionsError: string | null;
   currentSessionKey: string;
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -463,16 +465,11 @@ export function useAgentSessionsPaneViewModel(
 
   const resolveSessionTitle = useMemo(() => {
     return (entry: AgentSessionsPaneSessionEntry): string => {
-      const previewTitle = entry.titlePreview?.trim();
-      if (previewTitle) {
-        return normalizeSessionTitle(previewTitle);
+      const title = entry.title?.trim();
+      if (title) {
+        return normalizeSessionTitle(title);
       }
-      const session = entry.session;
-      const persistedLabel = entry.label?.trim();
-      if (persistedLabel) {
-        return normalizeSessionTitle(persistedLabel);
-      }
-      return inferUntitledSessionLabel(session, input.t);
+      return inferUntitledSessionLabel(entry.session, input.t);
     };
   }, [input.t]);
 
@@ -509,10 +506,9 @@ export function useAgentSessionsPaneViewModel(
     ? 'loading'
     : (!input.agentsResource.hasLoadedOnce && input.agentsResource.status === 'error' ? 'error' : 'ready');
 
-  const sessionListState = !input.sessionMetasResource.hasLoadedOnce
-    && (input.sessionMetasResource.status === 'idle' || input.sessionMetasResource.status === 'loading')
-    ? 'loading'
-    : (!input.sessionMetasResource.hasLoadedOnce && input.sessionMetasResource.status === 'error' ? 'error' : 'ready');
+  const sessionListState = !input.sessionsLoadedOnce && input.sessionEntries.length === 0
+    ? (input.sessionsError ? 'error' : 'loading')
+    : 'ready';
 
   return {
     activeAgentId,
@@ -522,7 +518,7 @@ export function useAgentSessionsPaneViewModel(
     agentListState,
     agentErrorMessage: input.agentsResource.error,
     sessionListState,
-    sessionErrorMessage: input.sessionMetasResource.error,
+    sessionErrorMessage: input.sessionEntries.length === 0 ? input.sessionsError : null,
   };
 }
 

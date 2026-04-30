@@ -59,9 +59,8 @@ function resetChatStoreForApprovalTests() {
     refreshing: false,
     mutating: false,
     error: null,
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

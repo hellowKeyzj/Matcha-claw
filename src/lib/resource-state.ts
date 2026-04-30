@@ -9,6 +9,12 @@ export interface ResourceState<T> {
 }
 
 export type ResourceStateMeta<T = unknown> = ResourceState<T>;
+export interface ResourceStatusState {
+  status: ResourceLoadStatus;
+  error: string | null;
+  hasLoadedOnce: boolean;
+  lastLoadedAt: number | null;
+}
 
 export function createIdleResourceState<T>(data: T): ResourceState<T> {
   return {
@@ -49,6 +55,45 @@ export function createErrorResourceState<T>(
 ): ResourceState<T> {
   return {
     data: previous.data,
+    status: 'error',
+    error,
+    hasLoadedOnce: previous.hasLoadedOnce,
+    lastLoadedAt: previous.lastLoadedAt,
+  };
+}
+
+export function createIdleResourceStatusState(): ResourceStatusState {
+  return {
+    status: 'idle',
+    error: null,
+    hasLoadedOnce: false,
+    lastLoadedAt: null,
+  };
+}
+
+export function createLoadingResourceStatusState(previous: ResourceStatusState): ResourceStatusState {
+  return {
+    status: 'loading',
+    error: null,
+    hasLoadedOnce: previous.hasLoadedOnce,
+    lastLoadedAt: previous.lastLoadedAt,
+  };
+}
+
+export function createReadyResourceStatusState(loadedAt = Date.now()): ResourceStatusState {
+  return {
+    status: 'ready',
+    error: null,
+    hasLoadedOnce: true,
+    lastLoadedAt: loadedAt,
+  };
+}
+
+export function createErrorResourceStatusState(
+  previous: ResourceStatusState,
+  error: string,
+): ResourceStatusState {
+  return {
     status: 'error',
     error,
     hasLoadedOnce: previous.hasLoadedOnce,

@@ -2,7 +2,6 @@ import type { RawMessage } from '@/stores/chat';
 import type { ExecutionGraphData } from './execution-graph-model';
 import {
   EMPTY_EXECUTION_GRAPHS,
-  EMPTY_SUPPRESSED_KEYS,
   EXECUTION_GRAPH_CACHE_MAX_SESSIONS,
   type IdleCallbackHandle,
   type SessionExecutionCache,
@@ -77,10 +76,6 @@ export function snapshotExecutionGraphs(executionGraphs: ExecutionGraphData[]): 
   return executionGraphs.length > 0 ? [...executionGraphs] : EMPTY_EXECUTION_GRAPHS;
 }
 
-export function snapshotSuppressedToolCardRowKeys(keys: Set<string>): Set<string> {
-  return keys.size > 0 ? new Set(keys) : EMPTY_SUPPRESSED_KEYS;
-}
-
 export function getExecutionGraphCacheStats(): ExecutionGraphCacheStats {
   let cachedGraphCount = 0;
   let cachedSuppressedRowKeyCount = 0;
@@ -90,7 +85,10 @@ export function getExecutionGraphCacheStats(): ExecutionGraphCacheStats {
 
   for (const cache of globalSessionExecutionCache.values()) {
     cachedGraphCount += cache.executionGraphs.length;
-    cachedSuppressedRowKeyCount += cache.suppressedToolCardRowKeys.size;
+    cachedSuppressedRowKeyCount += cache.executionGraphs.reduce(
+      (total, graph) => total + (graph.suppressToolCardMessageKeys?.length ?? 0),
+      0,
+    );
     graphSignatureCacheEntryCount += cache.graphCacheBySignature.size;
     mainStepCacheEntryCount += cache.mainStepsCacheBySignature.size;
     childStepCacheEntryCount += cache.childStepsCacheBySignature.size;

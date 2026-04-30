@@ -1,4 +1,4 @@
-import { AlertCircle, Bot, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { AlertCircle, Bot, MessageSquare, Sparkles } from 'lucide-react';
 import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
 import { useTranslation } from 'react-i18next';
 
@@ -48,40 +48,6 @@ export function FailureScreen({ message }: { message: string | null }) {
       <p className="mt-2 max-w-2xl text-[14px] leading-6 text-muted-foreground md:text-[15px] md:leading-7">
         {message || t('common:status.error')}
       </p>
-    </div>
-  );
-}
-
-export function TypingIndicator() {
-  return (
-    <div className="grid w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-2.5">
-      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/55 bg-background/82 text-foreground shadow-sm backdrop-blur-sm">
-        <Sparkles className="h-4 w-4" />
-      </div>
-      <div className="flex min-h-[34px] items-center px-0.5 py-1.5">
-        <div className="flex gap-1.5">
-          <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/45" style={{ animationDelay: '0ms' }} />
-          <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/45" style={{ animationDelay: '150ms' }} />
-          <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/45" style={{ animationDelay: '300ms' }} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function ActivityIndicator() {
-  const label = 'Processing tool results...';
-  return (
-    <div className="grid w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-2.5">
-      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/55 bg-background/82 text-foreground shadow-sm backdrop-blur-sm">
-        <Sparkles className="h-4 w-4" />
-      </div>
-      <div className="flex min-h-[34px] items-center px-0.5 py-1.5">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>{label}</span>
-        </div>
-      </div>
     </div>
   );
 }

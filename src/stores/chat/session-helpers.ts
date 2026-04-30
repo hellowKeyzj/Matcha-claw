@@ -1,4 +1,5 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
+import { resolveSessionLabelFromMessages } from './message-helpers';
 import {
   getSessionMeta,
   getSessionMessages,
@@ -7,10 +8,160 @@ import {
   toMs,
 } from './store-state-helpers';
 
+const EMPTY_CHAT_SESSIONS: ChatSession[] = [];
+
+let cachedReadSessionsLoadedSessions: ChatStoreState['loadedSessions'] | null = null;
+let cachedReadSessionsResult: ChatSession[] = EMPTY_CHAT_SESSIONS;
+let cachedReadSessionsByKey = new Map<string, ChatSession>();
+
+function normalizeSessionLabel(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export interface SessionCatalogStatusShell {
+  sessionsLoading: boolean;
+  sessionsLoadedOnce: boolean;
+  sessionsError: string | null;
+}
+
+export function readSessionCatalogStatusShell(
+  state: Pick<ChatStoreState, 'sessionCatalogStatus'>,
+): SessionCatalogStatusShell {
+  return {
+    sessionsLoading: state.sessionCatalogStatus.status === 'loading',
+    sessionsLoadedOnce: state.sessionCatalogStatus.hasLoadedOnce,
+    sessionsError: state.sessionCatalogStatus.error,
+  };
+}
+
+export function hasSessionCatalogLoaded(
+  state: Pick<ChatStoreState, 'sessionCatalogStatus'>,
+): boolean {
+  return readSessionCatalogStatusShell(state).sessionsLoadedOnce;
+}
+
+export function resolveSessionListLabel(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+  fallbackLabel?: string | null,
+): string | null {
+  const runtime = getSessionRuntime(state, sessionKey);
+  const pendingUserLabel = runtime.pendingUserMessage
+    ? resolveSessionLabelFromMessages([runtime.pendingUserMessage.message])
+    : null;
+  if (pendingUserLabel) {
+    return pendingUserLabel;
+  }
+
+  const viewportMessages = getSessionMessages(state, sessionKey);
+  if (viewportMessages.length > 0) {
+    const viewportLabel = resolveSessionLabelFromMessages(viewportMessages);
+    if (viewportLabel) {
+      return viewportLabel;
+    }
+  }
+
+  return normalizeSessionLabel(getSessionMeta(state, sessionKey).label ?? fallbackLabel);
+}
+
+function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession): boolean {
+  if (!left) {
+    return false;
+  }
+  return (
+    left.key === right.key
+    && (left.label ?? null) === (right.label ?? null)
+    && (left.displayName ?? null) === (right.displayName ?? null)
+    && (left.thinkingLevel ?? null) === (right.thinkingLevel ?? null)
+    && (left.model ?? null) === (right.model ?? null)
+    && (left.updatedAt ?? null) === (right.updatedAt ?? null)
+  );
+}
+
+function reuseChatSession(previous: ChatSession | undefined, next: ChatSession): ChatSession {
+  if (areChatSessionsEqual(previous, next)) {
+    return previous!;
+  }
+  return next;
+}
+
 export function readSessionsFromState(
-  state: Pick<ChatStoreState, 'sessionMetasResource'>,
+  state: Pick<ChatStoreState, 'loadedSessions'>,
 ): ChatSession[] {
-  return Array.isArray(state.sessionMetasResource.data) ? state.sessionMetasResource.data : [];
+  if (cachedReadSessionsLoadedSessions === state.loadedSessions) {
+    return cachedReadSessionsResult;
+  }
+
+  const mergedSessionsByKey = new Map<string, ChatSession>();
+
+  for (const sessionKey of Object.keys(state.loadedSessions)) {
+    if (!sessionKey) {
+      continue;
+    }
+    const meta = getSessionMeta(state, sessionKey);
+    const label = resolveSessionListLabel(state, sessionKey, null);
+    const nextSession = {
+      key: sessionKey,
+      label: label ?? undefined,
+      displayName: normalizeSessionLabel(meta.displayName) ?? sessionKey,
+      thinkingLevel: meta.thinkingLevel ?? undefined,
+      model: normalizeSessionLabel(meta.model) ?? undefined,
+      updatedAt: typeof meta.lastActivityAt === 'number' ? meta.lastActivityAt : undefined,
+    } satisfies ChatSession;
+    mergedSessionsByKey.set(sessionKey, reuseChatSession(cachedReadSessionsByKey.get(sessionKey), nextSession));
+  }
+
+  const nextSessions = Array.from(mergedSessionsByKey.values()).sort((left, right) => {
+    const leftActivity = resolveSessionActivityMs(left, state.loadedSessions);
+    const rightActivity = resolveSessionActivityMs(right, state.loadedSessions);
+    if (leftActivity !== rightActivity) {
+      return rightActivity - leftActivity;
+    }
+    return left.key.localeCompare(right.key);
+  });
+
+  let nextResult = nextSessions;
+  if (
+    cachedReadSessionsResult.length === nextSessions.length
+    && nextSessions.every((session, index) => cachedReadSessionsResult[index] === session)
+  ) {
+    nextResult = cachedReadSessionsResult;
+  }
+
+  cachedReadSessionsLoadedSessions = state.loadedSessions;
+  cachedReadSessionsResult = nextResult.length > 0 ? nextResult : EMPTY_CHAT_SESSIONS;
+  cachedReadSessionsByKey = mergedSessionsByKey;
+  return cachedReadSessionsResult;
+}
+
+export function shouldRetainLocalSessionRecord(
+  sessionKey: string,
+  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions' | 'pendingApprovalsBySession'>,
+): boolean {
+  if (!sessionKey) {
+    return false;
+  }
+  if (state.currentSessionKey === sessionKey) {
+    return true;
+  }
+  const record = getSessionRecord(state, sessionKey);
+  const runtime = record.runtime;
+  return (
+    record.window.messages.length > 0
+    || Boolean(record.meta.label)
+    || Boolean(record.meta.lastActivityAt)
+    || runtime.pendingUserMessage != null
+    || runtime.sending
+    || runtime.pendingFinal
+    || runtime.activeRunId != null
+    || runtime.streamingMessageId != null
+    || runtime.approvalStatus === 'awaiting_approval'
+    || (state.pendingApprovalsBySession[sessionKey]?.length ?? 0) > 0
+  );
 }
 
 export function resolveSessionThinkingLevelFromList(
@@ -168,4 +319,3 @@ export function isTrulyEmptyNonMainSession(
     && !record.meta.lastActivityAt
     && !record.meta.label;
 }
-

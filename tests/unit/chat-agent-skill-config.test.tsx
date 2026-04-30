@@ -52,11 +52,8 @@ describe('chat agent skill configuration', () => {
       mutating: false,
       error: null,
       foregroundHistorySessionKey: null,
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [
-          { key: 'agent:test:main', displayName: 'agent:test:main' },
-        ],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

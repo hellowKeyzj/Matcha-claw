@@ -92,12 +92,8 @@ function setupChatSessions() {
     showThinking: true,
     currentSessionKey,
     pendingApprovalsBySession: {},
-    sessionMetasResource: {
+    sessionCatalogStatus: {
       status: 'ready',
-      data: [
-        { key: currentSessionKey, displayName: currentSessionKey },
-        { key: anotherSessionKey, displayName: anotherSessionKey },
-      ],
       error: null,
       hasLoadedOnce: true,
       lastLoadedAt: 1,

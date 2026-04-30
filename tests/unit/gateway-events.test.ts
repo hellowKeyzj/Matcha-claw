@@ -166,9 +166,8 @@ describe('gateway store event wiring', () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -229,9 +228,8 @@ describe('gateway store event wiring', () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -283,9 +281,8 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -359,9 +356,8 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -406,9 +402,8 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -469,9 +464,8 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,
@@ -533,9 +527,8 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessionMetasResource: {
+      sessionCatalogStatus: {
         status: 'ready',
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
         hasLoadedOnce: true,
         lastLoadedAt: 1,

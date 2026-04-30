@@ -1,8 +1,8 @@
 import { hostApiFetch, hostSessionWindowFetch } from '@/lib/host-api';
 import {
-  createErrorResourceState,
-  createLoadingResourceState,
-  createReadyResourceState,
+  createErrorResourceStatusState,
+  createLoadingResourceStatusState,
+  createReadyResourceStatusState,
 } from '@/lib/resource-state';
 import { trackUiEvent } from '@/lib/telemetry';
 import { prewarmAssistantMarkdownBodies } from '@/lib/chat-markdown-body';
@@ -15,6 +15,7 @@ import {
   resolveCanonicalPrefixForAgent,
   resolvePreferredSessionKeyForAgent,
   shouldKeepMissingCurrentSession,
+  shouldRetainLocalSessionRecord,
 } from './session-helpers';
 import {
   clearErrorRecoveryTimer,
@@ -24,7 +25,6 @@ import {
 import { resetToolSnapshotTxnState } from './tool-snapshot-txn';
 import {
   mergeMessageReferences,
-  areSessionsEquivalent,
   createEmptySessionRecord,
   createEmptySessionViewportState,
   getSessionRuntime,
@@ -217,6 +217,27 @@ function prewarmViewportWindow(sessionKey: string, messages: RawMessage[]): void
   prewarmStaticRowsForMessages(sessionKey, messages);
 }
 
+function normalizeCatalogString(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function shouldMarkSessionLoadingOnSwitch(
+  sessionKey: string,
+  sessionRecord: ReturnType<typeof resolveSessionRecord>,
+): boolean {
+  if (!sessionKey) {
+    return false;
+  }
+  if (sessionRecord.runtime.sending) {
+    return false;
+  }
+  return sessionRecord.meta.historyStatus !== 'ready' && sessionRecord.window.messages.length === 0;
+}
+
 export function createStoreSessionActions(input: CreateStoreSessionActionsInput): StoreSessionActions {
   const {
     set,
@@ -231,12 +252,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
   return {
     loadSessions: async () => {
       const stateBeforeLoad = get();
-      const previousResource = stateBeforeLoad.sessionMetasResource;
+      const previousResource = stateBeforeLoad.sessionCatalogStatus;
       set({
-        sessionMetasResource: createLoadingResourceState({
-          ...previousResource,
-          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
-        }),
+        sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
       });
       try {
         const data = await hostApiFetch<Record<string, unknown>>('/api/sessions/list');
@@ -292,29 +310,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             }
           }
           const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
-          const sessionsWithCurrent = !currentExistsInBackend && shouldKeepMissingCurrent && nextSessionKey
-            ? [
-                ...dedupedSessions,
-                { key: nextSessionKey, displayName: nextSessionKey },
-              ]
-            : dedupedSessions;
-
-          const discoveredActivity = Object.fromEntries(
-            sessionsWithCurrent
-              .filter((session) => typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt))
-              .map((session) => [session.key, session.updatedAt!]),
-          );
-          const discoveredLabels = Object.fromEntries(
-            sessionsWithCurrent
-              .map((session) => {
-                const explicit = (session.label || '').trim();
-                if (!explicit || explicit === session.key) {
-                  return null;
-                }
-                return [session.key, explicit] as const;
-              })
-              .filter((entry): entry is readonly [string, string] => entry != null),
-          );
+          const backendSessions = dedupedSessions;
 
           const shouldMarkCurrentAsReadyEmpty = (
             !currentExistsInBackend
@@ -322,66 +318,60 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             && dedupedSessions.length === 0
             && nextSessionKey.length > 0
           );
-
-          const snapshot = get();
-          const currentSessions = readSessionsFromState(snapshot);
-          const sessionsChanged = !areSessionsEquivalent(currentSessions, sessionsWithCurrent);
-          const sessionKeyChanged = snapshot.currentSessionKey !== nextSessionKey;
-          const discoveredActivityChanged = Object.entries(discoveredActivity).some(
-            ([sessionKey, updatedAt]) => getSessionMeta(snapshot, sessionKey).lastActivityAt !== updatedAt,
-          );
-          const discoveredLabelsChanged = Object.entries(discoveredLabels).some(
-            ([sessionKey, label]) => getSessionMeta(snapshot, sessionKey).label !== label,
-          );
           const loadedAt = Date.now();
+          set((state) => {
+            const backendSessionKeys = new Set(backendSessions.map((session) => session.key));
+            let loadedSessions = Object.fromEntries(
+              Object.entries(state.loadedSessions).filter(([sessionKey]) => (
+                backendSessionKeys.has(sessionKey)
+                || shouldRetainLocalSessionRecord(sessionKey, {
+                  currentSessionKey: nextSessionKey,
+                  loadedSessions: state.loadedSessions,
+                  pendingApprovalsBySession: state.pendingApprovalsBySession,
+                })
+              )),
+            );
 
-          if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
-            set((state) => {
-              let loadedSessions = { ...state.loadedSessions };
-              for (const [sessionKey, updatedAt] of Object.entries(discoveredActivity)) {
-                loadedSessions = patchSessionMeta({ loadedSessions }, sessionKey, { lastActivityAt: updatedAt });
-              }
-              for (const [sessionKey, label] of Object.entries(discoveredLabels)) {
-                loadedSessions = patchSessionMeta({ loadedSessions }, sessionKey, { label });
-              }
-              if (shouldMarkCurrentAsReadyEmpty) {
-                loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
-              }
+            for (const session of backendSessions) {
+              loadedSessions = ensureSessionRecordMap(loadedSessions, session.key);
+              const currentMeta = getSessionMeta({ loadedSessions }, session.key);
+              const explicitLabel = normalizeCatalogString(session.label);
+              loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
+                label: explicitLabel && explicitLabel !== session.key ? explicitLabel : currentMeta.label,
+                displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
+                thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
+                model: normalizeCatalogString(session.model) ?? currentMeta.model ?? null,
+                lastActivityAt: typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
+                  ? session.updatedAt
+                  : currentMeta.lastActivityAt,
+              });
+            }
 
-              return {
-                sessionMetasResource: createReadyResourceState(
-                  sessionsChanged ? sessionsWithCurrent : state.sessionMetasResource.data,
-                  loadedAt,
-                ),
-                currentSessionKey: sessionKeyChanged ? nextSessionKey : state.currentSessionKey,
-                loadedSessions,
-              };
-            });
-          } else {
-            const patch = shouldMarkCurrentAsReadyEmpty
-              && getSessionMeta(get(), nextSessionKey).historyStatus !== 'ready'
-              ? {
-                  loadedSessions: patchSessionMeta(get(), nextSessionKey, { historyStatus: 'ready' }),
-                  sessionMetasResource: createReadyResourceState(get().sessionMetasResource.data, loadedAt),
-                }
-              : {
-                  sessionMetasResource: createReadyResourceState(get().sessionMetasResource.data, loadedAt),
-                };
-            set(patch);
-          }
+            if (shouldMarkCurrentAsReadyEmpty) {
+              loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
+              loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
+            }
+
+            const retainedSessionKeys = new Set(Object.keys(loadedSessions));
+            return {
+              sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
+              currentSessionKey: nextSessionKey,
+              loadedSessions,
+              pendingApprovalsBySession: Object.fromEntries(
+                Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
+              ),
+            };
+          });
           return;
         }
         set({
-          sessionMetasResource: createReadyResourceState(previousResource.data),
+          sessionCatalogStatus: createReadyResourceStatusState(),
         });
       } catch (error) {
         const stateSnapshot = get();
         const message = error instanceof Error ? error.message : 'Failed to load sessions';
         set({
-          sessionMetasResource: createErrorResourceState({
-            ...stateSnapshot.sessionMetasResource,
-            hasLoadedOnce: stateSnapshot.sessionMetasResource.hasLoadedOnce || stateSnapshot.sessionMetasResource.data.length > 0,
-          }, message),
+          sessionCatalogStatus: createErrorResourceStatusState(stateSnapshot.sessionCatalogStatus, message),
         });
       }
     },
@@ -429,7 +419,13 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         nextloadedSessions = removeSessionRecord({ loadedSessions: nextloadedSessions }, currentSessionKey);
       }
       nextloadedSessions = ensureSessionRecordMap(nextloadedSessions, key);
-      const targetRecord = resolveSessionRecord(nextloadedSessions[key]);
+      let targetRecord = resolveSessionRecord(nextloadedSessions[key]);
+      if (shouldMarkSessionLoadingOnSwitch(key, targetRecord)) {
+        nextloadedSessions = patchSessionMeta({ loadedSessions: nextloadedSessions }, key, {
+          historyStatus: 'loading',
+        });
+        targetRecord = resolveSessionRecord(nextloadedSessions[key]);
+      }
       const hasHistoryFingerprint = historyRuntime.historyFingerprintBySession.has(key);
       const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || targetRecord.window.messages.length > 0;
       trackUiEvent('chat.session_switch_start', {
@@ -441,14 +437,11 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       });
 
       set((stateValue) => ({
+        sessionCatalogStatus: stateValue.sessionCatalogStatus,
         currentSessionKey: key,
         error: null,
         loadedSessions: nextloadedSessions,
         ...(leavingEmpty ? {
-          sessionMetasResource: {
-            ...stateValue.sessionMetasResource,
-            data: stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey),
-          },
           pendingApprovalsBySession: Object.fromEntries(
             Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
           ),
@@ -642,19 +635,16 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         }
         const { currentSessionKey } = get();
         const sessions = readSessionsFromState(get());
-        const remaining = sessions.filter((session) => session.key !== key);
+        const remainingSessions = sessions.filter((session) => session.key !== key);
         clearSessionHistoryFingerprints(historyRuntime, key);
 
         if (currentSessionKey === key) {
           clearHistoryPoll();
           clearErrorRecoveryTimer();
-          const next = remaining[0];
+          const next = remainingSessions[0];
           set((state) => ({
             loadedSessions: removeSessionRecord(state, key),
-            sessionMetasResource: {
-              ...state.sessionMetasResource,
-              data: remaining,
-            },
+            sessionCatalogStatus: state.sessionCatalogStatus,
             pendingApprovalsBySession: Object.fromEntries(
               Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
             ),
@@ -672,10 +662,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         } else {
           set((state) => ({
             loadedSessions: removeSessionRecord(state, key),
-            sessionMetasResource: {
-              ...state.sessionMetasResource,
-              data: remaining,
-            },
+            sessionCatalogStatus: state.sessionCatalogStatus,
             pendingApprovalsBySession: Object.fromEntries(
               Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
             ),
@@ -699,34 +686,28 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         ?? getCanonicalPrefixFromSessions(readSessionsFromState(get()), currentSessionKey)
         ?? defaultCanonicalPrefix;
       const newKey = `${prefix}:session-${Date.now()}`;
-      const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
       const newSessionRecord = createEmptySessionRecord();
       newSessionRecord.meta = {
         ...newSessionRecord.meta,
         historyStatus: 'ready',
       };
-      set((stateValue) => ({
-        loadedSessions: {
+      set((stateValue) => {
+        const loadedSessions = {
           ...(leavingEmpty ? removeSessionRecord(stateValue, currentSessionKey) : stateValue.loadedSessions),
           [newKey]: newSessionRecord,
-        },
-        currentSessionKey: newKey,
-        sessionMetasResource: {
-          ...stateValue.sessionMetasResource,
-          data: [
-            ...(leavingEmpty
-              ? stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey)
-              : stateValue.sessionMetasResource.data),
-            newSessionEntry,
-          ],
-        },
-        pendingApprovalsBySession: leavingEmpty
-          ? Object.fromEntries(
-              Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-            )
-          : stateValue.pendingApprovalsBySession,
-        error: null,
-      }));
+        };
+        return {
+          loadedSessions,
+          sessionCatalogStatus: stateValue.sessionCatalogStatus,
+          currentSessionKey: newKey,
+          pendingApprovalsBySession: leavingEmpty
+            ? Object.fromEntries(
+                Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+              )
+            : stateValue.pendingApprovalsBySession,
+          error: null,
+        };
+      });
     },
 
     cleanupEmptySession: () => {
@@ -735,16 +716,16 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const isEmptyNonMain = isTrulyEmptyNonMainSession(currentSessionKey, state);
       if (!isEmptyNonMain) return;
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
-      set((stateValue) => ({
-        sessionMetasResource: {
-          ...stateValue.sessionMetasResource,
-          data: stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey),
-        },
-        loadedSessions: removeSessionRecord(stateValue, currentSessionKey),
-        pendingApprovalsBySession: Object.fromEntries(
-          Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-        ),
-      }));
+      set((stateValue) => {
+        const loadedSessions = removeSessionRecord(stateValue, currentSessionKey);
+        return {
+          loadedSessions,
+          sessionCatalogStatus: stateValue.sessionCatalogStatus,
+          pendingApprovalsBySession: Object.fromEntries(
+            Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+          ),
+        };
+      });
     },
   };
 }

@@ -1,8 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
+import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import { ChatList } from '@/pages/Chat/components/ChatList';
+
+const chatMessageRenderSpy = vi.fn();
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -10,53 +13,88 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/ChatMessage', () => ({
-  ChatMessage: () => <div data-testid="chat-message-item" />,
+vi.mock('@/pages/Chat/ChatMessage', async () => {
+  const React = await import('react');
+  return {
+    ChatMessage: React.memo(function MockChatMessage() {
+      chatMessageRenderSpy();
+      return <div data-testid="chat-message-item" />;
+    }),
+  };
+});
+
+vi.mock('@/pages/Chat/pending-assistant-shell', () => ({
+  PendingAssistantShell: () => <div data-testid="chat-pending-shell" />,
 }));
 
 vi.mock('@/pages/Chat/components/ChatStates', () => ({
-  ActivityIndicator: () => <div data-testid="chat-activity-item" />,
-  TypingIndicator: () => <div data-testid="chat-typing-item" />,
+  FailureScreen: () => <div data-testid="chat-failure-screen" />,
   WelcomeScreen: () => <div data-testid="chat-welcome-screen" />,
 }));
 
 describe('chat content rail layout', () => {
-  it('chat list uses a centered narrow content rail with viewport-safe bottom padding', () => {
+  beforeEach(() => {
+    chatMessageRenderSpy.mockClear();
+  });
+
+  function buildScrollChromeStore(options?: {
+    isBottomLocked?: boolean;
+    visible?: boolean;
+    isAtLatest?: boolean;
+    jumpActionLabel?: string;
+    onJumpToBottom?: () => void;
+    onJumpToLatest?: () => void;
+  }) {
+    const store = createChatScrollChromeStore({
+      isBottomLocked: options?.isBottomLocked ?? true,
+      visible: options?.visible ?? true,
+      isAtLatest: options?.isAtLatest ?? true,
+      jumpActionLabel: options?.jumpActionLabel ?? 'Jump to bottom',
+    });
+    store.setJumpHandlers({
+      jumpToBottom: options?.onJumpToBottom ?? vi.fn(),
+      jumpToLatest: options?.onJumpToLatest ?? vi.fn(),
+    });
+    return store;
+  }
+
+  it('chat list uses a centered narrow content rail with composer-driven viewport bottom padding', () => {
     const { container } = render(
       <ChatList
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
         showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
         onPointerDown={vi.fn()}
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        items={[{
+        rows={[{
           kind: 'message',
           key: 'row:1',
-          row: {
-            kind: 'message',
-            key: 'row:1',
-            message: {
-              id: 'message-1',
-              role: 'assistant',
-              content: 'hello',
-            },
+          message: {
+            id: 'message-1',
+            role: 'assistant',
+            content: 'hello',
           },
         } as never]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
         loadOlderLabel="Load older"
-        showJumpToBottom={false}
-        onJumpAction={vi.fn()}
-        jumpActionLabel="Jump to bottom"
+        scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
+        streamingTools={[]}
         assistantAgentId="main"
         assistantAgentName="Main"
         userAvatarImageUrl={null}
-        suppressedToolCardRowKeys={new Set<string>()}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map(),
+          suppressedToolCardRowKeys: new Set(),
+        }}
+        pendingAssistantShell={null}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -75,7 +113,8 @@ describe('chat content rail layout', () => {
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadViewportPadding))).toBe(true);
     expect(CHAT_LAYOUT_TOKENS.threadRail).toContain('mx-auto');
     expect(CHAT_LAYOUT_TOKENS.threadRail).toContain('max-w-');
-    expect(CHAT_LAYOUT_TOKENS.threadViewportPadding).toContain('pb-');
+    expect(CHAT_LAYOUT_TOKENS.threadViewportPadding).not.toContain('pb-');
+    expect(viewport?.style.paddingBottom).toContain('--chat-thread-bottom-padding');
   });
 
   it('chat list places the load-older affordance above the message stack instead of burying it in the top padding gap', () => {
@@ -85,35 +124,36 @@ describe('chat content rail layout', () => {
         messageContentRef={{ current: null }}
         isEmptyState={false}
         showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
         onPointerDown={vi.fn()}
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        items={[{
+        rows={[{
           kind: 'message',
           key: 'row:1',
-          row: {
-            kind: 'message',
-            key: 'row:1',
-            message: {
-              id: 'message-1',
-              role: 'assistant',
-              content: 'hello',
-            },
+          message: {
+            id: 'message-1',
+            role: 'assistant',
+            content: 'hello',
           },
         } as never]}
         showLoadOlder
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
         loadOlderLabel="Load older"
-        showJumpToBottom={false}
-        onJumpAction={vi.fn()}
-        jumpActionLabel="Jump to bottom"
+        scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
+        streamingTools={[]}
         assistantAgentId="main"
         assistantAgentName="Main"
         userAvatarImageUrl={null}
-        suppressedToolCardRowKeys={new Set<string>()}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map(),
+          suppressedToolCardRowKeys: new Set(),
+        }}
+        pendingAssistantShell={null}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -124,6 +164,10 @@ describe('chat content rail layout', () => {
 
   it('chat list exposes a jump-to-bottom button only when requested', () => {
     const onJumpToBottom = vi.fn();
+    const scrollChromeStore = buildScrollChromeStore({
+      isBottomLocked: false,
+      onJumpToBottom,
+    });
 
     const { container } = render(
       <ChatList
@@ -131,35 +175,36 @@ describe('chat content rail layout', () => {
         messageContentRef={{ current: null }}
         isEmptyState={false}
         showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
         onPointerDown={vi.fn()}
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        items={[{
+        rows={[{
           kind: 'message',
           key: 'row:1',
-          row: {
-            kind: 'message',
-            key: 'row:1',
-            message: {
-              id: 'message-1',
-              role: 'assistant',
-              content: 'hello',
-            },
+          message: {
+            id: 'message-1',
+            role: 'assistant',
+            content: 'hello',
           },
         } as never]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
         loadOlderLabel="Load older"
-        showJumpToBottom
-        onJumpAction={onJumpToBottom}
-        jumpActionLabel="Jump to bottom"
+        scrollChromeStore={scrollChromeStore}
         showThinking={false}
+        streamingTools={[]}
         assistantAgentId="main"
         assistantAgentName="Main"
         userAvatarImageUrl={null}
-        suppressedToolCardRowKeys={new Set<string>()}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map(),
+          suppressedToolCardRowKeys: new Set(),
+        }}
+        pendingAssistantShell={null}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -174,47 +219,117 @@ describe('chat content rail layout', () => {
     expect(jumpRail?.style.bottom).toContain('--chat-composer-safe-offset');
   });
 
-  it('chat list renders non-message viewport items directly without a row forwarding layer', () => {
+  it('chat list renders execution graphs on a sibling rail below the anchored message row', () => {
     render(
       <ChatList
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
         showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
         onPointerDown={vi.fn()}
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        items={[
-          {
-            kind: 'activity',
-            key: 'activity:1',
-            row: { kind: 'activity', key: 'activity:1' },
+        rows={[{
+          kind: 'message',
+          key: 'assistant-1',
+          message: {
+            id: 'assistant-1',
+            role: 'assistant',
+            content: 'hello',
           },
-          {
-            kind: 'typing',
-            key: 'typing:1',
-            row: { kind: 'typing', key: 'typing:1' },
-          },
-        ] as never}
+        } as never]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
         loadOlderLabel="Load older"
-        showJumpToBottom={false}
-        onJumpAction={vi.fn()}
-        jumpActionLabel="Jump to bottom"
+        scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
+        streamingTools={[]}
         assistantAgentId="main"
         assistantAgentName="Main"
         userAvatarImageUrl={null}
-        suppressedToolCardRowKeys={new Set<string>()}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map([['assistant-1', [{
+            id: 'graph-1',
+            anchorMessageKey: 'assistant-1',
+            triggerMessageKey: 'assistant-1',
+            agentLabel: 'main',
+            sessionLabel: 'session',
+            steps: [],
+            active: false,
+          }]]]),
+          suppressedToolCardRowKeys: new Set(),
+        }}
+        pendingAssistantShell={null}
         onJumpToRowKey={vi.fn()}
       />,
     );
 
-    expect(screen.getByTestId('chat-activity-item')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-typing-item')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-message-item')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-execution-graph-rail')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-execution-graph')).toBeInTheDocument();
+  });
+
+  it('jump-to-bottom chrome toggle should not rerender static message rows', () => {
+    const rows = [{
+      kind: 'message',
+      key: 'assistant-1',
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'hello',
+        streaming: false,
+      },
+    }] as never;
+    const sharedStreamingTools: never[] = [];
+    const executionGraphSlots = {
+      anchoredGraphsByRowKey: new Map(),
+      suppressedToolCardRowKeys: new Set(),
+    };
+    const commonProps = {
+      messagesViewportRef: { current: null },
+      messageContentRef: { current: null },
+      isEmptyState: false,
+      showBlockingLoading: false,
+      showBlockingError: false,
+      errorMessage: null,
+      onPointerDown: vi.fn(),
+      onScroll: vi.fn(),
+      onTouchMove: vi.fn(),
+      onWheel: vi.fn(),
+      rows,
+      showLoadOlder: false,
+      isLoadingOlder: false,
+      onLoadOlder: vi.fn(),
+      loadOlderLabel: 'Load older',
+      scrollChromeStore: buildScrollChromeStore(),
+      showThinking: false,
+      streamingTools: sharedStreamingTools,
+      assistantAgentId: 'main',
+      assistantAgentName: 'Main',
+      userAvatarImageUrl: null,
+      executionGraphSlots,
+      pendingAssistantShell: null,
+      onJumpToRowKey: vi.fn(),
+    };
+
+    render(
+      <ChatList
+        {...commonProps}
+      />,
+    );
+
+    expect(chatMessageRenderSpy).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      commonProps.scrollChromeStore.setBottomLocked(false);
+    });
+
+    expect(chatMessageRenderSpy).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Jump to bottom' })).toBeInTheDocument();
   });
 
   it('chat input uses a floating narrow composer rail instead of a full-width dock strip', () => {
@@ -240,23 +355,28 @@ describe('chat content rail layout', () => {
         messageContentRef={{ current: null }}
         isEmptyState
         showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
         onPointerDown={vi.fn()}
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        items={[]}
+        rows={[]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
         loadOlderLabel="Load older"
-        showJumpToBottom={false}
-        onJumpAction={vi.fn()}
-        jumpActionLabel="Jump to bottom"
+        scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
+        streamingTools={[]}
         assistantAgentId="main"
         assistantAgentName="Main"
         userAvatarImageUrl={null}
-        suppressedToolCardRowKeys={new Set<string>()}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map(),
+          suppressedToolCardRowKeys: new Set(),
+        }}
+        pendingAssistantShell={null}
         onJumpToRowKey={vi.fn()}
       />,
     );

@@ -49,10 +49,7 @@ describe('useChatInit', () => {
       loadedSessions: {
         'agent:main:main': createEmptySessionRecord(),
       },
-      sessionMetasResource: {
-        ...idleResource,
-        data: [],
-      },
+      sessionCatalogStatus: idleResource,
     } as never);
   });
 
@@ -69,7 +66,7 @@ describe('useChatInit', () => {
     }));
     const loadSessions = vi.fn().mockImplementation(async () => {
       useChatStore.setState({
-        sessionMetasResource: readyResource,
+        sessionCatalogStatus: readyResource,
       } as never);
     });
     const loadHistory = vi.fn().mockResolvedValue(undefined);
@@ -130,7 +127,7 @@ describe('useChatInit', () => {
         sessionsAttempts += 1;
         if (sessionsAttempts === 1) {
           useChatStore.setState({
-            sessionMetasResource: {
+            sessionCatalogStatus: {
               status: 'error',
               error: 'sessions failed',
               hasLoadedOnce: false,
@@ -140,7 +137,7 @@ describe('useChatInit', () => {
           return;
         }
         useChatStore.setState({
-          sessionMetasResource: readyResource,
+          sessionCatalogStatus: readyResource,
         } as never);
       });
 
@@ -164,7 +161,7 @@ describe('useChatInit', () => {
       expect(loadAgents).toHaveBeenCalledTimes(1);
       expect(loadSessions).toHaveBeenCalledTimes(1);
       expect(useSubagentsStore.getState().agentsResource.status).toBe('error');
-      expect(useChatStore.getState().sessionMetasResource.status).toBe('error');
+      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('error');
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1_600);
@@ -173,7 +170,7 @@ describe('useChatInit', () => {
       expect(loadAgents).toHaveBeenCalledTimes(2);
       expect(loadSessions).toHaveBeenCalledTimes(2);
       expect(useSubagentsStore.getState().agentsResource.status).toBe('ready');
-      expect(useChatStore.getState().sessionMetasResource.status).toBe('ready');
+      expect(useChatStore.getState().sessionCatalogStatus.status).toBe('ready');
     } finally {
       vi.useRealTimers();
     }
@@ -198,10 +195,7 @@ describe('useChatInit', () => {
           }),
         }),
       },
-      sessionMetasResource: {
-        ...readyResource,
-        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      },
+      sessionCatalogStatus: readyResource,
     } as never);
 
     renderHook(() => useChatInit({

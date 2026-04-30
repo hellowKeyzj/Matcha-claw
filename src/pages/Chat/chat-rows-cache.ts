@@ -5,13 +5,13 @@ import {
   canAppendMessageList,
   canPrependMessageList,
   prependMessageRows,
-  type ChatRow,
+  type ChatMessageRow,
 } from './chat-row-model';
 import { getSessionCacheValue, rememberSessionCacheValue } from './chat-session-cache';
 
 export interface SessionStaticRowsCacheEntry {
   messagesRef: RawMessage[];
-  rows: ChatRow[];
+  rows: ChatMessageRow[];
   renderableCount: number;
 }
 
@@ -35,7 +35,7 @@ function buildStaticRowsCacheEntry(
     return previousCache;
   }
 
-  let rows: ChatRow[];
+  let rows: ChatMessageRow[];
   let renderableCount: number;
   const canIncrementalAppend = Boolean(
     previousCache
@@ -82,20 +82,6 @@ function buildStaticRowsCacheEntry(
   } satisfies SessionStaticRowsCacheEntry;
   rememberSessionCacheValue(globalStaticRowsCache, sessionKey, nextEntry);
   return nextEntry;
-}
-
-export function peekStaticRowsCacheEntry(
-  sessionKey: string,
-  rowSourceMessages: RawMessage[],
-): SessionStaticRowsCacheEntry | undefined {
-  const cached = getSessionCacheValue(globalStaticRowsCache, sessionKey);
-  if (
-    cached
-    && cached.messagesRef === rowSourceMessages
-  ) {
-    return cached;
-  }
-  return undefined;
 }
 
 export function getOrBuildStaticRowsCacheEntry(

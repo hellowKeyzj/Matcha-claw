@@ -58,8 +58,9 @@ describe('chat rich blocks layout', () => {
             detail: 'reasoning',
           },
         ]}
-        onJumpToReply={vi.fn()}
-        onJumpToTrigger={vi.fn()}
+        triggerMessageKey="trigger-row"
+        replyMessageKey="reply-row"
+        onJumpToRowKey={vi.fn()}
       />,
     );
 
