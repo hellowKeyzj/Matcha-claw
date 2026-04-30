@@ -126,7 +126,7 @@ Environment variables for bundled search skills:
 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
-For OpenAI-compatible gateways configured via **Custom** provider, you can set a custom `User-Agent` in **Settings → Models → Edit Provider**.
+For OpenAI-compatible gateways configured via **Custom** provider, **Settings → Models → Edit Provider** now supports model-level `Context Window` and `Max Tokens` overrides.
 
 ### 🌐 Browser Relay Window Targeting
 When Browser Relay is enabled, each Chrome profile connects as one browser instance, but the default browser control target is chosen at the **window** level. In the extension popup you use **Use This Window**, MatchaClaw remembers that window across desktop restarts, and default browser actions always run against that selected window's current attached page. `open` and `focus` also bring that page to the foreground, so the visible page and the automation page stay aligned. If no such page is attached, MatchaClaw fails fast instead of guessing another tab.

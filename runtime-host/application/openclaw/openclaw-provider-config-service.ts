@@ -386,6 +386,12 @@ interface RuntimeProviderConfigOverride {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  models?: Array<{
+    id: string;
+    name: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }>;
 }
 
 type ProviderEntryBuildOptions = {
@@ -394,7 +400,12 @@ type ProviderEntryBuildOptions = {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
-  modelIds?: string[];
+  models?: Array<{
+    id: string;
+    name: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }>;
   includeRegistryModels?: boolean;
   mergeExistingModels?: boolean;
 };
@@ -436,6 +447,10 @@ function mergeProviderModels(
   return merged;
 }
 
+function buildNamedProviderModels(modelIds: string[]): Array<Record<string, unknown>> {
+  return modelIds.map((id) => ({ id, name: id }));
+}
+
 function removeLegacyMoonshotProviderEntry(
   _provider: string,
   _providers: Record<string, unknown>,
@@ -463,7 +478,7 @@ function upsertOpenClawProviderEntry(
   const registryModels = options.includeRegistryModels
     ? ((getProviderConfig(provider)?.models ?? []).map((model) => ({ ...model })) as Array<Record<string, unknown>>)
     : [];
-  const runtimeModels = (options.modelIds ?? []).map((id) => ({ id, name: id }));
+  const runtimeModels = (options.models ?? []).map((model) => ({ ...model }));
 
   const nextProvider: Record<string, unknown> = {
     ...existingProvider,
@@ -548,7 +563,7 @@ export async function setOpenClawDefaultModel(
         api: providerCfg.api,
         apiKeyEnv: providerCfg.apiKeyEnv,
         headers: providerCfg.headers,
-        modelIds: [modelId, ...fallbackModelIds],
+        models: buildNamedProviderModels([modelId, ...fallbackModelIds]),
         includeRegistryModels: true,
         mergeExistingModels: true,
       });
@@ -575,7 +590,6 @@ export async function setOpenClawDefaultModel(
 
 export async function syncProviderConfigToOpenClaw(
   provider: string,
-  modelId: string | undefined,
   override: RuntimeProviderConfigOverride,
 ): Promise<void> {
   await withOpenClawConfigLock(async () => {
@@ -588,7 +602,7 @@ export async function syncProviderConfigToOpenClaw(
         api: override.api,
         apiKeyEnv: override.apiKeyEnv,
         headers: override.headers,
-        modelIds: modelId ? [modelId] : [],
+        models: override.models,
       });
     }
 
@@ -645,7 +659,7 @@ export async function setOpenClawDefaultModelWithOverride(
         apiKeyEnv: override.apiKeyEnv,
         headers: override.headers,
         authHeader: override.authHeader,
-        modelIds: [modelId, ...fallbackModelIds],
+        models: override.models ?? buildNamedProviderModels([modelId, ...fallbackModelIds]),
       });
     }
 

@@ -19,6 +19,7 @@ import {
   ExternalLink,
   Copy,
   XCircle,
+  ChevronRight,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -86,34 +87,32 @@ function normalizeFallbackModels(models?: string[]): string[] {
   return Array.from(new Set((models ?? []).map((model) => model.trim()).filter(Boolean)));
 }
 
+function formatOptionalPositiveInteger(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? String(Math.floor(value))
+    : '';
+}
+
+function parseOptionalPositiveInteger(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const normalized = Number.parseInt(trimmed, 10);
+  return normalized > 0 ? normalized : undefined;
+}
+
 function fallbackModelsEqual(a?: string[], b?: string[]): boolean {
   const left = normalizeFallbackModels(a);
   const right = normalizeFallbackModels(b);
   return left.length === right.length && left.every((model, index) => model === right[index]);
 }
 
-function getUserAgentHeader(headers?: Record<string, string>): string {
-  if (!headers) return '';
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === 'user-agent') {
-      return value;
-    }
-  }
-  return '';
-}
-
-function mergeHeadersWithUserAgent(
-  headers: Record<string, string> | undefined,
-  userAgent: string,
-): Record<string, string> | undefined {
+function stripUserAgentHeader(headers?: Record<string, string>): Record<string, string> | undefined {
   const next = Object.fromEntries(
     Object.entries(headers ?? {})
       .filter(([key]) => key.toLowerCase() !== 'user-agent'),
   );
-  const normalizedUserAgent = userAgent.trim();
-  if (normalizedUserAgent) {
-    next['User-Agent'] = normalizedUserAgent;
-  }
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
@@ -129,14 +128,6 @@ function isArkCodePlanMode(
   }
   return (baseUrl || '').trim() === codePlanPresetBaseUrl
     && (modelId || '').trim() === codePlanPresetModelId;
-}
-
-function shouldShowUserAgentField(account: ProviderAccount): boolean {
-  return account.vendorId === 'custom';
-}
-
-function shouldShowUserAgentFieldForNewProvider(providerType: ProviderType | null): boolean {
-  return providerType === 'custom';
 }
 
 function getAuthModeLabel(
@@ -267,6 +258,8 @@ export function ProvidersSettings() {
       apiProtocol?: ProviderAccount['apiProtocol'];
       headers?: Record<string, string>;
       model?: string;
+      contextWindow?: number;
+      maxTokens?: number;
       authMode?: ProviderAccount['authMode'];
     }
   ) => {
@@ -285,6 +278,8 @@ export function ProvidersSettings() {
           : undefined,
         headers: options?.headers,
         model: options?.model,
+        contextWindow: options?.contextWindow,
+        maxTokens: options?.maxTokens,
         enabled: true,
         isDefault: false,
         createdAt: new Date().toISOString(),
@@ -416,6 +411,12 @@ export function ProvidersSettings() {
                   if (payload.updates.apiProtocol !== undefined) updates.apiProtocol = payload.updates.apiProtocol;
                   if (payload.updates.headers !== undefined) updates.headers = payload.updates.headers;
                   if (payload.updates.model !== undefined) updates.model = payload.updates.model;
+                  if (Object.prototype.hasOwnProperty.call(payload.updates, 'contextWindow')) {
+                    updates.contextWindow = payload.updates.contextWindow;
+                  }
+                  if (Object.prototype.hasOwnProperty.call(payload.updates, 'maxTokens')) {
+                    updates.maxTokens = payload.updates.maxTokens;
+                  }
                   if (payload.updates.fallbackModels !== undefined) updates.fallbackModels = payload.updates.fallbackModels;
                   if (payload.updates.fallbackProviderIds !== undefined) {
                     updates.fallbackAccountIds = payload.updates.fallbackProviderIds;
@@ -499,14 +500,16 @@ function ProviderCard({
   const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>(
     account.apiProtocol || 'openai-completions',
   );
-  const [userAgent, setUserAgent] = useState(getUserAgentHeader(account.headers));
   const [modelId, setModelId] = useState(account.model || '');
+  const [contextWindow, setContextWindow] = useState(formatOptionalPositiveInteger(account.contextWindow));
+  const [maxTokens, setMaxTokens] = useState(formatOptionalPositiveInteger(account.maxTokens));
   const [fallbackModelsText, setFallbackModelsText] = useState(
     normalizeFallbackModels(account.fallbackModels).join('\n')
   );
   const [fallbackProviderIds, setFallbackProviderIds] = useState<string[]>(
     normalizeFallbackProviderIds(account.fallbackAccountIds)
   );
+  const [fallbackExpanded, setFallbackExpanded] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -525,7 +528,9 @@ function ProviderCard({
     ? (typeInfo?.codePlanDocsUrl || providerDocsUrl)
     : providerDocsUrl;
   const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
-  const showUserAgentField = shouldShowUserAgentField(account);
+  const sanitizedHeaders = stripUserAgentHeader(account.headers);
+  const hasLegacyUserAgentHeader = Object.keys(account.headers ?? {}).length
+    !== Object.keys(sanitizedHeaders ?? {}).length;
 
   const resolveAccountLabel = (candidate: ProviderAccount): string => {
     const rawLabel = (candidate.label ?? '').trim();
@@ -549,10 +554,12 @@ function ProviderCard({
       setShowKey(false);
       setBaseUrl(account.baseUrl || '');
       setApiProtocol(account.apiProtocol || 'openai-completions');
-      setUserAgent(getUserAgentHeader(account.headers));
       setModelId(account.model || '');
+      setContextWindow(formatOptionalPositiveInteger(account.contextWindow));
+      setMaxTokens(formatOptionalPositiveInteger(account.maxTokens));
       setFallbackModelsText(normalizeFallbackModels(account.fallbackModels).join('\n'));
       setFallbackProviderIds(normalizeFallbackProviderIds(account.fallbackAccountIds));
+      setFallbackExpanded(false);
       setArkMode(
         isArkCodePlanMode(
           account.vendorId,
@@ -567,9 +574,11 @@ function ProviderCard({
     isEditing,
     account.apiProtocol,
     account.baseUrl,
+    account.contextWindow,
     account.headers,
     account.fallbackModels,
     account.fallbackAccountIds,
+    account.maxTokens,
     account.model,
     account.vendorId,
     typeInfo?.codePlanPresetBaseUrl,
@@ -594,6 +603,8 @@ function ProviderCard({
   }, [isEditing, onCancelEdit]);
 
   const fallbackOptions = allProviders.filter((candidate) => candidate.account.id !== account.id);
+  const fallbackSelectionCount = normalizeFallbackModels(fallbackModelsText.split('\n')).length
+    + normalizeFallbackProviderIds(fallbackProviderIds).length;
 
   const toggleFallbackProvider = (providerId: string) => {
     setFallbackProviderIds((current) => (
@@ -608,6 +619,8 @@ function ProviderCard({
     try {
       const payload: { newApiKey?: string; updates?: Partial<ProviderConfig> } = {};
       const normalizedFallbackModels = normalizeFallbackModels(fallbackModelsText.split('\n'));
+      const nextContextWindow = parseOptionalPositiveInteger(contextWindow);
+      const nextMaxTokens = parseOptionalPositiveInteger(maxTokens);
 
       if (newKey.trim()) {
         setValidating(true);
@@ -616,9 +629,7 @@ function ProviderCard({
           apiProtocol: (account.vendorId === 'custom' || account.vendorId === 'ollama')
             ? apiProtocol
             : undefined,
-          headers: showUserAgentField
-            ? mergeHeadersWithUserAgent(account.headers, userAgent)
-            : undefined,
+          headers: sanitizedHeaders,
         });
         setValidating(false);
         if (!result.valid) {
@@ -649,12 +660,14 @@ function ProviderCard({
         if (showModelIdField && (modelId.trim() || undefined) !== (account.model || undefined)) {
           updates.model = modelId.trim() || undefined;
         }
-        if (showUserAgentField) {
-          const existingUserAgent = getUserAgentHeader(account.headers).trim();
-          const nextUserAgent = userAgent.trim();
-          if (nextUserAgent !== existingUserAgent) {
-            updates.headers = mergeHeadersWithUserAgent(account.headers, nextUserAgent);
-          }
+        if (account.vendorId === 'custom' && nextContextWindow !== account.contextWindow) {
+          updates.contextWindow = nextContextWindow;
+        }
+        if (account.vendorId === 'custom' && nextMaxTokens !== account.maxTokens) {
+          updates.maxTokens = nextMaxTokens;
+        }
+        if (hasLegacyUserAgentHeader) {
+          updates.headers = sanitizedHeaders;
         }
         if (!fallbackModelsEqual(normalizedFallbackModels, account.fallbackModels)) {
           updates.fallbackModels = normalizedFallbackModels;
@@ -861,21 +874,13 @@ function ProviderCard({
                     </div>
                   </div>
                 )}
-                {showUserAgentField && (
-                  <div className="space-y-1">
-                    <Label className="text-xs">{t('aiProviders.dialog.userAgent')}</Label>
-                    <Input
-                      value={userAgent}
-                      onChange={(e) => setUserAgent(e.target.value)}
-                      placeholder={t('aiProviders.dialog.userAgentPlaceholder')}
-                      className="h-9 text-sm"
-                    />
-                  </div>
-                )}
                 {showModelIdField && (
                   <div className="space-y-1">
-                    <Label className="text-xs">{t('aiProviders.dialog.modelId')}</Label>
+                    <Label htmlFor={`provider-model-id-${account.id}`} className="text-xs">
+                      {t('aiProviders.dialog.modelId')}
+                    </Label>
                     <Input
+                      id={`provider-model-id-${account.id}`}
                       value={modelId}
                       onChange={(e) => setModelId(e.target.value)}
                       placeholder={typeInfo?.modelIdPlaceholder || 'provider/model-id'}
@@ -883,44 +888,108 @@ function ProviderCard({
                     />
                   </div>
                 )}
-              </div>
-            )}
-            <div className="space-y-3 rounded-md border p-3">
-              <p className="text-sm font-medium">{t('aiProviders.sections.fallback')}</p>
-              <div className="space-y-1">
-                <Label className="text-xs">{t('aiProviders.dialog.fallbackModelIds')}</Label>
-                <textarea
-                  value={fallbackModelsText}
-                  onChange={(e) => setFallbackModelsText(e.target.value)}
-                  placeholder={t('aiProviders.dialog.fallbackModelIdsPlaceholder')}
-                  className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none"
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t('aiProviders.dialog.fallbackModelIdsHelp')}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs">{t('aiProviders.dialog.fallbackProviders')}</Label>
-                {fallbackOptions.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">{t('aiProviders.dialog.noFallbackOptions')}</p>
-                ) : (
-                  <div className="space-y-2 rounded-md border p-2">
-                    {fallbackOptions.map((candidate) => (
-                      <label key={candidate.account.id} className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={fallbackProviderIds.includes(candidate.account.id)}
-                          onChange={() => toggleFallbackProvider(candidate.account.id)}
-                        />
-                        <span className="font-medium">{candidate.account.label}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {candidate.account.model || candidate.vendor?.name || candidate.account.vendorId}
-                        </span>
-                      </label>
-                    ))}
+                {account.vendorId === 'custom' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label htmlFor={`provider-context-window-${account.id}`} className="text-xs">
+                        {t('aiProviders.dialog.contextWindow')}
+                      </Label>
+                      <Input
+                        id={`provider-context-window-${account.id}`}
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={contextWindow}
+                        onChange={(e) => setContextWindow(e.target.value)}
+                        placeholder="200000"
+                        className="h-9 text-sm"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor={`provider-max-tokens-${account.id}`} className="text-xs">
+                        {t('aiProviders.dialog.maxTokens')}
+                      </Label>
+                      <Input
+                        id={`provider-max-tokens-${account.id}`}
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={maxTokens}
+                        onChange={(e) => setMaxTokens(e.target.value)}
+                        placeholder="64000"
+                        className="h-9 text-sm"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
+            )}
+            <div className="space-y-3 rounded-md border p-3">
+              <button
+                type="button"
+                onClick={() => setFallbackExpanded((current) => !current)}
+                className="group flex w-full items-center justify-between gap-3 text-left"
+                aria-expanded={fallbackExpanded}
+                aria-label={fallbackExpanded
+                  ? t('aiProviders.dialog.collapseFallback')
+                  : t('aiProviders.dialog.expandFallback')}
+              >
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">{t('aiProviders.sections.fallback')}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {fallbackSelectionCount > 0
+                      ? t('aiProviders.dialog.fallbackSummaryCount', { count: fallbackSelectionCount })
+                      : t('aiProviders.dialog.fallbackSummaryEmpty')}
+                  </p>
+                </div>
+                <ChevronRight
+                  className={cn(
+                    'h-4 w-4 shrink-0 text-muted-foreground transition-all group-hover:text-foreground',
+                    fallbackExpanded && 'rotate-90 text-foreground',
+                  )}
+                />
+              </button>
+              {fallbackExpanded && (
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <Label htmlFor={`fallback-model-ids-${account.id}`} className="text-xs">
+                      {t('aiProviders.dialog.fallbackModelIds')}
+                    </Label>
+                    <textarea
+                      id={`fallback-model-ids-${account.id}`}
+                      value={fallbackModelsText}
+                      onChange={(e) => setFallbackModelsText(e.target.value)}
+                      placeholder={t('aiProviders.dialog.fallbackModelIdsPlaceholder')}
+                      className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t('aiProviders.dialog.fallbackModelIdsHelp')}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">{t('aiProviders.dialog.fallbackProviders')}</Label>
+                    {fallbackOptions.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">{t('aiProviders.dialog.noFallbackOptions')}</p>
+                    ) : (
+                      <div className="space-y-2 rounded-md border p-2">
+                        {fallbackOptions.map((candidate) => (
+                          <label key={candidate.account.id} className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={fallbackProviderIds.includes(candidate.account.id)}
+                              onChange={() => toggleFallbackProvider(candidate.account.id)}
+                            />
+                            <span className="font-medium">{candidate.account.label}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {candidate.account.model || candidate.vendor?.name || candidate.account.vendorId}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="space-y-3 rounded-md border p-3">
               <div className="flex items-center justify-between gap-3">
@@ -979,8 +1048,10 @@ function ProviderCard({
                         !newKey.trim()
                         && (baseUrl.trim() || undefined) === (account.baseUrl || undefined)
                         && (apiProtocol || 'openai-completions') === (account.apiProtocol || 'openai-completions')
-                        && userAgent.trim() === getUserAgentHeader(account.headers).trim()
+                        && !hasLegacyUserAgentHeader
                         && (modelId.trim() || undefined) === (account.model || undefined)
+                        && parseOptionalPositiveInteger(contextWindow) === account.contextWindow
+                        && parseOptionalPositiveInteger(maxTokens) === account.maxTokens
                         && fallbackModelsEqual(normalizeFallbackModels(fallbackModelsText.split('\n')), account.fallbackModels)
                         && fallbackProviderIdsEqual(fallbackProviderIds, account.fallbackAccountIds)
                       )
@@ -1107,6 +1178,8 @@ interface AddProviderDialogProps {
       apiProtocol?: ProviderAccount['apiProtocol'];
       headers?: Record<string, string>;
       model?: string;
+      contextWindow?: number;
+      maxTokens?: number;
       authMode?: ProviderAccount['authMode'];
     }
   ) => Promise<void>;
@@ -1136,8 +1209,9 @@ function AddProviderDialog({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>('openai-completions');
-  const [userAgent, setUserAgent] = useState('');
   const [modelId, setModelId] = useState('');
+  const [contextWindow, setContextWindow] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
   const [arkMode, setArkMode] = useState<ArkMode>('apikey');
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1177,7 +1251,6 @@ function AddProviderDialog({
   const supportsApiKey = typeInfo?.supportsApiKey ?? false;
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
-  const showUserAgentInAddDialog = shouldShowUserAgentFieldForNewProvider(selectedType);
   const preferredOAuthMode = selectedVendor?.supportedAuthModes.includes('oauth_browser')
     ? 'oauth_browser'
     : (selectedVendor?.supportedAuthModes.includes('oauth_device')
@@ -1376,9 +1449,6 @@ function AddProviderDialog({
           apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')
             ? apiProtocol
             : undefined,
-          headers: showUserAgentInAddDialog
-            ? mergeHeadersWithUserAgent(undefined, userAgent)
-            : undefined,
         });
         if (!result.valid) {
           setValidationError(result.error || t('aiProviders.toast.invalidKey'));
@@ -1394,6 +1464,9 @@ function AddProviderDialog({
         return;
       }
 
+      const nextContextWindow = parseOptionalPositiveInteger(contextWindow);
+      const nextMaxTokens = parseOptionalPositiveInteger(maxTokens);
+
       await onAdd(
         selectedType,
         name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType,
@@ -1403,10 +1476,9 @@ function AddProviderDialog({
           apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')
             ? apiProtocol
             : undefined,
-          headers: showUserAgentInAddDialog
-            ? mergeHeadersWithUserAgent(undefined, userAgent)
-            : undefined,
           model: resolveProviderModelForSave(typeInfo, modelId, devModeUnlocked),
+          contextWindow: selectedType === 'custom' ? nextContextWindow : undefined,
+          maxTokens: selectedType === 'custom' ? nextMaxTokens : undefined,
           authMode: useOAuthFlow ? (preferredOAuthMode || 'oauth_device') : selectedType === 'ollama'
             ? 'local'
             : (isOAuth && supportsApiKey && authMode === 'apikey')
@@ -1453,8 +1525,9 @@ function AddProviderDialog({
                     setName(type.id === 'custom' ? t('aiProviders.custom') : type.name);
                     setBaseUrl(type.defaultBaseUrl || '');
                     setApiProtocol('openai-completions');
-                    setUserAgent('');
                     setModelId(type.defaultModelId || '');
+                    setContextWindow('');
+                    setMaxTokens('');
                     setArkMode('apikey');
                   }}
                   className="p-4 rounded-lg border hover:bg-accent transition-colors text-center"
@@ -1484,8 +1557,9 @@ function AddProviderDialog({
                       setValidationError(null);
                       setBaseUrl('');
                       setApiProtocol('openai-completions');
-                      setUserAgent('');
                       setModelId('');
+                      setContextWindow('');
+                      setMaxTokens('');
                       setArkMode('apikey');
                     }}
                     className="text-sm text-muted-foreground hover:text-foreground"
@@ -1597,18 +1671,6 @@ function AddProviderDialog({
                     placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
-                  />
-                </div>
-              )}
-
-              {showUserAgentInAddDialog && (
-                <div className="space-y-2">
-                  <Label htmlFor="userAgent">{t('aiProviders.dialog.userAgent')}</Label>
-                  <Input
-                    id="userAgent"
-                    placeholder={t('aiProviders.dialog.userAgentPlaceholder')}
-                    value={userAgent}
-                    onChange={(e) => setUserAgent(e.target.value)}
                   />
                 </div>
               )}
@@ -1732,6 +1794,34 @@ function AddProviderDialog({
                       setValidationError(null);
                     }}
                   />
+                </div>
+              )}
+              {selectedType === 'custom' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="contextWindow">{t('aiProviders.dialog.contextWindow')}</Label>
+                    <Input
+                      id="contextWindow"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="200000"
+                      value={contextWindow}
+                      onChange={(e) => setContextWindow(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="maxTokens">{t('aiProviders.dialog.maxTokens')}</Label>
+                    <Input
+                      id="maxTokens"
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder="64000"
+                      value={maxTokens}
+                      onChange={(e) => setMaxTokens(e.target.value)}
+                    />
+                  </div>
                 </div>
               )}
               {/* Device OAuth Trigger — only shown when in OAuth mode */}

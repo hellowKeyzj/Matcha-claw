@@ -59,9 +59,12 @@ export interface AgentsListResult {
 
 export interface ModelCatalogEntry {
   id: string;
-  name?: string;
-  provider?: string;
+  provider: string;
+  providerLabel: string;
+  modelLabel: string;
+  displayLabel: string;
   contextWindow?: number;
+  maxTokens?: number;
 }
 
 export interface AgentModelObject {

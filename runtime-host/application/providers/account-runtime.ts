@@ -25,6 +25,14 @@ function normalizeHeadersRecord(input: unknown): Record<string, string> | undefi
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function normalizePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
 export function normalizeProviderAccountLocal(input: unknown, current?: Record<string, any> | null) {
   if (!isRecord(input)) {
     return null;
@@ -42,6 +50,12 @@ export function normalizeProviderAccountLocal(input: unknown, current?: Record<s
   const headers = Object.prototype.hasOwnProperty.call(input, 'headers')
     ? normalizeHeadersRecord(input.headers)
     : normalizeHeadersRecord(current?.headers);
+  const contextWindow = Object.prototype.hasOwnProperty.call(input, 'contextWindow')
+    ? normalizePositiveInteger(input.contextWindow)
+    : normalizePositiveInteger(current?.contextWindow);
+  const maxTokens = Object.prototype.hasOwnProperty.call(input, 'maxTokens')
+    ? normalizePositiveInteger(input.maxTokens)
+    : normalizePositiveInteger(current?.maxTokens);
   return {
     ...current,
     ...input,
@@ -60,6 +74,8 @@ export function normalizeProviderAccountLocal(input: unknown, current?: Record<s
       ? input.isDefault
       : (typeof current?.isDefault === 'boolean' ? current.isDefault : false),
     headers,
+    contextWindow,
+    maxTokens,
     createdAt: typeof current?.createdAt === 'string' ? current.createdAt : nowIso,
     updatedAt: nowIso,
   };
@@ -82,6 +98,8 @@ export function accountToStatusLocal(account: Record<string, any>, apiKey: strin
     type: account.vendorId,
     baseUrl: account.baseUrl,
     model: account.model,
+    contextWindow: account.contextWindow,
+    maxTokens: account.maxTokens,
     fallbackModels: Array.isArray(account.fallbackModels) ? account.fallbackModels : [],
     fallbackProviderIds: Array.isArray(account.fallbackAccountIds) ? account.fallbackAccountIds : [],
     enabled: account.enabled !== false,

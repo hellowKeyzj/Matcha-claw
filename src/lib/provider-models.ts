@@ -82,19 +82,60 @@ function normalizeExplicitModel(account: ProviderAccount): string | undefined {
   return explicitModel;
 }
 
-function buildModelEntry(modelRef: string, providerKey: string): ModelCatalogEntry {
+function resolveProviderDisplayName(
+  account: ProviderAccount,
+  vendor: ProviderVendorInfo | undefined,
+  providerKey: string,
+): string {
+  return getOptionalString(account.label)
+    || getOptionalString(vendor?.name)
+    || providerKey;
+}
+
+function stripProviderPrefix(modelValue: string, providerKey: string): string {
+  const prefix = `${providerKey}/`;
+  return modelValue.startsWith(prefix)
+    ? modelValue.slice(prefix.length)
+    : modelValue;
+}
+
+function buildModelDisplayLabel(providerLabel: string, modelLabel: string): string {
+  return `${providerLabel} / ${modelLabel}`;
+}
+
+function buildModelEntry(params: {
+  modelRef: string;
+  providerKey: string;
+  providerLabel: string;
+  modelLabel: string;
+  contextWindow?: number;
+  maxTokens?: number;
+}): ModelCatalogEntry {
   return {
-    id: modelRef,
-    provider: providerKey,
+    id: params.modelRef,
+    provider: params.providerKey,
+    providerLabel: params.providerLabel,
+    modelLabel: params.modelLabel,
+    displayLabel: buildModelDisplayLabel(params.providerLabel, params.modelLabel),
+    contextWindow: params.contextWindow,
+    maxTokens: params.maxTokens,
   };
+}
+
+function getPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
 }
 
 function collectAccountModelRefs(
   account: ProviderAccount,
   vendor?: ProviderVendorInfo,
-): string[] {
+): Array<{ modelRef: string; modelLabel: string; contextWindow?: number; maxTokens?: number }> {
   const providerKey = getRuntimeProviderKey(account);
-  const refs: string[] = [];
+  const refs: Array<{ modelRef: string; modelLabel: string; contextWindow?: number; maxTokens?: number }> = [];
   const seen = new Set<string>();
   const push = (candidate?: string) => {
     const normalized = getOptionalString(candidate);
@@ -106,17 +147,27 @@ function collectAccountModelRefs(
       return;
     }
     seen.add(modelRef);
-    refs.push(modelRef);
+    refs.push({
+      modelRef,
+      modelLabel: stripProviderPrefix(normalized, providerKey),
+    });
   };
 
+  const explicitModel = normalizeExplicitModel(account);
+  const fallbackModel = getOptionalString(vendor?.defaultModelId);
   const primaryModelRef = buildProviderModelRef(
     providerKey,
-    normalizeExplicitModel(account),
-    getOptionalString(vendor?.defaultModelId),
+    explicitModel,
+    fallbackModel,
   );
   if (primaryModelRef) {
     seen.add(primaryModelRef);
-    refs.push(primaryModelRef);
+    refs.push({
+      modelRef: primaryModelRef,
+      modelLabel: stripProviderPrefix(explicitModel || fallbackModel || primaryModelRef, providerKey),
+      contextWindow: getPositiveInteger(account.contextWindow),
+      maxTokens: getPositiveInteger(account.maxTokens),
+    });
   }
 
   for (const fallbackModel of Array.isArray(account.fallbackModels) ? account.fallbackModels : []) {
@@ -132,13 +183,23 @@ export function buildSelectableProviderModels(snapshot: ProviderSnapshot): Model
   const seen = new Set<string>();
 
   for (const account of snapshot.accounts) {
-    const refs = collectAccountModelRefs(account, vendorById.get(account.vendorId));
+    const vendor = vendorById.get(account.vendorId);
+    const refs = collectAccountModelRefs(account, vendor);
+    const providerKey = getRuntimeProviderKey(account);
+    const providerLabel = resolveProviderDisplayName(account, vendor, providerKey);
     for (const ref of refs) {
-      if (seen.has(ref)) {
+      if (seen.has(ref.modelRef)) {
         continue;
       }
-      seen.add(ref);
-      models.push(buildModelEntry(ref, getRuntimeProviderKey(account)));
+      seen.add(ref.modelRef);
+      models.push(buildModelEntry({
+        modelRef: ref.modelRef,
+        providerKey,
+        providerLabel,
+        modelLabel: ref.modelLabel,
+        contextWindow: ref.contextWindow,
+        maxTokens: ref.maxTokens,
+      }));
     }
   }
 

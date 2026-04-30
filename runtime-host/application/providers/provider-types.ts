@@ -56,6 +56,8 @@ export interface ProviderConfig {
   baseUrl?: string;
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackProviderIds?: string[];
   enabled: boolean;
@@ -89,6 +91,8 @@ export interface ProviderTypeInfo {
 export interface ProviderModelEntry extends Record<string, unknown> {
   id: string;
   name: string;
+  contextWindow?: number;
+  maxTokens?: number;
 }
 
 export interface ProviderBackendConfig {
@@ -117,6 +121,8 @@ export interface ProviderAccount {
   apiProtocol?: ProviderProtocol;
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackAccountIds?: string[];
   enabled: boolean;

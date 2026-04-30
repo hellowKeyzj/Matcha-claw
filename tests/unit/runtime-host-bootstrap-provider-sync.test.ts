@@ -123,10 +123,15 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.saveProviderKeyToOpenClawMock).toHaveBeenCalledWith('ollama-ollama-main', 'ollama-local');
     expect(hoisted.syncProviderConfigToOpenClawMock).toHaveBeenCalledWith(
       'ollama-ollama-main',
-      'qwen3:30b',
       expect.objectContaining({
         baseUrl: 'http://localhost:11434/v1',
         api: 'openai-completions',
+        models: [
+          {
+            id: 'qwen3:30b',
+            name: 'qwen3:30b',
+          },
+        ],
       }),
     );
     expect(hoisted.setOpenClawDefaultModelWithOverrideMock).toHaveBeenCalledWith(

@@ -37,12 +37,16 @@ export async function hostProviderReadAccount(
 ): Promise<{
   baseUrl?: string;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   apiProtocol?: ProviderAccount['apiProtocol'];
   headers?: Record<string, string>;
 } | null> {
   return await hostApiFetch<{
     baseUrl?: string;
     model?: string;
+    contextWindow?: number;
+    maxTokens?: number;
     apiProtocol?: ProviderAccount['apiProtocol'];
     headers?: Record<string, string>;
   } | null>(
@@ -116,6 +120,8 @@ export function buildProviderAccountPayload(input: {
   apiProtocol?: ProviderAccount['apiProtocol'];
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
 }): ProviderAccount {
   return {
     id: input.accountId,
@@ -126,6 +132,8 @@ export function buildProviderAccountPayload(input: {
     apiProtocol: input.apiProtocol,
     headers: input.headers,
     model: input.model,
+    contextWindow: input.contextWindow,
+    maxTokens: input.maxTokens,
     enabled: true,
     isDefault: false,
     createdAt: new Date().toISOString(),

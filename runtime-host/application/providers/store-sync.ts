@@ -23,6 +23,12 @@ type RuntimeProviderConfigOverride = {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  models?: Array<{
+    id: string;
+    name: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }>;
 };
 
 export type ProviderStoreLike = {
@@ -54,6 +60,14 @@ function getOptionalString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function getPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
 }
 
 function toStringArray(value: unknown): string[] {
@@ -122,6 +136,48 @@ function normalizeFallbackModelRefs(providerKey: string, fallbackModels: unknown
   return normalized;
 }
 
+function buildRuntimeProviderModels(
+  account: Record<string, unknown>,
+): Array<{
+  id: string;
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+}> {
+  const models: Array<{
+    id: string;
+    name: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }> = [];
+  const seen = new Set<string>();
+  const push = (
+    modelId: string | undefined,
+    capabilities?: { contextWindow?: number; maxTokens?: number },
+  ) => {
+    if (!modelId || seen.has(modelId)) {
+      return;
+    }
+    seen.add(modelId);
+    models.push({
+      id: modelId,
+      name: modelId,
+      contextWindow: capabilities?.contextWindow,
+      maxTokens: capabilities?.maxTokens,
+    });
+  };
+
+  push(getOptionalString(account.model), {
+    contextWindow: getPositiveInteger(account.contextWindow),
+    maxTokens: getPositiveInteger(account.maxTokens),
+  });
+  for (const fallbackModel of toStringArray(account.fallbackModels)) {
+    push(fallbackModel);
+  }
+
+  return models;
+}
+
 function normalizeIsoTimestamp(value: unknown): string {
   return typeof value === 'string' && value.trim().length > 0
     ? value
@@ -164,6 +220,7 @@ function resolveRuntimeProviderConfigOverride(
       baseUrl: normalizeProviderBaseUrl(vendorId, account.baseUrl, protocol),
       api: protocol,
       headers: normalizeProviderHeaders(account.headers),
+      models: buildRuntimeProviderModels(account),
     };
   }
 
@@ -306,7 +363,7 @@ export async function syncProviderStoreToOpenClaw(store: ProviderStoreLike): Pro
 
     const runtimeOverride = resolveRuntimeProviderConfigOverride(providerKey, account);
     if (runtimeOverride) {
-      await syncProviderConfigToOpenClaw(providerKey, getOptionalString(account.model), runtimeOverride);
+      await syncProviderConfigToOpenClaw(providerKey, runtimeOverride);
     }
   }
 
