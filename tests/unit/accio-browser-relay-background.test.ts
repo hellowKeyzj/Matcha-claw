@@ -77,7 +77,7 @@ class MockTabManager {
   }
 }
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/index.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/index.js', () => ({
   TabManager: MockTabManager,
   createDispatcher,
   initRelay: (callbacks: RelayCallbacks) => {
@@ -101,7 +101,7 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
   resetReconnectBackoff,
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/constants.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/constants.js', () => ({
   RelayState: {
     DISABLED: 'disabled',
     DISCONNECTED: 'disconnected',
@@ -109,7 +109,7 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
   },
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/logger.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
@@ -119,7 +119,7 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-rel
   setDebug: vi.fn(),
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/browser-instance.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/browser-instance.js', () => ({
   getBrowserInstanceId,
 }))
 
@@ -132,7 +132,7 @@ function registerChromeEvent(path: string) {
 }
 
 async function loadBackground() {
-  await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/background.js')
+  await import('../../resources/tools/data/extension/chrome-extension/browser-relay/background.js')
 }
 
 async function flushTasks() {

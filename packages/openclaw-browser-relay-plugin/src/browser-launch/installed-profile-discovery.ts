@@ -26,7 +26,7 @@ const RELAY_EXTENSION_NAME = 'MatchaClaw Browser Relay'
 const RELAY_EXTENSION_DESCRIPTION = 'Attach MatchaClaw to your existing Chrome tab via a local CDP relay server.'
 const CHROME_PROFILE_FAILURE_THRESHOLD = 2
 const EXTENSION_LOCATION_UNPACKED = 4
-const RELAY_EXTENSION_PATH_SEGMENTS = ['resources', 'tools', 'data', 'extension', 'chrome-extension', 'accio-browser-relay']
+const RELAY_EXTENSION_PATH_SEGMENTS = ['resources', 'tools', 'data', 'extension', 'chrome-extension', 'browser-relay']
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)

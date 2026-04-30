@@ -31,7 +31,7 @@ Connect the MatchaClaw agent to your Chrome browser so it can see and interact w
 ## File Structure
 
 ```
-accio-browser-relay/
+browser-relay/
 ├── background.js              # Service worker entry — relay lifecycle, event listeners
 ├── manifest.json              # Extension manifest (MV3)
 ├── options.html               # Options page — usage guide & advanced settings

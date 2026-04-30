@@ -256,7 +256,7 @@
         "openFolderTitle": "Open the extension folder",
         "openFolderBody": "Find the directory that contains the browser extension files. In development you can use the repository path below; in packaged builds you can use Reveal extension directory.",
         "installTitle": "Drag the extension folder into Chrome",
-        "installBody": "Drag the accio-browser-relay folder onto the chrome://extensions page and Chrome will install it immediately.",
+        "installBody": "Drag the browser-relay folder onto the chrome://extensions page and Chrome will install it immediately.",
         "installHint": "If drag and drop is inconvenient, click Load unpacked and select this extension directory instead."
       }
     }

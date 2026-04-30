@@ -255,7 +255,7 @@
         "openFolderTitle": "拡張機能フォルダーを開く",
         "openFolderBody": "ブラウザ拡張機能ファイルを含むディレクトリを探します。開発環境では下のリポジトリパスを使えます。パッケージ版では「拡張ディレクトリを表示」を使ってください。",
         "installTitle": "拡張機能フォルダーを Chrome にドラッグする",
-        "installBody": "accio-browser-relay フォルダーを chrome://extensions ページへドラッグすると、Chrome がすぐにインストールします。",
+        "installBody": "browser-relay フォルダーを chrome://extensions ページへドラッグすると、Chrome がすぐにインストールします。",
         "installHint": "ドラッグしづらい場合は「パッケージ化されていない拡張機能を読み込む」をクリックして、この拡張ディレクトリを選択してください。"
       }
     }

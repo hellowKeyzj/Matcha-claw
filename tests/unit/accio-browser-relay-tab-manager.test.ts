@@ -7,22 +7,22 @@ const cleanupTabQueue = vi.fn()
 const cleanupAllTabQueues = vi.fn()
 const interceptEvent = vi.fn(() => ({}))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/debugger-attach.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/tabs/debugger-attach.js', () => ({
   attachDebugger,
   detachDebugger,
   detachAll,
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/commands/dispatch.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/commands/dispatch.js', () => ({
   cleanupTabQueue,
   cleanupAllTabQueues,
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/events/index.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/events/index.js', () => ({
   interceptEvent,
 }))
 
-vi.mock('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/session-indicators.js', () => ({
+vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/tabs/session-indicators.js', () => ({
   SessionIndicators: class {
     trackCommand() {}
     removeTab() {}
@@ -73,7 +73,7 @@ type StoredTabManagerState = {
 let selectedWindowId = 11
 
 async function loadTabManager() {
-  const mod = await import('../../resources/tools/data/extension/chrome-extension/accio-browser-relay/lib/cdp/tabs/manager.js')
+  const mod = await import('../../resources/tools/data/extension/chrome-extension/browser-relay/lib/cdp/tabs/manager.js')
   return mod.TabManager
 }
 

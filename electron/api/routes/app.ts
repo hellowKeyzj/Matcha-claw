@@ -12,14 +12,14 @@ export async function handleAppRoutes(
   ctx: AppApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/app/browser-relay-info' && req.method === 'GET') {
-    const relativeDir = 'resources/tools/data/extension/chrome-extension/accio-browser-relay';
+    const relativeDir = 'resources/tools/data/extension/chrome-extension/browser-relay';
     const extensionDir = join(
       getResourcesDir(),
       'tools',
       'data',
       'extension',
       'chrome-extension',
-      'accio-browser-relay',
+      'browser-relay',
     );
 
     sendJson(res, 200, {
