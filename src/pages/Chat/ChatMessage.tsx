@@ -3,7 +3,7 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { startTransition, useEffect, useState, useCallback, useMemo, memo, type ReactNode } from 'react';
+import { useCallback, useMemo, useState, memo, type ReactNode } from 'react';
 import { User, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { Button } from '@/components/ui/button';
@@ -11,9 +11,8 @@ import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import {
-  prewarmAssistantMarkdownBody,
+  getOrBuildAssistantMarkdownBody,
   getMessageAttachedFiles,
-  peekAssistantMarkdownBody,
 } from '@/lib/chat-markdown-body';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractThinking, extractImages, extractToolUse, formatTimestamp } from './message-utils';
@@ -49,33 +48,6 @@ interface ChatMessageProps {
 
 interface ExtractedImage { url?: string; data?: string; mimeType: string; }
 
-type MarkdownWarmupHandle = number | ReturnType<typeof setTimeout>;
-
-function scheduleMarkdownWarmup(task: () => void): MarkdownWarmupHandle {
-  if (typeof window !== 'undefined') {
-    const win = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
-    };
-    if (typeof win.requestIdleCallback === 'function') {
-      return win.requestIdleCallback(() => task(), { timeout: 120 });
-    }
-  }
-  return setTimeout(task, 0);
-}
-
-function cancelMarkdownWarmup(handle: MarkdownWarmupHandle): void {
-  if (typeof window !== 'undefined') {
-    const win = window as Window & {
-      cancelIdleCallback?: (id: number) => void;
-    };
-    if (typeof win.cancelIdleCallback === 'function' && typeof handle === 'number') {
-      win.cancelIdleCallback(handle);
-      return;
-    }
-  }
-  clearTimeout(handle);
-}
-
 /** Resolve an ExtractedImage to a displayable src string, or null if not possible. */
 function imageSrc(img: ExtractedImage): string | null {
   if (img.url) return img.url;
@@ -93,7 +65,7 @@ export const ChatMessage = memo(function ChatMessage({
   assistantAvatarSeed,
   assistantAvatarStyle,
   userAvatarImageUrl,
-  isStreaming = false,
+  isStreaming = Boolean(message.streaming),
   streamingTools = [],
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
@@ -379,10 +351,10 @@ function ToolStatusBar({
           <div
             key={tool.toolCallId || tool.id || tool.name}
             className={cn(
-              'flex items-center gap-2 rounded-[18px] border px-3 py-2 text-xs shadow-sm backdrop-blur-sm transition-colors',
-              isRunning && 'border-primary/20 bg-background/78 text-foreground',
-              !isRunning && !isError && 'border-border/45 bg-background/68 text-muted-foreground',
-              isError && 'border-destructive/20 bg-background/78 text-destructive',
+              'flex items-center gap-2 rounded-[16px] border px-3 py-2 text-xs transition-colors',
+              isRunning && 'border-primary/18 bg-background/84 text-foreground',
+              !isRunning && !isError && 'border-border/38 bg-background/72 text-muted-foreground',
+              isError && 'border-destructive/18 bg-background/84 text-destructive',
             )}
           >
             {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
@@ -414,7 +386,7 @@ const AssistantHoverBar = memo(function AssistantHoverBar({ text, timestamp }: {
 
   return (
     <div className="flex w-full justify-start opacity-0 transition-opacity duration-200 select-none group-hover:opacity-100">
-      <div className="inline-flex items-center gap-1 rounded-full border border-border/45 bg-background/68 px-1.5 py-0.5 shadow-sm backdrop-blur-sm">
+      <div className="inline-flex items-center gap-1 rounded-full border border-border/38 bg-background/78 px-1.5 py-0.5 shadow-sm backdrop-blur-sm">
         <span className="px-1 text-[11px] text-muted-foreground">
           {timestamp ? formatTimestamp(timestamp) : ''}
         </span>
@@ -449,7 +421,7 @@ const MessageBody = memo(function MessageBody({
       <div
         className={CHAT_LAYOUT_TOKENS.userBubble}
       >
-        <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.6]">{text}</p>
+        <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.58]">{text}</p>
       </div>
     );
   }
@@ -484,44 +456,11 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
   }, []);
 
   const renderMode = isStreaming ? 'streaming' : 'settled';
-  const [cacheVersion, setCacheVersion] = useState(0);
   const markdownBody = useMemo(
-    () => peekAssistantMarkdownBody(message, renderMode),
-    [cacheVersion, message, renderMode],
+    () => getOrBuildAssistantMarkdownBody(message, renderMode) ?? null,
+    [message, renderMode],
   );
-
-  useEffect(() => {
-    if (isStreaming || markdownBody) {
-      return;
-    }
-    let cancelled = false;
-    const handle = scheduleMarkdownWarmup(() => {
-      if (cancelled) {
-        return;
-      }
-      if (!prewarmAssistantMarkdownBody(message, renderMode)) {
-        return;
-      }
-      if (cancelled) {
-        return;
-      }
-      startTransition(() => {
-        setCacheVersion((version) => version + 1);
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      cancelMarkdownWarmup(handle);
-    };
-  }, [isStreaming, markdownBody, message, renderMode]);
-
-  const streamingMarkdownBody = useMemo(
-    () => (isStreaming && !markdownBody ? prewarmAssistantMarkdownBody(message, renderMode) : markdownBody),
-    [isStreaming, markdownBody, message, renderMode],
-  );
-  const resolvedMarkdownBody = streamingMarkdownBody ?? markdownBody;
-  const renderNodes = resolvedMarkdownBody?.nodes ?? [];
+  const renderNodes = markdownBody?.nodes ?? [];
 
   const handleMarkdownClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -542,15 +481,15 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
 
   return (
     <div
-      data-chat-body-mode="full"
+      data-chat-body-mode={isStreaming ? 'streaming' : 'full'}
       className={cn(
         CHAT_LAYOUT_TOKENS.assistantSurface,
         'relative',
       )}
     >
-      <div className="space-y-3.5 text-[14px] leading-[1.75] text-foreground">
-        {!resolvedMarkdownBody && (
-          <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.75] text-foreground">{text}</p>
+      <div className="space-y-3 text-[14px] leading-[1.72] text-foreground">
+        {!markdownBody && (
+          <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.72] text-foreground">{text}</p>
         )}
         {renderNodes.map((node) => {
           if (node.kind === 'csv') {
@@ -578,7 +517,7 @@ const AssistantMessageBody = memo(function AssistantMessageBody({
           return (
             <div
               key={node.key}
-              className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-3 prose-headings:mt-5 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:rounded-2xl prose-pre:border prose-pre:border-border/60 prose-pre:bg-background/92 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/70 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/82 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
+              className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:rounded-[18px] prose-pre:border prose-pre:border-border/45 prose-pre:bg-background/88 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/60 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/75 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
               onClick={handleMarkdownClick}
               dangerouslySetInnerHTML={{ __html: node.html }}
             />
@@ -604,7 +543,7 @@ function ThinkingBlock({ content }: { content: string }) {
   }), [content, thinkingCacheKey]);
 
   return (
-    <div className="w-full rounded-[18px] border border-border/45 bg-background/62 text-sm shadow-sm backdrop-blur-sm">
+    <div className="w-full rounded-[16px] border border-border/38 bg-background/72 text-sm backdrop-blur-sm">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
@@ -657,7 +596,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
         type="button"
         onClick={handleOpen}
         title="Open file"
-        className="flex max-w-[220px] items-center gap-2 rounded-[18px] border border-border/50 bg-background/72 px-3 py-2 text-left shadow-sm backdrop-blur-sm transition-colors hover:bg-background/88"
+        className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-background/72 px-3 py-2 text-left shadow-sm backdrop-blur-sm transition-colors hover:bg-background/84"
       >
         <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
         <div className="min-w-0 overflow-hidden">
@@ -671,7 +610,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
   }
 
   return (
-    <div className="flex max-w-[220px] items-center gap-2 rounded-[18px] border border-border/50 bg-background/72 px-3 py-2 shadow-sm backdrop-blur-sm">
+    <div className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-background/72 px-3 py-2 shadow-sm backdrop-blur-sm">
       <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 overflow-hidden">
         <p className="text-xs font-medium truncate">{file.fileName}</p>
@@ -696,7 +635,7 @@ function ImageThumbnail({
 }) {
   return (
     <div
-      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[20px] border border-border/50 bg-background/72 shadow-sm backdrop-blur-sm"
+      className="group/img relative h-36 w-36 cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-background/72 shadow-sm backdrop-blur-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="w-full h-full object-cover" />
@@ -720,7 +659,7 @@ function ImagePreviewCard({
 }) {
   return (
     <div
-      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[20px] border border-border/50 bg-background/68 shadow-sm backdrop-blur-sm"
+      className="group/img relative max-w-xs cursor-zoom-in overflow-hidden rounded-[18px] border border-border/42 bg-background/68 shadow-sm backdrop-blur-sm"
       onClick={onPreview}
     >
       <img src={src} alt={fileName} className="block w-full" />
@@ -737,7 +676,7 @@ const ToolCard = memo(function ToolCard({ name, input }: { name: string; input: 
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="rounded-[18px] border border-border/45 bg-background/62 text-sm shadow-sm backdrop-blur-sm">
+    <div className="rounded-[16px] border border-border/38 bg-background/72 text-sm backdrop-blur-sm">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
         onClick={() => setExpanded(!expanded)}

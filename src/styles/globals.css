@@ -4,6 +4,8 @@
 
 @layer base {
   :root {
+    --scrollbar-size: 8px;
+    --chat-scrollbar-gutter: calc(var(--scrollbar-size) + 6px);
     --background: 240 11% 95%;
     --foreground: 220 12% 13%;
     --card: 0 0% 100%;
@@ -122,8 +124,8 @@
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
 
 ::-webkit-scrollbar-track {

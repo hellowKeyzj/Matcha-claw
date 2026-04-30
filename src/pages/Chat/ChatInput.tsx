@@ -64,7 +64,6 @@ interface ChatInputProps {
   sending?: boolean;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
-  layout?: 'dock' | 'hero';
 }
 
 function resolveInputPlaceholder(
@@ -255,7 +254,6 @@ export const ChatInput = memo(function ChatInput({
   sending = false,
   approvalWaiting = false,
   mentionCandidates = [],
-  layout = 'dock',
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
@@ -767,23 +765,18 @@ export const ChatInput = memo(function ChatInput({
 
   return (
     <div
-      className={cn(
-        'w-full',
-        layout === 'hero' ? 'py-1' : '',
-      )}
+      className="w-full"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className={CHAT_LAYOUT_TOKENS.inputRail}>
+      <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
         {/* Input Row */}
         <div
           className={cn(
             CHAT_LAYOUT_TOKENS.inputCard,
             dragOver && 'border-ring shadow-[var(--shadow-focus)]',
-            layout === 'hero'
-              ? CHAT_LAYOUT_TOKENS.inputCardHeroMinHeight
-              : CHAT_LAYOUT_TOKENS.inputCardDockMinHeight,
+            CHAT_LAYOUT_TOKENS.inputCardMinHeight,
           )}
         >
           <div className="relative min-w-0">
@@ -847,7 +840,6 @@ export const ChatInput = memo(function ChatInput({
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputTextarea,
                   'placeholder:text-muted-foreground/70',
-                  layout === 'hero' && CHAT_LAYOUT_TOKENS.inputTextareaHeroMinHeight,
                 )}
                 rows={1}
               />
@@ -932,7 +924,7 @@ export const ChatInput = memo(function ChatInput({
                 size="icon"
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputAttachButton,
-                  'rounded-full border border-border/55 bg-background/66 text-muted-foreground shadow-sm hover:bg-background/86 hover:text-foreground',
+                  'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
                 )}
                 onClick={pickFiles}
                 disabled={disabled || sending || approvalWaiting}
@@ -948,7 +940,7 @@ export const ChatInput = memo(function ChatInput({
                 size="icon"
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputSendButton,
-                  'rounded-full shadow-[0_10px_25px_rgba(15,23,42,0.12)]',
+                  'rounded-full shadow-[0_8px_20px_rgba(15,23,42,0.10)]',
                 )}
                 variant={sending ? 'destructive' : 'default'}
                 aria-label={sending ? 'Stop' : 'Send'}
@@ -1027,7 +1019,7 @@ function AttachmentChip({
   }
 
   return (
-    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/60 bg-background/80 pr-1 shadow-sm backdrop-blur-sm">
+    <div className="inline-flex w-[120px] max-w-full items-center rounded-full border border-border/50 bg-background/84 pr-1 shadow-sm backdrop-blur-sm">
       {canOpen ? (
         <button
           type="button"

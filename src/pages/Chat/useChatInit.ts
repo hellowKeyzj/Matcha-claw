@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/stores/chat';
-import { getSessionTranscript } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
@@ -96,17 +95,13 @@ export function useChatInit(input: UseChatInitInput): void {
           return;
         }
         void loadSessions().finally(() => {
-          const { sessionsResource } = useChatStore.getState();
-          if (!sessionsResource.hasLoadedOnce) {
+          const { sessionMetasResource } = useChatStore.getState();
+          if (!sessionMetasResource.hasLoadedOnce) {
             scheduleSessionsRetry(attempt + 1);
           }
         });
       }, RESOURCE_RETRY_DELAY_MS);
     };
-    const hasExistingMessages = getSessionTranscript(
-      useChatStore.getState(),
-      useChatStore.getState().currentSessionKey,
-    ).length > 0;
     const params = new URLSearchParams(locationSearch);
     const sessionParam = params.get('session')?.trim() ?? '';
     const agentParam = params.get('agent')?.trim() ?? '';
@@ -126,8 +121,8 @@ export function useChatInit(input: UseChatInitInput): void {
         return !agentsResource.hasLoadedOnce;
       };
       const shouldRetrySessionsAfterLoad = () => {
-        const { sessionsResource } = useChatStore.getState();
-        return !sessionsResource.hasLoadedOnce;
+        const { sessionMetasResource } = useChatStore.getState();
+        return !sessionMetasResource.hasLoadedOnce;
       };
       const shouldLoadAgents = (
         !subagentsState.agentsResource.hasLoadedOnce
@@ -148,7 +143,13 @@ export function useChatInit(input: UseChatInitInput): void {
       if (switchedViaQueryParam) {
         return;
       }
-      if (hasExistingMessages) {
+      const currentChatState = useChatStore.getState();
+      const currentSessionRecord = currentChatState.loadedSessions[currentChatState.currentSessionKey];
+      const hasCurrentViewportSnapshot = (
+        currentSessionRecord?.meta.historyStatus === 'ready'
+        || (currentSessionRecord?.window.messages.length ?? 0) > 0
+      );
+      if (hasCurrentViewportSnapshot) {
         initialHistoryIdleHandleRef.current = scheduleIdleTask(() => {
           initialHistoryIdleHandleRef.current = null;
           if (cancelled) {
@@ -200,3 +201,5 @@ export function useChatInit(input: UseChatInitInput): void {
     switchSession,
   ]);
 }
+
+

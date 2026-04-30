@@ -15,6 +15,7 @@ export interface RawMessage {
   content: unknown; // string | ContentBlock[]
   timestamp?: number;
   id?: string;
+  streaming?: boolean;
   toolCallId?: string;
   toolName?: string;
   details?: unknown;
@@ -39,7 +40,7 @@ export interface ContentBlock {
   content?: unknown;
 }
 
-/** Session from sessions.list */
+/** Session from session catalog */
 export interface ChatSession {
   key: string;
   label?: string;
@@ -48,6 +49,8 @@ export interface ChatSession {
   model?: string;
   updatedAt?: number;
 }
+
+export type ChatSessionHistoryStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ToolStatus {
   id?: string;
@@ -71,17 +74,6 @@ export type ChatRunPhase =
 
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
-export type StreamRuntimeStatus = 'streaming' | 'finalizing';
-
-export interface AssistantMessageOverlay {
-  runId: string;
-  messageId: string;
-  sourceMessage: RawMessage | null;
-  committedText: string;
-  targetText: string;
-  status: StreamRuntimeStatus;
-  rafId: number | null;
-}
 
 export interface PendingUserMessageOverlay {
   clientMessageId: string;
@@ -110,7 +102,7 @@ export interface ChatSessionRuntimeState {
   activeRunId: string | null;
   runPhase: ChatRunPhase;
   pendingUserMessage?: PendingUserMessageOverlay | null;
-  assistantOverlay: AssistantMessageOverlay | null;
+  streamingMessageId: string | null;
   streamingTools: ToolStatus[];
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
@@ -121,18 +113,14 @@ export interface ChatSessionRuntimeState {
 export interface ChatSessionMetaState {
   label: string | null;
   lastActivityAt: number | null;
-  ready: boolean;
+  historyStatus: ChatSessionHistoryStatus;
   thinkingLevel: string | null;
 }
 
 export interface ChatSessionRecord {
-  transcript: RawMessage[];
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
-}
-
-export interface ChatViewportAnchorRestore {
-  messageId: string;
+  window: ChatSessionViewportState;
 }
 
 export interface ChatSessionViewportState {
@@ -145,15 +133,12 @@ export interface ChatSessionViewportState {
   isLoadingMore: boolean;
   isLoadingNewer: boolean;
   isAtLatest: boolean;
-  anchorRestore: ChatViewportAnchorRestore | null;
   lastVisibleMessageId: string | null;
 }
 
 export interface ChatViewState {
-  snapshotReady: boolean;
-  initialLoading: boolean;
-  refreshing: boolean;
-  sessionsResource: ResourceStateMeta<ChatSession[]>;
+  foregroundHistorySessionKey: string | null;
+  sessionMetasResource: ResourceStateMeta<ChatSession[]>;
   mutating: boolean;
   error: string | null;
   showThinking: boolean;
@@ -161,10 +146,8 @@ export interface ChatViewState {
 
 export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
-  sessionsByKey: Record<string, ChatSessionRecord>;
-  viewportBySession: Record<string, ChatSessionViewportState>;
+  loadedSessions: Record<string, ChatSessionRecord>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
-  sessions?: ChatSession[];
 }
 
 export interface ChatSendAttachment {
@@ -216,13 +199,10 @@ export type ChatStoreState = ChatStoreBaseState & ChatStoreActions;
 
 export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
-  'sessionsByKey',
-  'viewportBySession',
+  'loadedSessions',
   'pendingApprovalsBySession',
-  'snapshotReady',
-  'initialLoading',
-  'refreshing',
-  'sessionsResource',
+  'foregroundHistorySessionKey',
+  'sessionMetasResource',
   'mutating',
   'error',
   'showThinking',
@@ -230,3 +210,5 @@ export const CHAT_BASE_STATE_KEYS = [
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 export const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
+
+

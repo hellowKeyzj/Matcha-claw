@@ -27,11 +27,10 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 function createStateHarness(overrides: Partial<ChatStoreState>) {
   let state = {
     currentSessionKey: 'agent:main:main',
-    sessionsByKey: {
+    loadedSessions: {
       'agent:main:main': createEmptySessionRecord(),
     },
-    initialLoading: false,
-    refreshing: false,
+    foregroundHistorySessionKey: null,
     error: null,
   } as ChatStoreState;
   state = { ...state, ...overrides } as ChatStoreState;
@@ -114,23 +113,21 @@ describe('chat history loading helpers', () => {
     expect(guard()).toBe(true);
   });
 
-  it('begin/finalize keep loading flags consistent with timeout safety', () => {
+  it('begin/finalize keep foreground history session consistent with timeout safety', () => {
     const requestedSessionKey = 'agent:main:main';
     const historyRuntime = createHistoryRuntimeHarness();
     const historyLoadRunId = historyRuntime.nextHistoryLoadRunId();
     const harness = createStateHarness({
       currentSessionKey: requestedSessionKey,
-      sessionsByKey: {
+      loadedSessions: {
         [requestedSessionKey]: createEmptySessionRecord(),
       },
-      initialLoading: false,
-      refreshing: false,
+      foregroundHistorySessionKey: null,
       error: 'stale',
     });
 
     const timer = beginHistoryLoadUiState({
       set: harness.set,
-      get: harness.get,
       requestedSessionKey,
       mode: 'active',
       scope: 'foreground',
@@ -139,23 +136,22 @@ describe('chat history loading helpers', () => {
       timeoutMs: 20,
     });
 
-    expect(harness.get().initialLoading).toBe(true);
-    expect(harness.get().refreshing).toBe(false);
+    expect(harness.get().foregroundHistorySessionKey).toBe(requestedSessionKey);
     expect(harness.get().error).toBeNull();
 
     vi.advanceTimersByTime(30);
-    expect(harness.get().initialLoading).toBe(false);
-    expect(harness.get().refreshing).toBe(false);
+    expect(harness.get().foregroundHistorySessionKey).toBeNull();
 
-    harness.set({ initialLoading: true, refreshing: true });
+    harness.set({ foregroundHistorySessionKey: requestedSessionKey });
     finalizeHistoryLoadUiState({
       set: harness.set,
       scope: 'foreground',
+      requestedSessionKey,
       historyLoadRunId,
       historyRuntime,
       loadingSafetyTimer: timer,
     });
-    expect(harness.get().initialLoading).toBe(false);
-    expect(harness.get().refreshing).toBe(false);
+    expect(harness.get().foregroundHistorySessionKey).toBeNull();
   });
 });
+

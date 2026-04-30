@@ -1,6 +1,5 @@
 import { useGatewayStore } from '../gateway';
-import { disposeActiveStreamPacer } from './stream-pacer';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
@@ -35,15 +34,14 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   const { set, get, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
   clearHistoryPoll();
   clearErrorRecoveryTimer();
-  disposeActiveStreamPacer(set, get);
 
   const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
   onAbortedTelemetry(sessionKey);
   set((state) => {
     const runtime = getSessionRuntime(state, sessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_aborted' });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_aborted' });
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -73,3 +71,4 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     onFinishMutating();
   }
 }
+

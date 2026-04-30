@@ -7,7 +7,7 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
-import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 class ResizeObserverStub {
@@ -28,7 +28,6 @@ function buildSessionMessages(count: number, prefix = 'session message') {
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
-    transcript: overrides?.transcript ?? base.transcript,
     meta: {
       ...base.meta,
       ...overrides?.meta,
@@ -37,6 +36,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    window: overrides?.window ?? base.window,
   };
 }
 
@@ -88,32 +88,32 @@ describe('chat viewport window', () => {
       clearError: vi.fn(),
     } as never);
     useChatStore.setState({
-      snapshotReady: true,
-      initialLoading: false,
-      refreshing: false,
+      foregroundHistorySessionKey: null,
       mutating: false,
       error: null,
       showThinking: true,
       currentSessionKey,
-      viewportBySession: {
-        [currentSessionKey]: createViewportWindowState({
-          ...createEmptySessionViewportState(),
-          messages: viewportMessages,
-          totalMessageCount: allMessages.length,
-          windowStartOffset: 15,
-          windowEndOffset: 35,
-          hasMore: true,
-          hasNewer: false,
-          isAtLatest: true,
-        }),
-      },
       pendingApprovalsBySession: {},
-      sessions: [
-        { key: currentSessionKey, displayName: currentSessionKey },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: currentSessionKey, displayName: currentSessionKey },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         [currentSessionKey]: buildSessionRecord({
-          transcript: viewportMessages,
+          window: createViewportWindowState({
+            messages: viewportMessages,
+            totalMessageCount: allMessages.length,
+            windowStartOffset: 15,
+            windowEndOffset: 35,
+            hasMore: true,
+            hasNewer: false,
+            isAtLatest: true,
+          }),
           meta: {
             ready: true,
             lastActivityAt: Date.now(),
@@ -169,31 +169,32 @@ describe('chat viewport window', () => {
       clearError: vi.fn(),
     } as never);
     useChatStore.setState({
-      snapshotReady: true,
-      initialLoading: false,
-      refreshing: false,
+      foregroundHistorySessionKey: null,
       mutating: false,
       error: null,
       showThinking: true,
       currentSessionKey,
-      viewportBySession: {
-        [currentSessionKey]: createViewportWindowState({
-          messages: buildSessionMessages(10),
-          totalMessageCount: 20,
-          windowStartOffset: 0,
-          windowEndOffset: 10,
-          hasMore: false,
-          hasNewer: true,
-          isAtLatest: false,
-        }),
-      },
       pendingApprovalsBySession: {},
-      sessions: [
-        { key: currentSessionKey, displayName: currentSessionKey },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: currentSessionKey, displayName: currentSessionKey },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         [currentSessionKey]: buildSessionRecord({
-          transcript: buildSessionMessages(10),
+          window: createViewportWindowState({
+            messages: buildSessionMessages(10),
+            totalMessageCount: 20,
+            windowStartOffset: 0,
+            windowEndOffset: 10,
+            hasMore: false,
+            hasNewer: true,
+            isAtLatest: false,
+          }),
           meta: {
             ready: true,
             lastActivityAt: Date.now(),
@@ -224,3 +225,5 @@ describe('chat viewport window', () => {
     });
   });
 });
+
+

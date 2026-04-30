@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RawMessage } from '@/stores/chat';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
@@ -13,7 +14,7 @@ vi.mock('@/lib/host-events', () => ({
 }));
 
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
+  messages?: RawMessage[];
   runtime?: Partial<{
     sending: boolean;
     activeRunId: string | null;
@@ -21,8 +22,8 @@ function createSessionRecord(input?: {
     approvalStatus: 'idle' | 'awaiting_approval';
   }>;
 }) {
+  const messages = input?.messages ?? [];
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: null,
       lastActivityAt: null,
@@ -33,14 +34,19 @@ function createSessionRecord(input?: {
       sending: input?.runtime?.sending ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      streamingMessage: null,
-      streamRuntime: null,
       streamingTools: [],
       pendingFinal: input?.runtime?.pendingFinal ?? false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: input?.runtime?.approvalStatus ?? 'idle',
     },
+    window: createViewportWindowState({
+      messages,
+      totalMessageCount: messages.length,
+      windowStartOffset: 0,
+      windowEndOffset: messages.length,
+      isAtLatest: true,
+    }),
   };
 }
 
@@ -160,8 +166,14 @@ describe('gateway store event wiring', () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord(),
       },
       pendingApprovalsBySession: {},
@@ -185,7 +197,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     let chatState = useChatStore.getState();
-    expect(chatState.sessionsByKey['agent:main:main']?.runtime.approvalStatus).toBe('awaiting_approval');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.approvalStatus).toBe('awaiting_approval');
     expect(chatState.pendingApprovalsBySession['agent:main:main']?.map((item) => item.id)).toEqual([
       'approval-evt-1',
     ]);
@@ -202,7 +214,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     chatState = useChatStore.getState();
-    expect(chatState.sessionsByKey['agent:main:main']?.runtime.approvalStatus).toBe('idle');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.approvalStatus).toBe('idle');
     expect(chatState.pendingApprovalsBySession['agent:main:main'] ?? []).toEqual([]);
   });
 
@@ -217,8 +229,14 @@ describe('gateway store event wiring', () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
             sending: true,
@@ -244,9 +262,9 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const state = useChatStore.getState();
-    expect(state.sessionsByKey['agent:main:main']?.runtime.sending).toBe(false);
-    expect(state.sessionsByKey['agent:main:main']?.runtime.pendingFinal).toBe(false);
-    expect(state.sessionsByKey['agent:main:main']?.runtime.activeRunId).toBeNull();
+    expect(state.loadedSessions['agent:main:main']?.runtime.sending).toBe(false);
+    expect(state.loadedSessions['agent:main:main']?.runtime.pendingFinal).toBe(false);
+    expect(state.loadedSessions['agent:main:main']?.runtime.activeRunId).toBeNull();
     expect(state.error).toBeNull();
   });
 
@@ -265,8 +283,14 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord(),
       },
     } as never);
@@ -335,8 +359,14 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
             sending: true,
@@ -376,8 +406,14 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
             sending: true,
@@ -433,8 +469,14 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
             sending: true,
@@ -491,8 +533,14 @@ describe('gateway store event wiring', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
           runtime: {
             sending: true,
@@ -569,3 +617,5 @@ describe('gateway store event wiring', () => {
     });
   });
 });
+
+

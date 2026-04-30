@@ -4,11 +4,11 @@ import { readSessionsFromState } from './session-helpers';
 import {
   getPendingApprovals,
   getSessionMeta,
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   getSessionViewportState,
 } from './store-state-helpers';
-import { selectStreamingRenderMessage } from './stream-overlay-message';
+import type { ChatSessionHistoryStatus } from './types';
 
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
@@ -18,7 +18,7 @@ export interface AgentSessionsPaneSessionEntry {
   label: string | null;
   titlePreview: string | null;
   lastActivityAt: number | null;
-  ready: boolean;
+  historyStatus: ChatSessionHistoryStatus;
 }
 
 let cachedAgentPaneSessionEntries: AgentSessionsPaneSessionEntry[] = [];
@@ -47,33 +47,32 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
 
   for (let index = 0; index < sessions.length; index += 1) {
     const session = sessions[index];
-    const meta = state.sessionsByKey[session.key]?.meta;
+    const meta = state.loadedSessions[session.key]?.meta;
     const runtime = getSessionRuntime(state, session.key);
-    const transcript = getSessionTranscript(state, session.key);
     const viewport = getSessionViewportState(state, session.key);
     const label = normalizeAgentPaneSessionLabel(meta?.label);
     const pendingUserPreview = runtime.pendingUserMessage
       ? resolveSessionLabelFromMessages([runtime.pendingUserMessage.message])
       : null;
     const titlePreview = pendingUserPreview
-      ?? resolveSessionLabelFromMessages(transcript)
+      ?? resolveSessionLabelFromMessages(getSessionMessages(state, session.key))
       ?? resolveSessionLabelFromMessages(viewport.messages);
     const lastActivityAt = typeof meta?.lastActivityAt === 'number' ? meta.lastActivityAt : null;
-    const ready = Boolean(meta?.ready);
+    const historyStatus = meta?.historyStatus ?? 'idle';
     const previousEntry = cachedAgentPaneSessionEntryByKey.get(session.key);
     const nextEntry = previousEntry
       && previousEntry.session === session
       && previousEntry.label === label
       && previousEntry.titlePreview === titlePreview
       && previousEntry.lastActivityAt === lastActivityAt
-      && previousEntry.ready === ready
+      && previousEntry.historyStatus === historyStatus
       ? previousEntry
       : {
           session,
           label,
           titlePreview,
           lastActivityAt,
-          ready,
+          historyStatus,
         };
     nextEntries[index] = nextEntry;
     nextEntryByKey.set(session.key, nextEntry);
@@ -94,7 +93,7 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
 function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: AgentSessionsPaneSessionEntry[]) {
   return {
     sessionEntries,
-    sessionsResource: state.sessionsResource,
+    sessionMetasResource: state.sessionMetasResource,
     currentSessionKey: state.currentSessionKey,
     switchSession: state.switchSession,
     openAgentConversation: state.openAgentConversation,
@@ -104,7 +103,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
 }
 
 export function selectCanonicalTranscript(state: ChatStoreState, sessionKey: string) {
-  return getSessionTranscript(state, sessionKey);
+  return getSessionMessages(state, sessionKey);
 }
 
 export function selectSessionMeta(state: ChatStoreState, sessionKey: string) {
@@ -124,10 +123,8 @@ export function selectSnapshotLayerState(state: ChatStoreState) {
 
 export function selectViewLayerState(state: ChatStoreState) {
   return {
-    snapshotReady: state.snapshotReady,
-    initialLoading: state.initialLoading,
-    refreshing: state.refreshing,
-    sessionsResource: state.sessionsResource,
+    foregroundHistorySessionKey: state.foregroundHistorySessionKey,
+    sessionMetasResource: state.sessionMetasResource,
     mutating: state.mutating,
     error: state.error,
     showThinking: state.showThinking,
@@ -142,8 +139,7 @@ export function selectChatPageSessionState(state: ChatStoreState) {
     viewportMessages: viewportWindow.messages,
     viewport: viewportWindow,
     currentSessionKey,
-    currentSessionReady: Boolean(currentSessionMeta.ready),
-    currentSessionHasActivity: typeof currentSessionMeta.lastActivityAt === 'number',
+    currentSessionStatus: currentSessionMeta.historyStatus,
     thinkingLevel: currentSessionMeta.thinkingLevel,
   };
 }
@@ -151,9 +147,8 @@ export function selectChatPageSessionState(state: ChatStoreState) {
 export function selectChatPageViewState(state: ChatStoreState) {
   const view = selectViewLayerState(state);
   return {
-    initialLoading: view.initialLoading,
-    refreshing: view.refreshing,
-    sessionsResource: view.sessionsResource,
+    foregroundHistorySessionKey: view.foregroundHistorySessionKey,
+    sessionMetasResource: view.sessionMetasResource,
     mutating: view.mutating,
     error: view.error,
     showThinking: view.showThinking,
@@ -167,8 +162,7 @@ export function selectChatPageRuntimeState(state: ChatStoreState) {
     activeRunId: runtime.activeRunId,
     runPhase: runtime.runPhase,
     pendingUserMessage: runtime.pendingUserMessage?.message ?? null,
-    streamingMessage: selectStreamingRenderMessage(runtime),
-    assistantOverlay: runtime.assistantOverlay,
+    streamingMessageId: runtime.streamingMessageId,
     streamingTools: runtime.streamingTools,
     pendingFinal: runtime.pendingFinal,
     lastUserMessageAt: runtime.lastUserMessageAt,
@@ -200,8 +194,8 @@ export function selectChatToolbarState(state: ChatStoreState) {
   const view = selectViewLayerState(state);
   return {
     refresh: state.refresh,
-    initialLoading: view.initialLoading,
-    refreshing: view.refreshing,
+    foregroundHistorySessionKey: view.foregroundHistorySessionKey,
+    sessionMetasResource: view.sessionMetasResource,
     showThinking: view.showThinking,
     toggleThinking: state.toggleThinking,
   };
@@ -210,7 +204,7 @@ export function selectChatToolbarState(state: ChatStoreState) {
 export function selectSidebarPendingBlockersState(state: ChatStoreState) {
   return {
     pendingApprovalsBySession: state.pendingApprovalsBySession,
-    sessionsByKey: state.sessionsByKey,
+    loadedSessions: state.loadedSessions,
     chatSessions: readSessionsFromState(state),
   };
 }
@@ -228,7 +222,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
   if (
     cachedAgentSessionsPaneState
     && cachedAgentSessionsPaneState.sessionEntries === sessionEntries
-    && cachedAgentSessionsPaneState.sessionsResource === state.sessionsResource
+    && cachedAgentSessionsPaneState.sessionMetasResource === state.sessionMetasResource
     && cachedAgentSessionsPaneState.currentSessionKey === state.currentSessionKey
     && cachedAgentSessionsPaneState.switchSession === state.switchSession
     && cachedAgentSessionsPaneState.openAgentConversation === state.openAgentConversation

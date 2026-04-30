@@ -1,4 +1,4 @@
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import type {
   ApprovalDecision,
@@ -35,7 +35,7 @@ export function buildSyncPendingApprovalsPatch(
   const currentPending = nextApprovals[state.currentSessionKey] ?? [];
   const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
   const nextActiveRunId = currentRuntime.activeRunId ?? currentPending.find((item) => typeof item.runId === 'string')?.runId ?? null;
-  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+  const runtimePatch = reduceSessionRuntime(currentRuntime, {
     type: 'pending_approvals_synced',
     currentPendingCount: currentPending.length,
     nextActiveRunId,
@@ -45,7 +45,7 @@ export function buildSyncPendingApprovalsPatch(
     ...(runtimePatch === currentRuntime
         ? {}
         : {
-          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),
         }),
@@ -76,7 +76,7 @@ export function buildApprovalRequestedPatch(
     };
   }
   const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+  const runtimePatch = reduceSessionRuntime(currentRuntime, {
     type: 'approval_requested',
     isCurrentSession,
     runId: approval.runId,
@@ -86,7 +86,7 @@ export function buildApprovalRequestedPatch(
     ...(runtimePatch === currentRuntime
         ? {}
         : {
-          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),
         }),
@@ -130,7 +130,7 @@ export function buildApprovalResolvedPatch(
   }
 
   const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
+  const runtimePatch = reduceSessionRuntime(currentRuntime, {
     type: 'approval_resolved',
     stillPendingCurrent,
     abortedCurrentByDeny,
@@ -141,9 +141,10 @@ export function buildApprovalResolvedPatch(
     ...(runtimePatch === currentRuntime
         ? {}
         : {
-          sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
             runtime: { ...currentRuntime, ...runtimePatch },
           }),
         }),
   };
 }
+

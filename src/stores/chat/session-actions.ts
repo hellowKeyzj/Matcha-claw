@@ -5,7 +5,8 @@ import {
   createReadyResourceState,
 } from '@/lib/resource-state';
 import { trackUiEvent } from '@/lib/telemetry';
-import { useGatewayStore } from '../gateway';
+import { prewarmAssistantMarkdownBodies } from '@/lib/chat-markdown-body';
+import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
 import {
   getCanonicalPrefixFromSessions,
   isTrulyEmptyNonMainSession,
@@ -15,8 +16,6 @@ import {
   resolvePreferredSessionKeyForAgent,
   shouldKeepMissingCurrentSession,
 } from './session-helpers';
-import { resolveSessionLabelFromMessages } from './message-helpers';
-import { disposeActiveStreamPacer } from './stream-pacer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -24,6 +23,7 @@ import {
 } from './timers';
 import { resetToolSnapshotTxnState } from './tool-snapshot-txn';
 import {
+  mergeMessageReferences,
   areSessionsEquivalent,
   createEmptySessionRecord,
   createEmptySessionViewportState,
@@ -33,12 +33,14 @@ import {
   patchSessionMeta,
   patchSessionViewportState,
   removeSessionRecord,
-  removeSessionViewportState,
   resolveSessionRecord,
 } from './store-state-helpers';
-import { selectStreamingRenderMessage } from './stream-overlay-message';
 import { createViewportWindowState } from './viewport-state';
-import { appendViewportMessage, upsertViewportMessage } from './viewport-state';
+import { appendViewportMessage } from './viewport-state';
+import {
+  findCurrentStreamingMessage,
+  upsertMessageById,
+} from './streaming-message';
 import type { StoreHistoryCache } from './history-cache';
 import type {
   ChatSession,
@@ -124,38 +126,44 @@ function resolveViewportFetchLimit(messageCount: number): number {
   return Math.min(Math.max(messageCount || 80, 40), 200);
 }
 
-const SESSION_LABEL_HYDRATE_LIMIT = 200;
-
-function readMessagesFromSessionPayload(payload: Record<string, unknown> | null | undefined): RawMessage[] {
-  if (!payload || !Array.isArray(payload.messages)) {
-    return [];
-  }
-  return payload.messages as RawMessage[];
-}
-
-async function fetchSessionLabelSummary(sessionKey: string): Promise<string | null> {
-  try {
-    const sessionsGetPayload = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.get', {
-      key: sessionKey,
-      limit: SESSION_LABEL_HYDRATE_LIMIT,
-    });
-    const sessionMessages = readMessagesFromSessionPayload(sessionsGetPayload);
-    if (sessionMessages.length > 0) {
-      return resolveSessionLabelFromMessages(sessionMessages);
-    }
-  } catch {
-    void 0;
+function reuseViewportMessageReferences(
+  currentViewport: ReturnType<typeof createEmptySessionViewportState>,
+  payload: {
+    messages: RawMessage[];
+    windowStartOffset: number;
+    windowEndOffset: number;
+  },
+): RawMessage[] {
+  const currentMessages = currentViewport.messages;
+  const nextMessages = payload.messages;
+  if (currentMessages.length === 0 || nextMessages.length === 0) {
+    return nextMessages;
   }
 
-  try {
-    const historyPayload = await useGatewayStore.getState().rpc<Record<string, unknown>>('chat.history', {
-      sessionKey,
-      limit: SESSION_LABEL_HYDRATE_LIMIT,
-    });
-    return resolveSessionLabelFromMessages(readMessagesFromSessionPayload(historyPayload));
-  } catch {
-    return null;
+  const overlapStart = Math.max(currentViewport.windowStartOffset, payload.windowStartOffset);
+  const overlapEnd = Math.min(currentViewport.windowEndOffset, payload.windowEndOffset);
+  if (overlapEnd <= overlapStart) {
+    return nextMessages;
   }
+
+  const currentOverlapStart = overlapStart - currentViewport.windowStartOffset;
+  const currentOverlapEnd = overlapEnd - currentViewport.windowStartOffset;
+  const nextOverlapStart = overlapStart - payload.windowStartOffset;
+  const nextOverlapEnd = overlapEnd - payload.windowStartOffset;
+  const currentOverlap = currentMessages.slice(currentOverlapStart, currentOverlapEnd);
+  const nextOverlap = nextMessages.slice(nextOverlapStart, nextOverlapEnd);
+  const mergedOverlap = mergeMessageReferences(currentOverlap, nextOverlap);
+
+  if (mergedOverlap === nextOverlap) {
+    return nextMessages;
+  }
+  if (nextOverlapStart === 0 && nextOverlapEnd === nextMessages.length) {
+    return mergedOverlap;
+  }
+
+  const mergedMessages = nextMessages.slice();
+  mergedMessages.splice(nextOverlapStart, mergedOverlap.length, ...mergedOverlap);
+  return mergedMessages;
 }
 
 function buildViewportFromWindowPayload(
@@ -171,9 +179,14 @@ function buildViewportFromWindowPayload(
   },
   runtimeState?: ReturnType<typeof getSessionRuntime>,
 ) {
+  const stitchedMessages = reuseViewportMessageReferences(currentViewport, {
+    messages: payload.messages,
+    windowStartOffset: payload.windowStartOffset,
+    windowEndOffset: payload.windowEndOffset,
+  });
   let nextViewport = createViewportWindowState({
     ...currentViewport,
-    messages: payload.messages,
+    messages: stitchedMessages,
     totalMessageCount: payload.totalMessageCount,
     windowStartOffset: payload.windowStartOffset,
     windowEndOffset: payload.windowEndOffset,
@@ -187,11 +200,21 @@ function buildViewportFromWindowPayload(
   if (pendingUserMessage) {
     nextViewport = appendViewportMessage(nextViewport, pendingUserMessage);
   }
-  const streamingMessage = runtimeState ? selectStreamingRenderMessage(runtimeState) : null;
+  const streamingMessage = runtimeState?.streamingMessageId
+    ? findCurrentStreamingMessage(currentViewport.messages, runtimeState.streamingMessageId)
+    : null;
   if (streamingMessage) {
-    nextViewport = upsertViewportMessage(nextViewport, streamingMessage);
+    nextViewport = {
+      ...nextViewport,
+      messages: upsertMessageById(nextViewport.messages, streamingMessage),
+    };
   }
   return nextViewport;
+}
+
+function prewarmViewportWindow(sessionKey: string, messages: RawMessage[]): void {
+  prewarmAssistantMarkdownBodies(messages, 'settled');
+  prewarmStaticRowsForMessages(sessionKey, messages);
 }
 
 export function createStoreSessionActions(input: CreateStoreSessionActionsInput): StoreSessionActions {
@@ -208,15 +231,15 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
   return {
     loadSessions: async () => {
       const stateBeforeLoad = get();
-      const previousResource = stateBeforeLoad.sessionsResource;
+      const previousResource = stateBeforeLoad.sessionMetasResource;
       set({
-        sessionsResource: createLoadingResourceState({
+        sessionMetasResource: createLoadingResourceState({
           ...previousResource,
           hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
         }),
       });
       try {
-        const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
+        const data = await hostApiFetch<Record<string, unknown>>('/api/sessions/list');
         if (data) {
           const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
           const sessions: ChatSession[] = rawSessions.map((session: Record<string, unknown>) => ({
@@ -293,6 +316,13 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
               .filter((entry): entry is readonly [string, string] => entry != null),
           );
 
+          const shouldMarkCurrentAsReadyEmpty = (
+            !currentExistsInBackend
+            && shouldKeepMissingCurrent
+            && dedupedSessions.length === 0
+            && nextSessionKey.length > 0
+          );
+
           const snapshot = get();
           const currentSessions = readSessionsFromState(snapshot);
           const sessionsChanged = !areSessionsEquivalent(currentSessions, sessionsWithCurrent);
@@ -307,89 +337,50 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
 
           if (sessionsChanged || sessionKeyChanged || discoveredActivityChanged || discoveredLabelsChanged) {
             set((state) => {
-              let sessionsByKey = { ...state.sessionsByKey };
+              let loadedSessions = { ...state.loadedSessions };
               for (const [sessionKey, updatedAt] of Object.entries(discoveredActivity)) {
-                sessionsByKey = patchSessionMeta({ sessionsByKey }, sessionKey, { lastActivityAt: updatedAt });
+                loadedSessions = patchSessionMeta({ loadedSessions }, sessionKey, { lastActivityAt: updatedAt });
               }
               for (const [sessionKey, label] of Object.entries(discoveredLabels)) {
-                sessionsByKey = patchSessionMeta({ sessionsByKey }, sessionKey, { label });
+                loadedSessions = patchSessionMeta({ loadedSessions }, sessionKey, { label });
+              }
+              if (shouldMarkCurrentAsReadyEmpty) {
+                loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
               }
 
               return {
-                sessionsResource: createReadyResourceState(
-                  sessionsChanged ? sessionsWithCurrent : state.sessionsResource.data,
+                sessionMetasResource: createReadyResourceState(
+                  sessionsChanged ? sessionsWithCurrent : state.sessionMetasResource.data,
                   loadedAt,
                 ),
                 currentSessionKey: sessionKeyChanged ? nextSessionKey : state.currentSessionKey,
-                sessionsByKey,
-                viewportBySession: sessionKeyChanged && !state.viewportBySession[nextSessionKey]
-                  ? {
-                      ...state.viewportBySession,
-                      [nextSessionKey]: createEmptySessionViewportState(),
-                    }
-                  : state.viewportBySession,
+                loadedSessions,
               };
             });
           } else {
-            set({
-              sessionsResource: createReadyResourceState(get().sessionsResource.data, loadedAt),
-            });
-          }
-          const sessionLabelHydrationTargets = sessionsWithCurrent.filter((session) => {
-            const explicitLabel = (session.label || '').trim();
-            if (explicitLabel) {
-              return false;
-            }
-            const currentMeta = getSessionMeta(snapshot, session.key);
-            const displayName = session.displayName?.trim() ?? '';
-            const activityAt = discoveredActivity[session.key];
-            const labelPromotedFromDisplayName = displayName.length > 0 && currentMeta.label === displayName;
-            const activityChanged = typeof activityAt === 'number' && currentMeta.lastActivityAt !== activityAt;
-            return labelPromotedFromDisplayName || !currentMeta.label || activityChanged;
-          });
-
-          if (sessionLabelHydrationTargets.length > 0) {
-            const hydratedLabels = await Promise.all(
-              sessionLabelHydrationTargets.map(async (session) => (
-                [session.key, await fetchSessionLabelSummary(session.key)] as const
-              )),
-            );
-            set((state) => {
-              let sessionsByKey = state.sessionsByKey;
-              let changed = false;
-              const currentSessionByKey = new Map(
-                readSessionsFromState(state).map((session) => [session.key, session] as const),
-              );
-
-              for (const [sessionKey, hydratedLabel] of hydratedLabels) {
-                const currentSession = currentSessionByKey.get(sessionKey);
-                if ((currentSession?.label || '').trim()) {
-                  continue;
+            const patch = shouldMarkCurrentAsReadyEmpty
+              && getSessionMeta(get(), nextSessionKey).historyStatus !== 'ready'
+              ? {
+                  loadedSessions: patchSessionMeta(get(), nextSessionKey, { historyStatus: 'ready' }),
+                  sessionMetasResource: createReadyResourceState(get().sessionMetasResource.data, loadedAt),
                 }
-                const currentLabel = getSessionMeta(state, sessionKey).label;
-                const nextLabel = hydratedLabel ?? null;
-                if (currentLabel === nextLabel) {
-                  continue;
-                }
-                sessionsByKey = patchSessionMeta({ sessionsByKey }, sessionKey, { label: nextLabel });
-                changed = true;
-              }
-
-              return changed ? { sessionsByKey } : state;
-            });
+              : {
+                  sessionMetasResource: createReadyResourceState(get().sessionMetasResource.data, loadedAt),
+                };
+            set(patch);
           }
           return;
         }
         set({
-          sessionsResource: createReadyResourceState(previousResource.data),
+          sessionMetasResource: createReadyResourceState(previousResource.data),
         });
       } catch (error) {
         const stateSnapshot = get();
         const message = error instanceof Error ? error.message : 'Failed to load sessions';
         set({
-          sessionsResource: createErrorResourceState({
-            ...stateSnapshot.sessionsResource,
-            hasLoadedOnce: stateSnapshot.sessionsResource.hasLoadedOnce || stateSnapshot.sessionsResource.data.length > 0,
+          sessionMetasResource: createErrorResourceState({
+            ...stateSnapshot.sessionMetasResource,
+            hasLoadedOnce: stateSnapshot.sessionMetasResource.hasLoadedOnce || stateSnapshot.sessionMetasResource.data.length > 0,
           }, message),
         });
       }
@@ -404,7 +395,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       const preferredSessionKey = resolvePreferredSessionKeyForAgent(
         normalized,
         readSessionsFromState(state),
-        state.sessionsByKey,
+        state.loadedSessions,
       );
       if (preferredSessionKey) {
         get().switchSession(preferredSessionKey);
@@ -428,31 +419,19 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       }
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      disposeActiveStreamPacer(set, get);
       resetToolSnapshotTxnState();
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
-      let nextSessionsByKey = { ...state.sessionsByKey };
-      let nextViewportBySession = state.viewportBySession;
+      let nextloadedSessions = { ...state.loadedSessions };
       if (leavingEmpty) {
         clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
-        nextSessionsByKey = removeSessionRecord({ sessionsByKey: nextSessionsByKey }, currentSessionKey);
-        nextViewportBySession = removeSessionViewportState(
-          { viewportBySession: nextViewportBySession },
-          currentSessionKey,
-        );
+        nextloadedSessions = removeSessionRecord({ loadedSessions: nextloadedSessions }, currentSessionKey);
       }
-      nextSessionsByKey = ensureSessionRecordMap(nextSessionsByKey, key);
-      if (!nextViewportBySession[key]) {
-        nextViewportBySession = {
-          ...nextViewportBySession,
-          [key]: createEmptySessionViewportState(),
-        };
-      }
-      const targetRecord = resolveSessionRecord(nextSessionsByKey[key]);
+      nextloadedSessions = ensureSessionRecordMap(nextloadedSessions, key);
+      const targetRecord = resolveSessionRecord(nextloadedSessions[key]);
       const hasHistoryFingerprint = historyRuntime.historyFingerprintBySession.has(key);
-      const targetSessionReady = Boolean(targetRecord.meta.ready) || hasHistoryFingerprint;
+      const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || targetRecord.window.messages.length > 0;
       trackUiEvent('chat.session_switch_start', {
         fromSessionKey: currentSessionKey,
         toSessionKey: key,
@@ -463,16 +442,12 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
 
       set((stateValue) => ({
         currentSessionKey: key,
-        snapshotReady: stateValue.snapshotReady || targetSessionReady,
-        initialLoading: false,
-        refreshing: false,
         error: null,
-        sessionsByKey: nextSessionsByKey,
-        viewportBySession: nextViewportBySession,
+        loadedSessions: nextloadedSessions,
         ...(leavingEmpty ? {
-          sessionsResource: {
-            ...stateValue.sessionsResource,
-            data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
+          sessionMetasResource: {
+            ...stateValue.sessionMetasResource,
+            data: stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey),
           },
           pendingApprovalsBySession: Object.fromEntries(
             Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
@@ -489,7 +464,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
             clearHistoryPoll();
             return;
           }
-          if (!runtime.assistantOverlay) {
+          if (!runtime.streamingMessageId) {
             void current.loadHistory({
               sessionKey: current.currentSessionKey,
               mode: 'quiet',
@@ -533,10 +508,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       }
 
       set((state) => ({
-        viewportBySession: patchSessionViewportState(state, sessionKey, {
+        loadedSessions: patchSessionViewportState(state, sessionKey, {
           ...getSessionViewportState(state, sessionKey),
           isLoadingMore: true,
-          anchorRestore: beforeViewport.messages[0]?.id ? { messageId: beforeViewport.messages[0].id! } : null,
         }),
       }));
 
@@ -547,27 +521,28 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           limit: resolveViewportFetchLimit(beforeViewport.messages.length),
           offset: beforeViewport.windowStartOffset,
         });
+        const nextViewport = buildViewportFromWindowPayload(beforeViewport, {
+          messages: payload.messages as RawMessage[],
+          totalMessageCount: payload.totalMessageCount,
+          windowStartOffset: payload.windowStartOffset,
+          windowEndOffset: payload.windowEndOffset,
+          hasMore: payload.hasMore,
+          hasNewer: payload.hasNewer,
+          isAtLatest: payload.isAtLatest,
+        }, resolveSessionRecord(get().loadedSessions[sessionKey]).runtime);
+        prewarmViewportWindow(sessionKey, nextViewport.messages);
         set((state) => ({
-          viewportBySession: patchSessionViewportState(
+          loadedSessions: patchSessionViewportState(
             state,
             sessionKey,
-            buildViewportFromWindowPayload(getSessionViewportState(state, sessionKey), {
-              messages: payload.messages as RawMessage[],
-              totalMessageCount: payload.totalMessageCount,
-              windowStartOffset: payload.windowStartOffset,
-              windowEndOffset: payload.windowEndOffset,
-              hasMore: payload.hasMore,
-              hasNewer: payload.hasNewer,
-              isAtLatest: payload.isAtLatest,
-            }, resolveSessionRecord(state.sessionsByKey[sessionKey]).runtime),
+            nextViewport,
           ),
         }));
       } catch {
         set((state) => ({
-          viewportBySession: patchSessionViewportState(state, sessionKey, {
+          loadedSessions: patchSessionViewportState(state, sessionKey, {
             ...getSessionViewportState(state, sessionKey),
             isLoadingMore: false,
-            anchorRestore: null,
           }),
         }));
       }
@@ -580,7 +555,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         return;
       }
       set((state) => ({
-        viewportBySession: patchSessionViewportState(state, sessionKey, {
+        loadedSessions: patchSessionViewportState(state, sessionKey, {
           ...getSessionViewportState(state, sessionKey),
           isLoadingNewer: true,
         }),
@@ -592,24 +567,26 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           mode: 'latest',
           limit: resolveViewportFetchLimit(beforeViewport.messages.length),
         });
+        const nextViewport = buildViewportFromWindowPayload(beforeViewport, {
+          messages: payload.messages as RawMessage[],
+          totalMessageCount: payload.totalMessageCount,
+          windowStartOffset: payload.windowStartOffset,
+          windowEndOffset: payload.windowEndOffset,
+          hasMore: payload.hasMore,
+          hasNewer: payload.hasNewer,
+          isAtLatest: payload.isAtLatest,
+        }, resolveSessionRecord(get().loadedSessions[sessionKey]).runtime);
+        prewarmViewportWindow(sessionKey, nextViewport.messages);
         set((state) => ({
-          viewportBySession: patchSessionViewportState(
+          loadedSessions: patchSessionViewportState(
             state,
             sessionKey,
-            buildViewportFromWindowPayload(getSessionViewportState(state, sessionKey), {
-              messages: payload.messages as RawMessage[],
-              totalMessageCount: payload.totalMessageCount,
-              windowStartOffset: payload.windowStartOffset,
-              windowEndOffset: payload.windowEndOffset,
-              hasMore: payload.hasMore,
-              hasNewer: payload.hasNewer,
-              isAtLatest: payload.isAtLatest,
-            }, resolveSessionRecord(state.sessionsByKey[sessionKey]).runtime),
+            nextViewport,
           ),
         }));
       } catch {
         set((state) => ({
-          viewportBySession: patchSessionViewportState(state, sessionKey, {
+          loadedSessions: patchSessionViewportState(state, sessionKey, {
             ...getSessionViewportState(state, sessionKey),
             isLoadingNewer: false,
           }),
@@ -632,10 +609,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           windowStartOffset: viewport.windowStartOffset + removedCount,
           windowEndOffset: viewport.windowEndOffset,
           hasMore: true,
-          anchorRestore: null,
         });
         return {
-          viewportBySession: patchSessionViewportState(state, sessionKey, nextViewport),
+          loadedSessions: patchSessionViewportState(state, sessionKey, nextViewport),
         };
       });
     },
@@ -643,7 +619,7 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     setViewportLastVisibleMessageId: (messageId: string | null, sessionKeyHint?: string) => {
       const sessionKey = sessionKeyHint?.trim() || get().currentSessionKey;
       set((state) => ({
-        viewportBySession: patchSessionViewportState(state, sessionKey, {
+        loadedSessions: patchSessionViewportState(state, sessionKey, {
           ...getSessionViewportState(state, sessionKey),
           lastVisibleMessageId: messageId,
         }),
@@ -651,7 +627,6 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     },
 
     deleteSession: async (key: string) => {
-      disposeActiveStreamPacer(set, get);
       beginMutating();
       try {
         try {
@@ -675,18 +650,15 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           clearErrorRecoveryTimer();
           const next = remaining[0];
           set((state) => ({
-            sessionsByKey: removeSessionRecord(state, key),
-            viewportBySession: removeSessionViewportState(state, key),
-            sessionsResource: {
-              ...state.sessionsResource,
+            loadedSessions: removeSessionRecord(state, key),
+            sessionMetasResource: {
+              ...state.sessionMetasResource,
               data: remaining,
             },
             pendingApprovalsBySession: Object.fromEntries(
               Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
             ),
             error: null,
-            initialLoading: false,
-            refreshing: false,
             currentSessionKey: next?.key ?? defaultSessionKey,
           }));
           if (next) {
@@ -699,10 +671,9 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
           }
         } else {
           set((state) => ({
-            sessionsByKey: removeSessionRecord(state, key),
-            viewportBySession: removeSessionViewportState(state, key),
-            sessionsResource: {
-              ...state.sessionsResource,
+            loadedSessions: removeSessionRecord(state, key),
+            sessionMetasResource: {
+              ...state.sessionMetasResource,
               data: remaining,
             },
             pendingApprovalsBySession: Object.fromEntries(
@@ -718,7 +689,6 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
     newSession: (agentId?: string) => {
       clearHistoryPoll();
       clearErrorRecoveryTimer();
-      disposeActiveStreamPacer(set, get);
       const state = get();
       const { currentSessionKey } = state;
       const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
@@ -730,24 +700,23 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
         ?? defaultCanonicalPrefix;
       const newKey = `${prefix}:session-${Date.now()}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
+      const newSessionRecord = createEmptySessionRecord();
+      newSessionRecord.meta = {
+        ...newSessionRecord.meta,
+        historyStatus: 'ready',
+      };
       set((stateValue) => ({
-        sessionsByKey: {
-          ...(leavingEmpty ? removeSessionRecord(stateValue, currentSessionKey) : stateValue.sessionsByKey),
-          [newKey]: createEmptySessionRecord(),
-        },
-        viewportBySession: {
-          ...(leavingEmpty
-            ? removeSessionViewportState(stateValue, currentSessionKey)
-            : stateValue.viewportBySession),
-          [newKey]: createEmptySessionViewportState(),
+        loadedSessions: {
+          ...(leavingEmpty ? removeSessionRecord(stateValue, currentSessionKey) : stateValue.loadedSessions),
+          [newKey]: newSessionRecord,
         },
         currentSessionKey: newKey,
-        sessionsResource: {
-          ...stateValue.sessionsResource,
+        sessionMetasResource: {
+          ...stateValue.sessionMetasResource,
           data: [
             ...(leavingEmpty
-              ? stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey)
-              : stateValue.sessionsResource.data),
+              ? stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey)
+              : stateValue.sessionMetasResource.data),
             newSessionEntry,
           ],
         },
@@ -756,9 +725,6 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
               Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
             )
           : stateValue.pendingApprovalsBySession,
-        snapshotReady: true,
-        initialLoading: false,
-        refreshing: false,
         error: null,
       }));
     },
@@ -770,12 +736,11 @@ export function createStoreSessionActions(input: CreateStoreSessionActionsInput)
       if (!isEmptyNonMain) return;
       clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
       set((stateValue) => ({
-        sessionsResource: {
-          ...stateValue.sessionsResource,
-          data: stateValue.sessionsResource.data.filter((session) => session.key !== currentSessionKey),
+        sessionMetasResource: {
+          ...stateValue.sessionMetasResource,
+          data: stateValue.sessionMetasResource.data.filter((session) => session.key !== currentSessionKey),
         },
-        sessionsByKey: removeSessionRecord(stateValue, currentSessionKey),
-        viewportBySession: removeSessionViewportState(stateValue, currentSessionKey),
+        loadedSessions: removeSessionRecord(stateValue, currentSessionKey),
         pendingApprovalsBySession: Object.fromEntries(
           Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
         ),

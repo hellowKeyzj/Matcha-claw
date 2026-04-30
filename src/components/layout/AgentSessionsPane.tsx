@@ -1,5 +1,4 @@
-import { memo, startTransition, useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { memo, useCallback, useEffect, useState } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
@@ -368,13 +367,12 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   onToggleCollapse,
   showRightDivider = true,
 }: AgentSessionsPaneProps) {
-  const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const {
     sessionEntries,
-    sessionsResource,
+    sessionMetasResource,
     currentSessionKey,
     switchSession,
     openAgentConversation,
@@ -394,7 +392,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     agents,
     agentsResource,
     sessionEntries,
-    sessionsResource,
+    sessionMetasResource,
     currentSessionKey,
     locale: i18n.language,
     t,
@@ -412,25 +410,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   }, [collapsedSessionBuckets]);
 
   const handleSwitchSession = useCallback((sessionKey: string) => {
-    startTransition(() => {
-      switchSession(sessionKey);
-      navigate('/');
-    });
-  }, [navigate, switchSession]);
+    switchSession(sessionKey);
+  }, [switchSession]);
 
   const handleOpenAgent = useCallback((agentId: string) => {
-    startTransition(() => {
-      openAgentConversation(agentId);
-      navigate('/');
-    });
-  }, [navigate, openAgentConversation]);
+    openAgentConversation(agentId);
+  }, [openAgentConversation]);
 
   const handleCreateSessionForAgent = useCallback((agentId: string) => {
-    startTransition(() => {
-      newSession(agentId);
-      navigate('/');
-    });
-  }, [navigate, newSession]);
+    newSession(agentId);
+  }, [newSession]);
 
   const toggleSessionBucket = useCallback((bucketId: SessionBucketId, defaultCollapsed: boolean) => {
     const stateKey = createSessionBucketStateKey(bucketId);
@@ -626,3 +615,4 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     </aside>
   );
 });
+

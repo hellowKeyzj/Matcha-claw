@@ -6,14 +6,13 @@ import {
   normalizeUserTextForReconcile,
   sanitizeIntermediateToolFillerMessage,
 } from './message-helpers';
-import { reduceRuntimeOverlay } from './overlay-reducer';
+import { reduceSessionRuntime } from './runtime-state-reducer';
 import { upsertToolStatuses } from './event-helpers';
 import {
   buildTranscriptBackedViewportState,
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   patchSessionRecord,
-  patchSessionViewportState,
 } from './store-state-helpers';
 import type {
   AttachedFileMeta,
@@ -22,25 +21,25 @@ import type {
   RawMessage,
   ToolStatus,
 } from './types';
+import {
+  removeMessageById,
+  settleMessage,
+  upsertMessageById,
+} from './streaming-message';
 
 type RuntimeStateLike = ChatStoreState;
 
 function buildTranscriptViewportPatch(
   state: RuntimeStateLike,
   sessionKey: string,
-  transcript: RawMessage[],
+  messages: RawMessage[],
   runtime: ReturnType<typeof getSessionRuntime>,
-): Pick<ChatStoreState, 'sessionsByKey' | 'viewportBySession'> {
+): Pick<ChatStoreState, 'loadedSessions'> {
   return {
-    sessionsByKey: patchSessionRecord(state, sessionKey, {
-      transcript,
+    loadedSessions: patchSessionRecord(state, sessionKey, {
       runtime,
+      window: buildTranscriptBackedViewportState(state, sessionKey, messages, runtime),
     }),
-    viewportBySession: patchSessionViewportState(
-      state,
-      sessionKey,
-      buildTranscriptBackedViewportState(state, sessionKey, transcript, runtime),
-    ),
   };
 }
 
@@ -116,26 +115,43 @@ function mergeCommittedMessage(
     ...incomingMessage,
     ...(incomingId ? { id: incomingId } : {}),
     _attachedFiles: mergeAttachedFiles(existingMessage._attachedFiles, incomingMessage._attachedFiles),
+    streaming: incomingMessage.streaming ?? false,
   };
 }
 
 function materializePendingUserMessage(
-  transcript: RawMessage[],
+  messages: RawMessage[],
   pendingUserMessage: PendingUserMessageOverlay,
+  options?: {
+    insertBeforeMessageId?: string | null;
+  },
 ): RawMessage[] {
-  const matchedIndex = transcript.findIndex((message) => matchesPendingUserMessage(pendingUserMessage, message));
+  const matchedIndex = messages.findIndex((message) => matchesPendingUserMessage(pendingUserMessage, message));
   if (matchedIndex < 0) {
-    return [...transcript, pendingUserMessage.message];
+    const insertBeforeMessageId = typeof options?.insertBeforeMessageId === 'string'
+      ? options.insertBeforeMessageId.trim()
+      : '';
+    if (insertBeforeMessageId) {
+      const insertIndex = messages.findIndex((message) => message.id === insertBeforeMessageId);
+      if (insertIndex >= 0) {
+        return [
+          ...messages.slice(0, insertIndex),
+          pendingUserMessage.message,
+          ...messages.slice(insertIndex),
+        ];
+      }
+    }
+    return [...messages, pendingUserMessage.message];
   }
 
-  const mergedMessage = mergePendingUserMessage(pendingUserMessage, transcript[matchedIndex]!);
-  if (mergedMessage === transcript[matchedIndex]) {
-    return transcript;
+  const mergedMessage = mergePendingUserMessage(pendingUserMessage, messages[matchedIndex]!);
+  if (mergedMessage === messages[matchedIndex]) {
+    return messages;
   }
 
-  const nextTranscript = [...transcript];
-  nextTranscript[matchedIndex] = mergedMessage;
-  return nextTranscript;
+  const nextMessages = [...messages];
+  nextMessages[matchedIndex] = mergedMessage;
+  return nextMessages;
 }
 
 export function mergePendingUserMessage(
@@ -207,7 +223,7 @@ export function buildAuthoritativeUserCommitPatch(
 ): Partial<ChatStoreState> {
   const { state, finalMessage } = input;
   const sessionKey = state.currentSessionKey;
-  const transcript = getSessionTranscript(state, sessionKey);
+  const messages = getSessionMessages(state, sessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
   const pendingUserMessage = runtime.pendingUserMessage ?? null;
   const matchedPending = pendingUserMessage && matchesPendingUserMessage(pendingUserMessage, finalMessage)
@@ -216,24 +232,24 @@ export function buildAuthoritativeUserCommitPatch(
   const nextMessage = matchedPending
     ? mergePendingUserMessage(matchedPending, finalMessage)
     : finalMessage;
-  const alreadyExists = transcript.some((message) => (
+  const alreadyExists = messages.some((message) => (
     (typeof nextMessage.id === 'string' && nextMessage.id.trim() && message.id === nextMessage.id)
     || (matchedPending != null && matchesPendingUserMessage(matchedPending, message))
   ));
   if (alreadyExists) {
     return {
-      sessionsByKey: patchSessionRecord(state, sessionKey, {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
         runtime: matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
       }),
     };
   }
   return {
-    ...buildTranscriptViewportPatch(
-      state,
-      sessionKey,
-      [...transcript, nextMessage],
-      matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
-    ),
+      ...buildTranscriptViewportPatch(
+        state,
+        sessionKey,
+        [...messages, nextMessage],
+        matchedPending ? { ...runtime, pendingUserMessage: null } : runtime,
+      ),
   };
 }
 
@@ -242,7 +258,7 @@ export function buildFinalMessageCommitPatch(
 ): Partial<ChatStoreState> {
   const { state, finalMessage, messageId, updates, hasOutput, toolOnly } = input;
   const sessionKey = state.currentSessionKey;
-  const transcript = getSessionTranscript(state, sessionKey);
+  const messages = getSessionMessages(state, sessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
   const nextTools = updates.length > 0
     ? upsertToolStatuses(runtime.streamingTools, updates)
@@ -256,9 +272,15 @@ export function buildFinalMessageCommitPatch(
         role: (finalMessage.role || 'assistant') as RawMessage['role'],
         id: messageId,
         _attachedFiles: [...(finalMessage._attachedFiles || []), ...pendingImages],
+        streaming: false,
       }
-    : { ...finalMessage, role: (finalMessage.role || 'assistant') as RawMessage['role'], id: messageId };
-  const runtimePatch = reduceRuntimeOverlay(runtime, {
+    : {
+        ...finalMessage,
+        role: (finalMessage.role || 'assistant') as RawMessage['role'],
+        id: messageId,
+        streaming: false,
+      };
+  const runtimePatch = reduceSessionRuntime(runtime, {
     type: 'final_message_committed',
     hasOutput,
     toolOnly,
@@ -266,16 +288,18 @@ export function buildFinalMessageCommitPatch(
   });
   const nextRuntimeBase = runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch };
   const pendingUserMessage = runtime.pendingUserMessage ?? null;
-  const transcriptWithCommittedUser = (
+  const messagesWithCommittedUser = (
     hasOutput && pendingUserMessage
-      ? materializePendingUserMessage(transcript, pendingUserMessage)
-      : transcript
+      ? materializePendingUserMessage(messages, pendingUserMessage, {
+          insertBeforeMessageId: runtime.streamingMessageId,
+        })
+      : messages
   );
   const nextRuntime = nextRuntimeBase;
 
-  const duplicateMessageIndexById = transcriptWithCommittedUser.findIndex((message) => message.id === messageId);
+  const duplicateMessageIndexById = messagesWithCommittedUser.findIndex((message) => message.id === messageId);
   const assistantSemanticDuplicateIndex = findAssistantSemanticDuplicateIndex(
-    transcriptWithCommittedUser,
+    messagesWithCommittedUser,
     messageWithImages,
     { sending: runtime.sending, pendingFinal: runtime.pendingFinal },
   );
@@ -284,13 +308,13 @@ export function buildFinalMessageCommitPatch(
     : assistantSemanticDuplicateIndex;
 
   if (existingMessageIndex >= 0) {
-    const mergedTranscript = [...transcriptWithCommittedUser];
-    mergedTranscript[existingMessageIndex] = mergeCommittedMessage(
-      transcriptWithCommittedUser[existingMessageIndex]!,
+    const mergedMessages = [...messagesWithCommittedUser];
+    mergedMessages[existingMessageIndex] = mergeCommittedMessage(
+      messagesWithCommittedUser[existingMessageIndex]!,
       messageWithImages,
     );
     return {
-      ...buildTranscriptViewportPatch(state, sessionKey, mergedTranscript, nextRuntime),
+      ...buildTranscriptViewportPatch(state, sessionKey, mergedMessages, nextRuntime),
     };
   }
 
@@ -300,7 +324,7 @@ export function buildFinalMessageCommitPatch(
       ...buildTranscriptViewportPatch(
         state,
         sessionKey,
-        [...transcript, mergedPendingUser],
+        [...messages, mergedPendingUser],
         { ...nextRuntime, pendingUserMessage: null },
       ),
     };
@@ -310,7 +334,7 @@ export function buildFinalMessageCommitPatch(
     ...buildTranscriptViewportPatch(
       state,
       sessionKey,
-      [...transcriptWithCommittedUser, messageWithImages],
+      [...messagesWithCommittedUser, messageWithImages],
       nextRuntime,
     ),
   };
@@ -598,9 +622,8 @@ export function buildToolResultFinalPatch(
     toolFiles,
   } = input;
   const sessionKey = state.currentSessionKey;
-  const transcript = getSessionTranscript(state, sessionKey);
+  const messages = getSessionMessages(state, sessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
-  const snapshotMessages: RawMessage[] = [];
   const nextPendingToolImages = toolFiles.length > 0
     ? [...runtime.pendingToolImages, ...toolFiles]
     : runtime.pendingToolImages;
@@ -615,19 +638,32 @@ export function buildToolResultFinalPatch(
       && hasAssistantToolCall(toolSnapshot)
     );
     if (shouldSnapshotIntermediateToolTurn) {
-      const snapshotId = toolSnapshot.id || `${runId || 'run'}-turn-${transcript.length}`;
-      const snapshot = buildSanitizedIntermediateSnapshot(
-        toolSnapshot,
-        transcript,
-        snapshotId,
+      const snapshotId = toolSnapshot.id || runtime.streamingMessageId || `${runId || 'run'}-turn-${messages.length}`;
+      const snapshot = sanitizeIntermediateToolFillerMessage(
+        settleMessage(createIntermediateToolTurnSnapshot(toolSnapshot, snapshotId)),
+        { trackPhrase: true },
       );
-      if (snapshot) {
-        snapshotMessages.push(snapshot);
-      }
+      const nextMessages = upsertMessageById(
+        removeMessageById(messages, runtime.streamingMessageId),
+        snapshot,
+      );
+      const runtimePatch = reduceSessionRuntime(runtime, {
+        type: 'tool_result_committed',
+        pendingToolImages: nextPendingToolImages,
+        streamingTools: nextStreamingTools,
+      });
+      return {
+        ...buildTranscriptViewportPatch(
+          state,
+          sessionKey,
+          nextMessages,
+          runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        ),
+      };
     }
   }
 
-  const runtimePatch = reduceRuntimeOverlay(runtime, {
+  const runtimePatch = reduceSessionRuntime(runtime, {
     type: 'tool_result_committed',
     pendingToolImages: nextPendingToolImages,
     streamingTools: nextStreamingTools,
@@ -636,9 +672,9 @@ export function buildToolResultFinalPatch(
     ...buildTranscriptViewportPatch(
       state,
       sessionKey,
-      snapshotMessages.length > 0
-        ? [...transcript, ...snapshotMessages]
-        : transcript,
+      runtime.streamingMessageId
+        ? removeMessageById(messages, runtime.streamingMessageId)
+        : messages,
       runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
     ),
   };
@@ -663,3 +699,4 @@ export function buildErrorStreamSnapshot(
     : fallbackSnapshotId;
   return buildSanitizedIntermediateSnapshot(currentStream, currentMessages, snapshotId);
 }
+

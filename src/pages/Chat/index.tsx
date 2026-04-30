@@ -10,8 +10,11 @@ import { useTranslation } from 'react-i18next';
 import { ChatShell } from './components/ChatShell';
 import { AgentSkillConfigDialog } from './components/AgentSkillConfigDialog';
 import { ChatOffline } from './components/ChatOffline';
+import { ChatInput } from './ChatInput';
 import { ChatViewportStage } from './components/ChatViewportStage';
 import { ChatViewportPane, type ChatViewportPaneHandle } from './components/ChatViewportPane';
+import { ChatHeaderBar } from './components/ChatHeaderBar';
+import { ChatApprovalDock, ChatErrorBanner } from './components/ChatRuntimeDock';
 import { useInboxLayout } from './useInboxLayout';
 import { useChatActivation } from './useChatActivation';
 import { useSkillConfig } from './useSkillConfig';
@@ -49,20 +52,19 @@ export function Chat({ isActive = true }: ChatProps) {
     viewportMessages,
     viewport,
     currentSessionKey,
-    currentSessionReady,
-    currentSessionHasActivity,
+    currentSessionStatus,
   } = sessionState;
   const {
-    initialLoading,
-    refreshing,
+    foregroundHistorySessionKey,
     mutating,
     error,
     showThinking,
   } = viewState;
   const {
     sending,
-    streamingMessage,
+    streamingMessageId,
     streamingTools,
+    pendingFinal,
     currentPendingApprovals,
   } = runtimeState;
   const {
@@ -115,27 +117,27 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentSessionKey, jumpToLatest, sendMessage, viewport.isAtLatest]);
 
   const inputRowCount = useMemo(() => {
-    const needsStatusRow = (
+    const hasStreamingSurface = Boolean(
+      streamingMessageId
+      && viewportMessages.some((message) => message.id === streamingMessageId),
+    );
+    const runtimeStatusRow = (
       sending
       && !waitingApproval
-      && !streamingMessage
+      && !hasStreamingSurface
       && streamingTools.length === 0
     );
-    return viewportMessages.length + (needsStatusRow ? 1 : 0);
-  }, [sending, streamingMessage, streamingTools.length, viewportMessages.length, waitingApproval]);
+    return viewportMessages.length + (runtimeStatusRow ? 1 : 0);
+  }, [sending, streamingMessageId, streamingTools.length, viewportMessages, waitingApproval]);
 
   const liveView = useChatView({
-    currentSessionKey,
-    currentSessionReady,
-    currentSessionHasActivity,
+    currentSessionStatus,
     rowCount: inputRowCount,
     sending,
-    initialLoading,
-    refreshing,
+    refreshing: foregroundHistorySessionKey === currentSessionKey,
     mutating,
   });
   const showBackgroundStatus = liveView.showBackgroundStatus;
-  const isEmptyState = liveView.isEmptyState;
 
   const {
     open: skillConfigOpen,
@@ -165,16 +167,12 @@ export function Chat({ isActive = true }: ChatProps) {
       agents={agents}
       isGatewayRunning={isGatewayRunning}
       gatewayRpc={gatewayRpc}
-      initialLoading={initialLoading}
-      refreshing={refreshing}
-      mutating={mutating}
-      currentSessionReady={currentSessionReady}
-      currentSessionHasActivity={currentSessionHasActivity}
+      currentSessionStatus={currentSessionStatus}
+      errorMessage={error}
       sending={sending}
-      pendingFinal={Boolean(runtimeState.pendingFinal)}
+      pendingFinal={Boolean(pendingFinal)}
       waitingApproval={waitingApproval}
       showThinking={showThinking}
-      streamingMessage={streamingMessage}
       streamingTools={streamingTools}
       userAvatarDataUrl={userAvatarDataUrl}
       assistantAgentId={currentAgentId}
@@ -206,36 +204,43 @@ export function Chat({ isActive = true }: ChatProps) {
 
   const stagePanel = (
     <ChatViewportStage
-      headerProps={{
-        showBackgroundStatus,
-        refreshing,
-        hasCurrentAgent: Boolean(currentAgent),
-        onOpenSkillConfig: openSkillConfigDialog,
-        skillConfigLabel: t('toolbar.skillConfig'),
-        statusRefreshingLabel: t('status.refreshing'),
-        statusMutatingLabel: t('status.mutating'),
-      }}
+      header={(
+        <ChatHeaderBar
+          showBackgroundStatus={showBackgroundStatus}
+          refreshing={foregroundHistorySessionKey === currentSessionKey}
+          hasCurrentAgent={Boolean(currentAgent)}
+          onOpenSkillConfig={openSkillConfigDialog}
+          skillConfigLabel={t('toolbar.skillConfig')}
+          statusRefreshingLabel={t('status.refreshing')}
+          statusMutatingLabel={t('status.mutating')}
+        />
+      )}
       viewportPane={viewportPane}
-      errorBannerProps={error ? {
-        error,
-        dismissLabel: t('common:actions.dismiss'),
-        onDismiss: clearError,
-      } : null}
-      approvalDockProps={waitingApproval ? {
-        waitingLabel: t('approval.waitingLabel'),
-        approvals: currentPendingApprovals,
-        onResolve: (id, decision) => {
-          void resolveApproval(id, decision);
-        },
-      } : null}
-      inputProps={{
-        layout: isEmptyState ? 'hero' : 'dock',
-        onSend: handleSendMessage,
-        onStop: abortRun,
-        disabled: !isGatewayRunning,
-        sending,
-        approvalWaiting: waitingApproval,
-      }}
+      errorBanner={error ? (
+        <ChatErrorBanner
+          error={error}
+          dismissLabel={t('common:actions.dismiss')}
+          onDismiss={clearError}
+        />
+      ) : null}
+      approvalDock={waitingApproval ? (
+        <ChatApprovalDock
+          waitingLabel={t('approval.waitingLabel')}
+          approvals={currentPendingApprovals}
+          onResolve={(id, decision) => {
+            void resolveApproval(id, decision);
+          }}
+        />
+      ) : null}
+      input={(
+        <ChatInput
+          onSend={handleSendMessage}
+          onStop={abortRun}
+          disabled={!isGatewayRunning}
+          sending={sending}
+          approvalWaiting={waitingApproval}
+        />
+      )}
     />
   );
 

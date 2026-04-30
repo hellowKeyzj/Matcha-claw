@@ -6,7 +6,10 @@ import { useChatView } from '../useChatView';
 import { useViewportListItems } from '../viewport-list-items';
 import { ChatList } from './ChatList';
 import type { ToolStatus } from '@/stores/chat';
-import type { ChatSessionViewportState } from '@/stores/chat/types';
+import type {
+  ChatSessionHistoryStatus,
+  ChatSessionViewportState,
+} from '@/stores/chat/types';
 
 interface ThreadAgent {
   id: string;
@@ -22,16 +25,12 @@ interface ChatViewportPaneProps {
   agents: ThreadAgent[];
   isGatewayRunning: boolean;
   gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
-  initialLoading: boolean;
-  refreshing: boolean;
-  mutating: boolean;
-  currentSessionReady: boolean;
-  currentSessionHasActivity: boolean;
+  currentSessionStatus: ChatSessionHistoryStatus;
+  errorMessage: string | null;
   sending: boolean;
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
   userAvatarDataUrl: string | null;
   assistantAgentId: string;
@@ -59,16 +58,12 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
     agents,
     isGatewayRunning,
     gatewayRpc,
-    initialLoading,
-    refreshing,
-    mutating,
-    currentSessionReady,
-    currentSessionHasActivity,
+    currentSessionStatus,
+    errorMessage,
     sending,
     pendingFinal,
     waitingApproval,
     showThinking,
-    streamingMessage,
     streamingTools,
     userAvatarDataUrl,
     assistantAgentId,
@@ -95,7 +90,6 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
   const effectiveSending = sending;
   const effectivePendingFinal = pendingFinal;
   const effectiveWaitingApproval = waitingApproval;
-  const effectiveStreamingMessage = streamingMessage;
   const effectiveStreamingTools = streamingTools;
 
   const {
@@ -112,29 +106,25 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
     pendingFinal: effectivePendingFinal,
     waitingApproval: effectiveWaitingApproval,
     showThinking,
-    streamingMessage: effectiveStreamingMessage,
     streamingTools: effectiveStreamingTools,
     sessionPipelineCostRef,
   });
 
   const liveView = useChatView({
-    currentSessionKey,
-    currentSessionReady,
-    currentSessionHasActivity,
+    currentSessionStatus,
     rowCount: items.length,
     sending: effectiveSending,
-    initialLoading,
-    refreshing,
-    mutating,
+    refreshing: false,
+    mutating: false,
   });
   const showBlockingLoading = liveView.showBlockingLoading;
+  const showBlockingError = liveView.showBlockingError;
   const isEmptyState = liveView.isEmptyState;
 
   const autoFollowSignal = buildChatAutoFollowSignal(items);
   const tailActivityOpen = (
     effectiveSending
     || effectivePendingFinal
-    || effectiveStreamingMessage != null
     || effectiveStreamingTools.length > 0
   );
 
@@ -150,10 +140,7 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
   } = useChatScroll({
     enabled: isActive,
     scrollScopeKey: scopeKey,
-    scrollActivationKey: scopeKey,
-    scrollResetKey: currentSessionKey,
     autoFollowSignal,
-    scopeRestorePending: false,
     tailActivityOpen,
     viewportRef: messagesViewportRef,
     contentRef: messageContentRef,
@@ -189,6 +176,8 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
         messageContentRef={messageContentRef}
         isEmptyState={isEmptyState}
         showBlockingLoading={showBlockingLoading}
+        showBlockingError={showBlockingError}
+        errorMessage={errorMessage}
         onPointerDown={handleViewportPointerDown}
         onScroll={handleViewportScroll}
         onTouchMove={handleViewportTouchMove}
@@ -201,7 +190,7 @@ export const ChatViewportPane = forwardRef<ChatViewportPaneHandle, ChatViewportP
           onLoadOlder();
         }}
         loadOlderLabel={loadOlderLabel}
-        showJumpToBottom={!isEmptyState && !showBlockingLoading && (!isBottomLocked || !viewport.isAtLatest)}
+        showJumpToBottom={!isEmptyState && !showBlockingLoading && !showBlockingError && (!isBottomLocked || !viewport.isAtLatest)}
         onJumpAction={viewport.isAtLatest ? jumpToBottom : onJumpToLatest}
         jumpActionLabel={viewport.isAtLatest ? jumpToBottomLabel : jumpToLatestLabel}
         showThinking={showThinking}

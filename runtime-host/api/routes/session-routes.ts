@@ -3,6 +3,7 @@ interface LocalDispatchResponse {
   data: unknown;
 }
 import { SessionsService } from '../../application/sessions/service';
+import { SessionCatalogService } from '../../application/sessions/catalog-service';
 import { SessionWindowService } from '../../application/sessions/window-service';
 
 interface SessionRouteDeps {
@@ -23,7 +24,19 @@ export async function handleSessionRoute(
     ...sessionDeps,
     resolveDeletedPath: deps.resolveDeletedPath,
   });
+  const catalogService = new SessionCatalogService(sessionDeps);
   const windowService = new SessionWindowService(sessionDeps);
+
+  if (method === 'GET' && routePath === '/api/sessions/list') {
+    try {
+      return await catalogService.list();
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
 
   if (method === 'POST' && routePath === '/api/sessions/window') {
     try {

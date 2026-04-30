@@ -7,6 +7,7 @@ import { useChatStore } from '@/stores/chat';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
 const chatHostInstanceSeq = vi.hoisted(() => ({ current: 0 }));
@@ -92,10 +93,8 @@ describe('main layout chat workspace host', () => {
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': {
-          transcript: [],
           meta: {
             label: null,
             lastActivityAt: null,
@@ -107,16 +106,23 @@ describe('main layout chat workspace host', () => {
             activeRunId: null,
             runPhase: 'idle',
             pendingUserMessage: null,
-            assistantOverlay: null,
+            streamingMessageId: null,
             streamingTools: [],
             pendingFinal: false,
             lastUserMessageAt: null,
             pendingToolImages: [],
             approvalStatus: 'idle',
           },
+          window: createViewportWindowState({
+            messages: [],
+            totalMessageCount: 0,
+            windowStartOffset: 0,
+            windowEndOffset: 0,
+            isAtLatest: true,
+          }),
         },
       },
-      sessionsResource: {
+      sessionMetasResource: {
         status: 'ready',
         data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
         error: null,
@@ -193,3 +199,5 @@ describe('main layout chat workspace host', () => {
     expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'false');
   });
 });
+
+

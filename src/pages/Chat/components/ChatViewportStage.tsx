@@ -1,26 +1,60 @@
-import type { ComponentProps, ReactNode } from 'react';
-import { ChatInput } from '../ChatInput';
+import { useLayoutEffect, useRef, type ReactNode } from 'react';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
-import { ChatHeaderBar } from './ChatHeaderBar';
-import { ChatApprovalDock, ChatErrorBanner } from './ChatRuntimeDock';
 
 interface ChatViewportStageProps {
-  headerProps: ComponentProps<typeof ChatHeaderBar>;
+  header: ReactNode;
   viewportPane: ReactNode;
-  errorBannerProps: ComponentProps<typeof ChatErrorBanner> | null;
-  approvalDockProps: ComponentProps<typeof ChatApprovalDock> | null;
-  inputProps: ComponentProps<typeof ChatInput>;
+  errorBanner: ReactNode;
+  approvalDock: ReactNode;
+  input: ReactNode;
 }
 
 export function ChatViewportStage({
-  headerProps,
+  header,
   viewportPane,
-  errorBannerProps,
-  approvalDockProps,
-  inputProps,
+  errorBanner,
+  approvalDock,
+  input,
 }: ChatViewportStageProps) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const composerOverlayRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const stageNode = stageRef.current;
+    const composerNode = composerOverlayRef.current;
+    if (!stageNode || !composerNode) {
+      return;
+    }
+
+    const syncComposerOffset = () => {
+      const composerHeight = Math.ceil(composerNode.getBoundingClientRect().height);
+      stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
+    };
+
+    syncComposerOffset();
+
+    if (typeof ResizeObserver !== 'function') {
+      return () => {
+        stageNode.style.removeProperty('--chat-composer-safe-offset');
+      };
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncComposerOffset();
+    });
+    observer.observe(composerNode);
+
+    return () => {
+      observer.disconnect();
+      stageNode.style.removeProperty('--chat-composer-safe-offset');
+    };
+  }, []);
+
   return (
-    <div className={CHAT_LAYOUT_TOKENS.stageSurface}>
+    <div
+      ref={stageRef}
+      className={`${CHAT_LAYOUT_TOKENS.stageSurface} chat-scroll-sync`}
+    >
       <div
         data-testid="chat-stage-backdrop"
         className={CHAT_LAYOUT_TOKENS.stageBackdrop}
@@ -31,29 +65,37 @@ export function ChatViewportStage({
         className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
       >
         <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>
-          <ChatHeaderBar {...headerProps} />
+          {header}
         </div>
       </div>
 
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {viewportPane}
 
-        <div className={CHAT_LAYOUT_TOKENS.composerOverlay}>
+        <div
+          data-testid="chat-stage-bottom-fade"
+          className={CHAT_LAYOUT_TOKENS.stageBottomFade}
+        />
+
+        <div
+          ref={composerOverlayRef}
+          className={CHAT_LAYOUT_TOKENS.composerOverlay}
+        >
           <div className={CHAT_LAYOUT_TOKENS.composerOverlayStack}>
-            {errorBannerProps && (
+            {errorBanner && (
               <div className="pointer-events-auto">
-                <ChatErrorBanner {...errorBannerProps} />
+                {errorBanner}
               </div>
             )}
 
-            {approvalDockProps && (
+            {approvalDock && (
               <div className="pointer-events-auto">
-                <ChatApprovalDock {...approvalDockProps} />
+                {approvalDock}
               </div>
             )}
 
-            <div className="pointer-events-auto">
-              <ChatInput {...inputProps} />
+            <div className="pointer-events-auto chat-scroll-sync-input">
+              {input}
             </div>
           </div>
         </div>

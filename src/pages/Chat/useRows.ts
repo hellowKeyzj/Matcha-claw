@@ -16,7 +16,6 @@ interface UseChatRowsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
 }
 
@@ -43,7 +42,6 @@ export function useChatRows(
     pendingFinal,
     waitingApproval,
     showThinking,
-    streamingMessage,
     streamingTools,
   } = input;
 
@@ -77,7 +75,6 @@ export function useChatRows(
         pendingFinal,
         waitingApproval,
         showThinking,
-        streamingMessage,
         streamingTools,
       });
       return {
@@ -91,7 +88,6 @@ export function useChatRows(
       sending,
       showThinking,
       staticRowsResult.rows,
-      streamingMessage,
       streamingTools,
       waitingApproval,
     ],

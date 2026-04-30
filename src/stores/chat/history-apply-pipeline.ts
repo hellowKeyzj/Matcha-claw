@@ -1,5 +1,6 @@
 import {
   resolveSessionLabelFromMessages,
+  normalizeAssistantFinalTextForDedup,
 } from './message-helpers';
 import { prewarmAssistantMarkdownBodies } from '@/lib/chat-markdown-body';
 import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
@@ -28,9 +29,10 @@ import { normalizeHistoryMessages } from './history-normalizer-worker-client';
 import {
   buildRenderMessagesFingerprint,
   buildQuickRawHistoryFingerprint,
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   getSessionViewportState,
+  isSessionHistoryReady,
   nowMs,
   patchSessionMeta,
   toMs,
@@ -47,6 +49,61 @@ import type {
   ChatStoreState,
   RawMessage,
 } from './types';
+import {
+  findCurrentStreamingMessage,
+  upsertMessageById,
+} from './streaming-message';
+
+function reconcileStreamingMessageWithHistory(input: {
+  historyMessages: RawMessage[];
+  currentMessages: RawMessage[];
+  streamingMessageId: string | null;
+  keepLocalStreamingMessage: boolean;
+}): RawMessage[] {
+  const {
+    historyMessages,
+    currentMessages,
+    streamingMessageId,
+    keepLocalStreamingMessage,
+  } = input;
+  const currentStreamingMessage = findCurrentStreamingMessage(currentMessages, streamingMessageId);
+  if (!currentStreamingMessage) {
+    return historyMessages;
+  }
+
+  const currentStreamingId = typeof currentStreamingMessage.id === 'string'
+    ? currentStreamingMessage.id.trim()
+    : '';
+  const currentStreamingText = normalizeAssistantFinalTextForDedup(currentStreamingMessage.content);
+  const matchedHistoryIndex = historyMessages.findIndex((message) => (
+    message.role === 'assistant'
+    && (
+      (currentStreamingId && message.id === currentStreamingId)
+      || (
+        currentStreamingText.length > 0
+        && normalizeAssistantFinalTextForDedup(message.content) === currentStreamingText
+      )
+    )
+  ));
+
+  if (matchedHistoryIndex >= 0) {
+    const mergedMessages = [...historyMessages];
+    mergedMessages[matchedHistoryIndex] = {
+      ...currentStreamingMessage,
+      ...historyMessages[matchedHistoryIndex],
+      id: currentStreamingId || historyMessages[matchedHistoryIndex]?.id,
+      streaming: false,
+      _attachedFiles: historyMessages[matchedHistoryIndex]?._attachedFiles ?? currentStreamingMessage._attachedFiles,
+    };
+    return mergedMessages;
+  }
+
+  if (!keepLocalStreamingMessage) {
+    return historyMessages;
+  }
+
+  return upsertMessageById(historyMessages, currentStreamingMessage);
+}
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -113,13 +170,11 @@ export function createApplyLoadedMessagesPipeline(
       const quickFingerprint = buildQuickRawHistoryFingerprint(canonicalRawMessages, window.thinkingLevel);
       const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
       const currentStateForQuickPath = get();
-      const currentTranscript = getSessionTranscript(currentStateForQuickPath, requestedSessionKey);
-      const currentMeta = currentStateForQuickPath.sessionsByKey[requestedSessionKey]?.meta;
-      const hasReadySnapshot = Boolean(currentMeta?.ready)
-        || (currentStateForQuickPath.currentSessionKey === requestedSessionKey && currentStateForQuickPath.snapshotReady);
+      const currentMessages = getSessionMessages(currentStateForQuickPath, requestedSessionKey);
+      const currentMeta = currentStateForQuickPath.loadedSessions[requestedSessionKey]?.meta;
       const canSkipWithQuickFingerprint = (
         previousQuickFingerprint === quickFingerprint
-        && (currentTranscript.length > 0 || hasReadySnapshot)
+        && (currentMessages.length > 0 || isSessionHistoryReady(currentMeta?.historyStatus))
         && (currentMeta?.thinkingLevel ?? null) === window.thinkingLevel
       );
       if (canSkipWithQuickFingerprint) {
@@ -131,21 +186,9 @@ export function createApplyLoadedMessagesPipeline(
             buildRenderMessagesFingerprint(currentViewport.messages),
           );
         }
-        if (isForeground && (currentStateForQuickPath.initialLoading || currentStateForQuickPath.refreshing)) {
-          set((state) => {
-            if (state.sessionsByKey[requestedSessionKey]?.meta.ready) {
-              return { initialLoading: false, refreshing: false, snapshotReady: true };
-            }
-            return {
-              initialLoading: false,
-              refreshing: false,
-              snapshotReady: true,
-              sessionsByKey: patchSessionMeta(state, requestedSessionKey, { ready: true }),
-            };
-          });
-        } else if (!currentMeta?.ready) {
+        if (!isSessionHistoryReady(currentMeta?.historyStatus)) {
           set((state) => ({
-            sessionsByKey: patchSessionMeta(state, requestedSessionKey, { ready: true }),
+            loadedSessions: patchSessionMeta(state, requestedSessionKey, { historyStatus: 'ready' }),
           }));
         }
         return;
@@ -193,13 +236,21 @@ export function createApplyLoadedMessagesPipeline(
       if (runtimeState.currentSessionKey === requestedSessionKey) {
         finalMessages = reconcileLatestAssistantInHistory({
           historyMessages: finalMessages,
-          currentMessages: getSessionTranscript(runtimeState, requestedSessionKey),
+          currentMessages: getSessionMessages(runtimeState, requestedSessionKey),
         });
       }
       if (runtimeState.currentSessionKey === requestedSessionKey) {
         finalMessages = reconcileCommittedCurrentTurnWithHistory({
           historyMessages: finalMessages,
-          currentMessages: getSessionTranscript(runtimeState, requestedSessionKey),
+          currentMessages: getSessionMessages(runtimeState, requestedSessionKey),
+        });
+      }
+      if (runtimeState.currentSessionKey === requestedSessionKey) {
+        finalMessages = reconcileStreamingMessageWithHistory({
+          historyMessages: finalMessages,
+          currentMessages: getSessionMessages(runtimeState, requestedSessionKey),
+          streamingMessageId: currentRuntime.streamingMessageId,
+          keepLocalStreamingMessage: currentRuntime.sending || currentRuntime.pendingFinal || currentRuntime.activeRunId != null,
         });
       }
       if (shouldAbortHistoryProcessing()) {
@@ -214,8 +265,16 @@ export function createApplyLoadedMessagesPipeline(
         : '';
       const lastMsg = finalMessages[finalMessages.length - 1];
       const lastAt = lastMsg?.timestamp ? toMs(lastMsg.timestamp) : null;
+      const canonicalWindowLength = Math.max(
+        0,
+        (window.canonicalRawMessages ?? window.rawMessages).length,
+      );
+      const reconciledWindowDelta = finalMessages.length - canonicalWindowLength;
       const viewportWindowStart = Math.min(Math.max(window.windowStartOffset, 0), finalMessages.length);
-      const viewportWindowEnd = Math.min(Math.max(window.windowEndOffset, viewportWindowStart), finalMessages.length);
+      const viewportWindowEnd = Math.min(
+        Math.max(window.windowEndOffset + Math.max(reconciledWindowDelta, 0), viewportWindowStart),
+        finalMessages.length,
+      );
       const viewportMessages = finalMessages.slice(viewportWindowStart, viewportWindowEnd);
       const renderFingerprint = buildRenderMessagesFingerprint(viewportMessages);
       const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
@@ -314,3 +373,4 @@ export function createApplyLoadedMessagesPipeline(
     }
   };
 }
+

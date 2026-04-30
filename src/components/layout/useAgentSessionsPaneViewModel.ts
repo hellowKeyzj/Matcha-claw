@@ -371,7 +371,7 @@ interface UseAgentSessionsPaneViewModelInput {
   agents: SidebarAgentSummary[];
   agentsResource: ResourceStateMeta;
   sessionEntries: AgentSessionsPaneSessionEntry[];
-  sessionsResource: ResourceStateMeta;
+  sessionMetasResource: ResourceStateMeta;
   currentSessionKey: string;
   locale: string;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -509,10 +509,10 @@ export function useAgentSessionsPaneViewModel(
     ? 'loading'
     : (!input.agentsResource.hasLoadedOnce && input.agentsResource.status === 'error' ? 'error' : 'ready');
 
-  const sessionListState = !input.sessionsResource.hasLoadedOnce
-    && (input.sessionsResource.status === 'idle' || input.sessionsResource.status === 'loading')
+  const sessionListState = !input.sessionMetasResource.hasLoadedOnce
+    && (input.sessionMetasResource.status === 'idle' || input.sessionMetasResource.status === 'loading')
     ? 'loading'
-    : (!input.sessionsResource.hasLoadedOnce && input.sessionsResource.status === 'error' ? 'error' : 'ready');
+    : (!input.sessionMetasResource.hasLoadedOnce && input.sessionMetasResource.status === 'error' ? 'error' : 'ready');
 
   return {
     activeAgentId,
@@ -522,6 +522,7 @@ export function useAgentSessionsPaneViewModel(
     agentListState,
     agentErrorMessage: input.agentsResource.error,
     sessionListState,
-    sessionErrorMessage: input.sessionsResource.error,
+    sessionErrorMessage: input.sessionMetasResource.error,
   };
 }
+

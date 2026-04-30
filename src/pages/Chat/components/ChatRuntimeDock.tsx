@@ -14,14 +14,14 @@ export function ChatErrorBanner({
 }) {
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail}>
-      <div className="flex items-center justify-between gap-3 rounded-[20px] border border-destructive/12 bg-background/82 px-4 py-3 shadow-[0_10px_28px_rgba(220,38,38,0.05)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-3 rounded-[22px] border border-destructive/14 bg-background/92 px-4 py-3 shadow-[0_10px_30px_rgba(220,38,38,0.045)] backdrop-blur-xl">
         <p className="flex items-center gap-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4" />
           {error}
         </p>
         <button
           onClick={onDismiss}
-          className="rounded-full border border-destructive/15 bg-background/72 px-2.5 py-1 text-[11px] text-destructive/70 transition-colors hover:bg-background/88 hover:text-destructive"
+          className="rounded-full border border-destructive/16 bg-background/80 px-2.5 py-1 text-[11px] text-destructive/72 transition-colors hover:bg-background/90 hover:text-destructive"
         >
           {dismissLabel}
         </button>
@@ -41,7 +41,7 @@ export function ChatApprovalDock({
 }) {
   return (
     <div className={CHAT_LAYOUT_TOKENS.runtimeDockRail} data-testid="chat-approval-dock">
-      <div className="rounded-[20px] border border-primary/12 bg-background/82 px-4 py-3 shadow-[0_12px_30px_rgba(37,99,235,0.05)] backdrop-blur-xl">
+      <div className="rounded-[22px] border border-primary/14 bg-background/92 px-4 py-3 shadow-[0_10px_30px_rgba(37,99,235,0.045)] backdrop-blur-xl">
         <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
           <span>{waitingLabel}</span>

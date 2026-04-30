@@ -153,7 +153,7 @@ describe('chat message links', () => {
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
   });
 
-  it('assistant plain markdown miss should first paint raw text and then hydrate rich markdown', async () => {
+  it('assistant plain markdown miss should render rich markdown immediately without raw-text fallback', () => {
     const content = '[OpenAI Miss](https://openai.com/?miss=1)';
     const message: RawMessage = {
       role: 'assistant',
@@ -162,11 +162,31 @@ describe('chat message links', () => {
 
     render(<ChatMessage message={message} showThinking={false} />);
 
-    expect(screen.getByText(content)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
+    expect(screen.queryByText(content)).toBeNull();
+  });
 
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
-    });
+  it('assistant streaming settle should switch to final markdown immediately without plain-text flash', () => {
+    const content = '[OpenAI Stream Final](https://openai.com/?stream-final=1)';
+    const message: RawMessage = {
+      role: 'assistant',
+      content,
+    };
+
+    const view = render(
+      <ChatMessage
+        message={message}
+        showThinking={false}
+        isStreaming
+      />,
+    );
+
+    expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
+
+    view.rerender(<ChatMessage message={message} showThinking={false} />);
+
+    expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
+    expect(screen.queryByText(content)).toBeNull();
   });
 
   it('assistant streaming plain csv should not switch into structured preview before settle', async () => {

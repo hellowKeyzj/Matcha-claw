@@ -4,6 +4,7 @@ import type {
   ChatHistoryLoadScope,
   ChatStoreState,
 } from './types';
+import { patchSessionMeta } from './store-state-helpers';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -36,6 +37,7 @@ interface BeginHistoryLoadUiStateInput {
 interface FinalizeHistoryLoadUiStateInput {
   set: ChatStoreSetFn;
   scope: ChatHistoryLoadScope;
+  requestedSessionKey: string;
   historyLoadRunId: number;
   historyRuntime: StoreHistoryCache;
   loadingSafetyTimer: ReturnType<typeof setTimeout> | null;
@@ -77,22 +79,27 @@ export function beginHistoryLoadUiState(
     return null;
   }
 
-  const snapshot = get();
-  const session = snapshot.sessionsByKey[requestedSessionKey];
-  const viewport = snapshot.viewportBySession[requestedSessionKey];
-  const hasSnapshot = Boolean(session?.meta.ready) || (viewport?.messages.length ?? 0) > 0;
   set({
-    initialLoading: !hasSnapshot,
-    refreshing: hasSnapshot,
+    foregroundHistorySessionKey: requestedSessionKey,
     error: null,
+    ...(input.mode === 'active'
+      ? {
+          loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
+            historyStatus: 'loading',
+          }),
+        }
+      : {}),
   });
 
   return setTimeout(() => {
     set((state) => {
-      if (historyLoadRunId !== historyRuntime.getHistoryLoadRunId() || (!state.initialLoading && !state.refreshing)) {
+      if (
+        historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
+        || state.foregroundHistorySessionKey !== requestedSessionKey
+      ) {
         return state;
       }
-      return { initialLoading: false, refreshing: false };
+      return { foregroundHistorySessionKey: null };
     });
   }, timeoutMs);
 }
@@ -101,6 +108,7 @@ export function finalizeHistoryLoadUiState(input: FinalizeHistoryLoadUiStateInpu
   const {
     set,
     scope,
+    requestedSessionKey,
     historyLoadRunId,
     historyRuntime,
     loadingSafetyTimer,
@@ -111,10 +119,13 @@ export function finalizeHistoryLoadUiState(input: FinalizeHistoryLoadUiStateInpu
   }
   if (scope === 'foreground') {
     set((state) => {
-      if (historyLoadRunId !== historyRuntime.getHistoryLoadRunId() || (!state.initialLoading && !state.refreshing)) {
+      if (
+        historyLoadRunId !== historyRuntime.getHistoryLoadRunId()
+        || state.foregroundHistorySessionKey !== requestedSessionKey
+      ) {
         return state;
       }
-      return { initialLoading: false, refreshing: false };
+      return { foregroundHistorySessionKey: null };
     });
   }
 }

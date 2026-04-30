@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
-    transcript: overrides?.transcript ?? base.transcript,
     meta: {
       ...base.meta,
       ...overrides?.meta,
@@ -14,6 +14,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    window: overrides?.window ?? base.window,
   };
 }
 
@@ -24,17 +25,21 @@ describe('chat store newSession agent targeting', () => {
     vi.restoreAllMocks();
     loadHistory.mockClear();
     useChatStore.setState({
-      snapshotReady: false,
-      initialLoading: false,
-      refreshing: false,
+      foregroundHistorySessionKey: null,
       mutating: false,
       error: null,
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:main:main', displayName: 'agent:main:main' },
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       currentSessionKey: 'agent:test:main',
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord(),
         'agent:test:main': buildSessionRecord(),
       },
@@ -49,6 +54,7 @@ describe('chat store newSession agent targeting', () => {
     useChatStore.getState().newSession();
 
     expect(useChatStore.getState().currentSessionKey).toBe('agent:test:session-1711111111111');
+    expect(useChatStore.getState().loadedSessions['agent:test:session-1711111111111']?.meta.historyStatus).toBe('ready');
     nowSpy.mockRestore();
   });
 
@@ -63,8 +69,8 @@ describe('chat store newSession agent targeting', () => {
 
   it('切换到其他 agent 会话时，应清理当前会话的发送态，避免跨会话锁死输入', () => {
     useChatStore.setState({
-      sessionsByKey: {
-        ...useChatStore.getState().sessionsByKey,
+      loadedSessions: {
+        ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
           runtime: {
             sending: true,
@@ -78,7 +84,7 @@ describe('chat store newSession agent targeting', () => {
     useChatStore.getState().switchSession('agent:another:main');
 
     const state = useChatStore.getState();
-    const runtime = state.sessionsByKey['agent:another:main']?.runtime;
+    const runtime = state.loadedSessions['agent:another:main']?.runtime;
     expect(state.currentSessionKey).toBe('agent:another:main');
     expect(runtime?.sending).toBe(false);
     expect(runtime?.activeRunId).toBeNull();
@@ -94,10 +100,16 @@ describe('chat store newSession agent targeting', () => {
     };
     useChatStore.setState({
       currentSessionKey: 'agent:test:main',
-      sessionsByKey: {
-        ...useChatStore.getState().sessionsByKey,
+      loadedSessions: {
+        ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
-          transcript: [userMsg],
+          window: createViewportWindowState({
+            messages: [userMsg],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            isAtLatest: true,
+          }),
           runtime: {
             sending: true,
             activeRunId: 'run-agent-test',
@@ -111,10 +123,10 @@ describe('chat store newSession agent targeting', () => {
     useChatStore.getState().switchSession('agent:test:main');
 
     const state = useChatStore.getState();
-    const record = state.sessionsByKey['agent:test:main'];
+    const record = state.loadedSessions['agent:test:main'];
     expect(state.currentSessionKey).toBe('agent:test:main');
-    expect(record?.transcript).toHaveLength(1);
-    expect(record?.transcript[0]?.id).toBe('msg-local-1');
+    expect(record?.window.messages).toHaveLength(1);
+    expect(record?.window.messages[0]?.id).toBe('msg-local-1');
     expect(record?.runtime.sending).toBe(true);
     expect(record?.runtime.pendingFinal).toBe(true);
   });
@@ -122,11 +134,17 @@ describe('chat store newSession agent targeting', () => {
   it('切换会话时，不应误删“messages 为空但已有历史痕迹”的会话', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-a',
-      sessions: [
-        { key: 'agent:test:session-a', displayName: 'agent:test:session-a' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:test:session-a', displayName: 'agent:test:session-a' },
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:test:session-a': buildSessionRecord({
           meta: {
             label: '历史会话A',
@@ -140,19 +158,25 @@ describe('chat store newSession agent targeting', () => {
     useChatStore.getState().switchSession('agent:test:main');
 
     const state = useChatStore.getState();
-    expect(state.sessions.some((session) => session.key === 'agent:test:session-a')).toBe(true);
-    expect(state.sessionsByKey['agent:test:session-a']?.meta.label).toBe('历史会话A');
-    expect(state.sessionsByKey['agent:test:session-a']?.meta.lastActivityAt).toBe(1_713_000_000_000);
+    expect(state.sessionMetasResource.data.some((session) => session.key === 'agent:test:session-a')).toBe(true);
+    expect(state.loadedSessions['agent:test:session-a']?.meta.label).toBe('历史会话A');
+    expect(state.loadedSessions['agent:test:session-a']?.meta.lastActivityAt).toBe(1_713_000_000_000);
   });
 
   it('cleanupEmptySession 仅清理真正空会话（无消息/无标签/无活动）', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-b',
-      sessions: [
-        { key: 'agent:test:session-b', displayName: 'agent:test:session-b' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:test:session-b', displayName: 'agent:test:session-b' },
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:test:session-b': buildSessionRecord({
           meta: { label: 'B' },
         }),
@@ -161,29 +185,35 @@ describe('chat store newSession agent targeting', () => {
     } as never);
 
     useChatStore.getState().cleanupEmptySession();
-    expect(useChatStore.getState().sessions.some((session) => session.key === 'agent:test:session-b')).toBe(true);
+    expect(useChatStore.getState().sessionMetasResource.data.some((session) => session.key === 'agent:test:session-b')).toBe(true);
 
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-c',
-      sessions: [
-        { key: 'agent:test:session-c', displayName: 'agent:test:session-c' },
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:test:session-c', displayName: 'agent:test:session-c' },
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:test:session-c': buildSessionRecord(),
         'agent:test:main': buildSessionRecord(),
       },
     } as never);
 
     useChatStore.getState().cleanupEmptySession();
-    expect(useChatStore.getState().sessions.some((session) => session.key === 'agent:test:session-c')).toBe(false);
+    expect(useChatStore.getState().sessionMetasResource.data.some((session) => session.key === 'agent:test:session-c')).toBe(false);
   });
 
   it('创建新会话时，应重置发送态，避免继承上一会话的等待状态', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_722_222_222_222);
     useChatStore.setState({
-      sessionsByKey: {
-        ...useChatStore.getState().sessionsByKey,
+      loadedSessions: {
+        ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
           runtime: {
             sending: true,
@@ -197,7 +227,7 @@ describe('chat store newSession agent targeting', () => {
     useChatStore.getState().newSession();
 
     const state = useChatStore.getState();
-    const runtime = state.sessionsByKey[state.currentSessionKey]?.runtime;
+    const runtime = state.loadedSessions[state.currentSessionKey]?.runtime;
     expect(state.currentSessionKey).toBe('agent:test:session-1722222222222');
     expect(runtime?.sending).toBe(false);
     expect(runtime?.activeRunId).toBeNull();
@@ -205,3 +235,5 @@ describe('chat store newSession agent targeting', () => {
     nowSpy.mockRestore();
   });
 });
+
+

@@ -25,7 +25,6 @@ interface BuildChatRowsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
 }
 
@@ -46,33 +45,11 @@ interface AppendRuntimeChatRowsInput {
   pendingFinal: boolean;
   waitingApproval: boolean;
   showThinking: boolean;
-  streamingMessage: unknown | null;
   streamingTools: ToolStatus[];
 }
 
-function resolveRuntimeRowKey(sessionKey: string, streamMessage?: RawMessage | null): string {
-  if (streamMessage?.id) {
-    return resolveMessageRowKey(sessionKey, streamMessage, 0);
-  }
+function resolveRuntimeRowKey(sessionKey: string): string {
   return `runtime:${sessionKey}`;
-}
-
-function resolveMatchingBaseMessageIndex(baseRows: ChatRow[], streamingMessage: RawMessage): number {
-  const streamingId = typeof streamingMessage.id === 'string' ? streamingMessage.id.trim() : '';
-  if (!streamingId) {
-    return -1;
-  }
-
-  for (let index = baseRows.length - 1; index >= 0; index -= 1) {
-    const row = baseRows[index];
-    if (row.kind !== 'message') {
-      continue;
-    }
-    if (row.message.id === streamingId) {
-      return index;
-    }
-  }
-  return -1;
 }
 
 const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
@@ -326,7 +303,6 @@ export function appendRuntimeChatRows({
   pendingFinal,
   waitingApproval,
   showThinking,
-  streamingMessage,
   streamingTools,
 }: AppendRuntimeChatRowsInput): ChatRow[] {
   let rows = baseRows;
@@ -337,10 +313,9 @@ export function appendRuntimeChatRows({
     return rows;
   };
 
-  const streamMsg = streamingMessage && typeof streamingMessage === 'object'
-    ? streamingMessage as { role?: string; content?: unknown; timestamp?: number }
-    : null;
-  const streamText = streamMsg ? extractText(streamMsg) : (typeof streamingMessage === 'string' ? streamingMessage : '');
+  const tailMessageRow = [...baseRows].reverse().find((row) => row.kind === 'message' && row.message.streaming);
+  const streamMsg = tailMessageRow?.kind === 'message' ? tailMessageRow.message : null;
+  const streamText = streamMsg ? extractText(streamMsg) : '';
   const streamThinking = streamMsg ? extractThinking(streamMsg) : null;
   const streamTools = streamMsg ? extractToolUse(streamMsg) : [];
   const streamImages = streamMsg ? extractImages(streamMsg) : [];
@@ -351,26 +326,24 @@ export function appendRuntimeChatRows({
   const hasStreamImages = streamImages.length > 0;
   const hasStreamToolStatus = streamingTools.length > 0;
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
-  const shouldRenderStreaming = sending && hasAnyStreamContent;
+  const shouldDecorateStreaming = sending && hasAnyStreamContent && streamMsg;
 
-  if (shouldRenderStreaming) {
-    const streamingRowMessage = streamMsg as RawMessage;
-    const matchingBaseRowIndex = resolveMatchingBaseMessageIndex(baseRows, streamingRowMessage);
-    if (matchingBaseRowIndex >= 0) {
-      const nextRows = ensureMutableRows();
-      const matchingRow = nextRows[matchingBaseRowIndex];
+  if (shouldDecorateStreaming) {
+    const nextRows = ensureMutableRows();
+    const targetIndex = nextRows.findIndex((row) => row.kind === 'message' && row.message === streamMsg);
+    if (targetIndex >= 0) {
+      const matchingRow = nextRows[targetIndex];
       if (matchingRow?.kind === 'message') {
-        nextRows[matchingBaseRowIndex] = {
+        nextRows[targetIndex] = {
           ...matchingRow,
-          message: streamingRowMessage,
-          isStreaming: sending,
+          isStreaming: true,
           streamingTools,
         };
       }
     }
   }
 
-  if (sending && pendingFinal && !waitingApproval && !shouldRenderStreaming && !streamMsg && !hasStreamToolStatus) {
+  if (sending && pendingFinal && !waitingApproval && !shouldDecorateStreaming && !streamMsg && !hasStreamToolStatus) {
     ensureMutableRows().push({
       key: resolveRuntimeRowKey(sessionKey),
       kind: 'activity',
@@ -394,7 +367,6 @@ export function buildChatRows({
   pendingFinal,
   waitingApproval,
   showThinking,
-  streamingMessage,
   streamingTools,
 }: BuildChatRowsInput): ChatRow[] {
   const baseRows = buildStaticChatRows({
@@ -408,7 +380,6 @@ export function buildChatRows({
     pendingFinal,
     waitingApproval,
     showThinking,
-    streamingMessage,
     streamingTools,
   });
 }

@@ -32,8 +32,14 @@ function enableMainAppRoutes() {
     selectAgent: vi.fn(),
   } as never);
   useChatStore.setState({
-    sessions: [],
     messages: [],
+    sessionMetasResource: {
+      status: 'ready',
+      data: [],
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
     currentSessionKey: 'agent:main:main',
     switchSession: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
@@ -105,3 +111,4 @@ describe('tasks navigation', () => {
     expect(await screen.findByRole('heading', { name: 'Models' })).toBeInTheDocument();
   });
 });
+

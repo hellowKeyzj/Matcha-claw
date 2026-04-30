@@ -8,6 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import i18n from '@/i18n';
 
 describe('chat agent skill configuration', () => {
@@ -48,33 +49,34 @@ describe('chat agent skill configuration', () => {
     } as never);
 
     useChatStore.setState({
-      messages: [],
-      snapshotReady: true,
-      initialLoading: false,
-      refreshing: false,
       mutating: false,
       error: null,
-      sending: false,
-      activeRunId: null,
-      streamingMessage: null,
-      streamRuntime: null,
-      streamingTools: [],
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
-      sessions: [
-        { key: 'agent:test:main', displayName: 'agent:test:main' },
-      ],
+      foregroundHistorySessionKey: null,
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:test:main', displayName: 'agent:test:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       currentSessionKey: 'agent:test:main',
-      sessionLabels: {},
-      sessionLastActivity: {},
-      sessionRuntimeByKey: {},
+      loadedSessions: {
+        'agent:test:main': {
+          ...createEmptySessionRecord(),
+          meta: {
+            ...createEmptySessionRecord().meta,
+            ready: true,
+          },
+        },
+      },
       showThinking: true,
-      thinkingLevel: null,
       pendingApprovalsBySession: {},
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       switchSession: vi.fn(),
+      openAgentConversation: vi.fn(),
       sendMessage: vi.fn(),
       abortRun: vi.fn(),
       clearError: vi.fn(),
@@ -82,6 +84,8 @@ describe('chat agent skill configuration', () => {
       resolveApproval: vi.fn(),
       refresh: vi.fn(),
       toggleThinking: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn(),
     } as never);
 
     useSkillsStore.setState({
@@ -147,3 +151,5 @@ describe('chat agent skill configuration', () => {
     expect(screen.queryByRole('option', { name: /web search/i })).toBeNull();
   });
 });
+
+

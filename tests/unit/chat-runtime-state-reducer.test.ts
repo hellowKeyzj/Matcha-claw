@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reduceRuntimeOverlay } from '@/stores/chat/overlay-reducer';
-import { createAssistantOverlay } from '@/stores/chat/stream-overlay-message';
+import { reduceSessionRuntime } from '@/stores/chat/runtime-state-reducer';
 import type { ChatSessionRuntimeState, ToolStatus } from '@/stores/chat/types';
 
 function buildRuntimeState(
@@ -10,7 +9,7 @@ function buildRuntimeState(
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    assistantOverlay: null,
+    streamingMessageId: null,
     streamingTools: [],
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -29,7 +28,7 @@ describe('chat runtime overlay reducer', () => {
       activeRunId: 'run-1',
     });
 
-    const patch = reduceRuntimeOverlay(snapshot, {
+    const patch = reduceSessionRuntime(snapshot, {
       type: 'session_runtime_restored',
       targetRuntime: snapshot,
       currentPendingApprovals: 2,
@@ -47,7 +46,7 @@ describe('chat runtime overlay reducer', () => {
       approvalStatus: 'idle',
     });
 
-    const patch = reduceRuntimeOverlay(snapshot, {
+    const patch = reduceSessionRuntime(snapshot, {
       type: 'session_runtime_restored',
       targetRuntime: snapshot,
       currentPendingApprovals: 0,
@@ -65,13 +64,8 @@ describe('chat runtime overlay reducer', () => {
         updatedAt: Date.now(),
       },
     ];
-    const patch = reduceRuntimeOverlay(buildRuntimeState({
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        committedText: 'hello',
-        targetText: 'hello world',
-      }),
+    const patch = reduceSessionRuntime(buildRuntimeState({
+      streamingMessageId: 'assistant-1',
     }), {
       type: 'tool_result_committed',
       pendingToolImages: [{
@@ -87,112 +81,59 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.pendingFinal).toBe(true);
     expect(patch.streamingTools).toBe(nextTools);
     expect(patch.pendingToolImages).toHaveLength(1);
-    expect(patch.assistantOverlay).toBeNull();
+    expect(patch.streamingMessageId).toBeNull();
   });
 
-  it('queues stream delta into assistant overlay without rewinding committed text', () => {
+  it('queues stream delta into the active streaming message id', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'submitted',
       lastUserMessageAt: 1_700_000_000_000,
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        sourceMessage: {
-          id: 'assistant-1',
-          role: 'assistant',
-          content: 'hello',
-          timestamp: 1_700_000_000,
-        },
-        committedText: 'hello',
-        targetText: 'hello',
-        status: 'streaming',
-      }),
+      streamingMessageId: 'assistant-1',
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      text: 'hello world',
-      textMode: 'snapshot',
       messageId: 'assistant-1',
       updates: [],
     });
 
     expect(patch.runPhase).toBe('streaming');
-    expect(patch.assistantOverlay).toMatchObject({
-      messageId: 'assistant-1',
-      committedText: 'hello',
-      targetText: 'hello world',
-      status: 'streaming',
-    });
+    expect(patch.streamingMessageId ?? state.streamingMessageId).toBe('assistant-1');
   });
 
-  it('appends monotonic delta chunks without treating them as full snapshot replacement', () => {
+  it('adopts a new stream message id when delta first binds', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        sourceMessage: {
-          id: 'assistant-1',
-          role: 'assistant',
-          content: 'hello',
-          timestamp: 1_700_000_000,
-        },
-        committedText: 'hello',
-        targetText: 'hello',
-        status: 'streaming',
-      }),
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      text: ' world',
-      textMode: 'append',
       messageId: 'assistant-1',
       updates: [],
     });
 
-    expect(patch.assistantOverlay).toMatchObject({
-      messageId: 'assistant-1',
-      committedText: 'hello',
-      targetText: 'hello world',
-      status: 'streaming',
-    });
+    expect(patch.streamingMessageId).toBe('assistant-1');
   });
 
-  it('keeps existing visible text when a tool-only delta carries no renderable assistant text', () => {
+  it('keeps existing active message id when a tool-only delta arrives', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        sourceMessage: {
-          id: 'assistant-1',
-          role: 'assistant',
-          content: 'hello',
-          timestamp: 1_700_000_000,
-        },
-        committedText: 'hello',
-        targetText: 'hello',
-        status: 'streaming',
-      }),
+      streamingMessageId: 'assistant-1',
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      text: '',
-      textMode: 'keep',
       messageId: 'assistant-1',
       updates: [{
         name: 'shell',
@@ -201,42 +142,27 @@ describe('chat runtime overlay reducer', () => {
       }],
     });
 
-    expect(patch.assistantOverlay).toMatchObject({
-      targetText: 'hello',
-      committedText: 'hello',
-    });
+    expect(patch.streamingMessageId ?? state.streamingMessageId).toBe('assistant-1');
     expect(patch.streamingTools).toHaveLength(1);
   });
 
-  it('clears assistant overlay immediately when final assistant message is committed', () => {
+  it('clears the active streaming message id immediately when final assistant message is committed', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        sourceMessage: {
-          id: 'assistant-1',
-          role: 'assistant',
-          content: 'hello world',
-          timestamp: 1_700_000_000,
-        },
-        committedText: 'hello',
-        targetText: 'hello world',
-        status: 'streaming',
-      }),
+      streamingMessageId: 'assistant-1',
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'final_message_committed',
       hasOutput: true,
       toolOnly: false,
       streamingTools: [],
     });
 
-    expect(patch.assistantOverlay).toBeNull();
+    expect(patch.streamingMessageId).toBeNull();
     expect(patch.sending).toBe(false);
     expect(patch.activeRunId).toBeNull();
     expect(patch.pendingFinal).toBe(false);
@@ -261,7 +187,7 @@ describe('chat runtime overlay reducer', () => {
       },
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'history_snapshot',
       hasRecentAssistantActivity: false,
       hasRecentFinalAssistantMessage: true,
@@ -274,25 +200,13 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.pendingUserMessage).toBeNull();
   });
 
-  it('does not let a lingering overlay block final history settlement', () => {
+  it('does not let a lingering active stream id block final history settlement', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       pendingFinal: true,
       runPhase: 'finalizing',
-      assistantOverlay: createAssistantOverlay({
-        runId: 'run-1',
-        messageId: 'assistant-1',
-        sourceMessage: {
-          id: 'assistant-1',
-          role: 'assistant',
-          content: 'hello world',
-          timestamp: 1_700_000_000,
-        },
-        committedText: 'hello world',
-        targetText: 'hello world',
-        status: 'finalizing',
-      }),
+      streamingMessageId: 'assistant-1',
       pendingUserMessage: {
         clientMessageId: 'user-local-1',
         createdAtMs: 1_700_000_000_000,
@@ -305,7 +219,7 @@ describe('chat runtime overlay reducer', () => {
       },
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'history_snapshot',
       hasRecentAssistantActivity: false,
       hasRecentFinalAssistantMessage: true,
@@ -316,7 +230,7 @@ describe('chat runtime overlay reducer', () => {
     expect(patch.pendingFinal).toBe(false);
     expect(patch.runPhase).toBe('done');
     expect(patch.pendingUserMessage).toBeNull();
-    expect(patch.assistantOverlay).toBeNull();
+    expect(patch.streamingMessageId).toBeNull();
   });
 
   it('clears approval wait flag after final history refresh when no pending approvals', () => {
@@ -324,7 +238,7 @@ describe('chat runtime overlay reducer', () => {
       approvalStatus: 'awaiting_approval',
     });
 
-    const patch = reduceRuntimeOverlay(state, {
+    const patch = reduceSessionRuntime(state, {
       type: 'final_history_refresh_requested',
       hasPendingApprovals: false,
     });

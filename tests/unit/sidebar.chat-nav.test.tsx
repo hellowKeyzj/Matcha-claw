@@ -11,6 +11,7 @@ import { useTaskCenterStore } from '@/stores/task-center-store';
 import { usePluginsStore } from '@/stores/plugins-store';
 import i18n from '@/i18n';
 import type { RawMessage } from '@/stores/chat';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function LocationEcho() {
   const location = useLocation();
@@ -36,12 +37,12 @@ function mountSidebar(initialPath: string) {
 }
 
 function createSessionRecord(input?: {
-  transcript?: RawMessage[];
+  messages?: RawMessage[];
   label?: string | null;
   ready?: boolean;
 }) {
+  const messages = input?.messages ?? [];
   return {
-    transcript: input?.transcript ?? [],
     meta: {
       label: input?.label ?? null,
       lastActivityAt: null,
@@ -52,14 +53,19 @@ function createSessionRecord(input?: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingMessage: null,
-      streamRuntime: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle' as const,
     },
+    window: createViewportWindowState({
+      messages,
+      totalMessageCount: messages.length,
+      windowStartOffset: 0,
+      windowEndOffset: messages.length,
+      isAtLatest: true,
+    }),
   };
 }
 
@@ -155,11 +161,17 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
-      sessions: [{ key: 'agent:main:main' }],
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       currentSessionKey: 'agent:main:main',
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
-          transcript: [{ role: 'user', content: 'existing' }],
+          messages: [{ role: 'user', content: 'existing' }],
           ready: true,
         }),
       },
@@ -182,11 +194,17 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
-      sessions: [{ key: 'agent:main:main' }],
+      sessionMetasResource: {
+        status: 'ready',
+        data: [{ key: 'agent:main:main' }],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       currentSessionKey: 'agent:main:main',
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': createSessionRecord({
-          transcript: [{ role: 'user', content: 'existing' }],
+          messages: [{ role: 'user', content: 'existing' }],
           ready: true,
         }),
       },
@@ -287,11 +305,17 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:analytics:main', displayName: 'agent:analytics:main' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:main:main', displayName: 'agent:main:main' },
+          { key: 'agent:analytics:main', displayName: 'agent:analytics:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true }),
         'agent:analytics:main': createSessionRecord({ ready: true }),
       },
@@ -321,10 +345,16 @@ describe('sidebar chat nav', () => {
     setupSidebarState();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
-      sessions: [
-        { key: 'agent:main:main', displayName: 'MatchaClaw Runtime Host' },
-      ],
-      sessionsByKey: {
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:main:main', displayName: 'MatchaClaw Runtime Host' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
         'agent:main:main': createSessionRecord({ ready: true, label: null }),
       },
       pendingApprovalsBySession: {
@@ -346,3 +376,5 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
   });
 });
+
+

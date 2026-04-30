@@ -10,11 +10,11 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
-    transcript: overrides?.transcript ?? base.transcript,
     meta: {
       ...base.meta,
       ...overrides?.meta,
@@ -23,6 +23,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    window: overrides?.window ?? base.window,
   };
 }
 
@@ -104,58 +105,76 @@ describe('chat 左侧点击链路回归', () => {
       mutating: false,
       error: null,
       pendingApprovalsBySession: {},
-      sessions: [
-        { key: 'agent:main:main', displayName: 'agent:main:main' },
-        { key: 'agent:another:main', displayName: 'agent:another:main' },
-      ],
+      sessionMetasResource: {
+        status: 'ready',
+        data: [
+          { key: 'agent:main:main', displayName: 'agent:main:main' },
+          { key: 'agent:another:main', displayName: 'agent:another:main' },
+        ],
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
       currentSessionKey: 'agent:main:main',
-      sessionsByKey: {
+      loadedSessions: {
         'agent:main:main': buildSessionRecord({
-          transcript: [
-            {
-              role: 'user',
-              content: 'current session user message',
-              timestamp: 1,
-              id: 'current-msg-1',
-            },
-            {
-              role: 'assistant',
-              content: 'current session mid message',
-              timestamp: 2,
-              id: 'current-msg-2',
-            },
-            {
-              role: 'assistant',
-              content: 'current session old message',
-              timestamp: 3,
-              id: 'current-msg-3',
-            },
-          ],
+          window: createViewportWindowState({
+            messages: [
+              {
+                role: 'user',
+                content: 'current session user message',
+                timestamp: 1,
+                id: 'current-msg-1',
+              },
+              {
+                role: 'assistant',
+                content: 'current session mid message',
+                timestamp: 2,
+                id: 'current-msg-2',
+              },
+              {
+                role: 'assistant',
+                content: 'current session old message',
+                timestamp: 3,
+                id: 'current-msg-3',
+              },
+            ],
+            totalMessageCount: 3,
+            windowStartOffset: 0,
+            windowEndOffset: 3,
+            isAtLatest: true,
+          }),
           meta: {
             ready: true,
           },
         }),
         'agent:another:main': buildSessionRecord({
-          transcript: [
-            {
-              role: 'user',
-              content: 'another user message',
-              timestamp: 1,
-              id: 'another-msg-1',
-            },
-            {
-              role: 'assistant',
-              content: 'another assistant mid message',
-              timestamp: 2,
-              id: 'another-msg-2',
-            },
-            {
-              role: 'assistant',
-              content: 'another assistant latest message',
-              timestamp: 3,
-              id: 'another-msg-3',
-            },
-          ],
+          window: createViewportWindowState({
+            messages: [
+              {
+                role: 'user',
+                content: 'another user message',
+                timestamp: 1,
+                id: 'another-msg-1',
+              },
+              {
+                role: 'assistant',
+                content: 'another assistant mid message',
+                timestamp: 2,
+                id: 'another-msg-2',
+              },
+              {
+                role: 'assistant',
+                content: 'another assistant latest message',
+                timestamp: 3,
+                id: 'another-msg-3',
+              },
+            ],
+            totalMessageCount: 3,
+            windowStartOffset: 0,
+            windowEndOffset: 3,
+            isAtLatest: true,
+          }),
           meta: {
             label: 'another latest session',
             lastActivityAt: 3,
@@ -211,3 +230,5 @@ describe('chat 左侧点击链路回归', () => {
     });
   });
 });
+
+

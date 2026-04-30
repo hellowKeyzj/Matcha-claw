@@ -2,6 +2,8 @@ import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatInit } from '@/pages/Chat/useChatInit';
 import { useChatStore } from '@/stores/chat';
+import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { useSubagentsStore } from '@/stores/subagents';
 
 const idleResource = {
@@ -18,6 +20,21 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+  const base = createEmptySessionRecord();
+  return {
+    meta: {
+      ...base.meta,
+      ...overrides?.meta,
+    },
+    runtime: {
+      ...base.runtime,
+      ...overrides?.runtime,
+    },
+    window: overrides?.window ?? base.window,
+  };
+}
+
 describe('useChatInit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -28,14 +45,14 @@ describe('useChatInit', () => {
       agentsResource: idleResource,
     } as never);
     useChatStore.setState({
-      messages: [],
-      sessions: [],
       currentSessionKey: 'agent:main:main',
-      sessionReadyByKey: {},
-      sessionRuntimeByKey: {},
-      sessionLabels: {},
-      sessionLastActivity: {},
-      sessionsResource: idleResource,
+      loadedSessions: {
+        'agent:main:main': createEmptySessionRecord(),
+      },
+      sessionMetasResource: {
+        ...idleResource,
+        data: [],
+      },
     } as never);
   });
 
@@ -52,12 +69,13 @@ describe('useChatInit', () => {
     }));
     const loadSessions = vi.fn().mockImplementation(async () => {
       useChatStore.setState({
-        sessionsResource: readyResource,
+        sessionMetasResource: readyResource,
       } as never);
     });
     const loadHistory = vi.fn().mockResolvedValue(undefined);
 
     const { unmount } = renderHook(() => useChatInit({
+      isActive: true,
       isGatewayRunning: true,
       locationSearch: '',
       navigate: vi.fn(),
@@ -112,7 +130,7 @@ describe('useChatInit', () => {
         sessionsAttempts += 1;
         if (sessionsAttempts === 1) {
           useChatStore.setState({
-            sessionsResource: {
+            sessionMetasResource: {
               status: 'error',
               error: 'sessions failed',
               hasLoadedOnce: false,
@@ -122,11 +140,12 @@ describe('useChatInit', () => {
           return;
         }
         useChatStore.setState({
-          sessionsResource: readyResource,
+          sessionMetasResource: readyResource,
         } as never);
       });
 
       renderHook(() => useChatInit({
+        isActive: true,
         isGatewayRunning: true,
         locationSearch: '',
         navigate: vi.fn(),
@@ -145,7 +164,7 @@ describe('useChatInit', () => {
       expect(loadAgents).toHaveBeenCalledTimes(1);
       expect(loadSessions).toHaveBeenCalledTimes(1);
       expect(useSubagentsStore.getState().agentsResource.status).toBe('error');
-      expect(useChatStore.getState().sessionsResource.status).toBe('error');
+      expect(useChatStore.getState().sessionMetasResource.status).toBe('error');
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1_600);
@@ -154,9 +173,67 @@ describe('useChatInit', () => {
       expect(loadAgents).toHaveBeenCalledTimes(2);
       expect(loadSessions).toHaveBeenCalledTimes(2);
       expect(useSubagentsStore.getState().agentsResource.status).toBe('ready');
-      expect(useChatStore.getState().sessionsResource.status).toBe('ready');
+      expect(useChatStore.getState().sessionMetasResource.status).toBe('ready');
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it('当前会话已有 viewport 快照时，初始化走 quiet refresh，不回退到阻塞加载', async () => {
+    const loadHistory = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      loadedSessions: {
+        'agent:main:main': buildSessionRecord({
+          meta: { ready: true },
+          window: createViewportWindowState({
+            ...createEmptySessionViewportState(),
+            messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
+            totalMessageCount: 1,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          }),
+        }),
+      },
+      sessionMetasResource: {
+        ...readyResource,
+        data: [{ key: 'agent:main:main', displayName: 'agent:main:main' }],
+      },
+    } as never);
+
+    renderHook(() => useChatInit({
+      isActive: true,
+      isGatewayRunning: true,
+      locationSearch: '',
+      navigate: vi.fn(),
+      switchSession: vi.fn(),
+      openAgentConversation: vi.fn(),
+      loadAgents: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      loadHistory,
+      cleanupEmptySession: vi.fn(),
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadHistory).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+
+    expect(loadHistory).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      mode: 'quiet',
+      scope: 'foreground',
+      reason: 'chat_init_snapshot_quiet_refresh',
+    });
+  });
 });
+
+

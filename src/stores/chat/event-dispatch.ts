@@ -1,7 +1,7 @@
 import { getMessageText } from './message-helpers';
 import {
-  reduceRuntimeOverlay,
-} from './overlay-reducer';
+  reduceSessionRuntime,
+} from './runtime-state-reducer';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -20,15 +20,21 @@ import {
 } from './tool-snapshot-txn';
 import { maybeTrackSendToFirstToken } from './telemetry';
 import {
+  getSessionMessages,
   getSessionRuntime,
-  getSessionTranscript,
   getSessionViewportState,
   patchSessionRecord,
-  patchSessionViewportState,
 } from './store-state-helpers';
-import { selectStreamingRenderMessage } from './stream-overlay-message';
 import type { ChatStoreState, RawMessage } from './types';
-import { removeViewportMessageById, upsertViewportMessage } from './viewport-state';
+import { syncViewportMessages } from './viewport-state';
+import {
+  findCurrentStreamingMessage,
+  getStreamingMessageText,
+  removeMessageById,
+  resolveNextStreamingText,
+  resolveStreamingMessage,
+  upsertMessageById,
+} from './streaming-message';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -108,13 +114,55 @@ function hasTokenContent(message: unknown): boolean {
   return content.trim().length > 0;
 }
 
+function buildNextStreamingState(params: {
+  state: ChatStoreState;
+  sessionKey: string;
+  runId: string;
+  message: RawMessage;
+  updates: ReturnType<typeof collectToolUpdates>;
+}): {
+  nextRuntime: ReturnType<typeof getSessionRuntime>;
+  nextMessages: RawMessage[];
+} {
+  const {
+    state,
+    sessionKey,
+    runId,
+    message,
+    updates,
+  } = params;
+  const runtime = getSessionRuntime(state, sessionKey);
+  const currentMessages = getSessionMessages(state, sessionKey);
+  const currentStreamingMessage = findCurrentStreamingMessage(currentMessages, runtime.streamingMessageId);
+  const currentStreamingText = getStreamingMessageText(currentStreamingMessage);
+  const textUpdate = resolveStreamDeltaTextUpdate(currentStreamingText, message);
+  const resolvedMessageId = (message.id || runtime.streamingMessageId || `stream:${runId}`).trim();
+  const nextStreamingMessage = resolveStreamingMessage({
+    previousMessage: currentStreamingMessage,
+    incomingMessage: message,
+    messageId: resolvedMessageId,
+    targetText: resolveNextStreamingText(currentStreamingText, textUpdate),
+    lastUserMessageAt: runtime.lastUserMessageAt,
+  });
+  const runtimePatch = reduceSessionRuntime(runtime, {
+    type: 'stream_delta_queued',
+    runId,
+    messageId: resolvedMessageId,
+    updates,
+  });
+  return {
+    nextRuntime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+    nextMessages: upsertMessageById(currentMessages, nextStreamingMessage),
+  };
+}
+
 export function handleRuntimeStartedEvent(input: RuntimeEventDispatchBaseInput): void {
   const { set, currentSessionKey, eventRunId } = input;
   set((state) => {
     const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_started', runId: eventRunId });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_started', runId: eventRunId });
     return {
-      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -138,9 +186,9 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
   }
   set((state) => {
     const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'delta_received' });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'delta_received' });
     return {
-      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
       }),
     };
@@ -150,38 +198,21 @@ export function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): v
   }
   const updates = collectToolUpdates(message, 'delta');
   set((state) => {
-    const runtime = getSessionRuntime(state, currentSessionKey);
-    const textUpdate = resolveStreamDeltaTextUpdate(
-      runtime.assistantOverlay?.targetText ?? '',
-      (message as RawMessage | undefined),
-    );
-    const runtimePatch = reduceRuntimeOverlay(runtime, {
-      type: 'stream_delta_queued',
-      runId: eventRunId,
-      text: textUpdate.text,
-      textMode: textUpdate.textMode,
-      messageId: (message as RawMessage | undefined)?.id,
-      message: (message as RawMessage | undefined) ?? null,
+    const { nextRuntime, nextMessages } = buildNextStreamingState({
+      state,
+      sessionKey: currentSessionKey,
+      runId: eventRunId || (getSessionRuntime(state, currentSessionKey).activeRunId ?? 'run'),
+      message: (message as RawMessage | undefined) ?? { role: 'assistant', content: '' },
       updates,
     });
-    const nextRuntime = runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch };
-    const streamingMessage = selectStreamingRenderMessage(nextRuntime);
     return {
-      sessionsByKey: patchSessionRecord(state, currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, currentSessionKey, {
         runtime: nextRuntime,
+        window: syncViewportMessages(
+          getSessionViewportState(state, currentSessionKey),
+          nextMessages,
+        ),
       }),
-      ...(streamingMessage
-        ? {
-            viewportBySession: patchSessionViewportState(
-              state,
-              currentSessionKey,
-              upsertViewportMessage(
-                getSessionViewportState(state, currentSessionKey),
-                streamingMessage,
-              ),
-            ),
-          }
-        : {}),
     };
   });
   armToolSnapshotTxnState(
@@ -250,28 +281,18 @@ export function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInpu
   onFinishAbortedTelemetry();
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const overlayMessageId = runtime.assistantOverlay?.messageId ?? null;
-    const transcript = getSessionTranscript(state, state.currentSessionKey);
-    const transcriptHasOverlayMessage = overlayMessageId
-      ? transcript.some((message) => message.id === overlayMessageId)
-      : false;
-    const runtimePatch = reduceRuntimeOverlay(runtime, { type: 'run_aborted' });
+    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_aborted' });
     return {
-      sessionsByKey: patchSessionRecord(state, state.currentSessionKey, {
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
         runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        window: syncViewportMessages(
+          getSessionViewportState(state, state.currentSessionKey),
+          removeMessageById(
+            getSessionMessages(state, state.currentSessionKey),
+            runtime.streamingMessageId,
+          ),
+        ),
       }),
-      ...(!transcriptHasOverlayMessage && overlayMessageId
-        ? {
-            viewportBySession: patchSessionViewportState(
-              state,
-              state.currentSessionKey,
-              removeViewportMessageById(
-                getSessionViewportState(state, state.currentSessionKey),
-                overlayMessageId,
-              ),
-            ),
-          }
-        : {}),
     };
   });
 }
@@ -285,38 +306,21 @@ export function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInpu
     const sessionKey = get().currentSessionKey;
     const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? '';
     set((state) => {
-      const currentRuntime = getSessionRuntime(state, sessionKey);
-      const textUpdate = resolveStreamDeltaTextUpdate(
-        currentRuntime.assistantOverlay?.targetText ?? '',
-        (message as RawMessage | undefined),
-      );
-      const runtimePatch = reduceRuntimeOverlay(currentRuntime, {
-        type: 'stream_delta_queued',
-        runId,
-        text: textUpdate.text,
-        textMode: textUpdate.textMode,
-        messageId: (message as RawMessage).id,
+      const { nextRuntime, nextMessages } = buildNextStreamingState({
+        state,
+        sessionKey,
+        runId: runId || 'run',
         message: message as RawMessage,
         updates,
       });
-      const nextRuntime = runtimePatch === currentRuntime ? currentRuntime : { ...currentRuntime, ...runtimePatch };
-      const streamingMessage = selectStreamingRenderMessage(nextRuntime);
       return {
-        sessionsByKey: patchSessionRecord(state, sessionKey, {
+        loadedSessions: patchSessionRecord(state, sessionKey, {
           runtime: nextRuntime,
+          window: syncViewportMessages(
+            getSessionViewportState(state, sessionKey),
+            nextMessages,
+          ),
         }),
-        ...(streamingMessage
-          ? {
-              viewportBySession: patchSessionViewportState(
-                state,
-                sessionKey,
-                upsertViewportMessage(
-                  getSessionViewportState(state, sessionKey),
-                  streamingMessage,
-                ),
-              ),
-            }
-          : {}),
       };
     });
   }

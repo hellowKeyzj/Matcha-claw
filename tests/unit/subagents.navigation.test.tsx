@@ -35,7 +35,13 @@ function enableMainAppRoutes() {
     selectAgent: vi.fn(),
   } as never);
   useChatStore.setState({
-    sessions: [],
+    sessionMetasResource: {
+      status: 'ready',
+      data: [],
+      error: null,
+      hasLoadedOnce: true,
+      lastLoadedAt: 1,
+    },
     currentSessionKey: 'agent:main:main',
     switchSession: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
@@ -73,3 +79,4 @@ describe('subagents navigation', () => {
     expect(await screen.findByText('Subagent Workspace')).toBeInTheDocument();
   });
 });
+
