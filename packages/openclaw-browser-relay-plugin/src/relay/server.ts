@@ -2,6 +2,7 @@ import type { PluginLogger } from 'openclaw/plugin-sdk'
 import { createCipheriv, createDecipheriv, privateDecrypt, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
+import type { BrowserCookieInput } from '../browser-action-contract.js'
 import { RELAY_PRIVATE_KEY_PEM } from './keypair.js'
 import {
   claimRelayPortOwnership,
@@ -722,6 +723,22 @@ export class BrowserRelayServer {
   async evaluate(targetId: string, expression: string): Promise<unknown> {
     const { client, localSessionId } = this.requireClientForTarget(targetId)
     return this.sendToExtension(client, 'Runtime.evaluate', { expression, returnByValue: true }, localSessionId)
+  }
+
+  async getCookies(targetId: string): Promise<unknown[]> {
+    const { client, localTargetId } = this.requireClientForTarget(targetId)
+    const result = await this.sendToExtension(client, 'Extension.getCookies', { targetId: localTargetId })
+    return Array.isArray(result) ? result : []
+  }
+
+  async setCookies(targetId: string, cookies: BrowserCookieInput[]): Promise<void> {
+    const { client, localTargetId } = this.requireClientForTarget(targetId)
+    await this.sendToExtension(client, 'Extension.setCookies', { targetId: localTargetId, cookies })
+  }
+
+  async clearCookies(targetId: string): Promise<void> {
+    const { client, localTargetId } = this.requireClientForTarget(targetId)
+    await this.sendToExtension(client, 'Extension.clearCookies', { targetId: localTargetId })
   }
 
   async closeAllAgentTabs(): Promise<unknown> {

@@ -407,6 +407,15 @@ export class PlaywrightSession {
     }
   }
 
+  async sendPageCdpCommand(
+    input: { cdpUrl: string; targetId?: string; mode?: ConnectionMode },
+    method: string,
+    params?: Record<string, unknown>,
+  ): Promise<any> {
+    const page = await this.getPageForTargetId(input)
+    return await this.withTemporaryPageSession(page, async (session) => await session.send(method, params))
+  }
+
   async connectBrowser(cdpUrl?: string, preferredMode?: ConnectionMode): Promise<BrowserConnection> {
     const relayStatus = this.getRelayStatus()
     const normalizedUrl = normalizeCdpUrl(cdpUrl ?? this.resolveDefaultCdpUrl(relayStatus))

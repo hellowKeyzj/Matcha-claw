@@ -78,6 +78,9 @@ type RelayMock = Pick<
   | 'resolveReadyTarget'
   | 'selectExecutionWindowForTargetIfUnset'
   | 'updateTargetUrl'
+  | 'getCookies'
+  | 'setCookies'
+  | 'clearCookies'
 >
 
 type BrowserControlServiceWithActions = BrowserControlService & {
@@ -92,10 +95,16 @@ type BrowserControlServiceWithActions = BrowserControlService & {
       params: Record<string, unknown>,
       mode?: 'relay' | 'direct-cdp',
     ) => Promise<Record<string, unknown>>
+    sendPageCdpCommand: (
+      input: Record<string, unknown>,
+      method: string,
+      params?: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>
+    getPageForTargetId: (input: Record<string, unknown>) => Promise<{ url: () => string }>
   }
 }
 
-function createRelayMock(overrides: Omit<RelayMock, 'onExtensionConnected'>): BrowserRelayServer {
+function createRelayMock(overrides: Partial<Omit<RelayMock, 'onExtensionConnected'>>): BrowserRelayServer {
   return {
     onExtensionConnected: () => () => {},
     status: {
@@ -124,6 +133,9 @@ function createRelayMock(overrides: Omit<RelayMock, 'onExtensionConnected'>): Br
     }),
     selectExecutionWindowForTargetIfUnset: async () => false,
     updateTargetUrl: () => {},
+    getCookies: async () => [],
+    setCookies: async () => {},
+    clearCookies: async () => {},
     ...overrides,
   } as RelayMock as BrowserRelayServer
 }
@@ -864,6 +876,140 @@ describe('browser relay service', () => {
       targetId: 'direct-target',
       requestedUrl: 'https://example.com/direct-opened',
       url: 'https://example.com/direct-opened',
+    })
+  })
+
+  it('routes relay cookies through native relay commands instead of Playwright context cookies', async () => {
+    const getCookies = vi.fn(async () => [
+      {
+        name: 'sid',
+        value: 'abc',
+        domain: 'example.com',
+        path: '/',
+        expirationDate: 123,
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        session: false,
+      },
+    ])
+
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+        getCookies,
+      }),
+    })
+
+    const legacyCookiesPath = vi.fn()
+    ;(service as any).actions.cookies = legacyCookiesPath
+
+    const result = await service.handleRequest({
+      action: 'cookies',
+      targetId: 'browser-a|tid|target-a',
+      operation: 'get',
+    })
+
+    expect(getCookies).toHaveBeenCalledWith('browser-a|tid|target-a')
+    expect(legacyCookiesPath).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      ok: true,
+      data: [
+        {
+          name: 'sid',
+          value: 'abc',
+          domain: 'example.com',
+          path: '/',
+          expires: 123,
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          session: false,
+        },
+      ],
+    })
+  })
+
+  it('uses page-scoped CDP cookie commands in direct-cdp mode', async () => {
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: false,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [],
+        listTabs: () => [],
+      }),
+    })
+
+    const sendPageCdpCommand = vi.fn(async (_input: Record<string, unknown>, method: string) => {
+      if (method === 'Network.getCookies') {
+        return {
+          cookies: [
+            {
+              name: 'sid',
+              value: 'xyz',
+              domain: 'example.com',
+              path: '/',
+              expires: 456,
+              httpOnly: false,
+              secure: true,
+              sameSite: 'Lax',
+              session: false,
+            },
+          ],
+        }
+      }
+      return {}
+    })
+
+    ;(service as any).resolveDirectEndpoint = async () => ({
+      httpUrl: 'http://127.0.0.1:9222',
+      wsUrl: null,
+      port: 9222,
+      preferredUrl: 'http://127.0.0.1:9222',
+    })
+    ;(service as any).session.getPageForTargetId = vi.fn(async () => ({
+      url: () => 'https://example.com/account',
+    }))
+    ;(service as BrowserControlServiceWithActions).session.sendPageCdpCommand = sendPageCdpCommand
+
+    const result = await service.handleRequest({
+      action: 'cookies',
+      connectionMode: 'direct-cdp',
+      targetId: 'direct-target',
+      operation: 'get',
+    })
+
+    expect(sendPageCdpCommand).toHaveBeenCalledWith(
+      {
+        cdpUrl: 'http://127.0.0.1:9222',
+        targetId: 'direct-target',
+        mode: 'direct-cdp',
+      },
+      'Network.getCookies',
+      { urls: ['https://example.com/account'] },
+    )
+    expect(result).toMatchObject({
+      ok: true,
+      data: [
+        {
+          name: 'sid',
+          value: 'xyz',
+          domain: 'example.com',
+          path: '/',
+          expires: 456,
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Lax',
+          session: false,
+        },
+      ],
     })
   })
 
