@@ -1166,6 +1166,141 @@ describe('openclaw browser relay plugin', () => {
     extensionWs.close()
   })
 
+  it('forwards native cookie commands through relay target routing', async () => {
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKey = randomBytes(32)
+    const extensionWs = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test' },
+    })
+    await waitForOpen(extensionWs)
+
+    const helloAckPromise = waitForMessage(extensionWs)
+    extensionWs.send(
+      JSON.stringify({
+        method: 'Extension.hello',
+        params: {
+          protocolVersion: RELAY_PROTOCOL_VERSION,
+          browserInstanceId: 'browser-a',
+          encryptedSessionKey: encryptSessionKey(sessionKey),
+        },
+      }),
+    )
+    await helloAckPromise
+
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          method: 'forwardCDPEvent',
+          params: {
+            method: 'Target.attachedToTarget',
+            params: {
+              sessionId: 'page-a',
+              tabId: 11,
+              windowId: 1,
+              active: true,
+              targetInfo: {
+                targetId: 'target-a',
+                type: 'page',
+                title: 'Page A',
+                url: 'https://a.example.com/account',
+              },
+            },
+          },
+        }),
+      ),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const getCookiesPromise = server!.getCookies('browser-a|tid|target-a')
+    const getCookiesCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Extension.getCookies',
+    )
+    expect(getCookiesCommand).toMatchObject({
+      method: 'forwardCDPCommand',
+      params: {
+        method: 'Extension.getCookies',
+        params: {
+          targetId: 'target-a',
+        },
+      },
+    })
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: getCookiesCommand.id,
+          result: [{ name: 'sid', value: 'abc' }],
+        }),
+      ),
+    )
+    await expect(getCookiesPromise).resolves.toEqual([{ name: 'sid', value: 'abc' }])
+
+    const setCookiesPromise = server!.setCookies('browser-a|tid|target-a', [
+      { name: 'sid', value: 'next', path: '/' },
+    ])
+    const setCookiesCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Extension.setCookies',
+    )
+    expect(setCookiesCommand).toMatchObject({
+      method: 'forwardCDPCommand',
+      params: {
+        method: 'Extension.setCookies',
+        params: {
+          targetId: 'target-a',
+          cookies: [{ name: 'sid', value: 'next', path: '/' }],
+        },
+      },
+    })
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: setCookiesCommand.id,
+          result: { ok: true },
+        }),
+      ),
+    )
+    await expect(setCookiesPromise).resolves.toBeUndefined()
+
+    const clearCookiesPromise = server!.clearCookies('browser-a|tid|target-a')
+    const clearCookiesCommand = await waitForEncryptedJsonMessageMatching(
+      extensionWs,
+      sessionKey,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Extension.clearCookies',
+    )
+    expect(clearCookiesCommand).toMatchObject({
+      method: 'forwardCDPCommand',
+      params: {
+        method: 'Extension.clearCookies',
+        params: {
+          targetId: 'target-a',
+        },
+      },
+    })
+    extensionWs.send(
+      encryptWireMessage(
+        sessionKey,
+        JSON.stringify({
+          id: clearCookiesCommand.id,
+          result: { ok: true },
+        }),
+      ),
+    )
+    await expect(clearCookiesPromise).resolves.toBeUndefined()
+
+    extensionWs.close()
+  })
+
   it('only exposes top-level page targets through relay tab discovery APIs', async () => {
     await startRelayServer()
 

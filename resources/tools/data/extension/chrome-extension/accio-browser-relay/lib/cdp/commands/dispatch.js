@@ -3,7 +3,7 @@
  *
  * Routes incoming forwardCDPCommand messages to the appropriate handler:
  *   Target.*     → target-ops.js   (tab creation, closing, activation)
- *   Extension.*  → content_script/extension-ops.js (viewport, content, elements, actions)
+ *   Extension.*  → content_script/extension-ops.js / cookie-ops.js (viewport, content, elements, cookies)
  *   Other CDP    → chrome.debugger.sendCommand (transparent forwarding)
  *
  * @param {import('../tabs/manager.js').TabManager} mgr
@@ -15,6 +15,7 @@ import {
   extGetViewportInfo, extEnsureZoom, extCaptureViewport,
   extExtractContent, extMarkElements, extClick, extInput,
 } from '../../content_script/extension-ops.js'
+import { extClearCookies, extGetCookies, extSetCookies } from './cookie-ops.js'
 import { RUNTIME_ENABLE_DELAY, CDP_COMMAND_TIMEOUT, withTimeout } from './utils.js'
 import { createLogger } from '../../logger.js'
 
@@ -145,6 +146,9 @@ export function createDispatcher(mgr) {
         return extCaptureViewport(tabId, params)
       }
       if (method === 'Extension.extractContent') return extExtractContent(tabId)
+      if (method === 'Extension.getCookies') return extGetCookies(tabId)
+      if (method === 'Extension.setCookies') return extSetCookies(tabId, params)
+      if (method === 'Extension.clearCookies') return extClearCookies(tabId)
       if (method === 'Extension.markElements') return extMarkElements(tabId, params)
       if (method === 'Extension.click') return extClick(tabId, params)
       if (method === 'Extension.input') return extInput(tabId, params)

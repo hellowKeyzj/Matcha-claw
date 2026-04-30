@@ -113,6 +113,18 @@ type PlaywrightBrowserLike = {
   }>
 }
 
+type BrowserCookieRecord = {
+  name: string
+  value: string
+  domain?: string
+  path?: string
+  expires?: number
+  httpOnly?: boolean
+  secure?: boolean
+  sameSite?: string
+  session?: boolean
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
@@ -178,6 +190,35 @@ function asCookieArray(value: unknown): BrowserCookieInput[] | undefined {
   }
 
   return cookies
+}
+
+function normalizeBrowserCookieRecord(cookie: unknown): BrowserCookieRecord | null {
+  if (!cookie || typeof cookie !== 'object') return null
+
+  const record = cookie as Record<string, unknown>
+  const name = asString(record.name)
+  const value = typeof record.value === 'string' ? record.value : undefined
+  if (!name || value === undefined) return null
+
+  return {
+    name,
+    value,
+    domain: typeof record.domain === 'string' ? record.domain : undefined,
+    path: typeof record.path === 'string' ? record.path : undefined,
+    expires: typeof record.expires === 'number'
+      ? record.expires
+      : typeof record.expirationDate === 'number'
+        ? record.expirationDate
+        : undefined,
+    httpOnly: typeof record.httpOnly === 'boolean' ? record.httpOnly : undefined,
+    secure: typeof record.secure === 'boolean' ? record.secure : undefined,
+    sameSite: typeof record.sameSite === 'string' ? record.sameSite : undefined,
+    session: typeof record.session === 'boolean'
+      ? record.session
+      : typeof record.expirationDate === 'number'
+        ? false
+        : undefined,
+  }
 }
 
 function sanitizeFileName(input: string): string {
@@ -767,7 +808,7 @@ export class BrowserControlService {
       }
       return {
         ok: true,
-        data: await this.actions.cookies({
+        data: await this.handleCookiesAction({
           cdpUrl,
           targetId,
           mode,
@@ -1067,6 +1108,140 @@ export class BrowserControlService {
     }
 
     return tabs
+  }
+
+  private async handleCookiesAction(input: {
+    cdpUrl: string
+    targetId?: string
+    mode: 'relay' | 'direct-cdp'
+    operation: 'get' | 'set' | 'clear'
+    cookies?: BrowserCookieInput[]
+  }): Promise<unknown> {
+    if (!input.targetId) {
+      throw new Error('targetId is required')
+    }
+
+    if (input.mode === 'relay') {
+      return await this.handleRelayCookiesAction(input.targetId, input.operation, input.cookies)
+    }
+
+    return await this.handleDirectCdpCookiesAction(input, input.targetId)
+  }
+
+  private async handleRelayCookiesAction(
+    targetId: string,
+    operation: 'get' | 'set' | 'clear',
+    cookies?: BrowserCookieInput[],
+  ): Promise<unknown> {
+    if (operation === 'get') {
+      return (await this.options.relay.getCookies(targetId))
+        .map((cookie) => normalizeBrowserCookieRecord(cookie))
+        .filter(Boolean)
+    }
+
+    if (operation === 'set') {
+      if (!cookies?.length) {
+        throw new Error('cookies are required for operation=set')
+      }
+      await this.options.relay.setCookies(targetId, cookies)
+      return { ok: true }
+    }
+
+    await this.options.relay.clearCookies(targetId)
+    return { ok: true }
+  }
+
+  private async handleDirectCdpCookiesAction(
+    input: {
+      cdpUrl: string
+      mode: 'direct-cdp'
+      operation: 'get' | 'set' | 'clear'
+      cookies?: BrowserCookieInput[]
+    },
+    targetId: string,
+  ): Promise<unknown> {
+    const page = await this.session.getPageForTargetId({
+      cdpUrl: input.cdpUrl,
+      targetId,
+      mode: input.mode,
+    })
+    const pageUrl = typeof page?.url === 'function' ? String(page.url()).trim() : ''
+    const currentPageCookieUrl = this.resolveCookieCapableUrl(pageUrl)
+
+    if (input.operation === 'get') {
+      if (!currentPageCookieUrl) {
+        return []
+      }
+      const result = await this.session.sendPageCdpCommand(
+        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        'Network.getCookies',
+        { urls: [currentPageCookieUrl] },
+      )
+      const cookies = Array.isArray(result?.cookies) ? result.cookies : []
+      return cookies.map((cookie) => normalizeBrowserCookieRecord(cookie)).filter(Boolean)
+    }
+
+    if (input.operation === 'set') {
+      if (!input.cookies?.length) {
+        throw new Error('cookies are required for operation=set')
+      }
+
+      const normalizedCookies = input.cookies.map((cookie) => ({
+        name: cookie.name,
+        value: cookie.value,
+        url: cookie.url ?? currentPageCookieUrl ?? undefined,
+        ...(cookie.domain ? { domain: cookie.domain } : {}),
+        ...(cookie.path ? { path: cookie.path } : {}),
+      }))
+      if (normalizedCookies.some((cookie) => !cookie.url && !cookie.domain)) {
+        throw new Error('A cookie url is required when the current page has no cookie-capable URL.')
+      }
+
+      await this.session.sendPageCdpCommand(
+        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        'Network.setCookies',
+        { cookies: normalizedCookies },
+      )
+      return { ok: true }
+    }
+
+    if (!currentPageCookieUrl) {
+      return { ok: true }
+    }
+
+    const existing = await this.session.sendPageCdpCommand(
+      { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+      'Network.getCookies',
+      { urls: [currentPageCookieUrl] },
+    )
+    const cookies = Array.isArray(existing?.cookies) ? existing.cookies : []
+    for (const cookie of cookies) {
+      if (!cookie || typeof cookie !== 'object') continue
+      const record = cookie as Record<string, unknown>
+      const name = typeof record.name === 'string' ? record.name : ''
+      if (!name) continue
+      await this.session.sendPageCdpCommand(
+        { cdpUrl: input.cdpUrl, targetId, mode: input.mode },
+        'Network.deleteCookies',
+        {
+          name,
+          ...(typeof record.domain === 'string' ? { domain: record.domain } : {}),
+          ...(typeof record.path === 'string' ? { path: record.path } : {}),
+        },
+      )
+    }
+    return { ok: true }
+  }
+
+  private resolveCookieCapableUrl(url: string): string | null {
+    try {
+      const parsed = new URL(url)
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+        ? parsed.toString()
+        : null
+    } catch {
+      return null
+    }
   }
 
   private syncRelayCurrentTarget(): void {

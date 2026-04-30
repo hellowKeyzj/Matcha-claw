@@ -495,30 +495,6 @@ export class PlaywrightActions {
     return { targetId: input.targetId, requests }
   }
 
-  async cookies(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; operation: 'get' | 'set' | 'clear'; cookies?: Array<{ name: string; value: string; url?: string; domain?: string; path?: string }> }): Promise<unknown> {
-    const context = (await this.session.getPageForTargetId(input)).context()
-    if (input.operation === 'get') {
-      return await context.cookies()
-    }
-    if (input.operation === 'set') {
-      if (!input.cookies?.length) {
-        throw new Error('cookies are required for operation=set')
-      }
-      await context.addCookies(
-        input.cookies.map((cookie) => ({
-          name: cookie.name,
-          value: cookie.value,
-          url: cookie.url,
-          domain: cookie.domain,
-          path: cookie.path ?? '/',
-        })),
-      )
-      return { ok: true }
-    }
-    await context.clearCookies()
-    return { ok: true }
-  }
-
   async storage(input: { cdpUrl: string; targetId?: string; mode?: 'relay' | 'direct-cdp'; storageType: 'local' | 'session'; operation: 'get' | 'set' | 'clear'; key?: string; value?: string }): Promise<unknown> {
     const page = await this.session.getPageForTargetId(input)
     const storageName: BrowserStorageHandle = input.storageType === 'session' ? 'sessionStorage' : 'localStorage'
