@@ -36,7 +36,7 @@ interface CLIContext {
   scopeManager: MemoryScopeManager;
   migrator: MemoryMigrator;
   embedder?: import("./src/embedder.js").Embedder;
-  llmClient?: LlmClient;
+  getLlmClient?: () => Promise<LlmClient | null>;
   pluginId?: string;
   pluginConfig?: Record<string, unknown>;
   oauthTestHooks?: {
@@ -1582,7 +1582,7 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
       try {
         const upgrader = createMemoryUpgrader(
           context.store,
-          options.llm === false ? null : (context.llmClient ?? null),
+          options.llm === false ? null : (context.getLlmClient ? await context.getLlmClient() : null),
           { log: console.log },
         );
 

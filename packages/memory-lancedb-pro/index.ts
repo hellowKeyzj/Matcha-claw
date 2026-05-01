@@ -3,7 +3,7 @@
  * Enhanced LanceDB-backed long-term memory with hybrid retrieval and multi-scope isolation
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { readFile, readdir, writeFile, mkdir, appendFile, unlink, stat } from "node:fs/promises";
@@ -297,17 +297,114 @@ function resolveFirstApiKey(apiKey: string | string[] | undefined): string {
   return resolveEnvVars(key);
 }
 
-function resolveLlmApiKey(config: PluginConfig): string | undefined {
-  if (config.llm?.apiKey) {
-    return resolveEnvVars(config.llm.apiKey);
+interface ResolvedOpenClawDefaultLlmConfig {
+  provider: string;
+  model: string;
+  baseURL?: string;
+}
+
+interface ResolvedSmartExtractionLlmConfig {
+  auth: "api-key" | "oauth";
+  apiKey?: string;
+  model: string;
+  baseURL?: string;
+  oauthProvider?: string;
+  oauthPath?: string;
+  timeoutMs: number;
+}
+
+function resolveOpenClawDefaultLlmConfig(config: OpenClawConfig): ResolvedOpenClawDefaultLlmConfig | undefined {
+  const parsed = config as Record<string, unknown>;
+  const agents = parsed.agents as Record<string, unknown> | undefined;
+  const defaults = agents?.defaults as Record<string, unknown> | undefined;
+  const modelConfig = defaults?.model as Record<string, unknown> | undefined;
+  const defaultModelRef = asNonEmptyString(modelConfig?.primary);
+  if (!defaultModelRef) {
+    return undefined;
   }
 
-  if (config.embedding.apiKey) {
-    return resolveFirstApiKey(config.embedding.apiKey);
+  const { provider, model } = splitProviderModel(defaultModelRef);
+  if (!provider || !model) {
+    throw new Error(`OpenClaw default model must use provider/model format: ${defaultModelRef}`);
   }
 
-  const envKey = process.env.OPENAI_API_KEY?.trim();
-  return envKey ? envKey : undefined;
+  const models = parsed.models as Record<string, unknown> | undefined;
+  const providers = models?.providers as Record<string, unknown> | undefined;
+  const providerEntry = (
+    providers?.[provider]
+    && typeof providers[provider] === "object"
+    && !Array.isArray(providers[provider])
+  )
+    ? providers[provider] as Record<string, unknown>
+    : {};
+
+  const providerApi = asNonEmptyString(providerEntry.api);
+  if (
+    providerApi
+    && providerApi !== "openai-completions"
+    && providerApi !== "openai-responses"
+  ) {
+    throw new Error(
+      `OpenClaw default model provider "${provider}" uses unsupported API "${providerApi}" for smart extraction`,
+    );
+  }
+
+  return {
+    provider,
+    model,
+    baseURL: asNonEmptyString(providerEntry.baseUrl) ?? asNonEmptyString(providerEntry.baseURL),
+  };
+}
+
+async function resolveSmartExtractionLlmConfig(
+  api: Pick<OpenClawPluginApi, "config" | "resolvePath" | "runtime">,
+  config: PluginConfig,
+): Promise<ResolvedSmartExtractionLlmConfig> {
+  const llmAuth = config.llm?.auth || "api-key";
+  const shouldResolveOpenClawDefaultLlm = llmAuth !== "oauth" && (
+    !config.llm?.model
+    || (!config.llm?.baseURL && !config.embedding.baseURL)
+    || (!config.llm?.apiKey && !config.embedding.apiKey && !process.env.OPENAI_API_KEY?.trim())
+  );
+  const openClawDefaultLlm = shouldResolveOpenClawDefaultLlm
+    ? resolveOpenClawDefaultLlmConfig(api.config)
+    : undefined;
+
+  if (llmAuth === "oauth") {
+    return {
+      auth: llmAuth,
+      model: config.llm?.model || "openai/gpt-oss-120b",
+      baseURL: config.llm?.baseURL ? resolveEnvVars(config.llm.baseURL) : undefined,
+      oauthProvider: config.llm?.oauthProvider,
+      oauthPath: resolveOptionalPathWithEnv(api, config.llm?.oauthPath, ".memory-lancedb-pro/oauth.json"),
+      timeoutMs: resolveLlmTimeoutMs(config),
+    };
+  }
+
+  let inheritedApiKey: string | undefined;
+  if (!config.llm?.apiKey && !config.embedding.apiKey && openClawDefaultLlm?.provider) {
+    const auth = await api.runtime.modelAuth.resolveApiKeyForProvider({
+      provider: openClawDefaultLlm.provider,
+      cfg: api.config,
+    });
+    inheritedApiKey = auth.apiKey?.trim() || undefined;
+  }
+
+  return {
+    auth: llmAuth,
+    apiKey: config.llm?.apiKey
+      ? resolveEnvVars(config.llm.apiKey)
+      : config.embedding.apiKey
+        ? resolveFirstApiKey(config.embedding.apiKey)
+        : inheritedApiKey
+          ?? (process.env.OPENAI_API_KEY?.trim() || undefined),
+    model: config.llm?.model || openClawDefaultLlm?.model || "openai/gpt-oss-120b",
+    baseURL: config.llm?.baseURL
+      ? resolveEnvVars(config.llm.baseURL)
+      : openClawDefaultLlm?.baseURL
+        ?? config.embedding.baseURL,
+    timeoutMs: resolveLlmTimeoutMs(config),
+  };
 }
 
 function resolveOptionalPathWithEnv(
@@ -1709,7 +1806,8 @@ interface PluginSingletonState {
   retriever: ReturnType<typeof createRetriever>;
   scopeManager: ReturnType<typeof createScopeManager>;
   migrator: ReturnType<typeof createMigrator>;
-  smartExtractor: SmartExtractor | null;
+  getSmartExtractionLlmClient: () => Promise<import("./src/llm-client.js").LlmClient | null>;
+  getSmartExtractor: () => Promise<SmartExtractor | null>;
   extractionRateLimiter: ReturnType<typeof createExtractionRateLimiter>;
   // Session Maps — persist across scope refreshes instead of being recreated
   reflectionErrorStateBySession: Map<string, ReflectionErrorState>;
@@ -1778,69 +1876,115 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   }
 
   const migrator = createMigrator(store);
-
+  let smartExtractionLlmConfig: ResolvedSmartExtractionLlmConfig | null = null;
+  let smartExtractionLlmClient: import("./src/llm-client.js").LlmClient | null = null;
+  let smartExtractionLlmClientPromise: Promise<import("./src/llm-client.js").LlmClient | null> | null = null;
   let smartExtractor: SmartExtractor | null = null;
-  if (config.smartExtraction !== false) {
-    try {
-      const llmAuth = config.llm?.auth || "api-key";
-      const llmApiKey = llmAuth === "oauth"
-        ? undefined
-        : resolveLlmApiKey(config);
-      const llmBaseURL = llmAuth === "oauth"
-        ? (config.llm?.baseURL ? resolveEnvVars(config.llm.baseURL) : undefined)
-        : config.llm?.baseURL
-          ? resolveEnvVars(config.llm.baseURL)
-          : config.embedding.baseURL;
-      const llmModel = config.llm?.model || "openai/gpt-oss-120b";
-      const llmOauthPath = llmAuth === "oauth"
-        ? resolveOptionalPathWithEnv(api, config.llm?.oauthPath, ".memory-lancedb-pro/oauth.json")
-        : undefined;
-      const llmOauthProvider = llmAuth === "oauth" ? config.llm?.oauthProvider : undefined;
-      const llmTimeoutMs = resolveLlmTimeoutMs(config);
+  let smartExtractorPromise: Promise<SmartExtractor | null> | null = null;
+  let noiseBank: NoisePrototypeBank | null = null;
 
-      const llmClient = createLlmClient({
-        auth: llmAuth,
-        apiKey: llmApiKey,
-        model: llmModel,
-        baseURL: llmBaseURL,
-        oauthProvider: llmOauthProvider,
-        oauthPath: llmOauthPath,
-        timeoutMs: llmTimeoutMs,
-        log: (msg: string) => api.logger.debug(msg),
-        warnLog: (msg: string) => api.logger.warn(msg),
-      });
-
-      const noiseBank = new NoisePrototypeBank((msg: string) => api.logger.debug(msg));
+  const getNoiseBank = (): NoisePrototypeBank => {
+    if (!noiseBank) {
+      noiseBank = new NoisePrototypeBank((msg: string) => api.logger.debug(msg));
       noiseBank.init(embedder).catch((err) =>
         api.logger.debug(`memory-lancedb-pro: noise bank init: ${String(err)}`),
       );
-
-      const admissionRejectionAuditWriter = createAdmissionRejectionAuditWriter(config, resolvedDbPath, api);
-
-      smartExtractor = new SmartExtractor(store, embedder, llmClient, {
-        user: "User",
-        extractMinMessages: config.extractMinMessages ?? 4,
-        extractMaxChars: config.extractMaxChars ?? 8000,
-        defaultScope: config.scopes?.default ?? "global",
-        workspaceBoundary: config.workspaceBoundary,
-        admissionControl: config.admissionControl,
-        onAdmissionRejected: admissionRejectionAuditWriter ?? undefined,
-        log: (msg: string) => api.logger.info(msg),
-        debugLog: (msg: string) => api.logger.debug(msg),
-        noiseBank,
-      });
-
-      (isCliMode() ? api.logger.debug : api.logger.info)(
-        "memory-lancedb-pro: smart extraction enabled (LLM model: "
-        + llmModel
-        + ", timeoutMs: "
-        + llmTimeoutMs
-        + ", noise bank: ON)",
-      );
-    } catch (err) {
-      api.logger.warn(`memory-lancedb-pro: smart extraction init failed, falling back to regex: ${String(err)}`);
     }
-  }
+    return noiseBank;
+  };
+
+  const admissionRejectionAuditWriter = createAdmissionRejectionAuditWriter(config, resolvedDbPath, api);
+
+  const getSmartExtractionLlmClient = async (): Promise<import("./src/llm-client.js").LlmClient | null> => {
+    if (config.smartExtraction === false) {
+      return null;
+    }
+    if (smartExtractionLlmClient) {
+      return smartExtractionLlmClient;
+    }
+    if (smartExtractionLlmClientPromise) {
+      return await smartExtractionLlmClientPromise;
+    }
+
+    smartExtractionLlmClientPromise = (async () => {
+      try {
+        const llmConfig = await resolveSmartExtractionLlmConfig(api, config);
+        smartExtractionLlmConfig = llmConfig;
+        smartExtractionLlmClient = createLlmClient({
+          auth: llmConfig.auth,
+          apiKey: llmConfig.apiKey,
+          model: llmConfig.model,
+          baseURL: llmConfig.baseURL,
+          oauthProvider: llmConfig.oauthProvider,
+          oauthPath: llmConfig.oauthPath,
+          timeoutMs: llmConfig.timeoutMs,
+          log: (msg: string) => api.logger.debug(msg),
+          warnLog: (msg: string) => api.logger.warn(msg),
+        });
+        return smartExtractionLlmClient;
+      } catch (err) {
+        smartExtractionLlmClientPromise = null;
+        throw err;
+      }
+    })();
+
+    return await smartExtractionLlmClientPromise;
+  };
+
+  const getSmartExtractor = async (): Promise<SmartExtractor | null> => {
+    if (config.smartExtraction === false) {
+      return null;
+    }
+    if (smartExtractor) {
+      return smartExtractor;
+    }
+    if (smartExtractorPromise) {
+      return await smartExtractorPromise;
+    }
+
+    smartExtractorPromise = (async () => {
+      try {
+        const llmClient = await getSmartExtractionLlmClient();
+        if (!llmClient) {
+          return null;
+        }
+
+        const extractor = new SmartExtractor(store, embedder, llmClient, {
+          user: "User",
+          extractMinMessages: config.extractMinMessages ?? 4,
+          extractMaxChars: config.extractMaxChars ?? 8000,
+          defaultScope: config.scopes?.default ?? "global",
+          workspaceBoundary: config.workspaceBoundary,
+          admissionControl: config.admissionControl,
+          onAdmissionRejected: admissionRejectionAuditWriter ?? undefined,
+          log: (msg: string) => api.logger.info(msg),
+          debugLog: (msg: string) => api.logger.debug(msg),
+          noiseBank: getNoiseBank(),
+        });
+
+        const llmConfig = smartExtractionLlmConfig;
+        (isCliMode() ? api.logger.debug : api.logger.info)(
+          "memory-lancedb-pro: smart extraction enabled (LLM model: "
+          + (llmConfig?.model || "unknown")
+          + ", timeoutMs: "
+          + (llmConfig?.timeoutMs ?? resolveLlmTimeoutMs(config))
+          + ", noise bank: ON)",
+        );
+
+        smartExtractor = extractor;
+        return extractor;
+      } catch (err) {
+        smartExtractionLlmConfig = null;
+        smartExtractionLlmClient = null;
+        smartExtractionLlmClientPromise = null;
+        smartExtractorPromise = null;
+        api.logger.warn(`memory-lancedb-pro: smart extraction init failed, falling back to regex: ${String(err)}`);
+        return null;
+      }
+    })();
+
+    return await smartExtractorPromise;
+  };
 
   const extractionRateLimiter = createExtractionRateLimiter({
     maxExtractionsPerHour: config.extractionThrottle?.maxExtractionsPerHour,
@@ -1873,7 +2017,8 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     retriever,
     scopeManager,
     migrator,
-    smartExtractor,
+    getSmartExtractionLlmClient,
+    getSmartExtractor,
     extractionRateLimiter,
     reflectionErrorStateBySession,
     reflectionDerivedBySession,
@@ -1918,7 +2063,8 @@ const memoryLanceDBProPlugin = {
       retriever,
       scopeManager,
       migrator,
-      smartExtractor,
+      getSmartExtractionLlmClient,
+      getSmartExtractor,
       decayEngine,
       tierManager,
       extractionRateLimiter,
@@ -2144,7 +2290,7 @@ const memoryLanceDBProPlugin = {
 
     const logReg = isCliMode() ? api.logger.debug : api.logger.info;
     logReg(
-      `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"}, smartExtraction: ${smartExtractor ? 'ON' : 'OFF'})`
+      `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"}, smartExtraction: ${config.smartExtraction !== false ? "ENABLED" : "OFF"})`
     );
     logReg(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
@@ -2294,36 +2440,7 @@ const memoryLanceDBProPlugin = {
         scopeManager,
         migrator,
         embedder,
-        llmClient: smartExtractor ? (() => {
-          try {
-            const llmAuth = config.llm?.auth || "api-key";
-            const llmApiKey = llmAuth === "oauth"
-              ? undefined
-              : resolveLlmApiKey(config);
-            const llmBaseURL = llmAuth === "oauth"
-              ? (config.llm?.baseURL ? resolveEnvVars(config.llm.baseURL) : undefined)
-              : config.llm?.baseURL
-                ? resolveEnvVars(config.llm.baseURL)
-                : config.embedding.baseURL;
-            const llmOauthPath = llmAuth === "oauth"
-              ? resolveOptionalPathWithEnv(api, config.llm?.oauthPath, ".memory-lancedb-pro/oauth.json")
-              : undefined;
-            const llmOauthProvider = llmAuth === "oauth"
-              ? config.llm?.oauthProvider
-              : undefined;
-            const llmTimeoutMs = resolveLlmTimeoutMs(config);
-            return createLlmClient({
-              auth: llmAuth,
-              apiKey: llmApiKey,
-              model: config.llm?.model || "openai/gpt-oss-120b",
-              baseURL: llmBaseURL,
-              oauthProvider: llmOauthProvider,
-              oauthPath: llmOauthPath,
-              timeoutMs: llmTimeoutMs,
-              log: (msg: string) => api.logger.debug(msg),
-            });
-          } catch { return undefined; }
-        })() : undefined,
+        getLlmClient: getSmartExtractionLlmClient,
       }),
       { commands: ["memory-pro"] },
     );
@@ -2863,7 +2980,7 @@ const memoryLanceDBProPlugin = {
             );
           }
           api.logger.debug(
-            `memory-lancedb-pro: auto-capture collected ${texts.length} text(s) for agent ${agentId} (minMessages=${minMessages}, smartExtraction=${smartExtractor ? "on" : "off"})`,
+            `memory-lancedb-pro: auto-capture collected ${texts.length} text(s) for agent ${agentId} (minMessages=${minMessages}, smartExtraction=${config.smartExtraction !== false ? "enabled" : "off"})`,
           );
           if (texts.length === 0) {
             api.logger.debug(
@@ -2911,46 +3028,53 @@ const memoryLanceDBProPlugin = {
           // Rate limiter charged AFTER successful extraction, not before,
           // so no-op sessions don't consume the hourly quota.
           // ----------------------------------------------------------------
-          if (smartExtractor) {
-            // Pre-filter: embedding-based noise detection (language-agnostic)
-            const cleanTexts = await smartExtractor.filterNoiseByEmbedding(texts);
-            if (cleanTexts.length === 0) {
+          if (config.smartExtraction !== false) {
+            const smartExtractor = await getSmartExtractor();
+            if (!smartExtractor) {
               api.logger.debug(
-                `memory-lancedb-pro: all texts filtered as embedding noise for agent ${agentId}`,
-              );
-              return;
-            }
-            if (cleanTexts.length >= minMessages) {
-              api.logger.debug(
-                `memory-lancedb-pro: auto-capture running smart extraction for agent ${agentId} (${cleanTexts.length} clean texts >= ${minMessages})`,
-              );
-              const conversationText = cleanTexts.join("\n");
-              const stats = await smartExtractor.extractAndPersist(
-                conversationText, sessionKey,
-                { scope: defaultScope, scopeFilter: accessibleScopes },
-              );
-              // Charge rate limiter only after successful extraction
-              extractionRateLimiter.recordExtraction();
-              if (stats.created > 0 || stats.merged > 0) {
-                api.logger.info(
-                  `memory-lancedb-pro: smart-extracted ${stats.created} created, ${stats.merged} merged, ${stats.skipped} skipped for agent ${agentId}`
-                );
-                return; // Smart extraction handled everything
-              }
-
-              if ((stats.boundarySkipped ?? 0) > 0) {
-                api.logger.info(
-                  `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; continuing to regex fallback for non-boundary texts`,
-                );
-              }
-
-              api.logger.info(
-                `memory-lancedb-pro: smart extraction produced no persisted memories for agent ${agentId} (created=${stats.created}, merged=${stats.merged}, skipped=${stats.skipped}); falling back to regex capture`,
+                `memory-lancedb-pro: smart extraction unavailable for agent ${agentId}; using regex fallback`,
               );
             } else {
-              api.logger.debug(
-                `memory-lancedb-pro: auto-capture skipped smart extraction for agent ${agentId} (${cleanTexts.length} < ${minMessages})`,
-              );
+              // Pre-filter: embedding-based noise detection (language-agnostic)
+              const cleanTexts = await smartExtractor.filterNoiseByEmbedding(texts);
+              if (cleanTexts.length === 0) {
+                api.logger.debug(
+                  `memory-lancedb-pro: all texts filtered as embedding noise for agent ${agentId}`,
+                );
+                return;
+              }
+              if (cleanTexts.length >= minMessages) {
+                api.logger.debug(
+                  `memory-lancedb-pro: auto-capture running smart extraction for agent ${agentId} (${cleanTexts.length} clean texts >= ${minMessages})`,
+                );
+                const conversationText = cleanTexts.join("\n");
+                const stats = await smartExtractor.extractAndPersist(
+                  conversationText, sessionKey,
+                  { scope: defaultScope, scopeFilter: accessibleScopes },
+                );
+                // Charge rate limiter only after successful extraction
+                extractionRateLimiter.recordExtraction();
+                if (stats.created > 0 || stats.merged > 0) {
+                  api.logger.info(
+                    `memory-lancedb-pro: smart-extracted ${stats.created} created, ${stats.merged} merged, ${stats.skipped} skipped for agent ${agentId}`
+                  );
+                  return; // Smart extraction handled everything
+                }
+
+                if ((stats.boundarySkipped ?? 0) > 0) {
+                  api.logger.info(
+                    `memory-lancedb-pro: smart extraction skipped ${stats.boundarySkipped} USER.md-exclusive candidate(s) for agent ${agentId}; continuing to regex fallback for non-boundary texts`,
+                  );
+                }
+
+                api.logger.info(
+                  `memory-lancedb-pro: smart extraction produced no persisted memories for agent ${agentId} (created=${stats.created}, merged=${stats.merged}, skipped=${stats.skipped}); falling back to regex capture`,
+                );
+              } else {
+                api.logger.debug(
+                  `memory-lancedb-pro: auto-capture skipped smart extraction for agent ${agentId} (${cleanTexts.length} < ${minMessages})`,
+                );
+              }
             }
           }
 
@@ -3853,6 +3977,8 @@ const memoryLanceDBProPlugin = {
     api.registerService({
       id: "memory-lancedb-pro",
       start: async () => {
+        await getSmartExtractor();
+
         // IMPORTANT: Do not block gateway startup on external network calls.
         // If embedding/retrieval tests hang (bad network / slow provider), the gateway
         // may never bind its HTTP port, causing restart timeouts.

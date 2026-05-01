@@ -34,6 +34,7 @@ export const CI_TEST_MANIFEST = [
   { group: "core-regression", runner: "node", file: "test/temporal-facts.test.mjs" },
   { group: "core-regression", runner: "node", file: "test/memory-update-supersede.test.mjs" },
   { group: "llm-clients-and-auth", runner: "node", file: "test/memory-upgrader-diagnostics.test.mjs" },
+  { group: "llm-clients-and-auth", runner: "node", file: "test/openclaw-default-llm-resolution.test.mjs", args: ["--test"] },
   { group: "llm-clients-and-auth", runner: "node", file: "test/llm-api-key-client.test.mjs", args: ["--test"] },
   { group: "llm-clients-and-auth", runner: "node", file: "test/llm-oauth-client.test.mjs", args: ["--test"] },
   { group: "llm-clients-and-auth", runner: "node", file: "test/cli-oauth-login.test.mjs", args: ["--test"] },

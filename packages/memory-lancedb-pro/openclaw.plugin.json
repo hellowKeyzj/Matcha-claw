@@ -941,12 +941,12 @@
       "label": "LLM API Key",
       "sensitive": true,
       "placeholder": "sk-... or ${GROQ_API_KEY}",
-      "help": "API key for LLM used by smart memory extraction (defaults to embedding.apiKey when available; set this explicitly when using embedding.provider=local-minilm)"
+      "help": "API key for the smart-extraction LLM. If omitted, the plugin first falls back to embedding.apiKey, then to OpenClaw's default model source when available."
     },
     "llm.model": {
       "label": "LLM Model",
       "placeholder": "openai/gpt-oss-120b",
-      "help": "OpenAI-compatible chat model for memory extraction/summary"
+      "help": "OpenAI-compatible chat model for memory extraction/summary. If omitted, the plugin inherits OpenClaw's default model on startup when available."
     },
     "llm.baseURL": {
       "label": "LLM Base URL",
@@ -1341,7 +1341,7 @@
     },
     "llm.auth": {
       "label": "LLM Auth",
-      "help": "api-key uses llm.apiKey or falls back to embedding.apiKey when present. oauth uses a plugin-scoped OAuth token file by default.",
+      "help": "api-key uses llm.apiKey, then embedding.apiKey, then OpenClaw's default model source when available. oauth uses a plugin-scoped OAuth token file by default.",
       "advanced": true
     },
     "llm.oauthProvider": {
