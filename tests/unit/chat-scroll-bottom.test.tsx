@@ -51,6 +51,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -103,25 +104,25 @@ function setupCommonStores() {
   useChatStore.setState({
     loadedSessions: {
       [sessionKey]: buildSessionRecord({
+        messages: [
+          {
+            role: 'user',
+            content: 'hello',
+            timestamp: now / 1000,
+            id: 'user-1',
+          },
+          {
+            ...createStreamingAssistantMessage('first chunk', now / 1000),
+          },
+        ],
         window: createViewportWindowState({
-          messages: [
-            {
-              role: 'user',
-              content: 'hello',
-              timestamp: now / 1000,
-              id: 'user-1',
-            },
-            {
-              ...createStreamingAssistantMessage('first chunk', now / 1000),
-            },
-          ],
           totalMessageCount: 2,
           windowStartOffset: 0,
           windowEndOffset: 2,
           isAtLatest: true,
         }),
         meta: {
-          ready: true,
+          historyStatus: 'ready',
           lastActivityAt: now,
         },
         runtime: {
@@ -265,12 +266,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
+            messages: [
+              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
+            ],
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              messages: [
-                useChatStore.getState().loadedSessions['agent:test:main']!.window.messages[0]!,
-                createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-              ],
               totalMessageCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
@@ -298,28 +299,28 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'tail message',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'tail message',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-            ],
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
           runtime: {
@@ -362,20 +363,20 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('锁底时发送中的 user overlay 出现后应立即贴底', async () => {
+  it('锁底时发送中的本地 user message 追加后应立即贴底', async () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': {
           ...useChatStore.getState().loadedSessions['agent:test:main'],
+          messages: [
+            {
+              role: 'user',
+              content: 'hello',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-            ],
             totalMessageCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
@@ -386,7 +387,6 @@ describe('chat 主线程滚动锁', () => {
             sending: true,
             streamingMessageId: null,
             pendingFinal: false,
-            pendingUserMessage: null,
           },
         },
       },
@@ -411,15 +411,23 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              pendingUserMessage: {
+            messages: [
+              ...useChatStore.getState().loadedSessions['agent:test:main']!.messages,
+              {
                 id: 'pending-user-2',
                 role: 'user',
                 content: 'pending send',
                 timestamp: Date.now() / 1000,
+                status: 'sending',
               },
-            },
+            ],
+            window: createViewportWindowState({
+              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
+              totalMessageCount: 2,
+              windowStartOffset: 0,
+              windowEndOffset: 2,
+              isAtLatest: true,
+            }),
           },
         },
       } as never);
@@ -453,28 +461,28 @@ describe('chat 主线程滚动锁', () => {
       useChatStore.setState({
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'older message',
+                timestamp: Date.now() / 1000,
+                id: 'user-1',
+              },
+              {
+                role: 'assistant',
+                content: 'latest message',
+                timestamp: Date.now() / 1000,
+                id: 'assistant-1',
+              },
+            ],
             window: createViewportWindowState({
-              messages: [
-                {
-                  role: 'user',
-                  content: 'older message',
-                  timestamp: Date.now() / 1000,
-                  id: 'user-1',
-                },
-                {
-                  role: 'assistant',
-                  content: 'latest message',
-                  timestamp: Date.now() / 1000,
-                  id: 'assistant-1',
-                },
-              ],
               totalMessageCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
             }),
             meta: {
-              ready: true,
+              historyStatus: 'ready',
               lastActivityAt: Date.now(),
             },
             runtime: useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
@@ -515,12 +523,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
+            messages: [
+              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
+            ],
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              messages: [
-                useChatStore.getState().loadedSessions['agent:test:main']!.window.messages[0]!,
-                createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-              ],
               totalMessageCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
@@ -545,34 +553,34 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'message-1',
+              timestamp: 1,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-2',
+              timestamp: 2,
+              id: 'assistant-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-3',
+              timestamp: 3,
+              id: 'assistant-2',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'message-1',
-                timestamp: 1,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-2',
-                timestamp: 2,
-                id: 'assistant-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-3',
-                timestamp: 3,
-                id: 'assistant-2',
-              },
-            ],
             totalMessageCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -705,12 +713,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
+            messages: [
+              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
+            ],
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              messages: [
-                useChatStore.getState().loadedSessions['agent:test:main']!.window.messages[0]!,
-                createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-              ],
               totalMessageCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
@@ -767,12 +775,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
+            messages: [
+              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
+            ],
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              messages: [
-                useChatStore.getState().loadedSessions['agent:test:main']!.window.messages[0]!,
-                createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-              ],
               totalMessageCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
@@ -793,11 +801,11 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('正文二次渲染只导致高度变化时，不应再次自动贴底', async () => {
-    useChatStore.setState({
-      loadedSessions: {
-        'agent:test:main': buildSessionRecord({
-          window: createViewportWindowState({
+  it('非 latest 窗口首次点击回到底部时，不应先停在旧位置再等下一帧贴底', async () => {
+    const jumpToLatest = vi.fn().mockImplementation(async () => {
+      useChatStore.setState({
+        loadedSessions: {
+          'agent:test:main': buildSessionRecord({
             messages: [
               {
                 role: 'user',
@@ -807,18 +815,122 @@ describe('chat 主线程滚动锁', () => {
               },
               {
                 role: 'assistant',
-                content: 'assistant body',
+                content: 'latest message',
                 timestamp: Date.now() / 1000,
                 id: 'assistant-1',
               },
             ],
+            window: createViewportWindowState({
+              totalMessageCount: 2,
+              windowStartOffset: 0,
+              windowEndOffset: 2,
+              hasMore: false,
+              hasNewer: false,
+              isAtLatest: true,
+            }),
+            meta: {
+              historyStatus: 'ready',
+              lastActivityAt: Date.now(),
+            },
+          }),
+        },
+      } as never);
+    });
+    useChatStore.setState({
+      loadedSessions: {
+        'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'latest message',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
+          window: createViewportWindowState({
+            totalMessageCount: 2,
+            windowStartOffset: 0,
+            windowEndOffset: 1,
+            hasMore: false,
+            hasNewer: true,
+            isAtLatest: false,
+          }),
+          meta: {
+            historyStatus: 'ready',
+            lastActivityAt: Date.now(),
+          },
+        }),
+      },
+      jumpToLatest,
+    } as never);
+
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      rafQueue.push(callback);
+      return rafQueue.length;
+    }));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    try {
+      const { container } = renderChat();
+      const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+      const metrics = {
+        scrollHeight: 980,
+        clientHeight: 320,
+        scrollTop: 420,
+      };
+      installViewportMetrics(viewport, metrics);
+
+      act(() => {
+        triggerResizeObserver?.();
+        fireEvent.wheel(viewport, { deltaY: -120 });
+        metrics.scrollTop = 420;
+        fireEvent.scroll(viewport);
+      });
+
+      const jumpButton = await screen.findByRole('button', { name: 'Jump to bottom' });
+      fireEvent.click(jumpButton);
+
+      expect(jumpToLatest).toHaveBeenCalledWith('agent:test:main');
+      expect(metrics.scrollTop).toBe(660);
+      expect(rafQueue.length).toBeGreaterThan(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('正文二次渲染只导致高度变化时，不应再次自动贴底', async () => {
+    useChatStore.setState({
+      loadedSessions: {
+        'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'assistant body',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
+          window: createViewportWindowState({
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -856,28 +968,28 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'assistant body',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'assistant body',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-            ],
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -915,28 +1027,28 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'assistant body',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'older message',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'assistant body',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-            ],
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -980,34 +1092,34 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'message-1',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-2',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-3',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-2',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'message-1',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-2',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-3',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-2',
-              },
-            ],
             totalMessageCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -1065,28 +1177,28 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'hello',
+              timestamp: Date.now() / 1000,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'first chunk',
+              timestamp: Date.now() / 1000,
+              id: 'assistant-1',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'hello',
-                timestamp: Date.now() / 1000,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'first chunk',
-                timestamp: Date.now() / 1000,
-                id: 'assistant-1',
-              },
-            ],
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
           runtime: {
@@ -1148,27 +1260,45 @@ describe('chat 主线程滚动锁', () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'message-0',
+              timestamp: 0,
+              id: 'user-0',
+            },
+            {
+              role: 'assistant',
+              content: 'message-0.5',
+              timestamp: 0.5,
+              id: 'assistant-0',
+            },
+            {
+              role: 'user',
+              content: 'older message',
+              timestamp: 0.75,
+              id: 'user-older',
+            },
+            {
+              role: 'user',
+              content: 'message-1',
+              timestamp: 1,
+              id: 'user-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-2',
+              timestamp: 2,
+              id: 'assistant-1',
+            },
+            {
+              role: 'assistant',
+              content: 'message-3',
+              timestamp: 3,
+              id: 'assistant-2',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'message-1',
-                timestamp: 1,
-                id: 'user-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-2',
-                timestamp: 2,
-                id: 'assistant-1',
-              },
-              {
-                role: 'assistant',
-                content: 'message-3',
-                timestamp: 3,
-                id: 'assistant-2',
-              },
-            ],
             totalMessageCount: 6,
             windowStartOffset: 3,
             windowEndOffset: 6,
@@ -1176,7 +1306,7 @@ describe('chat 主线程滚动锁', () => {
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
@@ -1216,41 +1346,53 @@ describe('chat 主线程滚动锁', () => {
       useChatStore.setState({
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'message-0',
+                timestamp: 0,
+                id: 'user-0',
+              },
+              {
+                role: 'assistant',
+                content: 'message-0.5',
+                timestamp: 0.5,
+                id: 'assistant-0',
+              },
+              {
+                role: 'user',
+                content: 'older message',
+                timestamp: 0.75,
+                id: 'user-older',
+              },
+              {
+                role: 'user',
+                content: 'message-1',
+                timestamp: 1,
+                id: 'user-1',
+              },
+              {
+                role: 'assistant',
+                content: 'message-2',
+                timestamp: 2,
+                id: 'assistant-1',
+              },
+              {
+                role: 'assistant',
+                content: 'message-3',
+                timestamp: 3,
+                id: 'assistant-2',
+              },
+            ],
             window: createViewportWindowState({
-              messages: [
-                {
-                  role: 'user',
-                  content: 'older message',
-                  timestamp: 0,
-                  id: 'user-0',
-                },
-                {
-                  role: 'user',
-                  content: 'message-1',
-                  timestamp: 1,
-                  id: 'user-1',
-                },
-                {
-                  role: 'assistant',
-                  content: 'message-2',
-                  timestamp: 2,
-                  id: 'assistant-1',
-                },
-                {
-                  role: 'assistant',
-                  content: 'message-3',
-                  timestamp: 3,
-                  id: 'assistant-2',
-                },
-              ],
               totalMessageCount: 6,
               windowStartOffset: 2,
               windowEndOffset: 6,
               hasMore: true,
               isAtLatest: true,
             }),
-            meta: {
-              ready: true,
+          meta: {
+              historyStatus: 'ready',
               lastActivityAt: Date.now(),
             },
           }),
@@ -1311,5 +1453,3 @@ describe('chat 主线程滚动锁', () => {
     )).toBe(860);
   });
 });
-
-

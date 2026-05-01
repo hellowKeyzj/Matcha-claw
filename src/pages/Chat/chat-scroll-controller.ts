@@ -375,55 +375,58 @@ export function createChatScrollController(
     syncContainer.dataset.chatScrollScope = config.scrollScopeKey;
   };
 
-  const scheduleBottomAlign = (options?: { force?: boolean; retry?: boolean }) => {
+  const applyBottomAlign = (force = false) => {
+    const config = getConfig();
+    const viewport = config.viewportRef.current;
+    if (!config.enabled || !viewport || !hasRenderableChatRows(config.contentRef.current, viewport)) {
+      return false;
+    }
+    const metrics = readViewportMetrics(viewport);
+    if (!metrics) {
+      return false;
+    }
+    const shouldStick = force || state.isBottomLocked || isChatViewportNearBottom(metrics, config.stickyBottomThresholdPx);
+    if (!shouldStick) {
+      return false;
+    }
+    markScopeLoaded();
+    setBottomLockedForCurrentScope(true);
+    state.programmaticScroll = true;
+    viewport.scrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
+    scheduleProgrammaticScrollCleanup(() => {
+      syncFollowSnapshot();
+      syncScrollContainerState();
+    });
+    return true;
+  };
+
+  const scheduleBottomAlignRetry = (force: boolean) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    state.scrollRetryTimerId = window.setTimeout(() => {
+      state.scrollRetryTimerId = null;
+      applyBottomAlign(force);
+    }, force ? INITIAL_ALIGN_RETRY_MS : FOLLOW_RETRY_MS);
+  };
+
+  const scheduleBottomAlign = (options?: { force?: boolean; retry?: boolean; immediate?: boolean }) => {
     clearScheduledBottomAlign();
     const force = Boolean(options?.force);
     const retry = Boolean(options?.retry);
     const run = () => {
-      const config = getConfig();
-      const viewport = config.viewportRef.current;
-      if (!config.enabled || !viewport || !hasRenderableChatRows(config.contentRef.current, viewport)) {
-        return;
+      if (!applyBottomAlign(force)) {
+        return false;
       }
-      const metrics = readViewportMetrics(viewport);
-      if (!metrics) {
-        return;
+      if (retry) {
+        scheduleBottomAlignRetry(force);
       }
-      const shouldStick = force || state.isBottomLocked || isChatViewportNearBottom(metrics, config.stickyBottomThresholdPx);
-      if (!shouldStick) {
-        return;
-      }
-      markScopeLoaded();
-      setBottomLockedForCurrentScope(true);
-      state.programmaticScroll = true;
-      viewport.scrollTop = computeBottomLockedScrollTopOnResize(metrics, metrics);
-      scheduleProgrammaticScrollCleanup(() => {
-        syncFollowSnapshot();
-        syncScrollContainerState();
-      });
-      if (!retry || typeof window === 'undefined') {
-        return;
-      }
-      state.scrollRetryTimerId = window.setTimeout(() => {
-        state.scrollRetryTimerId = null;
-        const latestConfig = getConfig();
-        const latestViewport = latestConfig.viewportRef.current;
-        const latestMetrics = readViewportMetrics(latestViewport);
-        if (!latestViewport || !latestMetrics) {
-          return;
-        }
-        const shouldRetryStick = force || state.isBottomLocked || isChatViewportNearBottom(latestMetrics, latestConfig.stickyBottomThresholdPx);
-        if (!shouldRetryStick) {
-          return;
-        }
-        state.programmaticScroll = true;
-        latestViewport.scrollTop = computeBottomLockedScrollTopOnResize(latestMetrics, latestMetrics);
-        scheduleProgrammaticScrollCleanup(() => {
-          syncFollowSnapshot();
-          syncScrollContainerState();
-        });
-      }, force ? INITIAL_ALIGN_RETRY_MS : FOLLOW_RETRY_MS);
+      return true;
     };
+
+    if (Boolean(options?.immediate) && run()) {
+      return;
+    }
 
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
       state.scrollFrameId = window.requestAnimationFrame(() => {
@@ -492,7 +495,7 @@ export function createChatScrollController(
     }
     if (pending.mode === 'force-bottom') {
       state.pendingScopeTransition = null;
-      scheduleBottomAlign({ force: true, retry: true });
+      scheduleBottomAlign({ force: true, retry: true, immediate: true });
       return true;
     }
     if (pending.anchor) {
@@ -730,7 +733,7 @@ export function createChatScrollController(
     }
     cancelPendingTransitionForScope(config.scrollScopeKey);
     clearScheduledDetachedAnchorCapture();
-    scheduleBottomAlign({ force: true, retry: true });
+    scheduleBottomAlign({ force: true, retry: true, immediate: true });
   };
 
   const prepareScopeAnchorRestore = (nextScopeKey: string) => {
@@ -749,7 +752,6 @@ export function createChatScrollController(
   };
 
   const prepareScopeBottomAlign = (nextScopeKey: string) => {
-    const config = getConfig();
     if (!nextScopeKey) {
       return;
     }
@@ -757,9 +759,6 @@ export function createChatScrollController(
       targetScopeKey: nextScopeKey,
       mode: 'force-bottom',
     };
-    if (nextScopeKey === config.scrollScopeKey) {
-      scheduleBottomAlign({ force: true, retry: true });
-    }
   };
 
   const cleanup = () => {
