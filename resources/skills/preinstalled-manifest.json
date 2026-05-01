@@ -77,6 +77,35 @@
       "sourceUrl": "https://claw.mytuanzi.com/SKILL.md",
       "version": "2026-03-15",
       "autoEnable": true
+    },
+    {
+      "slug": "multi-search-engine",
+      "localDir": "resources/skills/preinstalled-skill-sources/multi-search-engine",
+      "version": "2026-05-01",
+      "autoEnable": true
+    },
+    {
+      "slug": "web-extract",
+      "localDir": "resources/skills/preinstalled-skill-sources/web-extract",
+      "version": "2026-05-01",
+      "autoEnable": true
+    },
+    {
+      "slug": "daily-news-briefing",
+      "localDir": "resources/skills/preinstalled-skill-sources/daily-news-briefing",
+      "version": "2026-05-01",
+      "autoEnable": false
+    },
+    {
+      "slug": "nuwa-skill",
+      "localDir": "resources/skills/preinstalled-skill-sources/nuwa-skill",
+      "version": "2026-05-01",
+      "autoEnable": false
     }
   ]
 }
+
+
+
+
+

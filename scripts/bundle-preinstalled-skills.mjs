@@ -1,8 +1,8 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
-import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
+import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync, readdirSync } from 'node:fs';
+import { join, dirname, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
@@ -58,7 +58,9 @@ function loadManifest() {
   for (const item of parsed.skills) {
     const hasRepoSource = Boolean(item.repo && item.repoPath);
     const hasUrlSource = Boolean(item.sourceUrl);
-    if (!item.slug || (!hasRepoSource && !hasUrlSource)) {
+    const hasLocalSource = Boolean(item.localDir);
+    const sourceCount = [hasRepoSource, hasUrlSource, hasLocalSource].filter(Boolean).length;
+    if (!item.slug || sourceCount !== 1) {
       throw new Error(`Invalid manifest entry: ${JSON.stringify(item)}`);
     }
   }
@@ -85,6 +87,50 @@ function createRepoDirName(repo, ref) {
 
 function toShellPath(path) {
   return path.replaceAll('\\', '/');
+}
+
+function resolveLocalSourceDir(localDir) {
+  const trimmed = typeof localDir === 'string' ? localDir.trim() : '';
+  if (!trimmed) {
+    throw new Error('localDir is empty');
+  }
+  const resolved = isAbsolute(trimmed) ? resolve(trimmed) : resolve(ROOT, trimmed);
+  const relativeToRoot = relative(ROOT, resolved);
+  if (relativeToRoot.startsWith('..') || isAbsolute(relativeToRoot)) {
+    throw new Error(`localDir must stay inside repository root: ${localDir}`);
+  }
+  return resolved;
+}
+
+function collectFiles(dir, root = dir) {
+  const entries = readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name, 'en'));
+  const files = [];
+  for (const entry of entries) {
+    const absPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectFiles(absPath, root));
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push({
+        absPath,
+        relativePath: relative(root, absPath).replaceAll('\\', '/'),
+      });
+    }
+  }
+  return files;
+}
+
+function hashDirectoryContents(dir) {
+  const hash = createHash('sha256');
+  for (const file of collectFiles(dir)) {
+    hash.update(file.relativePath, 'utf8');
+    hash.update('\0', 'utf8');
+    hash.update(readFileSync(file.absPath));
+    hash.update('\0', 'utf8');
+  }
+  return hash.digest('hex');
 }
 
 async function fetchSkillFromUrl(sourceUrl) {
@@ -153,6 +199,7 @@ const lock = {
 
 const repoBackedSkills = manifestSkills.filter((entry) => entry.repo && entry.repoPath);
 const urlBackedSkills = manifestSkills.filter((entry) => entry.sourceUrl);
+const localBackedSkills = manifestSkills.filter((entry) => entry.localDir);
 
 const groups = groupByRepoRef(repoBackedSkills);
 for (const group of groups) {
@@ -216,6 +263,40 @@ for (const entry of urlBackedSkills) {
     version: resolvedVersion,
     sourceUrl: entry.sourceUrl,
     ref: 'url',
+    commit: contentHash,
+  });
+
+  echo`   OK ${entry.slug}`;
+}
+
+for (const entry of localBackedSkills) {
+  const sourceDir = resolveLocalSourceDir(entry.localDir);
+  const targetDir = join(OUTPUT_ROOT, entry.slug);
+
+  echo`Copying local skill ${entry.localDir} -> ${entry.slug}`;
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Missing local skill source directory: ${entry.localDir}`);
+  }
+
+  rmSync(targetDir, { recursive: true, force: true });
+  cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+
+  const skillManifest = join(targetDir, 'SKILL.md');
+  if (!existsSync(skillManifest)) {
+    throw new Error(`Local skill ${entry.slug} is missing SKILL.md after copy`);
+  }
+
+  const contentHash = hashDirectoryContents(targetDir);
+  const requestedVersion = (entry.version || '').trim();
+  const resolvedVersion = !requestedVersion || requestedVersion === 'main'
+    ? `local-${contentHash.slice(0, 12)}`
+    : requestedVersion;
+
+  lock.skills.push({
+    slug: entry.slug,
+    version: resolvedVersion,
+    localDir: entry.localDir,
+    ref: 'local',
     commit: contentHash,
   });
 

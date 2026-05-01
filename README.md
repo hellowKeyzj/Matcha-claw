@@ -118,7 +118,7 @@ WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
-ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `self-improving-agent`, `tavily-search`, `brave-web-search`, `bocha-skill`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
+ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `self-improving-agent`, `tavily-search`, `brave-web-search`, `bocha-skill`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
 Environment variables for bundled search skills:
 - `BRAVE_SEARCH_API_KEY` for `brave-web-search`
@@ -133,6 +133,7 @@ For OpenAI-compatible gateways configured via **Custom** provider, **Settings �
 ### 🌐 Browser Relay Window Targeting
 When Browser Relay is enabled, each Chrome profile connects as one browser instance, but the default browser control target is chosen at the **window** level. In the extension popup you use **Use This Window**, MatchaClaw remembers that window across desktop restarts, and default browser actions always run against that selected window's current attached page. `open` and `focus` also bring that page to the foreground, so the visible page and the automation page stay aligned. If no such page is attached, MatchaClaw fails fast instead of guessing another tab.
 If no relay-backed browser is running, MatchaClaw now prefers the last Chrome profile that successfully reconnected with Browser Relay, launches that existing profile, and waits for it to reconnect automatically. If no remembered profile is available, it falls back to another healthy Chrome profile with Browser Relay already enabled.
+When the managed `browser-relay` plugin is enabled, MatchaClaw also auto-installs and enables its companion skill so browser-oriented requests follow Browser Relay specific routing and troubleshooting guidance by default.
 
 ### 🔑 License Gate & Diagnostics
 The setup wizard requires license validation before continuing. Runtime access is guarded by a license gate, and Settings now provides dedicated sections for License, Task Plugin, Diagnostics, and user avatar management.
