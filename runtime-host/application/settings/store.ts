@@ -24,10 +24,10 @@ async function writeSettingsStore(settings: Record<string, unknown>) {
 }
 
 function normalizeBrowserMode(value: unknown): 'off' | 'relay' | 'native' {
-  if (value === 'off' || value === 'native') {
+  if (value === 'off' || value === 'relay' || value === 'native') {
     return value;
   }
-  return 'relay';
+  return 'native';
 }
 
 function normalizeSettingsValueForKey(key: string, value: unknown) {

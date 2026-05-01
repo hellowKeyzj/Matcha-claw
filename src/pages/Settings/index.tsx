@@ -1264,7 +1264,7 @@ export function Settings() {
                     <Label>{t('gateway.browser.modeLabel')}</Label>
                     <p className="text-sm text-muted-foreground">{t('gateway.browser.modeDescription')}</p>
                   </div>
-                  <div className="grid gap-3 md:grid-cols-3">
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
                     {([
                       {
                         value: 'relay',
@@ -1297,7 +1297,7 @@ export function Settings() {
                         >
                           <div className="flex items-center justify-between gap-3">
                             <div className="font-medium">{option.label}</div>
-                            {active ? <Badge variant="secondary">{t('gateway.browser.currentMode')}</Badge> : null}
+                            {active ? <Badge className="shrink-0" variant="secondary">{t('gateway.browser.currentMode')}</Badge> : null}
                           </div>
                           <p className="mt-2 text-sm text-muted-foreground">{option.description}</p>
                         </button>
