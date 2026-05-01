@@ -42,6 +42,13 @@ export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPlugin
   {
     id: 'browser-relay',
     sourceDirs: ['browser-relay'],
+    companionSkills: [
+      {
+        slug: 'browser-relay-skill',
+        sourceDir: 'browser-relay-skill',
+        autoEnable: true,
+      },
+    ],
   },
   {
     id: 'memory-lancedb-pro',
