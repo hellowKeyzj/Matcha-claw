@@ -31,6 +31,7 @@ import {
   runPluginStartupSideEffectLifecycles,
   runPluginTransitionSideEffectLifecycles,
 } from './plugin-lifecycle-registry';
+import { getCompanionSkillSlugsForPlugin } from './plugin-companion-skill-service';
 import type { RuntimePluginTransitionLifecycleState } from './plugin-lifecycle-types';
 
 interface ManagedRegistryPluginSnapshot extends RuntimeHostCatalogPlugin {
@@ -181,6 +182,7 @@ async function discoverManagedRegistryPlugin(
       const manifestId = typeof parsedManifest.id === 'string' && parsedManifest.id.trim()
         ? parsedManifest.id.trim()
         : manifest.id;
+      const companionSkillSlugs = getCompanionSkillSlugsForPlugin(definition.id);
 
       return {
         id: definition.id,
@@ -197,6 +199,7 @@ async function discoverManagedRegistryPlugin(
         }),
         controlMode: 'manual',
         ...(description ? { description } : {}),
+        ...(companionSkillSlugs.length > 0 ? { companionSkillSlugs: [...companionSkillSlugs] } : {}),
         sourceDir,
         manifestId,
       };

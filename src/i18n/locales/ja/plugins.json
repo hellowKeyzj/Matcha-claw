@@ -15,6 +15,7 @@
     "description": "プラグインの有効化はここで管理します。設定ページには配置しません。",
     "empty": "管理可能なプラグインがありません。",
     "emptyGroup": "{{group}}に該当するプラグインはありません。",
+    "companionSkills": "有効化すると連携スキルも自動でインストールして有効化します: {{skills}}",
     "channelManaged": "チャンネル設定で管理されます",
     "columns": {
       "plugin": "プラグイン",

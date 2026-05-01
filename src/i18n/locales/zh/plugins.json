@@ -15,6 +15,7 @@
     "description": "管理插件启用状态",
     "empty": "暂无可管理插件。",
     "emptyGroup": "{{group}}分类下暂无插件。",
+    "companionSkills": "启用后将自动安装并启用配套技能：{{skills}}",
     "channelManaged": "由渠道配置管理",
     "columns": {
       "plugin": "插件",

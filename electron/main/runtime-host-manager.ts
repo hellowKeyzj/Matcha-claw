@@ -184,7 +184,7 @@ export function createRuntimeHostManager(
         childPluginCatalogSnapshot = parsed.filter((item): item is RuntimeHostCatalogPlugin => {
           if (!item || typeof item !== 'object') return false;
           const candidate = item as Record<string, unknown>;
-          return typeof candidate.id === 'string'
+        return typeof candidate.id === 'string'
             && typeof candidate.name === 'string'
             && typeof candidate.version === 'string'
             && (candidate.kind === 'builtin' || candidate.kind === 'third-party')
@@ -193,6 +193,13 @@ export function createRuntimeHostManager(
         }).map((item) => ({
           ...item,
           platform: item.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
+          ...(Array.isArray(item.companionSkillSlugs)
+            ? {
+              companionSkillSlugs: item.companionSkillSlugs.filter(
+                (slug): slug is string => typeof slug === 'string' && slug.trim().length > 0,
+              ),
+            }
+            : {}),
         }));
       }
     }
@@ -473,6 +480,13 @@ export function createRuntimeHostManager(
           platform: plugin.platform === 'matchaclaw' ? 'matchaclaw' : 'openclaw',
           category: plugin.category,
           ...(typeof plugin.description === 'string' ? { description: plugin.description } : {}),
+          ...(Array.isArray(plugin.companionSkillSlugs)
+            ? {
+              companionSkillSlugs: plugin.companionSkillSlugs.filter(
+                (slug): slug is string => typeof slug === 'string' && slug.trim().length > 0,
+              ),
+            }
+            : {}),
         };
       })
       .filter((item): item is RuntimeHostCatalogPlugin => Boolean(item));

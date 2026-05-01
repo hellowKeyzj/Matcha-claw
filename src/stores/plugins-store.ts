@@ -13,6 +13,7 @@ export type PluginCatalogItem = {
   description?: string;
   enabled: boolean;
   controlMode?: 'manual' | 'channel-config';
+  companionSkillSlugs?: string[];
 };
 
 export type RuntimePayload = {

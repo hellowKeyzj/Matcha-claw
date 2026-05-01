@@ -308,6 +308,13 @@ export function PluginsPage() {
                           {plugin.description && (
                             <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
                           )}
+                          {plugin.companionSkillSlugs && plugin.companionSkillSlugs.length > 0 && (
+                            <div className="truncate text-xs text-muted-foreground">
+                              {t('plugins:catalog.companionSkills', {
+                                skills: plugin.companionSkillSlugs.join(', '),
+                              })}
+                            </div>
+                          )}
                           {channelManaged && (
                             <div className="truncate text-xs text-muted-foreground">
                               {t('plugins:catalog.channelManaged')}

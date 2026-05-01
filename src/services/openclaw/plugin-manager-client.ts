@@ -12,7 +12,7 @@ export type RuntimePluginCatalogItem = {
   description?: string;
   enabled: boolean;
   controlMode?: 'manual' | 'channel-config';
-  skillIds?: string[];
+  companionSkillSlugs?: string[];
 };
 
 type PluginCatalogPayload = {

@@ -4,6 +4,7 @@ import type { RuntimeHostCatalogPlugin } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
 import { createPluginManifestLoader } from '../../plugin-engine/plugin-manifest-loader';
 import type { RuntimeHostDiscoveredPlugin } from '../../shared/types';
+import { getCompanionSkillSlugsForPlugin } from './plugin-companion-skill-service';
 import { pickCatalogGroup } from './plugin-groups';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -99,6 +100,7 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
         tryReadPackageJson(plugin.rootDir),
       ]);
       const description = pickCatalogDescription(manifest.description, packageJson);
+      const companionSkillSlugs = getCompanionSkillSlugsForPlugin(manifest.id);
       return {
         id: manifest.id,
         name: manifest.name,
@@ -114,6 +116,7 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
         }),
         controlMode: 'manual',
         ...(description ? { description } : {}),
+        ...(companionSkillSlugs.length > 0 ? { companionSkillSlugs: [...companionSkillSlugs] } : {}),
       } satisfies RuntimeHostCatalogPlugin;
     }),
   );

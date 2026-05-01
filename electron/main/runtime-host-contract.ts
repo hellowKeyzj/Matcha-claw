@@ -55,6 +55,7 @@ export interface RuntimeHostCatalogPlugin {
   readonly platform: 'openclaw' | 'matchaclaw';
   readonly category: string;
   readonly description?: string;
+  readonly companionSkillSlugs?: readonly string[];
 }
 
 export interface RuntimeHostExecutionState {
