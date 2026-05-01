@@ -22,6 +22,8 @@ import { createRequire } from 'node:module';
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
+const MATCHACLAW_MAIN_AGENT_TEMPLATES = path.join(ROOT, 'resources', 'agent-workspace-templates', 'main-agent');
+const UPSTREAM_TEMPLATE_SNAPSHOT_DIRNAME = 'templates-upstream-openclaw';
 const requireFromRoot = createRequire(path.join(ROOT, 'package.json'));
 
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
@@ -52,6 +54,40 @@ fs.mkdirSync(OUTPUT, { recursive: true });
 // 3. Copy openclaw package itself to OUTPUT root
 echo`   Copying openclaw package...`;
 fs.cpSync(openclawReal, OUTPUT, { recursive: true, dereference: true });
+
+function overlayMainAgentTemplates(outputDir) {
+  const targetDir = path.join(outputDir, 'docs', 'reference', 'templates');
+  const upstreamSnapshotDir = path.join(outputDir, 'docs', 'reference', UPSTREAM_TEMPLATE_SNAPSHOT_DIRNAME);
+  if (!fs.existsSync(targetDir)) {
+    echo`   ⚠️  OpenClaw template directory not found, skip MatchaClaw workspace overlay`;
+    return;
+  }
+  if (!fs.existsSync(path.join(MATCHACLAW_MAIN_AGENT_TEMPLATES, 'AGENTS.md'))) {
+    echo`   ⚠️  MatchaClaw main-agent templates not found, skip overlay`;
+    return;
+  }
+
+  fs.mkdirSync(upstreamSnapshotDir, { recursive: true });
+  for (const entry of fs.readdirSync(targetDir, { withFileTypes: true })) {
+    if (!entry.isFile() || path.extname(entry.name) !== '.md') continue;
+    fs.cpSync(
+      path.join(targetDir, entry.name),
+      path.join(upstreamSnapshotDir, entry.name),
+      { dereference: true },
+    );
+  }
+  for (const entry of fs.readdirSync(MATCHACLAW_MAIN_AGENT_TEMPLATES, { withFileTypes: true })) {
+    if (!entry.isFile() || path.extname(entry.name) !== '.md') continue;
+    fs.cpSync(
+      path.join(MATCHACLAW_MAIN_AGENT_TEMPLATES, entry.name),
+      path.join(targetDir, entry.name),
+      { dereference: true },
+    );
+  }
+  echo`   Applied MatchaClaw main-agent workspace templates`;
+}
+
+overlayMainAgentTemplates(OUTPUT);
 
 // 4. Recursively collect ALL transitive dependencies via pnpm virtual store BFS
 //
