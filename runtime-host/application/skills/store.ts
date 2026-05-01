@@ -2,9 +2,14 @@ import { listInstalledClawHubSkills } from './clawhub';
 import { readOpenClawConfigJson, writeOpenClawConfigJson } from '../../api/storage/paths';
 import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
+
+type InstalledClawHubSkill = {
+  slug: string;
+  version?: string;
+};
 
 export function getAllSkillConfigsLocal() {
   const config = readOpenClawConfigJson();
@@ -84,18 +89,49 @@ export async function updateSkillConfigLocal(skillKey: string, updates: Record<s
   }
 }
 
+export async function setSkillEnabledLocal(skillKey: string, enabled: boolean) {
+  const trimmedSkillKey = typeof skillKey === 'string' ? skillKey.trim() : '';
+  if (!trimmedSkillKey) {
+    return { success: false, error: 'skillKey is required' };
+  }
+  try {
+    await withOpenClawConfigLock(async () => {
+      const config = readOpenClawConfigJson();
+      if (!isRecord(config.skills)) {
+        config.skills = {};
+      }
+      if (!isRecord(config.skills.entries)) {
+        config.skills.entries = {};
+      }
+
+      const entries = config.skills.entries;
+      const current = isRecord(entries[trimmedSkillKey]) ? entries[trimmedSkillKey] : {};
+      entries[trimmedSkillKey] = {
+        ...current,
+        enabled,
+      };
+      await writeOpenClawConfigJson(config);
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: String(error) };
+  }
+}
+
 export async function listEffectiveSkillsLocal() {
   const configs = getAllSkillConfigsLocal();
-  const installed = await listInstalledClawHubSkills();
-  const installedMap = new Map(installed.map((item: any) => [item.slug, item]));
+  const installed = await listInstalledClawHubSkills() as InstalledClawHubSkill[];
+  const installedMap = new Map(installed.map((item) => [item.slug, item]));
   const keys = new Set([
     ...Object.keys(configs),
-    ...installed.map((item: any) => item.slug),
+    ...installed.map((item) => item.slug),
   ]);
 
   const tools: Array<Record<string, unknown>> = [];
   for (const key of [...keys].sort()) {
-    const configEntry = isRecord((configs as Record<string, unknown>)[key]) ? (configs as Record<string, any>)[key] : {};
+    const configEntry = isRecord((configs as Record<string, unknown>)[key])
+      ? (configs as Record<string, Record<string, unknown>>)[key]
+      : {};
     const enabled = configEntry.enabled !== false;
     if (!enabled) {
       continue;

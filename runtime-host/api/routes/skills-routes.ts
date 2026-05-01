@@ -1,3 +1,4 @@
+import type { OpenClawBridge } from '../../openclaw-bridge';
 import { SkillsService } from '../../application/skills/service';
 
 interface LocalDispatchResponse {
@@ -8,7 +9,9 @@ interface LocalDispatchResponse {
 interface SkillsRouteDeps {
   getAllSkillConfigsLocal: () => Record<string, unknown>;
   updateSkillConfigLocal: (skillKey: string, updates: Record<string, unknown>) => Promise<unknown>;
+  setSkillEnabledLocal: (skillKey: string, enabled: boolean) => Promise<unknown>;
   listEffectiveSkillsLocal: () => Promise<unknown>;
+  openclawBridge: Pick<OpenClawBridge, 'gatewayRpc' | 'isGatewayRunning'>;
 }
 
 export async function handleSkillsRoute(
@@ -20,7 +23,9 @@ export async function handleSkillsRoute(
   const service = new SkillsService({
     getAllSkillConfigs: deps.getAllSkillConfigsLocal,
     updateSkillConfig: deps.updateSkillConfigLocal,
+    setSkillEnabled: deps.setSkillEnabledLocal,
     listEffectiveSkills: deps.listEffectiveSkillsLocal,
+    openclawBridge: deps.openclawBridge,
   });
 
   if (method === 'GET' && routePath === '/api/skills/configs') {
@@ -32,6 +37,10 @@ export async function handleSkillsRoute(
 
   if (method === 'PUT' && routePath === '/api/skills/config') {
     return await service.updateConfig(payload);
+  }
+
+  if (method === 'PUT' && routePath === '/api/skills/state') {
+    return await service.updateState(payload);
   }
 
   if (method === 'GET' && routePath === '/api/skills/effective') {
