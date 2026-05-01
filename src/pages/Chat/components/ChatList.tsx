@@ -1,23 +1,146 @@
-import { memo, useSyncExternalStore, type RefObject, type TouchEventHandler, type WheelEventHandler } from 'react';
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type RefObject,
+  type TouchEventHandler,
+  type WheelEventHandler,
+} from 'react';
 import { ArrowDown } from 'lucide-react';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
-import type { ChatScrollChromeStore } from '../chat-scroll-chrome-store';
-import { ChatMessage } from '../ChatMessage';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
+import { buildChatAutoFollowSignal } from '../chat-auto-follow';
+import { getOrBuildStaticRowsCacheEntry } from '../chat-rows-cache';
+import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
 import type { ChatMessageRow } from '../chat-row-model';
-import type {
-  ChatExecutionGraphSlots,
-  PendingAssistantShell as PendingAssistantShellState,
-} from '../chat-render-model';
+import type { ExecutionGraphData } from '../execution-graph-model';
+import { ChatMessage } from '../ChatMessage';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import { PendingAssistantShell } from '../pending-assistant-shell';
-import type { ToolStatus } from '@/stores/chat';
-import { FailureScreen, WelcomeScreen } from './ChatStates';
+import { useExecutionGraphs } from '../useExecutionGraphs';
+import { useChatScroll } from '../useChatScroll';
+import { useChatView } from '../useChatView';
+import { FailureScreen } from './ChatStates';
+import type {
+  ApprovalStatus,
+  ChatSessionRecord,
+  ToolStatus,
+} from '@/stores/chat';
 
-interface ChatListProps {
+const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
+const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
+
+interface ThreadAgent {
+  id: string;
+  name?: string;
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
+}
+
+export interface ChatListHandle {
+  prepareCurrentLatestBottomAlign: () => void;
+}
+
+export interface ChatExecutionGraphSlots {
+  anchoredGraphsByRowKey: ReadonlyMap<string, ReadonlyArray<ExecutionGraphData>>;
+  suppressedToolCardRowKeys: ReadonlySet<string>;
+}
+
+export interface PendingAssistantShellState {
+  state: 'typing' | 'activity';
+}
+
+const EMPTY_EXECUTION_GRAPH_SLOTS: ChatExecutionGraphSlots = {
+  anchoredGraphsByRowKey: new Map(),
+  suppressedToolCardRowKeys: new Set(),
+};
+
+export function buildExecutionGraphSlots(
+  rows: ChatMessageRow[],
+  executionGraphs: ExecutionGraphData[],
+): ChatExecutionGraphSlots {
+  if (rows.length === 0 || executionGraphs.length === 0) {
+    return EMPTY_EXECUTION_GRAPH_SLOTS;
+  }
+
+  const rowKeys = new Set(rows.map((row) => row.key));
+  const anchoredGraphsByRowKey = new Map<string, ExecutionGraphData[]>();
+  const suppressedToolCardRowKeys = new Set<string>();
+  for (const graph of executionGraphs) {
+    for (const rowKey of graph.suppressToolCardMessageKeys || []) {
+      suppressedToolCardRowKeys.add(rowKey);
+    }
+    const anchorRowKey = rowKeys.has(graph.anchorMessageKey)
+      ? graph.anchorMessageKey
+      : rows[rows.length - 1]?.key;
+    if (!anchorRowKey) {
+      continue;
+    }
+    const current = anchoredGraphsByRowKey.get(anchorRowKey);
+    if (current) {
+      current.push(graph);
+      continue;
+    }
+    anchoredGraphsByRowKey.set(anchorRowKey, [graph]);
+  }
+
+  return {
+    anchoredGraphsByRowKey,
+    suppressedToolCardRowKeys,
+  };
+}
+
+export function buildPendingAssistantShell(
+  approvalStatus: ApprovalStatus,
+  sending: boolean,
+  pendingFinal: boolean,
+  streamingTools: ToolStatus[],
+  messages: ChatSessionRecord['messages'],
+): PendingAssistantShellState | null {
+  if (
+    !sending
+    || approvalStatus === 'awaiting_approval'
+    || streamingTools.length > 0
+    || messages.some((message) => message.role === 'assistant' && Boolean(message.streaming))
+  ) {
+    return null;
+  }
+
+  return {
+    state: pendingFinal ? 'activity' : 'typing',
+  };
+}
+
+export interface ChatListProps {
+  isActive: boolean;
+  currentSessionKey: string;
+  currentSession: ChatSessionRecord;
+  approvalStatus: ApprovalStatus;
+  agents: ThreadAgent[];
+  isGatewayRunning: boolean;
+  gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
+  errorMessage: string | null;
+  showThinking: boolean;
+  userAvatarDataUrl: string | null;
+  assistantAgentId: string;
+  assistantAgentName: string;
+  assistantAvatarSeed?: string;
+  assistantAvatarStyle?: AgentAvatarStyle;
+  onLoadOlder: () => void;
+  loadOlderLabel: string;
+  onJumpToLatest: () => void;
+  jumpToBottomLabel: string;
+}
+
+interface ChatListSurfaceProps {
   messagesViewportRef: RefObject<HTMLDivElement | null>;
   messageContentRef: RefObject<HTMLDivElement | null>;
   isEmptyState: boolean;
@@ -46,29 +169,7 @@ interface ChatListProps {
   onJumpToRowKey: (rowKey?: string) => void;
 }
 
-interface ChatListContentProps {
-  isEmptyState: boolean;
-  showBlockingLoading: boolean;
-  showBlockingError: boolean;
-  errorMessage: string | null;
-  rows: ChatMessageRow[];
-  showLoadOlder: boolean;
-  isLoadingOlder: boolean;
-  onLoadOlder: () => void;
-  loadOlderLabel: string;
-  showThinking: boolean;
-  streamingTools: ToolStatus[];
-  assistantAgentId: string;
-  assistantAgentName: string;
-  assistantAvatarSeed?: string;
-  assistantAvatarStyle?: AgentAvatarStyle;
-  userAvatarImageUrl: string | null;
-  executionGraphSlots: ChatExecutionGraphSlots;
-  pendingAssistantShell: PendingAssistantShellState | null;
-  onJumpToRowKey: (rowKey?: string) => void;
-}
-
-const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
+interface ChatListContentProps extends Omit<ChatListSurfaceProps, 'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'scrollChromeStore'> {}
 
 function getMessageDataAttributes(row: ChatMessageRow) {
   const messageId = typeof row.message.id === 'string' && row.message.id.trim()
@@ -133,7 +234,7 @@ const ChatListContent = memo(function ChatListContent({
             type="button"
             variant="ghost"
             size="sm"
-            className="h-8 rounded-full border border-border/45 bg-background/86 px-4 text-xs text-muted-foreground shadow-sm backdrop-blur-sm hover:bg-background/94 hover:text-foreground"
+            className="h-7 rounded-none px-1.5 text-[11px] text-muted-foreground hover:bg-transparent hover:text-foreground"
             onClick={onLoadOlder}
             disabled={isLoadingOlder}
           >
@@ -143,9 +244,7 @@ const ChatListContent = memo(function ChatListContent({
         </div>
       ) : null}
 
-      {isEmptyState ? (
-        <WelcomeScreen />
-      ) : (
+      {!isEmptyState ? (
         <>
           {rows.map((row, index) => {
             const rowExecutionGraphs = anchoredGraphsByRowKey.get(row.key);
@@ -227,20 +326,18 @@ const ChatListContent = memo(function ChatListContent({
             </div>
           ) : null}
         </>
-      )}
+      ) : null}
     </>
   );
 });
 
-interface ChatScrollChromeProps {
-  scrollChromeStore: ChatScrollChromeStore;
-  showLoadOlderButton: boolean;
-}
-
 const ChatScrollChrome = memo(function ChatScrollChrome({
   scrollChromeStore,
   showLoadOlderButton,
-}: ChatScrollChromeProps) {
+}: {
+  scrollChromeStore: ChatScrollChromeStore;
+  showLoadOlderButton: boolean;
+}) {
   const { isBottomLocked, visible, isAtLatest, jumpActionLabel } = useSyncExternalStore(
     scrollChromeStore.subscribe,
     scrollChromeStore.getSnapshot,
@@ -277,7 +374,7 @@ const ChatScrollChrome = memo(function ChatScrollChrome({
   );
 });
 
-export const ChatList = memo(function ChatList({
+export const ChatListSurface = memo(function ChatListSurface({
   messagesViewportRef,
   messageContentRef,
   isEmptyState,
@@ -304,7 +401,7 @@ export const ChatList = memo(function ChatList({
   executionGraphSlots,
   pendingAssistantShell,
   onJumpToRowKey,
-}: ChatListProps) {
+}: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
   return (
@@ -363,5 +460,207 @@ export const ChatList = memo(function ChatList({
         showLoadOlderButton={showLoadOlderButton}
       />
     </div>
+  );
+});
+
+export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatList(
+  {
+    isActive,
+    currentSessionKey,
+    currentSession,
+    approvalStatus,
+    agents,
+    isGatewayRunning,
+    gatewayRpc,
+    errorMessage,
+    showThinking,
+    userAvatarDataUrl,
+    assistantAgentId,
+    assistantAgentName,
+    assistantAvatarSeed,
+    assistantAvatarStyle,
+    onLoadOlder,
+    loadOlderLabel,
+    onJumpToLatest,
+    jumpToBottomLabel,
+  },
+  ref,
+) {
+  const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const messageContentRef = useRef<HTMLDivElement>(null);
+  const scrollChromeStoreRef = useRef<ReturnType<typeof createChatScrollChromeStore> | null>(null);
+  const viewport = currentSession.window;
+  const runtime = currentSession.runtime;
+  if (scrollChromeStoreRef.current == null) {
+    scrollChromeStoreRef.current = createChatScrollChromeStore({
+      isBottomLocked: true,
+      visible: false,
+      isAtLatest: viewport.isAtLatest,
+      jumpActionLabel: jumpToBottomLabel,
+    });
+  }
+  const scrollChromeStore = scrollChromeStoreRef.current;
+  const viewportMessages = currentSession.messages.slice(
+    viewport.windowStartOffset,
+    viewport.windowEndOffset,
+  );
+  const tooling = currentSession.tooling ?? {
+    streamingTools: [],
+    pendingToolImages: [],
+  };
+  const executionGraphs = useExecutionGraphs({
+    enabled: isGatewayRunning,
+    messages: viewportMessages,
+    currentSessionKey,
+    agents,
+    isGatewayRunning,
+    gatewayRpc,
+    showThinking,
+  });
+  const rows = useMemo(
+    () => getOrBuildStaticRowsCacheEntry(currentSessionKey, viewportMessages).rows,
+    [currentSessionKey, viewportMessages],
+  );
+  const executionGraphSlots = useMemo(
+    () => buildExecutionGraphSlots(rows, executionGraphs),
+    [executionGraphs, rows],
+  );
+  const pendingAssistantShell = useMemo(
+    () => buildPendingAssistantShell(
+      approvalStatus,
+      runtime.sending,
+      runtime.pendingFinal,
+      tooling.streamingTools,
+      viewportMessages,
+    ),
+    [approvalStatus, runtime.pendingFinal, runtime.sending, tooling.streamingTools, viewportMessages],
+  );
+
+  const liveView = useChatView({
+    currentSessionStatus: currentSession.meta.historyStatus,
+    rowCount: rows.length,
+    sending: runtime.sending,
+    refreshing: false,
+    mutating: false,
+  });
+  const autoFollowSignal = buildChatAutoFollowSignal(rows);
+  const tailActivityOpen = runtime.sending || runtime.pendingFinal || tooling.streamingTools.length > 0;
+
+  const {
+    handleViewportPointerDown,
+    handleViewportTouchMove,
+    handleViewportWheel,
+    handleViewportScroll,
+    prepareScopeAnchorRestore,
+    prepareScopeBottomAlign,
+    jumpToBottom,
+  } = useChatScroll({
+    enabled: isActive,
+    scrollScopeKey: currentSessionKey,
+    autoFollowSignal,
+    tailActivityOpen,
+    setScrollChromeBottomLocked: scrollChromeStore.setBottomLocked,
+    viewportRef: messagesViewportRef,
+    contentRef: messageContentRef,
+    stickyBottomThresholdPx: CHAT_BOTTOM_FOLLOW_THRESHOLD_PX,
+  });
+
+  const handleLoadOlder = useCallback(() => {
+    if (!currentSessionKey) {
+      return;
+    }
+    prepareScopeAnchorRestore(currentSessionKey);
+    onLoadOlder();
+  }, [currentSessionKey, onLoadOlder, prepareScopeAnchorRestore]);
+
+  const handleJumpToRowKey = useCallback((rowKey?: string) => {
+    if (!rowKey) {
+      return;
+    }
+    const viewportNode = messagesViewportRef.current;
+    if (!viewportNode) {
+      return;
+    }
+    const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-row-key]'))
+      .find((element) => element.dataset.chatRowKey === rowKey);
+    if (!target) {
+      return;
+    }
+    target.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }, []);
+
+  const handleJumpToLatestBottom = useCallback(() => {
+    if (!currentSessionKey) {
+      return;
+    }
+    if (viewport.isAtLatest) {
+      jumpToBottom();
+      return;
+    }
+    prepareScopeBottomAlign(currentSessionKey);
+    onJumpToLatest();
+  }, [
+    currentSessionKey,
+    jumpToBottom,
+    onJumpToLatest,
+    prepareScopeBottomAlign,
+    viewport.isAtLatest,
+  ]);
+
+  useLayoutEffect(() => {
+    scrollChromeStore.setChromeState({
+      visible: !liveView.isEmptyState && !liveView.showBlockingLoading && !liveView.showBlockingError,
+      isAtLatest: viewport.isAtLatest,
+      jumpActionLabel: jumpToBottomLabel,
+    });
+    scrollChromeStore.setJumpAction(handleJumpToLatestBottom);
+  }, [
+    jumpToBottomLabel,
+    handleJumpToLatestBottom,
+    liveView.isEmptyState,
+    liveView.showBlockingError,
+    liveView.showBlockingLoading,
+    scrollChromeStore,
+    viewport.isAtLatest,
+  ]);
+
+  useImperativeHandle(ref, () => ({
+    prepareCurrentLatestBottomAlign: () => {
+      if (!currentSessionKey) {
+        return;
+      }
+      prepareScopeBottomAlign(currentSessionKey);
+    },
+  }), [currentSessionKey, prepareScopeBottomAlign]);
+
+  return (
+    <ChatListSurface
+      messagesViewportRef={messagesViewportRef}
+      messageContentRef={messageContentRef}
+      isEmptyState={liveView.isEmptyState}
+      showBlockingLoading={liveView.showBlockingLoading}
+      showBlockingError={liveView.showBlockingError}
+      errorMessage={errorMessage}
+      onPointerDown={handleViewportPointerDown}
+      onScroll={handleViewportScroll}
+      onTouchMove={handleViewportTouchMove}
+      onWheel={handleViewportWheel}
+      rows={rows}
+      showLoadOlder={viewport.hasMore || viewport.isLoadingMore}
+      isLoadingOlder={viewport.isLoadingMore}
+      onLoadOlder={handleLoadOlder}
+      loadOlderLabel={loadOlderLabel}
+      scrollChromeStore={scrollChromeStore}
+      showThinking={showThinking}
+      streamingTools={tooling.streamingTools}
+      assistantAgentId={assistantAgentId}
+      assistantAgentName={assistantAgentName}
+      assistantAvatarSeed={assistantAvatarSeed}
+      assistantAvatarStyle={assistantAvatarStyle}
+      userAvatarImageUrl={userAvatarDataUrl}
+      executionGraphSlots={executionGraphSlots}
+      pendingAssistantShell={pendingAssistantShell}
+      onJumpToRowKey={handleJumpToRowKey}
+    />
   );
 });
