@@ -14,6 +14,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -99,8 +100,8 @@ describe('chat store newSession agent targeting', () => {
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
+          messages: [userMsg],
           window: createViewportWindowState({
-            messages: [userMsg],
             totalMessageCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
@@ -121,8 +122,8 @@ describe('chat store newSession agent targeting', () => {
     const state = useChatStore.getState();
     const record = state.loadedSessions['agent:test:main'];
     expect(state.currentSessionKey).toBe('agent:test:main');
-    expect(record?.window.messages).toHaveLength(1);
-    expect(record?.window.messages[0]?.id).toBe('msg-local-1');
+    expect(record?.messages).toHaveLength(1);
+    expect(record?.messages[0]?.id).toBe('msg-local-1');
     expect(record?.runtime.sending).toBe(true);
     expect(record?.runtime.pendingFinal).toBe(true);
   });
@@ -233,5 +234,4 @@ describe('chat store newSession agent targeting', () => {
     nowSpy.mockRestore();
   });
 });
-
 

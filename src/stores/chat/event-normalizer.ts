@@ -1,11 +1,21 @@
 import { asRecord } from './value';
+import type { ChatRuntimeEventPhase } from './types';
 
 export type GatewayConversationRunPhase = 'started' | 'completed' | 'error' | 'aborted';
-export type ChatRuntimePhase = 'started' | 'delta' | 'final' | 'error' | 'aborted' | 'unknown';
+export type ChatRuntimePhase = ChatRuntimeEventPhase;
 
-export interface ChatRuntimeDomainEvent {
-  kind: 'chat.runtime';
-  source: 'chat.message' | 'run.phase';
+export interface ChatMessageDomainEvent {
+  kind: 'chat.message';
+  source: 'chat.message';
+  phase: ChatRuntimePhase;
+  runId: string | null;
+  sessionKey: string | null;
+  event: Record<string, unknown>;
+}
+
+export interface ChatRuntimeLifecycleDomainEvent {
+  kind: 'chat.runtime.lifecycle';
+  source: 'run.phase';
   phase: ChatRuntimePhase;
   runId: string | null;
   sessionKey: string | null;
@@ -27,7 +37,8 @@ export interface ChatApprovalResolvedDomainEvent {
 }
 
 export type ChatDomainEvent =
-  | ChatRuntimeDomainEvent
+  | ChatMessageDomainEvent
+  | ChatRuntimeLifecycleDomainEvent
   | ChatApprovalRequestedDomainEvent
   | ChatApprovalResolvedDomainEvent;
 
@@ -120,7 +131,11 @@ function mapRunPhaseToChatEvent(
   };
 }
 
-export function normalizeGatewayConversationEvent(payload: unknown): ChatRuntimeDomainEvent | null {
+export type ChatConversationDomainEvent =
+  | ChatMessageDomainEvent
+  | ChatRuntimeLifecycleDomainEvent;
+
+export function normalizeGatewayConversationEvent(payload: unknown): ChatConversationDomainEvent | null {
   const input = asRecord(payload);
   if (!input) {
     return null;
@@ -135,7 +150,7 @@ export function normalizeGatewayConversationEvent(payload: unknown): ChatRuntime
     const sessionKey = normalizeIdentifier(event.sessionKey);
     const eventState = typeof event.state === 'string' ? event.state : '';
     return {
-      kind: 'chat.runtime',
+      kind: 'chat.message',
       source: 'chat.message',
       phase: resolveRuntimePhaseFromState(eventState),
       runId,
@@ -156,7 +171,7 @@ export function normalizeGatewayConversationEvent(payload: unknown): ChatRuntime
     }
     const event = mapRunPhaseToChatEvent(input, phase, runId ?? undefined, sessionKey ?? undefined);
     return {
-      kind: 'chat.runtime',
+      kind: 'chat.runtime.lifecycle',
       source: 'run.phase',
       phase: phase === 'completed' ? 'final' : phase,
       runId,

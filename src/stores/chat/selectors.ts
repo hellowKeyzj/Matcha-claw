@@ -1,17 +1,13 @@
-import { type ApprovalItem, type ChatSession, type ChatStoreState } from '@/stores/chat';
+import type { ChatSession, ChatStoreState } from './types';
 import { readSessionCatalogStatusShell, readSessionsFromState, resolveSessionListLabel } from './session-helpers';
 import {
-  createEmptySessionRecord,
-  getPendingApprovals,
   getSessionMeta,
   getSessionMessages,
   getSessionRuntime,
 } from './store-state-helpers';
 import type { ChatSessionHistoryStatus } from './types';
 
-const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
 const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
-const EMPTY_CHAT_PAGE_SESSION = createEmptySessionRecord();
 
 export interface AgentSessionsPaneSessionEntry {
   session: ChatSession;
@@ -122,60 +118,6 @@ export function selectViewLayerState(state: ChatStoreState) {
   };
 }
 
-export function selectChatPageState(state: ChatStoreState) {
-  const currentSessionKey = state.currentSessionKey;
-  const currentSession = state.loadedSessions[currentSessionKey] ?? EMPTY_CHAT_PAGE_SESSION;
-  const runtime = currentSession.runtime;
-  return {
-    currentSessionKey,
-    currentSession,
-    sending: runtime.sending,
-    activeRunId: runtime.activeRunId,
-    runPhase: runtime.runPhase,
-    pendingUserMessage: runtime.pendingUserMessage?.message ?? null,
-    streamingMessageId: runtime.streamingMessageId,
-    streamingTools: runtime.streamingTools,
-    pendingFinal: runtime.pendingFinal,
-    lastUserMessageAt: runtime.lastUserMessageAt,
-    pendingToolImages: runtime.pendingToolImages,
-    approvalStatus: runtime.approvalStatus,
-    currentPendingApprovals: getPendingApprovals(state, currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
-    foregroundHistorySessionKey: state.foregroundHistorySessionKey,
-    mutating: state.mutating,
-    error: state.error,
-    showThinking: state.showThinking,
-  };
-}
-
-export function selectChatPageActions(state: ChatStoreState) {
-  return {
-    resolveApproval: state.resolveApproval,
-    loadHistory: state.loadHistory,
-    loadOlderMessages: state.loadOlderMessages,
-    jumpToLatest: state.jumpToLatest,
-    trimTopMessages: state.trimTopMessages,
-    setViewportLastVisibleMessageId: state.setViewportLastVisibleMessageId,
-    loadSessions: state.loadSessions,
-    switchSession: state.switchSession,
-    openAgentConversation: state.openAgentConversation,
-    sendMessage: state.sendMessage,
-    abortRun: state.abortRun,
-    clearError: state.clearError,
-    cleanupEmptySession: state.cleanupEmptySession,
-  };
-}
-
-export function selectChatToolbarState(state: ChatStoreState) {
-  const view = selectViewLayerState(state);
-  return {
-    refresh: state.refresh,
-    foregroundHistorySessionKey: view.foregroundHistorySessionKey,
-    sessionsLoading: view.sessionsLoading,
-    showThinking: view.showThinking,
-    toggleThinking: state.toggleThinking,
-  };
-}
-
 export function selectSidebarPendingBlockersState(state: ChatStoreState) {
   return {
     pendingApprovalsBySession: state.pendingApprovalsBySession,
@@ -186,10 +128,6 @@ export function selectSidebarPendingBlockersState(state: ChatStoreState) {
 
 export function selectSidebarNewSessionAction(state: ChatStoreState) {
   return state.newSession;
-}
-
-export function selectChatInputSessionKey(state: ChatStoreState) {
-  return state.currentSessionKey;
 }
 
 export function selectAgentSessionsPaneState(state: ChatStoreState) {

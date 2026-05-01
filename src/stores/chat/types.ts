@@ -15,9 +15,20 @@ export interface RawMessage {
   content: unknown; // string | ContentBlock[]
   timestamp?: number;
   id?: string;
+  messageId?: string;
+  clientId?: string;
+  uniqueId?: string;
+  status?: 'sending' | 'sent' | 'timeout' | 'error';
   streaming?: boolean;
   toolCallId?: string;
+  tool_calls?: Array<Record<string, unknown>>;
+  toolCalls?: Array<Record<string, unknown>>;
   toolName?: string;
+  agentId?: string;
+  parentMessageId?: string;
+  metadata?: Record<string, unknown>;
+  name?: string;
+  requestId?: string;
   details?: unknown;
   isError?: boolean;
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
@@ -75,12 +86,6 @@ export type ChatRunPhase =
 export type ApprovalStatus = 'idle' | 'awaiting_approval';
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 
-export interface PendingUserMessageOverlay {
-  clientMessageId: string;
-  message: RawMessage;
-  createdAtMs: number;
-}
-
 export interface ApprovalItem {
   id: string;
   sessionKey: string;
@@ -101,13 +106,14 @@ export interface ChatSessionRuntimeState {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  pendingUserMessage?: PendingUserMessageOverlay | null;
   streamingMessageId: string | null;
-  streamingTools: ToolStatus[];
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
+}
+
+export interface ChatSessionToolingState {
+  streamingTools: ToolStatus[];
   pendingToolImages: AttachedFileMeta[];
-  approvalStatus: ApprovalStatus;
 }
 
 export interface ChatSessionMetaState {
@@ -122,11 +128,12 @@ export interface ChatSessionMetaState {
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
+  tooling: ChatSessionToolingState;
+  messages: RawMessage[];
   window: ChatSessionViewportState;
 }
 
 export interface ChatSessionViewportState {
-  messages: RawMessage[];
   totalMessageCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
@@ -162,6 +169,14 @@ export interface ChatSendAttachment {
 
 export type ChatHistoryLoadMode = 'active' | 'quiet';
 export type ChatHistoryLoadScope = 'foreground' | 'background';
+export type ChatRuntimeEventPhase = 'started' | 'delta' | 'final' | 'error' | 'aborted' | 'unknown';
+
+export interface ChatRuntimeLifecycleEvent {
+  phase: ChatRuntimeEventPhase;
+  runId: string | null;
+  sessionKey: string | null;
+  event: Record<string, unknown>;
+}
 
 export interface ChatHistoryLoadRequest {
   sessionKey: string;
@@ -180,7 +195,6 @@ export interface ChatStoreActions {
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
   loadOlderMessages: (sessionKey?: string) => Promise<void>;
   jumpToLatest: (sessionKey?: string) => Promise<void>;
-  trimTopMessages: (sessionKey?: string, keep?: number) => void;
   setViewportLastVisibleMessageId: (messageId: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
@@ -191,7 +205,7 @@ export interface ChatStoreActions {
   getTaskInboxBridgeState: () => TaskInboxChatBridgeState;
   openTaskInboxSession: (sessionKey: string) => string;
   sendTaskInboxRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
-  handleChatEvent: (event: Record<string, unknown>) => void;
+  handleConversationEvent: (event: Record<string, unknown>) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
   clearError: () => void;
@@ -212,5 +226,3 @@ export const CHAT_BASE_STATE_KEYS = [
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';
 export const DEFAULT_SESSION_KEY = `${DEFAULT_CANONICAL_PREFIX}:main`;
-
-

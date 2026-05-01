@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import type { RawMessage } from '@/stores/chat';
+import { getSessionApprovalStatus } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { findCurrentStreamingMessage } from '@/stores/chat/streaming-message';
 
@@ -14,7 +15,7 @@ function createSessionRecord(input?: {
     meta: {
       label: null,
       lastActivityAt: null,
-      ready: true,
+      historyStatus: 'ready' as const,
       thinkingLevel: null,
     },
     runtime: {
@@ -29,8 +30,8 @@ function createSessionRecord(input?: {
       approvalStatus: 'idle' as const,
       ...input?.runtime,
     },
+    messages,
     window: createViewportWindowState({
-      messages,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -71,6 +72,21 @@ function resetChatStoreForApprovalTests() {
   } as never);
 }
 
+function dispatchConversationMessageEvent(event: Record<string, unknown>): void {
+  useChatStore.getState().handleConversationEvent({
+    kind: 'chat.message',
+    source: 'chat.message',
+    phase: typeof event.state === 'string' && event.state.trim().toLowerCase() === 'delta' ? 'delta' : (
+      typeof event.state === 'string' && ['final', 'completed', 'done', 'finished', 'end'].includes(event.state.trim().toLowerCase())
+        ? 'final'
+        : 'unknown'
+    ),
+    runId: typeof event.runId === 'string' ? event.runId : null,
+    sessionKey: typeof event.sessionKey === 'string' ? event.sessionKey : null,
+    event,
+  });
+}
+
 describe('chat 审批等待态流程', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -89,7 +105,7 @@ describe('chat 审批等待态流程', () => {
       },
     } as never);
 
-    useChatStore.getState().handleChatEvent({
+    dispatchConversationMessageEvent({
       state: 'delta',
       runId: 'run-delta-recover',
       message: {
@@ -119,7 +135,7 @@ describe('chat 审批等待态流程', () => {
       },
     } as never);
 
-    useChatStore.getState().handleChatEvent({
+    dispatchConversationMessageEvent({
       state: 'delta',
       runId: 'run-delta-batched',
       message: {
@@ -131,7 +147,7 @@ describe('chat 审批等待态流程', () => {
     const state = useChatStore.getState();
     const runtime = state.loadedSessions['agent:main:main']?.runtime;
     const streamingMessage = findCurrentStreamingMessage(
-      state.loadedSessions['agent:main:main']?.window.messages ?? [],
+      state.loadedSessions['agent:main:main']?.messages ?? [],
       runtime?.streamingMessageId ?? null,
     );
     expect(runtime?.streamingMessageId).toBe('stream:run-delta-batched');
@@ -156,7 +172,7 @@ describe('chat 审批等待态流程', () => {
       },
     } as never);
 
-    useChatStore.getState().handleChatEvent({
+    dispatchConversationMessageEvent({
       state: 'delta',
       runId: 'run-delta-append',
       message: {
@@ -169,7 +185,7 @@ describe('chat 审批等待态流程', () => {
     const state = useChatStore.getState();
     const runtime = state.loadedSessions['agent:main:main']?.runtime;
     const streamingMessage = findCurrentStreamingMessage(
-      state.loadedSessions['agent:main:main']?.window.messages ?? [],
+      state.loadedSessions['agent:main:main']?.messages ?? [],
       runtime?.streamingMessageId ?? null,
     );
     expect(streamingMessage?.content).toBe('hello world');
@@ -193,7 +209,7 @@ describe('chat 审批等待态流程', () => {
       },
     } as never);
 
-    useChatStore.getState().handleChatEvent({
+    dispatchConversationMessageEvent({
       state: 'delta',
       runId: 'run-delta-tool',
       message: {
@@ -208,7 +224,7 @@ describe('chat 审批等待态流程', () => {
     const state = useChatStore.getState();
     const runtime = state.loadedSessions['agent:main:main']?.runtime;
     const streamingMessage = findCurrentStreamingMessage(
-      state.loadedSessions['agent:main:main']?.window.messages ?? [],
+      state.loadedSessions['agent:main:main']?.messages ?? [],
       runtime?.streamingMessageId ?? null,
     );
     expect(streamingMessage?.content).toEqual([
@@ -306,9 +322,8 @@ describe('chat 审批等待态流程', () => {
 
     const state = useChatStore.getState();
     const runtime = state.loadedSessions['agent:main:main']?.runtime;
-    expect(runtime?.approvalStatus).toBe('awaiting_approval');
+    expect(getSessionApprovalStatus(state, 'agent:main:main')).toBe('awaiting_approval');
     expect(runtime?.streamingMessageId).toBeNull();
-    expect(runtime?.streamingTools).toEqual([]);
     expect((state.pendingApprovalsBySession['agent:main:main'] ?? []).some((item) => item.id === 'approval-visible')).toBe(true);
   });
 
@@ -347,9 +362,7 @@ describe('chat 审批等待态流程', () => {
     await useChatStore.getState().syncPendingApprovals('agent:main:main');
 
     const state = useChatStore.getState();
-    expect(state.loadedSessions['agent:main:main']?.runtime.approvalStatus).toBe('idle');
+    expect(getSessionApprovalStatus(state, 'agent:main:main')).toBe('idle');
     expect(state.pendingApprovalsBySession['agent:main:main']).toEqual([]);
   });
 });
-
-

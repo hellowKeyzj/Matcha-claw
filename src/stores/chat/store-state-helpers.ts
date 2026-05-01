@@ -1,4 +1,5 @@
 import type {
+  ApprovalStatus,
   ApprovalItem,
   AttachedFileMeta,
   ChatSession,
@@ -6,16 +7,13 @@ import type {
   ChatSessionMetaState,
   ChatSessionRecord,
   ChatSessionRuntimeState,
+  ChatSessionToolingState,
   ChatSessionViewportState,
   ChatStoreState,
   RawMessage,
   ToolStatus,
 } from './types';
-import {
-  appendViewportMessage,
-  createViewportWindowState,
-  syncViewportMessages,
-} from './viewport-state';
+import { syncViewportState } from './viewport-state';
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 export function toMs(ts: number): number {
@@ -66,7 +64,12 @@ function areAttachedFilesEqual(
 function areMessagesEqualAtIndex(left: RawMessage, right: RawMessage): boolean {
   return (
     (left.id ?? null) === (right.id ?? null)
+    && (left.messageId ?? null) === (right.messageId ?? null)
+    && (left.clientId ?? null) === (right.clientId ?? null)
+    && (left.uniqueId ?? null) === (right.uniqueId ?? null)
     && left.role === right.role
+    && (left.status ?? null) === (right.status ?? null)
+    && Boolean(left.streaming) === Boolean(right.streaming)
     && (left.timestamp ?? null) === (right.timestamp ?? null)
     && (left.toolCallId ?? null) === (right.toolCallId ?? null)
     && (left.toolName ?? null) === (right.toolName ?? null)
@@ -242,7 +245,6 @@ const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
 const EMPTY_PENDING_TOOL_IMAGES: AttachedFileMeta[] = [];
 const EMPTY_APPROVALS: ApprovalItem[] = [];
 const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
-  messages: EMPTY_MESSAGES,
   totalMessageCount: 0,
   windowStartOffset: 0,
   windowEndOffset: 0,
@@ -259,13 +261,16 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    pendingUserMessage: null,
     streamingMessageId: null,
-    streamingTools: EMPTY_STREAMING_TOOLS,
     pendingFinal: false,
     lastUserMessageAt: null,
+  };
+}
+
+export function createEmptySessionTooling(): ChatSessionToolingState {
+  return {
+    streamingTools: EMPTY_STREAMING_TOOLS,
     pendingToolImages: EMPTY_PENDING_TOOL_IMAGES,
-    approvalStatus: 'idle',
   };
 }
 
@@ -288,6 +293,8 @@ export function createEmptySessionRecord(): ChatSessionRecord {
   return {
     meta: createEmptySessionMeta(),
     runtime: createEmptySessionRuntime(),
+    tooling: createEmptySessionTooling(),
+    messages: EMPTY_MESSAGES,
     window: createEmptySessionViewportState(),
   };
 }
@@ -306,12 +313,22 @@ export function resolveSessionRuntime(session: ChatSessionRecord | undefined): C
   };
 }
 
+export function resolveSessionTooling(session: ChatSessionRecord | undefined): ChatSessionToolingState {
+  if (!session?.tooling) {
+    return createEmptySessionTooling();
+  }
+  return {
+    ...createEmptySessionTooling(),
+    ...session.tooling,
+  };
+}
+
 export function resolveSessionMeta(session: ChatSessionRecord | undefined): ChatSessionMetaState {
   return session?.meta ?? createEmptySessionMeta();
 }
 
 export function resolveSessionTranscript(session: ChatSessionRecord | undefined): RawMessage[] {
-  return Array.isArray(session?.window?.messages) ? session.window.messages : EMPTY_MESSAGES;
+  return Array.isArray(session?.messages) ? session.messages : EMPTY_MESSAGES;
 }
 
 export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
@@ -321,6 +338,8 @@ export function resolveSessionRecord(session: ChatSessionRecord | undefined): Ch
   return {
     meta: resolveSessionMeta(session),
     runtime: resolveSessionRuntime(session),
+    tooling: resolveSessionTooling(session),
+    messages: resolveSessionTranscript(session),
     window: resolveSessionViewportState(session),
   };
 }
@@ -343,6 +362,13 @@ export function getSessionMeta(state: Pick<ChatStoreState, 'loadedSessions'>, se
 
 export function getSessionRuntime(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionRuntimeState {
   return resolveSessionRuntime(state.loadedSessions[sessionKey]);
+}
+
+export function getSessionTooling(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+): ChatSessionToolingState {
+  return resolveSessionTooling(state.loadedSessions[sessionKey]);
 }
 
 export function getSessionViewportState(
@@ -374,6 +400,8 @@ export function patchSessionRecord(
     [sessionKey]: {
       meta: patch.meta ?? current.meta,
       runtime: patch.runtime ?? current.runtime,
+      tooling: patch.tooling ?? current.tooling,
+      messages: patch.messages ?? current.messages,
       window: patch.window ?? current.window,
     },
   };
@@ -422,6 +450,24 @@ export function patchSessionRuntime(
   };
 }
 
+export function patchSessionTooling(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+  patch: Partial<ChatSessionToolingState>,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return {
+    ...state.loadedSessions,
+    [sessionKey]: {
+      ...current,
+      tooling: {
+        ...current.tooling,
+        ...patch,
+      },
+    },
+  };
+}
+
 export function patchCurrentSessionRuntime(
   state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   patch: Partial<ChatSessionRuntimeState>,
@@ -439,7 +485,7 @@ export function patchSessionTranscript(
     ...state.loadedSessions,
     [sessionKey]: {
       ...current,
-      window: syncViewportMessages(current.window, messages),
+      messages,
     },
   };
 }
@@ -485,37 +531,64 @@ export function removeSessionViewportState(
   return removeSessionRecord(state, sessionKey);
 }
 
-export function buildTranscriptBackedViewportState(
+export function selectViewportMessages(
+  record: Pick<ChatSessionRecord, 'messages' | 'window'>,
+): RawMessage[] {
+  const totalMessages = record.messages;
+  if (totalMessages.length === 0) {
+    return totalMessages;
+  }
+  const start = Math.max(0, Math.min(record.window.windowStartOffset, totalMessages.length));
+  const end = Math.max(start, Math.min(record.window.windowEndOffset, totalMessages.length));
+  if (start === 0 && end === totalMessages.length) {
+    return totalMessages;
+  }
+  return totalMessages.slice(start, end);
+}
+
+export function patchSessionMessagesAndViewport(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
   messages: RawMessage[],
-  runtime: ChatSessionRuntimeState,
-): ChatSessionViewportState {
-  const baseViewport = state.loadedSessions?.[sessionKey]?.window;
-  let nextViewport = !baseViewport
-    ? createViewportWindowState({
+  viewportPatch?: Partial<ChatSessionViewportState>,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  const nextViewport = syncViewportState(current.window, {
+    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, messages.length),
+    windowStartOffset: viewportPatch?.windowStartOffset ?? current.window.windowStartOffset,
+    windowEndOffset: viewportPatch?.windowEndOffset ?? (
+      (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + messages.length
+    ),
+    hasMore: viewportPatch?.hasMore ?? current.window.hasMore,
+    hasNewer: viewportPatch?.hasNewer ?? current.window.hasNewer,
+    isLoadingMore: viewportPatch?.isLoadingMore ?? current.window.isLoadingMore,
+    isLoadingNewer: viewportPatch?.isLoadingNewer ?? current.window.isLoadingNewer,
+    isAtLatest: viewportPatch?.isAtLatest ?? current.window.isAtLatest,
+    lastVisibleMessageId: viewportPatch?.lastVisibleMessageId ?? current.window.lastVisibleMessageId,
+  });
+  return {
+    ...state.loadedSessions,
+    [sessionKey]: {
+      ...current,
       messages,
-      totalMessageCount: messages.length,
-      windowStartOffset: 0,
-      windowEndOffset: messages.length,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    })
-    : syncViewportMessages(baseViewport, messages);
-
-  const pendingUserMessage = runtime.pendingUserMessage?.message ?? null;
-  if (pendingUserMessage) {
-    nextViewport = appendViewportMessage(nextViewport, pendingUserMessage);
-  }
-
-  return nextViewport;
+      window: nextViewport,
+    },
+  };
 }
 export function getPendingApprovals(
   state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
   sessionKey: string,
 ): ApprovalItem[] {
   return state.pendingApprovalsBySession[sessionKey] ?? EMPTY_APPROVALS;
+}
+
+export function getSessionApprovalStatus(
+  state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
+  sessionKey: string,
+): ApprovalStatus {
+  return getPendingApprovals(state, sessionKey).length > 0
+    ? 'awaiting_approval'
+    : 'idle';
 }
 
 export function hasTimeoutSignal(error: unknown): boolean {
@@ -533,4 +606,3 @@ export function isRecoverableChatSendTimeout(errorMessage: string): boolean {
     || normalized.includes('Gateway RPC timeout: chat.send')
   );
 }
-

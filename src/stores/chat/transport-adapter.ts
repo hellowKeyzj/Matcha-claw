@@ -1,11 +1,11 @@
 import { subscribeHostEvent } from '@/lib/host-events';
 import {
   normalizeGatewayConversationEvent,
-  type ChatRuntimeDomainEvent,
+  type ChatConversationDomainEvent,
 } from './event-normalizer';
 
 export function subscribeChatConversationEvents(
-  handler: (event: ChatRuntimeDomainEvent) => void,
+  handler: (event: ChatConversationDomainEvent) => void,
 ): () => void {
   return subscribeHostEvent('gateway:conversation-event', (payload) => {
     const event = normalizeGatewayConversationEvent(payload);

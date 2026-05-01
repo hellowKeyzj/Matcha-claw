@@ -2,25 +2,27 @@ import { hasNonToolAssistantContent } from './event-helpers';
 import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
   areMessagesEquivalent,
-  getSessionMeta,
   getSessionMessages,
+  getSessionMeta,
   getSessionRuntime,
-  getSessionViewportState,
   mergeMessageReferences,
+  patchSessionMessagesAndViewport,
   patchSessionRecord,
-  patchSessionViewportState,
+  selectViewportMessages,
   toMs,
 } from './store-state-helpers';
+import { createViewportWindowState } from './viewport-state';
 import type {
   ChatHistoryLoadScope,
-  PendingUserMessageOverlay,
+  ChatSessionViewportState,
   ChatStoreState,
   RawMessage,
 } from './types';
 import {
-  appendViewportMessage,
-  syncViewportMessages,
-} from './viewport-state';
+  findMessageIndexForCommit,
+  findCurrentStreamingMessage,
+  mergeMessagesPreservingLocalIdentity,
+} from './streaming-message';
 
 interface ResolveHistoryActivityFlagsInput {
   normalizedMessages: RawMessage[];
@@ -35,19 +37,8 @@ export interface HistoryActivityFlags {
 }
 
 export function resolveHistoryActivityFlags(input: ResolveHistoryActivityFlagsInput): HistoryActivityFlags {
-  const {
-    normalizedMessages,
-    isSendingNow,
-    pendingFinal,
-    lastUserMessageAt,
-  } = input;
-
+  const { normalizedMessages, isSendingNow, pendingFinal, lastUserMessageAt } = input;
   const userMsTs = lastUserMessageAt ? toMs(lastUserMessageAt) : 0;
-  const isAfterUserMsg = (message: RawMessage): boolean => {
-    if (!userMsTs || !message.timestamp) return true;
-    return toMs(message.timestamp) >= userMsTs;
-  };
-
   const shouldTrackRecentAssistantActivity = isSendingNow && !pendingFinal;
   let hasRecentAssistantActivity = false;
   let hasRecentFinalAssistantMessage = false;
@@ -56,23 +47,240 @@ export function resolveHistoryActivityFlags(input: ResolveHistoryActivityFlagsIn
     if (message.role !== 'assistant') {
       continue;
     }
-    if (!isAfterUserMsg(message)) {
+    if (userMsTs && message.timestamp && toMs(message.timestamp) < userMsTs) {
       continue;
     }
-    if (shouldTrackRecentAssistantActivity && !hasRecentAssistantActivity) {
+    if (shouldTrackRecentAssistantActivity) {
       hasRecentAssistantActivity = true;
     }
-    if (!hasRecentFinalAssistantMessage && hasNonToolAssistantContent(message)) {
+    if (hasNonToolAssistantContent(message)) {
       hasRecentFinalAssistantMessage = true;
     }
     if (hasRecentFinalAssistantMessage && (!shouldTrackRecentAssistantActivity || hasRecentAssistantActivity)) {
       break;
     }
   }
+  return { hasRecentAssistantActivity, hasRecentFinalAssistantMessage };
+}
 
+function shouldPreserveLocalMessage(message: RawMessage): boolean {
+  const normalizedId = typeof message.id === 'string' ? message.id.trim() : '';
+  if (message.status === 'sending' || message.status === 'timeout') {
+    return true;
+  }
+  if (message.role !== 'user') {
+    return false;
+  }
+  return Boolean(
+    normalizedId.startsWith('user-')
+    || (typeof message.clientId === 'string' && message.clientId.trim())
+    || (typeof message.messageId === 'string' && message.messageId.trim()),
+  );
+}
+
+function findLocalMatchIndex(
+  localMessages: RawMessage[],
+  canonicalMessage: RawMessage,
+  usedLocalIndexes: Set<number>,
+  runtime: ReturnType<typeof getSessionRuntime>,
+): number {
+  const unmatchedLocalIndexes: number[] = [];
+  const unmatchedLocalMessages: RawMessage[] = [];
+  for (let index = 0; index < localMessages.length; index += 1) {
+    if (usedLocalIndexes.has(index)) {
+      continue;
+    }
+    unmatchedLocalIndexes.push(index);
+    unmatchedLocalMessages.push(localMessages[index]!);
+  }
+  const preferredAssistantMessageId = canonicalMessage.role === 'assistant'
+    ? (findCurrentStreamingMessage(unmatchedLocalMessages, runtime.streamingMessageId)?.id ?? runtime.streamingMessageId)
+    : null;
+  const matchedFilteredIndex = findMessageIndexForCommit(unmatchedLocalMessages, canonicalMessage, {
+    preferredMessageId: preferredAssistantMessageId,
+  });
+  return matchedFilteredIndex >= 0
+    ? unmatchedLocalIndexes[matchedFilteredIndex]!
+    : -1;
+}
+
+function shouldKeepUnmatchedLocalMessage(
+  localMessages: RawMessage[],
+  localIndex: number,
+  _runtime: ReturnType<typeof getSessionRuntime>,
+): boolean {
+  return shouldPreserveLocalMessage(localMessages[localIndex]!);
+}
+
+function hasPreservedLocalUserBefore(
+  localMessages: RawMessage[],
+  localIndex: number,
+  runtime: ReturnType<typeof getSessionRuntime>,
+): boolean {
+  for (let index = localIndex - 1; index >= 0; index -= 1) {
+    const message = localMessages[index]!;
+    if (!shouldKeepUnmatchedLocalMessage(localMessages, index, runtime)) {
+      continue;
+    }
+    if (message.role === 'user') {
+      return true;
+    }
+    if (message.role === 'assistant') {
+      return false;
+    }
+  }
+  return false;
+}
+
+function mergeCanonicalMessageOntoLocal(
+  localMessage: RawMessage,
+  canonicalMessage: RawMessage,
+  runtime: ReturnType<typeof getSessionRuntime>,
+  preserveStreamingAssistantIdentity: boolean,
+): RawMessage {
+  const localMessageId = typeof localMessage.messageId === 'string' ? localMessage.messageId.trim() : '';
+  const canonicalMessageId = typeof canonicalMessage.messageId === 'string' && canonicalMessage.messageId.trim()
+    ? canonicalMessage.messageId.trim()
+    : (typeof canonicalMessage.id === 'string' ? canonicalMessage.id.trim() : '');
+  if (
+    localMessage.role === 'assistant'
+    && runtime.streamingMessageId === localMessage.id
+    && !localMessageId
+    && canonicalMessageId
+    && !preserveStreamingAssistantIdentity
+  ) {
+    return canonicalMessage._attachedFiles?.length
+      ? canonicalMessage
+      : { ...canonicalMessage, _attachedFiles: localMessage._attachedFiles };
+  }
+  const merged = mergeMessagesPreservingLocalIdentity(localMessage, canonicalMessage);
+  if (
+    localMessage.role !== 'assistant'
+    || runtime.streamingMessageId !== localMessage.id
+    || (typeof merged.messageId === 'string' && merged.messageId.trim())
+  ) {
+    return merged;
+  }
+  const protocolMessageId = (
+    typeof canonicalMessage.messageId === 'string' && canonicalMessage.messageId.trim()
+      ? canonicalMessage.messageId.trim()
+      : (typeof canonicalMessage.id === 'string' ? canonicalMessage.id.trim() : '')
+  );
+  return protocolMessageId
+    ? { ...merged, messageId: protocolMessageId }
+    : merged;
+}
+
+export function mergeCanonicalHistoryWithLocalState(input: {
+  canonicalMessages: RawMessage[];
+  localMessages: RawMessage[];
+  runtime: ReturnType<typeof getSessionRuntime>;
+}): RawMessage[] {
+  const { canonicalMessages, localMessages, runtime } = input;
+  const usedLocalIndexes = new Set<number>();
+  const nextMessages: RawMessage[] = [];
+  let localCursor = 0;
+
+  for (const canonicalMessage of canonicalMessages) {
+    const localIndex = findLocalMatchIndex(localMessages, canonicalMessage, usedLocalIndexes, runtime);
+
+    if (localIndex >= 0) {
+      for (let index = localCursor; index < localIndex; index += 1) {
+        if (usedLocalIndexes.has(index) || !shouldKeepUnmatchedLocalMessage(localMessages, index, runtime)) {
+          continue;
+        }
+        nextMessages.push(localMessages[index]!);
+      }
+      const localMessage = localMessages[localIndex]!;
+      nextMessages.push(mergeCanonicalMessageOntoLocal(
+        localMessage,
+        canonicalMessage,
+        runtime,
+        hasPreservedLocalUserBefore(localMessages, localIndex, runtime),
+      ));
+      usedLocalIndexes.add(localIndex);
+      localCursor = localIndex + 1;
+      continue;
+    }
+
+    if (canonicalMessage.role === 'assistant') {
+      while (localCursor < localMessages.length) {
+        const localMessage = localMessages[localCursor]!;
+        if (
+          usedLocalIndexes.has(localCursor)
+          || localMessage.role !== 'user'
+          || !shouldKeepUnmatchedLocalMessage(localMessages, localCursor, runtime)
+        ) {
+          break;
+        }
+        nextMessages.push(localMessage);
+        localCursor += 1;
+      }
+    }
+
+    nextMessages.push(canonicalMessage);
+  }
+
+  for (let index = localCursor; index < localMessages.length; index += 1) {
+    if (usedLocalIndexes.has(index) || !shouldKeepUnmatchedLocalMessage(localMessages, index, runtime)) {
+      continue;
+    }
+    nextMessages.push(localMessages[index]!);
+  }
+
+  return nextMessages;
+}
+
+interface ReconcileHistoryWindowInput {
+  currentMessages: RawMessage[];
+  currentViewport: ChatSessionViewportState;
+  canonicalMessages: RawMessage[];
+  totalMessageCount: number;
+  windowStartOffset: number;
+  windowEndOffset: number;
+  hasMore: boolean;
+  hasNewer: boolean;
+  isAtLatest: boolean;
+  runtime?: ReturnType<typeof getSessionRuntime>;
+}
+
+export function reconcileHistoryWindow(input: ReconcileHistoryWindowInput): {
+  messages: RawMessage[];
+  viewport: ChatSessionViewportState;
+  viewportMessages: RawMessage[];
+} {
+  const authoritativeMessages = input.runtime
+    ? mergeCanonicalHistoryWithLocalState({
+        canonicalMessages: input.canonicalMessages,
+        localMessages: input.currentMessages,
+        runtime: input.runtime,
+      })
+    : input.canonicalMessages;
+  const nextMessages = mergeMessageReferences(input.currentMessages, authoritativeMessages);
+  const reconciledWindowDelta = nextMessages.length - input.canonicalMessages.length;
+  const windowStartOffset = Math.min(Math.max(input.windowStartOffset, 0), nextMessages.length);
+  const windowEndOffset = Math.min(
+    Math.max(input.windowEndOffset + Math.max(reconciledWindowDelta, 0), windowStartOffset),
+    nextMessages.length,
+  );
+  const viewport = createViewportWindowState({
+    ...input.currentViewport,
+    totalMessageCount: input.totalMessageCount,
+    windowStartOffset,
+    windowEndOffset,
+    hasMore: input.hasMore,
+    hasNewer: input.hasNewer,
+    isLoadingMore: false,
+    isLoadingNewer: false,
+    isAtLatest: input.isAtLatest,
+  });
   return {
-    hasRecentAssistantActivity,
-    hasRecentFinalAssistantMessage,
+    messages: nextMessages,
+    viewport,
+    viewportMessages: selectViewportMessages({
+      messages: nextMessages,
+      window: viewport,
+    }),
   };
 }
 
@@ -92,7 +300,6 @@ interface BuildHistoryApplyPatchInput {
   lastAt: number | null;
   previousRenderFingerprint: string | null;
   renderFingerprint: string;
-  pendingUserMessage?: PendingUserMessageOverlay | null;
   flags: HistoryActivityFlags;
 }
 
@@ -101,44 +308,17 @@ export interface BuildHistoryApplyPatchOutput {
   didMessageListChange: boolean;
 }
 
-function resolveNextPendingUserMessage(input: {
-  currentRuntime: ReturnType<typeof getSessionRuntime>;
-  nextRuntime: ReturnType<typeof getSessionRuntime>;
-  pendingUserMessage: PendingUserMessageOverlay | null | undefined;
-}): PendingUserMessageOverlay | null {
-  const { currentRuntime, nextRuntime, pendingUserMessage } = input;
-  const runtimeClearedPendingUser = (
-    currentRuntime.pendingUserMessage != null
-    && nextRuntime.pendingUserMessage == null
-  );
-  if (runtimeClearedPendingUser) {
-    return null;
-  }
-  return pendingUserMessage ?? null;
-}
-
 export function buildHistoryApplyPatch(
   state: ChatStoreState,
   input: BuildHistoryApplyPatchInput,
 ): BuildHistoryApplyPatchOutput {
-  const patch: Partial<ChatStoreState> = {};
-  let changed = false;
   const isCurrentSession = state.currentSessionKey === input.requestedSessionKey;
-
   const currentMessages = getSessionMessages(state, input.requestedSessionKey);
+  const currentMeta = getSessionMeta(state, input.requestedSessionKey);
+  const currentRuntime = getSessionRuntime(state, input.requestedSessionKey);
   const nextMessages = areMessagesEquivalent(currentMessages, input.finalMessages)
     ? currentMessages
     : mergeMessageReferences(currentMessages, input.finalMessages);
-  const currentViewport = getSessionViewportState(state, input.requestedSessionKey);
-  const nextViewportMessages = areMessagesEquivalent(currentViewport.messages, input.viewportMessages)
-    ? currentViewport.messages
-    : mergeMessageReferences(currentViewport.messages, input.viewportMessages);
-  const didMessageListChange = (
-    input.previousRenderFingerprint !== input.renderFingerprint
-    || nextViewportMessages !== currentViewport.messages
-  );
-  const currentMeta = getSessionMeta(state, input.requestedSessionKey);
-  const currentRuntime = getSessionRuntime(state, input.requestedSessionKey);
   const runtimePatch = (isCurrentSession && input.scope === 'foreground' && (
     currentRuntime.sending
     || currentRuntime.pendingFinal
@@ -147,12 +327,12 @@ export function buildHistoryApplyPatch(
     || input.flags.hasRecentFinalAssistantMessage
   ))
     ? reduceSessionRuntime(currentRuntime, {
-        type: 'history_snapshot',
-        hasRecentAssistantActivity: input.flags.hasRecentAssistantActivity,
-        hasRecentFinalAssistantMessage: input.flags.hasRecentFinalAssistantMessage,
-      })
+      type: 'history_snapshot',
+      hasRecentAssistantActivity: input.flags.hasRecentAssistantActivity,
+      hasRecentFinalAssistantMessage: input.flags.hasRecentFinalAssistantMessage,
+    })
     : currentRuntime;
-
+  const nextRuntime = runtimePatch === currentRuntime ? currentRuntime : { ...currentRuntime, ...runtimePatch };
   const nextMeta = {
     ...currentMeta,
     historyStatus: 'ready' as const,
@@ -160,61 +340,39 @@ export function buildHistoryApplyPatch(
     label: input.resolvedLabel ?? currentMeta.label,
     lastActivityAt: input.lastAt ?? currentMeta.lastActivityAt,
   };
-  const nextRuntime = runtimePatch === currentRuntime
-    ? currentRuntime
-    : { ...currentRuntime, ...runtimePatch };
-  const nextPendingUserMessage = isCurrentSession
-    ? resolveNextPendingUserMessage({
-        currentRuntime,
-        nextRuntime,
-        pendingUserMessage: input.pendingUserMessage,
-      })
-    : (nextRuntime.pendingUserMessage ?? null);
-  const shouldPatchPendingUser = isCurrentSession
-    && nextRuntime.pendingUserMessage !== nextPendingUserMessage;
-  const resolvedRuntime = shouldPatchPendingUser
-    ? { ...nextRuntime, pendingUserMessage: nextPendingUserMessage }
-    : nextRuntime;
   const didMetaChange = (
     nextMeta.historyStatus !== currentMeta.historyStatus
     || nextMeta.thinkingLevel !== currentMeta.thinkingLevel
     || nextMeta.label !== currentMeta.label
     || nextMeta.lastActivityAt !== currentMeta.lastActivityAt
   );
-  if (
-    nextMessages !== currentMessages
-    || didMetaChange
-    || resolvedRuntime !== currentRuntime
-    || nextViewportMessages !== currentViewport.messages
-  ) {
-    const nextViewport = {
-      ...currentViewport,
-      messages: nextViewportMessages,
-      totalMessageCount: input.totalMessageCount,
-      windowStartOffset: input.windowStartOffset,
-      windowEndOffset: input.windowEndOffset,
-      hasMore: input.hasMore,
-      hasNewer: input.hasNewer,
-      isLoadingMore: false,
-      isLoadingNewer: false,
-      isAtLatest: input.isAtLatest,
-    };
-    const viewportWithPendingUser = nextPendingUserMessage
-      ? appendViewportMessage(nextViewport, nextPendingUserMessage.message)
-      : nextViewport;
-    Object.assign(patch, {
-      loadedSessions: patchSessionRecord(state, input.requestedSessionKey, {
-        meta: nextMeta,
-        runtime: resolvedRuntime,
-        window: viewportWithPendingUser,
-      }),
-    });
-    changed = true;
+  const didMessageListChange = input.previousRenderFingerprint !== input.renderFingerprint || nextMessages !== currentMessages;
+  if (!didMetaChange && nextRuntime === currentRuntime && nextMessages === currentMessages) {
+    return { patch: null, didMessageListChange };
   }
-
   return {
-    patch: changed ? patch : null,
     didMessageListChange,
+    patch: {
+      loadedSessions: patchSessionRecord(
+        {
+          loadedSessions: patchSessionMessagesAndViewport(state, input.requestedSessionKey, nextMessages, {
+            totalMessageCount: input.totalMessageCount,
+            windowStartOffset: input.windowStartOffset,
+            windowEndOffset: input.windowEndOffset,
+            hasMore: input.hasMore,
+            hasNewer: input.hasNewer,
+            isLoadingMore: false,
+            isLoadingNewer: false,
+            isAtLatest: input.isAtLatest,
+          }),
+        },
+        input.requestedSessionKey,
+        {
+          meta: nextMeta,
+          runtime: nextRuntime,
+        },
+      ),
+    },
   };
 }
 
@@ -223,24 +381,16 @@ export function buildHistoryPreviewHydrationPatch(
   requestedSessionKey: string,
   viewportMessages: RawMessage[],
 ): Partial<ChatStoreState> | ChatStoreState {
+  const currentMessages = getSessionMessages(state, requestedSessionKey);
+  if (currentMessages !== viewportMessages) {
+    return state;
+  }
   const hydratedMessages = viewportMessages.map((message) => (
     message._attachedFiles
       ? { ...message, _attachedFiles: message._attachedFiles.map((file) => ({ ...file })) }
       : message
   ));
-  const currentViewport = getSessionViewportState(state, requestedSessionKey);
-  if (currentViewport.messages !== viewportMessages) {
-    return state;
-  }
   return {
-    loadedSessions: patchSessionViewportState(
-      state,
-      requestedSessionKey,
-      syncViewportMessages(
-        currentViewport,
-        hydratedMessages,
-      ),
-    ),
+    loadedSessions: patchSessionMessagesAndViewport(state, requestedSessionKey, hydratedMessages),
   };
 }
-

@@ -9,12 +9,10 @@ import type { GatewayStatus } from '../types/gateway';
 import {
   normalizeGatewayNotificationEvent,
   type ChatDomainEvent,
-  type ChatRuntimeDomainEvent,
+  type ChatConversationDomainEvent,
 } from './chat/event-normalizer';
 import { subscribeChatConversationEvents } from './chat/transport-adapter';
 import { useChatStore } from './chat';
-import { readSessionsFromState } from './chat/session-helpers';
-import { getSessionRuntime } from './chat/store-state-helpers';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
 
@@ -185,63 +183,11 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
   }
 }
 
-function maybeRefreshChatSessionsFromRuntimeEvent(
-  state: ReturnType<typeof useChatStore.getState>,
-  event: ChatRuntimeDomainEvent,
-): void {
-  if (event.source !== 'run.phase') {
-    return;
-  }
-  if (event.phase !== 'started' && event.phase !== 'final' && event.phase !== 'error' && event.phase !== 'aborted') {
-    return;
-  }
-  if (!event.sessionKey) {
-    return;
-  }
-  const shouldRefreshSessions =
-    event.sessionKey !== state.currentSessionKey
-    || !readSessionsFromState(state).some((session) => session.key === event.sessionKey);
-  if (!shouldRefreshSessions) {
-    return;
-  }
-  void state.loadSessions();
-}
-
-function maybeRefreshChatHistoryFromRuntimeEvent(
-  state: ReturnType<typeof useChatStore.getState>,
-  event: ChatRuntimeDomainEvent,
-): void {
-  if (event.source !== 'run.phase') {
-    return;
-  }
-  if (event.phase !== 'error' && event.phase !== 'aborted') {
-    return;
-  }
-  const matchesCurrentSession = event.sessionKey == null || event.sessionKey === state.currentSessionKey;
-  const currentRuntime = getSessionRuntime(state, state.currentSessionKey);
-  const matchesActiveRun = (
-    event.runId != null
-    && currentRuntime.activeRunId != null
-    && event.runId === currentRuntime.activeRunId
-  );
-  if (!matchesCurrentSession && !matchesActiveRun && event.sessionKey != null) {
-    return;
-  }
-  void state.loadHistory({
-    sessionKey: state.currentSessionKey,
-    mode: 'quiet',
-    scope: 'foreground',
-    reason: 'gateway_runtime_phase_refresh',
-  });
-}
-
 function handleChatDomainEvent(event: ChatDomainEvent): void {
   try {
     const state = useChatStore.getState();
-    if (event.kind === 'chat.runtime') {
-      maybeRefreshChatSessionsFromRuntimeEvent(state, event);
-      maybeRefreshChatHistoryFromRuntimeEvent(state, event);
-      state.handleChatEvent(event.event);
+    if (event.kind === 'chat.message' || event.kind === 'chat.runtime.lifecycle') {
+      state.handleConversationEvent(event as unknown as Record<string, unknown>);
       return;
     }
     if (event.kind === 'chat.approval.requested') {
@@ -254,7 +200,7 @@ function handleChatDomainEvent(event: ChatDomainEvent): void {
   }
 }
 
-function handleGatewayConversationEvent(event: ChatRuntimeDomainEvent): void {
+function handleGatewayConversationEvent(event: ChatConversationDomainEvent): void {
   handleChatDomainEvent(event);
 }
 

@@ -174,22 +174,17 @@ function estimateMessageChars(message: RawMessage): {
 
 function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): number {
   const runtime = state.loadedSessions[sessionKey]?.runtime;
-  if (!runtime) {
+  const tooling = state.loadedSessions[sessionKey]?.tooling;
+  if (!runtime && !tooling) {
     return 0;
   }
 
   let total = 0;
-  const pendingUserMessage = runtime.pendingUserMessage?.message;
-  if (pendingUserMessage) {
-    total += estimateMessageChars(pendingUserMessage).approxChars;
-  }
-
-  if (runtime.streamingMessageId) {
+  if (runtime?.streamingMessageId) {
     total += runtime.streamingMessageId.length;
   }
-
-  total += runtime.streamingTools.length * 64;
-  total += runtime.pendingToolImages.length * 64;
+  total += (tooling?.streamingTools.length ?? 0) * 64;
+  total += (tooling?.pendingToolImages.length ?? 0) * 64;
   return total;
 }
 
@@ -206,7 +201,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   let approxRetainedBytes = 0;
 
   for (const [sessionKey, record] of sessions) {
-    const messages = Array.isArray(record.window?.messages) ? record.window.messages : [];
+    const messages = Array.isArray(record.messages) ? record.messages : [];
     let sessionContentChars = 0;
     let sessionAttachedFileCount = 0;
     let sessionPreviewCharCount = 0;
@@ -324,4 +319,3 @@ export function installChatMemoryDiagnosticsDebugApi(target: Window): void {
     collectMemoryDiagnostics: collectAppMemoryDiagnostics,
   };
 }
-

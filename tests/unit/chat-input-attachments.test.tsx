@@ -38,22 +38,6 @@ const skillsStoreState: {
   fetchSkills: fetchSkillsMock,
 };
 
-const chatStoreState: {
-  currentSessionKey: string;
-} = {
-  currentSessionKey: 'agent:main:main',
-};
-
-const subagentsStoreState: {
-  agentsResource: {
-    data: Array<{ id: string; skills?: string[] }>;
-  };
-} = {
-  agentsResource: {
-    data: [],
-  },
-};
-
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
@@ -66,14 +50,6 @@ vi.mock('@/stores/skills', () => ({
   useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
 }));
 
-vi.mock('@/stores/chat', () => ({
-  useChatStore: (selector: (state: typeof chatStoreState) => unknown) => selector(chatStoreState),
-}));
-
-vi.mock('@/stores/subagents', () => ({
-  useSubagentsStore: (selector: (state: typeof subagentsStoreState) => unknown) => selector(subagentsStoreState),
-}));
-
 describe('chat input attachments', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
@@ -81,8 +57,6 @@ describe('chat input attachments', () => {
     skillsStoreState.skills = [];
     skillsStoreState.snapshotReady = true;
     skillsStoreState.initialLoading = false;
-    chatStoreState.currentSessionKey = 'agent:main:main';
-    subagentsStoreState.agentsResource.data = [];
   });
 
   it('图片附件以紧凑 chip 展示并支持点击预览', async () => {

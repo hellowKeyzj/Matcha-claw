@@ -14,6 +14,10 @@ let historyPollTimer: ReturnType<typeof setTimeout> | null = null;
 // before committing the error to give the recovery path a chance.
 let errorRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Timer for active-run safety timeout. This stays outside the store so the
+// timeout can survive async gaps without becoming store state.
+let sendSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+
 export function clearErrorRecoveryTimer(): void {
   if (errorRecoveryTimer) {
     clearTimeout(errorRecoveryTimer);
@@ -38,6 +42,17 @@ export function hasErrorRecoveryTimer(): boolean {
 
 export function setErrorRecoveryTimer(timer: ReturnType<typeof setTimeout> | null): void {
   errorRecoveryTimer = timer;
+}
+
+export function clearSendSafetyTimer(): void {
+  if (sendSafetyTimer) {
+    clearTimeout(sendSafetyTimer);
+    sendSafetyTimer = null;
+  }
+}
+
+export function setSendSafetyTimer(timer: ReturnType<typeof setTimeout> | null): void {
+  sendSafetyTimer = timer;
 }
 
 export function setLastChatEventAt(value: number): void {

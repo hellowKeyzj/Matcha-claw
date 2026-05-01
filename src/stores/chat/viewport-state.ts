@@ -1,7 +1,4 @@
-import type {
-  ChatSessionViewportState,
-  RawMessage,
-} from './types';
+import type { ChatSessionViewportState } from './types';
 
 export interface ChatViewportWindow extends ChatSessionViewportState {}
 
@@ -13,18 +10,16 @@ export interface ChatViewportCacheStats {
 export function createViewportWindowState(
   partial: Partial<ChatSessionViewportState> = {},
 ): ChatViewportWindow {
-  const messages = Array.isArray(partial.messages) ? partial.messages : [];
   const totalMessageCount = typeof partial.totalMessageCount === 'number'
     ? partial.totalMessageCount
-    : messages.length;
+    : (typeof partial.windowEndOffset === 'number' ? partial.windowEndOffset : 0);
   const windowStartOffset = typeof partial.windowStartOffset === 'number'
     ? partial.windowStartOffset
     : 0;
   const windowEndOffset = typeof partial.windowEndOffset === 'number'
     ? partial.windowEndOffset
-    : windowStartOffset + messages.length;
+    : totalMessageCount;
   return {
-    messages,
     totalMessageCount,
     windowStartOffset,
     windowEndOffset,
@@ -37,122 +32,14 @@ export function createViewportWindowState(
   };
 }
 
-function hasMessageId(messages: RawMessage[], messageId: string): boolean {
-  return messages.some((message) => message.id === messageId);
-}
-
-function finalizeViewportMessages(
+export function syncViewportState(
   viewport: ChatSessionViewportState,
-  messages: RawMessage[],
-  options?: {
-    totalMessageCount?: number;
-    hasNewer?: boolean;
-    isAtLatest?: boolean;
-  },
-): ChatViewportWindow {
-  const totalMessageCount = typeof options?.totalMessageCount === 'number'
-    ? options.totalMessageCount
-    : Math.max(viewport.windowStartOffset + messages.length, viewport.totalMessageCount);
-  return createViewportWindowState({
-    ...viewport,
-    messages,
-    totalMessageCount,
-    windowEndOffset: viewport.windowStartOffset + messages.length,
-    hasNewer: options?.hasNewer ?? viewport.hasNewer,
-    isAtLatest: options?.isAtLatest ?? viewport.isAtLatest,
-  });
-}
-
-export function syncViewportMessages(
-  viewport: ChatSessionViewportState,
-  messages: RawMessage[],
-  options?: {
-    totalMessageCount?: number;
-    hasMore?: boolean;
-    hasNewer?: boolean;
-    isAtLatest?: boolean;
-  },
+  next: ChatSessionViewportState,
 ): ChatViewportWindow {
   return createViewportWindowState({
     ...viewport,
-    messages,
-    totalMessageCount: typeof options?.totalMessageCount === 'number'
-      ? options.totalMessageCount
-      : Math.max(viewport.windowStartOffset + messages.length, viewport.totalMessageCount),
-    windowEndOffset: viewport.windowStartOffset + messages.length,
-    hasMore: options?.hasMore ?? viewport.hasMore,
-    hasNewer: options?.hasNewer ?? viewport.hasNewer,
-    isAtLatest: options?.isAtLatest ?? viewport.isAtLatest,
+    ...next,
   });
-}
-
-export function appendViewportMessage(
-  viewport: ChatSessionViewportState,
-  message: RawMessage,
-): ChatViewportWindow {
-  const messageId = typeof message.id === 'string' ? message.id.trim() : '';
-  if (messageId && hasMessageId(viewport.messages, messageId)) {
-    return viewport;
-  }
-  return finalizeViewportMessages(
-    viewport,
-    [...viewport.messages, message],
-    {
-      totalMessageCount: viewport.totalMessageCount + 1,
-      hasNewer: false,
-      isAtLatest: true,
-    },
-  );
-}
-
-export function upsertViewportMessage(
-  viewport: ChatSessionViewportState,
-  message: RawMessage,
-  options?: {
-    appendIfMissing?: boolean;
-  },
-): ChatViewportWindow {
-  const appendIfMissing = options?.appendIfMissing ?? true;
-  const messageId = typeof message.id === 'string' ? message.id.trim() : '';
-  if (!messageId) {
-    return appendIfMissing ? appendViewportMessage(viewport, message) : viewport;
-  }
-
-  const matchedIndex = viewport.messages.findIndex((candidate) => candidate.id === messageId);
-  if (matchedIndex < 0) {
-    return appendIfMissing ? appendViewportMessage(viewport, message) : viewport;
-  }
-  if (viewport.messages[matchedIndex] === message) {
-    return viewport;
-  }
-
-  const nextMessages = [...viewport.messages];
-  nextMessages[matchedIndex] = message;
-  return finalizeViewportMessages(viewport, nextMessages);
-}
-
-export function removeViewportMessageById(
-  viewport: ChatSessionViewportState,
-  messageId: string | null | undefined,
-): ChatViewportWindow {
-  const normalizedMessageId = typeof messageId === 'string' ? messageId.trim() : '';
-  if (!normalizedMessageId) {
-    return viewport;
-  }
-
-  const matchedIndex = viewport.messages.findIndex((message) => message.id === normalizedMessageId);
-  if (matchedIndex < 0) {
-    return viewport;
-  }
-
-  const nextMessages = viewport.messages.filter((_, index) => index !== matchedIndex);
-  return finalizeViewportMessages(
-    viewport,
-    nextMessages,
-    {
-      totalMessageCount: Math.max(viewport.windowStartOffset + nextMessages.length, viewport.totalMessageCount - 1),
-    },
-  );
 }
 
 export function getChatViewportCacheStats(): ChatViewportCacheStats {

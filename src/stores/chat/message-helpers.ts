@@ -240,8 +240,24 @@ function stripLeadingUntrustedMetadataBlocks(text: string): string {
   return output;
 }
 
-function cleanGatewayUserText(text: string): string {
+function stripLeadingInternalPromptArtifacts(text: string): string {
+  let output = text;
+  while (true) {
+    const next = output
+      .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
+      .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '');
+    if (next === output) {
+      break;
+    }
+    output = next;
+  }
+  return output;
+}
+
+export function sanitizeCanonicalUserText(text: string): string {
   const cleaned = text
+    .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
+    .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '')
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
@@ -250,13 +266,112 @@ function cleanGatewayUserText(text: string): string {
     .replace(/^Sender\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
     .replace(/^\s*[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*/i, '');
-  return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
+  return stripLeadingUntrustedMetadataBlocks(stripLeadingInternalPromptArtifacts(cleaned)).trim();
+}
+
+export function sanitizeCanonicalUserContent(content: unknown): unknown {
+  if (typeof content === 'string') {
+    return sanitizeCanonicalUserText(content);
+  }
+  if (!Array.isArray(content)) {
+    return content;
+  }
+
+  let changed = false;
+  const nextContent = (content as ContentBlock[]).map((block) => {
+    if (block?.type !== 'text' || typeof block.text !== 'string') {
+      return block;
+    }
+    const nextText = sanitizeCanonicalUserText(block.text);
+    if (nextText === block.text) {
+      return block;
+    }
+    changed = true;
+    return {
+      ...block,
+      text: nextText,
+    };
+  });
+
+  return changed ? nextContent : content;
+}
+
+function normalizeOptionalIdentity(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+interface NormalizeIncomingMessageOptions {
+  fallbackId?: string | null;
+}
+
+export function normalizeIncomingMessage(
+  message: RawMessage,
+  options: NormalizeIncomingMessageOptions = {},
+): RawMessage {
+  const messageRecord = message as RawMessage & Record<string, unknown> & { text?: unknown };
+  const nextId = normalizeOptionalIdentity(message.id ?? options.fallbackId);
+  const extractedClientId = message.role === 'user'
+    ? extractUserMessageClientId(message.content)
+    : null;
+  const nextClientId = normalizeOptionalIdentity(
+    message.clientId
+    ?? messageRecord.client_id
+    ?? messageRecord.idempotencyKey
+    ?? messageRecord.idempotency_key,
+  ) ?? extractedClientId ?? undefined;
+  const nextMessageId = normalizeOptionalIdentity(
+    message.messageId
+    ?? messageRecord.message_id,
+  ) ?? nextId ?? nextClientId ?? undefined;
+  const nextUniqueId = normalizeOptionalIdentity(
+    message.uniqueId
+    ?? messageRecord.unique_id,
+  ) ?? nextId ?? undefined;
+  const nextContent = message.role === 'user'
+    ? sanitizeCanonicalUserContent(message.content)
+    : message.content;
+  const nextText = typeof messageRecord.text === 'string' && message.role === 'user'
+    ? sanitizeCanonicalUserText(messageRecord.text)
+    : messageRecord.text;
+
+  if (
+    nextId === message.id
+    && nextMessageId === message.messageId
+    && nextClientId === message.clientId
+    && nextUniqueId === message.uniqueId
+    && nextContent === message.content
+    && nextText === messageRecord.text
+  ) {
+    return message;
+  }
+
+  return {
+    ...message,
+    ...(nextId ? { id: nextId } : {}),
+    ...(nextMessageId ? { messageId: nextMessageId } : {}),
+    ...(nextClientId ? { clientId: nextClientId } : {}),
+    ...(nextUniqueId ? { uniqueId: nextUniqueId } : {}),
+    content: nextContent,
+    ...(typeof nextText === 'string' ? { text: nextText } : {}),
+  };
+}
+
+export function normalizeIncomingMessages(messages: RawMessage[]): RawMessage[] {
+  let changed = false;
+  const nextMessages = messages.map((message) => {
+    const nextMessage = normalizeIncomingMessage(message);
+    if (nextMessage !== message) {
+      changed = true;
+    }
+    return nextMessage;
+  });
+  return changed ? nextMessages : messages;
 }
 
 export function normalizeUserTextForReconcile(content: unknown): string {
-  const raw = getMessageText(content);
+  const raw = getMessageText(sanitizeCanonicalUserContent(content));
   if (!raw) return '';
-  return cleanGatewayUserText(raw)
+  return sanitizeCanonicalUserText(raw)
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, ' ')
     .replace(/\s*([，。！？：；,.!?;:])\s*/g, '$1')
@@ -272,7 +387,7 @@ export function normalizeAssistantFinalTextForDedup(content: unknown): string {
 }
 
 function resolveSessionLabelCandidateFromUserMessage(content: unknown): string {
-  return normalizeSessionLabelText(cleanGatewayUserText(getMessageText(content)));
+  return normalizeSessionLabelText(sanitizeCanonicalUserText(getMessageText(content)));
 }
 
 function resolveSessionLabelCandidateFromAssistantMessage(content: unknown): string {

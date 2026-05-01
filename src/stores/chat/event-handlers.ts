@@ -1,6 +1,4 @@
 import { collectToolResultPendingFiles } from './attachment-helpers';
-import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import { prewarmStaticRowsForMessages } from '@/pages/Chat/chat-rows-cache';
 import {
   buildAuthoritativeUserCommitPatch,
   buildErrorStreamSnapshot,
@@ -21,12 +19,12 @@ import {
 import { isToolOnlyMessage } from './message-helpers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import {
-  buildTranscriptBackedViewportState,
   getSessionMessages,
   getSessionRuntime,
+  patchSessionMessagesAndViewport,
   patchSessionRecord,
 } from './store-state-helpers';
-import type { ChatStoreState, RawMessage } from './types';
+import type { ChatHistoryLoadMode, ChatStoreState, RawMessage } from './types';
 import { findCurrentStreamingMessage } from './streaming-message';
 
 export type ChatStoreSetFn = (
@@ -35,13 +33,6 @@ export type ChatStoreSetFn = (
 ) => void;
 
 export type ChatStoreGetFn = () => ChatStoreState;
-
-function prewarmCurrentSessionRows(
-  sessionKey: string,
-  messages: RawMessage[],
-): void {
-  prewarmStaticRowsForMessages(sessionKey, messages);
-}
 
 interface StoreToolSnapshotAdapter {
   reset: () => void;
@@ -58,6 +49,7 @@ interface HandleStoreFinalEventParams {
   eventRunId: string;
   snapshot: StoreToolSnapshotAdapter;
   onMaybeTrackFirstTokenFinal: () => void;
+  historyLoadModeOnMissingMessage?: ChatHistoryLoadMode;
 }
 
 export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void {
@@ -70,6 +62,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     eventRunId,
     snapshot,
     onMaybeTrackFirstTokenFinal,
+    historyLoadModeOnMissingMessage = 'active',
   } = params;
 
   void resolvedState;
@@ -93,7 +86,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     });
     void get().loadHistory({
       sessionKey: get().currentSessionKey,
-      mode: 'active',
+      mode: historyLoadModeOnMissingMessage,
       scope: 'foreground',
       reason: 'final_event_without_message',
     });
@@ -118,7 +111,6 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       updates,
       toolFiles,
     }));
-    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
     return;
   }
 
@@ -128,7 +120,6 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
       state,
       finalMessage: finalMsg,
     }));
-    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
     return;
   }
 
@@ -140,7 +131,7 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
   }
   const fallbackRole = typeof finalMsg.role === 'string' ? finalMsg.role : 'assistant';
   const currentRuntime = getSessionRuntime(get(), currentSessionKey);
-  const msgId = currentRuntime.streamingMessageId || finalMsg.id || (toolOnly
+  const msgId = currentRuntime.streamingMessageId || finalMsg.id || finalMsg.messageId || (toolOnly
     ? `run-${eventRunId}-tool-${Date.now()}`
     : `run-${eventRunId}-${fallbackRole}`);
 
@@ -152,14 +143,6 @@ export function handleStoreFinalEvent(params: HandleStoreFinalEventParams): void
     hasOutput,
     toolOnly,
   }));
-  prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
-
-  if (hasOutput && !toolOnly) {
-    prewarmAssistantMarkdownBody({
-      ...finalMsg,
-      id: msgId,
-    });
-  }
 }
 
 interface HandleStoreErrorEventParams {
@@ -197,14 +180,10 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
   if (snapshot) {
     set((state) => {
       const nextMessages = [...getSessionMessages(state, currentSessionKey), snapshot];
-      const runtime = getSessionRuntime(state, currentSessionKey);
       return {
-        loadedSessions: patchSessionRecord(state, currentSessionKey, {
-          window: buildTranscriptBackedViewportState(state, currentSessionKey, nextMessages, runtime),
-        }),
+        loadedSessions: patchSessionMessagesAndViewport(state, currentSessionKey, nextMessages),
       };
     });
-    prewarmCurrentSessionRows(currentSessionKey, getSessionMessages(get(), currentSessionKey));
   }
 
   set((state) => {
@@ -258,4 +237,3 @@ export function handleStoreErrorEvent(params: HandleStoreErrorEventParams): void
     };
   });
 }
-

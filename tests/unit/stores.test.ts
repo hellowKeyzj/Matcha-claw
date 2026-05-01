@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { waitFor } from '@testing-library/react';
+import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 import { gatewayClientRpcMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
@@ -14,7 +15,6 @@ describe('Settings Store', () => {
     useSettingsStore.setState({
       theme: 'system',
       language: 'en',
-      sidebarCollapsed: false,
       devModeUnlocked: false,
       gatewayAutoStart: true,
       gatewayPort: 18789,
@@ -29,7 +29,6 @@ describe('Settings Store', () => {
   it('should have default values', () => {
     const state = useSettingsStore.getState();
     expect(state.theme).toBe('system');
-    expect(state.sidebarCollapsed).toBe(false);
     expect(state.gatewayAutoStart).toBe(true);
   });
   
@@ -38,13 +37,6 @@ describe('Settings Store', () => {
     const { setTheme } = useSettingsStore.getState();
     setTheme('dark');
     expect(useSettingsStore.getState().theme).toBe('dark');
-  });
-  
-  it('should toggle sidebar collapsed state', () => {
-    hostApiFetchMock.mockResolvedValueOnce({ success: true });
-    const { setSidebarCollapsed } = useSettingsStore.getState();
-    setSidebarCollapsed(true);
-    expect(useSettingsStore.getState().sidebarCollapsed).toBe(true);
   });
   
   it('should unlock dev mode', () => {
@@ -110,6 +102,28 @@ describe('Settings Store', () => {
         }),
       );
     });
+  });
+});
+
+describe('Layout Store', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem('layout:sidebar-visible');
+    window.localStorage.removeItem('layout:sidebar-width');
+    useLayoutStore.setState({
+      sidebarVisible: true,
+      sidebarWidth: 256,
+    });
+  });
+
+  it('should have default values', () => {
+    const state = useLayoutStore.getState();
+    expect(state.sidebarVisible).toBe(true);
+    expect(state.sidebarWidth).toBe(256);
+  });
+
+  it('should toggle sidebar visibility', () => {
+    useLayoutStore.getState().toggleSidebar();
+    expect(useLayoutStore.getState().sidebarVisible).toBe(false);
   });
 });
 

@@ -49,17 +49,9 @@ export function resolveSessionListLabel(
   sessionKey: string,
   fallbackLabel?: string | null,
 ): string | null {
-  const runtime = getSessionRuntime(state, sessionKey);
-  const pendingUserLabel = runtime.pendingUserMessage
-    ? resolveSessionLabelFromMessages([runtime.pendingUserMessage.message])
-    : null;
-  if (pendingUserLabel) {
-    return pendingUserLabel;
-  }
-
-  const viewportMessages = getSessionMessages(state, sessionKey);
-  if (viewportMessages.length > 0) {
-    const viewportLabel = resolveSessionLabelFromMessages(viewportMessages);
+  const messages = getSessionMessages(state, sessionKey);
+  if (messages.length > 0) {
+    const viewportLabel = resolveSessionLabelFromMessages(messages);
     if (viewportLabel) {
       return viewportLabel;
     }
@@ -151,15 +143,13 @@ export function shouldRetainLocalSessionRecord(
   const record = getSessionRecord(state, sessionKey);
   const runtime = record.runtime;
   return (
-    record.window.messages.length > 0
+    record.messages.length > 0
     || Boolean(record.meta.label)
     || Boolean(record.meta.lastActivityAt)
-    || runtime.pendingUserMessage != null
     || runtime.sending
     || runtime.pendingFinal
     || runtime.activeRunId != null
     || runtime.streamingMessageId != null
-    || runtime.approvalStatus === 'awaiting_approval'
     || (state.pendingApprovalsBySession[sessionKey]?.length ?? 0) > 0
   );
 }
@@ -284,7 +274,7 @@ export function shouldKeepMissingCurrentSession(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
-  const hasMessages = record.window.messages.length > 0;
+  const hasMessages = record.messages.length > 0;
   const hasLabel = Boolean(record.meta.label);
   const hasActivity = Boolean(record.meta.lastActivityAt);
   const hasRuntime = Object.prototype.hasOwnProperty.call(state.loadedSessions, sessionKey);

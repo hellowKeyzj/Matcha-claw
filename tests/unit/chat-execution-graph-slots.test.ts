@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildStaticChatRows, type ChatMessageRow } from '@/pages/Chat/chat-row-model';
+import { buildExecutionGraphSlots } from '@/pages/Chat/components/ChatList';
 import type { ExecutionGraphData } from '@/pages/Chat/execution-graph-model';
-import { buildExecutionGraphSlots } from '@/pages/Chat/chat-render-model';
 
 describe('chat execution graph slots', () => {
   it('anchors execution graphs onto their message row and folds missing anchors into the final row', () => {

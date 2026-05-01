@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import {
-  appendViewportMessage,
-  createViewportWindowState,
-  removeViewportMessageById,
-  upsertViewportMessage,
-} from '@/stores/chat/viewport-state';
+import { selectViewportMessages } from '@/stores/chat/store-state-helpers';
+import { createViewportWindowState, syncViewportState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from '@/stores/chat';
 
 function buildMessages(count: number): RawMessage[] {
@@ -17,10 +13,9 @@ function buildMessages(count: number): RawMessage[] {
 }
 
 describe('viewport window state', () => {
-  it('preserves the supplied viewport window metadata', () => {
+  it('preserves only viewport metadata and derives the visible slice from messages + offsets', () => {
     const messages = buildMessages(40);
     const window = createViewportWindowState({
-      messages: messages.slice(-30),
       totalMessageCount: 40,
       windowStartOffset: 10,
       windowEndOffset: 40,
@@ -29,70 +24,41 @@ describe('viewport window state', () => {
       isAtLatest: true,
     });
 
-    expect(window.messages).toHaveLength(30);
-    expect(window.messages[0]?.id).toBe('message-11');
     expect(window.windowStartOffset).toBe(10);
     expect(window.windowEndOffset).toBe(40);
     expect(window.totalMessageCount).toBe(40);
     expect(window.hasMore).toBe(true);
     expect(window.isAtLatest).toBe(true);
+    expect(selectViewportMessages({ messages, window }).map((message) => message.id)).toEqual(
+      messages.slice(10).map((message) => message.id),
+    );
   });
 
-  it('appends optimistic messages directly into the viewport window', () => {
-    const messages = buildMessages(3);
-    const nextWindow = appendViewportMessage(createViewportWindowState({
-      messages,
-      totalMessageCount: 3,
-      windowStartOffset: 0,
-      windowEndOffset: 3,
-      isAtLatest: true,
-    }), {
-      id: 'pending-user-1',
-      role: 'user',
-      content: 'pending user',
-      timestamp: 10,
-    });
-
-    expect(nextWindow.messages.map((message) => message.id)).toEqual([
-      'message-1',
-      'message-2',
-      'message-3',
-      'pending-user-1',
-    ]);
-    expect(nextWindow.totalMessageCount).toBe(4);
-    expect(nextWindow.windowEndOffset).toBe(4);
-  });
-
-  it('upserts streaming messages in place and removes failed optimistic messages', () => {
+  it('syncViewportState updates paging metadata without owning message instances', () => {
+    const messages = buildMessages(6);
     const baseWindow = createViewportWindowState({
-      messages: [
-        ...buildMessages(2),
-        {
-          id: 'stream-1',
-          role: 'assistant',
-          content: 'draft',
-          timestamp: 3,
-        },
-      ],
-      totalMessageCount: 3,
+      totalMessageCount: 6,
       windowStartOffset: 0,
-      windowEndOffset: 3,
+      windowEndOffset: 6,
       isAtLatest: true,
     });
 
-    const streamedWindow = upsertViewportMessage(baseWindow, {
-      id: 'stream-1',
-      role: 'assistant',
-      content: 'streaming answer',
-      timestamp: 3,
-    });
-    const clearedWindow = removeViewportMessageById(streamedWindow, 'stream-1');
+    const trimmedWindow = syncViewportState(baseWindow, createViewportWindowState({
+      totalMessageCount: 6,
+      windowStartOffset: 2,
+      windowEndOffset: 6,
+      hasMore: true,
+      isAtLatest: true,
+    }));
 
-    expect(streamedWindow.messages.at(-1)?.content).toBe('streaming answer');
-    expect(clearedWindow.messages.map((message) => message.id)).toEqual([
-      'message-1',
-      'message-2',
+    expect(trimmedWindow.windowStartOffset).toBe(2);
+    expect(trimmedWindow.windowEndOffset).toBe(6);
+    expect(trimmedWindow.hasMore).toBe(true);
+    expect(selectViewportMessages({ messages, window: trimmedWindow }).map((message) => message.id)).toEqual([
+      'message-3',
+      'message-4',
+      'message-5',
+      'message-6',
     ]);
-    expect(clearedWindow.totalMessageCount).toBe(2);
   });
 });

@@ -19,7 +19,6 @@ function createSessionRecord(input?: {
     sending: boolean;
     activeRunId: string | null;
     pendingFinal: boolean;
-    approvalStatus: 'idle' | 'awaiting_approval';
   }>;
 }) {
   const messages = input?.messages ?? [];
@@ -34,14 +33,16 @@ function createSessionRecord(input?: {
       sending: input?.runtime?.sending ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      streamingTools: [],
       pendingFinal: input?.runtime?.pendingFinal ?? false,
+      streamingMessageId: null,
       lastUserMessageAt: null,
-      pendingToolImages: [],
-      approvalStatus: input?.runtime?.approvalStatus ?? 'idle',
     },
+    tooling: {
+      streamingTools: [],
+      pendingToolImages: [],
+    },
+    messages,
     window: createViewportWindowState({
-      messages,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -196,7 +197,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     let chatState = useChatStore.getState();
-    expect(chatState.loadedSessions['agent:main:main']?.runtime.approvalStatus).toBe('awaiting_approval');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('waiting_tool');
     expect(chatState.pendingApprovalsBySession['agent:main:main']?.map((item) => item.id)).toEqual([
       'approval-evt-1',
     ]);
@@ -213,7 +214,7 @@ describe('gateway store event wiring', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     chatState = useChatStore.getState();
-    expect(chatState.loadedSessions['agent:main:main']?.runtime.approvalStatus).toBe('idle');
+    expect(chatState.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('aborted');
     expect(chatState.pendingApprovalsBySession['agent:main:main'] ?? []).toEqual([]);
   });
 
@@ -266,6 +267,59 @@ describe('gateway store event wiring', () => {
     expect(state.error).toBeNull();
   });
 
+  it('run.phase completed 只应进入单一 conversation event 入口', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const handleConversationEventMock = vi.fn();
+    useChatStore.setState({
+      handleConversationEvent: handleConversationEventMock,
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord(),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:conversation-event')?.({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: 'run-lifecycle-1',
+      sessionKey: 'agent:main:main',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handleConversationEventMock).toHaveBeenCalledTimes(1);
+    expect(handleConversationEventMock).toHaveBeenCalledWith({
+      kind: 'chat.runtime.lifecycle',
+      source: 'run.phase',
+      phase: 'final',
+      runId: 'run-lifecycle-1',
+      sessionKey: 'agent:main:main',
+      event: {
+        state: 'final',
+        runId: 'run-lifecycle-1',
+        sessionKey: 'agent:main:main',
+      },
+    });
+  });
+
   it('agent 通知与 conversation chat.message 同时到达时，不应重复转发到 chat store', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
@@ -275,9 +329,9 @@ describe('gateway store event wiring', () => {
     });
 
     const { useChatStore } = await import('@/stores/chat');
-    const handleChatEventMock = vi.fn();
+    const handleConversationEventMock = vi.fn();
     useChatStore.setState({
-      handleChatEvent: handleChatEventMock,
+      handleConversationEvent: handleConversationEventMock,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
@@ -328,15 +382,22 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
-    expect(handleChatEventMock).toHaveBeenCalledWith({
+    expect(handleConversationEventMock).toHaveBeenCalledTimes(1);
+    expect(handleConversationEventMock).toHaveBeenCalledWith({
+      kind: 'chat.message',
+      source: 'chat.message',
+      phase: 'final',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
-      state: 'final',
-      message: {
-        role: 'assistant',
-        id: 'assistant-final-1',
-        content: 'hello',
+      event: {
+        runId: 'run-1',
+        sessionKey: 'agent:main:main',
+        state: 'final',
+        message: {
+          role: 'assistant',
+          id: 'assistant-final-1',
+          content: 'hello',
+        },
       },
     });
   });
@@ -350,9 +411,9 @@ describe('gateway store event wiring', () => {
     });
 
     const { useChatStore } = await import('@/stores/chat');
-    const handleChatEventMock = vi.fn();
+    const handleConversationEventMock = vi.fn();
     useChatStore.setState({
-      handleChatEvent: handleChatEventMock,
+      handleConversationEvent: handleConversationEventMock,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
@@ -384,7 +445,7 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleChatEventMock).not.toHaveBeenCalled();
+    expect(handleConversationEventMock).not.toHaveBeenCalled();
   });
 
   it('legacy chat 与结构化 final 同时到达时，应只消费结构化 final', async () => {
@@ -396,9 +457,9 @@ describe('gateway store event wiring', () => {
     });
 
     const { useChatStore } = await import('@/stores/chat');
-    const handleChatEventMock = vi.fn();
+    const handleConversationEventMock = vi.fn();
     useChatStore.setState({
-      handleChatEvent: handleChatEventMock,
+      handleConversationEvent: handleConversationEventMock,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
@@ -443,9 +504,10 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
-    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
-      state: 'final',
+    expect(handleConversationEventMock).toHaveBeenCalledTimes(1);
+    expect(handleConversationEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'chat.message',
+      phase: 'final',
     }));
   });
 
@@ -458,9 +520,9 @@ describe('gateway store event wiring', () => {
     });
 
     const { useChatStore } = await import('@/stores/chat');
-    const handleChatEventMock = vi.fn();
+    const handleConversationEventMock = vi.fn();
     useChatStore.setState({
-      handleChatEvent: handleChatEventMock,
+      handleConversationEvent: handleConversationEventMock,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
@@ -505,9 +567,10 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
-    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
-      state: 'final',
+    expect(handleConversationEventMock).toHaveBeenCalledTimes(1);
+    expect(handleConversationEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'chat.message',
+      phase: 'final',
       runId: 'run-user-1',
     }));
   });
@@ -521,9 +584,9 @@ describe('gateway store event wiring', () => {
     });
 
     const { useChatStore } = await import('@/stores/chat');
-    const handleChatEventMock = vi.fn();
+    const handleConversationEventMock = vi.fn();
     useChatStore.setState({
-      handleChatEvent: handleChatEventMock,
+      handleConversationEvent: handleConversationEventMock,
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       currentSessionKey: 'agent:main:main',
@@ -568,9 +631,10 @@ describe('gateway store event wiring', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(handleChatEventMock).toHaveBeenCalledTimes(1);
-    expect(handleChatEventMock).toHaveBeenCalledWith(expect.objectContaining({
-      state: 'final',
+    expect(handleConversationEventMock).toHaveBeenCalledTimes(1);
+    expect(handleConversationEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'chat.message',
+      phase: 'final',
       runId: 'run-assistant-1',
     }));
   });
@@ -610,5 +674,3 @@ describe('gateway store event wiring', () => {
     });
   });
 });
-
-
