@@ -28,13 +28,13 @@ function ensureRecord(target: Record<string, unknown>, key: string): Record<stri
 
 function getCompanionSkillsRootCandidates(): string[] {
   const roots = [
-    join(process.cwd(), 'resources', 'plugin-companion-skills'),
+    join(process.cwd(), 'resources', 'skills', 'plugin-companion-skills'),
   ];
 
   if (typeof process.resourcesPath === 'string' && process.resourcesPath.trim()) {
     roots.push(
-      join(process.resourcesPath, 'resources', 'plugin-companion-skills'),
-      join(process.resourcesPath, 'plugin-companion-skills'),
+      join(process.resourcesPath, 'resources', 'skills', 'plugin-companion-skills'),
+      join(process.resourcesPath, 'skills', 'plugin-companion-skills'),
     );
   }
 
