@@ -1,5 +1,219 @@
-import { getMessageText } from './message-helpers';
+import {
+  extractUserMessageClientId,
+  getMessageText,
+  normalizeAssistantFinalTextForDedup,
+} from './message-helpers';
 import type { ContentBlock, RawMessage } from './types';
+
+function normalizeValue(value: string | null | undefined): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getAssistantToolCallIds(message: RawMessage): string[] {
+  const ids = new Set<string>();
+  if (Array.isArray(message.content)) {
+    for (const block of message.content as ContentBlock[]) {
+      if ((block.type === 'tool_use' || block.type === 'toolCall') && typeof block.id === 'string' && block.id.trim()) {
+        ids.add(block.id.trim());
+      }
+    }
+  }
+  const toolCalls = message.tool_calls ?? message.toolCalls;
+  if (Array.isArray(toolCalls)) {
+    for (const toolCall of toolCalls) {
+      const id = typeof toolCall?.id === 'string' ? toolCall.id.trim() : '';
+      if (id) {
+        ids.add(id);
+      }
+    }
+  }
+  return Array.from(ids).sort();
+}
+
+function matchesMessageIdentifier(message: RawMessage, candidateId: string): boolean {
+  if (!candidateId) {
+    return false;
+  }
+  return (
+    message.id === candidateId
+    || message.clientId === candidateId
+    || message.messageId === candidateId
+    || message.uniqueId === candidateId
+  );
+}
+
+function collectMessageIdentifierCandidates(message: RawMessage | null | undefined): string[] {
+  if (!message) {
+    return [];
+  }
+  const candidates = [
+    normalizeValue(message.messageId),
+    normalizeValue(message.clientId),
+    normalizeValue(message.uniqueId),
+    normalizeValue(message.id),
+  ].filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
+export function buildMessageIdentityKey(message: RawMessage | null | undefined): string | null {
+  if (!message) {
+    return null;
+  }
+  const toolCallId = normalizeValue(message.toolCallId);
+  if (toolCallId) {
+    return `tool:${toolCallId}`;
+  }
+  const agentId = normalizeValue(message.agentId);
+  if (message.role === 'assistant') {
+    const toolCallIds = getAssistantToolCallIds(message);
+    if (toolCallIds.length > 0) {
+      return `tool_calls:${toolCallIds.join(',')}:${agentId}`;
+    }
+  }
+  const messageId = normalizeValue(message.messageId) || normalizeValue(message.id);
+  if (messageId) {
+    const contentPrefix = (
+      message.role === 'assistant'
+        ? normalizeAssistantFinalTextForDedup(message.content)
+        : getMessageText(message.content).trim()
+    ).slice(0, 200);
+    return contentPrefix
+      ? `message:${message.role}:${messageId}:${agentId}:${contentPrefix}`
+      : `message:${message.role}:${messageId}:${agentId}:empty:${normalizeValue(message.id)}`;
+  }
+  const clientId = normalizeValue(message.clientId);
+  if (clientId) {
+    return `client:${message.role}:${clientId}:${agentId}`;
+  }
+  const uniqueId = normalizeValue(message.uniqueId);
+  if (uniqueId) {
+    return `unique:${message.role}:${uniqueId}:${agentId}`;
+  }
+  const id = normalizeValue(message.id);
+  if (id) {
+    return `id:${id}`;
+  }
+  const fallbackText = getMessageText(message.content).trim().slice(0, 120);
+  const timestamp = typeof message.timestamp === 'number' ? String(message.timestamp) : '';
+  if (fallbackText || timestamp) {
+    return `fallback:${message.role}:${timestamp}:${fallbackText}`;
+  }
+  return null;
+}
+
+export function getMessageIdentityKeys(message: RawMessage | null | undefined): string[] {
+  const key = buildMessageIdentityKey(message);
+  return key ? [key] : [];
+}
+
+export function findMessageIndexByIdentity(messages: RawMessage[], target: RawMessage | null | undefined): number {
+  if (!target) {
+    return -1;
+  }
+  const targetKey = buildMessageIdentityKey(target);
+  if (!targetKey) {
+    return -1;
+  }
+  for (let index = 0; index < messages.length; index += 1) {
+    if (buildMessageIdentityKey(messages[index]) === targetKey) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+export interface MessageCommitMatchOptions {
+  preferredMessageId?: string | null;
+}
+
+export function findMessageIndexForCommit(
+  messages: RawMessage[],
+  incomingMessage: RawMessage | null | undefined,
+  options: MessageCommitMatchOptions = {},
+): number {
+  if (!incomingMessage) {
+    return -1;
+  }
+
+  const preferredMessageId = normalizeValue(options.preferredMessageId);
+  if (preferredMessageId) {
+    const preferredIndex = messages.findIndex((message) => matchesMessageIdentifier(message, preferredMessageId));
+    if (preferredIndex >= 0) {
+      return preferredIndex;
+    }
+  }
+
+  const normalizedUserClientId = normalizeValue(extractUserMessageClientId(incomingMessage.content) ?? undefined);
+  if (normalizedUserClientId) {
+    const extractedClientMatchIndex = messages.findIndex((message) => matchesMessageIdentifier(message, normalizedUserClientId));
+    if (extractedClientMatchIndex >= 0) {
+      return extractedClientMatchIndex;
+    }
+  }
+
+  for (const candidateId of collectMessageIdentifierCandidates(incomingMessage)) {
+    const directIdentifierMatchIndex = messages.findIndex((message) => matchesMessageIdentifier(message, candidateId));
+    if (directIdentifierMatchIndex >= 0) {
+      return directIdentifierMatchIndex;
+    }
+  }
+
+  const identityIndex = findMessageIndexByIdentity(messages, incomingMessage);
+  if (identityIndex >= 0) {
+    return identityIndex;
+  }
+
+  return -1;
+}
+
+export function mergeMessagesPreservingLocalIdentity(
+  localMessage: RawMessage,
+  incomingMessage: RawMessage,
+): RawMessage {
+  const localId = normalizeValue(localMessage.id);
+  const localClientId = normalizeValue(localMessage.clientId);
+  const localUniqueId = normalizeValue(localMessage.uniqueId);
+  const localMessageId = normalizeValue(localMessage.messageId);
+  const incomingMessageId = normalizeValue(incomingMessage.messageId);
+  const incomingId = normalizeValue(incomingMessage.id);
+  const shouldLiftIncomingIdToMessageId = (
+    Boolean(localId)
+    && Boolean(incomingId)
+    && localId !== incomingId
+    && !localMessageId
+    && !incomingMessageId
+  );
+  return {
+    ...incomingMessage,
+    ...(localId ? { id: localMessage.id } : {}),
+    ...(localClientId ? { clientId: localMessage.clientId } : {}),
+    ...(localUniqueId ? { uniqueId: localMessage.uniqueId } : {}),
+    ...(localMessageId
+      ? { messageId: localMessage.messageId }
+      : (shouldLiftIncomingIdToMessageId ? { messageId: incomingId } : {})),
+    _attachedFiles: incomingMessage._attachedFiles?.length
+      ? incomingMessage._attachedFiles
+      : localMessage._attachedFiles,
+  };
+}
+
+export function commitMessageToTranscript(
+  messages: RawMessage[],
+  incomingMessage: RawMessage,
+  options: MessageCommitMatchOptions = {},
+): RawMessage[] {
+  const existingIndex = findMessageIndexForCommit(messages, incomingMessage, options);
+  if (existingIndex < 0) {
+    return [...messages, incomingMessage];
+  }
+  const currentMessage = messages[existingIndex]!;
+  if (currentMessage === incomingMessage) {
+    return messages;
+  }
+  const nextMessages = [...messages];
+  nextMessages[existingIndex] = mergeMessagesPreservingLocalIdentity(currentMessage, incomingMessage);
+  return nextMessages;
+}
 
 function isToolBlock(block: ContentBlock): boolean {
   return (
@@ -174,20 +388,9 @@ export function upsertMessageById(
   messages: RawMessage[],
   nextMessage: RawMessage,
 ): RawMessage[] {
-  const messageId = typeof nextMessage.id === 'string' ? nextMessage.id.trim() : '';
-  if (!messageId) {
-    return [...messages, nextMessage];
-  }
-  const existingIndex = messages.findIndex((message) => message.id === messageId);
-  if (existingIndex < 0) {
-    return [...messages, nextMessage];
-  }
-  if (messages[existingIndex] === nextMessage) {
-    return messages;
-  }
-  const nextMessages = [...messages];
-  nextMessages[existingIndex] = nextMessage;
-  return nextMessages;
+  return commitMessageToTranscript(messages, nextMessage, {
+    preferredMessageId: nextMessage.id ?? nextMessage.messageId ?? null,
+  });
 }
 
 export function removeMessageById(

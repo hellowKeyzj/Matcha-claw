@@ -1,13 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildHistoryFingerprint, createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
-  createFetchHistoryWindow,
-  loadHistoryWindow,
+  fetchHistoryWindow,
 } from '@/stores/chat/history-fetch-helpers';
 import { useGatewayStore } from '@/stores/gateway';
-import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import type { RawMessage } from '@/stores/chat/types';
 
 const hostSessionWindowFetchMock = vi.fn();
 
@@ -15,36 +12,6 @@ vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn(),
   hostSessionWindowFetch: (...args: unknown[]) => hostSessionWindowFetchMock(...args),
 }));
-
-function createHistoryRuntimeHarness(): StoreHistoryCache {
-  let runId = 0;
-  return {
-    getHistoryLoadRunId: () => runId,
-    nextHistoryLoadRunId: () => {
-      runId += 1;
-      return runId;
-    },
-    replaceHistoryLoadAbortController: () => null,
-    clearHistoryLoadAbortController: () => {},
-    historyFingerprintBySession: new Map<string, string>(),
-    historyQuickFingerprintBySession: new Map<string, string>(),
-    historyRenderFingerprintBySession: new Map<string, string>(),
-  };
-}
-
-function createStateHarness(overrides: Partial<ChatStoreState>) {
-  let state = {
-    currentSessionKey: 'agent:main:main',
-    loadedSessions: {
-      'agent:main:main': createEmptySessionRecord(),
-    },
-    ...overrides,
-  } as ChatStoreState;
-
-  return {
-    getState: () => state,
-  };
-}
 
 describe('chat history fetch pipeline helpers', () => {
   it('falls back to gateway history when host window responds empty for a non-empty historical session', async () => {
@@ -75,11 +42,11 @@ describe('chat history fetch pipeline helpers', () => {
       rpc: rpcMock,
     } as never);
 
-    const fetchHistoryWindow = createFetchHistoryWindow({
+    const result = await fetchHistoryWindow({
       requestedSessionKey,
-      getSessions: () => [{ key: requestedSessionKey, updatedAt: 1 }],
+      sessions: [{ key: requestedSessionKey, updatedAt: 1 }],
+      limit: CHAT_HISTORY_FULL_LIMIT,
     });
-    const result = await fetchHistoryWindow(CHAT_HISTORY_FULL_LIMIT);
 
     expect(hostSessionWindowFetchMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
@@ -99,120 +66,42 @@ describe('chat history fetch pipeline helpers', () => {
     expect(result.isAtLatest).toBe(true);
   });
 
-  it('fetches one latest window and applies it directly', async () => {
+  it('returns host session window directly when host already provides latest rows', async () => {
     const requestedSessionKey = 'agent:main:main';
-    const historyRuntime = createHistoryRuntimeHarness();
-    const { getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
     const rawMessages: RawMessage[] = [
       { role: 'assistant', content: 'a', timestamp: 1 },
       { role: 'assistant', content: 'b', timestamp: 2 },
     ];
-    const fetchHistoryWindow = vi.fn(async () => ({
-      rawMessages,
-      thinkingLevel: 'medium' as const,
+    hostSessionWindowFetchMock.mockReset();
+    hostSessionWindowFetchMock.mockResolvedValueOnce({
+      messages: rawMessages,
+      canonicalMessages: rawMessages,
       totalMessageCount: rawMessages.length,
       windowStartOffset: 0,
       windowEndOffset: rawMessages.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
-    }));
-    const applyLoadedMessages = vi.fn(async () => {});
+    });
+    const rpcMock = vi.fn(async () => ({}));
+    useGatewayStore.setState({
+      status: { state: 'running', port: 18789 },
+      rpc: rpcMock,
+    } as never);
 
-    await loadHistoryWindow({
-      getState,
-      mode: 'active',
-      scope: 'foreground',
+    const result = await fetchHistoryWindow({
       requestedSessionKey,
-      historyRuntime,
-      abortSignal: new AbortController().signal,
-      isAborted: () => false,
-      fetchHistoryWindow,
-      applyLoadedMessages,
+      sessions: [{ key: requestedSessionKey, thinkingLevel: 'medium', updatedAt: 1 }],
+      limit: CHAT_HISTORY_FULL_LIMIT,
     });
 
-    expect(fetchHistoryWindow).toHaveBeenCalledTimes(1);
-    expect(fetchHistoryWindow).toHaveBeenCalledWith(CHAT_HISTORY_FULL_LIMIT);
-    expect(applyLoadedMessages).toHaveBeenCalledTimes(1);
-    expect(applyLoadedMessages).toHaveBeenCalledWith(expect.objectContaining({
+    expect(result).toEqual(expect.objectContaining({
       rawMessages,
       thinkingLevel: 'medium',
       totalMessageCount: rawMessages.length,
       windowStartOffset: 0,
       windowEndOffset: rawMessages.length,
     }));
-    expect(historyRuntime.historyFingerprintBySession.get(requestedSessionKey)).toBe(
-      buildHistoryFingerprint(rawMessages, 'medium'),
-    );
-  });
-
-  it('skips apply when foreground session changed before window is applied', async () => {
-    const requestedSessionKey = 'agent:main:main';
-    const historyRuntime = createHistoryRuntimeHarness();
-    const { getState } = createStateHarness({ currentSessionKey: 'agent:main:other' });
-    const fetchHistoryWindow = vi.fn(async () => ({
-      rawMessages: [{ role: 'assistant', content: 'stale', timestamp: 1 }] as RawMessage[],
-      thinkingLevel: null,
-      totalMessageCount: 1,
-      windowStartOffset: 0,
-      windowEndOffset: 1,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
-    }));
-    const applyLoadedMessages = vi.fn(async () => {});
-
-    await loadHistoryWindow({
-      getState,
-      mode: 'quiet',
-      scope: 'foreground',
-      requestedSessionKey,
-      historyRuntime,
-      abortSignal: new AbortController().signal,
-      isAborted: () => false,
-      fetchHistoryWindow,
-      applyLoadedMessages,
-    });
-
-    expect(fetchHistoryWindow).toHaveBeenCalledTimes(1);
-    expect(applyLoadedMessages).not.toHaveBeenCalled();
-    expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(false);
-  });
-
-  it('stops when abort is raised after window fetch', async () => {
-    const requestedSessionKey = 'agent:main:main';
-    const historyRuntime = createHistoryRuntimeHarness();
-    const { getState } = createStateHarness({ currentSessionKey: requestedSessionKey });
-    let aborted = false;
-    const fetchHistoryWindow = vi.fn(async () => {
-      aborted = true;
-      return {
-        rawMessages: [{ role: 'assistant', content: 'late', timestamp: 1 }] as RawMessage[],
-        thinkingLevel: null,
-        totalMessageCount: 1,
-        windowStartOffset: 0,
-        windowEndOffset: 1,
-        hasMore: false,
-        hasNewer: false,
-        isAtLatest: true,
-      };
-    });
-    const applyLoadedMessages = vi.fn(async () => {});
-
-    await expect(loadHistoryWindow({
-      getState,
-      mode: 'quiet',
-      scope: 'foreground',
-      requestedSessionKey,
-      historyRuntime,
-      abortSignal: new AbortController().signal,
-      isAborted: () => aborted,
-      fetchHistoryWindow,
-      applyLoadedMessages,
-    })).rejects.toMatchObject({ name: 'AbortError' });
-
-    expect(fetchHistoryWindow).toHaveBeenCalledTimes(1);
-    expect(applyLoadedMessages).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 });
-

@@ -10,10 +10,7 @@ export interface ChatScrollChromeStore {
   subscribe: (listener: () => void) => () => void;
   setBottomLocked: (isBottomLocked: boolean) => void;
   setChromeState: (state: Omit<ChatScrollChromeSnapshot, 'isBottomLocked'>) => void;
-  setJumpHandlers: (handlers: {
-    jumpToBottom: () => void;
-    jumpToLatest: () => void;
-  }) => void;
+  setJumpAction: (handler: () => void) => void;
   runJumpAction: () => void;
 }
 
@@ -28,8 +25,7 @@ export function createChatScrollChromeStore(
   initialSnapshot: ChatScrollChromeSnapshot = DEFAULT_SNAPSHOT,
 ): ChatScrollChromeStore {
   let snapshot = initialSnapshot;
-  let jumpToBottom = () => {};
-  let jumpToLatest = () => {};
+  let jumpAction = () => {};
   const listeners = new Set<() => void>();
 
   const emit = () => {
@@ -70,16 +66,11 @@ export function createChatScrollChromeStore(
       };
       emit();
     },
-    setJumpHandlers: (handlers) => {
-      jumpToBottom = handlers.jumpToBottom;
-      jumpToLatest = handlers.jumpToLatest;
+    setJumpAction: (handler) => {
+      jumpAction = handler;
     },
     runJumpAction: () => {
-      if (snapshot.isAtLatest) {
-        jumpToBottom();
-        return;
-      }
-      jumpToLatest();
+      jumpAction();
     },
   };
 }

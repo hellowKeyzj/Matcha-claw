@@ -34,29 +34,9 @@ const skillsStoreState: {
   initialLoading: false,
   fetchSkills: fetchSkillsMock,
 };
-const chatStoreState: {
-  currentSessionKey: string;
-} = {
-  currentSessionKey: 'agent:main:main',
-};
-const subagentsStoreState: {
-  agentsResource: {
-    data: Array<{ id: string; skills?: string[] }>;
-  };
-} = {
-  agentsResource: {
-    data: [],
-  },
-};
 
 vi.mock('@/stores/skills', () => ({
   useSkillsStore: (selector: (state: typeof skillsStoreState) => unknown) => selector(skillsStoreState),
-}));
-vi.mock('@/stores/chat', () => ({
-  useChatStore: (selector: (state: typeof chatStoreState) => unknown) => selector(chatStoreState),
-}));
-vi.mock('@/stores/subagents', () => ({
-  useSubagentsStore: (selector: (state: typeof subagentsStoreState) => unknown) => selector(subagentsStoreState),
 }));
 
 describe('chat input slash skills', () => {
@@ -65,8 +45,6 @@ describe('chat input slash skills', () => {
     skillsStoreState.skills = [];
     skillsStoreState.snapshotReady = true;
     skillsStoreState.initialLoading = false;
-    chatStoreState.currentSessionKey = 'agent:main:main';
-    subagentsStoreState.agentsResource.data = [];
   });
 
   it('slash 只展示可用技能（enabled 且 eligible=true）', () => {
@@ -93,10 +71,8 @@ describe('chat input slash skills', () => {
       { id: 'web-search', name: 'Web Search', description: '', enabled: true, eligible: true, icon: '🌐' },
       { id: 'feishu-doc', name: 'Feishu Doc', description: '', enabled: true, eligible: true, icon: '📄' },
     ];
-    chatStoreState.currentSessionKey = 'agent:test:main';
-    subagentsStoreState.agentsResource.data = [{ id: 'test', skills: ['feishu-doc'] }];
 
-    render(<ChatInput onSend={vi.fn()} />);
+    render(<ChatInput onSend={vi.fn()} allowedSkillIds={['feishu-doc']} />);
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '/', selectionStart: 1 } });

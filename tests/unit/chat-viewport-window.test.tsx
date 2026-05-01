@@ -36,6 +36,11 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    tooling: {
+      ...base.tooling,
+      ...overrides?.tooling,
+    },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -102,8 +107,8 @@ describe('chat viewport window', () => {
       },
       loadedSessions: {
         [currentSessionKey]: buildSessionRecord({
+          messages: allMessages,
           window: createViewportWindowState({
-            messages: viewportMessages,
             totalMessageCount: allMessages.length,
             windowStartOffset: 15,
             windowEndOffset: 35,
@@ -120,7 +125,6 @@ describe('chat viewport window', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadOlderMessages: vi.fn().mockResolvedValue(undefined),
       jumpToLatest: vi.fn().mockResolvedValue(undefined),
-      trimTopMessages: vi.fn(),
       setViewportLastVisibleMessageId: vi.fn(),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -133,10 +137,11 @@ describe('chat viewport window', () => {
     expect(screen.getByRole('button', { name: 'Load older messages' })).toBeInTheDocument();
   });
 
-  it('jumps to latest before sending when the viewport is detached from the newest window', async () => {
+  it('detached viewport send does not require页面层先 jumpToLatest', async () => {
     const currentSessionKey = 'agent:test:main';
     const jumpToLatest = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const allMessages = buildSessionMessages(20);
 
     useGatewayStore.setState({
       status: { state: 'running', port: 18789 },
@@ -180,8 +185,8 @@ describe('chat viewport window', () => {
       },
       loadedSessions: {
         [currentSessionKey]: buildSessionRecord({
+          messages: allMessages,
           window: createViewportWindowState({
-            messages: buildSessionMessages(10),
             totalMessageCount: 20,
             windowStartOffset: 0,
             windowEndOffset: 10,
@@ -198,7 +203,6 @@ describe('chat viewport window', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadOlderMessages: vi.fn().mockResolvedValue(undefined),
       jumpToLatest,
-      trimTopMessages: vi.fn(),
       setViewportLastVisibleMessageId: vi.fn(),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       sendMessage,
@@ -212,12 +216,8 @@ describe('chat viewport window', () => {
     fireEvent.click(container.querySelector('button[title="Send"]') as HTMLButtonElement);
 
     await waitFor(() => {
-      expect(jumpToLatest).toHaveBeenCalledWith(currentSessionKey);
-    });
-    await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith('reply from detached viewport', undefined);
     });
+    expect(jumpToLatest).not.toHaveBeenCalled();
   });
 });
-
-

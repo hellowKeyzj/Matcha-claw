@@ -146,7 +146,7 @@ export function useChatInit(input: UseChatInitInput): void {
       const currentSessionRecord = currentChatState.loadedSessions[currentChatState.currentSessionKey];
       const hasCurrentViewportSnapshot = (
         currentSessionRecord?.meta.historyStatus === 'ready'
-        || (currentSessionRecord?.window.messages.length ?? 0) > 0
+        || (currentSessionRecord?.messages.length ?? 0) > 0
       );
       if (hasCurrentViewportSnapshot) {
         initialHistoryIdleHandleRef.current = scheduleIdleTask(() => {
@@ -200,5 +200,4 @@ export function useChatInit(input: UseChatInitInput): void {
     switchSession,
   ]);
 }
-
 

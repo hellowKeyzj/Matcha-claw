@@ -16,30 +16,30 @@ describe('chat memory diagnostics', () => {
   it('summarizes window, preview, and runtime-state memory by session', () => {
     const state = createStateWithSessions({
       'agent:main:main': {
+        messages: [
+          {
+            role: 'user',
+            id: 'user-1',
+            timestamp: 1,
+            content: 'hello world',
+            _attachedFiles: [
+              {
+                fileName: 'shot.png',
+                mimeType: 'image/png',
+                fileSize: 12,
+                preview: 'data:image/png;base64,AAAA',
+                filePath: 'C:/shot.png',
+              },
+            ],
+          },
+          {
+            role: 'assistant',
+            id: 'assistant-1',
+            timestamp: 2,
+            content: [{ type: 'text', text: 'answer body' }],
+          },
+        ],
         window: createViewportWindowState({
-          messages: [
-            {
-              role: 'user',
-              id: 'user-1',
-              timestamp: 1,
-              content: 'hello world',
-              _attachedFiles: [
-                {
-                  fileName: 'shot.png',
-                  mimeType: 'image/png',
-                  fileSize: 12,
-                  preview: 'data:image/png;base64,AAAA',
-                  filePath: 'C:/shot.png',
-                },
-              ],
-            },
-            {
-              role: 'assistant',
-              id: 'assistant-1',
-              timestamp: 2,
-              content: [{ type: 'text', text: 'answer body' }],
-            },
-          ],
           totalMessageCount: 2,
           windowStartOffset: 0,
           windowEndOffset: 2,
@@ -53,29 +53,19 @@ describe('chat memory diagnostics', () => {
         },
         runtime: {
           ...useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
-          pendingUserMessage: {
-            clientMessageId: 'pending-user',
-            createdAtMs: 3000,
-            message: {
-              role: 'user',
-              id: 'pending-user',
-              timestamp: 3,
-              content: 'pending content',
-            },
-          },
           streamingMessageId: 'overlay-1',
         },
       },
       'agent:other:main': {
+        messages: [
+          {
+            role: 'assistant',
+            id: 'assistant-2',
+            timestamp: 5,
+            content: 'short',
+          },
+        ],
         window: createViewportWindowState({
-          messages: [
-            {
-              role: 'assistant',
-              id: 'assistant-2',
-              timestamp: 5,
-              content: 'short',
-            },
-          ],
           totalMessageCount: 1,
           windowStartOffset: 0,
           windowEndOffset: 1,
@@ -107,4 +97,3 @@ describe('chat memory diagnostics', () => {
     expect(summary.largestSessions[0]?.runtimeStateCharCount).toBeGreaterThan(0);
   });
 });
-

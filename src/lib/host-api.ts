@@ -53,8 +53,19 @@ export interface HostSessionWindowMessage {
   content: unknown;
   timestamp?: number;
   id?: string;
+  messageId?: string;
+  clientId?: string;
+  uniqueId?: string;
+  status?: 'sending' | 'sent' | 'timeout' | 'error';
   toolCallId?: string;
+  tool_calls?: Array<Record<string, unknown>>;
+  toolCalls?: Array<Record<string, unknown>>;
   toolName?: string;
+  agentId?: string;
+  parentMessageId?: string;
+  metadata?: Record<string, unknown>;
+  name?: string;
+  requestId?: string;
   details?: unknown;
   isError?: boolean;
 }

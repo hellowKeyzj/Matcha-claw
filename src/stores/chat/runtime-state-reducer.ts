@@ -1,11 +1,6 @@
 import type {
-  ApprovalStatus,
-  AttachedFileMeta,
   ChatSessionRuntimeState,
-  PendingUserMessageOverlay,
-  ToolStatus,
 } from './types';
-import { upsertToolStatuses } from './event-helpers';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 
 type RuntimeStateLike = ChatSessionRuntimeState;
@@ -18,7 +13,6 @@ interface RuntimeRunStartedAction {
 interface RuntimeSendSubmittedAction {
   type: 'send_submitted';
   nowMs: number;
-  pendingUserMessage: PendingUserMessageOverlay;
 }
 
 interface RuntimeSendRunBoundAction {
@@ -33,7 +27,6 @@ interface RuntimeSendWaitingApprovalAction {
 interface RuntimeSendFailedAction {
   type: 'send_failed';
   error: string;
-  approvalStatus?: ApprovalStatus;
   clearRun?: boolean;
 }
 
@@ -73,8 +66,6 @@ interface RuntimeSessionRuntimeRestoredAction {
 
 interface RuntimeToolResultCommittedAction {
   type: 'tool_result_committed';
-  pendingToolImages: AttachedFileMeta[];
-  streamingTools: ToolStatus[];
 }
 
 interface RuntimeDeltaReceivedAction {
@@ -85,7 +76,6 @@ interface RuntimeStreamDeltaQueuedAction {
   type: 'stream_delta_queued';
   runId: string;
   messageId: string;
-  updates?: ToolStatus[];
 }
 
 interface RuntimeEventErrorClearedAction {
@@ -114,7 +104,6 @@ interface RuntimeFinalMessageCommittedAction {
   type: 'final_message_committed';
   hasOutput: boolean;
   toolOnly: boolean;
-  streamingTools: ToolStatus[];
 }
 
 export type RuntimeStateAction =
@@ -164,12 +153,9 @@ export function reduceSessionRuntime(
       return {
         sending: true,
         runPhase: 'submitted',
-        pendingUserMessage: action.pendingUserMessage,
         streamingMessageId: null,
-        streamingTools: [],
         pendingFinal: false,
         lastUserMessageAt: action.nowMs,
-        approvalStatus: 'idle',
       };
     }
 
@@ -189,7 +175,6 @@ export function reduceSessionRuntime(
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
-        approvalStatus: 'awaiting_approval',
       };
     }
 
@@ -197,14 +182,11 @@ export function reduceSessionRuntime(
       return {
         sending: false,
         runPhase: 'error',
-        pendingUserMessage: null,
         streamingMessageId: action.clearRun ? null : state.streamingMessageId,
-        approvalStatus: action.approvalStatus ?? 'idle',
         ...(action.clearRun
           ? {
               activeRunId: null,
               lastUserMessageAt: null,
-              streamingTools: [],
               pendingFinal: false,
             }
           : {}),
@@ -214,7 +196,6 @@ export function reduceSessionRuntime(
     case 'pending_approvals_synced': {
       const hasCurrentPending = action.currentPendingCount > 0;
       return {
-        approvalStatus: hasCurrentPending ? 'awaiting_approval' : 'idle',
         sending: hasCurrentPending ? true : state.sending,
         pendingFinal: hasCurrentPending ? true : state.pendingFinal,
         runPhase: hasCurrentPending ? 'waiting_tool' : state.runPhase,
@@ -227,12 +208,10 @@ export function reduceSessionRuntime(
         return {};
       }
       return {
-        approvalStatus: 'awaiting_approval',
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
         streamingMessageId: null,
-        streamingTools: [],
         activeRunId: action.runId
           ? (state.activeRunId ?? action.runId)
           : state.activeRunId,
@@ -242,7 +221,6 @@ export function reduceSessionRuntime(
     case 'approval_resolved': {
       if (action.abortedCurrentByDeny) {
         return {
-          approvalStatus: action.stillPendingCurrent ? 'awaiting_approval' : 'idle',
           pendingFinal: false,
           sending: false,
           activeRunId: null,
@@ -250,7 +228,6 @@ export function reduceSessionRuntime(
         };
       }
       return {
-        approvalStatus: action.stillPendingCurrent ? 'awaiting_approval' : 'idle',
         runPhase: action.stillPendingCurrent ? 'waiting_tool' : state.runPhase,
       };
     }
@@ -263,15 +240,11 @@ export function reduceSessionRuntime(
         state.sending
         || state.activeRunId != null
         || state.pendingFinal
-        || state.pendingUserMessage != null
-        || state.streamingMessageId != null
       )) {
         patch.sending = false;
         patch.activeRunId = null;
         patch.pendingFinal = false;
         patch.runPhase = 'done';
-        patch.streamingMessageId = null;
-        patch.pendingUserMessage = null;
         changed = true;
       }
 
@@ -302,15 +275,11 @@ export function reduceSessionRuntime(
       const waitingApproval = action.currentPendingApprovals > 0;
       return {
         sending: action.targetRuntime.sending,
-        pendingUserMessage: action.targetRuntime.pendingUserMessage ?? null,
         streamingMessageId: action.targetRuntime.streamingMessageId,
-        streamingTools: action.targetRuntime.streamingTools,
         activeRunId: action.targetRuntime.activeRunId,
         runPhase: waitingApproval ? 'waiting_tool' : action.targetRuntime.runPhase,
         pendingFinal: action.targetRuntime.pendingFinal,
         lastUserMessageAt: action.targetRuntime.lastUserMessageAt,
-        pendingToolImages: action.targetRuntime.pendingToolImages,
-        approvalStatus: waitingApproval ? 'awaiting_approval' : action.targetRuntime.approvalStatus,
       };
     }
 
@@ -319,8 +288,6 @@ export function reduceSessionRuntime(
         streamingMessageId: null,
         pendingFinal: true,
         runPhase: 'waiting_tool',
-        pendingToolImages: action.pendingToolImages,
-        streamingTools: action.streamingTools,
       };
     }
 
@@ -335,22 +302,16 @@ export function reduceSessionRuntime(
 
     case 'stream_delta_queued': {
       const deltaPatch = reduceSessionRuntime(state, { type: 'delta_received' });
-      const updates = action.updates ?? [];
-      const nextStreamingTools = updates.length > 0
-        ? upsertToolStatuses(state.streamingTools, updates)
-        : state.streamingTools;
       const normalizedRunId = normalizeRunId(action.runId);
       const nextStreamingMessageId = action.messageId.trim() || state.streamingMessageId;
       const changedMessageId = nextStreamingMessageId !== state.streamingMessageId;
-      const changedTools = nextStreamingTools !== state.streamingTools;
       const changedRun = normalizedRunId && normalizedRunId !== state.activeRunId;
-      if (deltaPatch === state && !changedMessageId && !changedTools && !changedRun) {
+      if (deltaPatch === state && !changedMessageId && !changedRun) {
         return state;
       }
       return {
         ...(deltaPatch === state ? {} : deltaPatch),
         ...(changedMessageId ? { streamingMessageId: nextStreamingMessageId } : {}),
-        ...(changedTools ? { streamingTools: nextStreamingTools } : {}),
         ...(changedRun ? { activeRunId: normalizedRunId } : {}),
       };
     }
@@ -364,25 +325,17 @@ export function reduceSessionRuntime(
         sending: false,
         activeRunId: null,
         runPhase: 'aborted',
-        pendingUserMessage: null,
         streamingMessageId: null,
-        streamingTools: [],
         pendingFinal: false,
         lastUserMessageAt: null,
-        pendingToolImages: [],
-        approvalStatus: 'idle',
       };
     }
 
     case 'event_error': {
-      return {
-        runPhase: 'error',
-        pendingUserMessage: null,
-        streamingMessageId: null,
-        streamingTools: [],
+        return {
+          runPhase: 'error',
+          streamingMessageId: null,
         pendingFinal: false,
-        pendingToolImages: [],
-        approvalStatus: 'idle',
       };
     }
 
@@ -391,7 +344,6 @@ export function reduceSessionRuntime(
         sending: false,
         activeRunId: null,
         runPhase: 'error',
-        pendingUserMessage: null,
         lastUserMessageAt: null,
       };
     }
@@ -416,8 +368,6 @@ export function reduceSessionRuntime(
     case 'final_message_committed': {
       const patch: Partial<ChatSessionRuntimeState> = {
         streamingMessageId: null,
-        streamingTools: action.streamingTools,
-        pendingToolImages: [],
       };
 
       if (action.toolOnly) {
@@ -431,7 +381,6 @@ export function reduceSessionRuntime(
       patch.pendingFinal = action.hasOutput ? false : true;
       patch.runPhase = action.hasOutput ? 'done' : 'finalizing';
       if (action.hasOutput) {
-        patch.pendingUserMessage = null;
       }
       return patch;
     }

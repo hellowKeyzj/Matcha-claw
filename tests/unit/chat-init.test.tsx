@@ -31,6 +31,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -182,10 +183,10 @@ describe('useChatInit', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
           meta: { ready: true },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
             totalMessageCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
@@ -229,5 +230,4 @@ describe('useChatInit', () => {
     });
   });
 });
-
 

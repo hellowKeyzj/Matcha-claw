@@ -16,6 +16,10 @@ function buildTranscriptLine(index: number) {
   });
 }
 
+function buildTranscriptLineFromShape(shape: Record<string, unknown>) {
+  return JSON.stringify(shape);
+}
+
 describe('session window service', () => {
   const tempDirs: string[] = [];
 
@@ -169,6 +173,53 @@ describe('session window service', () => {
       'message-2',
       'message-3',
       'message-4',
+    ]);
+  });
+
+  it('preserves transcript identity fields needed to reconcile optimistic user messages', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-window-'));
+    tempDirs.push(configDir);
+    const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:main:session-a', id: 'session-a' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'session-a.jsonl'), [
+      buildTranscriptLineFromShape({
+        id: 'transcript-user-1',
+        timestamp: '2026-04-01T10:00:00.000Z',
+        message: {
+          role: 'user',
+          content: 'hello world',
+          idempotencyKey: 'client-user-1',
+        },
+      }),
+    ].join('\n'));
+
+    const service = new SessionWindowService({
+      getOpenClawConfigDir: () => configDir,
+    });
+    const response = await service.getWindow({
+      sessionKey: 'agent:main:session-a',
+      mode: 'latest',
+      limit: 20,
+      includeCanonical: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect((response.data as {
+      messages: Array<{ id?: string; clientId?: string; uniqueId?: string }>;
+    }).messages).toMatchObject([
+      {
+        role: 'user',
+        content: 'hello world',
+        timestamp: Date.parse('2026-04-01T10:00:00.000Z'),
+        id: 'transcript-user-1',
+        clientId: 'client-user-1',
+        uniqueId: 'transcript-user-1',
+      },
     ]);
   });
 

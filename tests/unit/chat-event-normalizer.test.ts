@@ -5,7 +5,7 @@ import {
 } from '@/stores/chat/event-normalizer';
 
 describe('chat event normalizer', () => {
-  it('normalizes structured chat.message into chat.runtime domain event', () => {
+  it('normalizes structured chat.message into chat.message domain event', () => {
     const normalized = normalizeGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -20,7 +20,7 @@ describe('chat event normalizer', () => {
     });
 
     expect(normalized).toEqual({
-      kind: 'chat.runtime',
+      kind: 'chat.message',
       source: 'chat.message',
       phase: 'final',
       runId: 'run-1',
@@ -33,6 +33,28 @@ describe('chat event normalizer', () => {
           role: 'assistant',
           content: 'hello',
         },
+      },
+    });
+  });
+
+  it('normalizes run.phase completed into runtime lifecycle domain event', () => {
+    const normalized = normalizeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'completed',
+      runId: ' run-2 ',
+      sessionKey: ' agent:main:main ',
+    });
+
+    expect(normalized).toEqual({
+      kind: 'chat.runtime.lifecycle',
+      source: 'run.phase',
+      phase: 'final',
+      runId: 'run-2',
+      sessionKey: 'agent:main:main',
+      event: {
+        state: 'final',
+        runId: 'run-2',
+        sessionKey: 'agent:main:main',
       },
     });
   });

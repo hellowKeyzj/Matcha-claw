@@ -11,6 +11,9 @@ export interface SessionTranscriptMessage {
   content: unknown;
   timestamp?: number;
   id?: string;
+  messageId?: string;
+  clientId?: string;
+  uniqueId?: string;
   toolCallId?: string;
   toolName?: string;
   details?: unknown;
@@ -22,6 +25,14 @@ interface TranscriptMessageShape {
   content?: unknown;
   timestamp?: unknown;
   id?: unknown;
+  messageId?: unknown;
+  message_id?: unknown;
+  clientId?: unknown;
+  client_id?: unknown;
+  uniqueId?: unknown;
+  unique_id?: unknown;
+  idempotencyKey?: unknown;
+  idempotency_key?: unknown;
   toolCallId?: unknown;
   tool_call_id?: unknown;
   toolName?: unknown;
@@ -33,6 +44,7 @@ interface TranscriptMessageShape {
 }
 
 interface TranscriptLineShape {
+  id?: unknown;
   timestamp?: unknown;
   message?: TranscriptMessageShape;
 }
@@ -189,7 +201,10 @@ export function parseTranscriptMessages(content: string): SessionTranscriptMessa
         ? parsed.message.content
         : '',
       timestamp: normalizeTimestamp(parsed.timestamp ?? parsed.message.timestamp),
-      id: normalizeOptionalString(parsed.message.id),
+      id: normalizeOptionalString(parsed.id ?? parsed.message.id),
+      messageId: normalizeOptionalString(parsed.message.messageId ?? parsed.message.message_id ?? parsed.message.id),
+      clientId: normalizeOptionalString(parsed.message.clientId ?? parsed.message.client_id ?? parsed.message.idempotencyKey ?? parsed.message.idempotency_key),
+      uniqueId: normalizeOptionalString(parsed.message.uniqueId ?? parsed.message.unique_id ?? parsed.id),
       toolCallId: normalizeOptionalString(parsed.message.toolCallId ?? parsed.message.tool_call_id),
       toolName: normalizeOptionalString(parsed.message.toolName ?? parsed.message.tool_name ?? parsed.message.name),
       details: parsed.message.details,

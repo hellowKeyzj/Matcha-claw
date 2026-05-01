@@ -24,6 +24,9 @@ interface SessionWindowMessage {
   content: unknown;
   timestamp?: number;
   id?: string;
+  messageId?: string;
+  clientId?: string;
+  uniqueId?: string;
   toolCallId?: string;
   toolName?: string;
   details?: unknown;
@@ -92,6 +95,9 @@ function toSessionWindowMessages(messages: SessionTranscriptMessage[]): SessionW
     content: message.content,
     timestamp: message.timestamp,
     id: message.id,
+    messageId: message.messageId,
+    clientId: message.clientId,
+    uniqueId: message.uniqueId,
     toolCallId: message.toolCallId,
     toolName: message.toolName,
     details: message.details,

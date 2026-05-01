@@ -1,29 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createStoreSessionActions } from '@/stores/chat/session-actions';
+import {
+  executeJumpToLatest,
+  executeLoadOlderMessages,
+  executeSetViewportLastVisibleMessageId,
+  executeSwitchSession,
+} from '@/stores/chat/session-actions';
 import {
   createEmptySessionRecord,
   createEmptySessionViewportState,
+  selectViewportMessages,
 } from '@/stores/chat/store-state-helpers';
+import { normalizeIncomingMessages } from '@/stores/chat/message-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
 
 const hostSessionWindowFetchMock = vi.fn();
 const hostApiFetchMock = vi.fn();
-const prewarmAssistantMarkdownBodiesMock = vi.fn();
-const prewarmStaticRowsForMessagesMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostSessionWindowFetch: (...args: unknown[]) => hostSessionWindowFetchMock(...args),
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
-}));
-
-vi.mock('@/lib/chat-markdown-body', () => ({
-  prewarmAssistantMarkdownBodies: (...args: unknown[]) => prewarmAssistantMarkdownBodiesMock(...args),
-}));
-
-vi.mock('@/pages/Chat/chat-rows-cache', () => ({
-  prewarmStaticRowsForMessages: (...args: unknown[]) => prewarmStaticRowsForMessagesMock(...args),
 }));
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
@@ -43,12 +40,12 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function buildMessages(count: number, start = 1): RawMessage[] {
-  return Array.from({ length: count }, (_, index) => ({
+  return normalizeIncomingMessages(Array.from({ length: count }, (_, index) => ({
     id: `message-${start + index}`,
     role: (start + index) % 2 === 0 ? 'assistant' : 'user',
     content: `message ${start + index}`,
     timestamp: start + index,
-  }));
+  })));
 }
 
 function createStateHarness(input: {
@@ -67,6 +64,7 @@ function createStateHarness(input: {
           ...createEmptySessionRecord().meta,
           ...input.meta,
         },
+        messages: input.messages,
         window: input.window,
       },
     },
@@ -93,20 +91,40 @@ function createStateHarness(input: {
   };
 }
 
+function createSessionHarness(input: {
+  set: (partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState)) => void;
+  get: () => ChatStoreState;
+  defaultSessionKey: string;
+  historyRuntime: StoreHistoryCache;
+}) {
+  const shared = {
+    set: input.set,
+    get: input.get,
+    beginMutating: vi.fn(),
+    finishMutating: vi.fn(),
+    defaultCanonicalPrefix: 'agent:test',
+    defaultSessionKey: input.defaultSessionKey,
+    historyRuntime: input.historyRuntime,
+  };
+  return {
+    loadOlderMessages: (sessionKey?: string) => executeLoadOlderMessages(shared, sessionKey),
+    jumpToLatest: (sessionKey?: string) => executeJumpToLatest(shared, sessionKey),
+    switchSession: (key: string) => executeSwitchSession(shared, key),
+    setViewportLastVisibleMessageId: (messageId: string | null, sessionKey?: string) => executeSetViewportLastVisibleMessageId(shared, messageId, sessionKey),
+  };
+}
+
 describe('chat session window ops', () => {
   beforeEach(() => {
     hostSessionWindowFetchMock.mockReset();
     hostApiFetchMock.mockReset();
-    prewarmAssistantMarkdownBodiesMock.mockReset();
-    prewarmStaticRowsForMessagesMock.mockReset();
   });
 
-  it('loadOlderMessages replaces the session window with the older fetched slice', async () => {
+  it('loadOlderMessages expands the current session window upward without dropping the visible range', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      messages: allMessages.slice(120),
       totalMessageCount: allMessages.length,
       windowStartOffset: 120,
       windowEndOffset: 220,
@@ -115,12 +133,9 @@ describe('chat session window ops', () => {
       isAtLatest: true,
     });
     const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: allMessages, window: viewport });
-    const actions = createStoreSessionActions({
+    const actions = createSessionHarness({
       set,
       get,
-      beginMutating: vi.fn(),
-      finishMutating: vi.fn(),
-      defaultCanonicalPrefix: 'agent:test',
       defaultSessionKey: sessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
@@ -128,6 +143,7 @@ describe('chat session window ops', () => {
     const olderWindowMessages = allMessages.slice(40, 180);
     hostSessionWindowFetchMock.mockResolvedValueOnce({
       messages: olderWindowMessages,
+      canonicalMessages: allMessages,
       totalMessageCount: allMessages.length,
       windowStartOffset: 40,
       windowEndOffset: 180,
@@ -138,16 +154,19 @@ describe('chat session window ops', () => {
 
     await actions.loadOlderMessages(sessionKey);
 
-    expect(get().loadedSessions[sessionKey]?.window.messages).toEqual(olderWindowMessages);
+    expect(get().loadedSessions[sessionKey]?.messages).toEqual(allMessages);
+    expect(selectViewportMessages(get().loadedSessions[sessionKey]!).map((message) => message.id)).toEqual(
+      allMessages.slice(40, 220).map((message) => message.id),
+    );
     expect(get().loadedSessions[sessionKey]?.window.windowStartOffset).toBe(40);
+    expect(get().loadedSessions[sessionKey]?.window.windowEndOffset).toBe(220);
   });
 
-  it('loadOlderMessages prewarms settled rows and preserves overlapping message references', async () => {
+  it('loadOlderMessages preserves overlapping message references', async () => {
     const sessionKey = 'agent:test:main';
-    const currentMessages = buildMessages(100, 121);
+    const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      messages: currentMessages,
       totalMessageCount: 220,
       windowStartOffset: 120,
       windowEndOffset: 220,
@@ -155,13 +174,10 @@ describe('chat session window ops', () => {
       hasNewer: false,
       isAtLatest: true,
     });
-    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: currentMessages, window: viewport });
-    const actions = createStoreSessionActions({
+    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: allMessages, window: viewport });
+    const actions = createSessionHarness({
       set,
       get,
-      beginMutating: vi.fn(),
-      finishMutating: vi.fn(),
-      defaultCanonicalPrefix: 'agent:test',
       defaultSessionKey: sessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
@@ -170,8 +186,10 @@ describe('chat session window ops', () => {
       ...buildMessages(80, 41),
       ...buildMessages(60, 121).map((message) => ({ ...message })),
     ];
+    const canonicalMessages = allMessages.map((message) => ({ ...message }));
     hostSessionWindowFetchMock.mockResolvedValueOnce({
       messages: fetchedOlderMessages,
+      canonicalMessages,
       totalMessageCount: 220,
       windowStartOffset: 40,
       windowEndOffset: 180,
@@ -182,12 +200,11 @@ describe('chat session window ops', () => {
 
     await actions.loadOlderMessages(sessionKey);
 
-    const nextMessages = get().loadedSessions[sessionKey]?.window.messages ?? [];
-    expect(nextMessages).toHaveLength(140);
-    expect(nextMessages[80]).toBe(currentMessages[0]);
-    expect(nextMessages[139]).toBe(currentMessages[59]);
-    expect(prewarmAssistantMarkdownBodiesMock).toHaveBeenCalledWith(nextMessages, 'settled');
-    expect(prewarmStaticRowsForMessagesMock).toHaveBeenCalledWith(sessionKey, nextMessages);
+    const nextRecord = get().loadedSessions[sessionKey]!;
+    const nextMessages = selectViewportMessages(nextRecord);
+    expect(nextMessages).toHaveLength(180);
+    expect(nextMessages[40]).toBe(allMessages[80]);
+    expect(nextMessages[139]).toBe(allMessages[179]);
   });
 
   it('jumpToLatest refreshes the session window to the latest slice', async () => {
@@ -195,7 +212,6 @@ describe('chat session window ops', () => {
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      messages: allMessages.slice(0, 120),
       totalMessageCount: allMessages.length,
       windowStartOffset: 0,
       windowEndOffset: 120,
@@ -204,12 +220,9 @@ describe('chat session window ops', () => {
       isAtLatest: false,
     });
     const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: allMessages, window: viewport });
-    const actions = createStoreSessionActions({
+    const actions = createSessionHarness({
       set,
       get,
-      beginMutating: vi.fn(),
-      finishMutating: vi.fn(),
-      defaultCanonicalPrefix: 'agent:test',
       defaultSessionKey: sessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
@@ -217,6 +230,7 @@ describe('chat session window ops', () => {
     const latestWindowMessages = allMessages.slice(100);
     hostSessionWindowFetchMock.mockResolvedValueOnce({
       messages: latestWindowMessages,
+      canonicalMessages: allMessages,
       totalMessageCount: allMessages.length,
       windowStartOffset: 100,
       windowEndOffset: 220,
@@ -227,86 +241,130 @@ describe('chat session window ops', () => {
 
     await actions.jumpToLatest(sessionKey);
 
-    expect(get().loadedSessions[sessionKey]?.window.messages).toEqual(latestWindowMessages);
+    expect(get().loadedSessions[sessionKey]?.messages).toEqual(allMessages);
+    expect(selectViewportMessages(get().loadedSessions[sessionKey]!).map((message) => message.id)).toEqual(
+      latestWindowMessages.map((message) => message.id),
+    );
     expect(get().loadedSessions[sessionKey]?.window.isAtLatest).toBe(true);
-    expect(prewarmAssistantMarkdownBodiesMock).toHaveBeenCalledWith(latestWindowMessages, 'settled');
-    expect(prewarmStaticRowsForMessagesMock).toHaveBeenCalledWith(sessionKey, latestWindowMessages);
   });
 
-  it('trimTopMessages trims the top of the active session window', () => {
+  it('jumpToLatest does not re-append a stale local assistant when canonical latest already has the server final', async () => {
     const sessionKey = 'agent:test:main';
-    const allMessages = buildMessages(240);
-    const viewportMessages = allMessages.slice(80);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      messages: viewportMessages,
-      totalMessageCount: allMessages.length,
-      windowStartOffset: 80,
-      windowEndOffset: 240,
-      hasMore: true,
-      hasNewer: false,
-      isAtLatest: true,
+      totalMessageCount: 1,
+      windowStartOffset: 0,
+      windowEndOffset: 1,
+      hasMore: false,
+      hasNewer: true,
+      isAtLatest: false,
     });
-    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: allMessages, window: viewport });
-    const actions = createStoreSessionActions({
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: {
+          ...createEmptySessionRecord(),
+          messages: [{
+            id: 'assistant-local-stream',
+            role: 'assistant',
+            content: 'draft preview',
+            timestamp: 2,
+            streaming: true,
+          }],
+          runtime: {
+            ...createEmptySessionRecord().runtime,
+            sending: true,
+            activeRunId: 'run-1',
+            runPhase: 'streaming' as const,
+            streamingMessageId: 'assistant-local-stream',
+          },
+          window: viewport,
+        },
+      },
+      pendingApprovalsBySession: {},
+      sessionCatalogStatus: {
+        status: 'ready' as const,
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: null,
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+    const actions = createSessionHarness({
       set,
       get,
-      beginMutating: vi.fn(),
-      finishMutating: vi.fn(),
-      defaultCanonicalPrefix: 'agent:test',
       defaultSessionKey: sessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
 
-    actions.trimTopMessages(sessionKey, 120);
+    hostSessionWindowFetchMock.mockResolvedValueOnce({
+      messages: [{
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'server final',
+        timestamp: 2,
+      }],
+      canonicalMessages: [{
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'server final',
+        timestamp: 2,
+      }],
+      totalMessageCount: 1,
+      windowStartOffset: 0,
+      windowEndOffset: 1,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    });
 
-    expect(get().loadedSessions[sessionKey]?.window.messages).toHaveLength(120);
-    expect(get().loadedSessions[sessionKey]?.window.windowStartOffset).toBe(120);
+    await actions.jumpToLatest(sessionKey);
+
+    expect(state.loadedSessions[sessionKey]?.messages.map((message) => message.id)).toEqual(['assistant-final-1']);
+    expect(selectViewportMessages(state.loadedSessions[sessionKey]!).map((message) => message.id)).toEqual(['assistant-final-1']);
   });
 
-  it('switchSession reloads history when the current session is reselected', async () => {
-    vi.useFakeTimers();
-    try {
-      const sessionKey = 'agent:test:session-1';
-      const loadHistoryMock = vi.fn().mockResolvedValue(undefined);
-      const viewport = createViewportWindowState({
-        ...createEmptySessionViewportState(),
-        messages: [],
-        totalMessageCount: 0,
-        windowStartOffset: 0,
-        windowEndOffset: 0,
-        hasMore: false,
-        hasNewer: false,
-        isAtLatest: true,
-      });
-      const { set, get } = createStateHarness({
-        currentSessionKey: sessionKey,
-        messages: [],
-        window: viewport,
-        loadHistory: loadHistoryMock,
-      });
-      const actions = createStoreSessionActions({
+  it('switchSession reloads history immediately when the current session is reselected', () => {
+    const sessionKey = 'agent:test:session-1';
+    const loadHistoryMock = vi.fn().mockResolvedValue(undefined);
+    const viewport = createViewportWindowState({
+      ...createEmptySessionViewportState(),
+      totalMessageCount: 0,
+      windowStartOffset: 0,
+      windowEndOffset: 0,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    });
+    const { set, get } = createStateHarness({
+      currentSessionKey: sessionKey,
+      messages: [],
+      window: viewport,
+      loadHistory: loadHistoryMock,
+    });
+      const actions = createSessionHarness({
         set,
         get,
-        beginMutating: vi.fn(),
-        finishMutating: vi.fn(),
-        defaultCanonicalPrefix: 'agent:test',
         defaultSessionKey: sessionKey,
         historyRuntime: createHistoryRuntimeHarness(),
       });
 
-      actions.switchSession(sessionKey);
-      await vi.runAllTimersAsync();
+    actions.switchSession(sessionKey);
 
-      expect(loadHistoryMock).toHaveBeenCalledWith({
-        sessionKey,
-        mode: 'active',
-        scope: 'foreground',
-        reason: 'switch_session_reselect',
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(loadHistoryMock).toHaveBeenCalledWith({
+      sessionKey,
+      mode: 'active',
+      scope: 'foreground',
+      reason: 'switch_session_reselect',
+    });
   });
 
   it('switchSession marks a cold target session as loading before foreground history reconcile', () => {
@@ -323,7 +381,6 @@ describe('chat session window ops', () => {
           },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            messages: buildMessages(2),
             totalMessageCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
@@ -352,12 +409,9 @@ describe('chat session window ops', () => {
     };
     const get = () => state;
 
-    const actions = createStoreSessionActions({
+    const actions = createSessionHarness({
       set,
       get,
-      beginMutating: vi.fn(),
-      finishMutating: vi.fn(),
-      defaultCanonicalPrefix: 'agent:test',
       defaultSessionKey: currentSessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
@@ -369,5 +423,3 @@ describe('chat session window ops', () => {
   });
 
 });
-
-

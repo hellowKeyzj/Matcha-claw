@@ -23,6 +23,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -114,27 +115,27 @@ describe('chat 左侧点击链路回归', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'current session user message',
+              timestamp: 1,
+              id: 'current-msg-1',
+            },
+            {
+              role: 'assistant',
+              content: 'current session mid message',
+              timestamp: 2,
+              id: 'current-msg-2',
+            },
+            {
+              role: 'assistant',
+              content: 'current session old message',
+              timestamp: 3,
+              id: 'current-msg-3',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'current session user message',
-                timestamp: 1,
-                id: 'current-msg-1',
-              },
-              {
-                role: 'assistant',
-                content: 'current session mid message',
-                timestamp: 2,
-                id: 'current-msg-2',
-              },
-              {
-                role: 'assistant',
-                content: 'current session old message',
-                timestamp: 3,
-                id: 'current-msg-3',
-              },
-            ],
             totalMessageCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
@@ -145,27 +146,27 @@ describe('chat 左侧点击链路回归', () => {
           },
         }),
         'agent:another:main': buildSessionRecord({
+          messages: [
+            {
+              role: 'user',
+              content: 'another user message',
+              timestamp: 1,
+              id: 'another-msg-1',
+            },
+            {
+              role: 'assistant',
+              content: 'another assistant mid message',
+              timestamp: 2,
+              id: 'another-msg-2',
+            },
+            {
+              role: 'assistant',
+              content: 'another assistant latest message',
+              timestamp: 3,
+              id: 'another-msg-3',
+            },
+          ],
           window: createViewportWindowState({
-            messages: [
-              {
-                role: 'user',
-                content: 'another user message',
-                timestamp: 1,
-                id: 'another-msg-1',
-              },
-              {
-                role: 'assistant',
-                content: 'another assistant mid message',
-                timestamp: 2,
-                id: 'another-msg-2',
-              },
-              {
-                role: 'assistant',
-                content: 'another assistant latest message',
-                timestamp: 3,
-                id: 'another-msg-3',
-              },
-            ],
             totalMessageCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
@@ -226,5 +227,4 @@ describe('chat 左侧点击链路回归', () => {
     });
   });
 });
-
 

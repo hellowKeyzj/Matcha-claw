@@ -36,6 +36,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
   };
 }
@@ -100,9 +101,9 @@ function setupChatSessions() {
     },
     loadedSessions: {
       [currentSessionKey]: buildSessionRecord({
+        messages: currentMessages,
         window: createViewportWindowState({
           ...createEmptySessionViewportState(),
-          messages: currentMessages,
           totalMessageCount: currentMessages.length,
           windowStartOffset: 0,
           windowEndOffset: currentMessages.length,
@@ -111,7 +112,7 @@ function setupChatSessions() {
           isAtLatest: true,
         }),
         meta: {
-          ready: true,
+          historyStatus: 'ready',
           lastActivityAt: Date.now(),
         },
         runtime: {
@@ -121,9 +122,9 @@ function setupChatSessions() {
         },
       }),
       [anotherSessionKey]: buildSessionRecord({
+        messages: anotherMessages,
         window: createViewportWindowState({
           ...createEmptySessionViewportState(),
-          messages: anotherMessages,
           totalMessageCount: anotherMessages.length,
           windowStartOffset: 0,
           windowEndOffset: anotherMessages.length,
@@ -132,7 +133,7 @@ function setupChatSessions() {
           isAtLatest: true,
         }),
         meta: {
-          ready: true,
+          historyStatus: 'ready',
           lastActivityAt: Date.now() - 1000,
         },
       }),
@@ -140,7 +141,6 @@ function setupChatSessions() {
     loadHistory: vi.fn().mockResolvedValue(undefined),
     loadOlderMessages: vi.fn().mockResolvedValue(undefined),
     jumpToLatest: vi.fn().mockResolvedValue(undefined),
-    trimTopMessages: vi.fn(),
     setViewportLastVisibleMessageId: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -173,7 +173,7 @@ describe('chat 会话切换 UX', () => {
     });
 
     const record = useChatStore.getState().loadedSessions[currentSessionKey];
-    expect(record?.window.messages).toHaveLength(12);
+    expect(record?.messages).toHaveLength(12);
     expect(record?.runtime.activeRunId).toBe('run-current');
     expect(record?.runtime.sending).toBe(true);
   });
@@ -208,5 +208,3 @@ describe('chat 会话切换 UX', () => {
     expect(screen.getByText('current 11')).toBeInTheDocument();
   });
 });
-
-
