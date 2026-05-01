@@ -52,6 +52,7 @@ import {
 import {
   getAllSkillConfigsLocal,
   listEffectiveSkillsLocal,
+  setSkillEnabledLocal,
   updateSkillConfigLocal,
 } from '../../application/skills/store';
 import type {
@@ -165,7 +166,9 @@ export function createCoreLocalBusinessHandlers(
       handle: (request) => handleSkillsRoute(request.method, request.routePath, request.payload, {
         getAllSkillConfigsLocal,
         updateSkillConfigLocal,
+        setSkillEnabledLocal,
         listEffectiveSkillsLocal,
+        openclawBridge: context.openclawBridge,
       }),
     },
   ];

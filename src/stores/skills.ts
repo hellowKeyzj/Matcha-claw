@@ -441,7 +441,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: true });
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/skills/state', {
+        method: 'PUT',
+        body: JSON.stringify({ skillKey: skillId, enabled: true }),
+      });
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to enable skill');
+      }
       updateSkill(skillId, { enabled: true });
     } catch (error) {
       console.error('Failed to enable skill:', error);
@@ -473,7 +479,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      await useGatewayStore.getState().rpc('skills.update', { skillKey: skillId, enabled: false });
+      const result = await hostApiFetch<{ success: boolean; error?: string }>('/api/skills/state', {
+        method: 'PUT',
+        body: JSON.stringify({ skillKey: skillId, enabled: false }),
+      });
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to disable skill');
+      }
       updateSkill(skillId, { enabled: false });
     } catch (error) {
       console.error('Failed to disable skill:', error);

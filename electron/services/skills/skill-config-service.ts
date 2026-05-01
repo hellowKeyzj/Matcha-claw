@@ -17,12 +17,33 @@ function createSkillsRuntimeHostClient() {
     });
 }
 
-async function setSkillsEnabledViaRuntimeHost(skillKeys: string[], enabled: boolean): Promise<void> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function getSkillConfigsViaRuntimeHost(): Promise<Record<string, Record<string, unknown>>> {
     const runtimeHostClient = createSkillsRuntimeHostClient();
-    for (const skillKey of skillKeys) {
-        await runtimeHostClient.request('PUT', '/api/skills/config', {
-            skillKey,
-            updates: { enabled },
+    const payload = await runtimeHostClient.request('GET', '/api/skills/configs');
+    if (!isRecord(payload)) {
+        return {};
+    }
+    const result: Record<string, Record<string, unknown>> = {};
+    for (const [skillKey, config] of Object.entries(payload)) {
+        if (isRecord(config)) {
+            result[skillKey] = config;
+        }
+    }
+    return result;
+}
+
+async function setSkillStatesViaRuntimeHost(
+    states: Array<{ skillKey: string; enabled: boolean }>,
+): Promise<void> {
+    const runtimeHostClient = createSkillsRuntimeHostClient();
+    for (const state of states) {
+        await runtimeHostClient.request('PUT', '/api/skills/state', {
+            skillKey: state.skillKey,
+            enabled: state.enabled,
         });
     }
 }
@@ -172,6 +193,25 @@ async function tryReadMarker(markerPath: string): Promise<PreinstalledMarker | n
     }
 }
 
+function resolveManagedPreinstalledSkillEnabled(spec: PreinstalledSkillSpec): boolean {
+    return spec.autoEnable === true;
+}
+
+function hasExplicitEnabledState(
+    currentSkillConfigs: Record<string, Record<string, unknown>>,
+    skillKey: string,
+): boolean {
+    return typeof currentSkillConfigs[skillKey]?.enabled === 'boolean';
+}
+
+function queueSkillStateSync(
+    pendingStates: Map<string, boolean>,
+    skillKey: string,
+    enabled: boolean,
+): void {
+    pendingStates.set(skillKey, enabled);
+}
+
 /**
  * Ensure third-party preinstalled skills (bundled in app resources) are
  * deployed to ~/.openclaw/skills/<slug>/ as full directories.
@@ -194,12 +234,21 @@ export async function ensurePreinstalledSkillsInstalled(): Promise<void> {
         return;
     }
     const lockVersions = await readPreinstalledLockVersions(sourceRoot);
+    let didLoadCurrentSkillConfigs = false;
+    let currentSkillConfigs: Record<string, Record<string, unknown>> = {};
+    try {
+        currentSkillConfigs = await getSkillConfigsViaRuntimeHost();
+        didLoadCurrentSkillConfigs = true;
+    } catch (error) {
+        logger.warn('Failed to read current skill configs before preinstall sync:', error);
+    }
 
     const targetRoot = join(homedir(), '.openclaw', 'skills');
     await mkdir(targetRoot, { recursive: true });
-    const toEnable: string[] = [];
+    const pendingStateSyncs = new Map<string, boolean>();
 
     for (const spec of skills) {
+        const desiredEnabled = resolveManagedPreinstalledSkillEnabled(spec);
         const sourceDir = join(sourceRoot, spec.slug);
         const sourceManifest = join(sourceDir, 'SKILL.md');
         if (!existsSync(sourceManifest)) {
@@ -220,7 +269,15 @@ export async function ensurePreinstalledSkillsInstalled(): Promise<void> {
                 logger.info(`Skipping user-managed skill: ${spec.slug}`);
                 continue;
             }
-            if (marker.version === desiredVersion) {
+            if (
+                didLoadCurrentSkillConfigs
+                && !hasExplicitEnabledState(currentSkillConfigs, spec.slug)
+            ) {
+                queueSkillStateSync(pendingStateSyncs, spec.slug, desiredEnabled);
+            }
+            if (
+                marker.version === desiredVersion
+            ) {
                 continue;
             }
             logger.info(`Skipping preinstalled skill update for ${spec.slug} (local marker version=${marker.version}, desired=${desiredVersion})`);
@@ -237,20 +294,23 @@ export async function ensurePreinstalledSkillsInstalled(): Promise<void> {
                 installedAt: new Date().toISOString(),
             };
             await writeFile(markerPath, `${JSON.stringify(markerPayload, null, 2)}\n`, 'utf-8');
-            if (spec.autoEnable) {
-                toEnable.push(spec.slug);
-            }
+            queueSkillStateSync(pendingStateSyncs, spec.slug, desiredEnabled);
             logger.info(`Installed preinstalled skill: ${spec.slug} -> ${targetDir}`);
         } catch (error) {
             logger.warn(`Failed to install preinstalled skill ${spec.slug}:`, error);
         }
     }
 
-    if (toEnable.length > 0) {
+    if (pendingStateSyncs.size > 0) {
         try {
-            await setSkillsEnabledViaRuntimeHost(toEnable, true);
+            await setSkillStatesViaRuntimeHost(
+                [...pendingStateSyncs.entries()].map(([skillKey, enabled]) => ({
+                    skillKey,
+                    enabled,
+                })),
+            );
         } catch (error) {
-            logger.warn('Failed to auto-enable preinstalled skills:', error);
+            logger.warn('Failed to sync preinstalled skill states:', error);
         }
     }
 }
