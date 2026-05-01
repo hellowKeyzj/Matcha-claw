@@ -21,6 +21,8 @@
     "noLogs": "（暂无日志）",
     "toolbar": {
         "refresh": "刷新聊天",
+        "openSidePanel": "打开右侧栏",
+        "closeSidePanel": "关闭右侧栏",
         "skillConfig": "技能配置",
         "showThinking": "显示思考过程",
         "hideThinking": "隐藏思考过程"
@@ -56,9 +58,7 @@
     "skillConfigDialog": {
         "titleWithAgent": "技能配置 · {{agent}}",
         "loading": "技能加载中...",
-        "empty": "暂无可用技能。",
-        "cancel": "取消",
-        "save": "保存"
+        "empty": "暂无可用技能。"
     },
     "approval": {
         "panelTitle": "审批待处理",

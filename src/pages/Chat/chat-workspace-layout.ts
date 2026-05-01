@@ -2,36 +2,37 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidebarMinWidth: 200,
   sidebarMaxWidth: 420,
   sidebarDefaultWidth: 256,
-  sidebarCollapsedWidth: 64,
+  sidebarRailWidth: 64,
   agentSessionsMinWidth: 220,
   agentSessionsMaxWidth: 520,
-  agentSessionsDefaultWidth: 300,
-  agentSessionsCollapsedWidth: 52,
-  taskInboxMinWidth: 260,
-  taskInboxMaxWidth: 560,
-  taskInboxDefaultWidth: 360,
-  taskInboxCollapsedWidth: 52,
+  agentSessionsDefaultWidth: 240,
+  agentSessionsCollapsedWidth: 0,
+  sidePanelMinWidth: 260,
+  sidePanelDefaultWidth: 360,
   paneResizerWidth: 6,
   chatMainMinWidth: 360,
 } as const;
 
 export interface ChatWorkspaceLayoutInput {
   containerWidth: number;
-  sidebarCollapsed: boolean;
-  sidebarPreferredWidth: number;
+  sidebarVisible: boolean;
+  sidebarWidth: number;
   agentSessionsUserCollapsed: boolean;
-  agentSessionsPreferredWidth: number;
 }
 
 export interface ChatWorkspaceLayoutResult {
   sidebarWidth: number;
+  sidebarOccupiedWidth: number;
   agentSessionsCollapsed: boolean;
   agentSessionsWidth: number;
 }
 
-export interface TaskInboxLayoutResult {
-  taskInboxCollapsed: boolean;
-  taskInboxWidth: number;
+export type ChatSidePanelMode = 'hidden' | 'docked' | 'overlay';
+
+export interface ChatSidePanelLayoutResult {
+  sidePanelOpen: boolean;
+  sidePanelMode: ChatSidePanelMode;
+  sidePanelWidth: number;
 }
 
 export function clampPaneWidth(value: number, min: number, max: number): number {
@@ -49,32 +50,29 @@ export function getSidebarResizeMaxWidth(containerWidth: number): number {
   return Math.max(CHAT_WORKSPACE_LAYOUT.sidebarMinWidth, maxWidth);
 }
 
-export function getAgentSessionsResizeMaxWidth(
-  containerWidth: number,
-  sidebarWidth: number,
-  sidebarCollapsed: boolean,
-): number {
-  const sidebarResizerWidth = sidebarCollapsed ? 0 : CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
-  const availableWidth = containerWidth - sidebarWidth - sidebarResizerWidth;
-  const maxWidth = Math.min(
-    CHAT_WORKSPACE_LAYOUT.agentSessionsMaxWidth,
-    availableWidth
-      - CHAT_WORKSPACE_LAYOUT.paneResizerWidth
-      - CHAT_WORKSPACE_LAYOUT.chatMainMinWidth,
+export function getSidebarRenderWidth(sidebarVisible: boolean, sidebarWidth: number): number {
+  if (!sidebarVisible) {
+    return CHAT_WORKSPACE_LAYOUT.sidebarRailWidth;
+  }
+  return clampPaneWidth(
+    sidebarWidth,
+    CHAT_WORKSPACE_LAYOUT.sidebarMinWidth,
+    CHAT_WORKSPACE_LAYOUT.sidebarMaxWidth,
   );
-  return Math.max(CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth, maxWidth);
+}
+
+export function getSidebarOccupiedWidth(sidebarVisible: boolean, sidebarWidth: number): number {
+  return getSidebarRenderWidth(sidebarVisible, sidebarWidth)
+    + (sidebarVisible ? CHAT_WORKSPACE_LAYOUT.paneResizerWidth : 0);
 }
 
 export function canExpandAgentSessions(
   containerWidth: number,
-  sidebarWidth: number,
-  sidebarCollapsed: boolean,
+  sidebarOccupiedWidth: number,
 ): boolean {
-  const sidebarResizerWidth = sidebarCollapsed ? 0 : CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
-  const availableWidth = containerWidth - sidebarWidth - sidebarResizerWidth;
+  const availableWidth = containerWidth - sidebarOccupiedWidth;
   return availableWidth >= (
     CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth
-    + CHAT_WORKSPACE_LAYOUT.paneResizerWidth
     + CHAT_WORKSPACE_LAYOUT.chatMainMinWidth
   );
 }
@@ -82,20 +80,22 @@ export function canExpandAgentSessions(
 export function resolveChatWorkspaceLayout(
   input: ChatWorkspaceLayoutInput,
 ): ChatWorkspaceLayoutResult {
-  const sidebarWidth = input.sidebarCollapsed
-    ? CHAT_WORKSPACE_LAYOUT.sidebarCollapsedWidth
-    : clampPaneWidth(
-      input.sidebarPreferredWidth,
+  const sidebarWidth = input.sidebarVisible
+    ? clampPaneWidth(
+      input.sidebarWidth,
       CHAT_WORKSPACE_LAYOUT.sidebarMinWidth,
       getSidebarResizeMaxWidth(input.containerWidth),
-    );
+    )
+    : CHAT_WORKSPACE_LAYOUT.sidebarRailWidth;
+  const sidebarOccupiedWidth = getSidebarOccupiedWidth(input.sidebarVisible, sidebarWidth);
 
   if (
     input.agentSessionsUserCollapsed
-    || !canExpandAgentSessions(input.containerWidth, sidebarWidth, input.sidebarCollapsed)
+    || !canExpandAgentSessions(input.containerWidth, sidebarOccupiedWidth)
   ) {
     return {
       sidebarWidth,
+      sidebarOccupiedWidth,
       agentSessionsCollapsed: true,
       agentSessionsWidth: CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth,
     };
@@ -103,57 +103,41 @@ export function resolveChatWorkspaceLayout(
 
   return {
     sidebarWidth,
+    sidebarOccupiedWidth,
     agentSessionsCollapsed: false,
     agentSessionsWidth: clampPaneWidth(
-      input.agentSessionsPreferredWidth,
+      CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth,
       CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
-      getAgentSessionsResizeMaxWidth(input.containerWidth, sidebarWidth, input.sidebarCollapsed),
+      Math.min(
+        CHAT_WORKSPACE_LAYOUT.agentSessionsMaxWidth,
+        input.containerWidth - sidebarOccupiedWidth - CHAT_WORKSPACE_LAYOUT.chatMainMinWidth,
+      ),
     ),
   };
 }
 
-export function getTaskInboxResizeMaxWidth(containerWidth: number): number {
-  const maxWidth = Math.min(
-    CHAT_WORKSPACE_LAYOUT.taskInboxMaxWidth,
-    containerWidth
-      - CHAT_WORKSPACE_LAYOUT.paneResizerWidth
-      - CHAT_WORKSPACE_LAYOUT.chatMainMinWidth,
-  );
-  return Math.max(CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth, maxWidth);
-}
-
-export function canExpandTaskInbox(containerWidth: number): boolean {
+export function canDockSidePanel(containerWidth: number): boolean {
   return containerWidth >= (
-    CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth
-    + CHAT_WORKSPACE_LAYOUT.paneResizerWidth
+    CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth
     + CHAT_WORKSPACE_LAYOUT.chatMainMinWidth
   );
 }
 
-export function resolveTaskInboxLayout(
-  preferredCollapsed: boolean,
-  preferredWidth: number,
+export function resolveChatSidePanelLayout(
+  open: boolean,
   containerWidth: number,
-): TaskInboxLayoutResult {
-  const normalizedWidth = clampPaneWidth(
-    preferredWidth,
-    CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth,
-    CHAT_WORKSPACE_LAYOUT.taskInboxMaxWidth,
-  );
-
-  if (preferredCollapsed || !canExpandTaskInbox(containerWidth)) {
+): ChatSidePanelLayoutResult {
+  if (!open) {
     return {
-      taskInboxCollapsed: true,
-      taskInboxWidth: normalizedWidth,
+      sidePanelOpen: false,
+      sidePanelMode: 'hidden',
+      sidePanelWidth: 0,
     };
   }
 
   return {
-    taskInboxCollapsed: false,
-    taskInboxWidth: clampPaneWidth(
-      normalizedWidth,
-      CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth,
-      getTaskInboxResizeMaxWidth(containerWidth),
-    ),
+    sidePanelOpen: true,
+    sidePanelMode: canDockSidePanel(containerWidth) ? 'docked' : 'overlay',
+    sidePanelWidth: CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
   };
 }

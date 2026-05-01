@@ -1,6 +1,6 @@
 /**
  * Main Layout Component
- * TitleBar at top, then resizable panes below.
+ * TitleBar at top, then layout panes below.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type SetStateAction } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
@@ -8,49 +8,17 @@ import { Sidebar } from './Sidebar';
 import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 import { TitleBar } from './TitleBar';
 import { VerticalPaneResizer } from './VerticalPaneResizer';
-import { cn } from '@/lib/utils';
 import {
   CHAT_WORKSPACE_LAYOUT,
-  clampPaneWidth,
-  getAgentSessionsResizeMaxWidth,
-  getSidebarResizeMaxWidth,
   resolveChatWorkspaceLayout,
 } from '@/pages/Chat/chat-workspace-layout';
-import { useSettingsStore } from '@/stores/settings';
-
-function loadSidebarWidth(): number {
-  try {
-    const raw = Number(window.localStorage.getItem('layout:sidebar-width') || CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth);
-    if (!Number.isFinite(raw)) {
-      return CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth;
-    }
-    return clampPaneWidth(raw, CHAT_WORKSPACE_LAYOUT.sidebarMinWidth, CHAT_WORKSPACE_LAYOUT.sidebarMaxWidth);
-  } catch {
-    return CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth;
-  }
-}
-
-function loadAgentSessionsWidth(): number {
-  try {
-    const raw = Number(window.localStorage.getItem('layout:agent-sessions-width') || CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth);
-    if (!Number.isFinite(raw)) {
-      return CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth;
-    }
-    return clampPaneWidth(
-      raw,
-      CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
-      CHAT_WORKSPACE_LAYOUT.agentSessionsMaxWidth,
-    );
-  } catch {
-    return CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth;
-  }
-}
+import { useLayoutStore } from '@/stores/layout';
 
 export function MainLayout() {
   const location = useLocation();
-  const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
-  const [sidebarPreferredWidth, setSidebarPreferredWidth] = useState<number>(() => loadSidebarWidth());
-  const [agentSessionsPreferredWidth, setAgentSessionsPreferredWidth] = useState<number>(() => loadAgentSessionsWidth());
+  const sidebarVisible = useLayoutStore((state) => state.sidebarVisible);
+  const sidebarWidth = useLayoutStore((state) => state.sidebarWidth);
+  const setSidebarWidth = useLayoutStore((state) => state.setSidebarWidth);
   const [agentSessionsUserCollapsed, setAgentSessionsUserCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('layout:agent-sessions-collapsed') === '1';
@@ -65,25 +33,15 @@ export function MainLayout() {
 
   const workspaceLayout = useMemo(() => resolveChatWorkspaceLayout({
     containerWidth,
-    sidebarCollapsed,
-    sidebarPreferredWidth,
+    sidebarVisible,
+    sidebarWidth,
     agentSessionsUserCollapsed,
-    agentSessionsPreferredWidth,
   }), [
-    agentSessionsPreferredWidth,
     agentSessionsUserCollapsed,
     containerWidth,
-    sidebarCollapsed,
-    sidebarPreferredWidth,
+    sidebarVisible,
+    sidebarWidth,
   ]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('layout:sidebar-width', String(sidebarPreferredWidth));
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [sidebarPreferredWidth]);
 
   useEffect(() => {
     try {
@@ -92,14 +50,6 @@ export function MainLayout() {
       // ignore localStorage errors
     }
   }, [agentSessionsUserCollapsed]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('layout:agent-sessions-width', String(agentSessionsPreferredWidth));
-    } catch {
-      // ignore localStorage errors
-    }
-  }, [agentSessionsPreferredWidth]);
 
   useEffect(() => {
     const applyResize = () => {
@@ -133,17 +83,10 @@ export function MainLayout() {
       ? next(workspaceLayout.agentSessionsCollapsed)
       : next;
     setAgentSessionsUserCollapsed(desiredCollapsed);
-    if (!desiredCollapsed) {
-      setAgentSessionsPreferredWidth((prev) => clampPaneWidth(
-        prev,
-        CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
-        getAgentSessionsResizeMaxWidth(containerWidth, workspaceLayout.sidebarWidth, sidebarCollapsed),
-      ));
-    }
-  }, [containerWidth, sidebarCollapsed, workspaceLayout.agentSessionsCollapsed, workspaceLayout.sidebarWidth]);
+  }, [workspaceLayout.agentSessionsCollapsed]);
 
   const startSidebarResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (sidebarCollapsed) {
+    if (!sidebarVisible) {
       return;
     }
     event.preventDefault();
@@ -153,47 +96,7 @@ export function MainLayout() {
       if (!rect) {
         return;
       }
-      const nextWidth = clampPaneWidth(
-        moveEvent.clientX - rect.left,
-        CHAT_WORKSPACE_LAYOUT.sidebarMinWidth,
-        getSidebarResizeMaxWidth(rect.width),
-      );
-      setSidebarPreferredWidth(nextWidth);
-    };
-
-    const onMouseUp = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const startAgentSessionsResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (workspaceLayout.agentSessionsCollapsed) {
-      return;
-    }
-    event.preventDefault();
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const rect = layoutRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-      const renderedSidebarWidth = workspaceLayout.sidebarWidth;
-      const sidebarResizerWidth = sidebarCollapsed ? 0 : CHAT_WORKSPACE_LAYOUT.paneResizerWidth;
-      const paneLeft = rect.left + renderedSidebarWidth + sidebarResizerWidth;
-      const nextWidth = clampPaneWidth(
-        moveEvent.clientX - paneLeft,
-        CHAT_WORKSPACE_LAYOUT.agentSessionsMinWidth,
-        getAgentSessionsResizeMaxWidth(rect.width, renderedSidebarWidth, sidebarCollapsed),
-      );
-      setAgentSessionsPreferredWidth(nextWidth);
+      setSidebarWidth(moveEvent.clientX - rect.left, rect.width);
     };
 
     const onMouseUp = () => {
@@ -218,11 +121,12 @@ export function MainLayout() {
         className="flex flex-1 overflow-hidden bg-card"
       >
         <Sidebar
-          expandedWidth={workspaceLayout.sidebarWidth}
-          collapsedWidth={CHAT_WORKSPACE_LAYOUT.sidebarCollapsedWidth}
-          showRightDivider={sidebarCollapsed}
+          width={workspaceLayout.sidebarWidth}
+          railWidth={CHAT_WORKSPACE_LAYOUT.sidebarRailWidth}
+          containerWidth={containerWidth}
+          showRightDivider={!sidebarVisible}
         />
-        {!sidebarCollapsed && (
+        {sidebarVisible && (
           <VerticalPaneResizer
             testId="layout-left-resizer"
             onMouseDown={startSidebarResize}
@@ -230,22 +134,16 @@ export function MainLayout() {
             variant="subtle-border"
           />
         )}
-        <main className="relative min-w-0 flex-1 overflow-hidden bg-card">
-          <ChatWorkspaceHost
-            isActive={isChatRoute}
-            agentSessionsWidth={workspaceLayout.agentSessionsWidth}
-            agentSessionsCollapsed={workspaceLayout.agentSessionsCollapsed}
-            agentSessionsCollapsedWidth={CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth}
-            onToggleAgentSessionsCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
-            onAgentSessionsResizeStart={startAgentSessionsResize}
-          />
-          {!isChatRoute && (
-            <div
-              data-testid="main-layout-route-overlay"
-              className={cn(
-                'absolute inset-0 z-10 h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6',
-              )}
-            >
+        <main className="min-w-0 flex-1 overflow-hidden bg-card">
+          {isChatRoute ? (
+            <ChatWorkspaceHost
+              agentSessionsWidth={workspaceLayout.agentSessionsWidth}
+              agentSessionsCollapsed={workspaceLayout.agentSessionsCollapsed}
+              agentSessionsCollapsedWidth={CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth}
+              onToggleAgentSessionsCollapse={() => setAgentSessionsCollapsed((prev) => !prev)}
+            />
+          ) : (
+            <div className="h-full overflow-auto bg-card px-5 py-4 md:px-8 md:py-6">
               <Outlet />
             </div>
           )}

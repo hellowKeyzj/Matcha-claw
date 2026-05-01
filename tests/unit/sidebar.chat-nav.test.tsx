@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
@@ -46,21 +47,23 @@ function createSessionRecord(input?: {
     meta: {
       label: input?.label ?? null,
       lastActivityAt: null,
-      ready: input?.ready ?? false,
+      historyStatus: input?.ready ? 'ready' : 'idle',
       thinkingLevel: null,
     },
     runtime: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingTools: [],
+      streamingMessageId: null,
       pendingFinal: false,
       lastUserMessageAt: null,
-      pendingToolImages: [],
-      approvalStatus: 'idle' as const,
     },
+    tooling: {
+      streamingTools: [],
+      pendingToolImages: [],
+    },
+    messages,
     window: createViewportWindowState({
-      messages,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -73,10 +76,13 @@ function setupSidebarState() {
   useSettingsStore.setState({
     setupComplete: true,
     language: 'en',
-    sidebarCollapsed: false,
     devModeUnlocked: false,
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
+  useLayoutStore.setState({
+    sidebarVisible: true,
+    sidebarWidth: 256,
+  });
   useSubagentsStore.setState({
     agents: [],
     availableModels: [],
@@ -139,6 +145,28 @@ function setupSidebarState() {
 }
 
 describe('sidebar chat nav', () => {
+  it('keeps nav labels mounted in the collapsed rail', () => {
+    setupSidebarState();
+    useLayoutStore.setState({
+      sidebarVisible: false,
+      sidebarWidth: 256,
+    });
+
+    mountSidebar('/dashboard');
+
+    expect(screen.getByText('New Chat')).toBeInTheDocument();
+    expect(screen.getByText('Plugin Center')).toBeInTheDocument();
+  });
+
+  it('does not animate sidebar width changes on the outer shell', () => {
+    setupSidebarState();
+
+    mountSidebar('/dashboard');
+
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).not.toContain('transition-[width]');
+  });
+
   it('hover 插件入口时会预热插件数据', async () => {
     vi.useFakeTimers();
     try {
@@ -367,5 +395,3 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
   });
 });
-
-

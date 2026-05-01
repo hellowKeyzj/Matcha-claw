@@ -33,21 +33,22 @@ function createSessionRecord(input?: {
     meta: {
       label: input?.label ?? null,
       lastActivityAt: input?.lastActivityAt ?? null,
-      ready: input?.ready ?? false,
+      historyStatus: input?.ready ? 'ready' : 'idle',
       thinkingLevel: null,
     },
     runtime: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
+      streamingMessageId: null,
       streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
       pendingToolImages: [],
       approvalStatus: 'idle' as const,
     },
+    messages,
     window: createViewportWindowState({
-      messages,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -121,6 +122,42 @@ describe('agent sessions pane', () => {
     expect(screen.getByTestId('agent-session-avatar-test')).toBeInTheDocument();
     expect(screen.getByText('主Agent会话')).toBeInTheDocument();
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
+  });
+
+  it('收缩态头像区应负责展开，下半部应给当前 agent 新建会话', () => {
+    const onToggleCollapse = vi.fn();
+    const newSession = vi.fn();
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:main',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:main:main', displayName: 'agent:main:main' },
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+      ]),
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ ready: true }),
+      },
+      switchSession: vi.fn(),
+      newSession,
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <AgentSessionsPane collapsed onToggleCollapse={onToggleCollapse} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('agent-sessions-collapsed-note')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-sessions-collapsed-avatar')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-sessions-collapsed-new-session')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('agent-sessions-collapsed-expand'));
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('agent-sessions-collapsed-new-session'));
+    expect(newSession).toHaveBeenCalledWith('test');
   });
 
   it('点击某个 agent 的新会话按钮，应按对应 agent 创建', async () => {
@@ -397,19 +434,14 @@ describe('agent sessions pane', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:test:session-2': {
           ...useChatStore.getState().loadedSessions['agent:test:session-2'],
-          runtime: {
-            ...useChatStore.getState().loadedSessions['agent:test:session-2'].runtime,
-            pendingUserMessage: {
-              clientMessageId: 'optimistic-user-1',
-              createdAtMs: now,
-              message: {
-                role: 'user',
-                content: '最新输入标题',
-                id: 'optimistic-user-1',
-                timestamp: now / 1000,
-              },
+          messages: [
+            {
+              role: 'user',
+              content: '最新输入标题',
+              id: 'optimistic-user-1',
+              timestamp: now / 1000,
             },
-          },
+          ],
         },
       },
     } as never);

@@ -5,6 +5,7 @@ import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
+import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
@@ -13,10 +14,13 @@ function enableMainAppRoutes() {
   useSettingsStore.setState({
     setupComplete: true,
     language: 'en',
-    sidebarCollapsed: false,
     devModeUnlocked: false,
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
+  useLayoutStore.setState({
+    sidebarVisible: true,
+    sidebarWidth: 256,
+  });
   useSubagentsStore.setState({
     agents: [],
     availableModels: [],
@@ -78,4 +82,3 @@ describe('subagents navigation', () => {
     expect(await screen.findByText('Subagent Workspace')).toBeInTheDocument();
   });
 });
-

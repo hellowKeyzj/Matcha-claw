@@ -8,7 +8,6 @@ import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
-import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { useShallow } from 'zustand/react/shallow';
 import {
   inferUntitledSessionLabel,
@@ -401,6 +400,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     locale: i18n.language,
     t,
   });
+  const activeAgentNode = paneViewModel.agentNodes.find((node) => node.agentId === paneViewModel.activeAgentId);
 
   useEffect(() => {
     try {
@@ -479,16 +479,52 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
     <aside
       data-testid="agent-sessions-pane"
       className={cn(
-        'relative flex shrink-0 flex-col overflow-hidden bg-card',
-        showRightDivider && 'border-r [border-right-color:var(--divider-line)]',
+        'relative flex shrink-0 flex-col',
+        collapsed ? 'z-10 overflow-visible' : 'overflow-hidden',
+        collapsed ? 'bg-transparent' : 'bg-card',
+        showRightDivider && !collapsed && 'border-r [border-right-color:var(--divider-line)]',
       )}
       style={{ width: collapsed ? collapsedWidth : expandedWidth }}
     >
       {collapsed ? (
-        <div className="flex flex-1 flex-col items-center gap-2 px-1 py-4">
-          <span className="px-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground [writing-mode:vertical-rl]">
-            {t('sidebar.agentSessions')}
-          </span>
+        <div className="absolute left-2 top-3">
+          <div
+            data-testid="agent-sessions-collapsed-note"
+            className="overflow-hidden rounded-[18px] border border-border/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.98),rgba(244,245,247,0.9))] shadow-[0_10px_26px_rgba(15,23,42,0.14)] dark:bg-[linear-gradient(180deg,rgba(39,39,42,0.98),rgba(24,24,27,0.94))]"
+          >
+            <button
+              type="button"
+              data-testid="agent-sessions-collapsed-expand"
+              className="group flex h-11 w-10 items-center justify-center bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(255,255,255,0))] text-muted-foreground transition-[transform,color] hover:-translate-y-0.5 hover:text-foreground dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0))]"
+              onClick={onToggleCollapse}
+              aria-label={t('sidebar.expandAgentSessions')}
+              title={t('sidebar.expandAgentSessions')}
+            >
+              <AgentAvatar
+                agentId={activeAgentNode?.agentId ?? paneViewModel.activeAgentId}
+                agentName={activeAgentNode?.agentName ?? paneViewModel.activeAgentId}
+                avatarSeed={activeAgentNode?.avatarSeed}
+                avatarStyle={activeAgentNode?.avatarStyle}
+                className="h-7 w-7 border border-border/60 bg-background shadow-sm"
+                dataTestId="agent-sessions-collapsed-avatar"
+              />
+            </button>
+            <button
+              type="button"
+              data-testid="agent-sessions-collapsed-new-session"
+              className="flex min-h-[70px] w-10 flex-col items-center justify-start gap-1.5 border-t border-border/65 bg-[linear-gradient(180deg,rgba(255,255,255,0),rgba(226,232,240,0.58))] px-1 pt-2 text-muted-foreground transition-colors hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(226,232,240,0.82))] hover:text-foreground dark:bg-[linear-gradient(180deg,rgba(255,255,255,0),rgba(63,63,70,0.64))] dark:hover:bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(82,82,91,0.82))]"
+              onClick={() => handleCreateSessionForAgent(paneViewModel.activeAgentId)}
+              aria-label={t('sidebar.newSession')}
+              title={t('sidebar.newSession')}
+            >
+              <span className="flex h-4 w-4 items-center justify-center rounded-full border border-border/60 bg-background/85 shadow-sm">
+                <Plus className="h-2.5 w-2.5" />
+              </span>
+              <span className="text-[9px] font-semibold tracking-[0.08em] text-current [writing-mode:vertical-rl]">
+                {t('sidebar.newSession')}
+              </span>
+            </button>
+          </div>
         </div>
       ) : (
         <>
@@ -496,16 +532,29 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
             <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
               {t('sidebar.agentSessions')}
             </p>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              onClick={() => handleCreateSessionForAgent(paneViewModel.activeAgentId)}
-              aria-label={t('sidebar.newSession')}
-              title={t('sidebar.newSession')}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => handleCreateSessionForAgent(paneViewModel.activeAgentId)}
+                aria-label={t('sidebar.newSession')}
+                title={t('sidebar.newSession')}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                data-testid="agent-sessions-collapse-trigger"
+                className="h-8 w-8 shrink-0"
+                onClick={onToggleCollapse}
+                aria-label={t('sidebar.collapseAgentSessions')}
+                title={t('sidebar.collapseAgentSessions')}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-4 p-3">
             <section className="flex min-h-0 max-h-[42%] flex-col space-y-1">
@@ -608,15 +657,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
           </section>
         </div>
       )}
-
-      <PaneEdgeToggle
-        side="right"
-        onClick={onToggleCollapse}
-        ariaLabel={collapsed ? t('sidebar.expandAgentSessions') : t('sidebar.collapseAgentSessions')}
-        title={collapsed ? t('sidebar.expandAgentSessions') : t('sidebar.collapseAgentSessions')}
-        icon={collapsed ? <ChevronRight className="h-2.5 w-2.5" /> : <ChevronLeft className="h-2.5 w-2.5" />}
-      />
     </aside>
   );
 });
-

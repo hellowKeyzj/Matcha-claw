@@ -1,19 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
-  canExpandTaskInbox,
+  canDockSidePanel,
   CHAT_WORKSPACE_LAYOUT,
   resolveChatWorkspaceLayout,
-  resolveTaskInboxLayout,
+  resolveChatSidePanelLayout,
 } from '@/pages/Chat/chat-workspace-layout';
 
 describe('chat workspace layout', () => {
   it('auto-collapses the agent sessions pane when the workspace becomes too narrow', () => {
     const wideLayout = resolveChatWorkspaceLayout({
       containerWidth: 1200,
-      sidebarCollapsed: false,
-      sidebarPreferredWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
+      sidebarVisible: true,
+      sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
       agentSessionsUserCollapsed: false,
-      agentSessionsPreferredWidth: CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth,
     });
 
     expect(wideLayout.agentSessionsCollapsed).toBe(false);
@@ -21,34 +20,40 @@ describe('chat workspace layout', () => {
 
     const narrowLayout = resolveChatWorkspaceLayout({
       containerWidth: 760,
-      sidebarCollapsed: false,
-      sidebarPreferredWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
+      sidebarVisible: true,
+      sidebarWidth: CHAT_WORKSPACE_LAYOUT.sidebarDefaultWidth,
       agentSessionsUserCollapsed: false,
-      agentSessionsPreferredWidth: CHAT_WORKSPACE_LAYOUT.agentSessionsDefaultWidth,
     });
 
     expect(narrowLayout.agentSessionsCollapsed).toBe(true);
     expect(narrowLayout.agentSessionsWidth).toBe(CHAT_WORKSPACE_LAYOUT.agentSessionsCollapsedWidth);
   });
 
-  it('keeps the task inbox expanded only when there is enough room for the chat main area to shrink first', () => {
+  it('docks the chat side panel only when the chat main area can keep its minimum width', () => {
     const threshold = (
-      CHAT_WORKSPACE_LAYOUT.taskInboxMinWidth
-      + CHAT_WORKSPACE_LAYOUT.paneResizerWidth
+      CHAT_WORKSPACE_LAYOUT.sidePanelMinWidth
       + CHAT_WORKSPACE_LAYOUT.chatMainMinWidth
     );
 
-    expect(canExpandTaskInbox(threshold - 1)).toBe(false);
-    expect(canExpandTaskInbox(threshold)).toBe(true);
+    expect(canDockSidePanel(threshold - 1)).toBe(false);
+    expect(canDockSidePanel(threshold)).toBe(true);
 
-    expect(resolveTaskInboxLayout(false, 360, threshold - 1)).toEqual({
-      taskInboxCollapsed: true,
-      taskInboxWidth: 360,
+    expect(resolveChatSidePanelLayout(false, 1200)).toEqual({
+      sidePanelOpen: false,
+      sidePanelMode: 'hidden',
+      sidePanelWidth: 0,
     });
 
-    expect(resolveTaskInboxLayout(false, 360, 900)).toEqual({
-      taskInboxCollapsed: false,
-      taskInboxWidth: 360,
+    expect(resolveChatSidePanelLayout(true, threshold - 1)).toEqual({
+      sidePanelOpen: true,
+      sidePanelMode: 'overlay',
+      sidePanelWidth: CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
+    });
+
+    expect(resolveChatSidePanelLayout(true, 1200)).toEqual({
+      sidePanelOpen: true,
+      sidePanelMode: 'docked',
+      sidePanelWidth: CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
     });
   });
 });

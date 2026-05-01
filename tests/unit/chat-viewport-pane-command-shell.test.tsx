@@ -1,7 +1,7 @@
 import { createRef } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { ChatViewportPane, type ChatViewportPaneHandle } from '@/pages/Chat/components/ChatViewportPane';
+import { ChatList, type ChatListHandle } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -23,15 +23,8 @@ vi.mock('@/pages/Chat/useChatScroll', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/useChatRenderModel', () => ({
-  useChatRenderModel: () => ({
-    rows: [],
-    executionGraphSlots: {
-      anchoredGraphsByRowKey: new Map(),
-      suppressedToolCardRowKeys: new Set(),
-    },
-    pendingAssistantShell: null,
-  }),
+vi.mock('@/pages/Chat/useExecutionGraphs', () => ({
+  useExecutionGraphs: () => [],
 }));
 
 vi.mock('@/pages/Chat/useChatView', () => ({
@@ -42,13 +35,25 @@ vi.mock('@/pages/Chat/useChatView', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/components/ChatList', () => ({
-  ChatList: (props: { onLoadOlder: () => void }) => (
-    <button type="button" onClick={props.onLoadOlder}>
-      Load older
-    </button>
-  ),
-}));
+vi.mock('@/pages/Chat/components/ChatList', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/pages/Chat/components/ChatList')>();
+  return {
+    ...actual,
+    ChatListSurface: (props: {
+      onLoadOlder: () => void;
+      scrollChromeStore: { runJumpAction: () => void };
+    }) => (
+      <>
+        <button type="button" onClick={props.onLoadOlder}>
+          Load older
+        </button>
+        <button type="button" onClick={props.scrollChromeStore.runJumpAction}>
+          Jump to bottom
+        </button>
+      </>
+    ),
+  };
+});
 
 function buildCurrentSession(hasMore = true) {
   const base = createEmptySessionRecord();
@@ -58,8 +63,8 @@ function buildCurrentSession(hasMore = true) {
       ...base.meta,
       historyStatus: 'ready' as const,
     },
+    messages: [],
     window: createViewportWindowState({
-      messages: [],
       totalMessageCount: 0,
       windowStartOffset: hasMore ? 1 : 0,
       windowEndOffset: 0,
@@ -69,7 +74,7 @@ function buildCurrentSession(hasMore = true) {
   };
 }
 
-describe('chat viewport pane command shell', () => {
+describe('chat list command shell', () => {
   beforeEach(() => {
     scrollHandlers.prepareScopeAnchorRestore.mockReset();
     scrollHandlers.prepareScopeBottomAlign.mockReset();
@@ -81,7 +86,7 @@ describe('chat viewport pane command shell', () => {
     const loadOlderSecond = vi.fn();
 
     const view = render(
-      <ChatViewportPane
+      <ChatList
         isActive
         currentSessionKey="agent:test:first"
         currentSession={buildCurrentSession(true)}
@@ -96,7 +101,6 @@ describe('chat viewport pane command shell', () => {
         onLoadOlder={loadOlderFirst}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -109,7 +113,7 @@ describe('chat viewport pane command shell', () => {
     scrollHandlers.prepareScopeAnchorRestore = nextPrepareScopeAnchorRestore;
 
     view.rerender(
-      <ChatViewportPane
+      <ChatList
         isActive
         currentSessionKey="agent:test:second"
         currentSession={buildCurrentSession(true)}
@@ -124,7 +128,6 @@ describe('chat viewport pane command shell', () => {
         onLoadOlder={loadOlderSecond}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -135,10 +138,10 @@ describe('chat viewport pane command shell', () => {
   });
 
   it('prepareCurrentLatestBottomAlign after session switch uses the latest bottom-align handler and session key', () => {
-    const paneRef = createRef<ChatViewportPaneHandle>();
+    const paneRef = createRef<ChatListHandle>();
 
     const view = render(
-      <ChatViewportPane
+      <ChatList
         ref={paneRef}
         isActive
         currentSessionKey="agent:test:first"
@@ -154,7 +157,6 @@ describe('chat viewport pane command shell', () => {
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -166,7 +168,7 @@ describe('chat viewport pane command shell', () => {
     scrollHandlers.prepareScopeBottomAlign = nextPrepareScopeBottomAlign;
 
     view.rerender(
-      <ChatViewportPane
+      <ChatList
         ref={paneRef}
         isActive
         currentSessionKey="agent:test:second"
@@ -182,12 +184,51 @@ describe('chat viewport pane command shell', () => {
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
 
     paneRef.current?.prepareCurrentLatestBottomAlign();
     expect(nextPrepareScopeBottomAlign).toHaveBeenCalledWith('agent:test:second');
+  });
+
+  it('jump action schedules bottom align before refreshing a detached non-latest window', () => {
+    const jumpToLatest = vi.fn();
+
+    render(
+      <ChatList
+        isActive
+        currentSessionKey="agent:test:main"
+        currentSession={{
+          ...buildCurrentSession(false),
+          window: createViewportWindowState({
+            totalMessageCount: 12,
+            windowStartOffset: 0,
+            windowEndOffset: 6,
+            hasMore: false,
+            hasNewer: true,
+            isAtLatest: false,
+          }),
+        }}
+        agents={[]}
+        isGatewayRunning={false}
+        gatewayRpc={vi.fn()}
+        errorMessage={null}
+        showThinking={false}
+        userAvatarDataUrl={null}
+        assistantAgentId="test"
+        assistantAgentName="Test Agent"
+        onLoadOlder={() => {}}
+        loadOlderLabel="Load older"
+        onJumpToLatest={jumpToLatest}
+        jumpToBottomLabel="Jump bottom"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Jump bottom' }));
+
+    expect(scrollHandlers.prepareScopeBottomAlign).toHaveBeenCalledWith('agent:test:main');
+    expect(jumpToLatest).toHaveBeenCalledTimes(1);
+    expect(scrollHandlers.jumpToBottom).not.toHaveBeenCalled();
   });
 });

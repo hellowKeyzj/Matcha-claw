@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AgentSkillOption } from './components/AgentSkillConfigDialog';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { AgentSkillOption } from './components/AgentSkillConfigPanel';
 
 interface AgentLike {
   id: string;
@@ -12,6 +12,7 @@ interface AgentLike {
 interface SkillLike {
   id: string;
   name: string;
+  description?: string;
   icon?: string;
   enabled?: boolean;
   eligible?: boolean;
@@ -19,6 +20,7 @@ interface SkillLike {
 
 interface UseSkillConfigInput {
   currentAgent?: AgentLike;
+  readAgent: (agentId: string) => AgentLike | undefined;
   skills: SkillLike[];
   skillsSnapshotReady: boolean;
   skillsInitialLoading: boolean;
@@ -33,20 +35,52 @@ interface UseSkillConfigInput {
 }
 
 interface UseSkillConfigResult {
-  open: boolean;
-  saving: boolean;
   selectedSkillIds: string[];
   availableSkillOptions: AgentSkillOption[];
   skillsLoading: boolean;
-  openDialog: () => void;
-  closeDialog: () => void;
+  prepare: () => void;
+  resetSession: () => void;
   toggleSkill: (skillId: string, checked: boolean) => void;
-  save: () => Promise<void>;
+}
+
+function equalSkillIds(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  for (let index = 0; index < normalizedLeft.length; index += 1) {
+    if (normalizedLeft[index] !== normalizedRight[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeSelectedSkillIds(params: {
+  currentAgent?: AgentLike;
+  availableSkillIds: string[];
+  availableSkillSet: Set<string>;
+  skillsSnapshotReady: boolean;
+}): string[] {
+  const { currentAgent, availableSkillIds, availableSkillSet, skillsSnapshotReady } = params;
+  if (!currentAgent) {
+    return [];
+  }
+
+  const currentSkills = Array.isArray(currentAgent.skills)
+    ? currentAgent.skills
+    : (skillsSnapshotReady ? availableSkillIds : []);
+
+  return skillsSnapshotReady
+    ? Array.from(new Set(currentSkills.filter((id) => availableSkillSet.has(id))))
+    : Array.from(new Set(currentSkills));
 }
 
 export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult {
   const {
     currentAgent,
+    readAgent,
     skills,
     skillsSnapshotReady,
     skillsInitialLoading,
@@ -54,9 +88,15 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
     updateAgent,
   } = input;
 
-  const [open, setOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [, setSyncedSkillIds] = useState<string[]>([]);
+  const preparedAgentIdRef = useRef<string | null>(null);
+  const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
+  const selectedSkillIdsRef = useRef<string[]>([]);
+  const syncedSkillIdsRef = useRef<string[]>([]);
+  const syncInFlightRef = useRef(false);
+  const syncRequestSeqRef = useRef(0);
+  const hasLocalInteractionRef = useRef(false);
 
   const availableSkillOptions = useMemo<AgentSkillOption[]>(
     () => skills
@@ -64,6 +104,7 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
       .map((skill) => ({
         id: skill.id,
         name: skill.name,
+        description: skill.description,
         icon: skill.icon,
       })),
     [skills],
@@ -76,73 +117,175 @@ export function useSkillConfig(input: UseSkillConfigInput): UseSkillConfigResult
     () => new Set(availableSkillIds),
     [availableSkillIds],
   );
+  const applySelectedSkillIds = useCallback((nextSkillIds: string[]) => {
+    if (equalSkillIds(selectedSkillIdsRef.current, nextSkillIds)) {
+      return;
+    }
+    selectedSkillIdsRef.current = nextSkillIds;
+    setSelectedSkillIds(nextSkillIds);
+  }, []);
 
-  const openDialog = useCallback(() => {
+  const applySyncedSkillIds = useCallback((nextSkillIds: string[]) => {
+    if (equalSkillIds(syncedSkillIdsRef.current, nextSkillIds)) {
+      return;
+    }
+    syncedSkillIdsRef.current = nextSkillIds;
+    setSyncedSkillIds(nextSkillIds);
+  }, []);
+
+  const resolveAgentSkillIds = useCallback((agent?: AgentLike) => normalizeSelectedSkillIds({
+    currentAgent: agent,
+    availableSkillIds,
+    availableSkillSet,
+    skillsSnapshotReady,
+  }), [availableSkillIds, availableSkillSet, skillsSnapshotReady]);
+
+  const syncLatestSkillSelection = useCallback(() => {
+    const agentId = preparedAgentIdRef.current;
+    if (!agentId || syncInFlightRef.current) {
+      return;
+    }
+
+    const desiredSkillIds = selectedSkillIdsRef.current;
+    const committedSkillIds = syncedSkillIdsRef.current;
+    if (equalSkillIds(desiredSkillIds, committedSkillIds)) {
+      return;
+    }
+
+    const latestAgent = readAgent(agentId) ?? currentAgent;
+    if (!latestAgent) {
+      return;
+    }
+
+    const requestSkillIds = desiredSkillIds;
+    const requestSeq = syncRequestSeqRef.current + 1;
+    syncRequestSeqRef.current = requestSeq;
+    syncInFlightRef.current = true;
+
+    void updateAgent({
+      agentId,
+      name: latestAgent.name || latestAgent.id,
+      workspace: latestAgent.workspace ?? '',
+      model: latestAgent.model,
+      skills: requestSkillIds,
+    }).then(() => {
+      if (syncRequestSeqRef.current !== requestSeq || preparedAgentIdRef.current !== agentId) {
+        return;
+      }
+      const committedAgent = readAgent(agentId) ?? latestAgent;
+      const committedAfterSync = resolveAgentSkillIds(committedAgent);
+      applySyncedSkillIds(committedAfterSync);
+
+      if (
+        equalSkillIds(selectedSkillIdsRef.current, requestSkillIds)
+        && !equalSkillIds(committedAfterSync, requestSkillIds)
+      ) {
+        applySelectedSkillIds(committedAfterSync);
+      }
+    }).finally(() => {
+      if (syncRequestSeqRef.current !== requestSeq || preparedAgentIdRef.current !== agentId) {
+        return;
+      }
+      syncInFlightRef.current = false;
+      if (!equalSkillIds(selectedSkillIdsRef.current, syncedSkillIdsRef.current)) {
+        syncLatestSkillSelection();
+      }
+    });
+  }, [
+    applySelectedSkillIds,
+    applySyncedSkillIds,
+    currentAgent,
+    readAgent,
+    resolveAgentSkillIds,
+    updateAgent,
+  ]);
+
+  useEffect(() => {
+    if (!pendingAgentId || !currentAgent || currentAgent.id !== pendingAgentId) {
+      return;
+    }
+    const normalizedSkillIds = resolveAgentSkillIds(currentAgent);
+    if (!hasLocalInteractionRef.current) {
+      applySelectedSkillIds(normalizedSkillIds);
+    }
+    applySyncedSkillIds(normalizedSkillIds);
+    if (skillsSnapshotReady || Array.isArray(currentAgent.skills)) {
+      preparedAgentIdRef.current = currentAgent.id;
+      setPendingAgentId(null);
+      if (!equalSkillIds(selectedSkillIdsRef.current, syncedSkillIdsRef.current)) {
+        syncLatestSkillSelection();
+      }
+    }
+  }, [
+    applySelectedSkillIds,
+    applySyncedSkillIds,
+    currentAgent,
+    pendingAgentId,
+    resolveAgentSkillIds,
+    syncLatestSkillSelection,
+    skillsSnapshotReady,
+  ]);
+
+  useEffect(() => {
+    if (!currentAgent || preparedAgentIdRef.current !== currentAgent.id || syncInFlightRef.current) {
+      return;
+    }
+    const normalizedSkillIds = resolveAgentSkillIds(currentAgent);
+    applySyncedSkillIds(normalizedSkillIds);
+    applySelectedSkillIds(normalizedSkillIds);
+  }, [applySelectedSkillIds, applySyncedSkillIds, currentAgent, resolveAgentSkillIds]);
+
+  useEffect(() => {
+    syncLatestSkillSelection();
+  }, [selectedSkillIds, syncLatestSkillSelection]);
+
+  const prepare = useCallback(() => {
     if (!currentAgent) {
       return;
     }
-    setOpen(true);
     if (!skillsSnapshotReady && !skillsInitialLoading) {
       void fetchSkills();
     }
-  }, [currentAgent, fetchSkills, skillsInitialLoading, skillsSnapshotReady]);
-
-  const closeDialog = useCallback(() => {
-    setOpen(false);
-  }, []);
-
-  useEffect(() => {
-    if (!open || !currentAgent) {
+    if (preparedAgentIdRef.current === currentAgent.id) {
       return;
     }
-    const currentSkills = Array.isArray(currentAgent.skills)
-      ? currentAgent.skills
-      : availableSkillIds;
-    const normalized = Array.from(new Set(currentSkills.filter((id) => availableSkillSet.has(id))));
-    setSelectedSkillIds(normalized);
-  }, [availableSkillIds, availableSkillSet, currentAgent, open]);
+    setPendingAgentId(currentAgent.id);
+  }, [currentAgent, fetchSkills, skillsInitialLoading, skillsSnapshotReady]);
+
+  const resetSession = useCallback(() => {
+    syncRequestSeqRef.current += 1;
+    preparedAgentIdRef.current = null;
+    setPendingAgentId(null);
+    syncInFlightRef.current = false;
+    hasLocalInteractionRef.current = false;
+    applySelectedSkillIds([]);
+    applySyncedSkillIds([]);
+  }, [applySelectedSkillIds, applySyncedSkillIds]);
 
   const toggleSkill = useCallback((skillId: string, checked: boolean) => {
-    setSelectedSkillIds((prev) => {
-      if (checked) {
-        if (prev.includes(skillId)) {
-          return prev;
-        }
-        return [...prev, skillId];
-      }
-      return prev.filter((id) => id !== skillId);
-    });
-  }, []);
-
-  const save = useCallback(async () => {
     if (!currentAgent) {
       return;
     }
-    setSaving(true);
-    try {
-      await updateAgent({
-        agentId: currentAgent.id,
-        name: currentAgent.name || currentAgent.id,
-        workspace: currentAgent.workspace ?? '',
-        model: currentAgent.model,
-        skills: selectedSkillIds,
-      });
-      setOpen(false);
-    } finally {
-      setSaving(false);
+
+    const previousSelectedSkillIds = selectedSkillIdsRef.current;
+    const nextSelectedSkillIds = checked
+      ? (previousSelectedSkillIds.includes(skillId) ? previousSelectedSkillIds : [...previousSelectedSkillIds, skillId])
+      : previousSelectedSkillIds.filter((id) => id !== skillId);
+
+    if (equalSkillIds(nextSelectedSkillIds, previousSelectedSkillIds)) {
+      return;
     }
-  }, [currentAgent, selectedSkillIds, updateAgent]);
+
+    hasLocalInteractionRef.current = true;
+    applySelectedSkillIds(nextSelectedSkillIds);
+  }, [applySelectedSkillIds, currentAgent]);
 
   return {
-    open,
-    saving,
     selectedSkillIds,
     availableSkillOptions,
     skillsLoading: !skillsSnapshotReady && skillsInitialLoading,
-    openDialog,
-    closeDialog,
+    prepare,
+    resetSession,
     toggleSkill,
-    save,
   };
 }
-

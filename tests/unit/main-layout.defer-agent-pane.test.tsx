@@ -4,6 +4,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { useChatStore } from '@/stores/chat';
+import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
@@ -72,10 +73,13 @@ describe('main layout chat workspace host', () => {
     useSettingsStore.setState({
       setupComplete: true,
       language: 'en',
-      sidebarCollapsed: false,
       devModeUnlocked: false,
       init: vi.fn().mockResolvedValue(undefined),
     } as never);
+    useLayoutStore.setState({
+      sidebarVisible: true,
+      sidebarWidth: 256,
+    });
 
     useSubagentsStore.setState({
       agents: [
@@ -95,17 +99,17 @@ describe('main layout chat workspace host', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': {
+          messages: [],
           meta: {
             label: null,
             lastActivityAt: null,
-            ready: true,
+            historyStatus: 'ready',
             thinkingLevel: null,
           },
           runtime: {
             sending: false,
             activeRunId: null,
             runPhase: 'idle',
-            pendingUserMessage: null,
             streamingMessageId: null,
             streamingTools: [],
             pendingFinal: false,
@@ -114,7 +118,6 @@ describe('main layout chat workspace host', () => {
             approvalStatus: 'idle',
           },
           window: createViewportWindowState({
-            messages: [],
             totalMessageCount: 0,
             windowStartOffset: 0,
             windowEndOffset: 0,
@@ -146,14 +149,13 @@ describe('main layout chat workspace host', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId('chat-workspace-host')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('chat-workspace-host')).toBeInTheDocument();
     expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'true');
     expect(screen.getByTestId('agent-sessions-pane')).toBeInTheDocument();
-    expect(screen.getByTestId('layout-agent-sessions-resizer')).toBeInTheDocument();
-    expect(screen.queryByTestId('main-layout-route-overlay')).toBeNull();
+    expect(screen.queryByTestId('layout-agent-sessions-resizer')).toBeNull();
   });
 
-  it('keeps chat workspace mounted but inactive on non-chat routes', () => {
+  it('does not mount chat workspace on non-chat routes', () => {
     render(
       <MemoryRouter initialEntries={['/tasks']}>
         <Routes>
@@ -165,14 +167,13 @@ describe('main layout chat workspace host', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByTestId('chat-workspace-host')).toHaveAttribute('data-active', 'false');
-    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'false');
-    expect(screen.getByTestId('agent-sessions-pane')).toBeInTheDocument();
-    expect(screen.getByTestId('main-layout-route-overlay')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-workspace-host')).toBeNull();
+    expect(screen.queryByTestId('chat-host')).toBeNull();
+    expect(screen.queryByTestId('agent-sessions-pane')).toBeNull();
     expect(screen.getByTestId('tasks-outlet')).toBeInTheDocument();
   });
 
-  it('switching routes does not recreate the chat host subtree', () => {
+  it('switching routes mounts chat only when entering the chat route', () => {
     render(
       <MemoryRouter initialEntries={['/tasks']}>
         <RouteSwitcher />
@@ -185,18 +186,14 @@ describe('main layout chat workspace host', () => {
       </MemoryRouter>,
     );
 
-    const initialInstanceId = screen.getByTestId('chat-host').getAttribute('data-instance-id');
-    expect(initialInstanceId).toBeTruthy();
-    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'false');
+    expect(screen.queryByTestId('chat-host')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'go-chat' }));
-    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-instance-id', initialInstanceId);
+    const activeInstanceId = screen.getByTestId('chat-host').getAttribute('data-instance-id');
+    expect(activeInstanceId).toBeTruthy();
     expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'true');
 
     fireEvent.click(screen.getByRole('button', { name: 'go-tasks' }));
-    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-instance-id', initialInstanceId);
-    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'false');
+    expect(screen.queryByTestId('chat-host')).toBeNull();
   });
 });
-
-

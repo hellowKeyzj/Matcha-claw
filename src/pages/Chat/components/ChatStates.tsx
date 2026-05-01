@@ -1,22 +1,32 @@
+import type { ReactNode } from 'react';
 import { AlertCircle, Bot, MessageSquare, Sparkles } from 'lucide-react';
 import type { ApprovalDecision, ApprovalItem } from '@/stores/chat';
 import { useTranslation } from 'react-i18next';
 
-export function WelcomeScreen() {
+export function WelcomeScreen({ input }: { input?: ReactNode }) {
   const { t } = useTranslation('chat');
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col items-start px-1 pb-20 pt-3 md:px-0 md:pt-5">
-      <div className="mb-5 inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-border/50 bg-background/82 text-foreground shadow-[0_10px_28px_rgba(15,23,42,0.05)] backdrop-blur-sm">
+    <div
+      data-testid="chat-welcome-screen"
+      className="mx-auto flex w-full max-w-[56rem] flex-col items-center px-3 pt-8 text-center md:px-4 md:pt-12"
+    >
+      <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-border/50 bg-background/82 text-foreground shadow-[0_10px_28px_rgba(15,23,42,0.05)] backdrop-blur-sm">
         <Bot className="h-[18px] w-[18px]" />
       </div>
-      <h2 className="max-w-2xl text-[1.9rem] font-semibold tracking-[-0.045em] text-foreground md:text-[2.05rem]">
+      <h2 className="max-w-2xl text-[2rem] font-semibold tracking-[-0.05em] text-foreground md:text-[2.35rem]">
         {t('welcome.title')}
       </h2>
       <p className="mt-2 max-w-2xl text-[14px] leading-6 text-muted-foreground md:text-[15px] md:leading-7">
         {t('welcome.subtitle')}
       </p>
 
-      <div className="mt-6 grid w-full gap-3 md:grid-cols-2">
+      {input ? (
+        <div className="mt-8 w-full">
+          {input}
+        </div>
+      ) : null}
+
+      <div className="mt-8 grid w-full gap-3 md:grid-cols-2">
         {[
           { icon: MessageSquare, title: t('welcome.askQuestions'), desc: t('welcome.askQuestionsDesc') },
           { icon: Sparkles, title: t('welcome.creativeTasks'), desc: t('welcome.creativeTasksDesc') },
