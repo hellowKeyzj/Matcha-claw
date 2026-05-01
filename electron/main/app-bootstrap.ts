@@ -12,6 +12,7 @@ import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { getSetting } from '../services/settings/settings-store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../services/skills/skill-config-service';
+import { migrateMainAgentWorkspaceTemplatesIfNeeded } from '../services/openclaw/main-agent-workspace-service';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
 import type { HostEventBus } from '../api/event-bus';
 import { ensureLicenseGateBootstrapped } from '../services/license/license-gate-service';
@@ -138,6 +139,12 @@ export async function bootstrapMainApplication(deps: {
     await deps.runtimeHostManager.start();
   } catch (error) {
     logger.warn('Runtime Host start failed, app will continue without plugin runtime:', error);
+  }
+
+  try {
+    await migrateMainAgentWorkspaceTemplatesIfNeeded();
+  } catch (error) {
+    logger.warn('Failed to migrate main-agent workspace templates:', error);
   }
 
   registerGatewayControlUiSecurityHeaders();
