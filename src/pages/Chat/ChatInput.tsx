@@ -12,10 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
-import { useChatStore } from '@/stores/chat';
-import { selectChatInputSessionKey } from '@/stores/chat/selectors';
 import { useSkillsStore } from '@/stores/skills';
-import { useSubagentsStore } from '@/stores/subagents';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
@@ -64,6 +61,7 @@ interface ChatInputProps {
   sending?: boolean;
   approvalWaiting?: boolean;
   mentionCandidates?: MentionCandidate[];
+  allowedSkillIds?: string[] | null;
 }
 
 function resolveInputPlaceholder(
@@ -254,6 +252,7 @@ export const ChatInput = memo(function ChatInput({
   sending = false,
   approvalWaiting = false,
   mentionCandidates = [],
+  allowedSkillIds = null,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
@@ -281,23 +280,16 @@ export const ChatInput = memo(function ChatInput({
   const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
-  const currentSessionKey = useChatStore(selectChatInputSessionKey);
-  const agents = useSubagentsStore((state) => (
-    Array.isArray(state.agentsResource.data) ? state.agentsResource.data : []
-  ));
   const allowedSkillIdSet = useMemo(() => {
-    const matched = currentSessionKey.match(/^agent:([^:]+):/i);
-    const currentAgentId = matched?.[1] ?? 'main';
-    const currentAgent = agents.find((agent) => agent.id === currentAgentId);
-    if (!Array.isArray(currentAgent?.skills)) {
+    if (!Array.isArray(allowedSkillIds)) {
       return null;
     }
-    const normalized = currentAgent.skills
+    const normalized = allowedSkillIds
       .filter((id): id is string => typeof id === 'string')
       .map((id) => id.trim())
       .filter((id) => id.length > 0);
     return new Set(normalized);
-  }, [agents, currentSessionKey]);
+  }, [allowedSkillIds]);
 
   // Auto-resize textarea
   useEffect(() => {

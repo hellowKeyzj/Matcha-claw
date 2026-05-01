@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChatViewportPane } from '@/pages/Chat/components/ChatViewportPane';
+import { ChatList } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -22,8 +22,8 @@ function buildCurrentSession(messages: Array<Record<string, unknown>>) {
       activeRunId: 'run-1',
       runPhase: 'submitted' as const,
     },
+    messages: messages as never,
     window: createViewportWindowState({
-      messages: messages as never,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -32,7 +32,7 @@ function buildCurrentSession(messages: Array<Record<string, unknown>>) {
   };
 }
 
-describe('chat viewport pane streaming render', () => {
+describe('chat list streaming render', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -42,7 +42,7 @@ describe('chat viewport pane streaming render', () => {
     vi.unstubAllGlobals();
   });
 
-  it('updates the active assistant row immediately when overlay target text grows', () => {
+  it('updates the active assistant row immediately when the streaming target text grows', () => {
     const now = Date.now() / 1000;
     const rafQueue: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
@@ -52,7 +52,7 @@ describe('chat viewport pane streaming render', () => {
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
 
     const view = render(
-      <ChatViewportPane
+      <ChatList
         isActive={false}
         currentSessionKey="agent:test:main"
         currentSession={buildCurrentSession([
@@ -75,7 +75,6 @@ describe('chat viewport pane streaming render', () => {
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -85,7 +84,7 @@ describe('chat viewport pane streaming render', () => {
     )).length).toBeGreaterThan(0);
 
     view.rerender(
-      <ChatViewportPane
+      <ChatList
         isActive={false}
         currentSessionKey="agent:test:main"
         currentSession={buildCurrentSession([
@@ -108,7 +107,6 @@ describe('chat viewport pane streaming render', () => {
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -121,7 +119,7 @@ describe('chat viewport pane streaming render', () => {
 
   it('renders a single assistant streaming shell before the first assistant token lands', () => {
     render(
-      <ChatViewportPane
+      <ChatList
         isActive={false}
         currentSessionKey="agent:test:main"
         currentSession={buildCurrentSession([])}
@@ -136,7 +134,6 @@ describe('chat viewport pane streaming render', () => {
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
-        jumpToLatestLabel="Jump latest"
         jumpToBottomLabel="Jump bottom"
       />,
     );

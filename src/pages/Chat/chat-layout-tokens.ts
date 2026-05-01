@@ -1,7 +1,7 @@
 export const CHAT_LAYOUT_TOKENS = {
   threadViewportPadding: 'px-3 pt-10 sm:px-4 sm:pt-10 md:px-5 md:pt-12 lg:px-6',
   threadRail: 'mx-auto flex w-full max-w-[56rem] flex-col',
-  threadTopAffordanceRail: 'flex justify-center pb-1',
+  threadTopAffordanceRail: 'flex justify-center -mt-10 pb-0.5 md:-mt-11',
   threadMessageStackPaddingTop: 'pt-2.5 sm:pt-3 md:pt-3.5',
   threadMessageRowSpacing: 'w-full pb-2.5 last:pb-0 md:pb-2.5',
   messageShell: 'group grid w-full items-start gap-2 max-md:gap-2 max-sm:gap-1.5',
@@ -25,7 +25,7 @@ export const CHAT_LAYOUT_TOKENS = {
   stageSurface: 'relative isolate flex min-h-0 min-w-0 flex-col overflow-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),rgba(248,250,252,0.92)_42%,rgba(244,245,247,0.86)_100%)] dark:bg-[radial-gradient(circle_at_top,rgba(39,39,42,0.98),rgba(24,24,27,0.96)_42%,rgba(18,18,20,0.98)_100%)]',
   stageBackdrop: 'pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.6),transparent_22%,transparent_78%,rgba(255,255,255,0.3))] dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.04),transparent_24%,transparent_78%,rgba(255,255,255,0.02))]',
   stageHeaderOverlay: 'pointer-events-none absolute inset-x-0 top-0 z-20 px-3 pt-2.5 md:px-4 md:pt-3',
-  stageHeaderRail: 'pointer-events-auto mx-auto flex w-full max-w-[56rem] justify-end',
+  stageHeaderRail: 'pointer-events-none flex w-full justify-end',
   stageFloatingRail: 'mx-auto flex w-full max-w-[56rem] justify-end',
   stageJumpToBottomRail: 'pointer-events-none absolute inset-x-0 z-10 px-3 md:px-4',
   stageBottomFade: 'pointer-events-none absolute bottom-0 left-0 right-[var(--chat-scrollbar-gutter)] z-10 h-24 bg-[linear-gradient(180deg,rgba(248,250,252,0),rgba(248,250,252,0.56)_24%,rgba(248,250,252,0.88)_54%,rgba(248,250,252,0.98)_100%)] dark:bg-[linear-gradient(180deg,rgba(24,24,27,0),rgba(24,24,27,0.5)_26%,rgba(24,24,27,0.82)_56%,rgba(24,24,27,0.96)_100%)]',

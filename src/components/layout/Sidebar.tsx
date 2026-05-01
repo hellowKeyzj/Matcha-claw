@@ -20,6 +20,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
@@ -51,8 +52,9 @@ interface NavItemProps {
 }
 
 interface SidebarProps {
-  expandedWidth?: number;
-  collapsedWidth?: number;
+  width?: number;
+  railWidth?: number;
+  containerWidth?: number;
   showRightDivider?: boolean;
 }
 
@@ -101,6 +103,28 @@ const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
 type PrefetchScheduleHandle =
   | { type: 'idle'; id: number }
   | { type: 'timeout'; id: number };
+
+interface SidebarTextLabelProps {
+  collapsed?: boolean;
+  className?: string;
+  children: React.ReactNode;
+}
+
+function SidebarTextLabel({ collapsed, className, children }: SidebarTextLabelProps) {
+  return (
+    <span
+      className={cn(
+        'block min-w-0 overflow-hidden transition-[opacity,transform] duration-150 ease-out',
+        collapsed
+          ? 'pointer-events-none w-0 flex-none -translate-x-1 opacity-0'
+          : 'flex-1 translate-x-0 opacity-100',
+        className,
+      )}
+    >
+      <span className="block truncate">{children}</span>
+    </span>
+  );
+}
 
 function buildTeamMailboxBlockerCards(input: {
   teamId: string;
@@ -212,17 +236,17 @@ function NavItem({ to, icon, label, collapsed, onMouseEnter, onFocus, onNavigate
       }}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-3 rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] transition-[background-color,color,box-shadow]',
+          'flex items-center rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] transition-[background-color,color,box-shadow]',
           'hover:bg-secondary hover:text-foreground',
           isActive
             ? 'bg-secondary text-foreground'
             : 'text-muted-foreground',
-          collapsed && 'justify-center px-2',
+          collapsed ? 'justify-center gap-0 px-0' : 'gap-3',
         )
       }
     >
       {icon}
-      {!collapsed && <span className="flex-1">{label}</span>}
+      <SidebarTextLabel collapsed={collapsed}>{label}</SidebarTextLabel>
     </NavLink>
   );
 }
@@ -398,12 +422,12 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
 });
 
 export function Sidebar({
-  expandedWidth = 256,
-  collapsedWidth = 64,
+  width = 256,
+  railWidth = 64,
   showRightDivider = true,
 }: SidebarProps) {
-  const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
-  const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
+  const sidebarVisible = useLayoutStore((state) => state.sidebarVisible);
+  const toggleSidebar = useLayoutStore((state) => state.toggleSidebar);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore(selectSidebarNewSessionAction);
   const gatewayState = useGatewayStore((state) => state.status.state);
@@ -417,6 +441,10 @@ export function Sidebar({
   const navigate = useNavigate();
   const location = useLocation();
   const isOnChat = location.pathname === '/';
+  const sidebarCollapsed = !sidebarVisible;
+  const sidebarExpanded = !sidebarCollapsed;
+  const deferredSidebarExpanded = useDeferredValue(sidebarExpanded);
+  const showExpandedExtras = sidebarExpanded && deferredSidebarExpanded;
   const { t } = useTranslation();
 
   const openDevConsole = async () => {
@@ -542,17 +570,17 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        'relative flex shrink-0 flex-col overflow-hidden bg-card transition-[width] duration-300',
+        'relative flex shrink-0 flex-col overflow-hidden bg-card',
         showRightDivider && 'border-r [border-right-color:var(--divider-line)]',
       )}
-      style={{ width: sidebarCollapsed ? collapsedWidth : expandedWidth }}
+      style={{ width: sidebarCollapsed ? railWidth : width }}
     >
       <nav className="flex flex-1 flex-col gap-1.5 overflow-hidden p-3">
         <button
           type="button"
           onClick={() => {
             const { currentSessionKey, loadedSessions } = useChatStore.getState();
-            const hasMessages = (loadedSessions[currentSessionKey]?.window.messages.length ?? 0) > 0;
+            const hasMessages = (loadedSessions[currentSessionKey]?.messages?.length ?? 0) > 0;
             if (isOnChat && hasMessages) {
               newSession();
             }
@@ -561,13 +589,15 @@ export function Sidebar({
             });
           }}
           className={cn(
-            'flex items-center gap-3 rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] text-muted-foreground transition-[background-color,color,box-shadow]',
+            'flex items-center rounded-[var(--radius-pill)] px-3.5 py-2.5 text-sm font-medium tracking-[-0.01em] text-muted-foreground transition-[background-color,color,box-shadow]',
             'hover:bg-secondary hover:text-foreground',
-            sidebarCollapsed && 'justify-center px-2',
+            sidebarCollapsed ? 'justify-center gap-0 px-0' : 'gap-3',
           )}
         >
           <MessageSquare className="h-5 w-5 shrink-0" />
-          {!sidebarCollapsed && <span className="flex-1 text-left">{t('sidebar.newChat')}</span>}
+          <SidebarTextLabel collapsed={sidebarCollapsed} className="text-left">
+            {t('sidebar.newChat')}
+          </SidebarTextLabel>
         </button>
 
         {navItems.map((item) => (
@@ -581,11 +611,11 @@ export function Sidebar({
           />
         ))}
 
-        {!sidebarCollapsed && <SidebarPendingBlockers />}
+        {showExpandedExtras && <SidebarPendingBlockers />}
       </nav>
 
       <div className="space-y-2 p-3 pt-0">
-        {devModeUnlocked && !sidebarCollapsed && (
+        {devModeUnlocked && showExpandedExtras && (
           <Button
             variant="ghost"
             size="sm"
@@ -601,7 +631,7 @@ export function Sidebar({
 
       <PaneEdgeToggle
         side="right"
-        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onClick={toggleSidebar}
         ariaLabel={sidebarCollapsed ? t('sidebar.expandMenu') : t('sidebar.collapseMenu')}
         title={sidebarCollapsed ? t('sidebar.expandMenu') : t('sidebar.collapseMenu')}
         icon={sidebarCollapsed ? <ChevronRight className="h-2.5 w-2.5" /> : <ChevronLeft className="h-2.5 w-2.5" />}

@@ -3,7 +3,7 @@ import { act, render, screen } from '@testing-library/react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
-import { ChatList } from '@/pages/Chat/components/ChatList';
+import { ChatListSurface } from '@/pages/Chat/components/ChatList';
 
 const chatMessageRenderSpy = vi.fn();
 
@@ -29,7 +29,6 @@ vi.mock('@/pages/Chat/pending-assistant-shell', () => ({
 
 vi.mock('@/pages/Chat/components/ChatStates', () => ({
   FailureScreen: () => <div data-testid="chat-failure-screen" />,
-  WelcomeScreen: () => <div data-testid="chat-welcome-screen" />,
 }));
 
 describe('chat content rail layout', () => {
@@ -42,8 +41,7 @@ describe('chat content rail layout', () => {
     visible?: boolean;
     isAtLatest?: boolean;
     jumpActionLabel?: string;
-    onJumpToBottom?: () => void;
-    onJumpToLatest?: () => void;
+    onJumpAction?: () => void;
   }) {
     const store = createChatScrollChromeStore({
       isBottomLocked: options?.isBottomLocked ?? true,
@@ -51,16 +49,13 @@ describe('chat content rail layout', () => {
       isAtLatest: options?.isAtLatest ?? true,
       jumpActionLabel: options?.jumpActionLabel ?? 'Jump to bottom',
     });
-    store.setJumpHandlers({
-      jumpToBottom: options?.onJumpToBottom ?? vi.fn(),
-      jumpToLatest: options?.onJumpToLatest ?? vi.fn(),
-    });
+    store.setJumpAction(options?.onJumpAction ?? vi.fn());
     return store;
   }
 
   it('chat list uses a centered narrow content rail with composer-driven viewport bottom padding', () => {
     const { container } = render(
-      <ChatList
+      <ChatListSurface
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
@@ -119,7 +114,7 @@ describe('chat content rail layout', () => {
 
   it('chat list places the load-older affordance above the message stack instead of burying it in the top padding gap', () => {
     render(
-      <ChatList
+      <ChatListSurface
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
@@ -159,18 +154,20 @@ describe('chat content rail layout', () => {
     );
 
     expect(screen.getByTestId('chat-load-older-rail')).toBeInTheDocument();
+    expect(CHAT_LAYOUT_TOKENS.threadTopAffordanceRail).toContain('-mt-10');
     expect(screen.getByTestId('chat-message-stack').className).toContain(CHAT_LAYOUT_TOKENS.threadMessageStackPaddingTop);
+    expect(screen.getByRole('button', { name: 'Load older' }).className).toContain('h-7');
   });
 
   it('chat list exposes a jump-to-bottom button only when requested', () => {
-    const onJumpToBottom = vi.fn();
+    const onJumpAction = vi.fn();
     const scrollChromeStore = buildScrollChromeStore({
       isBottomLocked: false,
-      onJumpToBottom,
+      onJumpAction,
     });
 
     const { container } = render(
-      <ChatList
+      <ChatListSurface
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
@@ -211,7 +208,7 @@ describe('chat content rail layout', () => {
 
     const jumpButton = screen.getByRole('button', { name: 'Jump to bottom' });
     jumpButton.click();
-    expect(onJumpToBottom).toHaveBeenCalledTimes(1);
+    expect(onJumpAction).toHaveBeenCalledTimes(1);
     const floatingRail = jumpButton.parentElement as HTMLElement | null;
     expect(floatingRail?.className).toContain('max-w-[56rem]');
     const jumpRail = floatingRail?.parentElement as HTMLElement | null;
@@ -221,7 +218,7 @@ describe('chat content rail layout', () => {
 
   it('chat list renders execution graphs on a sibling rail below the anchored message row', () => {
     render(
-      <ChatList
+      <ChatListSurface
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState={false}
@@ -317,7 +314,7 @@ describe('chat content rail layout', () => {
     };
 
     render(
-      <ChatList
+      <ChatListSurface
         {...commonProps}
       />,
     );
@@ -348,9 +345,9 @@ describe('chat content rail layout', () => {
     expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
-  it('empty state stays on the same viewport rail instead of switching to a dedicated hero rail', () => {
+  it('empty state no longer renders welcome content inside the message viewport rail', () => {
     const { container } = render(
-      <ChatList
+      <ChatListSurface
         messagesViewportRef={{ current: null }}
         messageContentRef={{ current: null }}
         isEmptyState
@@ -381,12 +378,12 @@ describe('chat content rail layout', () => {
       />,
     );
 
-    expect(screen.getByTestId('chat-welcome-screen')).toBeInTheDocument();
     const viewport = container.querySelector('.chat-scroll-sync-viewport') as HTMLElement | null;
     expect(viewport?.className).toContain(CHAT_LAYOUT_TOKENS.threadViewportPadding);
     const classNames = Array.from(container.querySelectorAll<HTMLElement>('div'))
       .map((node) => node.className)
       .filter((value): value is string => typeof value === 'string');
     expect(classNames.some((value) => value.includes(CHAT_LAYOUT_TOKENS.threadRail))).toBe(true);
+    expect(screen.queryByTestId('chat-message-item')).toBeNull();
   });
 });
