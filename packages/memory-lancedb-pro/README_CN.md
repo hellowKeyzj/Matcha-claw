@@ -504,10 +504,10 @@ git clone https://github.com/CortexReach/memory-lancedb-pro-skill.git ~/.opencla
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `smartExtraction` | boolean | `true` | 是否启用 LLM 智能 6 类别提取 |
-| `llm.auth` | string | `api-key` | `api-key` 使用 `llm.apiKey` / `embedding.apiKey`；`oauth` 默认使用 plugin 级 OAuth token 文件 |
-| `llm.apiKey` | string | *（复用 `embedding.apiKey`）* | LLM 提供商 API Key |
-| `llm.model` | string | `openai/gpt-oss-120b` | LLM 模型名称 |
-| `llm.baseURL` | string | *（复用 `embedding.baseURL`）* | LLM API 端点 |
+| `llm.auth` | string | `api-key` | `api-key` 依次使用 `llm.apiKey`、`embedding.apiKey`，再回退到 OpenClaw 默认模型来源；`oauth` 默认使用 plugin 级 OAuth token 文件 |
+| `llm.apiKey` | string | *（先复用 `embedding.apiKey`，再回退到 OpenClaw 默认 LLM 来源）* | LLM 提供商 API Key |
+| `llm.model` | string | `openai/gpt-oss-120b` | LLM 模型名称。未配置时，插件启动会优先继承 OpenClaw 默认模型 |
+| `llm.baseURL` | string | *（先回退到 OpenClaw 默认 LLM 来源，再复用 `embedding.baseURL`）* | LLM API 端点 |
 | `llm.oauthProvider` | string | `openai-codex` | `llm.auth` 为 `oauth` 时使用的 OAuth provider id |
 | `llm.oauthPath` | string | `~/.openclaw/.memory-lancedb-pro/oauth.json` | `llm.auth` 为 `oauth` 时使用的 OAuth token 文件 |
 | `llm.timeoutMs` | number | `30000` | LLM 请求超时（毫秒） |

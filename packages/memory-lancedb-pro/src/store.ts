@@ -15,6 +15,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { buildSmartMetadata, isMemoryActiveAt, parseSmartMetadata, stringifySmartMetadata } from "./smart-metadata.js";
 
@@ -53,6 +54,7 @@ export interface MetadataPatch {
 
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
   null;
+const requireFromHere = createRequire(import.meta.url);
 
 // =========================================================================
 // Cross-Process File Lock (proper-lockfile)
@@ -71,8 +73,9 @@ export const loadLanceDB = async (): Promise<
   typeof import("@lancedb/lancedb")
 > => {
   if (!lancedbImportPromise) {
-    // Use require() for CommonJS modules on Windows to avoid ESM URL scheme issues
-    lancedbImportPromise = Promise.resolve(require("@lancedb/lancedb"));
+    lancedbImportPromise = Promise.resolve(
+      requireFromHere("@lancedb/lancedb") as typeof import("@lancedb/lancedb"),
+    );
   }
   try {
     return await lancedbImportPromise;
