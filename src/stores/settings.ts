@@ -39,7 +39,6 @@ interface SettingsState {
   autoDownloadUpdate: boolean;
 
   // UI State
-  sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
 
   // Setup
@@ -63,7 +62,6 @@ interface SettingsState {
   setUpdateChannel: (channel: UpdateChannel) => void;
   setAutoCheckUpdate: (value: boolean) => void;
   setAutoDownloadUpdate: (value: boolean) => void;
-  setSidebarCollapsed: (value: boolean) => void;
   setDevModeUnlocked: (value: boolean) => void;
   markSetupComplete: () => void;
   resetSettings: () => Promise<void>;
@@ -85,7 +83,6 @@ const defaultSettings = {
   updateChannel: 'stable' as UpdateChannel,
   autoCheckUpdate: true,
   autoDownloadUpdate: false,
-  sidebarCollapsed: false,
   devModeUnlocked: false,
   setupComplete: false,
   initialized: false,
@@ -181,10 +178,6 @@ export const useSettingsStore = create<SettingsState>()(
       setAutoDownloadUpdate: (autoDownloadUpdate) => {
         set({ autoDownloadUpdate });
         void hostSettingsPutValue('autoDownloadUpdate', autoDownloadUpdate).catch(() => {});
-      },
-      setSidebarCollapsed: (sidebarCollapsed) => {
-        set({ sidebarCollapsed });
-        void hostSettingsPutValue('sidebarCollapsed', sidebarCollapsed).catch(() => {});
       },
       setDevModeUnlocked: (devModeUnlocked) => {
         set({ devModeUnlocked });

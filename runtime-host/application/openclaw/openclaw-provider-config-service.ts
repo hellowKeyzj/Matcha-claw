@@ -74,10 +74,10 @@ let bundledPluginDiscoveryCache: BundledPluginDiscovery | null = null;
 export type BrowserMode = 'off' | 'relay' | 'native';
 
 export function normalizeBrowserMode(value: unknown): BrowserMode {
-  if (value === 'off' || value === 'native') {
+  if (value === 'off' || value === 'relay' || value === 'native') {
     return value;
   }
-  return 'relay';
+  return 'native';
 }
 
 function discoverBundledPlugins(): BundledPluginDiscovery {

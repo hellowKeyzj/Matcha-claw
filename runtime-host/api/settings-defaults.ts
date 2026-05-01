@@ -17,7 +17,6 @@ export const SETTINGS_DEFAULTS = {
   autoCheckUpdate: true,
   autoDownloadUpdate: false,
   skippedVersions: [],
-  sidebarCollapsed: false,
   devModeUnlocked: false,
   setupComplete: false,
   selectedBundles: ['productivity', 'developer'],

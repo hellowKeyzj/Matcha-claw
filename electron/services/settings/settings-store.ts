@@ -45,7 +45,6 @@ export interface AppSettings {
   skippedVersions: string[];
   
   // UI State
-  sidebarCollapsed: boolean;
   devModeUnlocked: boolean;
   setupComplete: boolean;
   
@@ -100,7 +99,6 @@ const defaults: AppSettings = {
   skippedVersions: [],
   
   // UI State
-  sidebarCollapsed: false,
   devModeUnlocked: false,
   setupComplete: false,
   
