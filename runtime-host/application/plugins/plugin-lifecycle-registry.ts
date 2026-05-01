@@ -6,6 +6,11 @@ import type {
   RuntimePluginStartupSideEffectLifecycleContext,
   RuntimePluginTransitionLifecycleState,
 } from './plugin-lifecycle-types';
+import {
+  applyCompanionSkillConfigState,
+  ensureCompanionSkillsInstalled,
+  reconcileCompanionSkillConfigStates,
+} from './plugin-companion-skill-service';
 import { memoryLancedbProLifecycle } from './plugin-lifecycles/memory-lancedb-pro-lifecycle';
 
 const REGISTERED_PLUGIN_LIFECYCLES: readonly RuntimePluginLifecycle[] = [
@@ -24,14 +29,15 @@ async function applyConfigLifecycle(
 ): Promise<Record<string, unknown>> {
   const lifecycle = lifecycleByPluginId.get(pluginId);
   const apply = lifecycle?.[handler];
-  if (!apply) {
-    return config;
+  let nextConfig = config;
+  if (apply) {
+    const context: RuntimePluginConfigLifecycleContext = {
+      pluginId,
+      ...state,
+    };
+    nextConfig = await apply(config, context);
   }
-  const context: RuntimePluginConfigLifecycleContext = {
-    pluginId,
-    ...state,
-  };
-  return await apply(config, context);
+  return applyCompanionSkillConfigState(nextConfig, pluginId, handler === 'onEnableConfig');
 }
 
 async function runSideEffectLifecycle(
@@ -41,14 +47,16 @@ async function runSideEffectLifecycle(
 ): Promise<void> {
   const lifecycle = lifecycleByPluginId.get(pluginId);
   const run = lifecycle?.[handler];
-  if (!run) {
-    return;
+  if (run) {
+    const context: RuntimePluginSideEffectLifecycleContext = {
+      pluginId,
+      ...state,
+    };
+    await run(context);
   }
-  const context: RuntimePluginSideEffectLifecycleContext = {
-    pluginId,
-    ...state,
-  };
-  await run(context);
+  if (handler === 'onEnable') {
+    await ensureCompanionSkillsInstalled(pluginId);
+  }
 }
 
 async function applyStartupConfigLifecycle(
@@ -74,14 +82,14 @@ async function runStartupSideEffectLifecycle(
 ): Promise<void> {
   const lifecycle = lifecycleByPluginId.get(pluginId);
   const run = lifecycle?.onStartup;
-  if (!run) {
-    return;
+  if (run) {
+    const context: RuntimePluginStartupSideEffectLifecycleContext = {
+      pluginId,
+      enabledPluginIds,
+    };
+    await run(context);
   }
-  const context: RuntimePluginStartupSideEffectLifecycleContext = {
-    pluginId,
-    enabledPluginIds,
-  };
-  await run(context);
+  await ensureCompanionSkillsInstalled(pluginId);
 }
 
 export async function applyPluginTransitionConfigLifecycles(
@@ -123,7 +131,7 @@ export async function applyPluginStartupConfigLifecycles(
     nextConfig = await applyStartupConfigLifecycle(nextConfig, pluginId, enabledPluginIds);
   }
 
-  return nextConfig;
+  return reconcileCompanionSkillConfigStates(nextConfig, enabledPluginIds);
 }
 
 export async function runPluginStartupSideEffectLifecycles(

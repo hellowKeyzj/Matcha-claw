@@ -16,6 +16,7 @@ export interface RuntimeHostCatalogPlugin {
   readonly group: RuntimeHostCatalogPluginGroup;
   readonly description?: string;
   readonly controlMode?: 'manual' | 'channel-config';
+  readonly companionSkillSlugs?: readonly string[];
 }
 
 export function normalizePluginIds(ids: readonly string[]): string[] {

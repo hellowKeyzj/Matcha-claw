@@ -15,6 +15,7 @@
     "description": "Manage plugin enablement here; Settings does not include plugin management.",
     "empty": "No plugins available.",
     "emptyGroup": "No plugins in {{group}}.",
+    "companionSkills": "Enabling this plugin will also install and enable companion skills: {{skills}}",
     "channelManaged": "Managed by channel configuration",
     "columns": {
       "plugin": "Plugin",
