@@ -193,16 +193,23 @@ function copyPackageDir(realPath, destDir) {
   fs.cpSync(normWin(realPath), normWin(destDir), { recursive: true, dereference: true });
 }
 
+function resolveInstalledPackageJsonPath(pkgName) {
+  try {
+    return requireFromRoot.resolve(`${pkgName}/package.json`);
+  } catch {
+    const packageJsonPath = path.join(NODE_MODULES, ...packageNameToPathSegments(pkgName), 'package.json');
+    return fs.existsSync(packageJsonPath) ? packageJsonPath : null;
+  }
+}
+
 function enqueuePackageDependency(pkgName) {
   if (SKIP_PACKAGES.has(pkgName) || SKIP_SCOPES.some((s) => pkgName.startsWith(s))) {
     skippedDevCount++;
     return false;
   }
 
-  let pkgJsonPath;
-  try {
-    pkgJsonPath = requireFromRoot.resolve(`${pkgName}/package.json`);
-  } catch {
+  const pkgJsonPath = resolveInstalledPackageJsonPath(pkgName);
+  if (!pkgJsonPath) {
     return false;
   }
 

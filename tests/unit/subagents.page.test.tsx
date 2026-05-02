@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
+import { toast } from 'sonner';
 import { SubAgents } from '@/pages/SubAgents';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
+
+vi.mock('sonner', () => ({
+  toast: {
+    warning: vi.fn(),
+  },
+}));
 
 function LocationProbe() {
   const location = useLocation();
@@ -22,8 +29,8 @@ function renderSubagentsPage(initialEntries: string[] = ['/subagents']) {
 }
 
 describe('subagents page', () => {
-  const createAgent = vi.fn().mockResolvedValue('writer');
-  const createAgentFromTemplate = vi.fn().mockResolvedValue('brand-guardian');
+  const createAgent = vi.fn().mockResolvedValue({ agentId: 'writer' });
+  const createAgentFromTemplate = vi.fn().mockResolvedValue({ agentId: 'brand-guardian' });
   const updateAgent = vi.fn().mockResolvedValue(undefined);
   const deleteAgent = vi.fn().mockResolvedValue(undefined);
   const loadAgents = vi.fn().mockResolvedValue(undefined);
@@ -82,6 +89,7 @@ describe('subagents page', () => {
     generateDraftFromPrompt.mockClear();
     cancelDraft.mockClear();
     loadPersistedFilesForAgent.mockClear();
+    vi.mocked(toast.warning).mockReset();
 
     i18n.changeLanguage('en');
     useGatewayStore.setState({
@@ -333,6 +341,33 @@ describe('subagents page', () => {
 
     expect(screen.getByText('Managing: writer')).toBeInTheDocument();
     expect(screen.getByLabelText('Prompt')).toHaveValue('act as a finance analyst');
+  });
+
+  it('create 返回 warning 时仍进入管理态，并显示 warning toast', async () => {
+    createAgent.mockResolvedValueOnce({
+      agentId: 'writer',
+      warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
+    });
+    renderSubagentsPage();
+
+    fireEvent.click(screen.getByRole('button', { name: 'New Subagent' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'writer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'writer',
+        workspace: '/home/dev/.openclaw/workspace-subagents/writer',
+        model: 'gpt-4.1-mini',
+      }));
+    });
+
+    await waitFor(() => {
+    expect(vi.mocked(toast.warning)).toHaveBeenCalledWith(
+      '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
+    );
+    });
+    expect(screen.getByText('Managing: writer')).toBeInTheDocument();
   });
 
   it('opens detail view when clicking manage button', () => {

@@ -44,6 +44,7 @@ import type {
   ModelCatalogEntry,
   PreviewDiffByFile,
   SubagentSummary,
+  SubagentAvatarPresentation,
   SubagentTemplateDetail,
   SubagentTargetFile,
 } from '@/types/subagent';
@@ -58,6 +59,7 @@ const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
 const CREATE_AGENT_RUNTIME_BARRIER_TIMEOUT_MS = 3000;
 const CREATE_AGENT_RUNTIME_BARRIER_POLL_INTERVAL_MS = 120;
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
+const SUBAGENT_AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
 let workspaceFallbackRootCache: string | undefined;
 let workspaceFallbackRootTask: Promise<string | undefined> | null = null;
 let configDisplayCache:
@@ -85,12 +87,15 @@ interface AgentsCreateResult {
   workspace?: unknown;
 }
 
+interface SubagentCreateResult {
+  agentId: string;
+  warning?: string;
+}
+
 interface ConfigAgentDisplaySnapshot {
   workspace?: string;
   model?: string;
   skills?: string[];
-  avatarSeed?: string;
-  avatarStyle?: AgentAvatarStyle;
 }
 
 interface ConfigDisplaySnapshot {
@@ -139,12 +144,12 @@ interface SubagentsState {
     model?: string;
     avatarSeed?: string;
     avatarStyle?: AgentAvatarStyle;
-  }) => Promise<string>;
+  }) => Promise<SubagentCreateResult>;
   createAgentFromTemplate: (input: {
     template: SubagentTemplateDetail;
     model: string;
     localizedName?: string;
-  }) => Promise<string>;
+  }) => Promise<SubagentCreateResult>;
   updateAgent: (input: {
     agentId: string;
     name: string;
@@ -306,8 +311,6 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
       }
       const workspace = getOptionalString((item as { workspace?: unknown }).workspace);
       const skills = normalizeSkillAllowlist((item as { skills?: unknown }).skills);
-      const avatarSeed = getOptionalString((item as { avatarSeed?: unknown }).avatarSeed);
-      const avatarStyle = getOptionalAgentAvatarStyle((item as { avatarStyle?: unknown }).avatarStyle);
       let model: string | undefined;
       for (const modelId of collectModelIdsFromAgentModelValue((item as { model?: unknown }).model)) {
         if (!model) {
@@ -318,8 +321,6 @@ function buildConfigDisplaySnapshot(configGetResult: ConfigGetResult | undefined
         workspace,
         model,
         skills,
-        avatarSeed,
-        avatarStyle,
       });
     }
   }
@@ -430,9 +431,111 @@ function resolveDefaultAgentId(result: AgentsListResult): string {
   return MAIN_AGENT_ID;
 }
 
+function normalizeAvatarPresentation(
+  value: { avatarSeed?: unknown; avatarStyle?: unknown } | undefined,
+): SubagentAvatarPresentation | undefined {
+  const avatarSeed = getOptionalString(value?.avatarSeed);
+  const avatarStyle = getOptionalAgentAvatarStyle(value?.avatarStyle);
+  if (avatarSeed === undefined && avatarStyle === undefined) {
+    return undefined;
+  }
+  return {
+    ...(avatarSeed === undefined ? {} : { avatarSeed }),
+    ...(avatarStyle === undefined ? {} : { avatarStyle }),
+  };
+}
+
+function readStoredAvatarPresentations(): Record<string, SubagentAvatarPresentation> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(SUBAGENT_AVATAR_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+    const result: Record<string, SubagentAvatarPresentation> = {};
+    for (const [agentId, value] of Object.entries(parsed)) {
+      const normalizedAgentId = normalizeAgentIdForComparison(agentId);
+      if (!normalizedAgentId || !value || typeof value !== 'object') {
+        continue;
+      }
+      const presentation = normalizeAvatarPresentation(value as {
+        avatarSeed?: unknown;
+        avatarStyle?: unknown;
+      });
+      if (!presentation) {
+        continue;
+      }
+      result[normalizedAgentId] = presentation;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredAvatarPresentations(
+  presentations: Record<string, SubagentAvatarPresentation>,
+): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const entries = Object.entries(presentations);
+  if (entries.length === 0) {
+    window.localStorage.removeItem(SUBAGENT_AVATAR_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(SUBAGENT_AVATAR_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+}
+
+function persistAvatarPresentation(
+  agentId: string,
+  presentation: SubagentAvatarPresentation | undefined,
+): void {
+  const normalizedAgentId = normalizeAgentIdForComparison(agentId);
+  if (!normalizedAgentId) {
+    return;
+  }
+  const nextPresentations = readStoredAvatarPresentations();
+  if (!presentation) {
+    delete nextPresentations[normalizedAgentId];
+  } else {
+    nextPresentations[normalizedAgentId] = presentation;
+  }
+  writeStoredAvatarPresentations(nextPresentations);
+}
+
+function pruneStoredAvatarPresentations(validAgentIds: Iterable<string>): void {
+  const presentations = readStoredAvatarPresentations();
+  const validIds = new Set<string>();
+  for (const agentId of validAgentIds) {
+    const normalizedAgentId = normalizeAgentIdForComparison(agentId);
+    if (normalizedAgentId) {
+      validIds.add(normalizedAgentId);
+    }
+  }
+  let changed = false;
+  for (const agentId of Object.keys(presentations)) {
+    if (validIds.has(agentId)) {
+      continue;
+    }
+    delete presentations[agentId];
+    changed = true;
+  }
+  if (changed) {
+    writeStoredAvatarPresentations(presentations);
+  }
+}
+
 function normalizeAgents(
   result: AgentsListResult,
   configSnapshot?: ConfigDisplaySnapshot,
+  avatarPresentations?: Record<string, SubagentAvatarPresentation>,
 ): SubagentSummary[] {
   const defaultId = resolveDefaultAgentId(result);
   const runtimeById = new Map<string, SubagentSummary>();
@@ -461,8 +564,7 @@ function normalizeAgents(
       ?? configSnapshot?.defaultModel;
     const skills = configAgent?.skills
       ?? normalizeSkillAllowlist(runtimeAgent?.skills);
-    const avatarSeed = configAgent?.avatarSeed;
-    const avatarStyle = configAgent?.avatarStyle;
+    const avatarPresentation = avatarPresentations?.[normalizeAgentIdForComparison(agentId) ?? ''];
     return {
       ...(runtimeAgent ?? { id: agentId }),
       id: agentId,
@@ -470,8 +572,8 @@ function normalizeAgents(
       workspace,
       model,
       skills,
-      avatarSeed,
-      avatarStyle,
+      avatarSeed: avatarPresentation?.avatarSeed,
+      avatarStyle: avatarPresentation?.avatarStyle,
       isDefault: agentId === defaultId,
     };
   });
@@ -608,119 +710,94 @@ function upsertAgentModelInConfig(params: {
   return nextConfig;
 }
 
-function upsertAgentAvatarConfigInConfig(params: {
-  config: ConfigGetResult['config'];
-  agentId: string;
-  avatarSeed: string | undefined;
-  avatarStyle: AgentAvatarStyle | undefined;
-}): ConfigGetResult['config'] {
-  const nextConfig = cloneConfigForWrite(params.config);
-  const nextAgents = (nextConfig.agents && typeof nextConfig.agents === 'object')
-    ? { ...nextConfig.agents }
-    : {};
-  const list = Array.isArray(nextAgents.list) ? [...nextAgents.list] : [];
-  const normalizedTargetId = normalizeAgentIdForComparison(params.agentId);
-  if (!normalizedTargetId) {
-    return nextConfig;
-  }
-
-  const targetIndex = list.findIndex((entry) => {
-    if (!entry || typeof entry !== 'object') {
-      return false;
-    }
-    const id = getOptionalString((entry as { id?: unknown }).id);
-    if (!id) {
-      return false;
-    }
-    return normalizeAgentIdForComparison(id) === normalizedTargetId;
-  });
-
-  const current = targetIndex >= 0
-    ? list[targetIndex]
-    : { id: normalizedTargetId };
-  const nextEntry = (current && typeof current === 'object')
-    ? { ...current } as Record<string, unknown>
-    : ({ id: normalizedTargetId } as Record<string, unknown>);
-
-  if (params.avatarSeed === undefined) {
-    delete nextEntry.avatarSeed;
-  } else {
-    nextEntry.avatarSeed = params.avatarSeed;
-  }
-  if (params.avatarStyle === undefined) {
-    delete nextEntry.avatarStyle;
-  } else {
-    nextEntry.avatarStyle = params.avatarStyle;
-  }
-
-  if (targetIndex >= 0) {
-    list[targetIndex] = nextEntry as typeof list[number];
-  } else {
-    list.push(nextEntry as typeof list[number]);
-  }
-
-  nextAgents.list = list;
-  nextConfig.agents = nextAgents;
-  return nextConfig;
-}
-
 async function updateAgentSkillsConfig(agentId: string, skills: string[] | undefined): Promise<void> {
-  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
-  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
-  if (!hash) {
-    throw new Error('Missing config hash for skills update');
-  }
-  const nextConfig = upsertAgentSkillsInConfig({
-    config: configGetResult.config,
-    agentId,
-    skills,
-  });
-  await rpc('config.set', {
-    raw: JSON.stringify(nextConfig),
-    baseHash: hash,
-  });
+  await writeConfigWithRetry(
+    (config) => upsertAgentSkillsInConfig({
+      config,
+      agentId,
+      skills,
+    }),
+    'Missing config hash for skills update',
+  );
 }
 
 async function updateAgentModelConfig(agentId: string, model: string | undefined): Promise<void> {
-  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
-  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
-  if (!hash) {
-    throw new Error('Missing config hash for model update');
-  }
-  const nextConfig = upsertAgentModelInConfig({
-    config: configGetResult.config,
-    agentId,
-    model,
-  });
-  await rpc('config.set', {
-    raw: JSON.stringify(nextConfig),
-    baseHash: hash,
-  });
-}
-
-async function updateAgentAvatarConfig(
-  agentId: string,
-  input: { avatarSeed: string | undefined; avatarStyle: AgentAvatarStyle | undefined },
-): Promise<void> {
-  const configGetResult = await rpc<ConfigGetResult>('config.get', {});
-  const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
-  if (!hash) {
-    throw new Error('Missing config hash for avatar seed update');
-  }
-  const nextConfig = upsertAgentAvatarConfigInConfig({
-    config: configGetResult.config,
-    agentId,
-    avatarSeed: input.avatarSeed,
-    avatarStyle: input.avatarStyle,
-  });
-  await rpc('config.set', {
-    raw: JSON.stringify(nextConfig),
-    baseHash: hash,
-  });
+  await writeConfigWithRetry(
+    (config) => upsertAgentModelInConfig({
+      config,
+      agentId,
+      model,
+    }),
+    'Missing config hash for model update',
+  );
 }
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isConfigChangedSinceLastLoadError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().includes('config changed since last load');
+}
+
+async function writeConfigWithRetry(
+  buildNextConfig: (config: ConfigGetResult['config']) => unknown,
+  missingHashMessage: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const configGetResult = await rpc<ConfigGetResult>('config.get', {});
+    const hash = getOptionalString(configGetResult.hash) ?? getOptionalString(configGetResult.baseHash);
+    if (!hash) {
+      throw new Error(missingHashMessage);
+    }
+    const nextConfig = buildNextConfig(configGetResult.config);
+    try {
+      await rpc('config.set', {
+        raw: JSON.stringify(nextConfig),
+        baseHash: hash,
+      });
+      return;
+    } catch (error) {
+      if (attempt === 0 && isConfigChangedSinceLastLoadError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function buildCreateWarning(agentId: string, message: string): string {
+  return `智能体 "${agentId}" 已创建，但${message}。请在编辑中重新确认`;
+}
+
+function buildCreateModelWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `模型配置写入失败：${getErrorMessage(error)}`);
+}
+
+function buildCreateAvatarWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `头像展示配置写入失败：${getErrorMessage(error)}`);
+}
+
+function buildCreateRefreshWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `列表刷新失败：${getErrorMessage(error)}`);
+}
+
+function buildTemplateRenameWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `模板名称写入失败：${getErrorMessage(error)}`);
+}
+
+function buildTemplateFilesWarning(agentId: string, error: unknown): string {
+  return buildCreateWarning(agentId, `模板文件写入失败：${getErrorMessage(error)}`);
+}
+
+function toSubagentCreateResult(agentId: string, warnings: string[]): SubagentCreateResult {
+  if (warnings.length === 0) {
+    return { agentId };
+  }
+  return {
+    agentId,
+    warning: warnings.join('；'),
+  };
 }
 
 function isAgentNotFoundErrorForId(error: unknown, agentId: string): boolean {
@@ -1043,7 +1120,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           readConfigForDisplay(),
         ]);
         settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
-        const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(result, configSnapshot));
+        try {
+          pruneStoredAvatarPresentations(result.agents.map((agent) => agent.id));
+        } catch {
+          // Ignore local presentation cleanup failures during refresh.
+        }
+        const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(
+          result,
+          configSnapshot,
+          readStoredAvatarPresentations(),
+        ));
         if (requestId !== latestLoadAgentsRequestId) {
           return;
         }
@@ -1198,8 +1284,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (!modelId) {
         throw new Error('Model is required');
       }
-      const avatarSeedValue = getOptionalString(avatarSeed);
-      const avatarStyleValue = resolveAgentAvatarStyle(avatarStyle);
+      const avatarPresentation = normalizeAvatarPresentation({
+        avatarSeed,
+        avatarStyle: avatarStyle === undefined ? undefined : resolveAgentAvatarStyle(avatarStyle),
+      });
       const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
       if (predictedAgentId) {
         pendingDeletedAgentIds.delete(predictedAgentId);
@@ -1226,25 +1314,27 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (normalizedCreatedAgentId) {
         pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
       }
-      let partialFailureMessage: string | null = null;
+      const warnings: string[] = [];
       try {
         await updateAgentWithCreateBarrier({
           agentId: createdAgentId,
           model: modelId,
         });
-        await updateAgentAvatarConfig(createdAgentId, {
-          avatarSeed: avatarSeedValue ?? `agent:${normalizeAgentIdForComparison(createdAgentId) || createdAgentId}`,
-          avatarStyle: avatarStyleValue,
-        });
-      } catch {
-        partialFailureMessage = `智能体 "${createdAgentId}" 已创建，但模型或头像配置写入失败，请在编辑中重新确认`;
+      } catch (error) {
+        warnings.push(buildCreateModelWarning(createdAgentId, error));
+      }
+      try {
+        persistAvatarPresentation(createdAgentId, avatarPresentation);
+      } catch (error) {
+        warnings.push(buildCreateAvatarWarning(createdAgentId, error));
       }
       invalidateConfigDisplayCache();
-      await get().loadAgents({ silent: true });
-      if (partialFailureMessage) {
-        set({ error: partialFailureMessage });
+      try {
+        await get().loadAgents({ silent: true });
+      } catch (error) {
+        warnings.push(buildCreateRefreshWarning(createdAgentId, error));
       }
-      return createdAgentId;
+      return toSubagentCreateResult(createdAgentId, warnings);
     } catch (error) {
       const message = getErrorMessage(error) || 'Failed to create subagent';
       set({
@@ -1269,23 +1359,30 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       throw new Error('Template name is required');
     }
     const localizedTemplateName = getOptionalString(localizedName);
-    const createdAgentId = await get().createAgent({
+    const createResult = await get().createAgent({
       name: templateName,
       workspace: '',
       model: modelId,
       avatarSeed: buildTemplateAvatarSeed(template.id),
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
     });
+    const createdAgentId = createResult.agentId;
+    const warnings = createResult.warning ? [createResult.warning] : [];
     if (localizedTemplateName && localizedTemplateName !== templateName) {
       const createdAgent = readAgentsFromState(get()).find((agent) => agent.id === createdAgentId);
       const workspace = getOptionalString(createdAgent?.workspace);
       if (workspace) {
-        await get().updateAgent({
-          agentId: createdAgentId,
-          name: localizedTemplateName,
-          workspace,
-          model: modelId,
-        });
+        try {
+          await rpc('agents.update', {
+            agentId: createdAgentId,
+            name: localizedTemplateName,
+            workspace,
+            model: modelId,
+          });
+          await get().loadAgents({ silent: true });
+        } catch (error) {
+          warnings.push(buildTemplateRenameWarning(createdAgentId, error));
+        }
       }
     }
     const fileEntries = SUBAGENT_TARGET_FILES
@@ -1299,7 +1396,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       .filter((entry): entry is readonly [SubagentTargetFile, string] => Boolean(entry));
 
     if (fileEntries.length === 0) {
-      return createdAgentId;
+      return toSubagentCreateResult(createdAgentId, warnings);
     }
 
     beginGlobalMutating(set);
@@ -1311,27 +1408,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           content,
         });
       }
-      await rpc('agents.files.list', { agentId: createdAgentId });
-      await get().loadAgents({ silent: true });
-      set((state) => ({
-        persistedFilesByAgent: {
-          ...state.persistedFilesByAgent,
-          [createdAgentId]: {
-            ...(state.persistedFilesByAgent[createdAgentId] ?? {}),
-            ...Object.fromEntries(fileEntries) as Partial<Record<SubagentTargetFile, string>>,
-          },
-        },
-      }));
-      return createdAgentId;
+      await get().loadPersistedFilesForAgent(createdAgentId);
     } catch (error) {
-      const message = getErrorMessage(error) || `Agent "${createdAgentId}" created, but template file copy failed`;
-      set({
-        error: message,
-      });
-      throw error instanceof Error ? error : new Error(message, { cause: error });
+      warnings.push(buildTemplateFilesWarning(createdAgentId, error));
     } finally {
       finishGlobalMutating(set);
     }
+    return toSubagentCreateResult(createdAgentId, warnings);
   },
 
   updateAgent: async ({ agentId, name, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
@@ -1394,10 +1477,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         await updateAgentSkillsConfig(agentId, nextSkills);
       }
       if (avatarSeedChanged || avatarStyleChanged) {
-        await updateAgentAvatarConfig(agentId, {
-          avatarSeed: avatarSeedChanged ? nextAvatarSeed : (current?.avatarSeed ?? undefined),
+        persistAvatarPresentation(agentId, normalizeAvatarPresentation({
+          avatarSeed: avatarSeedChanged ? nextAvatarSeed : current?.avatarSeed,
           avatarStyle: avatarStyleChanged ? nextAvatarStyle : current?.avatarStyle,
-        });
+        }));
       }
       invalidateConfigDisplayCache();
       await get().loadAgents({ silent: true });
@@ -1447,6 +1530,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         };
       });
       await rpc('agents.delete', { agentId, deleteFiles: true });
+      try {
+        persistAvatarPresentation(agentId, undefined);
+      } catch {
+        // Ignore local presentation cleanup failures after runtime deletion succeeds.
+      }
     } catch (error) {
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
       if (normalizedAgentId) {

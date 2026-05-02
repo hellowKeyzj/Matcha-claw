@@ -3,10 +3,13 @@ import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-ga
 
 import { useSubagentsStore } from '@/stores/subagents';
 
+const AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
+
 describe('subagents crud', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
     vi.mocked(window.electron.ipcRenderer.invoke).mockReset();
+    window.localStorage.removeItem(AVATAR_STORAGE_KEY);
     useSubagentsStore.setState({
       agents: [{ id: 'main', workspace: '/home/dev/.openclaw/workspace', isDefault: true }],
       availableModels: [{
@@ -29,9 +32,9 @@ describe('subagents crud', () => {
     });
   });
 
-  it('calls agents.create, agents.update, and persists avatar config', async () => {
+  it('calls agents.create and agents.update without writing avatar into openclaw config', async () => {
     const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method, params) => {
+    rpc.mockImplementation(async (method) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer-v2' } };
       }
@@ -46,39 +49,15 @@ describe('subagents crud', () => {
       if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-create-1',
-            config: {
-              agents: {
-                list: [],
-              },
-            },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string; baseHash?: string };
-        expect(payload.baseHash).toBe('cfg-hash-create-1');
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
-        };
-        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer-v2');
-        expect(writer?.avatarSeed).toBe('agent:writer-v2');
-        expect(writer?.avatarStyle).toBe('pixelArt');
-        return { success: true, result: { ok: true } };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
-    const createdAgentId = await useSubagentsStore.getState().createAgent({
+    const createResult = await useSubagentsStore.getState().createAgent({
       name: 'writer',
       workspace: '/tmp/writer',
       model: 'gpt-4.1-mini',
     });
-    expect(createdAgentId).toBe('writer-v2');
+    expect(createResult).toEqual({ agentId: 'writer-v2' });
 
     expect(rpc).toHaveBeenCalledWith(
       'agents.create',
@@ -90,7 +69,8 @@ describe('subagents crud', () => {
       { agentId: 'writer-v2', model: 'gpt-4.1-mini' },
       undefined,
     );
-    expect(rpc).toHaveBeenCalledWith('config.get', {}, undefined);
+    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
+    expect(window.localStorage.getItem(AVATAR_STORAGE_KEY)).toBeNull();
   });
 
   it('create 在缺少主工作区时，优先用 openclaw:getConfigDir 生成 fallback 工作区', async () => {
@@ -127,25 +107,6 @@ describe('subagents crud', () => {
       if (method === 'agents.update') {
         return { success: true, result: {} };
       }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-create-2',
-            config: { agents: { list: [] } },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string };
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
-        };
-        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
-        expect(writer?.avatarSeed).toBe('agent:writer');
-        expect(writer?.avatarStyle).toBe('pixelArt');
-        return { success: true, result: { ok: true } };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
@@ -166,9 +127,9 @@ describe('subagents crud', () => {
     );
   });
 
-  it('persists chosen avatar config when creating agent', async () => {
+  it('persists chosen avatar presentation locally when creating agent', async () => {
     const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method, params) => {
+    rpc.mockImplementation(async (method) => {
       if (method === 'agents.create') {
         return { success: true, result: { agentId: 'writer' } };
       }
@@ -182,25 +143,6 @@ describe('subagents crud', () => {
       }
       if (method === 'agents.update') {
         return { success: true, result: {} };
-      }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-create-3',
-            config: { agents: { list: [] } },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string };
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
-        };
-        const writer = parsed.agents?.list?.find((entry) => entry.id === 'writer');
-        expect(writer?.avatarSeed).toBe('picker:writer:page:0:option:3');
-        expect(writer?.avatarStyle).toBe('bottts');
-        return { success: true, result: { ok: true } };
       }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
@@ -218,6 +160,12 @@ describe('subagents crud', () => {
       { name: 'writer', workspace: '/home/dev/.openclaw/workspace-subagents/writer' },
       undefined,
     );
+    expect(JSON.parse(window.localStorage.getItem(AVATAR_STORAGE_KEY) || '{}')).toEqual({
+      writer: {
+        avatarSeed: 'picker:writer:page:0:option:3',
+        avatarStyle: 'bottts',
+      },
+    });
   });
 
   it('create 成功后若首次 agents.update 返回 not found，会自动重试并成功', async () => {
@@ -246,25 +194,6 @@ describe('subagents crud', () => {
         }
         return { success: true, result: { ok: true } };
       }
-      if (method === 'config.get') {
-        return {
-          success: true,
-          result: {
-            hash: 'cfg-hash-create-4',
-            config: { agents: { list: [] } },
-          },
-        };
-      }
-      if (method === 'config.set') {
-        const payload = params as { raw?: string };
-        const parsed = JSON.parse(payload.raw || '{}') as {
-          agents?: { list?: Array<{ id?: string; avatarSeed?: string; avatarStyle?: string }> };
-        };
-        const test4 = parsed.agents?.list?.find((entry) => entry.id === 'test4');
-        expect(test4?.avatarSeed).toBe('agent:test4');
-        expect(test4?.avatarStyle).toBe('pixelArt');
-        return { success: true, result: { ok: true } };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
@@ -272,7 +201,7 @@ describe('subagents crud', () => {
       name: 'test4',
       workspace: '/tmp/test4',
       model: 'gpt-4.1-mini',
-    })).resolves.toBe('test4');
+    })).resolves.toEqual({ agentId: 'test4' });
 
     expect(updateCallCount).toBe(2);
     expect(listCallCount).toBeGreaterThanOrEqual(2);
@@ -280,6 +209,86 @@ describe('subagents crud', () => {
     expect(rpc).not.toHaveBeenCalledWith('config.patch', expect.anything());
     expect(loadAgents).toHaveBeenCalledTimes(1);
     expect(useSubagentsStore.getState().error).toBeNull();
+  });
+
+  it('create 在后置配置失败时返回 warning，但不把成功态写成 error', async () => {
+    const rpc = gatewayClientRpcMock;
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({ loadAgents });
+    rpc.mockImplementation(async (method) => {
+      if (method === 'agents.create') {
+        return { success: true, result: { agentId: 'writer' } };
+      }
+      if (method === 'agents.list') {
+        return {
+          success: true,
+          result: {
+            agents: [{ id: 'writer' }],
+          },
+        };
+      }
+      if (method === 'agents.update') {
+        return { success: false, error: 'RPC timeout: agents.update' };
+      }
+      throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+    });
+
+    await expect(useSubagentsStore.getState().createAgent({
+      name: 'writer',
+      workspace: '/tmp/writer',
+      model: 'gpt-4.1-mini',
+    })).resolves.toEqual({
+      agentId: 'writer',
+      warning: '智能体 "writer" 已创建，但模型配置写入失败：RPC timeout: agents.update。请在编辑中重新确认',
+    });
+
+    expect(loadAgents).toHaveBeenCalledTimes(1);
+    expect(useSubagentsStore.getState().error).toBeNull();
+    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
+  });
+
+  it('create 在本地头像展示配置写入失败时返回 warning，但不回滚已创建 agent', async () => {
+    const rpc = gatewayClientRpcMock;
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({ loadAgents });
+    const setItemSpy = vi.spyOn(window.localStorage.__proto__, 'setItem').mockImplementation(() => {
+      throw new Error('localStorage quota exceeded');
+    });
+    try {
+      rpc.mockImplementation(async (method) => {
+        if (method === 'agents.create') {
+          return { success: true, result: { agentId: 'writer' } };
+        }
+        if (method === 'agents.list') {
+          return {
+            success: true,
+            result: {
+              agents: [{ id: 'writer' }],
+            },
+          };
+        }
+        if (method === 'agents.update') {
+          return { success: true, result: {} };
+        }
+        throw new Error(`Unexpected rpc method in test: ${String(method)}`);
+      });
+
+      await expect(useSubagentsStore.getState().createAgent({
+        name: 'writer',
+        workspace: '/tmp/writer',
+        model: 'gpt-4.1-mini',
+        avatarSeed: 'picker:writer:page:0:option:1',
+        avatarStyle: 'botttsNeutral',
+      })).resolves.toEqual({
+        agentId: 'writer',
+        warning: '智能体 "writer" 已创建，但头像展示配置写入失败：localStorage quota exceeded。请在编辑中重新确认',
+      });
+
+      expect(loadAgents).toHaveBeenCalledTimes(1);
+      expect(useSubagentsStore.getState().error).toBeNull();
+    } finally {
+      setItemSpy.mockRestore();
+    }
   });
 
   it('create 在 agents.create 未返回 agentId 时抛协议错误且不调用 agents.update', async () => {
@@ -325,6 +334,45 @@ describe('subagents crud', () => {
       },
       undefined,
     );
+  });
+
+  it('updateAgent 修改头像时只更新本地展示配置，不写 openclaw config', async () => {
+    const rpc = gatewayClientRpcMock;
+    const loadAgents = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      agents: [
+        { id: 'main', workspace: '/home/dev/.openclaw/workspace', isDefault: true },
+        {
+          id: 'writer',
+          name: 'writer-v2',
+          workspace: '/tmp/writer-v2',
+          model: 'gpt-4.1-mini',
+          avatarSeed: 'agent:writer',
+          avatarStyle: 'pixelArt',
+          isDefault: false,
+        },
+      ],
+      loadAgents,
+    });
+
+    await useSubagentsStore.getState().updateAgent({
+      agentId: 'writer',
+      name: 'writer-v2',
+      workspace: '/tmp/writer-v2',
+      model: 'gpt-4.1-mini',
+      avatarSeed: 'picker:writer:page:1:option:2',
+      avatarStyle: 'bottts',
+    });
+
+    expect(rpc).not.toHaveBeenCalledWith('config.get', {}, undefined);
+    expect(rpc).not.toHaveBeenCalledWith('config.set', expect.anything(), undefined);
+    expect(JSON.parse(window.localStorage.getItem(AVATAR_STORAGE_KEY) || '{}')).toEqual({
+      writer: {
+        avatarSeed: 'picker:writer:page:1:option:2',
+        avatarStyle: 'bottts',
+      },
+    });
+    expect(loadAgents).toHaveBeenCalledTimes(1);
   });
 
   it('updateAgent 选择默认模型时会通过 config.set 清理 agents.list[].model', async () => {

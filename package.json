@@ -73,6 +73,7 @@
     "postversion": "git push && git push --tags"
   },
   "dependencies": {
+    "@buape/carbon": "0.0.0-beta-20260327000044",
     "@dicebear/collection": "^9.4.2",
     "@dicebear/core": "^9.4.2",
     "@matchaclaw/plugins-sdk": "workspace:*",

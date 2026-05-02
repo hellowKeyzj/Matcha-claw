@@ -23,6 +23,11 @@ export interface SubagentSummary {
   isDefault?: boolean;
 }
 
+export interface SubagentAvatarPresentation {
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
+}
+
 export interface SubagentTemplateSummary {
   id: string;
   name: string;
@@ -79,8 +84,6 @@ export interface AgentConfigEntry {
   default?: boolean;
   model?: AgentModelValue;
   skills?: string[];
-  avatarSeed?: string;
-  avatarStyle?: AgentAvatarStyle;
   [key: string]: unknown;
 }
 
