@@ -2,8 +2,8 @@ import {
   createIntermediateToolTurnSnapshot,
   extractUserMessageClientId,
   hasAssistantToolCall,
-  normalizeIncomingMessage,
   resolveSessionLabelFromMessages,
+  sanitizeCanonicalUserMessage,
   sanitizeIntermediateToolFillerMessage,
 } from './message-helpers';
 import { reduceSessionRuntime } from './runtime-state-reducer';
@@ -96,7 +96,7 @@ export function buildAuthoritativeUserCommitPatch(
   const messages = getSessionMessages(state, sessionKey);
   const runtime = getSessionRuntime(state, sessionKey);
   const extractedClientMessageId = extractUserMessageClientId(finalMessage.content);
-  const sanitizedFinalMessage = normalizeIncomingMessage(finalMessage);
+  const sanitizedFinalMessage = sanitizeCanonicalUserMessage(finalMessage);
   const matchedIndex = findMessageIndexForCommit(messages, sanitizedFinalMessage, {
     preferredMessageId: extractedClientMessageId,
   });

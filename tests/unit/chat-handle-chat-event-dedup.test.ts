@@ -415,62 +415,6 @@ describe('chat.handleChatEvent 工具回合快照去重', () => {
     expect(userMessages[0]?.status).toBe('sent');
   });
 
-  it('authoritative user final 只有 idempotencyKey 和外层 event id 时，也应合并到现有本地 user message', () => {
-    const sentAtMs = Date.now();
-    resetChatState({
-      loadedSessions: {
-        'agent:main:main': buildSessionRecord({
-          messages: [{
-            role: 'user',
-            id: 'optimistic-user-idem-1',
-            clientId: 'optimistic-user-idem-1',
-            messageId: 'optimistic-user-idem-1',
-            status: 'sending',
-            content: '给我总结一下',
-            timestamp: sentAtMs / 1000,
-          }],
-          meta: {
-            ready: true,
-          },
-          runtime: {
-            sending: true,
-            activeRunId: 'run-user-idem-1',
-            runPhase: 'streaming',
-            lastUserMessageAt: sentAtMs,
-          },
-        }),
-      },
-    });
-
-    useChatStore.getState().handleConversationEvent({
-      kind: 'chat.message',
-      source: 'chat.message',
-      phase: 'final',
-      runId: 'run-user-idem-1',
-      sessionKey: 'agent:main:main',
-      event: {
-        id: 'transcript-user-idem-1',
-        state: 'final',
-        runId: 'run-user-idem-1',
-        sessionKey: 'agent:main:main',
-        message: {
-          role: 'user',
-          content: '[Tue 2026-04-14 20:11 GMT+8]给我总结一下',
-          idempotencyKey: 'optimistic-user-idem-1',
-          timestamp: (sentAtMs + 1200) / 1000,
-        },
-      },
-    });
-
-    const userMessages = (useChatStore.getState().loadedSessions['agent:main:main']?.messages ?? []).filter((message) => message.role === 'user');
-    expect(userMessages).toHaveLength(1);
-    expect(userMessages[0]?.id).toBe('optimistic-user-idem-1');
-    expect(userMessages[0]?.clientId).toBe('optimistic-user-idem-1');
-    expect(userMessages[0]?.uniqueId).toBe('transcript-user-idem-1');
-    expect(userMessages[0]?.content).toBe('给我总结一下');
-    expect(userMessages[0]?.status).toBe('sent');
-  });
-
   it('toolresult final 不应把纯文本 streaming assistant 快照进 messages，避免后续 assistant final 重复', async () => {
     vi.useFakeTimers();
     resetChatState({

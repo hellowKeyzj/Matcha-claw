@@ -1,6 +1,6 @@
 import type { ChatSessionViewportState } from './types';
 
-export interface ChatViewportWindow extends ChatSessionViewportState {}
+export type ChatViewportWindow = ChatSessionViewportState;
 
 export interface ChatViewportCacheStats {
   cachedSessionCount: number;

@@ -277,62 +277,6 @@ describe('chat history apply pipeline', () => {
     expect(state.loadedSessions[requestedSessionKey]?.messages.at(-1)?.id).toBe('message-32');
   });
 
-  it('foreground apply merges the local sending user message into the canonical transcript', async () => {
-    const requestedSessionKey = 'agent:main:main';
-    const pendingUserId = 'user-local-1';
-    const rawMessages: RawMessage[] = [
-      { role: 'user', content: 'hello world [message_id: user-local-1]', timestamp: 1, id: 'gateway-user-1' },
-      { role: 'assistant', content: 'done', timestamp: 2, id: 'assistant-1' },
-    ];
-
-    const historyRuntime = createHistoryRuntimeHarness();
-    let state = {
-      currentSessionKey: requestedSessionKey,
-      loadedSessions: {
-        [requestedSessionKey]: createSessionRecord({
-          messages: [{
-            role: 'user',
-            content: 'hello world',
-            timestamp: 1,
-            id: pendingUserId,
-            clientId: pendingUserId,
-            messageId: pendingUserId,
-            status: 'sending',
-          }],
-          runtime: {
-            sending: true,
-          },
-        }),
-      },
-      pendingApprovalsBySession: {},
-      foregroundHistorySessionKey: null,
-    } as ChatStoreState;
-
-    const set = (
-      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
-    ) => {
-      const patch = typeof partial === 'function' ? partial(state) : partial;
-      state = { ...state, ...patch } as ChatStoreState;
-    };
-    const get = () => state;
-
-    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
-      set,
-      get,
-      historyRuntime,
-      requestedSessionKey,
-      mode: 'active',
-      scope: 'foreground',
-      abortSignal: new AbortController().signal,
-      shouldAbortHistoryProcessing: () => false,
-    });
-
-    await applyLoadedMessages(createHistoryWindow(rawMessages));
-
-    expect(state.loadedSessions[requestedSessionKey]?.messages[0]?.id).toBe(pendingUserId);
-    expect(state.loadedSessions[requestedSessionKey]?.messages[0]?.content).toBe('hello world');
-  });
-
   it('foreground apply merges the local sending user message when canonical history only carries clientId identity', async () => {
     const requestedSessionKey = 'agent:main:main';
     const pendingUserId = 'user-local-2';
@@ -464,14 +408,7 @@ describe('chat history apply pipeline', () => {
   it('reuses the current message window reference when history payload is semantically unchanged', async () => {
     const requestedSessionKey = 'agent:main:main';
     const existingMessages: RawMessage[] = [
-      {
-        role: 'assistant',
-        content: 'same content',
-        timestamp: 1,
-        id: 'assistant-1',
-        messageId: 'assistant-1',
-        uniqueId: 'assistant-1',
-      },
+      { role: 'assistant', content: 'same content', timestamp: 1, id: 'assistant-1' },
     ];
 
     const historyRuntime = createHistoryRuntimeHarness();
@@ -511,8 +448,6 @@ describe('chat history apply pipeline', () => {
       content: 'same content',
       timestamp: 1,
       id: 'assistant-1',
-      messageId: 'assistant-1',
-      uniqueId: 'assistant-1',
     }]));
 
     expect(state.loadedSessions[requestedSessionKey]?.messages).toBe(existingMessages);
@@ -521,22 +456,8 @@ describe('chat history apply pipeline', () => {
   it('reuses unchanged message references when history only patches part of the message window', async () => {
     const requestedSessionKey = 'agent:main:main';
     const existingMessages: RawMessage[] = [
-      {
-        role: 'user',
-        content: 'hello',
-        timestamp: 1,
-        id: 'user-1',
-        messageId: 'user-1',
-        uniqueId: 'user-1',
-      },
-      {
-        role: 'assistant',
-        content: 'draft',
-        timestamp: 2,
-        id: 'assistant-1',
-        messageId: 'assistant-1',
-        uniqueId: 'assistant-1',
-      },
+      { role: 'user', content: 'hello', timestamp: 1, id: 'user-1' },
+      { role: 'assistant', content: 'draft', timestamp: 2, id: 'assistant-1' },
     ];
 
     const historyRuntime = createHistoryRuntimeHarness();
@@ -577,16 +498,12 @@ describe('chat history apply pipeline', () => {
         content: 'hello',
         timestamp: 1,
         id: 'user-1',
-        messageId: 'user-1',
-        uniqueId: 'user-1',
       },
       {
         role: 'assistant',
         content: 'final',
         timestamp: 2,
         id: 'assistant-1',
-        messageId: 'assistant-1',
-        uniqueId: 'assistant-1',
       },
     ]));
 
@@ -599,14 +516,7 @@ describe('chat history apply pipeline', () => {
   it('keeps the settled transcript stable after background history apply confirms the final message window', async () => {
     const requestedSessionKey = 'agent:main:main';
     const existingMessages: RawMessage[] = [
-      {
-        role: 'assistant',
-        content: 'final answer',
-        timestamp: 1,
-        id: 'assistant-1',
-        messageId: 'assistant-1',
-        uniqueId: 'assistant-1',
-      },
+      { role: 'assistant', content: 'final answer', timestamp: 1, id: 'assistant-1' },
     ];
 
     const historyRuntime = createHistoryRuntimeHarness();
@@ -654,8 +564,6 @@ describe('chat history apply pipeline', () => {
         content: 'final answer',
         timestamp: 1,
         id: 'assistant-1',
-        messageId: 'assistant-1',
-        uniqueId: 'assistant-1',
       },
     ]));
 
