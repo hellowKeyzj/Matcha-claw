@@ -60,13 +60,11 @@ import { compressTexts, estimateConversationValue } from "./src/session-compress
 import { NoisePrototypeBank } from "./src/noise-prototypes.js";
 import { createLlmClient } from "./src/llm-client.js";
 import { createDecayEngine, DEFAULT_DECAY_CONFIG } from "./src/decay-engine.js";
-import { createTierManager, DEFAULT_TIER_CONFIG } from "./src/tier-manager.js";
 import { createMemoryUpgrader } from "./src/memory-upgrader.js";
 import {
   buildSmartMetadata,
   parseSmartMetadata,
   stringifySmartMetadata,
-  toLifecycleMemory,
 } from "./src/smart-metadata.js";
 import {
   filterUserMdExclusiveRecallResults,
@@ -1613,7 +1611,9 @@ async function findPreviousSessionFile(
       );
       if (nonReset.length > 0) return join(sessionsDir, nonReset[0]);
     }
-  } catch { }
+  } catch {
+    // Best-effort fallback: callers already handle the unresolved path case.
+  }
 }
 
 // ============================================================================
@@ -1801,8 +1801,6 @@ interface PluginSingletonState {
   resolvedDbPath: string;
   store: MemoryStore;
   embedder: ReturnType<typeof createEmbedder>;
-  decayEngine: ReturnType<typeof createDecayEngine>;
-  tierManager: ReturnType<typeof createTierManager>;
   retriever: ReturnType<typeof createRetriever>;
   scopeManager: ReturnType<typeof createScopeManager>;
   migrator: ReturnType<typeof createMigrator>;
@@ -1856,10 +1854,6 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
   const decayEngine = createDecayEngine({
     ...DEFAULT_DECAY_CONFIG,
     ...(config.decay || {}),
-  });
-  const tierManager = createTierManager({
-    ...DEFAULT_TIER_CONFIG,
-    ...(config.tier || {}),
   });
   const retriever = createRetriever(
     store,
@@ -2012,8 +2006,6 @@ function _initPluginState(api: OpenClawPluginApi): PluginSingletonState {
     resolvedDbPath,
     store,
     embedder,
-    decayEngine,
-    tierManager,
     retriever,
     scopeManager,
     migrator,
@@ -2065,8 +2057,6 @@ const memoryLanceDBProPlugin = {
       migrator,
       getSmartExtractionLlmClient,
       getSmartExtractor,
-      decayEngine,
-      tierManager,
       extractionRateLimiter,
       reflectionErrorStateBySession,
       reflectionDerivedBySession,
@@ -2095,92 +2085,6 @@ const memoryLanceDBProPlugin = {
         results = await retriever.retrieve(params);
       }
       return results;
-    }
-
-    async function runRecallLifecycle(
-      results: Array<{ entry: { id: string; text: string; category: "preference" | "fact" | "decision" | "entity" | "other"; scope: string; importance: number; timestamp: number; metadata?: string } }>,
-      scopeFilter?: string[],
-    ): Promise<Map<string, string>> {
-      const now = Date.now();
-      type LifecycleEntry = {
-        id: string;
-        text: string;
-        category: "preference" | "fact" | "decision" | "entity" | "other";
-        scope: string;
-        importance: number;
-        timestamp: number;
-        metadata?: string;
-      };
-      const lifecycleEntries = new Map<string, LifecycleEntry>();
-      const tierOverrides = new Map<string, string>();
-
-      await Promise.allSettled(
-        results.map(async (result) => {
-          const metadata = parseSmartMetadata(result.entry.metadata, result.entry);
-          const updated = await store.patchMetadata(
-            result.entry.id,
-            {
-              access_count: metadata.access_count + 1,
-              last_accessed_at: now,
-            },
-            scopeFilter,
-          );
-          lifecycleEntries.set(result.entry.id, updated ?? result.entry);
-        }),
-      );
-
-      try {
-        if (scopeFilter !== undefined) {
-          const recentEntries = await store.list(scopeFilter, undefined, 100, 0);
-          for (const entry of recentEntries) {
-            if (!lifecycleEntries.has(entry.id)) {
-              lifecycleEntries.set(entry.id, entry);
-            }
-          }
-        } else {
-          api.logger.debug(`memory-lancedb-pro: skipping tier maintenance preload for bypass scope filter`);
-        }
-      } catch (err) {
-        api.logger.warn(`memory-lancedb-pro: tier maintenance preload failed: ${String(err)}`);
-      }
-
-      const candidates = Array.from(lifecycleEntries.values())
-        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
-        .filter((entry) => parseSmartMetadata(entry.metadata, entry).type !== "session-summary");
-
-      if (candidates.length === 0) {
-        return tierOverrides;
-      }
-
-      try {
-        const memories = candidates.map((entry) => toLifecycleMemory(entry.id, entry));
-        const decayScores = decayEngine.scoreAll(memories, now);
-        const transitions = tierManager.evaluateAll(memories, decayScores, now);
-
-        await Promise.allSettled(
-          transitions.map(async (transition) => {
-            await store.patchMetadata(
-              transition.memoryId,
-              {
-                tier: transition.toTier,
-                tier_updated_at: now,
-              },
-              scopeFilter,
-            );
-            tierOverrides.set(transition.memoryId, transition.toTier);
-          }),
-        );
-
-        if (transitions.length > 0) {
-          api.logger.info(
-            `memory-lancedb-pro: tier maintenance applied ${transitions.length} transition(s)`,
-          );
-        }
-      } catch (err) {
-        api.logger.warn(`memory-lancedb-pro: tier maintenance failed: ${String(err)}`);
-      }
-
-      return tierOverrides;
     }
 
     const pruneOldestByUpdatedAt = <T extends { updatedAt: number }>(map: Map<string, T>, maxSize: number) => {

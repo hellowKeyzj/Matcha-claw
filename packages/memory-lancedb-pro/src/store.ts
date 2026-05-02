@@ -55,6 +55,8 @@ export interface MetadataPatch {
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
   null;
 const requireFromHere = createRequire(import.meta.url);
+const DEFAULT_LANCEDB_PACKAGE = "@lancedb/lancedb";
+const INTEL_MAC_LANCEDB_COMPAT_PACKAGE = "@matchaclaw/lancedb-darwin-x64-compat";
 
 // =========================================================================
 // Cross-Process File Lock (proper-lockfile)
@@ -74,7 +76,9 @@ export const loadLanceDB = async (): Promise<
 > => {
   if (!lancedbImportPromise) {
     lancedbImportPromise = Promise.resolve(
-      requireFromHere("@lancedb/lancedb") as typeof import("@lancedb/lancedb"),
+      requireFromHere(
+        resolveLanceDbRuntimePackageName(),
+      ) as typeof import("@lancedb/lancedb"),
     );
   }
   try {
@@ -86,6 +90,16 @@ export const loadLanceDB = async (): Promise<
     );
   }
 };
+
+export function resolveLanceDbRuntimePackageName(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string {
+  if (platform === "darwin" && arch === "x64") {
+    return INTEL_MAC_LANCEDB_COMPAT_PACKAGE;
+  }
+  return DEFAULT_LANCEDB_PACKAGE;
+}
 
 // ============================================================================
 // Utility Functions
