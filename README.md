@@ -118,13 +118,12 @@ WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
-ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `self-improving-agent`, `tavily-search`, `brave-web-search`, `bocha-skill`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
+ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `brave-web-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
 Environment variables for bundled search skills:
 - `BRAVE_SEARCH_API_KEY` for `brave-web-search`
 - `TAVILY_API_KEY` for `tavily-search` (OAuth may also be supported by upstream skill runtime)
-- `BOCHA_API_KEY` for `bocha-skill`
-- `find-skills` and `self-improving-agent` do not require API keys
+- `find-skills` does not require API keys
 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
