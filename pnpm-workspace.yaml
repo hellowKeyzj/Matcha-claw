@@ -1,5 +1,6 @@
 packages:
   - '.'
+  - 'packages/openclaw-runtime-bundle'
   - 'packages/memory-lancedb-pro'
   - 'runtime-host'
   - 'worktrees/plugins/sdk'
