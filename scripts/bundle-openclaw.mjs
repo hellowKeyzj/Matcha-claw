@@ -1,4 +1,4 @@
-#!/usr/bin/env zx
+#!/usr/bin/env node
 
 /**
  * bundle-openclaw.mjs
@@ -16,8 +16,16 @@
  * collect every transitive dependency into a flat node_modules structure.
  */
 
-import 'zx/globals';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function printLine(message = '') {
+  process.stdout.write(`${message}\n`);
+}
 
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
@@ -33,17 +41,17 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
-echo`📦 Bundling openclaw for electron-builder...`;
+printLine('📦 Bundling openclaw for electron-builder...');
 
 // 1. Resolve the real path of node_modules/openclaw (follows pnpm symlink)
 const openclawLink = path.join(NODE_MODULES, 'openclaw');
 if (!fs.existsSync(openclawLink)) {
-  echo`❌ node_modules/openclaw not found. Run pnpm install first.`;
+  printLine('❌ node_modules/openclaw not found. Run pnpm install first.');
   process.exit(1);
 }
 
 const openclawReal = fs.realpathSync(openclawLink);
-echo`   openclaw resolved: ${openclawReal}`;
+printLine(`   openclaw resolved: ${openclawReal}`);
 
 // 2. Clean and create output directory
 if (fs.existsSync(OUTPUT)) {
@@ -52,18 +60,18 @@ if (fs.existsSync(OUTPUT)) {
 fs.mkdirSync(OUTPUT, { recursive: true });
 
 // 3. Copy openclaw package itself to OUTPUT root
-echo`   Copying openclaw package...`;
+printLine('   Copying openclaw package...');
 fs.cpSync(openclawReal, OUTPUT, { recursive: true, dereference: true });
 
 function overlayMainAgentTemplates(outputDir) {
   const targetDir = path.join(outputDir, 'docs', 'reference', 'templates');
   const upstreamSnapshotDir = path.join(outputDir, 'docs', 'reference', UPSTREAM_TEMPLATE_SNAPSHOT_DIRNAME);
   if (!fs.existsSync(targetDir)) {
-    echo`   ⚠️  OpenClaw template directory not found, skip MatchaClaw workspace overlay`;
+    printLine('   ⚠️  OpenClaw template directory not found, skip MatchaClaw workspace overlay');
     return;
   }
   if (!fs.existsSync(path.join(MATCHACLAW_MAIN_AGENT_TEMPLATES, 'AGENTS.md'))) {
-    echo`   ⚠️  MatchaClaw main-agent templates not found, skip overlay`;
+    printLine('   ⚠️  MatchaClaw main-agent templates not found, skip overlay');
     return;
   }
 
@@ -84,7 +92,7 @@ function overlayMainAgentTemplates(outputDir) {
       { dereference: true },
     );
   }
-  echo`   Applied MatchaClaw main-agent workspace templates`;
+  printLine('   Applied MatchaClaw main-agent workspace templates');
 }
 
 overlayMainAgentTemplates(OUTPUT);
@@ -105,6 +113,7 @@ overlayMainAgentTemplates(OUTPUT);
 // to discover the target's own virtual store node_modules and its deps.
 
 const collected = new Map(); // realPath -> packageName (for deduplication)
+const packageNodes = new Map(); // realPath -> { name, realPath, directDeps: Map<depName, depRealPath> }
 const queue = []; // BFS queue of virtual-store node_modules dirs to visit
 
 /**
@@ -158,6 +167,32 @@ function listPackages(nodeModulesDir) {
   return result;
 }
 
+function ensurePackageNode(pkgName, realPath) {
+  let node = packageNodes.get(realPath);
+  if (!node) {
+    node = {
+      name: pkgName,
+      realPath,
+      directDeps: new Map(),
+    };
+    packageNodes.set(realPath, node);
+  }
+  return node;
+}
+
+function packageNameToPathSegments(pkgName) {
+  return pkgName.split('/');
+}
+
+function resolvePackageOutputDir(baseDir, pkgName) {
+  return path.join(baseDir, ...packageNameToPathSegments(pkgName));
+}
+
+function copyPackageDir(realPath, destDir) {
+  fs.mkdirSync(normWin(path.dirname(destDir)), { recursive: true });
+  fs.cpSync(normWin(realPath), normWin(destDir), { recursive: true, dereference: true });
+}
+
 function enqueuePackageDependency(pkgName) {
   if (SKIP_PACKAGES.has(pkgName) || SKIP_SCOPES.some((s) => pkgName.startsWith(s))) {
     skippedDevCount++;
@@ -172,6 +207,7 @@ function enqueuePackageDependency(pkgName) {
   }
 
   const realPath = fs.realpathSync(path.dirname(pkgJsonPath));
+  ensurePackageNode(pkgName, realPath);
   if (collected.has(realPath)) {
     return true;
   }
@@ -221,11 +257,11 @@ function collectStagedBundledRuntimeDeps(openclawDir) {
 // Start BFS from openclaw's virtual store node_modules
 const openclawVirtualNM = getVirtualStoreNodeModules(openclawReal);
 if (!openclawVirtualNM) {
-  echo`❌ Could not determine pnpm virtual store for openclaw`;
+  printLine('❌ Could not determine pnpm virtual store for openclaw');
   process.exit(1);
 }
 
-echo`   Virtual store root: ${openclawVirtualNM}`;
+printLine(`   Virtual store root: ${openclawVirtualNM}`);
 queue.push({ nodeModulesDir: openclawVirtualNM, skipPkg: 'openclaw' });
 
 const SKIP_PACKAGES = new Set([
@@ -243,6 +279,15 @@ function drainDependencyQueue() {
   while (queue.length > 0) {
     const { nodeModulesDir, skipPkg } = queue.shift();
     const packages = listPackages(nodeModulesDir);
+    const ownerPath = path.join(nodeModulesDir, ...packageNameToPathSegments(skipPkg));
+
+    let ownerRealPath;
+    try {
+      ownerRealPath = fs.realpathSync(ownerPath);
+    } catch {
+      continue;
+    }
+    const ownerNode = ensurePackageNode(skipPkg, ownerRealPath);
 
     for (const { name, fullPath } of packages) {
       // Skip the package that owns this virtual store entry (it's the package itself, not a dep)
@@ -259,6 +304,9 @@ function drainDependencyQueue() {
       } catch {
         continue; // broken symlink, skip
       }
+
+      ownerNode.directDeps.set(name, realPath);
+      ensurePackageNode(name, realPath);
 
       if (collected.has(realPath)) continue; // already visited
       collected.set(realPath, name);
@@ -286,42 +334,85 @@ for (const pkgName of stagedBundledRuntimeDeps) {
 
 drainDependencyQueue();
 
-echo`   Found ${collected.size} total packages (direct + transitive)`;
-echo`   Skipped ${skippedDevCount} dev-only package references`;
+printLine(`   Found ${collected.size} total packages (direct + transitive)`);
+printLine(`   Skipped ${skippedDevCount} dev-only package references`);
 if (stagedBundledRuntimeDepCount > 0) {
-  echo`   Staged ${stagedBundledRuntimeDepCount} bundled extension runtime deps`;
+  printLine(`   Staged ${stagedBundledRuntimeDepCount} bundled extension runtime deps`);
 }
 
-// 5. Copy all collected packages into OUTPUT/node_modules/ (flat structure)
+// 5. Copy all collected packages into OUTPUT/node_modules/.
 //
-// IMPORTANT: BFS guarantees direct deps are encountered before transitive deps.
-// When the same package name appears at different versions (e.g. chalk@5 from
-// openclaw directly, chalk@4 from a transitive dep), we keep the FIRST one
-// (direct dep version) and skip later duplicates. This prevents version
-// conflicts like CJS chalk@4 overwriting ESM chalk@5.
+// Model:
+// - top-level node_modules keeps the first discovered version for each package
+//   name (BFS means closer deps win)
+// - if a package's direct dependency resolves to a different real package than
+//   the inherited top-level pick, we backfill that dependency into the
+//   package's own node_modules and recurse
 const outputNodeModules = path.join(OUTPUT, 'node_modules');
 fs.mkdirSync(outputNodeModules, { recursive: true });
 
 const copiedNames = new Set(); // Track package names already copied
+const copiedPackageDirs = new Set(); // Track concrete copied destination paths
+const topLevelRealPaths = new Map(); // pkgName -> realPath
 let copiedCount = 0;
 let skippedDupes = 0;
+let localBackfillCount = 0;
 
 for (const [realPath, pkgName] of collected) {
   if (copiedNames.has(pkgName)) {
     skippedDupes++;
     continue; // Keep the first version (closer to openclaw in dep tree)
   }
-  copiedNames.add(pkgName);
 
-  const dest = path.join(outputNodeModules, pkgName);
+  const dest = resolvePackageOutputDir(outputNodeModules, pkgName);
 
   try {
-    fs.mkdirSync(normWin(path.dirname(dest)), { recursive: true });
-    fs.cpSync(normWin(realPath), normWin(dest), { recursive: true, dereference: true });
+    copyPackageDir(realPath, dest);
+    copiedNames.add(pkgName);
+    topLevelRealPaths.set(pkgName, realPath);
+    copiedPackageDirs.add(dest);
     copiedCount++;
   } catch (err) {
-    echo`   ⚠️  Skipped ${pkgName}: ${err.message}`;
+    printLine(`   ⚠️  Skipped ${pkgName}: ${err.message}`);
   }
+}
+
+function materializeLocalDependencyTree(realPath, packageOutputDir, inheritedResolutions) {
+  const node = packageNodes.get(realPath);
+  if (!node) return;
+
+  const boundaryResolutions = new Map(inheritedResolutions);
+  const localOverrides = [];
+
+  for (const [depName, depRealPath] of node.directDeps) {
+    if (boundaryResolutions.get(depName) === depRealPath) {
+      continue;
+    }
+    boundaryResolutions.set(depName, depRealPath);
+    localOverrides.push([depName, depRealPath]);
+  }
+
+  for (const [depName, depRealPath] of localOverrides) {
+    const depOutputDir = resolvePackageOutputDir(path.join(packageOutputDir, 'node_modules'), depName);
+
+    if (!copiedPackageDirs.has(depOutputDir)) {
+      try {
+        copyPackageDir(depRealPath, depOutputDir);
+        copiedPackageDirs.add(depOutputDir);
+        localBackfillCount++;
+      } catch (err) {
+        printLine(`   ⚠️  Skipped nested ${depName}: ${err.message}`);
+        continue;
+      }
+    }
+
+    materializeLocalDependencyTree(depRealPath, depOutputDir, boundaryResolutions);
+  }
+}
+
+for (const [pkgName, realPath] of topLevelRealPaths) {
+  const packageOutputDir = resolvePackageOutputDir(outputNodeModules, pkgName);
+  materializeLocalDependencyTree(realPath, packageOutputDir, topLevelRealPaths);
 }
 
 // 6. Clean up the bundle to reduce package size
@@ -478,13 +569,13 @@ function cleanupBundle(outputDir) {
   return removedCount;
 }
 
-echo``;
-echo`🧹 Cleaning up bundle (removing dev artifacts, docs, source maps, type defs)...`;
+printLine();
+printLine('🧹 Cleaning up bundle (removing dev artifacts, docs, source maps, type defs)...');
 const sizeBefore = getDirSize(OUTPUT);
 const cleanedCount = cleanupBundle(OUTPUT);
 const sizeAfter = getDirSize(OUTPUT);
-echo`   Removed ${cleanedCount} files/directories`;
-echo`   Size: ${formatSize(sizeBefore)} → ${formatSize(sizeAfter)} (saved ${formatSize(sizeBefore - sizeAfter)})`;
+printLine(`   Removed ${cleanedCount} files/directories`);
+printLine(`   Size: ${formatSize(sizeBefore)} → ${formatSize(sizeAfter)} (saved ${formatSize(sizeBefore - sizeAfter)})`);
 
 // 7. Patch known broken packages
 //
@@ -560,7 +651,7 @@ function patchBrokenModules(nodeModulesDir) {
 
     const current = fs.readFileSync(target, 'utf8');
     if (!current.includes(search)) {
-      echo`   ⚠️  Skipped patch for ${rel}: expected source snippet not found`;
+      printLine(`   ⚠️  Skipped patch for ${rel}: expected source snippet not found`);
       continue;
     }
 
@@ -571,7 +662,7 @@ function patchBrokenModules(nodeModulesDir) {
     }
   }
   if (count > 0) {
-    echo`   🩹 Patched ${count} broken module(s) in node_modules`;
+    printLine(`   🩹 Patched ${count} broken module(s) in node_modules`);
   }
 }
 
@@ -727,13 +818,13 @@ function patchBundledRuntime(outputDir) {
   for (const patch of replacePatches) {
     const target = patch.target();
     if (!target || !fs.existsSync(target)) {
-      echo`   ⚠️  Skipped patch for ${patch.label}: target file not found`;
+      printLine(`   ⚠️  Skipped patch for ${patch.label}: target file not found`);
       continue;
     }
 
     const current = fs.readFileSync(target, 'utf8');
     if (!current.includes(patch.search)) {
-      echo`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`;
+      printLine(`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`);
       continue;
     }
 
@@ -745,7 +836,7 @@ function patchBundledRuntime(outputDir) {
   }
 
   if (count > 0) {
-    echo`   🩹 Patched ${count} bundled runtime spawn site(s)`;
+    printLine(`   🩹 Patched ${count} bundled runtime spawn site(s)`);
   }
 
   const ptyTargets = findFilesByName(
@@ -797,12 +888,12 @@ function patchBundledRuntime(outputDir) {
       }
     }
     if (!matchedAny) {
-      echo`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`;
+      printLine(`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`);
     }
   }
 
   if (ptyCount > 0) {
-    echo`   🩹 Patched ${ptyCount} bundled PTY site(s)`;
+    printLine(`   🩹 Patched ${ptyCount} bundled PTY site(s)`);
   }
 }
 
@@ -813,16 +904,17 @@ patchBundledRuntime(OUTPUT);
 const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));
 const distExists = fs.existsSync(path.join(OUTPUT, 'dist', 'entry.js'));
 
-echo``;
-echo`✅ Bundle complete: ${OUTPUT}`;
-echo`   Unique packages copied: ${copiedCount}`;
-echo`   Dev-only packages skipped: ${skippedDevCount}`;
-echo`   Duplicate versions skipped: ${skippedDupes}`;
-echo`   Total discovered: ${collected.size}`;
-echo`   openclaw.mjs: ${entryExists ? '✓' : '✗'}`;
-echo`   dist/entry.js: ${distExists ? '✓' : '✗'}`;
+printLine();
+printLine(`✅ Bundle complete: ${OUTPUT}`);
+printLine(`   Unique packages copied: ${copiedCount}`);
+printLine(`   Nested dependency backfills: ${localBackfillCount}`);
+printLine(`   Dev-only packages skipped: ${skippedDevCount}`);
+printLine(`   Duplicate versions skipped: ${skippedDupes}`);
+printLine(`   Total discovered: ${collected.size}`);
+printLine(`   openclaw.mjs: ${entryExists ? '✓' : '✗'}`);
+printLine(`   dist/entry.js: ${distExists ? '✓' : '✗'}`);
 
 if (!entryExists || !distExists) {
-  echo`❌ Bundle verification failed!`;
+  printLine('❌ Bundle verification failed!');
   process.exit(1);
 }

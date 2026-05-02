@@ -27,23 +27,82 @@ function resolveOpenClawPackageJson(packageName: string): string {
   }
 }
 
-const baileysPath = dirname(resolveOpenClawPackageJson('@whiskeysockets/baileys'));
-const qrcodeTerminalPath = dirname(resolveOpenClawPackageJson('qrcode-terminal'));
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState: initAuth,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-} = require(baileysPath);
-
-const QRCodeModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'index.js'));
-const QRErrorCorrectLevelModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'QRErrorCorrectLevel.js'));
-
 interface BaileysError extends Error {
   output?: { statusCode?: number };
 }
-type BaileysSocket = ReturnType<typeof makeWASocket>;
+type WhatsAppRuntimeDeps = {
+  readonly baileysPath: string;
+  readonly makeWASocket: (...args: unknown[]) => {
+    ev: {
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeAllListeners: (event?: string) => void;
+    };
+    ws?: { close?: () => void };
+    end: (arg?: unknown) => void;
+  };
+  readonly initAuth: (authDir: string) => Promise<{
+    state: unknown;
+    saveCreds: () => Promise<void>;
+  }>;
+  readonly DisconnectReason: { loggedOut?: number };
+  readonly fetchLatestBaileysVersion: () => Promise<{ version: unknown }>;
+  readonly QRCode: new (typeNumber: number, errorCorrectLevel: unknown) => {
+    addData: (input: string) => void;
+    make: () => void;
+    getModuleCount: () => number;
+    isDark: (row: number, col: number) => boolean;
+  };
+  readonly QRErrorCorrectLevel: { L: unknown };
+};
+let cachedWhatsAppRuntimeDeps: WhatsAppRuntimeDeps | null = null;
+
+function loadWhatsAppRuntimeDeps(): WhatsAppRuntimeDeps {
+  if (cachedWhatsAppRuntimeDeps) {
+    return cachedWhatsAppRuntimeDeps;
+  }
+
+  const baileysPath = dirname(resolveOpenClawPackageJson('@whiskeysockets/baileys'));
+  const qrcodeTerminalPath = dirname(resolveOpenClawPackageJson('qrcode-terminal'));
+
+  const baileysModule = require(baileysPath) as {
+    default?: WhatsAppRuntimeDeps['makeWASocket'];
+    useMultiFileAuthState?: WhatsAppRuntimeDeps['initAuth'];
+    DisconnectReason?: WhatsAppRuntimeDeps['DisconnectReason'];
+    fetchLatestBaileysVersion?: WhatsAppRuntimeDeps['fetchLatestBaileysVersion'];
+  };
+  const QRCodeModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'index.js')) as WhatsAppRuntimeDeps['QRCode'];
+  const QRErrorCorrectLevelModule = require(join(
+    qrcodeTerminalPath,
+    'vendor',
+    'QRCode',
+    'QRErrorCorrectLevel.js',
+  )) as WhatsAppRuntimeDeps['QRErrorCorrectLevel'];
+
+  if (
+    typeof baileysModule.default !== 'function'
+    || typeof baileysModule.useMultiFileAuthState !== 'function'
+    || !baileysModule.DisconnectReason
+    || typeof baileysModule.fetchLatestBaileysVersion !== 'function'
+  ) {
+    throw new Error(
+      `Invalid Baileys runtime exports from OpenClaw context. openclawPath=${openclawPath}, resolvedPath=${openclawResolvedPath}.`,
+    );
+  }
+
+  cachedWhatsAppRuntimeDeps = {
+    baileysPath,
+    makeWASocket: baileysModule.default,
+    initAuth: baileysModule.useMultiFileAuthState,
+    DisconnectReason: baileysModule.DisconnectReason,
+    fetchLatestBaileysVersion: baileysModule.fetchLatestBaileysVersion,
+    QRCode: QRCodeModule,
+    QRErrorCorrectLevel: QRErrorCorrectLevelModule,
+  };
+
+  return cachedWhatsAppRuntimeDeps;
+}
+
+type BaileysSocket = ReturnType<WhatsAppRuntimeDeps['makeWASocket']>;
 type ConnectionState = {
   connection: 'close' | 'open' | 'connecting';
   lastDisconnect?: {
@@ -52,10 +111,8 @@ type ConnectionState = {
   qr?: string;
 };
 
-const QRCode = QRCodeModule;
-const QRErrorCorrectLevel = QRErrorCorrectLevelModule;
-
 function createQrMatrix(input: string) {
+  const { QRCode, QRErrorCorrectLevel } = loadWhatsAppRuntimeDeps();
   const qr = new QRCode(-1, QRErrorCorrectLevel.L);
   qr.addData(input);
   qr.make();
@@ -221,6 +278,13 @@ export class WhatsAppLoginManager extends EventEmitter {
     if (!this.active) return;
 
     try {
+      const {
+        baileysPath,
+        makeWASocket,
+        initAuth,
+        DisconnectReason,
+        fetchLatestBaileysVersion,
+      } = loadWhatsAppRuntimeDeps();
       const authDir = resolveWhatsAppAuthDir(accountId);
       this.currentAuthDir = authDir;
 

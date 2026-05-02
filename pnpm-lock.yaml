@@ -23,6 +23,9 @@ importers:
       '@slack/bolt':
         specifier: ^4.6.0
         version: 4.7.0(@types/express@5.0.6)
+      '@whiskeysockets/baileys':
+        specifier: 7.0.0-rc.9
+        version: 7.0.0-rc.9(sharp@0.34.5)
       clawhub:
         specifier: ^0.5.0
         version: 0.5.0
@@ -138,9 +141,6 @@ importers:
       '@wecom/wecom-openclaw-plugin':
         specifier: 2026.3.26
         version: 2026.3.26
-      '@whiskeysockets/baileys':
-        specifier: 7.0.0-rc.9
-        version: 7.0.0-rc.9(sharp@0.34.5)
       autoprefixer:
         specifier: ^10.4.24
         version: 10.4.24(postcss@8.5.6)
@@ -7933,7 +7933,7 @@ snapshots:
       '@aws-sdk/client-bedrock-runtime': 3.1026.0
       '@google/genai': 1.42.0(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))
       '@mistralai/mistralai': 1.14.1
-      '@sinclair/typebox': 0.34.48
+      '@sinclair/typebox': 0.34.49
       ajv: 8.18.0
       ajv-formats: 3.0.1(ajv@8.18.0)
       chalk: 5.6.2
@@ -11634,7 +11634,7 @@ snapshots:
       debug: 4.4.3
       file-type: 21.3.4
       media-typer: 1.1.0
-      strtok3: 10.3.4
+      strtok3: 10.3.5
       token-types: 6.1.2
       uint8array-extras: 1.5.0
       win-guid: 0.2.1
