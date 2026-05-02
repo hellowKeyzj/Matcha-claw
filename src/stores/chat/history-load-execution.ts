@@ -20,8 +20,8 @@ import {
   resolveHistoryActivityFlags,
 } from './history-apply-helpers';
 import {
-  normalizeIncomingMessages,
   resolveSessionLabelFromMessages,
+  sanitizeCanonicalMessages,
 } from './message-helpers';
 import { finishChatRunTelemetry } from './telemetry';
 import { clearHistoryPoll } from './timers';
@@ -162,7 +162,7 @@ export async function executeViewportWindowLoad(
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
-    const canonicalMessages = normalizeIncomingMessages(
+    const canonicalMessages = sanitizeCanonicalMessages(
       Array.isArray(payload.canonicalMessages) && payload.canonicalMessages.length > 0
         ? payload.canonicalMessages
         : payload.messages,
@@ -225,149 +225,145 @@ export function createApplyLoadedMessagesPipeline(
   const isForeground = scope === 'foreground';
 
   return async (window: HistoryWindowResult) => {
-    const canonicalRawMessages = normalizeIncomingMessages(window.canonicalRawMessages ?? window.rawMessages);
-    try {
-      const quickFingerprint = buildQuickRawHistoryFingerprint(canonicalRawMessages, window.thinkingLevel);
-      const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
-      const currentStateForQuickPath = get();
-      const currentMessages = getSessionMessages(currentStateForQuickPath, requestedSessionKey);
-      const currentMeta = currentStateForQuickPath.loadedSessions[requestedSessionKey]?.meta;
-      const canSkipWithQuickFingerprint = (
-        previousQuickFingerprint === quickFingerprint
-        && (currentMessages.length > 0 || isSessionHistoryReady(currentMeta?.historyStatus))
-        && (currentMeta?.thinkingLevel ?? null) === window.thinkingLevel
-      );
-      if (canSkipWithQuickFingerprint) {
-        if (!historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)) {
-          historyRuntime.historyRenderFingerprintBySession.set(
-            requestedSessionKey,
-            buildRenderMessagesFingerprint(currentMessages),
-          );
-        }
-        if (!isSessionHistoryReady(currentMeta?.historyStatus)) {
-          set((state) => ({
-            loadedSessions: patchSessionMeta(state, requestedSessionKey, { historyStatus: 'ready' }),
-          }));
-        }
-        return;
+    const canonicalRawMessages = sanitizeCanonicalMessages(window.canonicalRawMessages ?? window.rawMessages);
+    const quickFingerprint = buildQuickRawHistoryFingerprint(canonicalRawMessages, window.thinkingLevel);
+    const previousQuickFingerprint = historyRuntime.historyQuickFingerprintBySession.get(requestedSessionKey) ?? null;
+    const currentStateForQuickPath = get();
+    const currentMessages = getSessionMessages(currentStateForQuickPath, requestedSessionKey);
+    const currentMeta = currentStateForQuickPath.loadedSessions[requestedSessionKey]?.meta;
+    const canSkipWithQuickFingerprint = (
+      previousQuickFingerprint === quickFingerprint
+      && (currentMessages.length > 0 || isSessionHistoryReady(currentMeta?.historyStatus))
+      && (currentMeta?.thinkingLevel ?? null) === window.thinkingLevel
+    );
+    if (canSkipWithQuickFingerprint) {
+      if (!historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)) {
+        historyRuntime.historyRenderFingerprintBySession.set(
+          requestedSessionKey,
+          buildRenderMessagesFingerprint(currentMessages),
+        );
       }
-      historyRuntime.historyQuickFingerprintBySession.set(requestedSessionKey, quickFingerprint);
+      if (!isSessionHistoryReady(currentMeta?.historyStatus)) {
+        set((state) => ({
+          loadedSessions: patchSessionMeta(state, requestedSessionKey, { historyStatus: 'ready' }),
+        }));
+      }
+      return;
+    }
+    historyRuntime.historyQuickFingerprintBySession.set(requestedSessionKey, quickFingerprint);
 
-      if (shouldAbortHistoryProcessing()) {
-        return;
-      }
-      throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+    if (shouldAbortHistoryProcessing()) {
+      return;
+    }
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
 
-      const normalizedMessages = window.normalizedMessages ?? canonicalRawMessages;
-      if (shouldAbortHistoryProcessing()) {
-        return;
-      }
-      throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
-      const enrichedMessages = hydrateAttachedFilesFromCache(normalizedMessages);
-      if (shouldAbortHistoryProcessing()) {
-        return;
-      }
-      throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+    const normalizedMessages = window.normalizedMessages ?? canonicalRawMessages;
+    if (shouldAbortHistoryProcessing()) {
+      return;
+    }
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+    const enrichedMessages = hydrateAttachedFilesFromCache(normalizedMessages);
+    if (shouldAbortHistoryProcessing()) {
+      return;
+    }
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
 
-      const runtimeState = get();
-      const currentSessionMessages = getSessionMessages(runtimeState, requestedSessionKey);
-      const currentViewport = getSessionViewportState(runtimeState, requestedSessionKey);
-      const currentRuntime = getSessionRuntime(runtimeState, requestedSessionKey);
-      const nextWindow = reconcileHistoryWindow({
-        currentMessages: currentSessionMessages,
-        currentViewport,
-        canonicalMessages: enrichedMessages,
+    const runtimeState = get();
+    const currentSessionMessages = getSessionMessages(runtimeState, requestedSessionKey);
+    const currentViewport = getSessionViewportState(runtimeState, requestedSessionKey);
+    const currentRuntime = getSessionRuntime(runtimeState, requestedSessionKey);
+    const nextWindow = reconcileHistoryWindow({
+      currentMessages: currentSessionMessages,
+      currentViewport,
+      canonicalMessages: enrichedMessages,
+      totalMessageCount: window.totalMessageCount,
+      windowStartOffset: window.windowStartOffset,
+      windowEndOffset: window.windowEndOffset,
+      hasMore: window.hasMore,
+      hasNewer: window.hasNewer,
+      isAtLatest: window.isAtLatest,
+      runtime: runtimeState.currentSessionKey === requestedSessionKey ? currentRuntime : undefined,
+    });
+    const finalMessages = nextWindow.messages;
+    if (shouldAbortHistoryProcessing()) {
+      return;
+    }
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+
+    const isMainSession = requestedSessionKey.endsWith(':main');
+    const resolvedLabel = !isMainSession
+      ? resolveSessionLabelFromMessages(finalMessages)
+      : '';
+    const lastMsg = finalMessages[finalMessages.length - 1];
+    const lastAt = lastMsg?.timestamp ? toMs(lastMsg.timestamp) : null;
+    const viewportWindowStart = nextWindow.viewport.windowStartOffset;
+    const viewportWindowEnd = nextWindow.viewport.windowEndOffset;
+    const viewportMessages = nextWindow.viewportMessages;
+    const renderFingerprint = buildRenderMessagesFingerprint(viewportMessages);
+    const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
+
+    const activityRuntimeState = get();
+    const activityRuntime = getSessionRuntime(activityRuntimeState, requestedSessionKey);
+    const shouldResolveHistoryActivity = (
+      isForeground
+      && activityRuntimeState.currentSessionKey === requestedSessionKey
+    );
+    const historyActivityFlags = shouldResolveHistoryActivity
+      ? resolveHistoryActivityFlags({
+          normalizedMessages,
+          isSendingNow: activityRuntime.sending,
+          pendingFinal: activityRuntime.pendingFinal,
+          lastUserMessageAt: activityRuntime.lastUserMessageAt,
+        })
+      : {
+          hasRecentAssistantActivity: false,
+          hasRecentFinalAssistantMessage: false,
+        };
+
+    let didMessageListChange = false;
+    set((state) => {
+      const applyPatchResult = buildHistoryApplyPatch(state, {
+        requestedSessionKey,
+        scope,
+        finalMessages,
+        viewportMessages,
+        thinkingLevel: window.thinkingLevel,
         totalMessageCount: window.totalMessageCount,
-        windowStartOffset: window.windowStartOffset,
-        windowEndOffset: window.windowEndOffset,
+        windowStartOffset: viewportWindowStart,
+        windowEndOffset: viewportWindowEnd,
         hasMore: window.hasMore,
         hasNewer: window.hasNewer,
         isAtLatest: window.isAtLatest,
-        runtime: runtimeState.currentSessionKey === requestedSessionKey ? currentRuntime : undefined,
+        resolvedLabel,
+        lastAt,
+        previousRenderFingerprint,
+        renderFingerprint,
+        flags: historyActivityFlags,
       });
-      const finalMessages = nextWindow.messages;
-      if (shouldAbortHistoryProcessing()) {
-        return;
-      }
-      throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+      didMessageListChange = applyPatchResult.didMessageListChange;
+      return applyPatchResult.patch ?? state;
+    });
+    historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
 
-      const isMainSession = requestedSessionKey.endsWith(':main');
-      const resolvedLabel = !isMainSession
-        ? resolveSessionLabelFromMessages(finalMessages)
-        : '';
-      const lastMsg = finalMessages[finalMessages.length - 1];
-      const lastAt = lastMsg?.timestamp ? toMs(lastMsg.timestamp) : null;
-      const viewportWindowStart = nextWindow.viewport.windowStartOffset;
-      const viewportWindowEnd = nextWindow.viewport.windowEndOffset;
-      const viewportMessages = nextWindow.viewportMessages;
-      const renderFingerprint = buildRenderMessagesFingerprint(viewportMessages);
-      const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
+    if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
+      finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
+      clearHistoryPoll();
+    }
 
-      const activityRuntimeState = get();
-      const activityRuntime = getSessionRuntime(activityRuntimeState, requestedSessionKey);
-      const shouldResolveHistoryActivity = (
-        isForeground
-        && activityRuntimeState.currentSessionKey === requestedSessionKey
-      );
-      const historyActivityFlags = shouldResolveHistoryActivity
-        ? resolveHistoryActivityFlags({
-            normalizedMessages,
-            isSendingNow: activityRuntime.sending,
-            pendingFinal: activityRuntime.pendingFinal,
-            lastUserMessageAt: activityRuntime.lastUserMessageAt,
-          })
-        : {
-            hasRecentAssistantActivity: false,
-            hasRecentFinalAssistantMessage: false,
-          };
-
-      let didMessageListChange = false;
-      set((state) => {
-        const applyPatchResult = buildHistoryApplyPatch(state, {
+    if ((didMessageListChange || scope === 'background') && hasPendingPreviewLoads(viewportMessages)) {
+      void loadMissingPreviews(viewportMessages).then((updated) => {
+        if (!updated) {
+          return;
+        }
+        if (abortSignal.aborted || shouldAbortHistoryProcessing()) {
+          return;
+        }
+        set((state) => buildHistoryPreviewHydrationPatch(
+          state,
           requestedSessionKey,
-          scope,
-          finalMessages,
           viewportMessages,
-          thinkingLevel: window.thinkingLevel,
-          totalMessageCount: window.totalMessageCount,
-          windowStartOffset: viewportWindowStart,
-          windowEndOffset: viewportWindowEnd,
-          hasMore: window.hasMore,
-          hasNewer: window.hasNewer,
-          isAtLatest: window.isAtLatest,
-          resolvedLabel,
-          lastAt,
-          previousRenderFingerprint,
-          renderFingerprint,
-          flags: historyActivityFlags,
-        });
-        didMessageListChange = applyPatchResult.didMessageListChange;
-        return applyPatchResult.patch ?? state;
+        ));
       });
-      historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
-
-      if (isForeground && historyActivityFlags.hasRecentFinalAssistantMessage) {
-        finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
-        clearHistoryPoll();
-      }
-
-      if ((didMessageListChange || scope === 'background') && hasPendingPreviewLoads(viewportMessages)) {
-        void loadMissingPreviews(viewportMessages).then((updated) => {
-          if (!updated) {
-            return;
-          }
-          if (abortSignal.aborted || shouldAbortHistoryProcessing()) {
-            return;
-          }
-          set((state) => buildHistoryPreviewHydrationPatch(
-            state,
-            requestedSessionKey,
-            viewportMessages,
-          ));
-        });
-      }
-    } catch (error) {
-      throw error;
     }
   };
 }
@@ -449,7 +445,7 @@ export async function executeHistoryLoad(
     if (shouldSkipForegroundApply(get, scope, requestedSessionKey)) {
       return;
     }
-    const canonicalRawMessages = normalizeIncomingMessages(window.canonicalRawMessages ?? window.rawMessages);
+    const canonicalRawMessages = window.canonicalRawMessages ?? window.rawMessages;
     const normalizedMessages = await normalizeHistoryMessages(
       canonicalRawMessages,
       { abortSignal: abortController.signal },

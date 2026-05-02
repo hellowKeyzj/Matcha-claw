@@ -380,8 +380,6 @@ export function reduceSessionRuntime(
       patch.activeRunId = action.hasOutput ? null : state.activeRunId;
       patch.pendingFinal = action.hasOutput ? false : true;
       patch.runPhase = action.hasOutput ? 'done' : 'finalizing';
-      if (action.hasOutput) {
-      }
       return patch;
     }
 

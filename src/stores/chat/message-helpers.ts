@@ -296,70 +296,45 @@ export function sanitizeCanonicalUserContent(content: unknown): unknown {
   return changed ? nextContent : content;
 }
 
-function normalizeOptionalIdentity(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+function cleanGatewayUserText(text: string): string {
+  const cleaned = text
+    .replace(/\s*\[media attached:[^\]]*\]/g, '')
+    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
+    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
+    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
+    .replace(/^Sender\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
+    .replace(/^Sender\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
+    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
+    .replace(/^\s*[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*/i, '');
+  return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
 }
 
-interface NormalizeIncomingMessageOptions {
-  fallbackId?: string | null;
-}
+export function sanitizeCanonicalUserMessage(message: RawMessage): RawMessage {
+  if (message.role !== 'user') {
+    return message;
+  }
 
-export function normalizeIncomingMessage(
-  message: RawMessage,
-  options: NormalizeIncomingMessageOptions = {},
-): RawMessage {
-  const messageRecord = message as RawMessage & Record<string, unknown> & { text?: unknown };
-  const nextId = normalizeOptionalIdentity(message.id ?? options.fallbackId);
-  const extractedClientId = message.role === 'user'
-    ? extractUserMessageClientId(message.content)
-    : null;
-  const nextClientId = normalizeOptionalIdentity(
-    message.clientId
-    ?? messageRecord.client_id
-    ?? messageRecord.idempotencyKey
-    ?? messageRecord.idempotency_key,
-  ) ?? extractedClientId ?? undefined;
-  const nextMessageId = normalizeOptionalIdentity(
-    message.messageId
-    ?? messageRecord.message_id,
-  ) ?? nextId ?? nextClientId ?? undefined;
-  const nextUniqueId = normalizeOptionalIdentity(
-    message.uniqueId
-    ?? messageRecord.unique_id,
-  ) ?? nextId ?? undefined;
-  const nextContent = message.role === 'user'
-    ? sanitizeCanonicalUserContent(message.content)
-    : message.content;
-  const nextText = typeof messageRecord.text === 'string' && message.role === 'user'
+  const nextContent = sanitizeCanonicalUserContent(message.content);
+  const messageRecord = message as RawMessage & { text?: unknown };
+  const nextText = typeof messageRecord.text === 'string'
     ? sanitizeCanonicalUserText(messageRecord.text)
     : messageRecord.text;
 
-  if (
-    nextId === message.id
-    && nextMessageId === message.messageId
-    && nextClientId === message.clientId
-    && nextUniqueId === message.uniqueId
-    && nextContent === message.content
-    && nextText === messageRecord.text
-  ) {
+  if (nextContent === message.content && nextText === messageRecord.text) {
     return message;
   }
 
   return {
     ...message,
-    ...(nextId ? { id: nextId } : {}),
-    ...(nextMessageId ? { messageId: nextMessageId } : {}),
-    ...(nextClientId ? { clientId: nextClientId } : {}),
-    ...(nextUniqueId ? { uniqueId: nextUniqueId } : {}),
     content: nextContent,
     ...(typeof nextText === 'string' ? { text: nextText } : {}),
   };
 }
 
-export function normalizeIncomingMessages(messages: RawMessage[]): RawMessage[] {
+export function sanitizeCanonicalMessages(messages: RawMessage[]): RawMessage[] {
   let changed = false;
   const nextMessages = messages.map((message) => {
-    const nextMessage = normalizeIncomingMessage(message);
+    const nextMessage = sanitizeCanonicalUserMessage(message);
     if (nextMessage !== message) {
       changed = true;
     }
@@ -369,9 +344,9 @@ export function normalizeIncomingMessages(messages: RawMessage[]): RawMessage[] 
 }
 
 export function normalizeUserTextForReconcile(content: unknown): string {
-  const raw = getMessageText(sanitizeCanonicalUserContent(content));
+  const raw = getMessageText(content);
   if (!raw) return '';
-  return sanitizeCanonicalUserText(raw)
+  return cleanGatewayUserText(raw)
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, ' ')
     .replace(/\s*([，。！？：；,.!?;:])\s*/g, '$1')
@@ -387,7 +362,7 @@ export function normalizeAssistantFinalTextForDedup(content: unknown): string {
 }
 
 function resolveSessionLabelCandidateFromUserMessage(content: unknown): string {
-  return normalizeSessionLabelText(sanitizeCanonicalUserText(getMessageText(content)));
+  return normalizeSessionLabelText(cleanGatewayUserText(getMessageText(content)));
 }
 
 function resolveSessionLabelCandidateFromAssistantMessage(content: unknown): string {

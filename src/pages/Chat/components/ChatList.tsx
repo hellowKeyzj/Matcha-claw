@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
   type RefObject,
   type TouchEventHandler,
@@ -169,7 +170,10 @@ interface ChatListSurfaceProps {
   onJumpToRowKey: (rowKey?: string) => void;
 }
 
-interface ChatListContentProps extends Omit<ChatListSurfaceProps, 'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'scrollChromeStore'> {}
+type ChatListContentProps = Omit<
+  ChatListSurfaceProps,
+  'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'scrollChromeStore'
+>;
 
 function getMessageDataAttributes(row: ChatMessageRow) {
   const messageId = typeof row.message.id === 'string' && row.message.id.trim()
@@ -488,18 +492,16 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
 ) {
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
-  const scrollChromeStoreRef = useRef<ReturnType<typeof createChatScrollChromeStore> | null>(null);
   const viewport = currentSession.window;
   const runtime = currentSession.runtime;
-  if (scrollChromeStoreRef.current == null) {
-    scrollChromeStoreRef.current = createChatScrollChromeStore({
+  const [scrollChromeStore] = useState(() => (
+    createChatScrollChromeStore({
       isBottomLocked: true,
       visible: false,
       isAtLatest: viewport.isAtLatest,
       jumpActionLabel: jumpToBottomLabel,
-    });
-  }
-  const scrollChromeStore = scrollChromeStoreRef.current;
+    })
+  ));
   const viewportMessages = currentSession.messages.slice(
     viewport.windowStartOffset,
     viewport.windowEndOffset,

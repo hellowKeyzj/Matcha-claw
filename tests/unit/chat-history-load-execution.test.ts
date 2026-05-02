@@ -128,71 +128,12 @@ describe('chat history load execution', () => {
 
     expect(sawLoadingState).toBe(true);
     expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(1);
-    expect(normalizeHistoryMessagesMock).toHaveBeenCalledWith([{
-      role: 'assistant',
-      content: 'loaded once',
-      timestamp: 1,
-      id: 'assistant-1',
-      messageId: 'assistant-1',
-      uniqueId: 'assistant-1',
-    }], expect.objectContaining({
+    expect(normalizeHistoryMessagesMock).toHaveBeenCalledWith(resultMessages, expect.objectContaining({
       abortSignal: expect.any(AbortSignal),
     }));
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual([{
-      role: 'assistant',
-      content: 'loaded once',
-      timestamp: 1,
-      id: 'assistant-1',
-      messageId: 'assistant-1',
-      uniqueId: 'assistant-1',
-    }]);
-  });
-
-  it('normalizes incoming history message identity before writing transcript state', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
-    const { set, get } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
-      loadedSessions: {
-        [requestedSessionKey]: createEmptySessionRecord(),
-      },
-    });
-    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult([
-      {
-        role: 'user',
-        id: 'transcript-user-1',
-        content: '你好',
-        timestamp: 1,
-        idempotencyKey: 'optimistic-user-1',
-      } as RawMessage,
-    ]));
-    const historyRuntime = createHistoryRuntimeHarness();
-
-    await executeHistoryLoad({
-      set,
-      get,
-      historyRuntime,
-      loadingTimeoutMs: 1000,
-    }, {
-      sessionKey: requestedSessionKey,
-      mode: 'active',
-      scope: 'foreground',
-    });
-
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual([
-      {
-        role: 'user',
-        id: 'transcript-user-1',
-        messageId: 'transcript-user-1',
-        clientId: 'optimistic-user-1',
-        uniqueId: 'transcript-user-1',
-        content: '你好',
-        timestamp: 1,
-        idempotencyKey: 'optimistic-user-1',
-      },
-    ]);
+    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(resultMessages);
   });
 
   it('background load does not touch foreground loading ui', async () => {
@@ -226,14 +167,7 @@ describe('chat history load execution', () => {
 
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().error).toBe('keep');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual([{
-      role: 'assistant',
-      content: 'background refresh',
-      timestamp: 1,
-      id: 'assistant-1',
-      messageId: 'assistant-1',
-      uniqueId: 'assistant-1',
-    }]);
+    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(loadedMessages);
   });
 
   it('recovers through cron fallback when fetch fails and fallback data exists', async () => {
@@ -258,14 +192,7 @@ describe('chat history load execution', () => {
 
     expect(loadCronFallbackMessagesMock).toHaveBeenCalledWith(requestedSessionKey, 200);
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual([{
-      role: 'assistant',
-      content: 'fallback',
-      timestamp: 1,
-      id: 'assistant-fallback',
-      messageId: 'assistant-fallback',
-      uniqueId: 'assistant-fallback',
-    }]);
+    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(fallbackMessages);
   });
 
   it('marks active foreground load as error when fetch fails and no fallback exists', async () => {

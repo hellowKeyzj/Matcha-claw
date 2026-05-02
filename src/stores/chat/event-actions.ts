@@ -10,7 +10,7 @@ import {
   isUnboundLifecycleEvent,
   shouldIgnoreRuntimeEvent,
 } from './event-routing';
-import { getMessageText, normalizeIncomingMessage } from './message-helpers';
+import { getMessageText } from './message-helpers';
 import { collectToolUpdates, upsertToolStatuses } from './event-helpers';
 import {
   handleStoreErrorEvent,
@@ -48,7 +48,6 @@ import {
   resolveStreamingMessage,
   upsertMessageById,
 } from './streaming-message';
-import { asRecord } from './value';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -100,19 +99,6 @@ interface RuntimeEventUnknownDispatchInput extends RuntimeEventDispatchBaseInput
 
 function normalizeIdentifier(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function normalizeRuntimeEventMessage(
-  message: unknown,
-  event: Record<string, unknown>,
-): RawMessage | undefined {
-  const candidate = asRecord(message);
-  if (!candidate) {
-    return undefined;
-  }
-  return normalizeIncomingMessage(candidate as unknown as RawMessage, {
-    fallbackId: normalizeIdentifier(event.id || event.messageId) || null,
-  });
 }
 
 function resolveStreamDeltaTextUpdate(
@@ -235,16 +221,13 @@ function normalizeConversationIngressEvent(
     return null;
   }
   const payloadRecord = payload as Record<string, unknown>;
-  const normalizedMessage = normalizeRuntimeEventMessage(payloadRecord.message, payloadRecord);
   return {
     kind,
     phase,
     runId: normalizeIdentifier(event.runId),
     sessionKey: normalizeIdentifier(event.sessionKey) || null,
-    event: normalizedMessage
-      ? { ...payloadRecord, message: normalizedMessage }
-      : payloadRecord,
-    message: normalizedMessage,
+    event: payloadRecord,
+    message: payloadRecord.message,
   };
 }
 

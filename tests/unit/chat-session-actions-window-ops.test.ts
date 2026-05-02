@@ -10,7 +10,7 @@ import {
   createEmptySessionViewportState,
   selectViewportMessages,
 } from '@/stores/chat/store-state-helpers';
-import { normalizeIncomingMessages } from '@/stores/chat/message-helpers';
+import { sanitizeCanonicalMessages } from '@/stores/chat/message-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
@@ -40,7 +40,7 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function buildMessages(count: number, start = 1): RawMessage[] {
-  return normalizeIncomingMessages(Array.from({ length: count }, (_, index) => ({
+  return sanitizeCanonicalMessages(Array.from({ length: count }, (_, index) => ({
     id: `message-${start + index}`,
     role: (start + index) % 2 === 0 ? 'assistant' : 'user',
     content: `message ${start + index}`,
