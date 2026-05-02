@@ -1,6 +1,7 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
@@ -805,18 +806,21 @@ export function SubAgents() {
         onSubmit={async (values) => {
           if (dialogMode === 'create') {
             try {
-              const createdAgentId = await createAgent({
+              const createResult = await createAgent({
                 name: values.name,
                 workspace: values.workspace,
                 model: values.model,
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
               });
-              const resolvedAgentId = createdAgentId || normalizeSubagentNameToSlug(values.name);
+              const resolvedAgentId = createResult.agentId || normalizeSubagentNameToSlug(values.name);
               setManagedAgentId(resolvedAgentId);
               void loadPersistedFilesForAgent(resolvedAgentId);
               setDraftPromptForAgent(resolvedAgentId, values.prompt);
               setDialogOpen(false);
+              if (createResult.warning) {
+                toast.warning(createResult.warning);
+              }
             } catch {
               // Error state is already set by store; keep dialog open for user correction/retry.
             }
@@ -869,14 +873,17 @@ export function SubAgents() {
             const localizedTemplateName = tTemplate(`templates.${activeTemplate.id}.name`, {
               defaultValue: activeTemplate.name,
             });
-            const createdAgentId = await createAgentFromTemplate({
+            const createResult = await createAgentFromTemplate({
               template: activeTemplate,
               model: modelId,
               localizedName: localizedTemplateName,
             });
-            setManagedAgentId(createdAgentId);
-            void loadPersistedFilesForAgent(createdAgentId);
+            setManagedAgentId(createResult.agentId);
+            void loadPersistedFilesForAgent(createResult.agentId);
             setTemplateDialogOpen(false);
+            if (createResult.warning) {
+              toast.warning(createResult.warning);
+            }
           } finally {
             setTemplateDialogSubmitting(false);
           }

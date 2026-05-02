@@ -8,9 +8,12 @@ import {
 import { useProviderStore } from '@/stores/providers';
 import { useSubagentsStore } from '@/stores/subagents';
 
+const AVATAR_STORAGE_KEY = 'clawx-subagent-avatar-presentations';
+
 describe('subagents store', () => {
   beforeEach(() => {
     resetGatewayClientMocks();
+    window.localStorage.removeItem(AVATAR_STORAGE_KEY);
     useProviderStore.setState({
       providerSnapshot: {
         accounts: [],
@@ -239,6 +242,69 @@ describe('subagents store', () => {
         workspace: '~/.openclaw/workspace-subagents/writer-config',
         model: 'anthropic/claude-3-7-sonnet',
         isDefault: false,
+      },
+    ]);
+  });
+
+  it('loadAgents 只从本地 presentation store 合并头像，不读取 openclaw config 里的非法 avatar 字段', async () => {
+    const rpc = gatewayClientRpcMock;
+    window.localStorage.setItem(AVATAR_STORAGE_KEY, JSON.stringify({
+      writer: {
+        avatarSeed: 'picker:writer:page:2:option:5',
+        avatarStyle: 'botttsNeutral',
+      },
+    }));
+    rpc
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          agents: [
+            { id: 'main', name: 'Main' },
+            { id: 'writer', name: 'Writer' },
+          ],
+          defaultId: 'main',
+          mainKey: 'main',
+          scope: 'per-sender',
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        result: {
+          config: {
+            agents: {
+              list: [
+                {
+                  id: 'main',
+                  workspace: '~/.openclaw/workspace-main-config',
+                  model: { primary: 'openai/gpt-4.1-mini' },
+                  avatarSeed: 'illegal:main',
+                  avatarStyle: 'bottts',
+                },
+                {
+                  id: 'writer',
+                  workspace: '~/.openclaw/workspace-subagents/writer-config',
+                  model: 'anthropic/claude-3-7-sonnet',
+                  avatarSeed: 'illegal:writer',
+                  avatarStyle: 'pixelArt',
+                },
+              ],
+            },
+          },
+        },
+      });
+
+    await useSubagentsStore.getState().loadAgents();
+
+    expect(useSubagentsStore.getState().agents).toMatchObject([
+      {
+        id: 'main',
+        avatarSeed: undefined,
+        avatarStyle: undefined,
+      },
+      {
+        id: 'writer',
+        avatarSeed: 'picker:writer:page:2:option:5',
+        avatarStyle: 'botttsNeutral',
       },
     ]);
   });
