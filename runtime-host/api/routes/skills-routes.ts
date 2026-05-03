@@ -36,11 +36,25 @@ export async function handleSkillsRoute(
   }
 
   if (method === 'PUT' && routePath === '/api/skills/config') {
-    return await service.updateConfig(payload);
+    try {
+      return await service.updateConfig(payload);
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
   }
 
   if (method === 'PUT' && routePath === '/api/skills/state') {
-    return await service.updateState(payload);
+    try {
+      return await service.updateState(payload);
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
   }
 
   if (method === 'GET' && routePath === '/api/skills/effective') {

@@ -8,6 +8,12 @@ interface SkillsServiceDeps {
   openclawBridge: Pick<OpenClawBridge, 'gatewayRpc' | 'isGatewayRunning'>;
 }
 
+interface SkillMutationResult {
+  success: boolean;
+  error?: string;
+  syncError?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -15,20 +21,59 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class SkillsService {
   constructor(private readonly deps: SkillsServiceDeps) {}
 
-  private async applyUpdates(
+  private async trySyncUpdatesToGateway(
     skillKey: string,
     updates: Record<string, unknown>,
-    localFallback: () => Promise<unknown>,
-  ) {
-    const gatewayRunning = await this.deps.openclawBridge.isGatewayRunning();
-    if (gatewayRunning) {
+  ): Promise<string | null> {
+    let gatewayRunning = false;
+    try {
+      gatewayRunning = await this.deps.openclawBridge.isGatewayRunning();
+    } catch (error) {
+      return String(error);
+    }
+    if (!gatewayRunning) {
+      return null;
+    }
+    try {
       await this.deps.openclawBridge.gatewayRpc('skills.update', {
         skillKey,
         ...updates,
       });
-      return { success: true };
+      return null;
+    } catch (error) {
+      return String(error);
     }
-    return await localFallback();
+  }
+
+  private async applyUpdates(
+    skillKey: string,
+    updates: Record<string, unknown>,
+    persistLocal: () => Promise<unknown>,
+  ): Promise<{
+    status: number;
+    data: SkillMutationResult;
+  }> {
+    const localResult = await persistLocal();
+    const normalizedLocalResult = isRecord(localResult)
+      ? localResult as SkillMutationResult
+      : { success: false, error: 'Invalid local skills mutation result' };
+    if (normalizedLocalResult.success !== true) {
+      return {
+        status: 500,
+        data: {
+          success: false,
+          error: normalizedLocalResult.error || 'Failed to persist local skills config',
+        },
+      };
+    }
+
+    const syncError = await this.trySyncUpdatesToGateway(skillKey, updates);
+    return {
+      status: 200,
+      data: syncError
+        ? { success: true, syncError }
+        : { success: true },
+    };
   }
 
   configs() {
@@ -54,14 +99,11 @@ export class SkillsService {
         data: { success: false, error: 'No config updates provided' },
       };
     }
-    return {
-      status: 200,
-      data: await this.applyUpdates(
-        skillKey,
-        updates,
-        async () => await this.deps.updateSkillConfig(skillKey, updates),
-      ),
-    };
+    return await this.applyUpdates(
+      skillKey,
+      updates,
+      async () => await this.deps.updateSkillConfig(skillKey, updates),
+    );
   }
 
   async updateState(payload: unknown) {
@@ -80,14 +122,11 @@ export class SkillsService {
       };
     }
 
-    return {
-      status: 200,
-      data: await this.applyUpdates(
-        skillKey,
-        { enabled: body.enabled },
-        async () => await this.deps.setSkillEnabled(skillKey, body.enabled),
-      ),
-    };
+    return await this.applyUpdates(
+      skillKey,
+      { enabled: body.enabled },
+      async () => await this.deps.setSkillEnabled(skillKey, body.enabled),
+    );
   }
 
   async effective() {
