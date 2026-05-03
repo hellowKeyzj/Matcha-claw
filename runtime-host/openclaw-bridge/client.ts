@@ -58,6 +58,7 @@ const GATEWAY_CLIENT_VERSION = '0.1.0';
 const GATEWAY_CLIENT_MODE = 'backend';
 const GATEWAY_CLIENT_DEVICE_FAMILY = 'desktop';
 const GATEWAY_CLIENT_DISPLAY_NAME = 'MatchaClaw Runtime Host';
+const GATEWAY_CLIENT_CAPS = ['tool-events'] as const;
 const GATEWAY_DEVICE_IDENTITY_PATH = join(getRuntimeHostDataDir(), 'identity', 'device.json');
 let gatewayDeviceIdentityCache: DeviceIdentity | null = null;
 
@@ -179,7 +180,7 @@ function buildGatewayConnectRequest(connectId: string, challengeNonce: string) {
         deviceFamily: GATEWAY_CLIENT_DEVICE_FAMILY,
       },
       ...(gatewayToken ? { auth: { token: gatewayToken } } : {}),
-      caps: [],
+      caps: [...GATEWAY_CLIENT_CAPS],
       role: 'operator',
       scopes: [...DEFAULT_GATEWAY_OPERATOR_SCOPES],
       device: {

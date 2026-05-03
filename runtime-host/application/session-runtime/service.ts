@@ -4,10 +4,12 @@ import { dirname, join } from 'node:path';
 import { extractMessageText, normalizeOptionalString } from '../../shared/chat-message-normalization';
 import type {
   SessionCatalogItem,
+  SessionExecutionGraph,
   SessionLoadResult,
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
+  SessionRenderRow,
   SessionRuntimeStateSnapshot,
   SessionStateSnapshot,
   SessionTimelineEntry,
@@ -22,6 +24,9 @@ import {
   resolveTranscriptSessionLabel,
   type SessionTranscriptMessage,
 } from '../sessions/transcript-utils';
+import { normalizeTaskCompletionEvents } from '../sessions/task-completion-events';
+import { buildSessionExecutionGraphs } from './execution-graphs';
+import { buildSessionRenderRows } from './render-rows';
 import { listIndexedSessions } from '../sessions/session-index';
 import {
   normalizeSendWithMediaInput,
@@ -94,6 +99,41 @@ interface GatewayConversationLifecyclePayload {
   runId?: unknown;
   sessionKey?: unknown;
 }
+
+interface GatewayConversationToolLifecyclePayload {
+  phase?: unknown;
+  runId?: unknown;
+  sessionKey?: unknown;
+  sequenceId?: unknown;
+  timestamp?: unknown;
+  toolCallId?: unknown;
+  name?: unknown;
+  args?: unknown;
+  partialResult?: unknown;
+  result?: unknown;
+  isError?: unknown;
+}
+
+interface SessionInfoIngressEvent {
+  sessionUpdate: 'session_info_update';
+  sessionKey: string | null;
+  runId: string | null;
+  phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
+  _meta?: Record<string, unknown>;
+}
+
+interface SessionEntryIngressEvent {
+  sessionUpdate: 'agent_message_chunk' | 'agent_message';
+  sessionKey: string | null;
+  runId: string | null;
+  laneKey: string;
+  entry: SessionTimelineEntry;
+  _meta?: Record<string, unknown>;
+}
+
+type GatewaySessionIngressEvent =
+  | SessionInfoIngressEvent
+  | SessionEntryIngressEvent;
 
 interface SessionRuntimeTimelineState {
   entries: SessionTimelineEntry[];
@@ -171,6 +211,24 @@ function normalizeSessionEntryStatus(value: unknown): SessionTimelineEntryStatus
     return 'pending';
   }
   return 'final';
+}
+
+function normalizeToolLifecyclePhase(value: unknown): 'start' | 'update' | 'result' | null {
+  const normalized = normalizeString(value);
+  if (normalized === 'start' || normalized === 'update' || normalized === 'result') {
+    return normalized;
+  }
+  return null;
+}
+
+function resolveToolLifecycleStatus(input: {
+  phase: 'start' | 'update' | 'result';
+  isError: boolean;
+}): 'running' | 'completed' | 'error' {
+  if (input.phase !== 'result') {
+    return 'running';
+  }
+  return input.isError ? 'error' : 'completed';
 }
 
 function normalizeWindowMode(value: unknown): SessionWindowMode {
@@ -282,11 +340,11 @@ function resolveEntryId(
     ?? message.messageId,
   ) ?? (() => {
     const runId = normalizeOptionalString(options.runId);
-    if (runId && typeof options.sequenceId === 'number' && Number.isFinite(options.sequenceId)) {
-      return `run:${runId}:seq:${options.sequenceId}`;
-    }
     if (runId) {
-      return `run:${runId}:${message.role || 'message'}:${index}`;
+      const agentId = normalizeOptionalString(message.agentId);
+      return agentId
+        ? `run:${runId}:agent:${agentId}:${message.role || 'message'}:${index}`
+        : `run:${runId}:${message.role || 'message'}:${index}`;
     }
     return `entry-${index}`;
   })();
@@ -383,6 +441,11 @@ function cloneTimelineEntryMessage(
     ...(Array.isArray(message.tool_calls) ? { tool_calls: message.tool_calls.map((item) => ({ ...item })) } : {}),
     ...(Array.isArray(message.toolCalls) ? { toolCalls: message.toolCalls.map((item) => ({ ...item })) } : {}),
     ...(Array.isArray(message.toolStatuses) ? { toolStatuses: message.toolStatuses.map((item) => ({ ...item })) } : {}),
+    ...(Array.isArray(message.taskCompletionEvents)
+      ? {
+          taskCompletionEvents: message.taskCompletionEvents.map((item) => ({ ...item })),
+        }
+      : {}),
     ...(Array.isArray(message._attachedFiles) ? { _attachedFiles: message._attachedFiles.map((item) => ({ ...item })) } : {}),
     ...(message.metadata ? { metadata: { ...message.metadata } } : {}),
   };
@@ -393,6 +456,27 @@ function cloneTimelineEntry(entry: SessionTimelineEntry): SessionTimelineEntry {
     ...entry,
     message: cloneTimelineEntryMessage(entry.message),
   };
+}
+
+function cloneExecutionGraphs(
+  executionGraphs: SessionExecutionGraph[],
+): SessionExecutionGraph[] {
+  return executionGraphs.map((graph) => ({
+    ...graph,
+    steps: graph.steps.map((step) => ({ ...step })),
+  }));
+}
+
+function filterExecutionGraphsForEntries(
+  executionGraphs: SessionExecutionGraph[],
+  entries: SessionTimelineEntry[],
+): SessionExecutionGraph[] {
+  const visibleEntryIds = new Set(entries.map((entry) => entry.entryId));
+  return executionGraphs.filter((graph) => visibleEntryIds.has(graph.anchorEntryId));
+}
+
+function cloneRenderRows(rows: SessionRenderRow[]): SessionRenderRow[] {
+  return structuredClone(rows);
 }
 
 function shouldPersistLiveRuntimeState(runtime: SessionRuntimeStateSnapshot): boolean {
@@ -483,6 +567,38 @@ function mergeAttachedFileRecords(
   return merged.length > 0 ? merged : undefined;
 }
 
+function mergeRecordListByKey(
+  existingItems: Array<Record<string, unknown>> | undefined,
+  incomingItems: Array<Record<string, unknown>> | undefined,
+  resolveKey: (item: Record<string, unknown>) => string,
+): Array<Record<string, unknown>> | undefined {
+  const merged: Array<Record<string, unknown>> = [];
+  const indexByKey = new Map<string, number>();
+  for (const item of existingItems ?? []) {
+    const key = resolveKey(item);
+    indexByKey.set(key || `existing:${merged.length}`, merged.length);
+    merged.push({ ...item });
+  }
+  for (const item of incomingItems ?? []) {
+    const key = resolveKey(item);
+    if (!key || !indexByKey.has(key)) {
+      indexByKey.set(key || `incoming:${merged.length}`, merged.length);
+      merged.push({ ...item });
+      continue;
+    }
+    const index = indexByKey.get(key)!;
+    merged[index] = {
+      ...merged[index],
+      ...item,
+    };
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function resolveToolStatusKey(item: Record<string, unknown>): string {
+  return normalizeString(item.toolCallId ?? item.id);
+}
+
 function resolveMergedEntryText(
   existing: SessionTimelineEntry | null,
   incoming: SessionTimelineEntry,
@@ -525,6 +641,14 @@ function findTimelineEntryIndex(
 
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const candidate = entries[index]!;
+    const shouldAllowFallbackMerge = (
+      candidate.entryId === incoming.entryId
+      || candidate.status === 'streaming'
+      || incoming.status === 'streaming'
+    );
+    if (!shouldAllowFallbackMerge) {
+      continue;
+    }
     if (
       candidate.role === incoming.role
       && (candidate.runId ?? null) === (incoming.runId ?? null)
@@ -552,6 +676,11 @@ function mergeTimelineEntry(
       existing?.message._attachedFiles,
       incoming.message._attachedFiles,
     ),
+    toolStatuses: mergeRecordListByKey(
+      existing?.message.toolStatuses,
+      incoming.message.toolStatuses,
+      resolveToolStatusKey,
+    ),
   };
 
   return {
@@ -571,11 +700,51 @@ function upsertTimelineEntry(
   incoming: SessionTimelineEntry,
 ): SessionTimelineEntry[] {
   const index = findTimelineEntryIndex(entries, incoming);
+  const resolveInsertionIndex = (
+    candidates: SessionTimelineEntry[],
+    entry: SessionTimelineEntry,
+    fallbackIndex: number,
+  ): number => {
+    const runId = normalizeString(entry.runId);
+    const sequenceId = entry.sequenceId;
+    if (!runId || sequenceId == null) {
+      return fallbackIndex;
+    }
+
+    let lastSameRunIndex = -1;
+    for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+      const candidate = candidates[candidateIndex]!;
+      if (normalizeString(candidate.runId) !== runId) {
+        continue;
+      }
+      const candidateSequenceId = candidate.sequenceId;
+      if (candidateSequenceId == null) {
+        continue;
+      }
+      if (candidateSequenceId > sequenceId) {
+        return candidateIndex;
+      }
+      lastSameRunIndex = candidateIndex;
+    }
+
+    if (lastSameRunIndex >= 0) {
+      return lastSameRunIndex + 1;
+    }
+    return fallbackIndex;
+  };
+
   if (index < 0) {
-    return [...entries, cloneTimelineEntry(incoming)];
+    const nextEntries = [...entries];
+    const insertionIndex = resolveInsertionIndex(nextEntries, incoming, nextEntries.length);
+    nextEntries.splice(insertionIndex, 0, cloneTimelineEntry(incoming));
+    return nextEntries;
   }
+
+  const mergedEntry = mergeTimelineEntry(entries[index]!, incoming);
   const nextEntries = [...entries];
-  nextEntries[index] = mergeTimelineEntry(entries[index]!, incoming);
+  nextEntries.splice(index, 1);
+  const insertionIndex = resolveInsertionIndex(nextEntries, mergedEntry, Math.min(index, nextEntries.length));
+  nextEntries.splice(insertionIndex, 0, mergedEntry);
   return nextEntries;
 }
 
@@ -601,6 +770,7 @@ function toTranscriptMessage(message: SessionTimelineEntryMessage): SessionTrans
     ...(message.name ? { name: message.name } : {}),
     ...(message.details !== undefined ? { details: message.details } : {}),
     ...(message.toolStatuses ? { toolStatuses: message.toolStatuses } : {}),
+    ...(message.taskCompletionEvents ? { taskCompletionEvents: message.taskCompletionEvents } : {}),
     ...(message.isError != null ? { isError: message.isError } : {}),
   };
 }
@@ -656,6 +826,10 @@ function normalizeConversationMessagePayload(
   const content = Object.prototype.hasOwnProperty.call(rawMessage, 'content')
     ? rawMessage.content
     : '';
+  const taskCompletionEvents = normalizeTaskCompletionEvents({
+    taskCompletionEvents: rawMessage.taskCompletionEvents,
+    internalEvents: rawMessage.internalEvents,
+  });
   const normalizedMessage: SessionTimelineEntryMessage = {
     role,
     content,
@@ -669,6 +843,8 @@ function normalizeConversationMessagePayload(
     ...(normalizeString(rawMessage.agentId ?? payload.agentId) ? { agentId: normalizeString(rawMessage.agentId ?? payload.agentId) } : {}),
     ...(normalizeString(rawMessage.toolCallId) ? { toolCallId: normalizeString(rawMessage.toolCallId) } : {}),
     ...(normalizeString(rawMessage.toolName ?? rawMessage.name) ? { toolName: normalizeString(rawMessage.toolName ?? rawMessage.name) } : {}),
+    ...(Array.isArray(rawMessage.toolStatuses) ? { toolStatuses: rawMessage.toolStatuses.map((item) => ({ ...(isRecord(item) ? item : {}) })) } : {}),
+    ...(taskCompletionEvents ? { taskCompletionEvents } : {}),
     ...(Object.prototype.hasOwnProperty.call(rawMessage, 'details') ? { details: rawMessage.details } : {}),
     ...(typeof rawMessage.isError === 'boolean' ? { isError: rawMessage.isError } : {}),
   };
@@ -682,9 +858,94 @@ function normalizeConversationMessagePayload(
   };
 }
 
+function buildToolLifecycleMessage(input: {
+  runId: string;
+  sequenceId: number;
+  timestamp: number;
+  phase: 'start' | 'update' | 'result';
+  toolCallId: string;
+  name?: string;
+  args?: unknown;
+  partialResult?: unknown;
+  result?: unknown;
+  isError: boolean;
+}): SessionTimelineEntryMessage {
+  const toolStatus = {
+    id: input.toolCallId,
+    toolCallId: input.toolCallId,
+    ...(input.name ? { name: input.name } : {}),
+    status: resolveToolLifecycleStatus({
+      phase: input.phase,
+      isError: input.isError,
+    }),
+    phase: input.phase,
+    ...(Object.prototype.hasOwnProperty.call(input, 'partialResult') ? { partialResult: input.partialResult } : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, 'result') ? { result: input.result } : {}),
+    isError: input.isError,
+    updatedAt: input.timestamp,
+  };
+
+  return {
+    role: 'assistant',
+    id: `run:${input.runId}:tool:${input.toolCallId}`,
+    content: input.phase === 'start'
+      ? [{
+          type: 'toolCall',
+          id: input.toolCallId,
+          name: input.name,
+          input: input.args,
+        }]
+      : '',
+    timestamp: input.timestamp,
+    toolCallId: input.toolCallId,
+    ...(input.name ? { toolName: input.name } : {}),
+    toolStatuses: [toolStatus],
+    isError: input.isError,
+  };
+}
+
+function normalizeToolLifecyclePayload(
+  payload: GatewayConversationToolLifecyclePayload,
+): { sessionKey: string; runId: string; sequenceId: number; phase: 'start' | 'update' | 'result'; message: SessionTimelineEntryMessage } | null {
+  const phase = normalizeToolLifecyclePhase(payload.phase);
+  const runId = normalizeString(payload.runId);
+  const sessionKey = normalizeString(payload.sessionKey);
+  const sequenceId = normalizeFiniteNumber(payload.sequenceId);
+  const timestamp = normalizeFiniteNumber(payload.timestamp);
+  const toolCallId = normalizeString(payload.toolCallId);
+  const name = normalizeString(payload.name);
+  if (!phase || !runId || !sessionKey || sequenceId == null || timestamp == null || !toolCallId) {
+    return null;
+  }
+  if (phase === 'start' && !name) {
+    return null;
+  }
+
+  const message = buildToolLifecycleMessage({
+    runId,
+    sequenceId,
+    timestamp,
+    phase,
+    toolCallId,
+    ...(name ? { name } : {}),
+    ...(Object.prototype.hasOwnProperty.call(payload, 'args') ? { args: payload.args } : {}),
+    ...(Object.prototype.hasOwnProperty.call(payload, 'partialResult') ? { partialResult: payload.partialResult } : {}),
+    ...(Object.prototype.hasOwnProperty.call(payload, 'result') ? { result: payload.result } : {}),
+    isError: payload.isError === true,
+  });
+
+  return {
+    sessionKey,
+    runId,
+    sequenceId,
+    phase,
+    message,
+  };
+}
+
 export function buildSessionUpdateEventsFromGatewayConversationEvent(
   payload: unknown,
-): SessionUpdateEvent[] {
+): GatewaySessionIngressEvent[] {
   const input = isRecord(payload) ? payload : null;
   if (!input) {
     return [];
@@ -700,9 +961,32 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
       sessionKey,
       runId,
       phase,
-      laneKey: 'main',
-      runtime: createEmptySessionRuntimeState(),
-      window: createLatestWindowState(0),
+    }];
+  }
+
+  if (input.type === 'tool.lifecycle') {
+    const toolLifecycle = normalizeToolLifecyclePayload(input.event as GatewayConversationToolLifecyclePayload);
+    if (!toolLifecycle) {
+      return [];
+    }
+    const entry = toTimelineEntry(
+      toolLifecycle.sessionKey,
+      toolLifecycle.message,
+      {
+        runId: toolLifecycle.runId,
+        sequenceId: toolLifecycle.sequenceId,
+        status: toolLifecycle.phase === 'result'
+          ? (toolLifecycle.message.isError ? 'error' : 'final')
+          : 'streaming',
+        index: 0,
+      },
+    );
+    return [{
+      sessionUpdate: 'agent_message_chunk',
+      sessionKey: toolLifecycle.sessionKey,
+      runId: toolLifecycle.runId,
+      laneKey: entry.laneKey,
+      entry,
     }];
   }
 
@@ -728,26 +1012,22 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
   const meta = buildMemberMeta(normalizeString(conversation.message.agentId));
   if (conversation.status === 'streaming') {
     return [{
-      sessionUpdate: 'agent_message_chunk',
+        sessionUpdate: 'agent_message_chunk',
+        sessionKey: conversation.sessionKey,
+        runId: conversation.runId,
+        laneKey,
+        entry,
+        ...(meta ? { _meta: meta } : {}),
+      }];
+  }
+  return [{
+      sessionUpdate: 'agent_message',
       sessionKey: conversation.sessionKey,
       runId: conversation.runId,
       laneKey,
       entry,
-      runtime: createEmptySessionRuntimeState(),
-      window: createLatestWindowState(0),
       ...(meta ? { _meta: meta } : {}),
     }];
-  }
-  return [{
-    sessionUpdate: 'agent_message',
-    sessionKey: conversation.sessionKey,
-    runId: conversation.runId,
-    laneKey,
-    entry,
-    runtime: createEmptySessionRuntimeState(),
-    window: createLatestWindowState(0),
-    ...(meta ? { _meta: meta } : {}),
-  }];
 }
 
 export class SessionRuntimeService {
@@ -936,6 +1216,23 @@ export class SessionRuntimeService {
     return cloneTimelineEntry(state.entries[findTimelineEntryIndex(state.entries, entry)]!);
   }
 
+  private buildExecutionGraphs(
+    sessionKey: string,
+    entries: SessionTimelineEntry[],
+  ): SessionExecutionGraph[] {
+    return buildSessionExecutionGraphs({
+      sessionKey,
+      entries,
+      resolveChildEntries: (childSessionKey) => {
+        const childState = this.getSessionState(childSessionKey);
+        if (!childState.hydrated) {
+          this.ensureSessionHydrated(childSessionKey, childState);
+        }
+        return childState.entries.map((entry) => cloneTimelineEntry(entry));
+      },
+    });
+  }
+
   private buildSnapshot(
     sessionKey: string,
     state: SessionRuntimeTimelineState,
@@ -947,9 +1244,19 @@ export class SessionRuntimeService {
   ): SessionStateSnapshot {
     const window = cloneSessionWindowState(options.window ?? state.window);
     const entries = options.entries ?? sliceEntriesForWindow(state.entries, window);
+    const executionGraphs = filterExecutionGraphsForEntries(
+      this.buildExecutionGraphs(sessionKey, state.entries),
+      entries,
+    );
+    const rows = buildSessionRenderRows({
+      sessionKey,
+      entries,
+      executionGraphs: cloneExecutionGraphs(executionGraphs),
+      runtime: cloneSessionRuntimeState(state.runtime),
+    });
     return {
       sessionKey,
-      entries: entries.map((entry) => cloneTimelineEntry(entry)),
+      rows: cloneRenderRows(rows),
       replayComplete: options.replayComplete ?? true,
       runtime: cloneSessionRuntimeState(state.runtime),
       window,
@@ -1151,34 +1458,76 @@ export class SessionRuntimeService {
     return translated.map((event) => {
       const sessionKey = normalizeString(event.sessionKey);
       if (!sessionKey) {
-        return event;
+        const emptySnapshot: SessionStateSnapshot = {
+          sessionKey: '',
+          rows: [],
+          replayComplete: true,
+          runtime: createEmptySessionRuntimeState(),
+          window: createLatestWindowState(0),
+        };
+        if (event.sessionUpdate === 'session_info_update') {
+          return {
+            sessionUpdate: 'session_info_update',
+            sessionKey: event.sessionKey,
+            runId: event.runId,
+            phase: event.phase,
+            snapshot: emptySnapshot,
+            ...(event._meta ? { _meta: event._meta } : {}),
+          };
+        }
+        return {
+          sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          row: null,
+          snapshot: emptySnapshot,
+          ...(event._meta ? { _meta: event._meta } : {}),
+        };
       }
       this.activateSession(sessionKey);
       if (event.sessionUpdate === 'session_info_update') {
-        const runtime = this.resolveLifecycleRuntime(sessionKey, {
+        this.resolveLifecycleRuntime(sessionKey, {
           phase: event.phase,
           runId: event.runId,
         });
         const state = this.getSessionState(sessionKey);
+        const snapshot = this.buildSnapshot(sessionKey, state, {
+          window: state.window.totalEntryCount > 0
+            ? state.window
+            : createLatestWindowState(state.entries.length),
+          replayComplete: true,
+        });
         return {
-          ...event,
-          runtime,
-          window: cloneSessionWindowState(state.window),
+          sessionUpdate: 'session_info_update',
+          sessionKey: event.sessionKey,
+          runId: event.runId,
+          phase: event.phase,
+          snapshot,
+          ...(event._meta ? { _meta: event._meta } : {}),
         };
       }
 
       const mergedEntry = this.upsertSessionEntry(sessionKey, event.entry);
-      const runtime = this.resolveMessageRuntime(sessionKey, {
+      this.resolveMessageRuntime(sessionKey, {
         runId: event.runId,
         entry: mergedEntry,
         sessionUpdate: event.sessionUpdate,
       });
       const state = this.getSessionState(sessionKey);
+      const snapshot = this.buildSnapshot(sessionKey, state, {
+        window: state.window.totalEntryCount > 0
+          ? state.window
+          : createLatestWindowState(state.entries.length),
+        replayComplete: true,
+      });
+      const row = snapshot.rows.find((candidate) => candidate.entryId === mergedEntry.entryId) ?? null;
       return {
-        ...event,
-        entry: mergedEntry,
-        runtime,
-        window: cloneSessionWindowState(state.window),
+        sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
+        sessionKey: event.sessionKey,
+        runId: event.runId,
+        row,
+        snapshot,
+        ...(event._meta ? { _meta: event._meta } : {}),
       };
     });
   }
@@ -1526,16 +1875,17 @@ export class SessionRuntimeService {
       pendingFinal: false,
       lastUserMessageAt: entry.timestamp ?? Date.now(),
     });
+    const snapshot = {
+      ...this.buildLatestSnapshot(sessionKey, state),
+      runtime,
+    };
     const result: SessionPromptResult = {
       success: true,
       sessionKey,
       runId: runId || null,
       promptId,
-      entry,
-      snapshot: {
-        ...this.buildLatestSnapshot(sessionKey, state),
-        runtime,
-      },
+      row: snapshot.rows.find((candidate) => candidate.entryId === entry.entryId) ?? null,
+      snapshot,
     };
     return {
       status: 200,

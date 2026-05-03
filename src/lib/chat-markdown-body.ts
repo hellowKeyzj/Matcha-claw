@@ -1,5 +1,5 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionMessageRow } from '../../runtime-host/shared/session-adapter-types';
 import {
   buildMarkdownCacheKey,
   getOrBuildMarkdownBody,
@@ -7,7 +7,6 @@ import {
   prewarmMarkdownBody,
   type MarkdownBodyRenderResult,
 } from '@/pages/Chat/md-pipeline';
-import { extractEntryText } from '@/pages/Chat/message-utils';
 import {
   createFileHintPathResolver,
   linkifyFileHintsInMarkdown,
@@ -19,58 +18,45 @@ interface PreparedAssistantMarkdownBodyInput {
   markdown: string;
 }
 
-export function getTimelineEntryAttachedFiles(entry: SessionTimelineEntry): AttachedFileMeta[] {
-  return Array.isArray(entry.message._attachedFiles)
-    ? entry.message._attachedFiles as unknown as AttachedFileMeta[]
+export function getMessageRowAttachedFiles(row: SessionMessageRow): AttachedFileMeta[] {
+  return Array.isArray(row.attachedFiles)
+    ? row.attachedFiles as unknown as AttachedFileMeta[]
     : [];
 }
 
-export function buildAssistantMarkdownCacheKey(
-  entry: SessionTimelineEntry,
-): string {
-  const text = extractEntryText(entry);
-  const attachedFiles = getTimelineEntryAttachedFiles(entry);
-  const baseCacheKey = buildMarkdownCacheKey({
-    messageId: entry.entryId,
-    role: entry.role,
-    timestamp: entry.timestamp,
-    text,
-    attachedFiles,
+export function buildAssistantMarkdownCacheKey(row: SessionMessageRow): string {
+  return buildMarkdownCacheKey({
+    messageId: row.messageId ?? row.entryId ?? row.key,
+    role: row.role,
+    timestamp: row.createdAt,
+    text: row.text,
+    attachedFiles: getMessageRowAttachedFiles(row),
   });
-  return baseCacheKey;
 }
 
-function buildAssistantMarkdownBodyInput(
-  entry: SessionTimelineEntry,
-): PreparedAssistantMarkdownBodyInput {
-  const text = extractEntryText(entry);
-  const attachedFiles = getTimelineEntryAttachedFiles(entry);
+function buildAssistantMarkdownBodyInput(row: SessionMessageRow): PreparedAssistantMarkdownBodyInput {
+  const attachedFiles = getMessageRowAttachedFiles(row);
   const resolveFileHintPath = createFileHintPathResolver(attachedFiles);
   const markdown = linkifyFileHintsInMarkdown(
-    migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
+    migrateLegacyMarkdownFileLinks(row.text, resolveFileHintPath),
     resolveFileHintPath,
   );
-
   return {
-    cacheKey: buildAssistantMarkdownCacheKey(entry),
+    cacheKey: buildAssistantMarkdownCacheKey(row),
     markdown,
   };
 }
 
-export function peekAssistantMarkdownBody(
-  entry: SessionTimelineEntry,
-): MarkdownBodyRenderResult | undefined {
-  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(entry));
+export function peekAssistantMarkdownBody(row: SessionMessageRow): MarkdownBodyRenderResult | undefined {
+  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(row));
 }
 
-export function prewarmAssistantMarkdownBody(
-  entry: SessionTimelineEntry,
-): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(entry);
+export function prewarmAssistantMarkdownBody(row: SessionMessageRow): MarkdownBodyRenderResult | undefined {
+  const cached = peekAssistantMarkdownBody(row);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(entry);
+  const input = buildAssistantMarkdownBodyInput(row);
   if (!input.markdown.trim()) {
     return undefined;
   }
@@ -79,25 +65,21 @@ export function prewarmAssistantMarkdownBody(
   });
 }
 
-export function prewarmAssistantMarkdownBodies(
-  entries: SessionTimelineEntry[],
-): void {
-  for (const entry of entries) {
-    if (entry.role !== 'assistant') {
+export function prewarmAssistantMarkdownBodies(rows: SessionMessageRow[]): void {
+  for (const row of rows) {
+    if (row.role !== 'assistant') {
       continue;
     }
-    prewarmAssistantMarkdownBody(entry);
+    prewarmAssistantMarkdownBody(row);
   }
 }
 
-export function getOrBuildAssistantMarkdownBody(
-  entry: SessionTimelineEntry,
-): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(entry);
+export function getOrBuildAssistantMarkdownBody(row: SessionMessageRow): MarkdownBodyRenderResult | undefined {
+  const cached = peekAssistantMarkdownBody(row);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(entry);
+  const input = buildAssistantMarkdownBodyInput(row);
   if (!input.markdown.trim()) {
     return undefined;
   }

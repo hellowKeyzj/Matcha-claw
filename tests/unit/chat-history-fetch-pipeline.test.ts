@@ -3,7 +3,7 @@ import {
   CHAT_HISTORY_FULL_LIMIT,
   fetchHistoryWindow,
 } from '@/stores/chat/history-fetch-helpers';
-import type { RawMessage } from '@/stores/chat/types';
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 const hostSessionLoadMock = vi.fn();
 
@@ -132,3 +132,4 @@ describe('chat history fetch pipeline helpers', () => {
     expect(result.isAtLatest).toBe(true);
   });
 });
+

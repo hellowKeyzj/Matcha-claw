@@ -1,4 +1,7 @@
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import type {
+  SessionTaskCompletionEvent,
+  SessionTimelineEntry,
+} from '../../../runtime-host/shared/session-adapter-types';
 import { sanitizeCanonicalUserText } from '@/stores/chat/message-helpers';
 
 interface ContentBlockLike {
@@ -140,32 +143,15 @@ export function extractEntryToolUse(entry: SessionTimelineEntry): Array<{ id: st
       }
     }
   }
-
-  if (tools.length === 0) {
-    const toolCalls = msg.tool_calls ?? msg.toolCalls;
-    if (Array.isArray(toolCalls)) {
-      for (const tc of toolCalls as Array<Record<string, unknown>>) {
-        const fn = (tc.function ?? tc) as Record<string, unknown>;
-        const name = typeof fn.name === 'string' ? fn.name : '';
-        if (!name) {
-          continue;
-        }
-        let input: unknown;
-        try {
-          input = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : fn.arguments ?? fn.input;
-        } catch {
-          input = fn.arguments;
-        }
-        tools.push({
-          id: typeof tc.id === 'string' ? tc.id : '',
-          name,
-          input,
-        });
-      }
-    }
-  }
-
   return tools;
+}
+
+export function readEntryTaskCompletionEvents(
+  entry: SessionTimelineEntry,
+): SessionTaskCompletionEvent[] {
+  return Array.isArray(entry.message.taskCompletionEvents)
+    ? entry.message.taskCompletionEvents
+    : [];
 }
 
 export function formatTimestamp(timestamp: unknown): string {

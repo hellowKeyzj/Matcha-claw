@@ -4,9 +4,12 @@ import { ChatInput } from '@/pages/Chat/ChatInput';
 import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import { ChatListSurface } from '@/pages/Chat/components/ChatList';
+import type { ChatMessageRow, ChatRow, ChatToolActivityRow } from '@/pages/Chat/chat-row-model';
 
 const chatMessageRenderSpy = vi.fn();
 const chatMessagePropsSpy = vi.fn();
+const chatToolActivityRenderSpy = vi.fn();
+const chatToolActivityPropsSpy = vi.fn();
 const pendingAssistantShellPropsSpy = vi.fn();
 
 vi.mock('react-i18next', () => ({
@@ -26,6 +29,17 @@ vi.mock('@/pages/Chat/ChatMessage', async () => {
   };
 });
 
+vi.mock('@/pages/Chat/ChatToolActivityRow', async () => {
+  const React = await import('react');
+  return {
+    ChatToolActivityRowView: React.memo(function MockChatToolActivityRow(props: unknown) {
+      chatToolActivityRenderSpy();
+      chatToolActivityPropsSpy(props);
+      return <div data-testid="chat-tool-activity-item" />;
+    }),
+  };
+});
+
 vi.mock('@/pages/Chat/pending-assistant-shell', () => ({
   PendingAssistantShell: (props: unknown) => {
     pendingAssistantShellPropsSpy(props);
@@ -41,6 +55,8 @@ describe('chat content rail layout', () => {
   beforeEach(() => {
     chatMessageRenderSpy.mockClear();
     chatMessagePropsSpy.mockClear();
+    chatToolActivityRenderSpy.mockClear();
+    chatToolActivityPropsSpy.mockClear();
     pendingAssistantShellPropsSpy.mockClear();
   });
 
@@ -61,6 +77,90 @@ describe('chat content rail layout', () => {
     return store;
   }
 
+  function buildTestRow(input: {
+    key: string;
+    message: Record<string, unknown>;
+    text?: string;
+    assistantTurnKey?: string | null;
+    assistantLaneKey?: string | null;
+    assistantLaneAgentId?: string | null;
+    assistantPresentation?: ChatMessageRow['assistantPresentation'];
+  }): ChatMessageRow {
+    const role = input.message.role === 'user' || input.message.role === 'system'
+      ? input.message.role
+      : 'assistant';
+    return {
+      kind: 'message',
+      key: input.key,
+      entry: {
+        entryId: input.key,
+        sessionKey: 'agent:test:main',
+        laneKey: input.assistantLaneKey ?? 'main',
+        turnKey: input.assistantTurnKey ?? input.key,
+        role: typeof input.message.role === 'string' ? input.message.role as never : 'assistant',
+        status: input.message.streaming ? 'streaming' : 'final',
+        text: input.text ?? (typeof input.message.content === 'string' ? input.message.content : ''),
+        message: input.message as never,
+      },
+      role,
+      text: input.text ?? (typeof input.message.content === 'string' ? input.message.content : ''),
+      renderSignature: input.key,
+      assistantTurnKey: input.assistantTurnKey ?? null,
+      assistantLaneKey: input.assistantLaneKey ?? null,
+      assistantLaneAgentId: input.assistantLaneAgentId ?? null,
+      assistantPresentation: input.assistantPresentation ?? null,
+      assistantMarkdownHtml: null,
+      messageView: {
+        thinking: null,
+        toolUses: [],
+        images: [],
+        attachedFiles: [],
+      },
+    };
+  }
+
+  function buildToolActivityRow(input: {
+    key: string;
+    message: Record<string, unknown>;
+    assistantTurnKey?: string | null;
+    assistantLaneKey?: string | null;
+    assistantLaneAgentId?: string | null;
+    assistantPresentation?: ChatToolActivityRow['assistantPresentation'];
+  }): ChatToolActivityRow {
+    return {
+      kind: 'tool-activity',
+      key: input.key,
+      entry: {
+        entryId: input.key,
+        sessionKey: 'agent:test:main',
+        laneKey: input.assistantLaneKey ?? 'main',
+        turnKey: input.assistantTurnKey ?? input.key,
+        role: 'assistant',
+        status: input.message.streaming ? 'streaming' : 'final',
+        text: '',
+        message: input.message as never,
+      },
+      role: 'assistant',
+      text: '',
+      renderSignature: input.key,
+      assistantTurnKey: input.assistantTurnKey ?? null,
+      assistantLaneKey: input.assistantLaneKey ?? null,
+      assistantLaneAgentId: input.assistantLaneAgentId ?? null,
+      assistantPresentation: input.assistantPresentation ?? null,
+      toolUses: [{
+        id: 'tool-1',
+        name: 'read_file',
+        input: { filePath: 'README.md' },
+      }],
+      toolStatuses: [{
+        toolCallId: 'tool-1',
+        name: 'read_file',
+        status: 'completed',
+      }],
+      isStreaming: false,
+    };
+  }
+
   it('chat list uses a centered narrow content rail with composer-driven viewport bottom padding', () => {
     const { container } = render(
       <ChatListSurface
@@ -74,15 +174,14 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'row:1',
           message: {
             id: 'message-1',
             role: 'assistant',
             content: 'hello',
           },
-        } as never]}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -92,7 +191,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -130,10 +228,8 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'assistant-a-row',
-          role: 'assistant',
           text: 'Alpha',
           assistantTurnKey: 'team-turn-1',
           assistantLaneKey: 'team:agent-a',
@@ -141,13 +237,6 @@ describe('chat content rail layout', () => {
           assistantPresentation: {
             agentId: 'agent-a',
             agentName: 'Agent A',
-          },
-          assistantMarkdownHtml: null,
-          messageView: {
-            thinking: null,
-            toolUses: [],
-            images: [],
-            attachedFiles: [],
           },
           message: {
             id: 'assistant-a',
@@ -157,7 +246,7 @@ describe('chat content rail layout', () => {
             requestId: 'user-1',
             content: 'Alpha',
           },
-        } as never]}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -167,7 +256,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -193,15 +281,14 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'row:1',
           message: {
             id: 'message-1',
             role: 'assistant',
             content: 'hello',
           },
-        } as never]}
+        })]}
         showLoadOlder
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -211,7 +298,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -243,15 +329,14 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'row:1',
           message: {
             id: 'message-1',
             role: 'assistant',
             content: 'hello',
           },
-        } as never]}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -261,7 +346,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -291,15 +375,14 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'assistant-1',
           message: {
             id: 'assistant-1',
             role: 'assistant',
             content: 'hello',
           },
-        } as never]}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -310,14 +393,14 @@ describe('chat content rail layout', () => {
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map([['assistant-1', [{
             id: 'graph-1',
-            anchorMessageKey: 'assistant-1',
-            triggerMessageKey: 'assistant-1',
+            anchorEntryId: 'assistant-1',
+            triggerEntryId: 'assistant-1',
+            childSessionKey: 'child-1',
             agentLabel: 'main',
             sessionLabel: 'session',
             steps: [],
             active: false,
           }]]]),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -330,8 +413,7 @@ describe('chat content rail layout', () => {
   });
 
   it('jump-to-bottom chrome toggle should not rerender static message rows', () => {
-    const rows = [{
-      kind: 'message',
+    const rows: ChatRow[] = [buildTestRow({
       key: 'assistant-1',
       message: {
         id: 'assistant-1',
@@ -339,10 +421,9 @@ describe('chat content rail layout', () => {
         content: 'hello',
         streaming: false,
       },
-    }] as never;
+    })];
     const executionGraphSlots = {
       anchoredGraphsByRowKey: new Map(),
-      suppressedToolCardRowKeys: new Set(),
     };
     const commonProps = {
       messagesViewportRef: { current: null },
@@ -384,6 +465,58 @@ describe('chat content rail layout', () => {
     expect(screen.getByRole('button', { name: 'Jump to bottom' })).toBeInTheDocument();
   });
 
+  it('tool activity rows are dispatched to the dedicated tool row component instead of ChatMessage', () => {
+    render(
+      <ChatListSurface
+        messagesViewportRef={{ current: null }}
+        messageContentRef={{ current: null }}
+        isEmptyState={false}
+        showBlockingLoading={false}
+        showBlockingError={false}
+        errorMessage={null}
+        onPointerDown={vi.fn()}
+        onScroll={vi.fn()}
+        onTouchMove={vi.fn()}
+        onWheel={vi.fn()}
+        rows={[buildToolActivityRow({
+          key: 'tool-row-1',
+          message: {
+            id: 'assistant-tool-1',
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'tool-1',
+              name: 'read_file',
+              input: { filePath: 'README.md' },
+            }],
+          },
+        })]}
+        showLoadOlder={false}
+        isLoadingOlder={false}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        scrollChromeStore={buildScrollChromeStore()}
+        showThinking={false}
+        userAvatarImageUrl={null}
+        executionGraphSlots={{
+          anchoredGraphsByRowKey: new Map(),
+        }}
+        pendingAssistantShells={[]}
+        onJumpToRowKey={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-tool-activity-item')).toBeInTheDocument();
+    expect(chatToolActivityRenderSpy).toHaveBeenCalledTimes(1);
+    expect(chatMessageRenderSpy).toHaveBeenCalledTimes(0);
+    expect(chatToolActivityPropsSpy.mock.calls[0]?.[0]).toMatchObject({
+      row: {
+        key: 'tool-row-1',
+        kind: 'tool-activity',
+      },
+    });
+  });
+
   it('每条 streaming assistant row 只接收自己的 tool 状态，不复用全局单值', () => {
     render(
       <ChatListSurface
@@ -397,8 +530,7 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'assistant-a',
           message: {
             id: 'assistant-a',
@@ -412,8 +544,7 @@ describe('chat content rail layout', () => {
               updatedAt: 1,
             }],
           },
-        }, {
-          kind: 'message',
+        }), buildTestRow({
           key: 'assistant-b',
           message: {
             id: 'assistant-b',
@@ -427,7 +558,7 @@ describe('chat content rail layout', () => {
               updatedAt: 2,
             }],
           },
-        }] as never}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -437,7 +568,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
@@ -447,8 +577,10 @@ describe('chat content rail layout', () => {
     expect(chatMessagePropsSpy).toHaveBeenCalledTimes(2);
     expect(chatMessagePropsSpy.mock.calls[0]?.[0]).toMatchObject({
       row: {
-        message: {
-          id: 'assistant-a',
+        entry: {
+          message: {
+            id: 'assistant-a',
+          },
         },
       },
       streamingTools: [{
@@ -459,8 +591,10 @@ describe('chat content rail layout', () => {
     });
     expect(chatMessagePropsSpy.mock.calls[1]?.[0]).toMatchObject({
       row: {
-        message: {
-          id: 'assistant-b',
+        entry: {
+          message: {
+            id: 'assistant-b',
+          },
         },
       },
       streamingTools: [{
@@ -484,51 +618,33 @@ describe('chat content rail layout', () => {
         onScroll={vi.fn()}
         onTouchMove={vi.fn()}
         onWheel={vi.fn()}
-        rows={[{
-          kind: 'message',
+        rows={[buildTestRow({
           key: 'assistant-a',
-          role: 'assistant',
           text: 'Alpha',
           assistantPresentation: {
             agentId: 'agent-a',
             agentName: 'Agent A',
           },
-          messageView: {
-            thinking: null,
-            toolUses: [],
-            images: [],
-            attachedFiles: [],
-          },
-          assistantMarkdownHtml: null,
           message: {
             id: 'assistant-a',
             role: 'assistant',
             agentId: 'agent-a',
             content: 'Alpha',
           },
-        }, {
-          kind: 'message',
+        }), buildTestRow({
           key: 'assistant-b',
-          role: 'assistant',
           text: 'Beta',
           assistantPresentation: {
             agentId: 'agent-b',
             agentName: 'Agent B',
           },
-          messageView: {
-            thinking: null,
-            toolUses: [],
-            images: [],
-            attachedFiles: [],
-          },
-          assistantMarkdownHtml: null,
           message: {
             id: 'assistant-b',
             role: 'assistant',
             agentId: 'agent-b',
             content: 'Beta',
           },
-        }] as never}
+        })]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -538,7 +654,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[{
           key: 'pending:agent-a',
@@ -627,7 +742,6 @@ describe('chat content rail layout', () => {
         userAvatarImageUrl={null}
         executionGraphSlots={{
           anchoredGraphsByRowKey: new Map(),
-          suppressedToolCardRowKeys: new Set(),
         }}
         pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}

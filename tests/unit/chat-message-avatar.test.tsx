@@ -1,16 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
+import { ChatToolActivityRowView } from '@/pages/Chat/ChatToolActivityRow';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
-import type { RawMessage } from '@/stores/chat';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 
 function buildRow(message: RawMessage) {
-  const row = buildStaticChatRows({
+  return buildStaticChatRows({
     sessionKey: 'agent:test:main',
     entries: buildTimelineEntriesFromMessages('agent:test:main', [message]),
   })[0]!;
+}
+
+function buildMessageRow(message: RawMessage) {
+  const row = buildRow(message);
+  if (row.kind !== 'message') {
+    throw new Error('expected message row');
+  }
   if (row.role === 'assistant') {
     return {
       ...row,
@@ -25,6 +33,22 @@ function buildRow(message: RawMessage) {
   return row;
 }
 
+function buildToolActivityRow(message: RawMessage) {
+  const row = buildRow(message);
+  if (row.kind !== 'tool-activity') {
+    throw new Error('expected tool activity row');
+  }
+  return {
+    ...row,
+    assistantPresentation: {
+      agentId: 'writer',
+      agentName: 'Writer',
+      avatarSeed: 'agent:writer',
+      avatarStyle: 'bottts' as const,
+    },
+  };
+}
+
 describe('chat message avatar', () => {
   it('assistant message renders generated agent avatar', () => {
     const message: RawMessage = {
@@ -34,7 +58,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        row={buildRow(message)}
+        row={buildMessageRow(message)}
         showThinking={false}
       />,
     );
@@ -53,7 +77,7 @@ describe('chat message avatar', () => {
 
     const { container } = render(
       <ChatMessage
-        row={buildRow(message)}
+        row={buildMessageRow(message)}
         showThinking={false}
       />,
     );
@@ -72,6 +96,40 @@ describe('chat message avatar', () => {
     expect(body?.className).toContain(CHAT_LAYOUT_TOKENS.assistantSurface);
   });
 
+  it('tool-only activity row renders expandable tool cards without empty assistant body shell', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'tool-1',
+        name: 'read',
+        input: { filePath: 'README.md' },
+      }],
+      toolStatuses: [{
+        toolCallId: 'tool-1',
+        name: 'read',
+        status: 'running',
+        updatedAt: 1,
+      }],
+      streaming: true,
+    };
+
+    const { container } = render(
+      <ChatToolActivityRowView
+        row={buildToolActivityRow(message)}
+      />,
+    );
+
+    expect(container.querySelector('[data-chat-body-mode="streaming"]')).toBeNull();
+    const toggle = screen.getByText('read').closest('button') as HTMLButtonElement | null;
+    expect(toggle).not.toBeNull();
+    act(() => {
+      toggle?.click();
+    });
+    expect(screen.getByText(/README\.md/)).toBeInTheDocument();
+    expect(screen.getAllByText('read').length).toBeGreaterThanOrEqual(1);
+  });
+
   it('user message renders custom avatar image when provided', () => {
     const message: RawMessage = {
       role: 'user',
@@ -81,7 +139,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        row={buildRow(message)}
+        row={buildMessageRow(message)}
         showThinking={false}
         userAvatarImageUrl={avatarDataUrl}
       />,
@@ -106,7 +164,7 @@ describe('chat message avatar', () => {
 
     render(
       <ChatMessage
-        row={buildRow(message)}
+        row={buildMessageRow(message)}
         showThinking={false}
       />,
     );
@@ -117,3 +175,4 @@ describe('chat message avatar', () => {
     expect(CHAT_LAYOUT_TOKENS.userBubble).not.toContain('bg-secondary');
   });
 });
+

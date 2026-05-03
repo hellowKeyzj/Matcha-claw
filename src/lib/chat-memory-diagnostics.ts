@@ -5,8 +5,8 @@ import {
   type ChatStoreState,
 } from '@/stores/chat';
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
-import { getExecutionGraphCacheStats } from '@/pages/Chat/exec-graph-cache';
+import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import { getExecutionGraphCacheStats } from '@/pages/Chat/execution-graph-diagnostics';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRowsCacheStats } from '@/pages/Chat/chat-rows-cache';
 import { hostApiFetch } from './host-api';
@@ -154,23 +154,21 @@ function estimateAttachedFiles(input: AttachedFileMeta[] | undefined): {
   };
 }
 
-function estimateTimelineEntryChars(entry: SessionTimelineEntry): {
+function estimateRenderRowChars(row: SessionRenderRow): {
   contentChars: number;
   attachedFileCount: number;
   previewCharCount: number;
   dataUrlPreviewCharCount: number;
   approxChars: number;
 } {
-  const contentChars = estimateUnknownChars(entry.message.content);
-  const attachedFiles = estimateAttachedFiles(entry.message._attachedFiles as AttachedFileMeta[] | undefined);
-  const idChars = [entry.entryId, entry.laneKey, entry.turnKey, entry.runId, entry.agentId]
+  const attachedFiles = estimateAttachedFiles(
+    row.kind === 'message' ? row.attachedFiles as AttachedFileMeta[] : undefined,
+  );
+  const contentChars = estimateUnknownChars(row);
+  const idChars = [row.entryId, row.laneKey, row.turnKey, row.runId, row.agentId]
     .filter((value): value is string => typeof value === 'string')
     .reduce((total, value) => total + value.length, 0);
-  const messageIdChars = typeof entry.message.id === 'string' ? entry.message.id.length : 0;
-  const toolCallChars = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.length : 0;
-  const toolNameChars = typeof entry.message.toolName === 'string' ? entry.message.toolName.length : 0;
-  const toolStatusesChars = estimateUnknownChars(entry.message.toolStatuses);
-  const approxChars = contentChars + attachedFiles.approxChars + toolStatusesChars + idChars + messageIdChars + toolCallChars + toolNameChars + 64;
+  const approxChars = contentChars + attachedFiles.approxChars + idChars + 64;
 
   return {
     contentChars,
@@ -207,15 +205,15 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   let approxRetainedBytes = 0;
 
   for (const [sessionKey, record] of sessions) {
-    const entries = Array.isArray(record.timelineEntries) ? record.timelineEntries : [];
+    const rows = Array.isArray(record.rows) ? record.rows : [];
     let sessionContentChars = 0;
     let sessionAttachedFileCount = 0;
     let sessionPreviewCharCount = 0;
     let sessionDataUrlPreviewCharCount = 0;
     let sessionApproxChars = 0;
 
-    for (const entry of entries) {
-      const stats = estimateTimelineEntryChars(entry);
+    for (const row of rows) {
+      const stats = estimateRenderRowChars(row);
       sessionContentChars += stats.contentChars;
       sessionAttachedFileCount += stats.attachedFileCount;
       sessionPreviewCharCount += stats.previewCharCount;
@@ -227,7 +225,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     const sessionApproxBytes = (sessionApproxChars + runtimeStateCharCount) * 2;
     sessionSummaries.push({
       sessionKey,
-      messageCount: entries.length,
+      messageCount: rows.length,
       attachedFileCount: sessionAttachedFileCount,
       previewCharCount: sessionPreviewCharCount,
       contentCharCount: sessionContentChars,
@@ -240,7 +238,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     if (isSessionHistoryReady(record.meta.historyStatus)) {
       readySessionCount += 1;
     }
-    totalMessageCount += entries.length;
+    totalMessageCount += rows.length;
     totalAttachedFileCount += sessionAttachedFileCount;
     totalPreviewCharCount += sessionPreviewCharCount;
     totalDataUrlPreviewCharCount += sessionDataUrlPreviewCharCount;

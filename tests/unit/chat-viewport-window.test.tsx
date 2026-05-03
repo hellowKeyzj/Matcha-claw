@@ -8,9 +8,9 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { RawMessage } from '@/stores/chat';
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 class ResizeObserverStub {
   observe() {}
@@ -44,6 +44,7 @@ function buildSessionRecord(
     timelineEntries: overrides?.messages
       ? buildTimelineEntriesFromMessages(sessionKey, overrides.messages)
       : (overrides?.timelineEntries ?? base.timelineEntries),
+    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
     window: overrides?.window ?? base.window,
   };
 }
@@ -222,3 +223,4 @@ describe('chat viewport window', () => {
     expect(jumpToLatest).not.toHaveBeenCalled();
   });
 });
+

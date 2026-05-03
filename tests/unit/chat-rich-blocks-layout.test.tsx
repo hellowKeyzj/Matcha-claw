@@ -58,8 +58,8 @@ describe('chat rich blocks layout', () => {
             detail: 'reasoning',
           },
         ]}
-        triggerMessageKey="trigger-row"
-        replyMessageKey="reply-row"
+        triggerRowKey="trigger-row"
+        replyRowKey="reply-row"
         onJumpToRowKey={vi.fn()}
       />,
     );

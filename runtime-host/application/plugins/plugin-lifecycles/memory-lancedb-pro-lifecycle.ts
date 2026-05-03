@@ -5,6 +5,7 @@ const LOCAL_MINILM_PROVIDER = 'local-minilm';
 const LOCAL_MINILM_MODEL = 'all-MiniLM-L6-v2';
 const DEFAULT_EXTRACT_MAX_CHARS = 8000;
 const DEFAULT_EXTRACT_MIN_MESSAGES = 5;
+const DEFAULT_AUTO_RECALL_MIN_LENGTH = 5;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -37,6 +38,9 @@ function ensureMemoryPluginConfigured(config: Record<string, unknown>): Record<s
   }
   if (typeof pluginConfig.autoRecall !== 'boolean') {
     pluginConfig.autoRecall = true;
+  }
+  if (typeof pluginConfig.autoRecallMinLength !== 'number') {
+    pluginConfig.autoRecallMinLength = DEFAULT_AUTO_RECALL_MIN_LENGTH;
   }
   if (typeof pluginConfig.smartExtraction !== 'boolean') {
     pluginConfig.smartExtraction = true;

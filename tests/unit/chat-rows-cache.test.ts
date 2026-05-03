@@ -3,8 +3,8 @@ import {
   getOrBuildStaticRowsCacheEntry,
   prewarmStaticRowsForTimeline,
 } from '@/pages/Chat/chat-rows-cache';
-import type { RawMessage } from '@/stores/chat';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -78,3 +78,4 @@ describe('chat rows cache', () => {
     expect(secondEntry.rows[1]?.key).toBe(firstEntry.rows[1]?.key);
   });
 });
+

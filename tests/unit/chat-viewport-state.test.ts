@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { selectViewportTimelineEntries } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState, syncViewportState } from '@/stores/chat/viewport-state';
-import type { RawMessage } from '@/stores/chat';
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -94,3 +94,4 @@ describe('viewport window state', () => {
     expect(viewportMessages.every((message) => Boolean(message._timeline?.entryId))).toBe(true);
   });
 });
+

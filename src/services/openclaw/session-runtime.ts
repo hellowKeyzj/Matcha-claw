@@ -4,11 +4,11 @@ import {
   hostSessionPrompt,
   hostSessionWindowFetch,
 } from '@/lib/host-api';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSession } from '@/stores/chat/types';
 import {
-  findLatestAssistantSnapshotFromTimelineEntries,
-  findLatestAssistantTextFromTimelineEntries,
+  findLatestAssistantSnapshotFromRows,
+  findLatestAssistantTextFromRows,
 } from '@/stores/chat/timeline-message';
 
 export interface AssistantSnapshot {
@@ -44,42 +44,42 @@ export interface ListSessionsInput {
 
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 
-function resolveAuthoritativeTimelineEntries(
+function resolveAuthoritativeRows(
   payload: Awaited<ReturnType<typeof hostSessionWindowFetch>>,
-): SessionTimelineEntry[] {
-  return Array.isArray(payload?.snapshot?.entries) ? payload.snapshot.entries : [];
+): SessionRenderRow[] {
+  return Array.isArray(payload?.snapshot?.rows) ? payload.snapshot.rows : [];
 }
 
 export async function fetchChatTimeline(
   input: FetchChatTimelineInput,
-): Promise<SessionTimelineEntry[]> {
+): Promise<SessionRenderRow[]> {
   const history = await hostSessionWindowFetch({
     sessionKey: input.sessionKey,
     mode: 'latest',
     limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
     includeCanonical: true,
   });
-  return resolveAuthoritativeTimelineEntries(history);
+  return resolveAuthoritativeRows(history);
 }
 
 export async function fetchLatestAssistantText(
   input: FetchChatHistoryInput,
 ): Promise<string> {
-  const entries = await fetchChatTimeline({
+  const rows = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     limit: input.limit,
   });
-  return findLatestAssistantTextFromTimelineEntries(entries);
+  return findLatestAssistantTextFromRows(rows);
 }
 
 export async function fetchLatestAssistantSnapshot(
   input: FetchChatHistoryInput,
 ): Promise<AssistantSnapshot> {
-  const entries = await fetchChatTimeline({
+  const rows = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     limit: input.limit,
   });
-  return findLatestAssistantSnapshotFromTimelineEntries(entries);
+  return findLatestAssistantSnapshotFromRows(rows);
 }
 
 export async function sendChatMessage(

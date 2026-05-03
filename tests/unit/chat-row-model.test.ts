@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   applyAssistantPresentationToRows,
   buildStaticChatRows,
+  patchTimelineRows,
+  type ChatRow,
   type ChatMessageRow,
 } from '@/pages/Chat/chat-row-model';
 import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
@@ -79,6 +81,7 @@ describe('chat row model lane identity', () => {
       kind: 'message',
       role: 'assistant',
       text: 'Alpha',
+      renderSignature: 'assistant|final|Alpha',
       assistantTurnKey: 'team-turn-1',
       assistantLaneKey: 'team:agent-a',
       assistantLaneAgentId: 'agent-a',
@@ -125,5 +128,114 @@ describe('chat row model lane identity', () => {
       avatarSeed: 'seed-a',
       avatarStyle: undefined,
     });
+  });
+
+  it('rebuilds assistant markdown html when a timeline entry with the same id receives final markdown text', () => {
+    const sessionKey = 'agent:main:main';
+    const previousEntry = buildAssistantEntry({
+      entryId: 'assistant-markdown-1',
+      laneKey: 'main',
+      turnKey: 'main:assistant-markdown-1',
+      text: '',
+    });
+    const nextEntry = buildAssistantEntry({
+      entryId: 'assistant-markdown-1',
+      laneKey: 'main',
+      turnKey: 'main:assistant-markdown-1',
+      text: '### Title\n\n```json\n{\"ok\":true}\n```',
+    });
+    const previousRows = buildStaticChatRows({
+      sessionKey,
+      entries: [previousEntry],
+    });
+
+    const patched = patchTimelineRows(
+      sessionKey,
+      previousRows,
+      [previousEntry],
+      [nextEntry],
+    );
+
+    expect(patched?.rows[0]?.text).toBe('### Title\n\n```json\n{"ok":true}\n```');
+    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<h3>');
+    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<pre>');
+  });
+
+  it('rebuilds assistant markdown html even when an upstream path mutates the same timeline entry object', () => {
+    const sessionKey = 'agent:main:main';
+    const entry = buildAssistantEntry({
+      entryId: 'assistant-mutated-markdown-1',
+      laneKey: 'main',
+      turnKey: 'main:assistant-mutated-markdown-1',
+      text: '',
+    });
+    const previousRows = buildStaticChatRows({
+      sessionKey,
+      entries: [entry],
+    });
+
+    entry.text = '### Title\n\n```json\n{"ok":true}\n```';
+    entry.message = {
+      ...entry.message,
+      content: entry.text,
+    };
+    const patched = patchTimelineRows(
+      sessionKey,
+      previousRows,
+      [entry],
+      [entry],
+    );
+
+    expect(patched?.rows[0]).not.toBe(previousRows[0]);
+    expect(patched?.rows[0]?.text).toBe('### Title\n\n```json\n{"ok":true}\n```');
+    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<h3>');
+    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<pre>');
+  });
+
+  it('rebuilds the row kind when an assistant entry changes from tool activity to text message', () => {
+    const sessionKey = 'agent:main:main';
+    const previousEntry: SessionTimelineEntry = {
+      entryId: 'assistant-tool-1',
+      sessionKey,
+      laneKey: 'main',
+      turnKey: 'main:assistant-tool-1',
+      role: 'assistant',
+      status: 'final',
+      text: '',
+      message: {
+        id: 'assistant-tool-1',
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'tool-1',
+          name: 'read_file',
+          input: { filePath: 'README.md' },
+        }],
+      },
+    };
+    const nextEntry: SessionTimelineEntry = {
+      ...previousEntry,
+      text: 'Done',
+      message: {
+        ...previousEntry.message,
+        content: 'Done',
+      },
+    };
+
+    const previousRows = buildStaticChatRows({
+      sessionKey,
+      entries: [previousEntry],
+    });
+    expect(previousRows[0]?.kind).toBe('tool-activity');
+
+    const patched = patchTimelineRows(
+      sessionKey,
+      previousRows,
+      [previousEntry],
+      [nextEntry],
+    );
+
+    expect((patched?.rows[0] as ChatRow | undefined)?.kind).toBe('message');
+    expect((patched?.rows[0] as ChatMessageRow | undefined)?.text).toBe('Done');
   });
 });

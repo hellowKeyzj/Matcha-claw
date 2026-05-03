@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildChatAutoFollowSignal } from '@/pages/Chat/chat-auto-follow';
 import { buildStaticChatRows, type ChatRow } from '@/pages/Chat/chat-row-model';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 
 function buildMessageRow(id: string, role: 'user' | 'assistant', content: string, timestamp = 1): ChatRow {
   return buildStaticChatRows({
@@ -79,3 +79,4 @@ describe('chat auto follow signal', () => {
   });
 
 });
+

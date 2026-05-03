@@ -23,10 +23,6 @@ vi.mock('@/pages/Chat/useChatScroll', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/useExecutionGraphs', () => ({
-  useExecutionGraphs: () => [],
-}));
-
 vi.mock('@/pages/Chat/useChatView', () => ({
   useChatView: () => ({
     showBlockingLoading: false,

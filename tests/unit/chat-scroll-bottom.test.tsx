@@ -8,10 +8,10 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom } from '@/pages/Chat/useChatScroll';
-import type { RawMessage } from '@/stores/chat';
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
@@ -57,6 +57,7 @@ function buildSessionRecord(
     timelineEntries: overrides?.messages
       ? buildTimelineEntriesFromMessages('agent:test:main', overrides.messages)
       : (overrides?.timelineEntries ?? base.timelineEntries),
+    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
     window: overrides?.window ?? base.window,
   };
 }
@@ -1468,3 +1469,4 @@ describe('chat 主线程滚动锁', () => {
     )).toBe(860);
   });
 });
+

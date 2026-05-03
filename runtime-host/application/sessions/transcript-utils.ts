@@ -6,6 +6,8 @@ import {
   normalizeRawChatMessage,
   sanitizeCanonicalUserText,
 } from '../../shared/chat-message-normalization';
+import type { SessionTaskCompletionEvent } from '../../shared/session-adapter-types';
+import { normalizeTaskCompletionEvents } from './task-completion-events';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
@@ -36,6 +38,7 @@ export interface SessionTranscriptMessage {
   name?: string;
   details?: unknown;
   toolStatuses?: Array<Record<string, unknown>>;
+  taskCompletionEvents?: SessionTaskCompletionEvent[];
   isError?: boolean;
 }
 
@@ -196,6 +199,10 @@ export function parseTranscriptMessages(content: string): SessionTranscriptMessa
       name: normalizeOptionalString(normalized.name),
       details: normalized.details,
       toolStatuses: Array.isArray(normalized.toolStatuses) ? normalized.toolStatuses as Array<Record<string, unknown>> : undefined,
+      taskCompletionEvents: normalizeTaskCompletionEvents({
+        taskCompletionEvents: normalized.taskCompletionEvents,
+        internalEvents: normalized.internalEvents,
+      }),
       isError: normalizeOptionalBoolean(normalized.isError ?? normalized.is_error),
     });
   }

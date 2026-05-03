@@ -1,10 +1,14 @@
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import { resolveAssistantEntryLaneIdentity } from '@/stores/chat/session-turn-state';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
-import type { ChatMessageView } from './chat-message-view';
-import { getOrBuildChatMessageView } from './chat-message-view';
-import { extractEntryText } from './message-utils';
+import type {
+  SessionExecutionGraphRow,
+  SessionMessageRow as ProtocolMessageRow,
+  SessionPendingAssistantRow as ProtocolPendingAssistantRow,
+  SessionRenderRow,
+  SessionSystemRow as ProtocolSystemRow,
+  SessionTaskCompletionRow as ProtocolTaskCompletionRow,
+  SessionToolActivityRow as ProtocolToolActivityRow,
+} from '../../../runtime-host/shared/session-adapter-types';
 
 export interface ChatAssistantPresentation {
   agentId?: string;
@@ -13,21 +17,49 @@ export interface ChatAssistantPresentation {
   avatarStyle?: AgentAvatarStyle;
 }
 
-export interface ChatMessageRow {
-  key: string;
-  kind: 'message';
-  entry: SessionTimelineEntry;
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  assistantTurnKey: string | null;
-  assistantLaneKey: string | null;
-  assistantLaneAgentId: string | null;
-  messageView: ChatMessageView;
-  assistantMarkdownHtml: string | null;
+interface ChatRowBase {
   assistantPresentation: ChatAssistantPresentation | null;
+  renderSignature: string;
 }
 
-export type ChatRow = ChatMessageRow;
+export type ChatMessageRow = ProtocolMessageRow & ChatRowBase & {
+  kind: 'message';
+  assistantMarkdownHtml: string | null;
+};
+
+export type ChatToolActivityRow = ProtocolToolActivityRow & ChatRowBase;
+export type ChatExecutionGraphRow = SessionExecutionGraphRow & ChatRowBase;
+export type ChatPendingAssistantRow = ProtocolPendingAssistantRow & ChatRowBase;
+export type ChatTaskCompletionRow = ProtocolTaskCompletionRow & ChatRowBase;
+export type ChatSystemRow = ProtocolSystemRow & ChatRowBase;
+
+export type ChatRow =
+  | ChatMessageRow
+  | ChatToolActivityRow
+  | ChatExecutionGraphRow
+  | ChatPendingAssistantRow
+  | ChatTaskCompletionRow
+  | ChatSystemRow;
+
+export interface ChatAssistantCatalogAgent extends ChatAssistantPresentation {
+  id: string;
+}
+
+function safeStableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return String(value);
+  }
+}
+
+function hashStringDjb2(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
+}
 
 export function buildAssistantLaneTurnMatchKey(
   turnKey: string | null | undefined,
@@ -41,286 +73,41 @@ export function buildAssistantLaneTurnMatchKey(
   return `${normalizedTurnKey}|${normalizedLaneKey}`;
 }
 
-export function resolveEntryAssistantLaneTurnMatchKey(
-  entry: SessionTimelineEntry | null | undefined,
-): string | null {
-  if (!entry) {
-    return null;
-  }
-  const laneIdentity = resolveAssistantEntryLaneIdentity(entry);
-  return buildAssistantLaneTurnMatchKey(laneIdentity.turnKey, laneIdentity.laneKey);
-}
-
-export function resolveRowAssistantLaneTurnMatchKey(
-  row: ChatMessageRow,
-): string | null {
+export function resolveRowAssistantLaneTurnMatchKey(row: ChatRow): string | null {
   return buildAssistantLaneTurnMatchKey(row.assistantTurnKey, row.assistantLaneKey);
 }
 
-interface BuildStaticChatRowsInput {
-  sessionKey: string;
-  entries: SessionTimelineEntry[];
+function buildRenderSignature(row: SessionRenderRow): string {
+  return [
+    row.key,
+    row.kind,
+    row.role,
+    row.status ?? '',
+    row.createdAt ?? '',
+    hashStringDjb2(safeStableStringify(row)),
+  ].join('|');
 }
 
-interface BuildStaticChatRowsResult {
-  rows: ChatMessageRow[];
-  renderableCount: number;
-}
-
-export function canAppendReferenceList<T>(
-  previous: T[],
-  next: T[],
-): boolean {
-  if (previous.length > next.length) {
-    return false;
-  }
-  for (let index = 0; index < previous.length; index += 1) {
-    if (previous[index] !== next[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export function canPrependReferenceList<T>(
-  previous: T[],
-  next: T[],
-): boolean {
-  if (previous.length > next.length) {
-    return false;
-  }
-  const offset = next.length - previous.length;
-  for (let index = 0; index < previous.length; index += 1) {
-    if (previous[index] !== next[offset + index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export function isRenderableTimelineEntry(entry: SessionTimelineEntry): boolean {
-  return entry.role !== 'toolresult' && entry.role !== 'tool_result';
-}
-
-function resolveRenderableEntryRole(entry: SessionTimelineEntry): ChatMessageRow['role'] {
-  return entry.role === 'user' || entry.role === 'system' ? entry.role : 'assistant';
-}
-
-function createMessageRow(
-  key: string,
-  entry: SessionTimelineEntry,
-): ChatMessageRow {
-  const role = resolveRenderableEntryRole(entry);
-  const messageView = getOrBuildChatMessageView(entry);
-  const laneIdentity = role === 'assistant'
-    ? resolveAssistantEntryLaneIdentity(entry)
-    : { turnKey: null, laneKey: null, agentId: null };
-  return {
-    key,
-    kind: 'message',
-    entry,
-    role,
-    text: extractEntryText(entry),
-    assistantTurnKey: laneIdentity.turnKey,
-    assistantLaneKey: laneIdentity.laneKey,
-    assistantLaneAgentId: laneIdentity.agentId,
-    messageView,
-    assistantMarkdownHtml: role === 'assistant'
-      ? (getOrBuildAssistantMarkdownBody(entry)?.fullHtml ?? null)
-      : null,
+function decorateProtocolRow(row: SessionRenderRow): ChatRow {
+  const base = {
     assistantPresentation: null,
-  };
-}
+    renderSignature: buildRenderSignature(row),
+  } satisfies ChatRowBase;
 
-export function resolveTimelineEntryRowKey(
-  sessionKey: string,
-  entry: SessionTimelineEntry,
-): string {
-  return `session:${sessionKey}|entry:${entry.entryId}`;
-}
-
-function buildEntryRow(
-  sessionKey: string,
-  entry: SessionTimelineEntry,
-  usedRowKeys: Set<string>,
-): ChatMessageRow {
-  const baseKey = resolveTimelineEntryRowKey(sessionKey, entry);
-  let rowKey = baseKey;
-  let duplicateOrdinal = 1;
-  while (usedRowKeys.has(rowKey)) {
-    rowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-    duplicateOrdinal += 1;
-  }
-  usedRowKeys.add(rowKey);
-  return createMessageRow(rowKey, entry);
-}
-
-export function appendTimelineRows(
-  sessionKey: string,
-  baseRows: ChatMessageRow[],
-  entries: SessionTimelineEntry[],
-  fromIndex: number,
-  startRenderableIndex: number,
-): {
-  rows: ChatMessageRow[];
-  renderableCount: number;
-} {
-  if (fromIndex >= entries.length) {
+  if (row.kind === 'message') {
     return {
-      rows: baseRows,
-      renderableCount: startRenderableIndex,
+      ...row,
+      ...base,
+      assistantMarkdownHtml: row.role === 'assistant'
+        ? (getOrBuildAssistantMarkdownBody(row)?.fullHtml ?? null)
+        : null,
     };
   }
 
-  const rows = [...baseRows];
-  const usedRowKeys = new Set(rows.map((row) => row.key));
-  let renderableCount = startRenderableIndex;
-  for (let index = fromIndex; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (!isRenderableTimelineEntry(entry)) {
-      continue;
-    }
-    rows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
-    renderableCount += 1;
-  }
-
   return {
-    rows,
-    renderableCount,
-  };
-}
-
-export function prependTimelineRows(
-  sessionKey: string,
-  baseRows: ChatMessageRow[],
-  entries: SessionTimelineEntry[],
-  toIndexExclusive: number,
-  startRenderableCount: number,
-): {
-  rows: ChatMessageRow[];
-  renderableCount: number;
-} {
-  if (toIndexExclusive <= 0) {
-    return {
-      rows: baseRows,
-      renderableCount: startRenderableCount,
-    };
-  }
-
-  const prependedRows: ChatMessageRow[] = [];
-  const usedRowKeys = new Set(baseRows.map((row) => row.key));
-  let prependedRenderableCount = 0;
-  for (let index = 0; index < toIndexExclusive; index += 1) {
-    const entry = entries[index];
-    if (!isRenderableTimelineEntry(entry)) {
-      continue;
-    }
-    prependedRows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
-    prependedRenderableCount += 1;
-  }
-
-  return {
-    rows: prependedRows.length > 0 ? [...prependedRows, ...baseRows] : baseRows,
-    renderableCount: startRenderableCount + prependedRenderableCount,
-  };
-}
-
-export function patchTimelineRows(
-  sessionKey: string,
-  baseRows: ChatMessageRow[],
-  previousEntries: SessionTimelineEntry[],
-  nextEntries: SessionTimelineEntry[],
-): {
-  rows: ChatMessageRow[];
-  renderableCount: number;
-} | null {
-  if (previousEntries.length !== nextEntries.length) {
-    return null;
-  }
-
-  const usedRowKeys = new Set<string>();
-  const nextRows: ChatMessageRow[] = [];
-  let previousRenderableIndex = 0;
-  let renderableCount = 0;
-
-  for (let index = 0; index < nextEntries.length; index += 1) {
-    const previousEntry = previousEntries[index];
-    const nextEntry = nextEntries[index];
-    const previousRenderable = isRenderableTimelineEntry(previousEntry);
-    const nextRenderable = isRenderableTimelineEntry(nextEntry);
-
-    if (previousRenderable !== nextRenderable) {
-      return null;
-    }
-    if (!nextRenderable) {
-      continue;
-    }
-
-    const previousRow = baseRows[previousRenderableIndex];
-    if (!previousRow) {
-      return null;
-    }
-
-    const baseKey = resolveTimelineEntryRowKey(sessionKey, nextEntry);
-    let nextRowKey = baseKey;
-    let duplicateOrdinal = 1;
-    while (usedRowKeys.has(nextRowKey)) {
-      nextRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-      duplicateOrdinal += 1;
-    }
-    usedRowKeys.add(nextRowKey);
-
-    if (previousRow.key !== nextRowKey) {
-      return null;
-    }
-
-    nextRows.push(previousEntry === nextEntry ? previousRow : createMessageRow(nextRowKey, nextEntry));
-    previousRenderableIndex += 1;
-    renderableCount += 1;
-  }
-
-  if (previousRenderableIndex !== baseRows.length) {
-    return null;
-  }
-
-  return {
-    rows: nextRows,
-    renderableCount,
-  };
-}
-
-export function buildStaticChatRows({
-  sessionKey,
-  entries,
-}: BuildStaticChatRowsInput): ChatMessageRow[] {
-  return buildTimelineRowsWithMeta({
-    sessionKey,
-    entries,
-  }).rows;
-}
-
-export function buildTimelineRowsWithMeta({
-  sessionKey,
-  entries,
-}: Pick<BuildStaticChatRowsInput, 'sessionKey' | 'entries'>): BuildStaticChatRowsResult {
-  const rows: ChatMessageRow[] = [];
-  const usedRowKeys = new Set<string>();
-  let renderableCount = 0;
-  for (const entry of entries) {
-    if (!isRenderableTimelineEntry(entry)) {
-      continue;
-    }
-    rows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
-    renderableCount += 1;
-  }
-  return {
-    rows,
-    renderableCount,
-  };
-}
-
-export interface ChatAssistantCatalogAgent extends ChatAssistantPresentation {
-  id: string;
+    ...row,
+    ...base,
+  } as ChatRow;
 }
 
 export function resolveAssistantPresentationForLaneAgentId(input: {
@@ -348,7 +135,7 @@ export function resolveAssistantPresentationForLaneAgentId(input: {
 }
 
 export function resolveRowAssistantPresentation(input: {
-  row: ChatMessageRow;
+  row: ChatRow;
   agents: ChatAssistantCatalogAgent[];
   defaultAssistant: ChatAssistantPresentation | null;
 }): ChatAssistantPresentation | null {
@@ -363,32 +150,19 @@ export function resolveRowAssistantPresentation(input: {
 }
 
 export function applyAssistantPresentationToRows(input: {
-  rows: ChatMessageRow[];
+  rows: SessionRenderRow[];
   agents: ChatAssistantCatalogAgent[];
   defaultAssistant: ChatAssistantPresentation | null;
-}): ChatMessageRow[] {
-  let changed = false;
-  const nextRows = input.rows.map((row) => {
-    const assistantPresentation = resolveRowAssistantPresentation({
-      row,
-      agents: input.agents,
-      defaultAssistant: input.defaultAssistant,
-    });
-    const currentPresentation = row.assistantPresentation;
-    const presentationUnchanged = (
-      currentPresentation?.agentId === assistantPresentation?.agentId
-      && currentPresentation?.agentName === assistantPresentation?.agentName
-      && currentPresentation?.avatarSeed === assistantPresentation?.avatarSeed
-      && currentPresentation?.avatarStyle === assistantPresentation?.avatarStyle
-    );
-    if (presentationUnchanged) {
-      return row;
-    }
-    changed = true;
+}): ChatRow[] {
+  return input.rows.map((protocolRow) => {
+    const row = decorateProtocolRow(protocolRow);
     return {
       ...row,
-      assistantPresentation,
+      assistantPresentation: resolveRowAssistantPresentation({
+        row,
+        agents: input.agents,
+        defaultAssistant: input.defaultAssistant,
+      }),
     };
   });
-  return changed ? nextRows : input.rows;
 }

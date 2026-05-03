@@ -48,6 +48,12 @@ describe('runtime plugin service', () => {
     }, null, 2));
   }
 
+  function writeCompanionSkillSource(skillSlug: string): void {
+    const sourceDir = join(workspaceDir, 'resources', 'skills', 'plugin-companion-skills', skillSlug);
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(sourceDir, 'SKILL.md'), `# ${skillSlug}\n`, 'utf8');
+  }
+
   function writeInstalledOpenClawPlugin(pluginId: string): void {
     const installedDir = join(configDir, 'extensions', pluginId);
     mkdirSync(installedDir, { recursive: true });
@@ -97,6 +103,7 @@ describe('runtime plugin service', () => {
 
   it('首次启用 memory-lancedb-pro 时会补默认 memory slot 和 local MiniLM 配置', async () => {
     writeManagedPluginSource('memory-lancedb-pro');
+    writeCompanionSkillSource('memory-lancedb-pro-skill');
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       plugins: {
         entries: {
@@ -136,6 +143,7 @@ describe('runtime plugin service', () => {
         },
         autoCapture: true,
         autoRecall: true,
+        autoRecallMinLength: 5,
         smartExtraction: true,
         extractMinMessages: 5,
         extractMaxChars: 8000,
@@ -203,6 +211,7 @@ describe('runtime plugin service', () => {
 
   it('启用 memory-lancedb-pro 时不会覆盖用户已经手动设置的 embedding 配置', async () => {
     writeManagedPluginSource('memory-lancedb-pro');
+    writeCompanionSkillSource('memory-lancedb-pro-skill');
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       plugins: {
         entries: {
@@ -244,8 +253,42 @@ describe('runtime plugin service', () => {
     });
   });
 
+  it('启用 memory-lancedb-pro 时不会覆盖用户已经手动设置的 autoRecallMinLength', async () => {
+    writeManagedPluginSource('memory-lancedb-pro');
+    writeCompanionSkillSource('memory-lancedb-pro-skill');
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        entries: {
+          'memory-lancedb-pro': {
+            enabled: false,
+            config: {
+              autoRecallMinLength: 9,
+            },
+          },
+        },
+      },
+    }, null, 2));
+
+    const { setRuntimeEnabledPluginIds } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
+
+    await setRuntimeEnabledPluginIds(['memory-lancedb-pro']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins?: {
+        entries?: Record<string, {
+          config?: {
+            autoRecallMinLength?: number;
+          };
+        }>;
+      };
+    };
+
+    expect(nextConfig.plugins?.entries?.['memory-lancedb-pro']?.config?.autoRecallMinLength).toBe(9);
+  });
+
   it('启动时会为已启用的 memory-lancedb-pro 补齐默认记忆配置', async () => {
     writeInstalledOpenClawPlugin('memory-lancedb-pro');
+    writeCompanionSkillSource('memory-lancedb-pro-skill');
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       plugins: {
         allow: ['memory-lancedb-pro'],
@@ -286,6 +329,7 @@ describe('runtime plugin service', () => {
         },
         autoCapture: true,
         autoRecall: true,
+        autoRecallMinLength: 5,
         smartExtraction: true,
         extractMinMessages: 5,
         extractMaxChars: 8000,

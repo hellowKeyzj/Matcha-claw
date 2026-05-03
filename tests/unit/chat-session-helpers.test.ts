@@ -8,8 +8,8 @@ import {
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
-import type { RawMessage } from '@/stores/chat';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
@@ -178,3 +178,4 @@ describe('chat session helpers', () => {
     });
   });
 });
+

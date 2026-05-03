@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RawMessage } from '@/stores/chat';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionTimelineEntries } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const hostApiFetchMock = vi.fn();
@@ -414,6 +414,73 @@ describe('gateway store event wiring', () => {
     }]);
   });
 
+  it('structured session:update tool delta 即使 sequenceId 不是从 1 开始，也会立即写入 timeline 供工具卡片渲染', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-tool-direct-1',
+          },
+        }),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message_chunk',
+      runId: 'run-tool-direct-1',
+      sessionKey: 'agent:main:main',
+      sequenceId: 8,
+      message: {
+        role: 'assistant',
+        id: 'run:run-tool-direct-1:tool:tool-1',
+        content: [{
+          type: 'toolCall',
+          id: 'tool-1',
+          name: 'memory_store',
+          input: { text: '记住偏好' },
+        }],
+        toolStatuses: [{
+          toolCallId: 'tool-1',
+          name: 'memory_store',
+          status: 'running',
+        }],
+      },
+    }));
+
+    const state = useChatStore.getState();
+    const [entry] = getSessionTimelineEntries(state, 'agent:main:main');
+    expect(entry).toMatchObject({
+      entryId: 'run:run-tool-direct-1:tool:tool-1',
+      sequenceId: 8,
+      message: {
+        toolStatuses: [{
+          toolCallId: 'tool-1',
+          name: 'memory_store',
+          status: 'running',
+        }],
+      },
+    });
+  });
+
   it('run.phase completed 只应进入单一 session update 入口', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
@@ -809,3 +876,4 @@ describe('gateway store event wiring', () => {
     });
   });
 });
+
