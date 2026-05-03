@@ -3,8 +3,8 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import type { RawMessage } from '@/stores/chat';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 
 const invokeIpcMock = vi.fn();
 
@@ -282,3 +282,4 @@ describe('chat message links', () => {
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
   });
 });
+

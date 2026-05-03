@@ -6,7 +6,9 @@ import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
-import type { RawMessage } from '@/stores/chat';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const readyResource = {
@@ -29,22 +31,19 @@ function createSessionRecord(input?: {
   ready?: boolean;
 }) {
   const messages = input?.messages ?? [];
+  const base = createEmptySessionRecord();
   return {
     meta: {
+      ...base.meta,
       label: input?.label ?? null,
       lastActivityAt: input?.lastActivityAt ?? null,
       historyStatus: input?.ready ? 'ready' : 'idle',
-      thinkingLevel: null,
     },
     runtime: {
-      sending: false,
-      activeRunId: null,
-      runPhase: 'idle' as const,
-      streamingMessageId: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
+      ...base.runtime,
     },
-    messages,
+    timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
+    executionGraphs: base.executionGraphs,
     window: createViewportWindowState({
       totalMessageCount: messages.length,
       windowStartOffset: 0,
@@ -431,14 +430,14 @@ describe('agent sessions pane', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:test:session-2': {
           ...useChatStore.getState().loadedSessions['agent:test:session-2'],
-          messages: [
+          timelineEntries: buildTimelineEntriesFromMessages('agent:test:session-2', [
             {
               role: 'user',
               content: '最新输入标题',
               id: 'optimistic-user-1',
               timestamp: now / 1000,
             },
-          ],
+          ]),
         },
       },
     } as never);
@@ -590,3 +589,4 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('正文来源会话')).toBeInTheDocument();
   });
 });
+

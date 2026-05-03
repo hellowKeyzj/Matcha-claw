@@ -156,8 +156,6 @@ export function reduceSessionRuntime(
         streamingMessageId: null,
         pendingFinal: false,
         lastUserMessageAt: action.nowMs,
-        pendingMessageSequenceByKey: {},
-        bufferedMessageEventsByKey: {},
       };
     }
 
@@ -190,8 +188,6 @@ export function reduceSessionRuntime(
               activeRunId: null,
               lastUserMessageAt: null,
               pendingFinal: false,
-              pendingMessageSequenceByKey: {},
-              bufferedMessageEventsByKey: {},
             }
           : {}),
       };
@@ -204,7 +200,6 @@ export function reduceSessionRuntime(
         pendingFinal: hasCurrentPending ? true : state.pendingFinal,
         runPhase: hasCurrentPending ? 'waiting_tool' : state.runPhase,
         activeRunId: action.nextActiveRunId,
-        ...(hasCurrentPending ? {} : { pendingMessageSequenceByKey: {}, bufferedMessageEventsByKey: {} }),
       };
     }
 
@@ -230,8 +225,6 @@ export function reduceSessionRuntime(
           sending: false,
           activeRunId: null,
           runPhase: 'aborted',
-          pendingMessageSequenceByKey: {},
-          bufferedMessageEventsByKey: {},
         };
       }
       return {
@@ -252,8 +245,6 @@ export function reduceSessionRuntime(
         patch.activeRunId = null;
         patch.pendingFinal = false;
         patch.runPhase = 'done';
-        patch.pendingMessageSequenceByKey = {};
-        patch.bufferedMessageEventsByKey = {};
         changed = true;
       }
 
@@ -297,8 +288,6 @@ export function reduceSessionRuntime(
         streamingMessageId: null,
         pendingFinal: true,
         runPhase: 'waiting_tool',
-        pendingMessageSequenceByKey: {},
-        bufferedMessageEventsByKey: {},
       };
     }
 
@@ -339,8 +328,6 @@ export function reduceSessionRuntime(
         streamingMessageId: null,
         pendingFinal: false,
         lastUserMessageAt: null,
-        pendingMessageSequenceByKey: {},
-        bufferedMessageEventsByKey: {},
       };
     }
 
@@ -349,8 +336,6 @@ export function reduceSessionRuntime(
           runPhase: 'error',
           streamingMessageId: null,
           pendingFinal: false,
-          pendingMessageSequenceByKey: {},
-          bufferedMessageEventsByKey: {},
       };
     }
 
@@ -360,8 +345,6 @@ export function reduceSessionRuntime(
         activeRunId: null,
         runPhase: 'error',
         lastUserMessageAt: null,
-        pendingMessageSequenceByKey: {},
-        bufferedMessageEventsByKey: {},
       };
     }
 
@@ -372,8 +355,6 @@ export function reduceSessionRuntime(
           activeRunId: null,
           runPhase: 'done',
           pendingFinal: false,
-          pendingMessageSequenceByKey: {},
-          bufferedMessageEventsByKey: {},
         };
       }
       return {
@@ -387,8 +368,6 @@ export function reduceSessionRuntime(
     case 'final_message_committed': {
       const patch: Partial<ChatSessionRuntimeState> = {
         streamingMessageId: null,
-        pendingMessageSequenceByKey: {},
-        bufferedMessageEventsByKey: {},
       };
 
       if (action.toolOnly) {
@@ -409,3 +388,4 @@ export function reduceSessionRuntime(
     }
   }
 }
+

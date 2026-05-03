@@ -1,7 +1,6 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
-import type { SessionTimelineEntryStatus } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderAttachedFile, SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -12,46 +11,7 @@ export interface AttachedFileMeta {
   filePath?: string;
 }
 
-export interface MessageTimelineMeta {
-  entryId: string;
-  sessionKey: string;
-  laneKey: string;
-  turnKey: string;
-  status: SessionTimelineEntryStatus;
-  timestamp?: number;
-  runId?: string;
-  agentId?: string;
-  sequenceId?: number;
-}
-
-/** Raw message from OpenClaw chat.history */
-export interface RawMessage {
-  role: 'user' | 'assistant' | 'system' | 'toolresult' | 'tool_result';
-  content: unknown; // string | ContentBlock[]
-  timestamp?: number;
-  id?: string;
-  messageId?: string;
-  originMessageId?: string;
-  clientId?: string;
-  uniqueId?: string;
-  status?: 'sending' | 'sent' | 'timeout' | 'error';
-  streaming?: boolean;
-  toolCallId?: string;
-  tool_calls?: Array<Record<string, unknown>>;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolName?: string;
-  agentId?: string;
-  parentMessageId?: string;
-  metadata?: Record<string, unknown>;
-  name?: string;
-  requestId?: string;
-  details?: unknown;
-  toolStatuses?: ToolStatus[];
-  isError?: boolean;
-  _timeline?: MessageTimelineMeta;
-  /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
-  _attachedFiles?: AttachedFileMeta[];
-}
+export type ChatAttachedFile = SessionRenderAttachedFile;
 
 /** Content block inside a message */
 export interface ContentBlock {
@@ -127,8 +87,6 @@ export interface ChatSessionRuntimeState {
   streamingMessageId: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
-  pendingMessageSequenceByKey?: Record<string, number>;
-  bufferedMessageEventsByKey?: Record<string, Array<Record<string, unknown>>>;
 }
 
 export interface ChatSessionMetaState {
@@ -143,7 +101,7 @@ export interface ChatSessionMetaState {
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
-  timelineEntries: SessionTimelineEntry[];
+  rows: SessionRenderRow[];
   window: ChatSessionViewportState;
 }
 

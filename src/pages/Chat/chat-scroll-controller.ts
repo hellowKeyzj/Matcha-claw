@@ -133,7 +133,7 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
     return null;
   }
   const viewportRect = viewport.getBoundingClientRect();
-  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]');
+  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]');
   for (const row of rows) {
     const rect = row.getBoundingClientRect();
     const intersectsViewport = rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
@@ -160,7 +160,7 @@ function sampleTailMessageMetrics(viewport: HTMLDivElement | null): TailMessageM
   if (!viewport) {
     return null;
   }
-  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]');
+  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]');
   const tailRow = rows.length > 0 ? rows[rows.length - 1] : null;
   const rowKey = tailRow?.dataset.chatRowKey;
   if (!tailRow || !rowKey) {
@@ -325,7 +325,7 @@ export function createChatScrollController(
       return false;
     }
     const messageRows = Array.from(
-      viewport.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'),
+      viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]'),
     );
     let target: HTMLElement | undefined;
     if (anchor.messageId) {

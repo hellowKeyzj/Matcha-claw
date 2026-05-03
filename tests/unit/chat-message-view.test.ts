@@ -73,4 +73,24 @@ describe('chat message view', () => {
 
     expect(second).toBe(first);
   });
+
+  it('extracts tool cards from live agent toolCall content blocks', () => {
+    const entry = buildEntry({
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'tool-3',
+          name: 'read',
+          input: { filePath: 'README.md' },
+        }],
+      },
+    });
+
+    expect(getOrBuildChatMessageView(entry).toolUses).toEqual([{
+      id: 'tool-3',
+      name: 'read',
+      input: { filePath: 'README.md' },
+    }]);
+  });
 });

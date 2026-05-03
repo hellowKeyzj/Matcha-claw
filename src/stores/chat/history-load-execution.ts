@@ -1,8 +1,8 @@
 import { hostSessionWindowFetch } from '@/lib/host-api';
 import {
-  hasPendingTimelineEntryPreviewLoads,
-  hydrateAttachedFilesFromTimelineEntries,
-  loadMissingTimelineEntryPreviews,
+  hasPendingRowPreviewLoads,
+  hydrateAttachedFilesFromRows,
+  loadMissingRowPreviews,
 } from './attachment-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
@@ -12,20 +12,18 @@ import {
   type HistoryWindowResult,
 } from './history-fetch-helpers';
 import {
-  resolveSessionLabelFromTimelineEntries,
+  resolveSessionLabelFromRows,
 } from './message-helpers';
-import {
-} from './timeline-message';
 import { finishChatRunTelemetry } from './telemetry';
 import { clearHistoryPoll } from './timers';
 import {
-  buildTimelineHistoryFingerprint,
-  buildTimelineRenderFingerprint,
-  getSessionTimelineEntries,
+  buildRowHistoryFingerprint,
+  buildRowRenderFingerprint,
+  getSessionRows,
   getSessionViewportState,
-  patchSessionSnapshot,
   patchSessionMeta,
   patchSessionRecord,
+  patchSessionSnapshot,
   patchSessionViewportState,
   toMs,
 } from './store-state-helpers';
@@ -33,7 +31,7 @@ import { readSessionsFromState } from './session-helpers';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -68,19 +66,10 @@ function resolveViewportFetchLimit(messageCount: number): number {
   return Math.min(Math.max(messageCount || 80, 40), 200);
 }
 
-function hydrateTimelineEntriesFromCache(
-  entries: SessionTimelineEntry[],
-): SessionTimelineEntry[] {
-  return hydrateAttachedFilesFromTimelineEntries(entries);
-}
-
 function resolveViewportWindowRequestState(input: {
-  mode: ViewportWindowLoadRequest['mode'];
-  beforeViewport: ReturnType<typeof getSessionViewportState>;
   payload: Awaited<ReturnType<typeof hostSessionWindowFetch>>;
 }) {
-  const { payload } = input;
-  const window = payload.snapshot.window;
+  const window = input.payload.snapshot.window;
   return {
     windowStartOffset: window.windowStartOffset,
     windowEndOffset: window.windowEndOffset,
@@ -137,22 +126,19 @@ export async function executeViewportWindowLoad(
 
   try {
     const currentState = deps.get();
-    const currentEntries = getSessionTimelineEntries(currentState, sessionKey);
+    const currentRows = getSessionRows(currentState, sessionKey);
     const payload = await hostSessionWindowFetch({
       sessionKey,
       mode: request.mode,
-      limit: resolveViewportFetchLimit(currentEntries.length),
+      limit: resolveViewportFetchLimit(currentRows.length),
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
-    const nextViewportRequestState = resolveViewportWindowRequestState({
-      mode: request.mode,
-      beforeViewport,
-      payload,
-    });
+    const nextViewportRequestState = resolveViewportWindowRequestState({ payload });
     deps.set((state) => ({
       loadedSessions: patchSessionSnapshot(state, sessionKey, {
         ...payload.snapshot,
+        rows: hydrateAttachedFilesFromRows(payload.snapshot.rows),
         window: {
           ...payload.snapshot.window,
           ...nextViewportRequestState,
@@ -180,15 +166,15 @@ function shouldSkipForegroundApply(
 function buildHistoryPreviewHydrationPatch(
   state: ChatStoreState,
   requestedSessionKey: string,
-  hydratedEntries: SessionTimelineEntry[],
+  hydratedRows: SessionRenderRow[],
 ): Partial<ChatStoreState> | ChatStoreState {
-  const currentEntries = getSessionTimelineEntries(state, requestedSessionKey);
-  if (currentEntries === hydratedEntries) {
+  const currentRows = getSessionRows(state, requestedSessionKey);
+  if (currentRows === hydratedRows) {
     return state;
   }
   return {
     loadedSessions: patchSessionRecord(state, requestedSessionKey, {
-      timelineEntries: hydratedEntries,
+      rows: hydratedRows,
     }),
   };
 }
@@ -217,17 +203,17 @@ export function createApplyLoadedMessagesPipeline(
       return;
     }
 
-    const hydratedEntries = hydrateTimelineEntriesFromCache(snapshot.entries);
-    const renderFingerprint = buildTimelineRenderFingerprint(hydratedEntries);
+    const hydratedRows = hydrateAttachedFilesFromRows(snapshot.rows);
+    const renderFingerprint = buildRowRenderFingerprint(hydratedRows);
     const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
     const currentState = get();
     const currentMeta = currentState.loadedSessions[requestedSessionKey]?.meta;
     const isMainSession = requestedSessionKey.endsWith(':main');
     const resolvedLabel = !isMainSession
-      ? resolveSessionLabelFromTimelineEntries(hydratedEntries)
+      ? resolveSessionLabelFromRows(hydratedRows)
       : '';
-    const lastEntry = hydratedEntries[hydratedEntries.length - 1];
-    const lastAt = lastEntry?.timestamp ? toMs(lastEntry.timestamp) : null;
+    const lastRow = hydratedRows[hydratedRows.length - 1];
+    const lastAt = lastRow?.createdAt ? toMs(lastRow.createdAt) : null;
     const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
 
     set((state) => ({
@@ -235,7 +221,7 @@ export function createApplyLoadedMessagesPipeline(
         {
           loadedSessions: patchSessionSnapshot(state, requestedSessionKey, {
             ...snapshot,
-            entries: hydratedEntries,
+            rows: hydratedRows,
           }),
         },
         requestedSessionKey,
@@ -252,21 +238,21 @@ export function createApplyLoadedMessagesPipeline(
     if (
       isForeground
       && snapshot.runtime.runPhase === 'done'
-      && hydratedEntries.some((entry) => entry.role === 'assistant')
+      && hydratedRows.some((row) => row.role === 'assistant' && row.kind === 'message')
     ) {
       finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
       clearHistoryPoll();
     }
 
-    if ((didMessageListChange || scope === 'background') && hasPendingTimelineEntryPreviewLoads(hydratedEntries)) {
-      void loadMissingTimelineEntryPreviews(hydratedEntries).then((updatedEntries) => {
-        if (!updatedEntries || abortSignal.aborted || shouldAbortHistoryProcessing()) {
+    if ((didMessageListChange || scope === 'background') && hasPendingRowPreviewLoads(hydratedRows)) {
+      void loadMissingRowPreviews(hydratedRows, abortSignal).then((updatedRows) => {
+        if (!updatedRows || abortSignal.aborted || shouldAbortHistoryProcessing()) {
           return;
         }
         set((state) => buildHistoryPreviewHydrationPatch(
           state,
           requestedSessionKey,
-          updatedEntries,
+          updatedRows,
         ));
       });
     }
@@ -349,10 +335,10 @@ export async function executeHistoryLoad(
     if (shouldSkipForegroundApply(get, scope, requestedSessionKey)) {
       return;
     }
-    const snapshotEntries = window.snapshot?.entries ?? [];
+    const snapshotRows = window.snapshot?.rows ?? [];
     historyRuntime.historyFingerprintBySession.set(
       requestedSessionKey,
-      buildTimelineHistoryFingerprint(snapshotEntries, window.thinkingLevel),
+      buildRowHistoryFingerprint(snapshotRows, window.thinkingLevel),
     );
     await applyLoadedMessages(window);
   } catch (err) {
@@ -366,11 +352,11 @@ export async function executeHistoryLoad(
       }
       historyRuntime.historyFingerprintBySession.set(
         requestedSessionKey,
-        buildTimelineHistoryFingerprint([], null),
+        buildRowHistoryFingerprint([], null),
       );
       historyRuntime.historyRenderFingerprintBySession.set(
         requestedSessionKey,
-        buildTimelineRenderFingerprint([]),
+        buildRowRenderFingerprint([]),
       );
       if (scope === 'foreground') {
         set({

@@ -11,10 +11,11 @@ import {
   getSessionTimelineEntries,
   selectViewportTimelineEntries,
 } from '@/stores/chat/store-state-helpers';
-import { materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { materializeTimelineMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import type { ChatStoreState } from '@/stores/chat/types';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import { normalizeCanonicalChatMessage } from '@/../runtime-host/shared/chat-message-normalization';
 
 const hostSessionWindowFetchMock = vi.fn();
@@ -527,3 +528,4 @@ describe('chat session window ops', () => {
   });
 
 });
+

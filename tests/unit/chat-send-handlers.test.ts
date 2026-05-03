@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend } from '@/stores/chat/send-handlers';
-import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import type { ChatStoreState } from '@/stores/chat/types';
+import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import { getSessionTimelineEntries } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -244,3 +245,4 @@ describe('chat send handlers', () => {
     expect(materializeTimelineMessages(getSessionTimelineEntries(state, sessionKey)).map((message) => message.id)).toEqual(['user-local-1']);
   });
 });
+

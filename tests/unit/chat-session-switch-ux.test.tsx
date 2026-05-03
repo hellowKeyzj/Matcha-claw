@@ -8,7 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 class ResizeObserverStub {
@@ -38,6 +38,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...overrides?.runtime,
     },
     timelineEntries: overrides?.timelineEntries ?? base.timelineEntries,
+    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
     window: overrides?.window ?? base.window,
   };
 }
@@ -211,3 +212,4 @@ describe('chat 会话切换 UX', () => {
     expect(screen.getByText('current 11')).toBeInTheDocument();
   });
 });
+

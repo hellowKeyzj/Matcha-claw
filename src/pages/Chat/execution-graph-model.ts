@@ -1,15 +1,7 @@
-import type { TaskStep } from './task-viz';
+import type {
+  SessionExecutionGraph,
+  SessionExecutionGraphStep,
+} from '../../../runtime-host/shared/session-adapter-types';
 
-export interface ExecutionGraphData {
-  id: string;
-  anchorMessageKey: string;
-  anchorTurnKey?: string;
-  anchorLaneKey?: string;
-  triggerMessageKey: string;
-  replyMessageKey?: string;
-  agentLabel: string;
-  sessionLabel: string;
-  steps: TaskStep[];
-  active: boolean;
-  suppressToolCardLaneTurnKeys?: string[];
-}
+export type ExecutionGraphStepData = SessionExecutionGraphStep;
+export type ExecutionGraphData = SessionExecutionGraph;

@@ -6,7 +6,7 @@ import {
   selectSnapshotLayerState,
   selectViewLayerState,
 } from '@/stores/chat/selectors';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function makeState(overrides: Record<string, unknown> = {}) {
@@ -352,3 +352,4 @@ describe('chat selectors layering', () => {
     expect(secondPane.sessionEntries).not.toBe(firstPane.sessionEntries);
   });
 });
+

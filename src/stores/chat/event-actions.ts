@@ -13,15 +13,12 @@ import {
 } from './event-routing';
 import {
   getSessionRuntime,
-  getSessionTimelineEntries,
-  patchSessionRecord,
-  patchSessionTimelineAndViewport,
-  upsertSessionTimelineEntry,
+  patchSessionSnapshot,
 } from './store-state-helpers';
 import type { ChatStoreState } from './types';
 import type {
-  SessionMessageChunkUpdateEvent,
-  SessionMessageUpdateEvent,
+  SessionRowChunkUpdateEvent,
+  SessionRowUpdateEvent,
   SessionUpdateEvent,
 } from '../../../runtime-host/shared/session-adapter-types';
 
@@ -32,11 +29,6 @@ type ChatStoreSetFn = (
 
 type ChatStoreGetFn = () => ChatStoreState;
 
-interface BufferedSessionUpdateEvent {
-  sequenceId: number;
-  event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
-}
-
 interface CreateStoreRuntimeEventActionsInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
@@ -44,89 +36,6 @@ interface CreateStoreRuntimeEventActionsInput {
 
 function normalizeIdentifier(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function normalizeSequenceId(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? value
-    : null;
-}
-
-function buildSessionUpdateSequenceKey(
-  event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent,
-): string | null {
-  const sessionKey = normalizeIdentifier(event.sessionKey);
-  const laneKey = normalizeIdentifier(event.entry?.laneKey);
-  const turnKey = normalizeIdentifier(event.entry?.turnKey);
-  const role = normalizeIdentifier(event.entry?.role);
-  if (!sessionKey || !laneKey || !turnKey || !role) {
-    return null;
-  }
-  return [sessionKey, laneKey, turnKey, role].join('|');
-}
-
-function readBufferedSessionUpdateEvents(
-  runtime: ReturnType<typeof getSessionRuntime>,
-  sequenceKey: string,
-): BufferedSessionUpdateEvent[] {
-  const buffered = runtime.bufferedMessageEventsByKey?.[sequenceKey];
-  if (!Array.isArray(buffered)) {
-    return [];
-  }
-  return buffered
-    .map((item) => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) {
-        return null;
-      }
-      const record = item as Record<string, unknown>;
-      const sequenceId = normalizeSequenceId(record.sequenceId);
-      const event = record.event;
-      if (sequenceId == null || !event || typeof event !== 'object' || Array.isArray(event)) {
-        return null;
-      }
-      const sessionUpdate = (event as { sessionUpdate?: unknown }).sessionUpdate;
-      if (sessionUpdate !== 'agent_message_chunk' && sessionUpdate !== 'agent_message') {
-        return null;
-      }
-      return {
-        sequenceId,
-        event: event as SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent,
-      } satisfies BufferedSessionUpdateEvent;
-    })
-    .filter((item): item is BufferedSessionUpdateEvent => item != null)
-    .sort((left, right) => left.sequenceId - right.sequenceId);
-}
-
-function writeBufferedSessionUpdateEvents(
-  runtime: ReturnType<typeof getSessionRuntime>,
-  sequenceKey: string,
-  bufferedEvents: BufferedSessionUpdateEvent[],
-): Pick<ReturnType<typeof getSessionRuntime>, 'bufferedMessageEventsByKey'> {
-  const nextBufferedByKey = { ...(runtime.bufferedMessageEventsByKey ?? {}) };
-  if (bufferedEvents.length === 0) {
-    delete nextBufferedByKey[sequenceKey];
-  } else {
-    nextBufferedByKey[sequenceKey] = bufferedEvents.map((item) => ({
-      sequenceId: item.sequenceId,
-      event: item.event,
-    }));
-  }
-  return {
-    bufferedMessageEventsByKey: nextBufferedByKey,
-  };
-}
-
-function writePendingMessageSequence(
-  runtime: ReturnType<typeof getSessionRuntime>,
-  sequenceKey: string,
-  nextSequenceId: number,
-): Pick<ReturnType<typeof getSessionRuntime>, 'pendingMessageSequenceByKey'> {
-  return {
-    pendingMessageSequenceByKey: {
-      ...(runtime.pendingMessageSequenceByKey ?? {}),
-      [sequenceKey]: nextSequenceId,
-    },
-  };
 }
 
 function applySessionLifecycleEvent(
@@ -207,17 +116,7 @@ function applySessionLifecycleEvent(
 
   set((state) => ({
     error: event.phase === 'started' || event.phase === 'final' ? null : state.error,
-    loadedSessions: patchSessionRecord(state, currentSessionKey, {
-      runtime: {
-        ...getSessionRuntime(state, currentSessionKey),
-        sending: event.runtime.sending,
-        activeRunId: event.runtime.activeRunId,
-        runPhase: event.runtime.runPhase,
-        streamingMessageId: event.runtime.streamingMessageId,
-        pendingFinal: event.runtime.pendingFinal,
-        lastUserMessageAt: event.runtime.lastUserMessageAt,
-      },
-    }),
+    loadedSessions: patchSessionSnapshot(state, currentSessionKey, event.snapshot),
   }));
 
   if (event.phase === 'final') {
@@ -230,7 +129,7 @@ function applySessionLifecycleEvent(
 function applySessionMessageEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     currentSessionKey: string;
-    event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
+    event: SessionRowChunkUpdateEvent | SessionRowUpdateEvent;
   },
 ): void {
   const {
@@ -239,136 +138,21 @@ function applySessionMessageEvent(
     event,
   } = input;
 
-  const authoritativeEntry = {
-    ...event.entry,
-    message: {
-      ...event.entry.message,
-      id: event.entry.message.id ?? event.entry.entryId,
-    },
-  };
-
   if (
-    authoritativeEntry.role === 'assistant'
-    && typeof authoritativeEntry.text === 'string'
-    && authoritativeEntry.text.trim()
+    event.row?.role === 'assistant'
+    && event.row.kind === 'message'
+    && event.row.text.trim()
   ) {
     maybeTrackSendToFirstToken(
       currentSessionKey,
-      event.sessionUpdate === 'agent_message_chunk' ? 'delta' : 'final',
+      event.sessionUpdate === 'session_row_chunk' ? 'delta' : 'final',
     );
   }
 
-  set((state) => {
-    const nextTimelineEntries = upsertSessionTimelineEntry(
-      getSessionTimelineEntries(state, currentSessionKey),
-      authoritativeEntry,
-    );
-    return {
+  set((state) => ({
       error: null,
-      loadedSessions: patchSessionRecord(
-        {
-          loadedSessions: patchSessionTimelineAndViewport(
-            state,
-            currentSessionKey,
-            nextTimelineEntries,
-            {
-              totalMessageCount: event.window.totalEntryCount,
-              windowStartOffset: event.window.windowStartOffset,
-              windowEndOffset: event.window.windowEndOffset,
-              hasMore: event.window.hasMore,
-              hasNewer: event.window.hasNewer,
-              isAtLatest: event.window.isAtLatest,
-            },
-          ),
-        },
-        currentSessionKey,
-        {
-          runtime: {
-            ...getSessionRuntime(state, currentSessionKey),
-            sending: event.runtime.sending,
-            activeRunId: event.runtime.activeRunId,
-            runPhase: event.runtime.runPhase,
-            streamingMessageId: event.runtime.streamingMessageId,
-            pendingFinal: event.runtime.pendingFinal,
-            lastUserMessageAt: event.runtime.lastUserMessageAt,
-          },
-        },
-      ),
-    };
-  });
-}
-
-function dispatchBufferedOrDirectSessionMessageEvent(
-  input: CreateStoreRuntimeEventActionsInput & {
-    currentSessionKey: string;
-    event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
-  },
-): void {
-  const { set, currentSessionKey, event } = input;
-  const sequenceKey = buildSessionUpdateSequenceKey(event);
-  const sequenceId = normalizeSequenceId(event.entry.sequenceId);
-
-  if (sequenceKey && sequenceId != null) {
-    set((state) => {
-      const runtime = getSessionRuntime(state, currentSessionKey);
-      const expectedSequenceId = runtime.pendingMessageSequenceByKey?.[sequenceKey] ?? 1;
-      const existingBuffered = readBufferedSessionUpdateEvents(runtime, sequenceKey);
-      const deduped = existingBuffered.filter((item) => item.sequenceId !== sequenceId);
-      const nextBuffered = [...deduped, { sequenceId, event }].sort((left, right) => left.sequenceId - right.sequenceId);
-
-      let nextExpectedSequenceId = expectedSequenceId;
-      const remaining: BufferedSessionUpdateEvent[] = [];
-      const drainedEvents: Array<SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent> = [];
-      for (const item of nextBuffered) {
-        if (item.sequenceId === nextExpectedSequenceId) {
-          drainedEvents.push(item.event);
-          nextExpectedSequenceId += 1;
-          continue;
-        }
-        remaining.push(item);
-      }
-
-      if (drainedEvents.length === 0) {
-        return {
-          loadedSessions: patchSessionRecord(state, currentSessionKey, {
-            runtime: {
-              ...runtime,
-              ...writeBufferedSessionUpdateEvents(runtime, sequenceKey, nextBuffered),
-              ...writePendingMessageSequence(runtime, sequenceKey, expectedSequenceId),
-            },
-          }),
-        };
-      }
-
-      let workingState = state;
-      let workingRuntime = runtime;
-      for (const drainedEvent of drainedEvents) {
-        applySessionMessageEvent({
-          set: (partial) => {
-            const patch = typeof partial === 'function' ? partial(workingState) : partial;
-            workingState = { ...workingState, ...patch } as ChatStoreState;
-          },
-          get: () => workingState,
-          currentSessionKey,
-          event: drainedEvent,
-        });
-        workingRuntime = getSessionRuntime(workingState, currentSessionKey);
-      }
-
-      return {
-        loadedSessions: patchSessionRecord(workingState, currentSessionKey, {
-          runtime: {
-            ...workingRuntime,
-            ...writeBufferedSessionUpdateEvents(workingRuntime, sequenceKey, remaining),
-            ...writePendingMessageSequence(workingRuntime, sequenceKey, nextExpectedSequenceId),
-          },
-        }),
-      };
-    });
-    return;
-  }
-
-  applySessionMessageEvent(input);
+      loadedSessions: patchSessionSnapshot(state, currentSessionKey, event.snapshot),
+  }));
 }
 
 export function handleStoreSessionUpdateEvent(
@@ -397,12 +181,9 @@ export function handleStoreSessionUpdateEvent(
   }
 
   if (
-    sessionUpdate.sessionUpdate !== 'agent_message_chunk'
-    && sessionUpdate.sessionUpdate !== 'agent_message'
+    sessionUpdate.sessionUpdate !== 'session_row_chunk'
+    && sessionUpdate.sessionUpdate !== 'session_row'
   ) {
-    return;
-  }
-  if (!sessionUpdate.entry || !sessionUpdate.entry.message) {
     return;
   }
 
@@ -418,15 +199,15 @@ export function handleStoreSessionUpdateEvent(
   bindChatRunIdTelemetry(currentSessionKey, eventRunId);
   setLastChatEventAt(Date.now());
 
-  dispatchBufferedOrDirectSessionMessageEvent({
+  applySessionMessageEvent({
     set,
     get,
     currentSessionKey,
     event: sessionUpdate,
   });
 
-  if (sessionUpdate.sessionUpdate === 'agent_message') {
-    const role = normalizeIdentifier(sessionUpdate.entry.role);
+  if (sessionUpdate.sessionUpdate === 'session_row') {
+    const role = normalizeIdentifier(sessionUpdate.row?.role);
     if (role === 'assistant') {
       finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_message_final' });
       clearHistoryPoll();

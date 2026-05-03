@@ -4,10 +4,11 @@ import {
   createEmptySessionRecord,
   getSessionTimelineEntries,
 } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
-import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import type { ChatStoreState } from '@/stores/chat/types';
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -260,3 +261,4 @@ describe('chat history apply pipeline', () => {
     expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
   });
 });
+

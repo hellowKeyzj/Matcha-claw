@@ -1,11 +1,11 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
-import { resolveSessionLabelFromTimelineEntries } from './message-helpers';
+import { resolveSessionLabelFromRows } from './message-helpers';
 import {
   getSessionMeta,
   getSessionMessageCount,
   getSessionRecord,
   getSessionRuntime,
-  getSessionTimelineEntries,
+  getSessionRows,
   toMs,
 } from './store-state-helpers';
 
@@ -50,9 +50,9 @@ export function resolveSessionListLabel(
   sessionKey: string,
   fallbackLabel?: string | null,
 ): string | null {
-  const timelineEntries = getSessionTimelineEntries(state, sessionKey);
-  if (timelineEntries.length > 0) {
-    const viewportLabel = resolveSessionLabelFromTimelineEntries(timelineEntries);
+  const rows = getSessionRows(state, sessionKey);
+  if (rows.length > 0) {
+    const viewportLabel = resolveSessionLabelFromRows(rows);
     if (viewportLabel) {
       return viewportLabel;
     }

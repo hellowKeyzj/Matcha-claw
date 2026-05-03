@@ -177,6 +177,7 @@ describe('runtime-host process gateway rpc client', () => {
       expect(connectParamsSnapshot).toBeTruthy();
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.read');
       expect((connectParamsSnapshot as { scopes?: string[] }).scopes).toContain('operator.write');
+      expect((connectParamsSnapshot as { caps?: string[] }).caps).toContain('tool-events');
       expect((connectParamsSnapshot as { client?: { id?: string; displayName?: string; mode?: string } }).client)
         .toMatchObject({
           id: 'gateway-client',

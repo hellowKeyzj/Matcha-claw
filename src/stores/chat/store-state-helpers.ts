@@ -10,18 +10,16 @@ import type {
   ChatStoreState,
 } from './types';
 import type {
+  SessionRenderRow,
   SessionStateSnapshot,
-  SessionTimelineEntry,
 } from '../../../runtime-host/shared/session-adapter-types';
-import { findLatestAssistantTextFromTimelineEntries } from './timeline-message';
+import { findLatestAssistantTextFromRows } from './timeline-message';
 import { syncViewportState } from './viewport-state';
 
-/** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 export function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
 
-/** Monotonic-ish timer for perf sampling with Date fallback. */
 export function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
     return performance.now();
@@ -35,6 +33,14 @@ function safeStableStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function hashStringDjb2(input: string): string {
+  let hash = 5381;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
@@ -61,76 +67,56 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
   return true;
 }
 
-export function buildTimelineHistoryFingerprint(
-  entries: SessionTimelineEntry[],
+export function buildRowHistoryFingerprint(
+  rows: SessionRenderRow[],
   thinkingLevel: string | null,
 ): string {
-  const count = entries.length;
-  const first = count > 0 ? entries[0] : null;
-  const last = count > 0 ? entries[count - 1] : null;
+  const count = rows.length;
+  const first = count > 0 ? rows[0] : null;
+  const last = count > 0 ? rows[count - 1] : null;
   return [
     count,
     thinkingLevel ?? '',
-    first?.entryId ?? '',
-    first?.role ?? '',
-    first?.timestamp ?? '',
-    last?.entryId ?? '',
-    last?.role ?? '',
-    last?.timestamp ?? '',
-    findLatestAssistantTextFromTimelineEntries(entries),
+    first?.key ?? '',
+    first?.kind ?? '',
+    first?.createdAt ?? '',
+    last?.key ?? '',
+    last?.kind ?? '',
+    last?.createdAt ?? '',
+    findLatestAssistantTextFromRows(rows),
   ].join('|');
 }
 
-function hashStringDjb2(input: string): string {
-  let hash = 5381;
-  for (let index = 0; index < input.length; index += 1) {
-    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-export function buildTimelineRenderFingerprint(entries: SessionTimelineEntry[]): string {
-  const count = entries.length;
+export function buildRowRenderFingerprint(rows: SessionRenderRow[]): string {
+  const count = rows.length;
   if (count === 0) {
     return hashStringDjb2('0');
   }
-
-  const first = entries[0];
-  const last = entries[count - 1];
+  const first = rows[0];
+  const last = rows[count - 1];
   const stride = Math.max(1, Math.floor(count / 8));
   const parts: string[] = [
     String(count),
     String(stride),
-    first?.entryId ?? '',
-    String(first?.timestamp ?? ''),
-    last?.entryId ?? '',
-    String(last?.timestamp ?? ''),
+    first?.key ?? '',
+    String(first?.createdAt ?? ''),
+    last?.key ?? '',
+    String(last?.createdAt ?? ''),
   ];
   for (let index = 0; index < count; index += stride) {
-    const entry = entries[index];
-    const attached = entry?.message._attachedFiles;
+    const row = rows[index];
     parts.push([
-      entry?.entryId ?? '',
-      entry?.role ?? '',
-      String(entry?.timestamp ?? ''),
-      entry?.message.toolCallId ?? '',
-      entry?.message.toolName ?? '',
-      entry?.message.isError ? '1' : '0',
-      hashStringDjb2([
-        safeStableStringify(entry?.message.tool_calls ?? entry?.message.toolCalls ?? null),
-        safeStableStringify(entry?.message.toolStatuses ?? null),
-        safeStableStringify(entry?.message.details ?? null),
-        safeStableStringify(entry?.message.metadata ?? null),
-      ].join('|')),
-      String(attached?.length ?? 0),
-      attached?.[0]?.filePath ?? '',
-      attached?.[0]?.preview ? '1' : '0',
+      row?.key ?? '',
+      row?.kind ?? '',
+      row?.role ?? '',
+      String(row?.createdAt ?? ''),
+      hashStringDjb2(safeStableStringify(row)),
     ].join(':'));
   }
   return hashStringDjb2(parts.join('|'));
 }
 
-const EMPTY_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
+const EMPTY_ROWS: SessionRenderRow[] = [];
 const EMPTY_APPROVALS: ApprovalItem[] = [];
 const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
   totalMessageCount: 0,
@@ -152,8 +138,6 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     streamingMessageId: null,
     pendingFinal: false,
     lastUserMessageAt: null,
-    pendingMessageSequenceByKey: {},
-    bufferedMessageEventsByKey: {},
   };
 }
 
@@ -176,7 +160,7 @@ export function createEmptySessionRecord(): ChatSessionRecord {
   return {
     meta: createEmptySessionMeta(),
     runtime: createEmptySessionRuntime(),
-    timelineEntries: EMPTY_TIMELINE_ENTRIES,
+    rows: EMPTY_ROWS,
     window: createEmptySessionViewportState(),
   };
 }
@@ -199,16 +183,16 @@ export function resolveSessionMeta(session: ChatSessionRecord | undefined): Chat
   return session?.meta ?? createEmptySessionMeta();
 }
 
-export function resolveSessionTimelineEntries(
+export function resolveSessionRows(
   session: ChatSessionRecord | undefined,
-): SessionTimelineEntry[] {
-  return Array.isArray(session?.timelineEntries) ? session.timelineEntries : EMPTY_TIMELINE_ENTRIES;
+): SessionRenderRow[] {
+  return Array.isArray(session?.rows) ? session.rows : EMPTY_ROWS;
 }
 
 export function getSessionMessageCount(
-  session: Pick<ChatSessionRecord, 'timelineEntries'> | undefined,
+  session: Pick<ChatSessionRecord, 'rows'> | undefined,
 ): number {
-  return Array.isArray(session?.timelineEntries) ? session.timelineEntries.length : 0;
+  return Array.isArray(session?.rows) ? session.rows.length : 0;
 }
 
 export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
@@ -218,7 +202,7 @@ export function resolveSessionRecord(session: ChatSessionRecord | undefined): Ch
   return {
     meta: resolveSessionMeta(session),
     runtime: resolveSessionRuntime(session),
-    timelineEntries: resolveSessionTimelineEntries(session),
+    rows: resolveSessionRows(session),
     window: resolveSessionViewportState(session),
   };
 }
@@ -231,11 +215,11 @@ export function getSessionRecord(state: Pick<ChatStoreState, 'loadedSessions'>, 
   return resolveSessionRecord(state.loadedSessions[sessionKey]);
 }
 
-export function getSessionTimelineEntries(
+export function getSessionRows(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-): SessionTimelineEntry[] {
-  return resolveSessionTimelineEntries(state.loadedSessions[sessionKey]);
+): SessionRenderRow[] {
+  return resolveSessionRows(state.loadedSessions[sessionKey]);
 }
 
 export function getSessionMeta(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionMetaState {
@@ -272,13 +256,12 @@ export function patchSessionRecord(
   patch: ChatSessionRecordPatch,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
-  const nextTimelineEntries = patch.timelineEntries ?? current.timelineEntries;
   return {
     ...state.loadedSessions,
     [sessionKey]: {
       meta: patch.meta ?? current.meta,
       runtime: patch.runtime ?? current.runtime,
-      timelineEntries: nextTimelineEntries,
+      rows: patch.rows ?? current.rows,
       window: patch.window ?? current.window,
     },
   };
@@ -368,43 +351,43 @@ export function removeSessionViewportState(
   return removeSessionRecord(state, sessionKey);
 }
 
-export function selectViewportTimelineEntries(
-  record: Pick<ChatSessionRecord, 'timelineEntries' | 'window'>,
-): SessionTimelineEntry[] {
-  const totalEntries = resolveSessionTimelineEntries(record as ChatSessionRecord);
-  if (totalEntries.length === 0) {
-    return EMPTY_TIMELINE_ENTRIES;
+export function selectViewportRows(
+  record: Pick<ChatSessionRecord, 'rows' | 'window'>,
+): SessionRenderRow[] {
+  const rows = resolveSessionRows(record as ChatSessionRecord);
+  if (rows.length === 0) {
+    return EMPTY_ROWS;
   }
-  const totalCount = Math.max(record.window.totalMessageCount, totalEntries.length);
-  const start = Math.max(0, Math.min(record.window.windowStartOffset, totalEntries.length));
-  const end = Math.max(start, Math.min(record.window.windowEndOffset, totalEntries.length));
+  const totalCount = Math.max(record.window.totalMessageCount, rows.length);
+  const start = Math.max(0, Math.min(record.window.windowStartOffset, rows.length));
+  const end = Math.max(start, Math.min(record.window.windowEndOffset, rows.length));
   const expectedWindowSize = Math.max(0, Math.min(record.window.windowEndOffset, totalCount) - Math.min(record.window.windowStartOffset, totalCount));
   const isAuthoritativeWindowSlice = (
-    totalCount > totalEntries.length
-    && totalEntries.length === expectedWindowSize
+    totalCount > rows.length
+    && rows.length === expectedWindowSize
   );
   if (isAuthoritativeWindowSlice) {
-    return totalEntries;
+    return rows;
   }
-  if (start === 0 && end === totalEntries.length) {
-    return totalEntries;
+  if (start === 0 && end === rows.length) {
+    return rows;
   }
-  return totalEntries.slice(start, end);
+  return rows.slice(start, end);
 }
 
-export function patchSessionTimelineAndViewport(
+export function patchSessionRowsAndViewport(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-  timelineEntries: SessionTimelineEntry[],
+  rows: SessionRenderRow[],
   viewportPatch?: Partial<ChatSessionViewportState>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
-  const nextMessageCount = timelineEntries.length;
+  const nextRowCount = rows.length;
   const nextViewport = syncViewportState(current.window, {
-    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, timelineEntries.length),
+    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, rows.length),
     windowStartOffset: viewportPatch?.windowStartOffset ?? current.window.windowStartOffset,
     windowEndOffset: viewportPatch?.windowEndOffset ?? (
-      (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + nextMessageCount
+      (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + nextRowCount
     ),
     hasMore: viewportPatch?.hasMore ?? current.window.hasMore,
     hasNewer: viewportPatch?.hasNewer ?? current.window.hasNewer,
@@ -414,7 +397,7 @@ export function patchSessionTimelineAndViewport(
     lastVisibleMessageId: viewportPatch?.lastVisibleMessageId ?? current.window.lastVisibleMessageId,
   });
   return patchSessionRecord(state, sessionKey, {
-    timelineEntries,
+    rows,
     window: nextViewport,
   });
 }
@@ -426,7 +409,7 @@ export function patchSessionSnapshot(
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   return patchSessionRecord(state, sessionKey, {
-    timelineEntries: snapshot.entries,
+    rows: snapshot.rows,
     runtime: {
       ...current.runtime,
       sending: snapshot.runtime.sending,
@@ -450,18 +433,6 @@ export function patchSessionSnapshot(
   });
 }
 
-export function upsertSessionTimelineEntry(
-  timelineEntries: SessionTimelineEntry[],
-  entry: SessionTimelineEntry,
-): SessionTimelineEntry[] {
-  const existingIndex = timelineEntries.findIndex((candidate) => candidate.entryId === entry.entryId);
-  if (existingIndex < 0) {
-    return [...timelineEntries, entry];
-  }
-  const nextEntries = [...timelineEntries];
-  nextEntries[existingIndex] = entry;
-  return nextEntries;
-}
 export function getPendingApprovals(
   state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,
   sessionKey: string,

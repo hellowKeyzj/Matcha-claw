@@ -1,10 +1,9 @@
 import {
-  extractMessageText,
   normalizeAssistantFinalText,
   sanitizeCanonicalUserContent as sanitizeCanonicalUserContentShared,
   sanitizeCanonicalUserText as sanitizeCanonicalUserTextShared,
 } from '../../../runtime-host/shared/chat-message-normalization';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionMessageRow, SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
@@ -35,41 +34,34 @@ function shouldIgnoreAssistantSessionLabel(text: string): boolean {
   return ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-export function getMessageText(content: unknown): string {
-  return extractMessageText(content);
-}
-
 export const sanitizeCanonicalUserText = sanitizeCanonicalUserTextShared;
 export const sanitizeCanonicalUserContent = sanitizeCanonicalUserContentShared;
 
-function resolveSessionLabelCandidateFromUserEntry(entry: SessionTimelineEntry): string {
-  const text = entry.text || getMessageText(entry.message.content);
-  return normalizeSessionLabelText(sanitizeCanonicalUserTextShared(text));
+function resolveSessionLabelCandidateFromUserRow(row: SessionMessageRow): string {
+  return normalizeSessionLabelText(sanitizeCanonicalUserTextShared(row.text));
 }
 
-function resolveSessionLabelCandidateFromAssistantEntry(entry: SessionTimelineEntry): string {
-  return normalizeSessionLabelText(normalizeAssistantFinalText(entry.text || entry.message.content));
+function resolveSessionLabelCandidateFromAssistantRow(row: SessionMessageRow): string {
+  return normalizeSessionLabelText(normalizeAssistantFinalText(row.text));
 }
 
-export function resolveSessionLabelFromTimelineEntries(
-  entries: SessionTimelineEntry[],
-): string | null {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry.role !== 'user') {
+export function resolveSessionLabelFromRows(rows: SessionRenderRow[]): string | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.kind !== 'message' || row.role !== 'user') {
       continue;
     }
-    const candidate = resolveSessionLabelCandidateFromUserEntry(entry);
+    const candidate = resolveSessionLabelCandidateFromUserRow(row);
     if (candidate) {
       return candidate;
     }
   }
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry.role !== 'assistant') {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.kind !== 'message' || row.role !== 'assistant') {
       continue;
     }
-    const candidate = resolveSessionLabelCandidateFromAssistantEntry(entry);
+    const candidate = resolveSessionLabelCandidateFromAssistantRow(row);
     if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
       return candidate;
     }

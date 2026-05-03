@@ -11,7 +11,9 @@ import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { usePluginsStore } from '@/stores/plugins-store';
 import i18n from '@/i18n';
-import type { RawMessage } from '@/stores/chat';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function LocationEcho() {
@@ -43,22 +45,18 @@ function createSessionRecord(input?: {
   ready?: boolean;
 }) {
   const messages = input?.messages ?? [];
+  const base = createEmptySessionRecord();
   return {
     meta: {
+      ...base.meta,
       label: input?.label ?? null,
-      lastActivityAt: null,
       historyStatus: input?.ready ? 'ready' : 'idle',
-      thinkingLevel: null,
     },
     runtime: {
-      sending: false,
-      activeRunId: null,
-      runPhase: 'idle' as const,
-      streamingMessageId: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
+      ...base.runtime,
     },
-    messages,
+    timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', messages),
+    executionGraphs: base.executionGraphs,
     window: createViewportWindowState({
       totalMessageCount: messages.length,
       windowStartOffset: 0,
@@ -391,3 +389,4 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
   });
 });
+

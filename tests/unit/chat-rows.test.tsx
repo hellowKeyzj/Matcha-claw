@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { RawMessage } from '@/stores/chat';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 
 describe('chat row model', () => {
   it('builds rows from renderable messages and filters tool_result messages', () => {
@@ -110,4 +110,44 @@ describe('chat row model', () => {
 
     expect(rows).toEqual([]);
   });
+
+  it('materializes tool-only assistant entries as explicit tool-activity rows', () => {
+    const rows = buildStaticChatRows({
+      sessionKey: 'agent:main:main',
+      entries: buildTimelineEntriesFromMessages('agent:main:main', [{
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'tool-1',
+          name: 'read_file',
+          input: { filePath: 'README.md' },
+        }],
+        timestamp: 1,
+        id: 'assistant-tool-1',
+        toolStatuses: [{
+          toolCallId: 'tool-1',
+          name: 'read_file',
+          status: 'completed',
+          updatedAt: 1,
+        }],
+      }]),
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'tool-activity',
+      key: 'session:agent:main:main|entry:assistant-tool-1',
+      toolUses: [{
+        id: 'tool-1',
+        name: 'read_file',
+        input: { filePath: 'README.md' },
+      }],
+      toolStatuses: [{
+        toolCallId: 'tool-1',
+        name: 'read_file',
+        status: 'completed',
+      }],
+    });
+  });
 });
+

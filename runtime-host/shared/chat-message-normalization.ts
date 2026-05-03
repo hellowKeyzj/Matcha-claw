@@ -10,10 +10,6 @@ type ContentTextBlock = {
   text?: unknown;
 };
 
-type ToolCallBlock = {
-  id?: unknown;
-};
-
 type ChatMessageRecord = Record<string, unknown>;
 
 export interface NormalizeRawChatMessageOptions {
@@ -163,34 +159,6 @@ export function normalizeAssistantFinalText(content: unknown): string {
     .trim();
 }
 
-function collectAssistantToolCallIds(message: ChatMessageRecord): string[] {
-  const ids = new Set<string>();
-  const content = message.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (!isRecord(block)) {
-        continue;
-      }
-      if ((block.type === 'tool_use' || block.type === 'toolCall') && typeof block.id === 'string' && block.id.trim()) {
-        ids.add(block.id.trim());
-      }
-    }
-  }
-  const toolCalls = message.tool_calls ?? message.toolCalls;
-  if (Array.isArray(toolCalls)) {
-    for (const toolCall of toolCalls) {
-      if (!isRecord(toolCall)) {
-        continue;
-      }
-      const id = normalizeOptionalString((toolCall as ToolCallBlock).id);
-      if (id) {
-        ids.add(id);
-      }
-    }
-  }
-  return Array.from(ids).sort();
-}
-
 export function resolveNormalizedMessageIdentity(
   value: unknown,
   options: NormalizeRawChatMessageOptions = {},
@@ -292,91 +260,4 @@ export function shouldPreserveCanonicalTranscriptMessage(value: unknown): boolea
     return false;
   }
   return !isInternalAssistantControlMessage(message);
-}
-
-export function matchesMessageIdentifier(message: unknown, candidateId: string): boolean {
-  const normalizedCandidate = normalizeOptionalString(candidateId);
-  if (!normalizedCandidate) {
-    return false;
-  }
-  const identity = resolveNormalizedMessageIdentity(message, {
-    fallbackMessageIdToId: true,
-  });
-  return (
-    identity.id === normalizedCandidate
-    || identity.messageId === normalizedCandidate
-    || identity.originMessageId === normalizedCandidate
-    || identity.clientId === normalizedCandidate
-    || identity.uniqueId === normalizedCandidate
-    || identity.requestId === normalizedCandidate
-  );
-}
-
-export function collectMessageIdentifierCandidates(message: unknown): string[] {
-  const identity = resolveNormalizedMessageIdentity(message, {
-    fallbackMessageIdToId: true,
-  });
-  return Array.from(new Set([
-    identity.uniqueId,
-    identity.clientId,
-    identity.requestId,
-    identity.messageId,
-    identity.originMessageId,
-    identity.id,
-  ].filter((value): value is string => Boolean(value))));
-}
-
-export function buildNormalizedMessageIdentityKeys(message: unknown): string[] {
-  const record = isRecord(message) ? message : {};
-  const role = normalizeMessageRole(record.role) ?? 'assistant';
-  const identity = resolveNormalizedMessageIdentity(record, {
-    fallbackMessageIdToId: true,
-  });
-  const agentId = identity.agentId ?? '';
-  const keys: string[] = [];
-
-  if (identity.toolCallId) {
-    keys.push(`tool:${identity.toolCallId}`);
-  }
-
-  if (role === 'assistant') {
-    const toolCallIds = collectAssistantToolCallIds(record);
-    if (toolCallIds.length > 0) {
-      keys.push(`tool_calls:${toolCallIds.join(',')}:${agentId}`);
-    }
-  }
-
-  if (identity.uniqueId) {
-    keys.push(`unique:${role}:${identity.uniqueId}:${agentId}`);
-  }
-  if (identity.clientId) {
-    keys.push(`client:${role}:${identity.clientId}:${agentId}`);
-  }
-  if (identity.requestId) {
-    keys.push(`request:${role}:${identity.requestId}:${agentId}`);
-  }
-  if (identity.messageId) {
-    keys.push(`message:${role}:${identity.messageId}:${agentId}`);
-  }
-  if (identity.originMessageId) {
-    keys.push(`origin:${role}:${identity.originMessageId}:${agentId}`);
-  }
-  if (identity.id) {
-    keys.push(`id:${role}:${identity.id}:${agentId}`);
-  }
-
-  if (keys.length > 0) {
-    return keys;
-  }
-
-  const fallbackText = (
-    role === 'assistant'
-      ? normalizeAssistantFinalText(record.content)
-      : extractMessageText(record.content).trim()
-  ).slice(0, 120);
-  const timestamp = typeof record.timestamp === 'number' ? String(record.timestamp) : '';
-  if (!fallbackText && !timestamp) {
-    return [];
-  }
-  return [`fallback:${role}:${timestamp}:${fallbackText}`];
 }

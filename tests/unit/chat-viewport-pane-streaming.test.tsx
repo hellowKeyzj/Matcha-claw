@@ -2,13 +2,9 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatList } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { RawMessage } from '@/stores/chat';
-
-vi.mock('@/pages/Chat/useExecutionGraphs', () => ({
-  useExecutionGraphs: () => [],
-}));
+import type { RawMessage } from './helpers/timeline-fixtures';
 
 function buildCurrentSession(messages: RawMessage[]) {
   const base = createEmptySessionRecord();
@@ -138,3 +134,4 @@ describe('chat list streaming render', () => {
     expect(document.querySelector('[data-chat-body-mode="streaming"]')).not.toBeNull();
   });
 });
+

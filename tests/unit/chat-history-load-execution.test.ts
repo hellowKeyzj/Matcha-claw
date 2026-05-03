@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
+import type { ChatStoreState } from '@/stores/chat/types';
+import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
   getSessionTimelineEntries,
 } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
 
@@ -223,3 +224,4 @@ describe('chat history load execution', () => {
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(false);
   });
 });
+

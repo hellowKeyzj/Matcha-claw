@@ -18,22 +18,18 @@ import {
 export const ChatMessage = memo(function ChatMessage({
   row,
   showThinking,
-  suppressToolCards = false,
   userAvatarImageUrl,
-  streamingTools = [],
 }: ChatMessageProps) {
-  const { entry } = row;
-  const { messageView } = row;
   const isUser = row.role === 'user';
-  const isStreaming = entry.status === 'streaming' || Boolean(entry.message.streaming);
+  const isStreaming = row.isStreaming;
   const hasText = row.text.trim().length > 0;
-  const visibleThinking = showThinking ? messageView.thinking : null;
-  const visibleTools = suppressToolCards ? [] : messageView.toolUses;
+  const visibleThinking = showThinking ? row.thinking : null;
+  const visibleTools = row.toolUses;
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
 
-  const hasStreamingToolStatus = isStreaming && streamingTools.length > 0;
+  const hasStreamingToolStatus = isStreaming && row.toolStatuses.length > 0;
   const hasStreamingShell = isStreaming && !isUser;
-  if (!hasText && !visibleThinking && messageView.images.length === 0 && visibleTools.length === 0 && messageView.attachedFiles.length === 0 && !hasStreamingToolStatus && !hasStreamingShell) return null;
+  if (!hasText && !visibleThinking && row.images.length === 0 && visibleTools.length === 0 && row.attachedFiles.length === 0 && !hasStreamingToolStatus && !hasStreamingShell) return null;
 
   return (
     <>
@@ -45,8 +41,8 @@ export const ChatMessage = memo(function ChatMessage({
         assistantAvatarStyle={row.assistantPresentation?.avatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       >
-        {isStreaming && !isUser && streamingTools.length > 0 && (
-          <ToolStatusBar tools={streamingTools} />
+        {isStreaming && !isUser && row.toolStatuses.length > 0 && (
+          <ToolStatusBar tools={row.toolStatuses} />
         )}
 
         {visibleThinking && (
@@ -57,8 +53,8 @@ export const ChatMessage = memo(function ChatMessage({
 
         {isUser && (
           <UserMessageMedia
-            images={messageView.images}
-            attachedFiles={messageView.attachedFiles}
+            images={row.images}
+            attachedFiles={row.attachedFiles}
             onPreview={setLightboxImg}
           />
         )}
@@ -85,14 +81,14 @@ export const ChatMessage = memo(function ChatMessage({
 
         {!isUser && (
           <AssistantMessageMedia
-            images={messageView.images}
-            attachedFiles={messageView.attachedFiles}
+            images={row.images}
+            attachedFiles={row.attachedFiles}
             onPreview={setLightboxImg}
           />
         )}
 
-        {isUser && <UserMessageMetaBar timestamp={entry.timestamp} />}
-        {!isUser && hasText && <AssistantMessageMetaBar text={row.text} timestamp={entry.timestamp} />}
+        {isUser && <UserMessageMetaBar timestamp={row.createdAt} />}
+        {!isUser && hasText && <AssistantMessageMetaBar text={row.text} timestamp={row.createdAt} />}
       </MessageShell>
 
       {/* Image lightbox portal */}
@@ -111,14 +107,5 @@ export const ChatMessage = memo(function ChatMessage({
 interface ChatMessageProps {
   row: ChatMessageRow;
   showThinking: boolean;
-  suppressToolCards?: boolean;
   userAvatarImageUrl?: string | null;
-  streamingTools?: Array<{
-    id?: string;
-    toolCallId?: string;
-    name: string;
-    status: 'running' | 'completed' | 'error';
-    durationMs?: number;
-    summary?: string;
-  }>;
 }

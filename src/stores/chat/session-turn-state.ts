@@ -1,7 +1,5 @@
-import { readTimelineEntryToolStatuses } from './event-helpers';
-import { resolveSessionTimelineEntries } from './store-state-helpers';
+import type { SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSessionRecord, ToolStatus } from './types';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 export interface AssistantTurnLaneIdentity {
   turnKey: string | null;
@@ -13,23 +11,23 @@ export interface SessionAssistantTurnLaneState {
   laneKey: string;
   turnKey: string;
   agentId: string | null;
-  entry: SessionTimelineEntry;
+  row: SessionRenderRow;
   toolStatuses: ToolStatus[];
 }
 
 export interface SessionAssistantTurnSnapshot {
   turnKey: string;
   lanes: SessionAssistantTurnLaneState[];
-  latestEntry: SessionTimelineEntry;
-  latestStreamingEntry: SessionTimelineEntry | null;
+  latestRow: SessionRenderRow;
+  latestStreamingRow: SessionRenderRow | null;
 }
 
 export interface SessionAssistantTurnState {
   turns: SessionAssistantTurnSnapshot[];
   activeTurn: SessionAssistantTurnSnapshot | null;
   activeTurnKey: string | null;
-  currentTurn: SessionTimelineEntry | null;
-  currentStreamingTurn: SessionTimelineEntry | null;
+  currentTurn: SessionRenderRow | null;
+  currentStreamingTurn: SessionRenderRow | null;
   lanes: SessionAssistantTurnLaneState[];
 }
 
@@ -37,53 +35,51 @@ function normalizeIdentifier(value: string | null | undefined): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function findCurrentStreamingTurn(
-  entries: SessionTimelineEntry[],
-  streamingMessageId: string | null | undefined,
-): SessionTimelineEntry | null {
-  const normalizedStreamingMessageId = normalizeIdentifier(streamingMessageId);
-  if (normalizedStreamingMessageId) {
-    const matched = entries.find((entry) => entry.entryId === normalizedStreamingMessageId);
-    if (matched) {
-      return matched;
-    }
-  }
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry?.role === 'assistant' && entry.status === 'streaming') {
-      return entry;
-    }
-  }
-  return null;
+function isAssistantLaneRow(row: SessionRenderRow): boolean {
+  return row.role === 'assistant'
+    && Boolean(normalizeIdentifier(row.assistantTurnKey))
+    && Boolean(normalizeIdentifier(row.assistantLaneKey));
 }
 
-export function resolveAssistantEntryLaneIdentity(entry: SessionTimelineEntry): AssistantTurnLaneIdentity {
-  const agentId = normalizeIdentifier(entry.agentId ?? entry.message.agentId) || null;
+export function resolveAssistantEntryLaneIdentity(row: SessionRenderRow): AssistantTurnLaneIdentity {
   return {
-    turnKey: normalizeIdentifier(entry.turnKey) || null,
-    laneKey: normalizeIdentifier(entry.laneKey) || null,
-    agentId,
+    turnKey: normalizeIdentifier(row.assistantTurnKey) || null,
+    laneKey: normalizeIdentifier(row.assistantLaneKey) || null,
+    agentId: normalizeIdentifier(row.assistantLaneAgentId ?? row.agentId) || null,
   };
 }
 
-function collectAssistantTurns(
-  entries: SessionTimelineEntry[],
-): SessionAssistantTurnSnapshot[] {
+function readRowToolStatuses(row: SessionRenderRow): ToolStatus[] {
+  if (row.kind === 'message' || row.kind === 'tool-activity') {
+    return row.toolStatuses.map((toolStatus) => ({
+      id: toolStatus.id,
+      toolCallId: toolStatus.toolCallId,
+      name: toolStatus.name,
+      status: toolStatus.status,
+      durationMs: toolStatus.durationMs,
+      summary: toolStatus.summary,
+      updatedAt: toolStatus.updatedAt ?? 0,
+    }));
+  }
+  return [];
+}
+
+function collectAssistantTurns(rows: SessionRenderRow[]): SessionAssistantTurnSnapshot[] {
   interface MutableTurnSnapshot {
     turnKey: string;
-    latestEntry: SessionTimelineEntry;
-    latestStreamingEntry: SessionTimelineEntry | null;
+    latestRow: SessionRenderRow;
+    latestStreamingRow: SessionRenderRow | null;
     lanesByKey: Map<string, SessionAssistantTurnLaneState>;
   }
 
   const turns: MutableTurnSnapshot[] = [];
   const turnIndexByKey = new Map<string, number>();
 
-  for (const entry of entries) {
-    if (entry.role !== 'assistant') {
+  for (const row of rows) {
+    if (!isAssistantLaneRow(row)) {
       continue;
     }
-    const laneIdentity = resolveAssistantEntryLaneIdentity(entry);
+    const laneIdentity = resolveAssistantEntryLaneIdentity(row);
     if (!laneIdentity.turnKey || !laneIdentity.laneKey) {
       continue;
     }
@@ -95,122 +91,77 @@ function collectAssistantTurns(
     if (!turn) {
       turn = {
         turnKey: laneIdentity.turnKey,
-        latestEntry: entry,
-        latestStreamingEntry: entry.status === 'streaming' ? entry : null,
+        latestRow: row,
+        latestStreamingRow: row.kind === 'message' && row.isStreaming ? row : null,
         lanesByKey: new Map<string, SessionAssistantTurnLaneState>(),
       };
       turnIndexByKey.set(laneIdentity.turnKey, turns.length);
       turns.push(turn);
     }
 
-    turn.latestEntry = entry;
-    if (entry.status === 'streaming') {
-      turn.latestStreamingEntry = entry;
+    turn.latestRow = row;
+    if (row.kind === 'message' && row.isStreaming) {
+      turn.latestStreamingRow = row;
     }
     turn.lanesByKey.set(laneIdentity.laneKey, {
       laneKey: laneIdentity.laneKey,
       turnKey: laneIdentity.turnKey,
       agentId: laneIdentity.agentId,
-      entry,
-      toolStatuses: readTimelineEntryToolStatuses(entry),
+      row,
+      toolStatuses: readRowToolStatuses(row),
     });
   }
 
   return turns.map((turn) => ({
     turnKey: turn.turnKey,
     lanes: Array.from(turn.lanesByKey.values()),
-    latestEntry: turn.latestEntry,
-    latestStreamingEntry: turn.latestStreamingEntry,
+    latestRow: turn.latestRow,
+    latestStreamingRow: turn.latestStreamingRow,
   }));
 }
 
-function findActiveAssistantTurn(
-  turns: SessionAssistantTurnSnapshot[],
-  currentStreamingTurn: SessionTimelineEntry | null,
-): SessionAssistantTurnSnapshot | null {
-  const currentStreamingTurnKey = currentStreamingTurn
-    ? resolveAssistantEntryLaneIdentity(currentStreamingTurn).turnKey
-    : null;
-  if (currentStreamingTurnKey) {
-    return turns.find((turn) => turn.turnKey === currentStreamingTurnKey) ?? null;
+function findCurrentStreamingTurn(
+  rows: SessionRenderRow[],
+  streamingMessageId: string | null | undefined,
+): SessionRenderRow | null {
+  const normalizedStreamingMessageId = normalizeIdentifier(streamingMessageId);
+  if (normalizedStreamingMessageId) {
+    const matched = rows.find((row) => row.entryId === normalizedStreamingMessageId);
+    if (matched) {
+      return matched;
+    }
   }
-  return turns[turns.length - 1] ?? null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.kind === 'message' && row.role === 'assistant' && row.isStreaming) {
+      return row;
+    }
+  }
+  return null;
 }
 
 export function readSessionAssistantTurnState(
-  session: Pick<ChatSessionRecord, 'timelineEntries' | 'runtime'>,
+  session: Pick<ChatSessionRecord, 'rows' | 'runtime'>,
 ): SessionAssistantTurnState {
-  const entries = resolveSessionTimelineEntries(session as ChatSessionRecord);
+  const rows = Array.isArray(session.rows) ? session.rows : [];
   const currentStreamingTurn = findCurrentStreamingTurn(
-    entries,
+    rows,
     session.runtime.streamingMessageId,
   );
-  const turns = collectAssistantTurns(entries);
-  const activeTurn = findActiveAssistantTurn(turns, currentStreamingTurn);
-  const activeTurnKey = activeTurn?.turnKey ?? null;
+  const turns = collectAssistantTurns(rows);
+  const activeTurnKey = currentStreamingTurn
+    ? resolveAssistantEntryLaneIdentity(currentStreamingTurn).turnKey
+    : (turns[turns.length - 1]?.turnKey ?? null);
+  const activeTurn = activeTurnKey
+    ? turns.find((turn) => turn.turnKey === activeTurnKey) ?? null
+    : null;
   const lanes = activeTurn?.lanes ?? [];
   return {
     turns,
     activeTurn,
     activeTurnKey,
-    currentTurn: currentStreamingTurn ?? activeTurn?.latestEntry ?? null,
+    currentTurn: currentStreamingTurn ?? activeTurn?.latestRow ?? null,
     currentStreamingTurn,
     lanes,
   };
-}
-
-export function consumeSessionAssistantTurn(
-  session: Pick<ChatSessionRecord, 'timelineEntries' | 'runtime'>,
-  incomingEntry: SessionTimelineEntry,
-): SessionTimelineEntry | null {
-  const entries = resolveSessionTimelineEntries(session as ChatSessionRecord);
-  const turnState = readSessionAssistantTurnState(session);
-  const incomingLaneIdentity = resolveAssistantEntryLaneIdentity(incomingEntry);
-  if (
-    incomingLaneIdentity.turnKey
-    && incomingLaneIdentity.laneKey
-  ) {
-    const matchedTurn = turnState.turns.find((turn) => turn.turnKey === incomingLaneIdentity.turnKey);
-    const matchedLane = matchedTurn?.lanes.find((lane) => lane.laneKey === incomingLaneIdentity.laneKey);
-    if (matchedLane) {
-      return matchedLane.entry;
-    }
-  }
-  if (
-    turnState.activeTurnKey
-    && incomingLaneIdentity.turnKey
-    && incomingLaneIdentity.laneKey
-    && turnState.activeTurnKey === incomingLaneIdentity.turnKey
-  ) {
-    const matchedLane = turnState.lanes.find((lane) => lane.laneKey === incomingLaneIdentity.laneKey);
-    if (matchedLane) {
-      return matchedLane.entry;
-    }
-  }
-  const incomingLane = resolveAssistantEntryLaneIdentity(incomingEntry);
-  const currentStreamingTurn = findCurrentStreamingTurn(
-    entries,
-    session.runtime.streamingMessageId,
-  );
-  if (currentStreamingTurn) {
-    const currentStreamingLane = resolveAssistantEntryLaneIdentity(currentStreamingTurn);
-    if (
-      !incomingLane.laneKey
-      || !currentStreamingLane.laneKey
-      || incomingLane.laneKey === currentStreamingLane.laneKey
-    ) {
-      return currentStreamingTurn;
-    }
-  }
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry?.role !== 'assistant') {
-      continue;
-    }
-    const laneIdentity = resolveAssistantEntryLaneIdentity(entry);
-    if (!incomingLane.laneKey || !laneIdentity.laneKey || incomingLane.laneKey === laneIdentity.laneKey) {
-      return entry;
-    }
-  }
-  return null;
 }

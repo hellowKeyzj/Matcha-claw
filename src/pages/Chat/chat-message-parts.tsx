@@ -36,7 +36,7 @@ function formatDuration(durationMs?: number): string | null {
   return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-export function ToolStatusBar({ tools }: { tools: StreamingToolStatus[] }) {
+export function ToolStatusBar({ tools }: { tools: ReadonlyArray<StreamingToolStatus> }) {
   return (
     <div className="w-full space-y-1.5">
       {tools.map((tool) => {
@@ -66,6 +66,37 @@ export function ToolStatusBar({ tools }: { tools: StreamingToolStatus[] }) {
         );
       })}
     </div>
+  );
+}
+
+export function ToolActivityBar({
+  tools,
+  statuses,
+}: {
+  tools: ReadonlyArray<{ id?: string; name: string; input: unknown }>;
+  statuses?: ReadonlyArray<StreamingToolStatus>;
+}) {
+  if (tools.length === 0) {
+    return null;
+  }
+
+  return (
+    <ToolUseList
+      tools={tools.map((tool) => {
+        const status = statuses?.find((item) => (
+          (item.toolCallId || item.id || item.name) === (tool.id || tool.name)
+        ));
+        return {
+          id: tool.id || tool.name,
+          ...tool,
+          status: status?.status,
+          summary: status?.summary,
+          durationMs: status?.durationMs,
+        };
+      })}
+      compact={false}
+      showStatus
+    />
   );
 }
 
@@ -101,7 +132,19 @@ export const ThinkingSection = memo(function ThinkingSection({ content }: { cont
   );
 });
 
-export const ToolUseList = memo(function ToolUseList({ tools }: { tools: ReadonlyArray<ChatMessageToolUse> }) {
+export const ToolUseList = memo(function ToolUseList({
+  tools,
+  compact = false,
+  showStatus = false,
+}: {
+  tools: ReadonlyArray<(ChatMessageToolUse & {
+    status?: StreamingToolStatus['status'];
+    summary?: string;
+    durationMs?: number;
+  })>;
+  compact?: boolean;
+  showStatus?: boolean;
+}) {
   if (tools.length === 0) {
     return null;
   }
@@ -109,7 +152,15 @@ export const ToolUseList = memo(function ToolUseList({ tools }: { tools: Readonl
   return (
     <div className="flex flex-col items-start gap-1.5">
       {tools.map((tool, index) => (
-        <ToolCard key={tool.id || index} name={tool.name} input={tool.input} />
+        <ToolCard
+          key={tool.id || index}
+          name={tool.name}
+          input={tool.input}
+          status={showStatus ? tool.status : undefined}
+          summary={showStatus ? tool.summary : undefined}
+          durationMs={showStatus ? tool.durationMs : undefined}
+          compact={compact}
+        />
       ))}
     </div>
   );
@@ -278,18 +329,45 @@ export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   );
 });
 
-function ToolCard({ name, input }: { name: string; input: unknown }) {
+function ToolCard({
+  name,
+  input,
+  status,
+  summary,
+  durationMs,
+  compact = false,
+}: {
+  name: string;
+  input: unknown;
+  status?: StreamingToolStatus['status'];
+  summary?: string;
+  durationMs?: number;
+  compact?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const durationLabel = formatDuration(durationMs);
+  const isRunning = status === 'running';
+  const isError = status === 'error';
 
   return (
-    <div className="inline-flex max-w-full flex-col self-start rounded-[16px] border border-border/38 bg-background/72 text-sm backdrop-blur-sm">
+    <div className={cn(
+      'inline-flex max-w-full flex-col self-start rounded-[16px] border border-border/38 bg-background/72 text-sm backdrop-blur-sm',
+      compact ? 'w-full' : '',
+    )}>
       <button
-        className="inline-flex max-w-full items-center gap-1.5 px-2.5 py-1 text-muted-foreground transition-colors hover:text-foreground"
+        className={cn(
+          'inline-flex max-w-full items-center gap-1.5 px-2.5 py-1 text-left text-muted-foreground transition-colors hover:text-foreground',
+          compact ? 'w-full py-2' : '',
+        )}
         onClick={() => setExpanded(!expanded)}
       >
-        <CheckCircle2 className="h-3 w-3 text-green-500 shrink-0" />
+        {isRunning && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
+        {!isRunning && !isError && <CheckCircle2 className="h-3 w-3 text-green-500 shrink-0" />}
+        {isError && <AlertCircle className="h-3 w-3 text-destructive shrink-0" />}
         <Wrench className="h-3 w-3 shrink-0 opacity-60" />
         <span className="max-w-[10rem] truncate font-mono text-[11px]">{name}</span>
+        {durationLabel ? <span className="text-[10px] opacity-60">{durationLabel}</span> : null}
+        {summary ? <span className="truncate text-[10px] opacity-70">{summary}</span> : null}
         {expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
       </button>
       {expanded && input != null && (

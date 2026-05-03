@@ -2,25 +2,25 @@ import { memo, useCallback, useState } from 'react';
 import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Sparkles, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import type { TaskStep } from './task-viz';
+import type { SessionExecutionGraphStep } from '../../../runtime-host/shared/session-adapter-types';
 
 interface ExecutionGraphCardProps {
   agentLabel: string;
   sessionLabel: string;
-  steps: TaskStep[];
+  steps: SessionExecutionGraphStep[];
   active: boolean;
-  triggerMessageKey?: string;
-  replyMessageKey?: string;
+  triggerRowKey?: string;
+  replyRowKey?: string;
   onJumpToRowKey?: (rowKey?: string) => void;
 }
 
-function GraphStatusIcon({ status }: { status: TaskStep['status'] }) {
+function GraphStatusIcon({ status }: { status: SessionExecutionGraphStep['status'] }) {
   if (status === 'completed') return <CheckCircle2 className="h-4 w-4" />;
   if (status === 'error') return <XCircle className="h-4 w-4" />;
   return <CircleDashed className="h-4 w-4" />;
 }
 
-function StepDetailCard({ step }: { step: TaskStep }) {
+function StepDetailCard({ step }: { step: SessionExecutionGraphStep }) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const hasDetail = !!step.detail;
@@ -73,17 +73,17 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   sessionLabel,
   steps,
   active,
-  triggerMessageKey,
-  replyMessageKey,
+  triggerRowKey,
+  replyRowKey,
   onJumpToRowKey,
 }: ExecutionGraphCardProps) {
   const { t } = useTranslation('chat');
   const handleJumpToTrigger = useCallback(() => {
-    onJumpToRowKey?.(triggerMessageKey);
-  }, [onJumpToRowKey, triggerMessageKey]);
+    onJumpToRowKey?.(triggerRowKey);
+  }, [onJumpToRowKey, triggerRowKey]);
   const handleJumpToReply = useCallback(() => {
-    onJumpToRowKey?.(replyMessageKey);
-  }, [onJumpToRowKey, replyMessageKey]);
+    onJumpToRowKey?.(replyRowKey);
+  }, [onJumpToRowKey, replyRowKey]);
 
   return (
     <div

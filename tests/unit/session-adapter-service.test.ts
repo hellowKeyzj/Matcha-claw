@@ -68,7 +68,7 @@ describe('session runtime service', () => {
       sessionKey: 'agent:main:main',
       laneKey: 'main',
       entry: {
-        entryId: 'run:run-live-1:seq:2',
+        entryId: 'run:run-live-1:assistant:0',
         turnKey: 'main:run-live-1',
         laneKey: 'main',
         status: 'streaming',
@@ -80,6 +80,48 @@ describe('session runtime service', () => {
         },
       },
     });
+  });
+
+  it('同一 run 的 chat delta 会持续合并到同一条 assistant timeline entry', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const [firstEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-stream-merge',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '主人，我' }],
+        },
+      },
+    });
+    const [secondEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-stream-merge',
+        sessionKey: 'agent:main:main',
+        sequenceId: 5,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '主人，我拿不到你当前定位' }],
+        },
+      },
+    });
+
+    expect(firstEvent.entry.entryId).toBe('run:run-stream-merge:assistant:0');
+    expect(secondEvent.entry.entryId).toBe('run:run-stream-merge:assistant:0');
+    expect(secondEvent.entry.text).toBe('主人，我拿不到你当前定位');
+    expect(secondEvent.window.totalEntryCount).toBe(1);
   });
 
   it('team lane live 事件会带上 member laneKey，并把 runId 作为 turn fallback', () => {
@@ -103,7 +145,7 @@ describe('session runtime service', () => {
       sessionUpdate: 'agent_message',
       laneKey: 'member:worker-a',
       entry: {
-        entryId: 'run:run-team-1:seq:3',
+        entryId: 'run:run-team-1:agent:worker-a:assistant:0',
         laneKey: 'member:worker-a',
         turnKey: 'member:worker-a:run-team-1',
         agentId: 'worker-a',
@@ -113,6 +155,281 @@ describe('session runtime service', () => {
         'codebuddy.ai/memberEvent': 'worker-a',
       },
     });
+  });
+
+  it('OpenClaw tool lifecycle 会物化为可渲染的 assistant toolCall timeline entry', () => {
+    const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-tools-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 4,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-1',
+        name: 'memory_store',
+        args: { text: '记住偏好' },
+      },
+    });
+
+    expect(event).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      entry: {
+        entryId: 'run:run-tools-1:tool:tool-1',
+        text: '',
+        message: {
+          content: [{
+            type: 'toolCall',
+            id: 'tool-1',
+            name: 'memory_store',
+            input: { text: '记住偏好' },
+          }],
+          toolStatuses: [{
+            toolCallId: 'tool-1',
+            name: 'memory_store',
+            status: 'running',
+          }],
+        },
+      },
+    });
+  });
+
+  it('同一个 toolCallId 的 live tool stream 会合并到同一条 timeline entry', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const [startEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-tool-live',
+        sessionKey: 'agent:main:main',
+        sequenceId: 10,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-1',
+        name: 'memory_store',
+        args: { text: '记住偏好' },
+      },
+    });
+    const [resultEvent] = service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-tool-live',
+        sessionKey: 'agent:main:main',
+        sequenceId: 11,
+        timestamp: 1_700_000_000_001,
+        phase: 'result',
+        toolCallId: 'tool-1',
+        isError: false,
+      },
+    });
+
+    expect(startEvent.entry.entryId).toBe('run:run-tool-live:tool:tool-1');
+    expect(resultEvent.entry.entryId).toBe('run:run-tool-live:tool:tool-1');
+    expect(resultEvent.entry.message.content).toMatchObject([{
+      type: 'toolCall',
+      id: 'tool-1',
+      name: 'memory_store',
+      input: { text: '记住偏好' },
+    }]);
+    expect(resultEvent.entry.message.toolStatuses).toMatchObject([{
+      toolCallId: 'tool-1',
+      name: 'memory_store',
+      status: 'completed',
+    }]);
+    expect(resultEvent.window.totalEntryCount).toBe(1);
+  });
+
+  it('同一 run 内 final assistant 会按 OpenClaw sequence 排在 tool activity 后面', async () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-order-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '我先看看' }],
+        },
+      },
+    });
+    service.consumeGatewayConversationEvent({
+      type: 'tool.lifecycle',
+      event: {
+        runId: 'run-order-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        timestamp: 1_700_000_000_000,
+        phase: 'start',
+        toolCallId: 'tool-read',
+        name: 'read',
+        args: { filePath: 'README.md' },
+      },
+    });
+    const [finalEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-order-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 3,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '读完了，结论如下' }],
+        },
+      },
+    });
+
+    expect(finalEvent.window.totalEntryCount).toBe(2);
+    await expect(service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' })).resolves.toMatchObject({
+      data: {
+        snapshot: {
+          entries: [
+            {
+              entryId: 'run:run-order-1:tool:tool-read',
+            },
+            {
+              entryId: 'run:run-order-1:assistant:0',
+              text: '读完了，结论如下',
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it('session snapshot 会直接产出 authoritative executionGraphs，前端不再自己拉 child history 拼 graph', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const mainDir = join(rootDir, 'agents', 'main', 'sessions');
+    const coderDir = join(rootDir, 'agents', 'coder', 'sessions');
+    await mkdir(mainDir, { recursive: true });
+    await mkdir(coderDir, { recursive: true });
+    await writeFile(
+      join(mainDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'user-1',
+          timestamp: '2026-05-03T12:00:00.000Z',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '请让 coder 去看一下' }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'completion-1',
+          timestamp: '2026-05-03T12:00:01.000Z',
+          message: {
+            role: 'user',
+            content: 'internal completion',
+            taskCompletionEvents: [{
+              kind: 'task_completion',
+              source: 'subagent',
+              childSessionKey: 'agent:coder:child-1',
+              childSessionId: 'child-1',
+              childAgentId: 'coder',
+            }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-1',
+          timestamp: '2026-05-03T12:00:02.000Z',
+          message: {
+            role: 'assistant',
+            agentId: 'coder',
+            uniqueId: 'turn-1',
+            requestId: 'user-1',
+            content: [{ type: 'text', text: 'coder 看完了' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(mainDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(
+      join(coderDir, 'child-1.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'child-assistant-1',
+          timestamp: '2026-05-03T12:00:01.500Z',
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'tool_use',
+              id: 'tool-1',
+              name: 'read_file',
+              input: { path: 'README.md' },
+            }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(coderDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:coder:child-1',
+          sessionKey: 'agent:coder:child-1',
+          file: 'child-1.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => rootDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+
+    expect(loadResponse.status).toBe(200);
+    expect(loadResponse.data.snapshot.executionGraphs).toMatchObject([{
+      childSessionKey: 'agent:coder:child-1',
+      childSessionId: 'child-1',
+      childAgentId: 'coder',
+      triggerEntryId: 'user-1',
+      replyEntryId: 'assistant-1',
+      anchorEntryId: 'assistant-1',
+      anchorTurnKey: 'member:coder:assistant-1',
+      anchorLaneKey: 'member:coder',
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          label: 'read_file',
+          kind: 'tool',
+        }),
+      ]),
+    }]);
   });
 
   it('promptSession 会返回并缓存 authoritative user entry，后续 load/window 直接读同一份 timeline', async () => {
@@ -241,6 +558,87 @@ describe('session runtime service', () => {
       },
     });
     expect(loadResponse.data.snapshot.entries).toHaveLength(1);
+  });
+
+  it('同一 run 内 assistant toolCall entry 与最终文本 entry 不应因 fallback merge 被压成一条', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          id: 'user-1',
+          timestamp: '2026-05-03T12:28:03.784Z',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: '记住：我是男的' }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-tool-1',
+          timestamp: '2026-05-03T12:28:12.787Z',
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'toolCall',
+              id: 'tool-1',
+              name: 'memory_store',
+              arguments: { text: '用户是男性。用户明确要求记住其性别为男。' },
+            }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'assistant-final-1',
+          timestamp: '2026-05-03T12:28:15.373Z',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: '记住了，主人。你是男的。' }],
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => rootDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
+
+    expect(loadResponse.status).toBe(200);
+    expect(loadResponse.data.snapshot.entries).toHaveLength(3);
+    expect(loadResponse.data.snapshot.entries[1]).toMatchObject({
+      role: 'assistant',
+      message: {
+        content: [{
+          type: 'toolCall',
+          id: 'tool-1',
+          name: 'memory_store',
+        }],
+      },
+    });
+    expect(loadResponse.data.snapshot.entries[2]).toMatchObject({
+      role: 'assistant',
+      text: '记住了，主人。你是男的。',
+    });
   });
 
   it('promptSession 进入 runtime 后，后续 loadSession 不再用 canonical user 文本语义回写覆盖本地 authoritative entry', async () => {
