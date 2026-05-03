@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import { deriveTaskSteps, parseSubagentCompletionInfo } from '@/pages/Chat/task-viz';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 describe('deriveTaskSteps', () => {
   it('builds running steps from streaming thinking and tool status', () => {
@@ -14,14 +15,14 @@ describe('deriveTaskSteps', () => {
     ];
 
     const steps = deriveTaskSteps({
-      messages: [],
-      streamingMessage: {
+      entries: [],
+      streamingEntry: buildTimelineEntriesFromMessages('agent:main:main', [{
         role: 'assistant',
         content: [
           { type: 'thinking', thinking: 'Compare a few approaches before coding.' },
           { type: 'tool_use', id: 'tool-1', name: 'web_search', input: { query: 'openclaw task list' } },
         ],
-      },
+      }])[0]!,
       streamingTools,
       sending: true,
       pendingFinal: false,
@@ -56,8 +57,8 @@ describe('deriveTaskSteps', () => {
     ];
 
     const steps = deriveTaskSteps({
-      messages,
-      streamingMessage: null,
+      entries: buildTimelineEntriesFromMessages('agent:main:main', messages),
+      streamingEntry: null,
       streamingTools: [],
       sending: false,
       pendingFinal: false,
@@ -105,8 +106,8 @@ describe('deriveTaskSteps', () => {
     ];
 
     const steps = deriveTaskSteps({
-      messages,
-      streamingMessage: null,
+      entries: buildTimelineEntriesFromMessages('agent:main:main', messages),
+      streamingEntry: null,
       streamingTools: [],
       sending: false,
       pendingFinal: false,
@@ -135,7 +136,7 @@ describe('deriveTaskSteps', () => {
   });
 
   it('parses internal subagent completion events from injected user messages', () => {
-    const info = parseSubagentCompletionInfo({
+    const info = parseSubagentCompletionInfo(buildTimelineEntriesFromMessages('agent:main:main', [{
       role: 'user',
       content: [{
         type: 'text',
@@ -145,7 +146,7 @@ session_key: agent:coder:subagent:child-123
 session_id: child-session-id
 status: completed successfully`,
       }],
-    } as RawMessage);
+    }])[0]!);
 
     expect(info).toEqual({
       sessionKey: 'agent:coder:subagent:child-123',
@@ -154,4 +155,3 @@ status: completed successfully`,
     });
   });
 });
-

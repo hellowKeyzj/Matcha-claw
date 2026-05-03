@@ -1,5 +1,7 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { extractText, extractThinking, extractToolUse } from './message-utils';
+import { readTimelineEntryToolStatuses } from '@/stores/chat/event-helpers';
+import type { ToolStatus } from '@/stores/chat';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import { extractEntryText, extractEntryThinking, extractEntryToolUse } from './message-utils';
 
 export type TaskStepStatus = 'running' | 'completed' | 'error';
 export type TaskStepKind = 'thinking' | 'tool' | 'system';
@@ -15,8 +17,8 @@ export interface TaskStep {
 }
 
 export interface DeriveTaskStepsInput {
-  messages: RawMessage[];
-  streamingMessage: unknown | null;
+  entries: SessionTimelineEntry[];
+  streamingEntry: SessionTimelineEntry | null;
   streamingTools: ToolStatus[];
   sending: boolean;
   pendingFinal: boolean;
@@ -115,12 +117,12 @@ function attachTopology(steps: TaskStep[]): TaskStep[] {
   return withTopology.slice(0, MAX_TASK_STEPS);
 }
 
-export function parseSubagentCompletionInfo(message: RawMessage): SubagentCompletionInfo | null {
-  if (!message || message.role !== 'user') {
+export function parseSubagentCompletionInfo(entry: SessionTimelineEntry): SubagentCompletionInfo | null {
+  if (!entry || entry.role !== 'user') {
     return null;
   }
 
-  const text = extractText(message);
+  const text = extractEntryText(entry);
   if (!text) {
     return null;
   }
@@ -148,8 +150,8 @@ export function parseSubagentCompletionInfo(message: RawMessage): SubagentComple
 }
 
 export function deriveTaskSteps({
-  messages,
-  streamingMessage,
+  entries,
+  streamingEntry,
   streamingTools,
   sending,
   pendingFinal,
@@ -165,12 +167,12 @@ export function deriveTaskSteps({
     steps.push(step);
   };
 
-  const streamMessage = streamingMessage && typeof streamingMessage === 'object'
-    ? streamingMessage as RawMessage
-    : null;
+  const effectiveStreamingTools = streamingTools.length > 0
+    ? streamingTools
+    : readTimelineEntryToolStatuses(streamingEntry);
 
-  if (streamMessage && showThinking) {
-    const thinking = extractThinking(streamMessage);
+  if (streamingEntry && showThinking) {
+    const thinking = extractEntryThinking(streamingEntry);
     if (thinking) {
       pushStep({
         id: 'stream-thinking',
@@ -183,7 +185,7 @@ export function deriveTaskSteps({
     }
   }
 
-  for (const [index, tool] of streamingTools.entries()) {
+  for (const [index, tool] of effectiveStreamingTools.entries()) {
     activeToolNames.add(tool.name);
     pushStep({
       id: tool.toolCallId || tool.id || makeToolId('stream-status', tool.name, index),
@@ -195,8 +197,8 @@ export function deriveTaskSteps({
     });
   }
 
-  if (streamMessage) {
-    const toolUse = extractToolUse(streamMessage);
+  if (streamingEntry) {
+    const toolUse = extractEntryToolUse(streamingEntry);
     for (const [index, tool] of toolUse.entries()) {
       if (activeToolNames.has(tool.name)) continue;
       pushStep({
@@ -231,18 +233,18 @@ export function deriveTaskSteps({
   }
 
   if (steps.length === 0) {
-    const relevantAssistantMessages = messages.filter((message) => {
-      if (!message || message.role !== 'assistant') return false;
-      if (extractToolUse(message).length > 0) return true;
-      return showThinking && !!extractThinking(message);
+    const relevantAssistantEntries = entries.filter((entry) => {
+      if (!entry || entry.role !== 'assistant') return false;
+      if (extractEntryToolUse(entry).length > 0) return true;
+      return showThinking && !!extractEntryThinking(entry);
     });
 
-    for (const [messageIndex, assistantMessage] of relevantAssistantMessages.entries()) {
+    for (const [entryIndex, assistantEntry] of relevantAssistantEntries.entries()) {
       if (showThinking) {
-        const thinking = extractThinking(assistantMessage);
+        const thinking = extractEntryThinking(assistantEntry);
         if (thinking) {
           pushStep({
-            id: `history-thinking-${assistantMessage.id || messageIndex}`,
+            id: `history-thinking-${assistantEntry.entryId || assistantEntry.message.id || entryIndex}`,
             label: 'Thinking',
             status: 'completed',
             kind: 'thinking',
@@ -252,9 +254,9 @@ export function deriveTaskSteps({
         }
       }
 
-      for (const [toolIndex, tool] of extractToolUse(assistantMessage).entries()) {
+      for (const [toolIndex, tool] of extractEntryToolUse(assistantEntry).entries()) {
         pushStep({
-          id: tool.id || makeToolId(`history-tool-${assistantMessage.id || messageIndex}`, tool.name, toolIndex),
+          id: tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.message.id || entryIndex}`, tool.name, toolIndex),
           label: tool.name,
           status: 'completed',
           kind: 'tool',

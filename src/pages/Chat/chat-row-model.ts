@@ -1,24 +1,65 @@
-import type { RawMessage } from '@/stores/chat';
+import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { resolveAssistantEntryLaneIdentity } from '@/stores/chat/session-turn-state';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatMessageView } from './chat-message-view';
 import { getOrBuildChatMessageView } from './chat-message-view';
-import { extractText } from './message-utils';
+import { extractEntryText } from './message-utils';
+
+export interface ChatAssistantPresentation {
+  agentId?: string;
+  agentName?: string;
+  avatarSeed?: string;
+  avatarStyle?: AgentAvatarStyle;
+}
 
 export interface ChatMessageRow {
   key: string;
   kind: 'message';
-  message: RawMessage;
+  entry: SessionTimelineEntry;
   role: 'user' | 'assistant' | 'system';
   text: string;
+  assistantTurnKey: string | null;
+  assistantLaneKey: string | null;
+  assistantLaneAgentId: string | null;
   messageView: ChatMessageView;
   assistantMarkdownHtml: string | null;
+  assistantPresentation: ChatAssistantPresentation | null;
 }
 
 export type ChatRow = ChatMessageRow;
 
+export function buildAssistantLaneTurnMatchKey(
+  turnKey: string | null | undefined,
+  laneKey: string | null | undefined,
+): string | null {
+  const normalizedTurnKey = typeof turnKey === 'string' ? turnKey.trim() : '';
+  const normalizedLaneKey = typeof laneKey === 'string' ? laneKey.trim() : '';
+  if (!normalizedTurnKey || !normalizedLaneKey) {
+    return null;
+  }
+  return `${normalizedTurnKey}|${normalizedLaneKey}`;
+}
+
+export function resolveEntryAssistantLaneTurnMatchKey(
+  entry: SessionTimelineEntry | null | undefined,
+): string | null {
+  if (!entry) {
+    return null;
+  }
+  const laneIdentity = resolveAssistantEntryLaneIdentity(entry);
+  return buildAssistantLaneTurnMatchKey(laneIdentity.turnKey, laneIdentity.laneKey);
+}
+
+export function resolveRowAssistantLaneTurnMatchKey(
+  row: ChatMessageRow,
+): string | null {
+  return buildAssistantLaneTurnMatchKey(row.assistantTurnKey, row.assistantLaneKey);
+}
+
 interface BuildStaticChatRowsInput {
   sessionKey: string;
-  messages: RawMessage[];
+  entries: SessionTimelineEntry[];
 }
 
 interface BuildStaticChatRowsResult {
@@ -26,104 +67,9 @@ interface BuildStaticChatRowsResult {
   renderableCount: number;
 }
 
-const anonymousMessageKeyByRef = new WeakMap<RawMessage, string>();
-
-function hashStringDjb2(input: string): string {
-  let hash = 5381;
-  for (let index = 0; index < input.length; index += 1) {
-    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function serializeContentForAnonymousKey(content: unknown): string {
-  if (typeof content === 'string') {
-    return content.trim().slice(0, 512);
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  const parts: string[] = [];
-  for (const block of content as Array<Record<string, unknown>>) {
-    if (!block || typeof block !== 'object') {
-      continue;
-    }
-    const type = typeof block.type === 'string' ? block.type : '';
-    if (type === 'text' && typeof block.text === 'string') {
-      parts.push(`t:${block.text.trim()}`);
-      continue;
-    }
-    if ((type === 'tool_use' || type === 'toolCall')) {
-      const id = typeof block.id === 'string' ? block.id : '';
-      const name = typeof block.name === 'string' ? block.name : '';
-      parts.push(`u:${id}:${name}`);
-      continue;
-    }
-    if ((type === 'tool_result' || type === 'toolResult')) {
-      const toolUseId = typeof block.tool_use_id === 'string'
-        ? block.tool_use_id
-        : (typeof block.toolUseId === 'string' ? block.toolUseId : '');
-      parts.push(`r:${toolUseId}`);
-      continue;
-    }
-    if (type) {
-      parts.push(`x:${type}`);
-    }
-  }
-  return parts.join('|').slice(0, 512);
-}
-
-export function isRenderableChatMessage(message: RawMessage): boolean {
-  const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
-  return role !== 'toolresult' && role !== 'tool_result';
-}
-
-function resolveRenderableMessageRole(message: RawMessage): ChatMessageRow['role'] {
-  return message.role === 'user' || message.role === 'system' ? message.role : 'assistant';
-}
-
-function createMessageRow(
-  key: string,
-  message: RawMessage,
-  role: ChatMessageRow['role'],
-  text: string,
-): ChatMessageRow {
-  const messageView = getOrBuildChatMessageView(message);
-  return {
-    key,
-    kind: 'message',
-    message,
-    role,
-    text,
-    messageView,
-    assistantMarkdownHtml: role === 'assistant'
-      ? (getOrBuildAssistantMarkdownBody(message)?.fullHtml ?? null)
-      : null,
-  };
-}
-
-function buildMessageRow(
-  sessionKey: string,
-  message: RawMessage,
-  renderableIndex: number,
-  usedRowKeys: Set<string>,
-): ChatMessageRow {
-  const baseKey = resolveMessageRowKey(sessionKey, message, renderableIndex);
-  let messageRowKey = baseKey;
-  let duplicateOrdinal = 1;
-  while (usedRowKeys.has(messageRowKey)) {
-    messageRowKey = `${baseKey}|dup:${duplicateOrdinal}`;
-    duplicateOrdinal += 1;
-  }
-  usedRowKeys.add(messageRowKey);
-  const text = extractText(message);
-  const role = resolveRenderableMessageRole(message);
-  return createMessageRow(messageRowKey, message, role, text);
-}
-
-export function canAppendMessageList(
-  previous: RawMessage[],
-  next: RawMessage[],
+export function canAppendReferenceList<T>(
+  previous: T[],
+  next: T[],
 ): boolean {
   if (previous.length > next.length) {
     return false;
@@ -136,9 +82,9 @@ export function canAppendMessageList(
   return true;
 }
 
-export function canPrependMessageList(
-  previous: RawMessage[],
-  next: RawMessage[],
+export function canPrependReferenceList<T>(
+  previous: T[],
+  next: T[],
 ): boolean {
   if (previous.length > next.length) {
     return false;
@@ -152,17 +98,74 @@ export function canPrependMessageList(
   return true;
 }
 
-export function appendMessageRows(
+export function isRenderableTimelineEntry(entry: SessionTimelineEntry): boolean {
+  return entry.role !== 'toolresult' && entry.role !== 'tool_result';
+}
+
+function resolveRenderableEntryRole(entry: SessionTimelineEntry): ChatMessageRow['role'] {
+  return entry.role === 'user' || entry.role === 'system' ? entry.role : 'assistant';
+}
+
+function createMessageRow(
+  key: string,
+  entry: SessionTimelineEntry,
+): ChatMessageRow {
+  const role = resolveRenderableEntryRole(entry);
+  const messageView = getOrBuildChatMessageView(entry);
+  const laneIdentity = role === 'assistant'
+    ? resolveAssistantEntryLaneIdentity(entry)
+    : { turnKey: null, laneKey: null, agentId: null };
+  return {
+    key,
+    kind: 'message',
+    entry,
+    role,
+    text: extractEntryText(entry),
+    assistantTurnKey: laneIdentity.turnKey,
+    assistantLaneKey: laneIdentity.laneKey,
+    assistantLaneAgentId: laneIdentity.agentId,
+    messageView,
+    assistantMarkdownHtml: role === 'assistant'
+      ? (getOrBuildAssistantMarkdownBody(entry)?.fullHtml ?? null)
+      : null,
+    assistantPresentation: null,
+  };
+}
+
+export function resolveTimelineEntryRowKey(
+  sessionKey: string,
+  entry: SessionTimelineEntry,
+): string {
+  return `session:${sessionKey}|entry:${entry.entryId}`;
+}
+
+function buildEntryRow(
+  sessionKey: string,
+  entry: SessionTimelineEntry,
+  usedRowKeys: Set<string>,
+): ChatMessageRow {
+  const baseKey = resolveTimelineEntryRowKey(sessionKey, entry);
+  let rowKey = baseKey;
+  let duplicateOrdinal = 1;
+  while (usedRowKeys.has(rowKey)) {
+    rowKey = `${baseKey}|dup:${duplicateOrdinal}`;
+    duplicateOrdinal += 1;
+  }
+  usedRowKeys.add(rowKey);
+  return createMessageRow(rowKey, entry);
+}
+
+export function appendTimelineRows(
   sessionKey: string,
   baseRows: ChatMessageRow[],
-  messages: RawMessage[],
+  entries: SessionTimelineEntry[],
   fromIndex: number,
   startRenderableIndex: number,
 ): {
   rows: ChatMessageRow[];
   renderableCount: number;
 } {
-  if (fromIndex >= messages.length) {
+  if (fromIndex >= entries.length) {
     return {
       rows: baseRows,
       renderableCount: startRenderableIndex,
@@ -171,26 +174,26 @@ export function appendMessageRows(
 
   const rows = [...baseRows];
   const usedRowKeys = new Set(rows.map((row) => row.key));
-  let renderableIndex = startRenderableIndex;
-  for (let index = fromIndex; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!isRenderableChatMessage(message)) {
+  let renderableCount = startRenderableIndex;
+  for (let index = fromIndex; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!isRenderableTimelineEntry(entry)) {
       continue;
     }
-    rows.push(buildMessageRow(sessionKey, message, renderableIndex, usedRowKeys));
-    renderableIndex += 1;
+    rows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
+    renderableCount += 1;
   }
 
   return {
     rows,
-    renderableCount: renderableIndex,
+    renderableCount,
   };
 }
 
-export function prependMessageRows(
+export function prependTimelineRows(
   sessionKey: string,
   baseRows: ChatMessageRow[],
-  messages: RawMessage[],
+  entries: SessionTimelineEntry[],
   toIndexExclusive: number,
   startRenderableCount: number,
 ): {
@@ -208,11 +211,11 @@ export function prependMessageRows(
   const usedRowKeys = new Set(baseRows.map((row) => row.key));
   let prependedRenderableCount = 0;
   for (let index = 0; index < toIndexExclusive; index += 1) {
-    const message = messages[index];
-    if (!isRenderableChatMessage(message)) {
+    const entry = entries[index];
+    if (!isRenderableTimelineEntry(entry)) {
       continue;
     }
-    prependedRows.push(buildMessageRow(sessionKey, message, prependedRenderableCount, usedRowKeys));
+    prependedRows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
     prependedRenderableCount += 1;
   }
 
@@ -222,29 +225,29 @@ export function prependMessageRows(
   };
 }
 
-export function patchMessageRows(
+export function patchTimelineRows(
   sessionKey: string,
   baseRows: ChatMessageRow[],
-  previousMessages: RawMessage[],
-  nextMessages: RawMessage[],
+  previousEntries: SessionTimelineEntry[],
+  nextEntries: SessionTimelineEntry[],
 ): {
   rows: ChatMessageRow[];
   renderableCount: number;
 } | null {
-  if (previousMessages.length !== nextMessages.length) {
+  if (previousEntries.length !== nextEntries.length) {
     return null;
   }
 
   const usedRowKeys = new Set<string>();
   const nextRows: ChatMessageRow[] = [];
-  let renderableIndex = 0;
   let previousRenderableIndex = 0;
+  let renderableCount = 0;
 
-  for (let index = 0; index < nextMessages.length; index += 1) {
-    const previousMessage = previousMessages[index];
-    const nextMessage = nextMessages[index];
-    const previousRenderable = isRenderableChatMessage(previousMessage);
-    const nextRenderable = isRenderableChatMessage(nextMessage);
+  for (let index = 0; index < nextEntries.length; index += 1) {
+    const previousEntry = previousEntries[index];
+    const nextEntry = nextEntries[index];
+    const previousRenderable = isRenderableTimelineEntry(previousEntry);
+    const nextRenderable = isRenderableTimelineEntry(nextEntry);
 
     if (previousRenderable !== nextRenderable) {
       return null;
@@ -258,7 +261,7 @@ export function patchMessageRows(
       return null;
     }
 
-    const baseKey = resolveMessageRowKey(sessionKey, nextMessage, renderableIndex);
+    const baseKey = resolveTimelineEntryRowKey(sessionKey, nextEntry);
     let nextRowKey = baseKey;
     let duplicateOrdinal = 1;
     while (usedRowKeys.has(nextRowKey)) {
@@ -271,16 +274,9 @@ export function patchMessageRows(
       return null;
     }
 
-    if (previousMessage === nextMessage) {
-      nextRows.push(previousRow);
-    } else {
-      const role = resolveRenderableMessageRole(nextMessage);
-      const text = extractText(nextMessage);
-      nextRows.push(createMessageRow(nextRowKey, nextMessage, role, text));
-    }
-
+    nextRows.push(previousEntry === nextEntry ? previousRow : createMessageRow(nextRowKey, nextEntry));
     previousRenderableIndex += 1;
-    renderableIndex += 1;
+    renderableCount += 1;
   }
 
   if (previousRenderableIndex !== baseRows.length) {
@@ -289,61 +285,110 @@ export function patchMessageRows(
 
   return {
     rows: nextRows,
-    renderableCount: renderableIndex,
+    renderableCount,
   };
-}
-
-function resolveAnonymousMessageRowKey(sessionKey: string, message: RawMessage): string {
-  const role = typeof message.role === 'string' ? message.role : 'unknown';
-  const timestamp = typeof message.timestamp === 'number'
-    ? String(message.timestamp)
-    : 'na';
-  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
-  const contentSignature = hashStringDjb2(serializeContentForAnonymousKey(message.content));
-  const deterministic = `session:${sessionKey}|anon:${role}:${timestamp}:${toolCallId}:${contentSignature}`;
-
-  // Preserve old WeakMap fast-path for repeated renders of the same object ref.
-  const existing = anonymousMessageKeyByRef.get(message);
-  if (existing === deterministic) {
-    return existing;
-  }
-  anonymousMessageKeyByRef.set(message, deterministic);
-  return deterministic;
-}
-
-export function resolveMessageRowKey(sessionKey: string, message: RawMessage, _index: number): string {
-  if (typeof message.id === 'string' && message.id.trim()) {
-    return `session:${sessionKey}|id:${message.id}`;
-  }
-  return resolveAnonymousMessageRowKey(sessionKey, message);
 }
 
 export function buildStaticChatRows({
   sessionKey,
-  messages,
+  entries,
 }: BuildStaticChatRowsInput): ChatMessageRow[] {
-  return buildMessageRowsWithMeta({
+  return buildTimelineRowsWithMeta({
     sessionKey,
-    messages,
+    entries,
   }).rows;
 }
 
-export function buildMessageRowsWithMeta({
+export function buildTimelineRowsWithMeta({
   sessionKey,
-  messages,
-}: Pick<BuildStaticChatRowsInput, 'sessionKey' | 'messages'>): BuildStaticChatRowsResult {
+  entries,
+}: Pick<BuildStaticChatRowsInput, 'sessionKey' | 'entries'>): BuildStaticChatRowsResult {
   const rows: ChatMessageRow[] = [];
   const usedRowKeys = new Set<string>();
   let renderableCount = 0;
-  for (const message of messages) {
-    if (!isRenderableChatMessage(message)) {
+  for (const entry of entries) {
+    if (!isRenderableTimelineEntry(entry)) {
       continue;
     }
-    rows.push(buildMessageRow(sessionKey, message, renderableCount, usedRowKeys));
+    rows.push(buildEntryRow(sessionKey, entry, usedRowKeys));
     renderableCount += 1;
   }
   return {
     rows,
     renderableCount,
   };
+}
+
+export interface ChatAssistantCatalogAgent extends ChatAssistantPresentation {
+  id: string;
+}
+
+export function resolveAssistantPresentationForLaneAgentId(input: {
+  agentId: string | null | undefined;
+  agents: ChatAssistantCatalogAgent[];
+  defaultAssistant: ChatAssistantPresentation | null;
+}): ChatAssistantPresentation | null {
+  const laneAgentId = typeof input.agentId === 'string' ? input.agentId.trim() : '';
+  if (laneAgentId) {
+    const matchedAgent = input.agents.find((agent) => agent.id === laneAgentId);
+    if (matchedAgent) {
+      return {
+        agentId: matchedAgent.id,
+        agentName: matchedAgent.agentName ?? matchedAgent.id,
+        avatarSeed: matchedAgent.avatarSeed,
+        avatarStyle: matchedAgent.avatarStyle,
+      };
+    }
+    return {
+      agentId: laneAgentId,
+      agentName: laneAgentId,
+    };
+  }
+  return input.defaultAssistant;
+}
+
+export function resolveRowAssistantPresentation(input: {
+  row: ChatMessageRow;
+  agents: ChatAssistantCatalogAgent[];
+  defaultAssistant: ChatAssistantPresentation | null;
+}): ChatAssistantPresentation | null {
+  if (input.row.role !== 'assistant') {
+    return null;
+  }
+  return resolveAssistantPresentationForLaneAgentId({
+    agentId: input.row.assistantLaneAgentId,
+    agents: input.agents,
+    defaultAssistant: input.defaultAssistant,
+  });
+}
+
+export function applyAssistantPresentationToRows(input: {
+  rows: ChatMessageRow[];
+  agents: ChatAssistantCatalogAgent[];
+  defaultAssistant: ChatAssistantPresentation | null;
+}): ChatMessageRow[] {
+  let changed = false;
+  const nextRows = input.rows.map((row) => {
+    const assistantPresentation = resolveRowAssistantPresentation({
+      row,
+      agents: input.agents,
+      defaultAssistant: input.defaultAssistant,
+    });
+    const currentPresentation = row.assistantPresentation;
+    const presentationUnchanged = (
+      currentPresentation?.agentId === assistantPresentation?.agentId
+      && currentPresentation?.agentName === assistantPresentation?.agentName
+      && currentPresentation?.avatarSeed === assistantPresentation?.avatarSeed
+      && currentPresentation?.avatarStyle === assistantPresentation?.avatarStyle
+    );
+    if (presentationUnchanged) {
+      return row;
+    }
+    changed = true;
+    return {
+      ...row,
+      assistantPresentation,
+    };
+  });
+  return changed ? nextRows : input.rows;
 }

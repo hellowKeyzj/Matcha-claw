@@ -8,7 +8,9 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { RawMessage } from '@/stores/chat';
 
 class ResizeObserverStub {
   observe() {}
@@ -25,7 +27,10 @@ function buildSessionMessages(count: number, prefix = 'session message') {
   }));
 }
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+function buildSessionRecord(
+  sessionKey: string,
+  overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & { messages?: RawMessage[] },
+) {
   const base = createEmptySessionRecord();
   return {
     meta: {
@@ -36,11 +41,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    tooling: {
-      ...base.tooling,
-      ...overrides?.tooling,
-    },
-    messages: overrides?.messages ?? base.messages,
+    timelineEntries: overrides?.messages
+      ? buildTimelineEntriesFromMessages(sessionKey, overrides.messages)
+      : (overrides?.timelineEntries ?? base.timelineEntries),
     window: overrides?.window ?? base.window,
   };
 }
@@ -63,8 +66,6 @@ describe('chat viewport window', () => {
   it('renders viewport messages directly and exposes load older when more history exists', async () => {
     const currentSessionKey = 'agent:test:main';
     const allMessages = buildSessionMessages(35);
-    const viewportMessages = allMessages.slice(-20);
-
     useGatewayStore.setState({
       status: { state: 'running', port: 18789 },
       rpc: vi.fn().mockResolvedValue({}),
@@ -106,7 +107,7 @@ describe('chat viewport window', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        [currentSessionKey]: buildSessionRecord({
+        [currentSessionKey]: buildSessionRecord(currentSessionKey, {
           messages: allMessages,
           window: createViewportWindowState({
             totalMessageCount: allMessages.length,
@@ -184,7 +185,7 @@ describe('chat viewport window', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        [currentSessionKey]: buildSessionRecord({
+        [currentSessionKey]: buildSessionRecord(currentSessionKey, {
           messages: allMessages,
           window: createViewportWindowState({
             totalMessageCount: 20,

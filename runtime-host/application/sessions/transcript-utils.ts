@@ -1,3 +1,12 @@
+import {
+  extractMessageText,
+  normalizeAssistantFinalText as normalizeAssistantFinalTextShared,
+  normalizeMessageRole,
+  normalizeOptionalString,
+  normalizeRawChatMessage,
+  sanitizeCanonicalUserText,
+} from '../../shared/chat-message-normalization';
+
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
   /^a new session was started via\b/i,
@@ -12,11 +21,21 @@ export interface SessionTranscriptMessage {
   timestamp?: number;
   id?: string;
   messageId?: string;
+  originMessageId?: string;
   clientId?: string;
   uniqueId?: string;
+  requestId?: string;
+  status?: 'sending' | 'sent' | 'timeout' | 'error';
+  streaming?: boolean;
+  agentId?: string;
   toolCallId?: string;
+  tool_calls?: Array<Record<string, unknown>>;
+  toolCalls?: Array<Record<string, unknown>>;
   toolName?: string;
+  metadata?: Record<string, unknown>;
+  name?: string;
   details?: unknown;
+  toolStatuses?: Array<Record<string, unknown>>;
   isError?: boolean;
 }
 
@@ -27,12 +46,20 @@ interface TranscriptMessageShape {
   id?: unknown;
   messageId?: unknown;
   message_id?: unknown;
+  originMessageId?: unknown;
+  origin_message_id?: unknown;
   clientId?: unknown;
   client_id?: unknown;
   uniqueId?: unknown;
   unique_id?: unknown;
+  requestId?: unknown;
+  request_id?: unknown;
   idempotencyKey?: unknown;
   idempotency_key?: unknown;
+  agentId?: unknown;
+  agent_id?: unknown;
+  parentMessageId?: unknown;
+  parent_message_id?: unknown;
   toolCallId?: unknown;
   tool_call_id?: unknown;
   toolName?: unknown;
@@ -51,27 +78,6 @@ interface TranscriptLineShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function normalizeRole(value: unknown): SessionTranscriptMessage['role'] | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized === 'user'
-    || normalized === 'assistant'
-    || normalized === 'system'
-    || normalized === 'toolresult'
-    || normalized === 'tool_result'
-  ) {
-    return normalized;
-  }
-  return null;
-}
-
-function normalizeOptionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
 function normalizeOptionalBoolean(value: unknown): boolean | undefined {
@@ -95,47 +101,8 @@ function normalizeTimestamp(value: unknown): number | undefined {
   return undefined;
 }
 
-function getMessageText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return content
-    .filter((block) => isRecord(block) && block.type === 'text' && typeof block.text === 'string')
-    .map((block) => String(block.text))
-    .join('\n');
-}
-
-function stripLeadingUntrustedMetadataBlocks(text: string): string {
-  const fencedPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?```[a-z]*\n[\s\S]*?```\s*/i;
-  const inlineJsonPattern = /^\s*(?:[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*)?\{[\s\S]*?\}\s*/i;
-
-  let output = text;
-  while (true) {
-    const next = output
-      .replace(fencedPattern, '')
-      .replace(inlineJsonPattern, '');
-    if (next === output) {
-      break;
-    }
-    output = next;
-  }
-  return output;
-}
-
 function cleanGatewayUserText(text: string): string {
-  const cleaned = text
-    .replace(/\s*\[media attached:[^\]]*\]/gi, '')
-    .replace(/\s*\[message_id:\s*[^\]]+\]/gi, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
-    .replace(/^\s*[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*/i, '');
-  return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
+  return sanitizeCanonicalUserText(text);
 }
 
 function normalizeSessionLabelText(text: string): string {
@@ -153,15 +120,11 @@ function normalizeSessionLabelText(text: string): string {
 }
 
 function normalizeAssistantFinalText(content: unknown): string {
-  return getMessageText(content)
-    .replace(/^\s*(?:\[\[reply_to(?:[:_][a-z0-9:_-]+)?\]\]\s*)+/ig, '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return normalizeAssistantFinalTextShared(content);
 }
 
 function resolveUserLabelCandidate(content: unknown): string {
-  return normalizeSessionLabelText(cleanGatewayUserText(getMessageText(content)));
+  return normalizeSessionLabelText(cleanGatewayUserText(extractMessageText(content)));
 }
 
 function resolveAssistantLabelCandidate(content: unknown): string {
@@ -190,25 +153,50 @@ export function parseTranscriptMessages(content: string): SessionTranscriptMessa
       continue;
     }
 
-    const role = normalizeRole(parsed.message.role);
+    const role = normalizeMessageRole(parsed.message.role);
     if (!role) {
       continue;
     }
 
-    messages.push({
+    const normalized = normalizeRawChatMessage({
+      ...parsed.message,
       role,
       content: Object.prototype.hasOwnProperty.call(parsed.message, 'content')
         ? parsed.message.content
         : '',
       timestamp: normalizeTimestamp(parsed.timestamp ?? parsed.message.timestamp),
       id: normalizeOptionalString(parsed.id ?? parsed.message.id),
-      messageId: normalizeOptionalString(parsed.message.messageId ?? parsed.message.message_id ?? parsed.message.id),
-      clientId: normalizeOptionalString(parsed.message.clientId ?? parsed.message.client_id ?? parsed.message.idempotencyKey ?? parsed.message.idempotency_key),
-      uniqueId: normalizeOptionalString(parsed.message.uniqueId ?? parsed.message.unique_id ?? parsed.id),
-      toolCallId: normalizeOptionalString(parsed.message.toolCallId ?? parsed.message.tool_call_id),
-      toolName: normalizeOptionalString(parsed.message.toolName ?? parsed.message.tool_name ?? parsed.message.name),
-      details: parsed.message.details,
-      isError: normalizeOptionalBoolean(parsed.message.isError ?? parsed.message.is_error),
+    }, {
+      fallbackMessageIdToId: true,
+      fallbackOriginMessageIdToParentMessageId: true,
+      fallbackUniqueIdToId: true,
+      fallbackRequestIdToClientId: true,
+    });
+
+    messages.push({
+      role,
+      content: Object.prototype.hasOwnProperty.call(normalized, 'content')
+        ? normalized.content
+        : '',
+      timestamp: normalizeTimestamp(normalized.timestamp),
+      id: normalizeOptionalString(normalized.id),
+      messageId: normalizeOptionalString(normalized.messageId),
+      originMessageId: normalizeOptionalString(normalized.originMessageId),
+      clientId: normalizeOptionalString(normalized.clientId),
+      uniqueId: normalizeOptionalString(normalized.uniqueId),
+      requestId: normalizeOptionalString(normalized.requestId),
+      status: normalized.status as SessionTranscriptMessage['status'],
+      streaming: typeof normalized.streaming === 'boolean' ? normalized.streaming : undefined,
+      agentId: normalizeOptionalString(normalized.agentId),
+      toolCallId: normalizeOptionalString(normalized.toolCallId),
+      tool_calls: Array.isArray(normalized.tool_calls) ? normalized.tool_calls as Array<Record<string, unknown>> : undefined,
+      toolCalls: Array.isArray(normalized.toolCalls) ? normalized.toolCalls as Array<Record<string, unknown>> : undefined,
+      toolName: normalizeOptionalString(normalized.toolName),
+      metadata: normalized.metadata as Record<string, unknown> | undefined,
+      name: normalizeOptionalString(normalized.name),
+      details: normalized.details,
+      toolStatuses: Array.isArray(normalized.toolStatuses) ? normalized.toolStatuses as Array<Record<string, unknown>> : undefined,
+      isError: normalizeOptionalBoolean(normalized.isError ?? normalized.is_error),
     });
   }
 

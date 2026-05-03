@@ -80,6 +80,7 @@ export function createTailLocalBusinessHandlers(
       handle: (request) => handleSessionRoute(request.method, request.routePath, request.payload, {
         getOpenClawConfigDir,
         resolveDeletedPath,
+        openclawBridge: context.openclawBridge,
       }),
     },
     {

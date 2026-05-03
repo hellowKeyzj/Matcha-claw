@@ -2,7 +2,8 @@ import { hostApiFetch } from '@/lib/host-api';
 import { isToolResultRole } from './event-helpers';
 import { throwIfHistoryLoadAborted } from './history-abort';
 import { getMessageText } from './message-helpers';
-import type { AttachedFileMeta, ChatSendAttachment, ContentBlock, RawMessage } from './types';
+import type { AttachedFileMeta, ChatSendAttachment, ContentBlock } from './types';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 // ── Local image cache ─────────────────────────────────────────
 // The Gateway doesn't store image attachments in session content blocks,
@@ -127,84 +128,8 @@ export function makeAttachedFile(ref: { filePath: string; mimeType: string }): A
   return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath };
 }
 
-/**
- * Extract file path from a tool call's arguments by toolCallId.
- * Searches common argument names: file_path, filePath, path, file.
- */
-export function getToolCallFilePath(msg: RawMessage, toolCallId: string): string | undefined {
-  if (!toolCallId) return undefined;
-
-  // Anthropic/normalized format — toolCall blocks in content array
-  const content = msg.content;
-  if (Array.isArray(content)) {
-    for (const block of content as ContentBlock[]) {
-      if ((block.type === 'tool_use' || block.type === 'toolCall') && block.id === toolCallId) {
-        const args = (block.input ?? block.arguments) as Record<string, unknown> | undefined;
-        if (args) {
-          const fp = args.file_path ?? args.filePath ?? args.path ?? args.file;
-          if (typeof fp === 'string') return fp;
-        }
-      }
-    }
-  }
-
-  // OpenAI format — tool_calls array on the message itself
-  const msgAny = msg as unknown as Record<string, unknown>;
-  const toolCalls = msgAny.tool_calls ?? msgAny.toolCalls;
-  if (Array.isArray(toolCalls)) {
-    for (const tc of toolCalls as Array<Record<string, unknown>>) {
-      if (tc.id !== toolCallId) continue;
-      const fn = (tc.function ?? tc) as Record<string, unknown>;
-      let args: Record<string, unknown> | undefined;
-      try {
-        args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : (fn.arguments ?? fn.input) as Record<string, unknown>;
-      } catch { /* ignore */ }
-      if (args) {
-        const fp = args.file_path ?? args.filePath ?? args.path ?? args.file;
-        if (typeof fp === 'string') return fp;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-export function collectToolResultPendingFiles(
-  toolResultMessage: RawMessage,
-  streamForPath: RawMessage | null | undefined,
-): AttachedFileMeta[] {
-  const matchedPath = (streamForPath && toolResultMessage.toolCallId)
-    ? getToolCallFilePath(streamForPath, toolResultMessage.toolCallId)
-    : undefined;
-
-  const toolFiles: AttachedFileMeta[] = [
-    ...extractImagesAsAttachedFiles(toolResultMessage.content),
-  ];
-
-  if (matchedPath) {
-    for (const file of toolFiles) {
-      if (!file.filePath) {
-        file.filePath = matchedPath;
-        file.fileName = matchedPath.split(/[\\/]/).pop() || 'image';
-      }
-    }
-  }
-
-  const text = getMessageText(toolResultMessage.content);
-  if (!text) {
-    return toolFiles;
-  }
-
-  const mediaRefs = extractMediaRefs(text);
-  for (const ref of mediaRefs) {
-    toolFiles.push(makeAttachedFile(ref));
-  }
-
-  return toolFiles;
-}
-
-function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void {
-  const content = msg.content;
+function collectTimelineEntryToolCallPaths(entry: SessionTimelineEntry, paths: Map<string, string>): void {
+  const content = entry.message.content;
   if (Array.isArray(content)) {
     for (const block of content as ContentBlock[]) {
       if ((block.type === 'tool_use' || block.type === 'toolCall') && block.id) {
@@ -216,8 +141,7 @@ function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void
       }
     }
   }
-  const msgAny = msg as unknown as Record<string, unknown>;
-  const toolCalls = msgAny.tool_calls ?? msgAny.toolCalls;
+  const toolCalls = entry.message.tool_calls ?? entry.message.toolCalls;
   if (Array.isArray(toolCalls)) {
     for (const tc of toolCalls as Array<Record<string, unknown>>) {
       const id = typeof tc.id === 'string' ? tc.id : '';
@@ -235,22 +159,20 @@ function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void
   }
 }
 
-export function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
+function attachPendingToolResultFilesToTimelineEntries(entries: SessionTimelineEntry[]): SessionTimelineEntry[] {
   const pending: AttachedFileMeta[] = [];
   const toolCallPaths = new Map<string, string>();
+  let changed = false;
 
-  return messages.map((msg) => {
-    // Track file paths from assistant tool call arguments for later matching
-    if (msg.role === 'assistant') {
-      collectToolCallPaths(msg, toolCallPaths);
+  const nextEntries = entries.map((entry) => {
+    if (entry.role === 'assistant') {
+      collectTimelineEntryToolCallPaths(entry, toolCallPaths);
     }
 
-    if (isToolResultRole(msg.role)) {
-      // Resolve file path from the matching tool call
-      const matchedPath = msg.toolCallId ? toolCallPaths.get(msg.toolCallId) : undefined;
+    if (isToolResultRole(entry.role)) {
+      const matchedPath = entry.message.toolCallId ? toolCallPaths.get(entry.message.toolCallId) : undefined;
 
-      // 1. Image/file content blocks in the structured content array
-      const imageFiles = extractImagesAsAttachedFiles(msg.content);
+      const imageFiles = extractImagesAsAttachedFiles(entry.message.content);
       if (matchedPath) {
         for (const f of imageFiles) {
           if (!f.filePath) {
@@ -261,8 +183,7 @@ export function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] 
       }
       pending.push(...imageFiles);
 
-      // 2. [media attached: ...] patterns in tool result text output
-      const text = getMessageText(msg.content);
+      const text = getMessageText(entry.message.content);
       if (text) {
         const mediaRefs = extractMediaRefs(text);
         for (const ref of mediaRefs) {
@@ -270,58 +191,61 @@ export function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] 
         }
       }
 
-      return msg; // will be filtered later
+      return entry;
     }
 
-    if (msg.role === 'assistant' && pending.length > 0) {
+    if (entry.role === 'assistant' && pending.length > 0) {
       const toAttach = pending.splice(0);
-      // Deduplicate against files already on the assistant message
       const existingPaths = new Set(
-        (msg._attachedFiles || []).map((f) => f.filePath).filter(Boolean),
+        (readTimelineEntryAttachedFiles(entry)).map((f) => f.filePath).filter(Boolean),
       );
       const newFiles = toAttach.filter((f) => !f.filePath || !existingPaths.has(f.filePath));
-      if (newFiles.length === 0) return msg;
+      if (newFiles.length === 0) return entry;
+      changed = true;
       return {
-        ...msg,
-        _attachedFiles: [...(msg._attachedFiles || []), ...newFiles],
+        ...entry,
+        message: {
+          ...entry.message,
+          _attachedFiles: [...readTimelineEntryAttachedFiles(entry), ...newFiles].map((file) => ({ ...file })),
+        },
       };
     }
 
-    return msg;
+    return entry;
   });
+
+  return changed ? nextEntries : entries;
 }
 
-export async function enrichWithToolResultFilesIncremental(
-  messages: RawMessage[],
+async function attachPendingToolResultFilesToTimelineEntriesIncremental(
+  entries: SessionTimelineEntry[],
   chunkSize = HISTORY_ENRICH_YIELD_INTERVAL,
   abortSignal?: AbortSignal,
-): Promise<RawMessage[]> {
+): Promise<SessionTimelineEntry[]> {
   throwIfAborted(abortSignal);
-  if (messages.length === 0) {
-    return messages;
+  if (entries.length === 0) {
+    return entries;
   }
 
   const pending: AttachedFileMeta[] = [];
   const toolCallPaths = new Map<string, string>();
-  const enriched = new Array<RawMessage>(messages.length);
+  const enriched = new Array<SessionTimelineEntry>(entries.length);
   const normalizedChunkSize = Math.max(1, Math.floor(chunkSize));
+  let changed = false;
 
-  for (let index = 0; index < messages.length; index += 1) {
+  for (let index = 0; index < entries.length; index += 1) {
     throwIfAborted(abortSignal);
-    const msg = messages[index];
-    let nextMessage = msg;
+    const entry = entries[index];
+    let nextEntry = entry;
 
-    // Track file paths from assistant tool call arguments for later matching
-    if (msg.role === 'assistant') {
-      collectToolCallPaths(msg, toolCallPaths);
+    if (entry.role === 'assistant') {
+      collectTimelineEntryToolCallPaths(entry, toolCallPaths);
     }
 
-    if (isToolResultRole(msg.role)) {
-      // Resolve file path from the matching tool call
-      const matchedPath = msg.toolCallId ? toolCallPaths.get(msg.toolCallId) : undefined;
+    if (isToolResultRole(entry.role)) {
+      const matchedPath = entry.message.toolCallId ? toolCallPaths.get(entry.message.toolCallId) : undefined;
 
-      // 1. Image/file content blocks in the structured content array
-      const imageFiles = extractImagesAsAttachedFiles(msg.content);
+      const imageFiles = extractImagesAsAttachedFiles(entry.message.content);
       if (matchedPath) {
         for (const f of imageFiles) {
           if (!f.filePath) {
@@ -332,30 +256,32 @@ export async function enrichWithToolResultFilesIncremental(
       }
       pending.push(...imageFiles);
 
-      // 2. [media attached: ...] patterns in tool result text output
-      const text = getMessageText(msg.content);
+      const text = getMessageText(entry.message.content);
       if (text) {
         const mediaRefs = extractMediaRefs(text);
         for (const ref of mediaRefs) {
           pending.push(makeAttachedFile(ref));
         }
       }
-    } else if (msg.role === 'assistant' && pending.length > 0) {
+    } else if (entry.role === 'assistant' && pending.length > 0) {
       const toAttach = pending.splice(0);
-      // Deduplicate against files already on the assistant message
       const existingPaths = new Set(
-        (msg._attachedFiles || []).map((f) => f.filePath).filter(Boolean),
+        readTimelineEntryAttachedFiles(entry).map((f) => f.filePath).filter(Boolean),
       );
       const newFiles = toAttach.filter((f) => !f.filePath || !existingPaths.has(f.filePath));
       if (newFiles.length > 0) {
-        nextMessage = {
-          ...msg,
-          _attachedFiles: [...(msg._attachedFiles || []), ...newFiles],
+        nextEntry = {
+          ...entry,
+          message: {
+            ...entry.message,
+            _attachedFiles: [...readTimelineEntryAttachedFiles(entry), ...newFiles].map((file) => ({ ...file })),
+          },
         };
+        changed = true;
       }
     }
 
-    enriched[index] = nextMessage;
+    enriched[index] = nextEntry;
 
     if ((index + 1) % normalizedChunkSize === 0) {
       throwIfAborted(abortSignal);
@@ -363,62 +289,29 @@ export async function enrichWithToolResultFilesIncremental(
     }
   }
 
-  return enriched;
+  return changed ? enriched : entries;
 }
 
-function enrichMessageWithCachedImages(msg: RawMessage): RawMessage {
-  // Only process user and assistant messages; skip if already enriched
-  if ((msg.role !== 'user' && msg.role !== 'assistant') || msg._attachedFiles) return msg;
-  const text = getMessageText(msg.content);
-
-  // Path 1: [media attached: path (mime) | path] — guaranteed format from attachment button
-  const mediaRefs = extractMediaRefs(text);
-  if (mediaRefs.length === 0) return msg;
-
-  const files: AttachedFileMeta[] = mediaRefs.map((ref) => {
-    const cached = imageCache.get(ref.filePath);
-    if (cached) return { ...cached, filePath: ref.filePath };
-    const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
-    return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath };
-  });
-  return { ...msg, _attachedFiles: files };
+function readTimelineEntryAttachedFiles(entry: SessionTimelineEntry): AttachedFileMeta[] {
+  const attachedFiles = entry.message._attachedFiles;
+  return Array.isArray(attachedFiles)
+    ? attachedFiles as unknown as AttachedFileMeta[]
+    : [];
 }
 
-export function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
-  return messages.map((msg) => enrichMessageWithCachedImages(msg));
-}
-
-export async function enrichWithCachedImagesIncremental(
-  messages: RawMessage[],
-  chunkSize = HISTORY_ENRICH_YIELD_INTERVAL,
-  abortSignal?: AbortSignal,
-): Promise<RawMessage[]> {
-  throwIfAborted(abortSignal);
-  if (messages.length === 0) {
-    return messages;
-  }
-
-  const normalizedChunkSize = Math.max(1, Math.floor(chunkSize));
-  const enriched = new Array<RawMessage>(messages.length);
-  for (let index = 0; index < messages.length; index += 1) {
-    throwIfAborted(abortSignal);
-    enriched[index] = enrichMessageWithCachedImages(messages[index]);
-    if ((index + 1) % normalizedChunkSize === 0) {
-      throwIfAborted(abortSignal);
-      await yieldToEventLoop();
+export function hydrateAttachedFilesFromTimelineEntries(
+  entries: SessionTimelineEntry[],
+): SessionTimelineEntry[] {
+  const withToolResultFiles = attachPendingToolResultFilesToTimelineEntries(entries);
+  let changed = withToolResultFiles !== entries;
+  const nextEntries = withToolResultFiles.map((entry) => {
+    const attachedFiles = readTimelineEntryAttachedFiles(entry);
+    if (attachedFiles.length === 0) {
+      return entry;
     }
-  }
-  return enriched;
-}
 
-export function hydrateAttachedFilesFromCache(messages: RawMessage[]): RawMessage[] {
-  let changed = false;
-  const nextMessages = messages.map((msg) => {
-    if (!Array.isArray(msg._attachedFiles) || msg._attachedFiles.length === 0) {
-      return msg;
-    }
-    let messageChanged = false;
-    const nextFiles = msg._attachedFiles.map((file) => {
+    let entryChanged = false;
+    const nextFiles = attachedFiles.map((file) => {
       const filePath = file.filePath;
       if (!filePath) {
         return file;
@@ -442,69 +335,101 @@ export function hydrateAttachedFilesFromCache(messages: RawMessage[]): RawMessag
         return file;
       }
 
-      messageChanged = true;
+      entryChanged = true;
       return {
         ...file,
         preview: nextPreview,
         fileSize: nextFileSize,
         fileName: nextFileName,
         mimeType: nextMimeType,
-      };
+      } satisfies AttachedFileMeta;
     });
 
-    if (!messageChanged) {
-      return msg;
+    if (!entryChanged) {
+      return entry;
     }
+
     changed = true;
     return {
-      ...msg,
-      _attachedFiles: nextFiles,
+      ...entry,
+      message: {
+        ...entry.message,
+        _attachedFiles: nextFiles.map((file) => ({ ...file })),
+      },
     };
   });
 
-  return changed ? nextMessages : messages;
+  return changed ? nextEntries : entries;
 }
 
-export async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
-  // Collect all image paths that need previews
+export function hasPendingTimelineEntryPreviewLoads(
+  entries: SessionTimelineEntry[],
+): boolean {
+  return entries.some((entry) => {
+    const attachedFiles = readTimelineEntryAttachedFiles(entry);
+    if (attachedFiles.length === 0) {
+      return false;
+    }
+    return attachedFiles.some((file) => {
+      if (!file.filePath) {
+        return false;
+      }
+      if (file.mimeType.startsWith('image/')) {
+        return !file.preview;
+      }
+      return file.fileSize === 0;
+    });
+  });
+}
+
+export async function loadMissingTimelineEntryPreviews(
+  entries: SessionTimelineEntry[],
+): Promise<SessionTimelineEntry[] | null> {
+  const normalizedEntries = await attachPendingToolResultFilesToTimelineEntriesIncremental(entries);
   const needPreview: Array<{ filePath: string; mimeType: string }> = [];
   const seenPaths = new Set<string>();
 
-  for (const msg of messages) {
-    if (!msg._attachedFiles) continue;
+  for (const entry of normalizedEntries) {
+    const attachedFiles = readTimelineEntryAttachedFiles(entry);
+    if (attachedFiles.length === 0) {
+      continue;
+    }
 
-    // Path 1: files with explicit filePath field (raw path detection or enriched refs)
-    for (const file of msg._attachedFiles) {
-      const fp = file.filePath;
-      if (!fp || seenPaths.has(fp)) continue;
-      // Images: need preview. Non-images: need file size (for FileCard display).
+    for (const file of attachedFiles) {
+      const filePath = file.filePath;
+      if (!filePath || seenPaths.has(filePath)) {
+        continue;
+      }
       const needsLoad = file.mimeType.startsWith('image/')
         ? !file.preview
         : file.fileSize === 0;
       if (needsLoad) {
-        seenPaths.add(fp);
-        needPreview.push({ filePath: fp, mimeType: file.mimeType });
+        seenPaths.add(filePath);
+        needPreview.push({ filePath, mimeType: file.mimeType });
       }
     }
 
-    // Path 2: [media attached: ...] patterns (legacy — in case filePath wasn't stored)
-    if (msg.role === 'user') {
-      const text = getMessageText(msg.content);
-      const refs = extractMediaRefs(text);
-      for (let i = 0; i < refs.length; i++) {
-        const file = msg._attachedFiles[i];
-        const ref = refs[i];
-        if (!file || !ref || seenPaths.has(ref.filePath)) continue;
-        const needsLoad = ref.mimeType.startsWith('image/') ? !file.preview : file.fileSize === 0;
-        if (needsLoad) {
-          seenPaths.add(ref.filePath);
-          needPreview.push(ref);
-        }
+    if (entry.role !== 'user') {
+      continue;
+    }
+    const refs = extractMediaRefs(getMessageText(entry.message.content));
+    for (let index = 0; index < refs.length; index += 1) {
+      const file = attachedFiles[index];
+      const ref = refs[index];
+      if (!file || !ref || seenPaths.has(ref.filePath)) {
+        continue;
+      }
+      const needsLoad = ref.mimeType.startsWith('image/') ? !file.preview : file.fileSize === 0;
+      if (needsLoad) {
+        seenPaths.add(ref.filePath);
+        needPreview.push(ref);
       }
     }
   }
 
-  if (needPreview.length === 0) return false;
+  if (needPreview.length === 0) {
+    return null;
+  }
 
   try {
     const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number }>>(
@@ -515,45 +440,68 @@ export async function loadMissingPreviews(messages: RawMessage[]): Promise<boole
       },
     );
 
-    let updated = false;
-    for (const msg of messages) {
-      if (!msg._attachedFiles) continue;
-
-      // Update files that have filePath
-      for (const file of msg._attachedFiles) {
-        const fp = file.filePath;
-        if (!fp) continue;
-        const thumb = thumbnails[fp];
-        if (thumb && (thumb.preview || thumb.fileSize)) {
-          if (thumb.preview) file.preview = thumb.preview;
-          if (thumb.fileSize) file.fileSize = thumb.fileSize;
-          imageCache.set(fp, { ...file });
-          updated = true;
-        }
+    let changed = false;
+    const nextEntries = normalizedEntries.map((entry) => {
+      const attachedFiles = readTimelineEntryAttachedFiles(entry);
+      if (attachedFiles.length === 0) {
+        return entry;
       }
 
-      // Legacy: update by index for [media attached: ...] refs
-      if (msg.role === 'user') {
-        const text = getMessageText(msg.content);
-        const refs = extractMediaRefs(text);
-        for (let i = 0; i < refs.length; i++) {
-          const file = msg._attachedFiles[i];
-          const ref = refs[i];
-          if (!file || !ref || file.filePath) continue; // skip if already handled via filePath
-          const thumb = thumbnails[ref.filePath];
-          if (thumb && (thumb.preview || thumb.fileSize)) {
-            if (thumb.preview) file.preview = thumb.preview;
-            if (thumb.fileSize) file.fileSize = thumb.fileSize;
-            imageCache.set(ref.filePath, { ...file });
-            updated = true;
-          }
+      const userRefs = entry.role === 'user'
+        ? extractMediaRefs(getMessageText(entry.message.content))
+        : [];
+      let entryChanged = false;
+      const nextFiles = attachedFiles.map((file, index) => {
+        const fallbackPath = !file.filePath && entry.role === 'user'
+          ? userRefs[index]?.filePath
+          : undefined;
+        const filePath = file.filePath ?? fallbackPath;
+        if (!filePath) {
+          return file;
         }
+        const thumb = thumbnails[filePath];
+        if (!thumb || (!thumb.preview && !thumb.fileSize)) {
+          return file;
+        }
+
+        const nextPreview = thumb.preview ?? file.preview ?? null;
+        const nextFileSize = thumb.fileSize || file.fileSize;
+        if (nextPreview === (file.preview ?? null) && nextFileSize === file.fileSize) {
+          return file;
+        }
+
+        const nextFile: AttachedFileMeta = {
+          ...file,
+          ...(file.filePath ? {} : { filePath }),
+          preview: nextPreview,
+          fileSize: nextFileSize,
+        };
+        imageCache.set(filePath, { ...nextFile });
+        entryChanged = true;
+        return nextFile;
+      });
+
+      if (!entryChanged) {
+        return entry;
       }
+
+      changed = true;
+      return {
+        ...entry,
+        message: {
+          ...entry.message,
+          _attachedFiles: nextFiles.map((file) => ({ ...file })),
+        },
+      };
+    });
+
+    if (changed) {
+      saveImageCache(imageCache);
+      return nextEntries;
     }
-    if (updated) saveImageCache(imageCache);
-    return updated;
+    return normalizedEntries === entries ? null : normalizedEntries;
   } catch {
-    return false;
+    return normalizedEntries === entries ? null : normalizedEntries;
   }
 }
 
@@ -567,23 +515,6 @@ export function getAttachmentImageCacheStats(): AttachmentImageCacheStats {
     entryCount: imageCache.size,
     previewCharCount,
   };
-}
-
-export function hasPendingPreviewLoads(messages: RawMessage[]): boolean {
-  return messages.some((msg) => {
-    if (!msg._attachedFiles || msg._attachedFiles.length === 0) {
-      return false;
-    }
-    return msg._attachedFiles.some((file) => {
-      if (!file.filePath) {
-        return false;
-      }
-      if (file.mimeType.startsWith('image/')) {
-        return !file.preview;
-      }
-      return file.fileSize === 0;
-    });
-  });
 }
 
 export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {

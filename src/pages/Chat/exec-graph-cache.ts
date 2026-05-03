@@ -1,4 +1,3 @@
-import type { RawMessage } from '@/stores/chat';
 import type { ExecutionGraphData } from './execution-graph-model';
 import {
   EMPTY_EXECUTION_GRAPHS,
@@ -6,6 +5,7 @@ import {
   type IdleCallbackHandle,
   type SessionExecutionCache,
 } from './exec-graph-types';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 interface IdleDeadlineLike {
   readonly didTimeout: boolean;
@@ -15,12 +15,12 @@ interface IdleDeadlineLike {
 type IdleCallback = (deadline: IdleDeadlineLike) => void;
 
 export const globalSessionExecutionCache = new Map<string, SessionExecutionCache>();
-export const globalSubagentHistoryBySession = new Map<string, RawMessage[]>();
+export const globalSubagentHistoryBySession = new Map<string, SessionTimelineEntry[]>();
 
 export interface ExecutionGraphCacheStats {
   cachedSessionCount: number;
   cachedGraphCount: number;
-  cachedSuppressedRowKeyCount: number;
+  cachedSuppressedLaneTurnKeyCount: number;
   graphSignatureCacheEntryCount: number;
   mainStepCacheEntryCount: number;
   childStepCacheEntryCount: number;
@@ -78,15 +78,15 @@ export function snapshotExecutionGraphs(executionGraphs: ExecutionGraphData[]): 
 
 export function getExecutionGraphCacheStats(): ExecutionGraphCacheStats {
   let cachedGraphCount = 0;
-  let cachedSuppressedRowKeyCount = 0;
+  let cachedSuppressedLaneTurnKeyCount = 0;
   let graphSignatureCacheEntryCount = 0;
   let mainStepCacheEntryCount = 0;
   let childStepCacheEntryCount = 0;
 
   for (const cache of globalSessionExecutionCache.values()) {
     cachedGraphCount += cache.executionGraphs.length;
-    cachedSuppressedRowKeyCount += cache.executionGraphs.reduce(
-      (total, graph) => total + (graph.suppressToolCardMessageKeys?.length ?? 0),
+    cachedSuppressedLaneTurnKeyCount += cache.executionGraphs.reduce(
+      (total, graph) => total + (graph.suppressToolCardLaneTurnKeys?.length ?? 0),
       0,
     );
     graphSignatureCacheEntryCount += cache.graphCacheBySignature.size;
@@ -95,14 +95,14 @@ export function getExecutionGraphCacheStats(): ExecutionGraphCacheStats {
   }
 
   let subagentHistoryMessageCount = 0;
-  for (const messages of globalSubagentHistoryBySession.values()) {
-    subagentHistoryMessageCount += messages.length;
+  for (const timelineEntries of globalSubagentHistoryBySession.values()) {
+    subagentHistoryMessageCount += timelineEntries.length;
   }
 
   return {
     cachedSessionCount: globalSessionExecutionCache.size,
     cachedGraphCount,
-    cachedSuppressedRowKeyCount,
+    cachedSuppressedLaneTurnKeyCount,
     graphSignatureCacheEntryCount,
     mainStepCacheEntryCount,
     childStepCacheEntryCount,

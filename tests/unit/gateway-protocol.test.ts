@@ -90,6 +90,42 @@ describe('dispatchProtocolEvent', () => {
     });
   });
 
+  it('chat 事件会保留 sequenceId、requestId、uniqueId 与 agentId', () => {
+    const emitNotification = vi.fn();
+    const emitConversationEvent = vi.fn();
+    const emitChannelStatus = vi.fn();
+
+    dispatchGatewayProtocolEvent(
+      { emitNotification, emitConversationEvent, emitChannelStatus },
+      'chat',
+      {
+        runId: 'run-identity-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 9,
+        requestId: 'user-local-1',
+        uniqueId: 'user-local-1',
+        agentId: 'agent-main',
+        message: {
+          role: 'assistant',
+          content: 'hello',
+        },
+      },
+    );
+
+    expect(emitConversationEvent).toHaveBeenCalledWith({
+      type: 'chat.message',
+      event: expect.objectContaining({
+        state: 'delta',
+        runId: 'run-identity-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 9,
+        requestId: 'user-local-1',
+        uniqueId: 'user-local-1',
+        agentId: 'agent-main',
+      }),
+    });
+  });
+
   it('agent 非生命周期事件只透传 notification，不进入 conversation 通道', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();

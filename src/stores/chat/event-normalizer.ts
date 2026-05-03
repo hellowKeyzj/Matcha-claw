@@ -1,3 +1,7 @@
+import {
+  normalizeRawChatMessage,
+  resolveNormalizedMessageIdentity,
+} from '../../../runtime-host/shared/chat-message-normalization';
 import { asRecord } from './value';
 import type { ChatRuntimeEventPhase } from './types';
 
@@ -42,6 +46,19 @@ export type ChatDomainEvent =
   | ChatApprovalRequestedDomainEvent
   | ChatApprovalResolvedDomainEvent;
 
+export interface NormalizedConversationIngressEvent {
+  kind: 'chat.message' | 'chat.runtime.lifecycle';
+  phase: ChatRuntimePhase;
+  runId: string;
+  sessionKey: string | null;
+  event: Record<string, unknown>;
+  message: unknown;
+}
+
+const RUNTIME_INGRESS_MESSAGE_NORMALIZE_OPTIONS = {
+  fallbackOriginMessageIdToParentMessageId: true,
+  fallbackRequestIdToClientId: true,
+} as const;
 function normalizeRunPhase(phaseRaw: unknown): GatewayConversationRunPhase | null {
   const phase = typeof phaseRaw === 'string' ? phaseRaw.trim().toLowerCase() : '';
   if (!phase) {
@@ -81,6 +98,36 @@ function resolveRuntimePhaseFromState(state: string): ChatRuntimePhase {
   return 'unknown';
 }
 
+function normalizeIdentifier(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || null;
+}
+
+function normalizeSequenceLaneRole(role: unknown): 'user' | 'assistant' | 'system' | null {
+  const normalized = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  if (normalized === 'toolresult' || normalized === 'tool_result' || normalized === 'assistant') {
+    return 'assistant';
+  }
+  if (normalized === 'user' || normalized === 'system') {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeSequenceId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = Number(value.trim());
+    return Number.isFinite(normalized) ? normalized : null;
+  }
+  return null;
+}
+
+export function normalizeConversationMessageSequenceId(value: unknown): number | null {
+  return normalizeSequenceId(value);
+}
 function normalizeStructuredChatMessageEvent(data: unknown): Record<string, unknown> | null {
   const candidate = asRecord(data);
   if (!candidate) {
@@ -99,18 +146,63 @@ function normalizeStructuredChatMessageEvent(data: unknown): Record<string, unkn
 
   const runId = typeof candidate.runId === 'string' ? candidate.runId.trim() : '';
   const sessionKey = typeof candidate.sessionKey === 'string' ? candidate.sessionKey.trim() : '';
+  const sequenceId = normalizeSequenceId(candidate.sequenceId ?? candidate.sequence_id);
+  const requestId = normalizeIdentifier(candidate.requestId ?? candidate.request_id);
+  const uniqueId = normalizeIdentifier(candidate.uniqueId ?? candidate.unique_id);
+  const agentId = normalizeIdentifier(candidate.agentId ?? candidate.agent_id);
+  const normalizedMessage = rawMessage
+    ? normalizeRawChatMessage({
+        ...(rawMessage as Record<string, unknown>),
+        ...(requestId ? { requestId } : {}),
+        ...(uniqueId ? { uniqueId } : {}),
+        ...(agentId ? { agentId } : {}),
+      }, RUNTIME_INGRESS_MESSAGE_NORMALIZE_OPTIONS)
+    : rawMessage;
 
   return {
     ...candidate,
     state,
     ...(runId ? { runId } : {}),
     ...(sessionKey ? { sessionKey } : {}),
+    ...(sequenceId != null ? { sequenceId } : {}),
+    ...(requestId ? { requestId } : {}),
+    ...(uniqueId ? { uniqueId } : {}),
+    ...(agentId ? { agentId } : {}),
+    ...(normalizedMessage ? { message: normalizedMessage } : {}),
   };
 }
 
-function normalizeIdentifier(value: unknown): string | null {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized || null;
+export function buildConversationMessageSequenceKey(event: Record<string, unknown>, message: unknown): string | null {
+  const eventRecord = event as Record<string, unknown>;
+  const messageRecord = (message && typeof message === 'object' && !Array.isArray(message))
+    ? message as Record<string, unknown>
+    : null;
+  const sessionKey = normalizeIdentifier(eventRecord.sessionKey);
+  const normalizedMessage = messageRecord
+    ? normalizeRawChatMessage({
+        ...messageRecord,
+        ...(normalizeIdentifier(eventRecord.requestId ?? eventRecord.request_id)
+          ? { requestId: normalizeIdentifier(eventRecord.requestId ?? eventRecord.request_id) }
+          : {}),
+        ...(normalizeIdentifier(eventRecord.uniqueId ?? eventRecord.unique_id)
+          ? { uniqueId: normalizeIdentifier(eventRecord.uniqueId ?? eventRecord.unique_id) }
+          : {}),
+        ...(normalizeIdentifier(eventRecord.agentId ?? eventRecord.agent_id)
+          ? { agentId: normalizeIdentifier(eventRecord.agentId ?? eventRecord.agent_id) }
+          : {}),
+      }, RUNTIME_INGRESS_MESSAGE_NORMALIZE_OPTIONS)
+    : null;
+  const identity = resolveNormalizedMessageIdentity(normalizedMessage ?? undefined, {
+    fallbackMessageIdToId: true,
+    fallbackOriginMessageIdToParentMessageId: true,
+    fallbackRequestIdToClientId: true,
+  });
+  const sequenceIdentity = identity.uniqueId || identity.clientId || identity.requestId || identity.messageId || identity.id;
+  const laneRole = normalizeSequenceLaneRole(normalizedMessage?.role ?? eventRecord.role);
+  if (!sessionKey || !sequenceIdentity || !laneRole) {
+    return null;
+  }
+  return [sessionKey, laneRole, sequenceIdentity, identity.agentId ?? ''].join('|');
 }
 
 function mapRunPhaseToChatEvent(
@@ -135,6 +227,74 @@ export type ChatConversationDomainEvent =
   | ChatMessageDomainEvent
   | ChatRuntimeLifecycleDomainEvent;
 
+export function normalizeConversationIngressDomainEvent(
+  payload: unknown,
+): NormalizedConversationIngressEvent | null {
+  const input = asRecord(payload);
+  if (!input) {
+    return null;
+  }
+  const kind = input.kind;
+  if (kind !== 'chat.message' && kind !== 'chat.runtime.lifecycle') {
+    return null;
+  }
+  const phase = input.phase;
+  if (
+    phase !== 'started'
+    && phase !== 'delta'
+    && phase !== 'final'
+    && phase !== 'error'
+    && phase !== 'aborted'
+    && phase !== 'unknown'
+  ) {
+    return null;
+  }
+  const event = asRecord(input.event);
+  if (!event) {
+    return null;
+  }
+  const runId = normalizeIdentifier(input.runId) ?? '';
+  const sessionKey = normalizeIdentifier(input.sessionKey);
+  const normalizedEvent = kind === 'chat.message'
+    ? normalizeStructuredChatMessageEvent(event)
+    : {
+        ...event,
+        ...(typeof event.state === 'string' ? { state: normalizeChatEventState(event.state) } : {}),
+        ...(runId ? { runId } : {}),
+        ...(sessionKey ? { sessionKey } : {}),
+      };
+  if (!normalizedEvent) {
+    return null;
+  }
+  return {
+    kind,
+    phase,
+    runId,
+    sessionKey,
+    event: normalizedEvent,
+    message: normalizedEvent.message,
+  };
+}
+
+export function normalizeBufferedConversationMessageEvent(
+  event: Record<string, unknown>,
+): NormalizedConversationIngressEvent | null {
+  const normalizedEvent = normalizeStructuredChatMessageEvent(event);
+  if (!normalizedEvent) {
+    return null;
+  }
+  const runId = normalizeIdentifier(normalizedEvent.runId) ?? '';
+  const sessionKey = normalizeIdentifier(normalizedEvent.sessionKey);
+  const eventState = typeof normalizedEvent.state === 'string' ? normalizedEvent.state : '';
+  return {
+    kind: 'chat.message',
+    phase: resolveRuntimePhaseFromState(eventState),
+    runId,
+    sessionKey,
+    event: normalizedEvent,
+    message: normalizedEvent.message,
+  };
+}
 export function normalizeGatewayConversationEvent(payload: unknown): ChatConversationDomainEvent | null {
   const input = asRecord(payload);
   if (!input) {

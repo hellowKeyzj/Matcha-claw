@@ -1,18 +1,19 @@
 import type {
   ApprovalStatus,
   ApprovalItem,
-  AttachedFileMeta,
   ChatSession,
   ChatSessionHistoryStatus,
   ChatSessionMetaState,
   ChatSessionRecord,
   ChatSessionRuntimeState,
-  ChatSessionToolingState,
   ChatSessionViewportState,
   ChatStoreState,
-  RawMessage,
-  ToolStatus,
 } from './types';
+import type {
+  SessionStateSnapshot,
+  SessionTimelineEntry,
+} from '../../../runtime-host/shared/session-adapter-types';
+import { findLatestAssistantTextFromTimelineEntries } from './timeline-message';
 import { syncViewportState } from './viewport-state';
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
@@ -34,93 +35,6 @@ function safeStableStringify(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function areAttachedFilesEqual(
-  left: AttachedFileMeta[] | undefined,
-  right: AttachedFileMeta[] | undefined,
-): boolean {
-  const leftItems = Array.isArray(left) ? left : [];
-  const rightItems = Array.isArray(right) ? right : [];
-  if (leftItems.length !== rightItems.length) {
-    return false;
-  }
-  for (let index = 0; index < leftItems.length; index += 1) {
-    const a = leftItems[index];
-    const b = rightItems[index];
-    if (
-      a.fileName !== b.fileName
-      || a.mimeType !== b.mimeType
-      || a.fileSize !== b.fileSize
-      || (a.preview ?? null) !== (b.preview ?? null)
-      || (a.filePath ?? null) !== (b.filePath ?? null)
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function areMessagesEqualAtIndex(left: RawMessage, right: RawMessage): boolean {
-  return (
-    (left.id ?? null) === (right.id ?? null)
-    && (left.messageId ?? null) === (right.messageId ?? null)
-    && (left.clientId ?? null) === (right.clientId ?? null)
-    && (left.uniqueId ?? null) === (right.uniqueId ?? null)
-    && left.role === right.role
-    && (left.status ?? null) === (right.status ?? null)
-    && Boolean(left.streaming) === Boolean(right.streaming)
-    && (left.timestamp ?? null) === (right.timestamp ?? null)
-    && (left.toolCallId ?? null) === (right.toolCallId ?? null)
-    && (left.toolName ?? null) === (right.toolName ?? null)
-    && (left.isError ?? null) === (right.isError ?? null)
-    && safeStableStringify(left.content) === safeStableStringify(right.content)
-    && areAttachedFilesEqual(left._attachedFiles, right._attachedFiles)
-  );
-}
-
-export function areMessagesEquivalent(left: RawMessage[], right: RawMessage[]): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-
-  for (let index = 0; index < left.length; index += 1) {
-    if (!areMessagesEqualAtIndex(left[index], right[index])) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-export function mergeMessageReferences(
-  current: RawMessage[],
-  next: RawMessage[],
-): RawMessage[] {
-  if (current === next) {
-    return current;
-  }
-  if (areMessagesEquivalent(current, next)) {
-    return current;
-  }
-
-  const merged: RawMessage[] = new Array(next.length);
-  let changed = current.length !== next.length;
-  for (let index = 0; index < next.length; index += 1) {
-    const currentMessage = current[index];
-    const nextMessage = next[index];
-    if (currentMessage && areMessagesEqualAtIndex(currentMessage, nextMessage)) {
-      merged[index] = currentMessage;
-      continue;
-    }
-    merged[index] = nextMessage;
-    changed = true;
-  }
-
-  return changed ? merged : current;
 }
 
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
@@ -147,19 +61,23 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
   return true;
 }
 
-export function buildHistoryFingerprint(messages: RawMessage[], thinkingLevel: string | null): string {
-  const count = messages.length;
-  const first = count > 0 ? messages[0] : null;
-  const last = count > 0 ? messages[count - 1] : null;
+export function buildTimelineHistoryFingerprint(
+  entries: SessionTimelineEntry[],
+  thinkingLevel: string | null,
+): string {
+  const count = entries.length;
+  const first = count > 0 ? entries[0] : null;
+  const last = count > 0 ? entries[count - 1] : null;
   return [
     count,
     thinkingLevel ?? '',
-    first?.id ?? '',
+    first?.entryId ?? '',
     first?.role ?? '',
     first?.timestamp ?? '',
-    last?.id ?? '',
+    last?.entryId ?? '',
     last?.role ?? '',
     last?.timestamp ?? '',
+    findLatestAssistantTextFromTimelineEntries(entries),
   ].join('|');
 }
 
@@ -171,67 +89,39 @@ function hashStringDjb2(input: string): string {
   return (hash >>> 0).toString(36);
 }
 
-export function buildQuickRawHistoryFingerprint(messages: RawMessage[], thinkingLevel: string | null): string {
-  const count = messages.length;
-  if (count === 0) {
-    return hashStringDjb2(`0|${thinkingLevel ?? ''}`);
-  }
-
-  const sampleStride = Math.max(1, Math.floor(count / 6));
-  const parts: string[] = [String(count), String(sampleStride), thinkingLevel ?? ''];
-  for (let index = 0; index < count; index += sampleStride) {
-    const msg = messages[index];
-    parts.push([
-      msg?.id ?? '',
-      msg?.role ?? '',
-      msg?.timestamp ?? '',
-      msg?.toolCallId ?? '',
-      msg?.toolName ?? '',
-      msg?.isError ? '1' : '0',
-    ].join(':'));
-  }
-  if ((count - 1) % sampleStride !== 0) {
-    const tail = messages[count - 1];
-    parts.push([
-      tail?.id ?? '',
-      tail?.role ?? '',
-      tail?.timestamp ?? '',
-      tail?.toolCallId ?? '',
-      tail?.toolName ?? '',
-      tail?.isError ? '1' : '0',
-    ].join(':'));
-  }
-
-  return hashStringDjb2(parts.join('|'));
-}
-
-export function buildRenderMessagesFingerprint(messages: RawMessage[]): string {
-  const count = messages.length;
+export function buildTimelineRenderFingerprint(entries: SessionTimelineEntry[]): string {
+  const count = entries.length;
   if (count === 0) {
     return hashStringDjb2('0');
   }
 
-  const first = messages[0];
-  const last = messages[count - 1];
+  const first = entries[0];
+  const last = entries[count - 1];
   const stride = Math.max(1, Math.floor(count / 8));
   const parts: string[] = [
     String(count),
     String(stride),
-    first?.id ?? '',
+    first?.entryId ?? '',
     String(first?.timestamp ?? ''),
-    last?.id ?? '',
+    last?.entryId ?? '',
     String(last?.timestamp ?? ''),
   ];
   for (let index = 0; index < count; index += stride) {
-    const message = messages[index];
-    const attached = message?._attachedFiles;
+    const entry = entries[index];
+    const attached = entry?.message._attachedFiles;
     parts.push([
-      message?.id ?? '',
-      message?.role ?? '',
-      String(message?.timestamp ?? ''),
-      message?.toolCallId ?? '',
-      message?.toolName ?? '',
-      message?.isError ? '1' : '0',
+      entry?.entryId ?? '',
+      entry?.role ?? '',
+      String(entry?.timestamp ?? ''),
+      entry?.message.toolCallId ?? '',
+      entry?.message.toolName ?? '',
+      entry?.message.isError ? '1' : '0',
+      hashStringDjb2([
+        safeStableStringify(entry?.message.tool_calls ?? entry?.message.toolCalls ?? null),
+        safeStableStringify(entry?.message.toolStatuses ?? null),
+        safeStableStringify(entry?.message.details ?? null),
+        safeStableStringify(entry?.message.metadata ?? null),
+      ].join('|')),
       String(attached?.length ?? 0),
       attached?.[0]?.filePath ?? '',
       attached?.[0]?.preview ? '1' : '0',
@@ -240,9 +130,7 @@ export function buildRenderMessagesFingerprint(messages: RawMessage[]): string {
   return hashStringDjb2(parts.join('|'));
 }
 
-const EMPTY_MESSAGES: RawMessage[] = [];
-const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
-const EMPTY_PENDING_TOOL_IMAGES: AttachedFileMeta[] = [];
+const EMPTY_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
 const EMPTY_APPROVALS: ApprovalItem[] = [];
 const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
   totalMessageCount: 0,
@@ -264,13 +152,8 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     streamingMessageId: null,
     pendingFinal: false,
     lastUserMessageAt: null,
-  };
-}
-
-export function createEmptySessionTooling(): ChatSessionToolingState {
-  return {
-    streamingTools: EMPTY_STREAMING_TOOLS,
-    pendingToolImages: EMPTY_PENDING_TOOL_IMAGES,
+    pendingMessageSequenceByKey: {},
+    bufferedMessageEventsByKey: {},
   };
 }
 
@@ -293,8 +176,7 @@ export function createEmptySessionRecord(): ChatSessionRecord {
   return {
     meta: createEmptySessionMeta(),
     runtime: createEmptySessionRuntime(),
-    tooling: createEmptySessionTooling(),
-    messages: EMPTY_MESSAGES,
+    timelineEntries: EMPTY_TIMELINE_ENTRIES,
     window: createEmptySessionViewportState(),
   };
 }
@@ -313,22 +195,20 @@ export function resolveSessionRuntime(session: ChatSessionRecord | undefined): C
   };
 }
 
-export function resolveSessionTooling(session: ChatSessionRecord | undefined): ChatSessionToolingState {
-  if (!session?.tooling) {
-    return createEmptySessionTooling();
-  }
-  return {
-    ...createEmptySessionTooling(),
-    ...session.tooling,
-  };
-}
-
 export function resolveSessionMeta(session: ChatSessionRecord | undefined): ChatSessionMetaState {
   return session?.meta ?? createEmptySessionMeta();
 }
 
-export function resolveSessionTranscript(session: ChatSessionRecord | undefined): RawMessage[] {
-  return Array.isArray(session?.messages) ? session.messages : EMPTY_MESSAGES;
+export function resolveSessionTimelineEntries(
+  session: ChatSessionRecord | undefined,
+): SessionTimelineEntry[] {
+  return Array.isArray(session?.timelineEntries) ? session.timelineEntries : EMPTY_TIMELINE_ENTRIES;
+}
+
+export function getSessionMessageCount(
+  session: Pick<ChatSessionRecord, 'timelineEntries'> | undefined,
+): number {
+  return Array.isArray(session?.timelineEntries) ? session.timelineEntries.length : 0;
 }
 
 export function resolveSessionRecord(session: ChatSessionRecord | undefined): ChatSessionRecord {
@@ -338,8 +218,7 @@ export function resolveSessionRecord(session: ChatSessionRecord | undefined): Ch
   return {
     meta: resolveSessionMeta(session),
     runtime: resolveSessionRuntime(session),
-    tooling: resolveSessionTooling(session),
-    messages: resolveSessionTranscript(session),
+    timelineEntries: resolveSessionTimelineEntries(session),
     window: resolveSessionViewportState(session),
   };
 }
@@ -352,8 +231,11 @@ export function getSessionRecord(state: Pick<ChatStoreState, 'loadedSessions'>, 
   return resolveSessionRecord(state.loadedSessions[sessionKey]);
 }
 
-export function getSessionMessages(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): RawMessage[] {
-  return resolveSessionTranscript(state.loadedSessions[sessionKey]);
+export function getSessionTimelineEntries(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+): SessionTimelineEntry[] {
+  return resolveSessionTimelineEntries(state.loadedSessions[sessionKey]);
 }
 
 export function getSessionMeta(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionMetaState {
@@ -362,13 +244,6 @@ export function getSessionMeta(state: Pick<ChatStoreState, 'loadedSessions'>, se
 
 export function getSessionRuntime(state: Pick<ChatStoreState, 'loadedSessions'>, sessionKey: string): ChatSessionRuntimeState {
   return resolveSessionRuntime(state.loadedSessions[sessionKey]);
-}
-
-export function getSessionTooling(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  sessionKey: string,
-): ChatSessionToolingState {
-  return resolveSessionTooling(state.loadedSessions[sessionKey]);
 }
 
 export function getSessionViewportState(
@@ -389,19 +264,21 @@ export function upsertSessionRecord(
   };
 }
 
+type ChatSessionRecordPatch = Partial<ChatSessionRecord>;
+
 export function patchSessionRecord(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-  patch: Partial<ChatSessionRecord>,
+  patch: ChatSessionRecordPatch,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
+  const nextTimelineEntries = patch.timelineEntries ?? current.timelineEntries;
   return {
     ...state.loadedSessions,
     [sessionKey]: {
       meta: patch.meta ?? current.meta,
       runtime: patch.runtime ?? current.runtime,
-      tooling: patch.tooling ?? current.tooling,
-      messages: patch.messages ?? current.messages,
+      timelineEntries: nextTimelineEntries,
       window: patch.window ?? current.window,
     },
   };
@@ -450,51 +327,11 @@ export function patchSessionRuntime(
   };
 }
 
-export function patchSessionTooling(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  sessionKey: string,
-  patch: Partial<ChatSessionToolingState>,
-): Record<string, ChatSessionRecord> {
-  const current = getSessionRecord(state, sessionKey);
-  return {
-    ...state.loadedSessions,
-    [sessionKey]: {
-      ...current,
-      tooling: {
-        ...current.tooling,
-        ...patch,
-      },
-    },
-  };
-}
-
 export function patchCurrentSessionRuntime(
   state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
   patch: Partial<ChatSessionRuntimeState>,
 ): Record<string, ChatSessionRecord> {
   return patchSessionRuntime(state, state.currentSessionKey, patch);
-}
-
-export function patchSessionTranscript(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-  sessionKey: string,
-  messages: RawMessage[],
-): Record<string, ChatSessionRecord> {
-  const current = getSessionRecord(state, sessionKey);
-  return {
-    ...state.loadedSessions,
-    [sessionKey]: {
-      ...current,
-      messages,
-    },
-  };
-}
-
-export function patchCurrentSessionTranscript(
-  state: Pick<ChatStoreState, 'currentSessionKey' | 'loadedSessions'>,
-  messages: RawMessage[],
-): Record<string, ChatSessionRecord> {
-  return patchSessionTranscript(state, state.currentSessionKey, messages);
 }
 
 export function patchSessionViewportState(
@@ -531,33 +368,43 @@ export function removeSessionViewportState(
   return removeSessionRecord(state, sessionKey);
 }
 
-export function selectViewportMessages(
-  record: Pick<ChatSessionRecord, 'messages' | 'window'>,
-): RawMessage[] {
-  const totalMessages = record.messages;
-  if (totalMessages.length === 0) {
-    return totalMessages;
+export function selectViewportTimelineEntries(
+  record: Pick<ChatSessionRecord, 'timelineEntries' | 'window'>,
+): SessionTimelineEntry[] {
+  const totalEntries = resolveSessionTimelineEntries(record as ChatSessionRecord);
+  if (totalEntries.length === 0) {
+    return EMPTY_TIMELINE_ENTRIES;
   }
-  const start = Math.max(0, Math.min(record.window.windowStartOffset, totalMessages.length));
-  const end = Math.max(start, Math.min(record.window.windowEndOffset, totalMessages.length));
-  if (start === 0 && end === totalMessages.length) {
-    return totalMessages;
+  const totalCount = Math.max(record.window.totalMessageCount, totalEntries.length);
+  const start = Math.max(0, Math.min(record.window.windowStartOffset, totalEntries.length));
+  const end = Math.max(start, Math.min(record.window.windowEndOffset, totalEntries.length));
+  const expectedWindowSize = Math.max(0, Math.min(record.window.windowEndOffset, totalCount) - Math.min(record.window.windowStartOffset, totalCount));
+  const isAuthoritativeWindowSlice = (
+    totalCount > totalEntries.length
+    && totalEntries.length === expectedWindowSize
+  );
+  if (isAuthoritativeWindowSlice) {
+    return totalEntries;
   }
-  return totalMessages.slice(start, end);
+  if (start === 0 && end === totalEntries.length) {
+    return totalEntries;
+  }
+  return totalEntries.slice(start, end);
 }
 
-export function patchSessionMessagesAndViewport(
+export function patchSessionTimelineAndViewport(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
-  messages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
   viewportPatch?: Partial<ChatSessionViewportState>,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
+  const nextMessageCount = timelineEntries.length;
   const nextViewport = syncViewportState(current.window, {
-    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, messages.length),
+    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, timelineEntries.length),
     windowStartOffset: viewportPatch?.windowStartOffset ?? current.window.windowStartOffset,
     windowEndOffset: viewportPatch?.windowEndOffset ?? (
-      (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + messages.length
+      (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + nextMessageCount
     ),
     hasMore: viewportPatch?.hasMore ?? current.window.hasMore,
     hasNewer: viewportPatch?.hasNewer ?? current.window.hasNewer,
@@ -566,14 +413,54 @@ export function patchSessionMessagesAndViewport(
     isAtLatest: viewportPatch?.isAtLatest ?? current.window.isAtLatest,
     lastVisibleMessageId: viewportPatch?.lastVisibleMessageId ?? current.window.lastVisibleMessageId,
   });
-  return {
-    ...state.loadedSessions,
-    [sessionKey]: {
-      ...current,
-      messages,
-      window: nextViewport,
+  return patchSessionRecord(state, sessionKey, {
+    timelineEntries,
+    window: nextViewport,
+  });
+}
+
+export function patchSessionSnapshot(
+  state: Pick<ChatStoreState, 'loadedSessions'>,
+  sessionKey: string,
+  snapshot: SessionStateSnapshot,
+): Record<string, ChatSessionRecord> {
+  const current = getSessionRecord(state, sessionKey);
+  return patchSessionRecord(state, sessionKey, {
+    timelineEntries: snapshot.entries,
+    runtime: {
+      ...current.runtime,
+      sending: snapshot.runtime.sending,
+      activeRunId: snapshot.runtime.activeRunId,
+      runPhase: snapshot.runtime.runPhase,
+      streamingMessageId: snapshot.runtime.streamingMessageId,
+      pendingFinal: snapshot.runtime.pendingFinal,
+      lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
     },
-  };
+    window: syncViewportState(current.window, {
+      totalMessageCount: snapshot.window.totalEntryCount,
+      windowStartOffset: snapshot.window.windowStartOffset,
+      windowEndOffset: snapshot.window.windowEndOffset,
+      hasMore: snapshot.window.hasMore,
+      hasNewer: snapshot.window.hasNewer,
+      isLoadingMore: false,
+      isLoadingNewer: false,
+      isAtLatest: snapshot.window.isAtLatest,
+      lastVisibleMessageId: current.window.lastVisibleMessageId,
+    }),
+  });
+}
+
+export function upsertSessionTimelineEntry(
+  timelineEntries: SessionTimelineEntry[],
+  entry: SessionTimelineEntry,
+): SessionTimelineEntry[] {
+  const existingIndex = timelineEntries.findIndex((candidate) => candidate.entryId === entry.entryId);
+  if (existingIndex < 0) {
+    return [...timelineEntries, entry];
+  }
+  const nextEntries = [...timelineEntries];
+  nextEntries[existingIndex] = entry;
+  return nextEntries;
 }
 export function getPendingApprovals(
   state: Pick<ChatStoreState, 'pendingApprovalsBySession'>,

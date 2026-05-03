@@ -25,6 +25,8 @@ describe('chat send-media', () => {
       sessionKey: 'agent:main:session-1',
       message: 'process this',
       idempotencyKey: 'id-text',
+      uniqueId: 'id-text',
+      requestId: 'id-text',
       media: [{ filePath, mimeType: 'text/plain', fileName: 'notes.txt' }],
     });
 
@@ -36,6 +38,8 @@ describe('chat send-media', () => {
       deliver: false,
       idempotencyKey: 'id-text',
     });
+    expect((rpcParams as { uniqueId?: string }).uniqueId).toBeUndefined();
+    expect((rpcParams as { requestId?: string }).requestId).toBeUndefined();
     expect((rpcParams as { message: string }).message).toContain('[media attached:');
     expect((rpcParams as { attachments?: unknown[] }).attachments).toBeUndefined();
   });
@@ -51,6 +55,8 @@ describe('chat send-media', () => {
       sessionKey: 'agent:main:session-2',
       message: 'process image',
       idempotencyKey: 'id-image',
+      uniqueId: 'id-image',
+      requestId: 'id-image',
       media: [{ filePath, mimeType: 'image/png', fileName: 'image.png' }],
     });
 
@@ -59,8 +65,12 @@ describe('chat send-media', () => {
     const [rpcParams] = chatSend.mock.calls[0];
     const payload = rpcParams as {
       message: string;
+      idempotencyKey?: string;
       attachments?: Array<{ content: string; mimeType: string; fileName: string }>;
     };
+    expect(payload.idempotencyKey).toBe('id-image');
+    expect((rpcParams as { uniqueId?: string }).uniqueId).toBeUndefined();
+    expect((rpcParams as { requestId?: string }).requestId).toBeUndefined();
     expect(payload.message).toContain('[media attached:');
     expect(payload.attachments?.length).toBe(1);
     expect(payload.attachments?.[0].mimeType).toBe('image/png');

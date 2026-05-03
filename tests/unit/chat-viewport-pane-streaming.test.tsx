@@ -2,13 +2,15 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatList } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { RawMessage } from '@/stores/chat';
 
 vi.mock('@/pages/Chat/useExecutionGraphs', () => ({
   useExecutionGraphs: () => [],
 }));
 
-function buildCurrentSession(messages: Array<Record<string, unknown>>) {
+function buildCurrentSession(messages: RawMessage[]) {
   const base = createEmptySessionRecord();
   return {
     ...base,
@@ -22,7 +24,7 @@ function buildCurrentSession(messages: Array<Record<string, unknown>>) {
       activeRunId: 'run-1',
       runPhase: 'submitted' as const,
     },
-    messages: messages as never,
+    timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
     window: createViewportWindowState({
       totalMessageCount: messages.length,
       windowStartOffset: 0,
@@ -66,12 +68,10 @@ describe('chat list streaming render', () => {
         ])}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -98,12 +98,10 @@ describe('chat list streaming render', () => {
         ])}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -125,12 +123,10 @@ describe('chat list streaming render', () => {
         currentSession={buildCurrentSession([])}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}

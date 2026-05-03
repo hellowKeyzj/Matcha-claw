@@ -6,13 +6,15 @@ import {
   selectSnapshotLayerState,
   selectViewLayerState,
 } from '@/stores/chat/selectors';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function makeState(overrides: Record<string, unknown> = {}) {
+  const baseMessages = [{ role: 'assistant', content: 'hello', id: 'm1' }];
   return {
     loadedSessions: {
       'agent:main:main': {
-        messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+        timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', baseMessages),
         meta: {
           label: 'Main',
           lastActivityAt: 1_700_000_000_000,
@@ -24,11 +26,8 @@ function makeState(overrides: Record<string, unknown> = {}) {
           activeRunId: null,
           runPhase: 'idle',
           streamingMessageId: null,
-          streamingTools: [],
           pendingFinal: false,
           lastUserMessageAt: null,
-          pendingToolImages: [],
-          approvalStatus: 'idle',
         },
         window: createViewportWindowState({
           totalMessageCount: 1,
@@ -82,6 +81,7 @@ describe('chat selectors layering', () => {
             thinkingLevel: null,
           },
           messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'assistant', content: 'hello', id: 'm1' }]),
           runtime: {
             sending: true,
             activeRunId: null,
@@ -127,7 +127,7 @@ describe('chat selectors layering', () => {
       },
       loadedSessions: {
         'agent:main:main': {
-          messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'assistant', content: 'hello', id: 'm1' }]),
           meta: {
             label: 'Main',
             lastActivityAt: 1_700_000_000_000,
@@ -155,7 +155,7 @@ describe('chat selectors layering', () => {
           }),
         },
         'agent:foo:main': {
-          messages: [],
+          timelineEntries: [],
           meta: {
             label: 'Foo',
             lastActivityAt: 1_699_000_000_000,
@@ -206,7 +206,7 @@ describe('chat selectors layering', () => {
       },
       loadedSessions: {
         'agent:main:main': {
-          messages: [{ role: 'tool_result', content: 'hello', id: 'm1' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello', id: 'm1' }]),
           meta: {
             label: 'Main',
             lastActivityAt: 1_700_000_000_000,
@@ -234,7 +234,7 @@ describe('chat selectors layering', () => {
       loadedSessions: {
         'agent:main:main': {
           ...baseState.loadedSessions['agent:main:main'],
-          messages: [{ role: 'tool_result', content: 'hello again', id: 'm2' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello again', id: 'm2' }]),
         },
       },
     });
@@ -256,7 +256,7 @@ describe('chat selectors layering', () => {
       },
       loadedSessions: {
         'agent:main:main': {
-          messages: [{ role: 'user', content: 'old title', id: 'u1' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: 'old title', id: 'u1' }]),
           meta: {
             label: 'Main',
             lastActivityAt: 1_700_000_000_000,
@@ -284,12 +284,12 @@ describe('chat selectors layering', () => {
       loadedSessions: {
         'agent:main:main': {
           ...baseState.loadedSessions['agent:main:main'],
-          messages: [{
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{
             role: 'user',
             content: 'new title',
             id: 'optimistic-user-1',
             timestamp: 1_700_000_001,
-          }],
+          }]),
         },
       },
     });
@@ -311,7 +311,7 @@ describe('chat selectors layering', () => {
       },
       loadedSessions: {
         'agent:main:main': {
-          messages: [{ role: 'user', content: '旧正文标题', id: 'u1' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: '旧正文标题', id: 'u1' }]),
           meta: {
             label: '旧标题',
             lastActivityAt: 1_700_000_000_000,
@@ -339,7 +339,7 @@ describe('chat selectors layering', () => {
       loadedSessions: {
         'agent:main:main': {
           ...baseState.loadedSessions['agent:main:main'],
-          messages: [{ role: 'user', content: '新正文标题', id: 'u2' }],
+          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: '新正文标题', id: 'u2' }]),
         },
       },
     });

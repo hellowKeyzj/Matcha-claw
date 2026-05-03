@@ -10,6 +10,5 @@ export interface StoreHistoryCache {
     controller: AbortController,
   ) => void;
   historyFingerprintBySession: Map<string, string>;
-  historyQuickFingerprintBySession: Map<string, string>;
   historyRenderFingerprintBySession: Map<string, string>;
 }

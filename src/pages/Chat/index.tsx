@@ -17,6 +17,7 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
+  getSessionMessageCount,
 } from '@/stores/chat/store-state-helpers';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
@@ -78,7 +79,6 @@ export function Chat({ isActive = true }: ChatProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayRpc = useGatewayStore((state) => state.rpc);
   const isGatewayRunning = gatewayStatus.state === 'running';
   const {
     currentSessionKey,
@@ -176,7 +176,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
-    rowCount: currentSession.messages.length,
+    rowCount: getSessionMessageCount(currentSession),
     sending: currentSession.runtime.sending,
     refreshing,
     mutating,
@@ -263,14 +263,15 @@ export function Chat({ isActive = true }: ChatProps) {
             approvalStatus={approvalStatus}
             agents={agents}
             isGatewayRunning={isGatewayRunning}
-            gatewayRpc={gatewayRpc}
             errorMessage={error}
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
-            assistantAgentId={currentAgentId}
-            assistantAgentName={currentAgent?.name || currentAgentId}
-            assistantAvatarSeed={currentAgent?.avatarSeed}
-            assistantAvatarStyle={currentAgent?.avatarStyle}
+            defaultAssistant={{
+              agentId: currentAgentId,
+              agentName: currentAgent?.name || currentAgentId,
+              avatarSeed: currentAgent?.avatarSeed,
+              avatarStyle: currentAgent?.avatarStyle,
+            }}
             onLoadOlder={() => {
               void loadOlderMessages(currentSessionKey);
             }}

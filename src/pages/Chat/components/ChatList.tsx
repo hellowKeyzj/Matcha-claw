@@ -13,7 +13,6 @@ import {
   type WheelEventHandler,
 } from 'react';
 import { ArrowDown } from 'lucide-react';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -21,7 +20,15 @@ import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { buildChatAutoFollowSignal } from '../chat-auto-follow';
 import { getOrBuildStaticRowsCacheEntry } from '../chat-rows-cache';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
-import type { ChatMessageRow } from '../chat-row-model';
+import {
+  applyAssistantPresentationToRows,
+  buildAssistantLaneTurnMatchKey,
+  resolveAssistantPresentationForLaneAgentId,
+  resolveRowAssistantLaneTurnMatchKey,
+  type ChatAssistantCatalogAgent,
+  type ChatAssistantPresentation,
+  type ChatMessageRow,
+} from '../chat-row-model';
 import type { ExecutionGraphData } from '../execution-graph-model';
 import { ChatMessage } from '../ChatMessage';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
@@ -35,6 +42,9 @@ import type {
   ChatSessionRecord,
   ToolStatus,
 } from '@/stores/chat';
+import { readTimelineEntryToolStatuses } from '@/stores/chat/event-helpers';
+import { selectViewportTimelineEntries } from '@/stores/chat/store-state-helpers';
+import { readSessionAssistantTurnState } from '@/stores/chat/session-turn-state';
 
 const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
 const EMPTY_STREAMING_TOOLS: ToolStatus[] = [];
@@ -43,7 +53,7 @@ interface ThreadAgent {
   id: string;
   name?: string;
   avatarSeed?: string;
-  avatarStyle?: AgentAvatarStyle;
+  avatarStyle?: ChatAssistantPresentation['avatarStyle'];
 }
 
 export interface ChatListHandle {
@@ -56,7 +66,9 @@ export interface ChatExecutionGraphSlots {
 }
 
 export interface PendingAssistantShellState {
+  key: string;
   state: 'typing' | 'activity';
+  assistantPresentation: ChatAssistantPresentation | null;
 }
 
 const EMPTY_EXECUTION_GRAPH_SLOTS: ChatExecutionGraphSlots = {
@@ -73,15 +85,42 @@ export function buildExecutionGraphSlots(
   }
 
   const rowKeys = new Set(rows.map((row) => row.key));
+  const rowKeysByLaneTurnKey = new Map<string, string[]>();
+  const latestRowKeyByLaneTurnKey = new Map<string, string>();
+  for (const row of rows) {
+    const laneTurnKey = resolveRowAssistantLaneTurnMatchKey(row);
+    if (!laneTurnKey) {
+      continue;
+    }
+    const currentRowKeys = rowKeysByLaneTurnKey.get(laneTurnKey);
+    if (currentRowKeys) {
+      currentRowKeys.push(row.key);
+    } else {
+      rowKeysByLaneTurnKey.set(laneTurnKey, [row.key]);
+    }
+    latestRowKeyByLaneTurnKey.set(laneTurnKey, row.key);
+  }
   const anchoredGraphsByRowKey = new Map<string, ExecutionGraphData[]>();
   const suppressedToolCardRowKeys = new Set<string>();
   for (const graph of executionGraphs) {
-    for (const rowKey of graph.suppressToolCardMessageKeys || []) {
-      suppressedToolCardRowKeys.add(rowKey);
+    for (const laneTurnKey of graph.suppressToolCardLaneTurnKeys || []) {
+      for (const rowKey of rowKeysByLaneTurnKey.get(laneTurnKey) ?? []) {
+        suppressedToolCardRowKeys.add(rowKey);
+      }
     }
-    const anchorRowKey = rowKeys.has(graph.anchorMessageKey)
-      ? graph.anchorMessageKey
-      : rows[rows.length - 1]?.key;
+    const anchorLaneTurnKey = buildAssistantLaneTurnMatchKey(
+      graph.anchorTurnKey,
+      graph.anchorLaneKey,
+    );
+    const anchorRowKey = (
+      anchorLaneTurnKey
+        ? latestRowKeyByLaneTurnKey.get(anchorLaneTurnKey)
+        : undefined
+    ) ?? (
+      rowKeys.has(graph.anchorMessageKey)
+        ? graph.anchorMessageKey
+        : undefined
+    ) ?? rows[rows.length - 1]?.key;
     if (!anchorRowKey) {
       continue;
     }
@@ -99,25 +138,50 @@ export function buildExecutionGraphSlots(
   };
 }
 
-export function buildPendingAssistantShell(
-  approvalStatus: ApprovalStatus,
-  sending: boolean,
-  pendingFinal: boolean,
-  streamingTools: ToolStatus[],
-  messages: ChatSessionRecord['messages'],
-): PendingAssistantShellState | null {
-  if (
-    !sending
-    || approvalStatus === 'awaiting_approval'
-    || streamingTools.length > 0
-    || messages.some((message) => message.role === 'assistant' && Boolean(message.streaming))
-  ) {
-    return null;
+function hasStreamingAssistantLane(
+  sessionAssistantTurnState: ReturnType<typeof readSessionAssistantTurnState>,
+): boolean {
+  return sessionAssistantTurnState.activeTurn?.lanes.some((lane) => lane.entry.status === 'streaming') ?? false;
+}
+
+export function buildPendingAssistantShells(input: {
+  approvalStatus: ApprovalStatus;
+  sending: boolean;
+  pendingFinal: boolean;
+  sessionAssistantTurnState: ReturnType<typeof readSessionAssistantTurnState>;
+  agents: ChatAssistantCatalogAgent[];
+  defaultAssistant: ChatAssistantPresentation | null;
+}): PendingAssistantShellState[] {
+  if (!input.sending || input.approvalStatus === 'awaiting_approval') {
+    return [];
   }
 
-  return {
-    state: pendingFinal ? 'activity' : 'typing',
-  };
+  const activeTurnLanes = input.sessionAssistantTurnState.activeTurn?.lanes ?? [];
+  const shells = activeTurnLanes
+    .filter((lane) => lane.entry.status !== 'streaming')
+    .filter((lane) => input.pendingFinal || lane.toolStatuses.length > 0)
+    .map((lane) => ({
+      key: `pending:${lane.turnKey}:${lane.laneKey}`,
+      state: 'activity' as const,
+      assistantPresentation: resolveAssistantPresentationForLaneAgentId({
+        agentId: lane.agentId,
+        agents: input.agents,
+        defaultAssistant: input.defaultAssistant,
+      }),
+    }));
+  if (shells.length > 0) {
+    return shells;
+  }
+
+  if (hasStreamingAssistantLane(input.sessionAssistantTurnState)) {
+    return [];
+  }
+
+  return [{
+    key: 'pending:default',
+    state: input.pendingFinal ? 'activity' : 'typing',
+    assistantPresentation: input.defaultAssistant,
+  }];
 }
 
 export interface ChatListProps {
@@ -127,18 +191,14 @@ export interface ChatListProps {
   approvalStatus: ApprovalStatus;
   agents: ThreadAgent[];
   isGatewayRunning: boolean;
-  gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   errorMessage: string | null;
   showThinking: boolean;
   userAvatarDataUrl: string | null;
-  assistantAgentId: string;
-  assistantAgentName: string;
-  assistantAvatarSeed?: string;
-  assistantAvatarStyle?: AgentAvatarStyle;
   onLoadOlder: () => void;
   loadOlderLabel: string;
   onJumpToLatest: () => void;
   jumpToBottomLabel: string;
+  defaultAssistant: ChatAssistantPresentation | null;
 }
 
 interface ChatListSurfaceProps {
@@ -159,14 +219,9 @@ interface ChatListSurfaceProps {
   loadOlderLabel: string;
   scrollChromeStore: ChatScrollChromeStore;
   showThinking: boolean;
-  streamingTools: ToolStatus[];
-  assistantAgentId: string;
-  assistantAgentName: string;
-  assistantAvatarSeed?: string;
-  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl: string | null;
   executionGraphSlots: ChatExecutionGraphSlots;
-  pendingAssistantShell: PendingAssistantShellState | null;
+  pendingAssistantShells: PendingAssistantShellState[];
   onJumpToRowKey: (rowKey?: string) => void;
 }
 
@@ -176,11 +231,20 @@ type ChatListContentProps = Omit<
 >;
 
 function getMessageDataAttributes(row: ChatMessageRow) {
-  const messageId = typeof row.message.id === 'string' && row.message.id.trim()
-    ? row.message.id
+  const messageId = typeof row.entry.message.id === 'string' && row.entry.message.id.trim()
+    ? row.entry.message.id
     : undefined;
-  const timestamp = typeof row.message.timestamp === 'number'
-    ? String(row.message.timestamp)
+  const timestamp = typeof row.entry.timestamp === 'number'
+    ? String(row.entry.timestamp)
+    : undefined;
+  const assistantTurnKey = row.role === 'assistant'
+    ? (row.assistantTurnKey ?? undefined)
+    : undefined;
+  const assistantLaneKey = row.role === 'assistant'
+    ? (row.assistantLaneKey ?? undefined)
+    : undefined;
+  const assistantAgentId = row.role === 'assistant'
+    ? (row.assistantLaneAgentId ?? undefined)
     : undefined;
 
   return {
@@ -188,6 +252,9 @@ function getMessageDataAttributes(row: ChatMessageRow) {
     'data-chat-row-kind': row.kind,
     'data-chat-message-id': messageId,
     'data-chat-message-timestamp': timestamp,
+    'data-chat-assistant-turn-key': assistantTurnKey,
+    'data-chat-assistant-lane-key': assistantLaneKey,
+    'data-chat-assistant-agent-id': assistantAgentId,
   };
 }
 
@@ -202,14 +269,9 @@ const ChatListContent = memo(function ChatListContent({
   onLoadOlder,
   loadOlderLabel,
   showThinking,
-  streamingTools,
-  assistantAgentId,
-  assistantAgentName,
-  assistantAvatarSeed,
-  assistantAvatarStyle,
   userAvatarImageUrl,
   executionGraphSlots,
-  pendingAssistantShell,
+  pendingAssistantShells,
   onJumpToRowKey,
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
@@ -262,17 +324,13 @@ const ChatListContent = memo(function ChatListContent({
                     {...getMessageDataAttributes(row)}
                     className="w-full"
                   >
-                    <ChatMessage
-                      row={row}
-                      showThinking={showThinking}
-                      suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
-                      streamingTools={row.message.streaming ? streamingTools : EMPTY_STREAMING_TOOLS}
-                      assistantAgentId={assistantAgentId}
-                      assistantAgentName={assistantAgentName}
-                      assistantAvatarSeed={assistantAvatarSeed}
-                      assistantAvatarStyle={assistantAvatarStyle}
-                      userAvatarImageUrl={userAvatarImageUrl}
-                    />
+                      <ChatMessage
+                        row={row}
+                        showThinking={showThinking}
+                        suppressToolCards={suppressedToolCardRowKeys.has(row.key)}
+                      streamingTools={row.entry.status === 'streaming' ? readTimelineEntryToolStatuses(row.entry) : EMPTY_STREAMING_TOOLS}
+                        userAvatarImageUrl={userAvatarImageUrl}
+                      />
                   </div>
                   {rowExecutionGraphs?.length ? (
                     <div
@@ -317,18 +375,21 @@ const ChatListContent = memo(function ChatListContent({
               </div>
             );
           })}
-          {pendingAssistantShell ? (
-            <div className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}>
+          {pendingAssistantShells.map((pendingAssistantShell) => (
+            <div
+              key={pendingAssistantShell.key}
+              className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}
+            >
               <PendingAssistantShell
                 state={pendingAssistantShell.state}
-                assistantAgentId={assistantAgentId}
-                assistantAgentName={assistantAgentName}
-                assistantAvatarSeed={assistantAvatarSeed}
-                assistantAvatarStyle={assistantAvatarStyle}
+                assistantAgentId={pendingAssistantShell.assistantPresentation?.agentId}
+                assistantAgentName={pendingAssistantShell.assistantPresentation?.agentName}
+                assistantAvatarSeed={pendingAssistantShell.assistantPresentation?.avatarSeed}
+                assistantAvatarStyle={pendingAssistantShell.assistantPresentation?.avatarStyle}
                 userAvatarImageUrl={userAvatarImageUrl}
               />
             </div>
-          ) : null}
+          ))}
         </>
       ) : null}
     </>
@@ -396,14 +457,9 @@ export const ChatListSurface = memo(function ChatListSurface({
   loadOlderLabel,
   scrollChromeStore,
   showThinking,
-  streamingTools,
-  assistantAgentId,
-  assistantAgentName,
-  assistantAvatarSeed,
-  assistantAvatarStyle,
   userAvatarImageUrl,
   executionGraphSlots,
-  pendingAssistantShell,
+  pendingAssistantShells,
   onJumpToRowKey,
 }: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
@@ -446,14 +502,9 @@ export const ChatListSurface = memo(function ChatListSurface({
               onLoadOlder={onLoadOlder}
               loadOlderLabel={loadOlderLabel}
               showThinking={showThinking}
-              streamingTools={streamingTools}
-              assistantAgentId={assistantAgentId}
-              assistantAgentName={assistantAgentName}
-              assistantAvatarSeed={assistantAvatarSeed}
-              assistantAvatarStyle={assistantAvatarStyle}
               userAvatarImageUrl={userAvatarImageUrl}
               executionGraphSlots={executionGraphSlots}
-              pendingAssistantShell={pendingAssistantShell}
+              pendingAssistantShells={pendingAssistantShells}
               onJumpToRowKey={onJumpToRowKey}
             />
           </div>
@@ -475,18 +526,14 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     approvalStatus,
     agents,
     isGatewayRunning,
-    gatewayRpc,
     errorMessage,
     showThinking,
     userAvatarDataUrl,
-    assistantAgentId,
-    assistantAgentName,
-    assistantAvatarSeed,
-    assistantAvatarStyle,
     onLoadOlder,
     loadOlderLabel,
     onJumpToLatest,
     jumpToBottomLabel,
+    defaultAssistant,
   },
   ref,
 ) {
@@ -502,40 +549,58 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       jumpActionLabel: jumpToBottomLabel,
     })
   ));
-  const viewportMessages = currentSession.messages.slice(
-    viewport.windowStartOffset,
-    viewport.windowEndOffset,
+  const viewportTimelineEntries = useMemo(
+    () => selectViewportTimelineEntries(currentSession),
+    [currentSession],
   );
-  const tooling = currentSession.tooling ?? {
-    streamingTools: [],
-    pendingToolImages: [],
-  };
+  const baseRows = useMemo(
+    () => getOrBuildStaticRowsCacheEntry(currentSessionKey, viewportTimelineEntries).rows,
+    [currentSessionKey, viewportTimelineEntries],
+  );
+  const sessionAssistantTurnState = useMemo(
+    () => readSessionAssistantTurnState(currentSession),
+    [currentSession],
+  );
+  const activeAssistantTurn = sessionAssistantTurnState.activeTurn;
+  const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
+    () => agents.map((agent) => ({
+      id: agent.id,
+      agentName: agent.name,
+      avatarSeed: agent.avatarSeed,
+      avatarStyle: agent.avatarStyle,
+    })),
+    [agents],
+  );
   const executionGraphs = useExecutionGraphs({
     enabled: isGatewayRunning,
-    messages: viewportMessages,
+    timelineEntries: viewportTimelineEntries,
     currentSessionKey,
     agents,
     isGatewayRunning,
-    gatewayRpc,
     showThinking,
   });
   const rows = useMemo(
-    () => getOrBuildStaticRowsCacheEntry(currentSessionKey, viewportMessages).rows,
-    [currentSessionKey, viewportMessages],
+    () => applyAssistantPresentationToRows({
+      rows: baseRows,
+      agents: assistantCatalogAgents,
+      defaultAssistant,
+    }),
+    [assistantCatalogAgents, baseRows, defaultAssistant],
   );
   const executionGraphSlots = useMemo(
     () => buildExecutionGraphSlots(rows, executionGraphs),
     [executionGraphs, rows],
   );
-  const pendingAssistantShell = useMemo(
-    () => buildPendingAssistantShell(
+  const pendingAssistantShells = useMemo(
+    () => buildPendingAssistantShells({
       approvalStatus,
-      runtime.sending,
-      runtime.pendingFinal,
-      tooling.streamingTools,
-      viewportMessages,
-    ),
-    [approvalStatus, runtime.pendingFinal, runtime.sending, tooling.streamingTools, viewportMessages],
+      sending: runtime.sending,
+      pendingFinal: runtime.pendingFinal,
+      sessionAssistantTurnState,
+      agents: assistantCatalogAgents,
+      defaultAssistant,
+    }),
+    [approvalStatus, assistantCatalogAgents, defaultAssistant, runtime.pendingFinal, runtime.sending, sessionAssistantTurnState],
   );
 
   const liveView = useChatView({
@@ -546,7 +611,11 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     mutating: false,
   });
   const autoFollowSignal = buildChatAutoFollowSignal(rows);
-  const tailActivityOpen = runtime.sending || runtime.pendingFinal || tooling.streamingTools.length > 0;
+  const tailActivityOpen = runtime.sending
+    || runtime.pendingFinal
+    || pendingAssistantShells.length > 0
+    || hasStreamingAssistantLane(sessionAssistantTurnState)
+    || Boolean(activeAssistantTurn?.latestStreamingEntry);
 
   const {
     handleViewportPointerDown,
@@ -654,14 +723,9 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       loadOlderLabel={loadOlderLabel}
       scrollChromeStore={scrollChromeStore}
       showThinking={showThinking}
-      streamingTools={tooling.streamingTools}
-      assistantAgentId={assistantAgentId}
-      assistantAgentName={assistantAgentName}
-      assistantAvatarSeed={assistantAvatarSeed}
-      assistantAvatarStyle={assistantAvatarStyle}
       userAvatarImageUrl={userAvatarDataUrl}
       executionGraphSlots={executionGraphSlots}
-      pendingAssistantShell={pendingAssistantShell}
+      pendingAssistantShells={pendingAssistantShells}
       onJumpToRowKey={handleJumpToRowKey}
     />
   );

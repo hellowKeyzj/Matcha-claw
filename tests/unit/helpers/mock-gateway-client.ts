@@ -18,6 +18,10 @@ function isGatewayRpcEnvelope(value: unknown): value is GatewayRpcEnvelope {
 export const gatewayClientRequestMock = vi.fn();
 export const gatewayClientRpcMock = vi.fn();
 export const hostApiFetchMock = vi.fn();
+export const hostSessionPromptMock = vi.fn();
+export const hostSessionWindowFetchMock = vi.fn();
+export const hostSessionDeleteMock = vi.fn();
+export const hostSessionListMock = vi.fn();
 
 vi.spyOn(hostApiModule.gatewayClient, 'request').mockImplementation(async <TResult = unknown>(
   method: string,
@@ -111,8 +115,43 @@ vi.spyOn(hostApiModule, 'hostApiFetch').mockImplementation(async <TResult = unkn
   return await hostApiFetchMock(path, init) as TResult;
 });
 
+vi.spyOn(hostApiModule, 'hostSessionPrompt').mockImplementation(async (
+  payload: {
+    sessionKey: string;
+    message: string;
+    promptId?: string;
+    idempotencyKey?: string;
+    deliver?: boolean;
+    media?: Array<{
+      filePath: string;
+      mimeType?: string;
+      fileName?: string;
+    }>;
+  },
+) => await hostSessionPromptMock(payload));
+
+vi.spyOn(hostApiModule, 'hostSessionWindowFetch').mockImplementation(async (
+  payload: {
+    sessionKey: string;
+    mode?: 'latest' | 'older' | 'newer';
+    limit?: number;
+    offset?: number;
+    includeCanonical?: boolean;
+  },
+) => await hostSessionWindowFetchMock(payload));
+
+vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (
+  payload: { sessionKey: string },
+) => await hostSessionDeleteMock(payload));
+
+vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async () => await hostSessionListMock());
+
 export function resetGatewayClientMocks(): void {
   gatewayClientRequestMock.mockReset();
   gatewayClientRpcMock.mockReset();
   hostApiFetchMock.mockReset();
+  hostSessionPromptMock.mockReset();
+  hostSessionWindowFetchMock.mockReset();
+  hostSessionDeleteMock.mockReset();
+  hostSessionListMock.mockReset();
 }

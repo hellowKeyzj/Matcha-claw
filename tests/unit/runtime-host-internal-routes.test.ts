@@ -208,16 +208,23 @@ describe('runtime-host internal routes', () => {
     });
   });
 
-  it('gateway-events 支持 gateway:conversation-event 事件透传', async () => {
+  it('gateway-events 支持 session:update 事件透传', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       version: 1,
-      eventName: 'gateway:conversation-event',
+      eventName: 'session:update',
       payload: {
-        type: 'chat.message',
-        event: {
-          state: 'final',
-          runId: 'run-2',
+        sessionUpdate: 'agent_message',
+        runId: 'run-2',
+        sessionKey: 'agent:main:main',
+        laneKey: 'main',
+        entry: {
+          entryId: 'assistant-1',
           sessionKey: 'agent:main:main',
+          laneKey: 'main',
+          turnKey: 'main:assistant-1',
+          role: 'assistant',
+          status: 'final',
+          text: 'hi',
           message: { role: 'assistant', content: 'hi' },
         },
       },
@@ -243,12 +250,19 @@ describe('runtime-host internal routes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(emitGatewayEvent).toHaveBeenCalledWith('gateway:conversation-event', {
-      type: 'chat.message',
-      event: {
-        state: 'final',
-        runId: 'run-2',
+    expect(emitGatewayEvent).toHaveBeenCalledWith('session:update', {
+      sessionUpdate: 'agent_message',
+      runId: 'run-2',
+      sessionKey: 'agent:main:main',
+      laneKey: 'main',
+      entry: {
+        entryId: 'assistant-1',
         sessionKey: 'agent:main:main',
+        laneKey: 'main',
+        turnKey: 'main:assistant-1',
+        role: 'assistant',
+        status: 'final',
+        text: 'hi',
         message: { role: 'assistant', content: 'hi' },
       },
     });

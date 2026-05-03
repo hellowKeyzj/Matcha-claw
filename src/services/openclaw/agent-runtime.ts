@@ -150,7 +150,7 @@ export async function waitAgentRunWithProgress(
   let fingerprint = '';
 
   try {
-    const initial = await fetchLatestAssistantSnapshot(rpc, { sessionKey, limit: 20 });
+    const initial = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
     fingerprint = buildSnapshotFingerprint(initial);
     if (fingerprint) {
       lastProgressAt = Date.now();
@@ -188,7 +188,7 @@ export async function waitAgentRunWithProgress(
       }
 
       try {
-        const snapshot = await fetchLatestAssistantSnapshot(rpc, { sessionKey, limit: 20 });
+        const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
         const nextFingerprint = buildSnapshotFingerprint(snapshot);
         if (nextFingerprint !== fingerprint) {
           fingerprint = nextFingerprint;
@@ -214,7 +214,7 @@ export async function waitAgentRunWithProgress(
     }
 
     try {
-      const snapshot = await fetchLatestAssistantSnapshot(rpc, { sessionKey, limit: 20 });
+      const snapshot = await fetchLatestAssistantSnapshot({ sessionKey, limit: 20 });
       const nextFingerprint = buildSnapshotFingerprint(snapshot);
       if (nextFingerprint !== fingerprint) {
         fingerprint = nextFingerprint;

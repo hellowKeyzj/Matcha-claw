@@ -7,7 +7,7 @@ function resolveTailMessageSignalPart(
     return '0||';
   }
   const hasContent = row.text.trim().length > 0 ? '1' : '0';
-  return [row.key, typeof row.message.id === 'string' ? row.message.id : '', hasContent].join('|');
+  return [row.key, typeof row.entry.message.id === 'string' ? row.entry.message.id : '', hasContent].join('|');
 }
 
 export function buildChatAutoFollowSignal(rows: ChatRow[]): string {

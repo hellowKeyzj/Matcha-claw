@@ -4,6 +4,7 @@ import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import type { RawMessage } from '@/stores/chat';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 const invokeIpcMock = vi.fn();
 
@@ -14,8 +15,12 @@ vi.mock('@/lib/api-client', () => ({
 function buildRow(message: RawMessage) {
   return buildStaticChatRows({
     sessionKey: 'agent:test:main',
-    messages: [message],
+    entries: buildTimelineEntriesFromMessages('agent:test:main', [message]),
   })[0]!;
+}
+
+function buildEntry(message: RawMessage) {
+  return buildTimelineEntriesFromMessages('agent:test:main', [message])[0]!;
 }
 
 describe('chat message links', () => {
@@ -38,7 +43,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(buildEntry(message));
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -62,7 +67,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(buildEntry(message));
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -89,7 +94,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(buildEntry(message));
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -134,7 +139,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: longMarkdown,
     };
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(buildEntry(message));
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 

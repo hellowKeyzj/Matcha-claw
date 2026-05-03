@@ -6,6 +6,16 @@ import {
   type HostApiProxyEnvelope,
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
+import type {
+  SessionCatalogItem,
+  SessionLoadResult,
+  SessionListResult,
+  SessionNewResult,
+  SessionPromptResult,
+  SessionStateSnapshot,
+  SessionTimelineEntry,
+  SessionWindowResult,
+} from '../../runtime-host/shared/session-adapter-types';
 
 const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
@@ -48,38 +58,10 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
-export interface HostSessionWindowMessage {
-  role: 'user' | 'assistant' | 'system' | 'toolresult' | 'tool_result';
-  content: unknown;
-  timestamp?: number;
-  id?: string;
-  messageId?: string;
-  clientId?: string;
-  uniqueId?: string;
-  status?: 'sending' | 'sent' | 'timeout' | 'error';
-  toolCallId?: string;
-  tool_calls?: Array<Record<string, unknown>>;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolName?: string;
-  agentId?: string;
-  parentMessageId?: string;
-  metadata?: Record<string, unknown>;
-  name?: string;
-  requestId?: string;
-  details?: unknown;
-  isError?: boolean;
-}
-
-export interface HostSessionWindowPayload {
-  messages: HostSessionWindowMessage[];
-  canonicalMessages?: HostSessionWindowMessage[];
-  totalMessageCount: number;
-  windowStartOffset: number;
-  windowEndOffset: number;
-  hasMore: boolean;
-  hasNewer: boolean;
-  isAtLatest: boolean;
-}
+export type HostSessionTimelineEntry = SessionTimelineEntry;
+export type HostSessionCatalogItem = SessionCatalogItem;
+export type HostSessionWindowPayload = SessionWindowResult;
+export type HostSessionSnapshot = SessionStateSnapshot;
 
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -263,6 +245,10 @@ export async function hostUvInstallAll(): Promise<{ success: boolean; error?: st
   });
 }
 
+export async function hostSessionList(): Promise<SessionListResult> {
+  return hostApiFetch('/api/sessions/list');
+}
+
 export async function hostSessionWindowFetch(
   payload: {
     sessionKey: string;
@@ -271,8 +257,98 @@ export async function hostSessionWindowFetch(
     offset?: number;
     includeCanonical?: boolean;
   },
-): Promise<HostSessionWindowPayload> {
+): Promise<SessionWindowResult> {
   return hostApiFetch('/api/sessions/window', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionNew(
+  payload: {
+    sessionKey?: string;
+    agentId?: string;
+    canonicalPrefix?: string;
+  },
+): Promise<SessionNewResult> {
+  return hostApiFetch('/api/session/new', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionDelete(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<{ success: boolean; error?: string }> {
+  return hostApiFetch('/api/sessions/delete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionLoad(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<SessionLoadResult> {
+  return hostApiFetch('/api/session/load', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionSwitch(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<SessionLoadResult> {
+  return hostApiFetch('/api/session/switch', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionResume(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<SessionLoadResult> {
+  return hostApiFetch('/api/session/resume', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionState(
+  payload: {
+    sessionKey?: string;
+  } = {},
+): Promise<SessionLoadResult> {
+  return hostApiFetch('/api/session/state', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionPrompt(
+  payload: {
+    sessionKey: string;
+    message: string;
+    promptId?: string;
+    idempotencyKey?: string;
+    deliver?: boolean;
+    media?: Array<{
+      filePath: string;
+      mimeType?: string;
+      fileName?: string;
+      fileSize?: number;
+      preview?: string | null;
+    }>;
+  },
+): Promise<SessionPromptResult> {
+  return hostApiFetch('/api/session/prompt', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

@@ -8,6 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom } from '@/pages/Chat/useChatScroll';
 import type { RawMessage } from '@/stores/chat';
@@ -40,7 +41,9 @@ class ResizeObserverStub {
   }
 }
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+function buildSessionRecord(
+  overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & { messages?: RawMessage[] },
+) {
   const base = createEmptySessionRecord();
   return {
     meta: {
@@ -51,7 +54,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    messages: overrides?.messages ?? base.messages,
+    timelineEntries: overrides?.messages
+      ? buildTimelineEntriesFromMessages('agent:test:main', overrides.messages)
+      : (overrides?.timelineEntries ?? base.timelineEntries),
     window: overrides?.window ?? base.window,
   };
 }
@@ -266,10 +271,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            messages: [
-              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+              materializeTimelineMessages(
+                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
+              )[0]!,
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
+            ]),
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
               totalMessageCount: 2,
@@ -368,14 +375,14 @@ describe('chat 主线程滚动锁', () => {
       loadedSessions: {
         'agent:test:main': {
           ...useChatStore.getState().loadedSessions['agent:test:main'],
-          messages: [
+          timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
             {
               role: 'user',
               content: 'hello',
               timestamp: Date.now() / 1000,
               id: 'user-1',
             },
-          ],
+          ]),
           window: createViewportWindowState({
             totalMessageCount: 1,
             windowStartOffset: 0,
@@ -411,8 +418,10 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            messages: [
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.messages,
+            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+              ...materializeTimelineMessages(
+                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
+              ),
               {
                 id: 'pending-user-2',
                 role: 'user',
@@ -420,7 +429,7 @@ describe('chat 主线程滚动锁', () => {
                 timestamp: Date.now() / 1000,
                 status: 'sending',
               },
-            ],
+            ]),
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
               totalMessageCount: 2,
@@ -523,10 +532,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            messages: [
-              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+              materializeTimelineMessages(
+                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
+              )[0]!,
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
+            ]),
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
               totalMessageCount: 2,
@@ -713,10 +724,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            messages: [
-              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+              materializeTimelineMessages(
+                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
+              )[0]!,
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
+            ]),
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
               totalMessageCount: 2,
@@ -775,10 +788,12 @@ describe('chat 主线程滚动锁', () => {
         loadedSessions: {
           'agent:test:main': {
             ...useChatStore.getState().loadedSessions['agent:test:main'],
-            messages: [
-              useChatStore.getState().loadedSessions['agent:test:main']!.messages[0]!,
+            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+              materializeTimelineMessages(
+                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
+              )[0]!,
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ],
+            ]),
             window: createViewportWindowState({
               ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
               totalMessageCount: 2,

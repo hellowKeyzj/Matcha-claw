@@ -1,9 +1,10 @@
-import { getMessageAttachedFiles } from '@/lib/chat-markdown-body';
-import type { AttachedFileMeta, RawMessage } from '@/stores/chat';
+import { getTimelineEntryAttachedFiles } from '@/lib/chat-markdown-body';
+import type { AttachedFileMeta } from '@/stores/chat';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 import {
-  extractImages,
-  extractThinking,
-  extractToolUse,
+  extractEntryImages,
+  extractEntryThinking,
+  extractEntryToolUse,
 } from './message-utils';
 
 export interface ChatMessageImage {
@@ -29,27 +30,27 @@ const EMPTY_IMAGES: ReadonlyArray<ChatMessageImage> = [];
 const EMPTY_TOOL_USES: ReadonlyArray<ChatMessageToolUse> = [];
 const EMPTY_ATTACHED_FILES: ReadonlyArray<AttachedFileMeta> = [];
 
-const chatMessageViewCache = new WeakMap<RawMessage, ChatMessageView>();
+const chatMessageViewCache = new WeakMap<SessionTimelineEntry, ChatMessageView>();
 
-function buildChatMessageView(message: RawMessage): ChatMessageView {
-  const images = extractImages(message);
-  const toolUses = extractToolUse(message);
-  const attachedFiles = getMessageAttachedFiles(message);
+function buildChatMessageView(entry: SessionTimelineEntry): ChatMessageView {
+  const images = extractEntryImages(entry);
+  const toolUses = extractEntryToolUse(entry);
+  const attachedFiles = getTimelineEntryAttachedFiles(entry);
 
   return {
-    thinking: extractThinking(message),
+    thinking: extractEntryThinking(entry),
     images: images.length > 0 ? images : EMPTY_IMAGES,
     toolUses: toolUses.length > 0 ? toolUses : EMPTY_TOOL_USES,
     attachedFiles: attachedFiles.length > 0 ? attachedFiles : EMPTY_ATTACHED_FILES,
   };
 }
 
-export function getOrBuildChatMessageView(message: RawMessage): ChatMessageView {
-  const cached = chatMessageViewCache.get(message);
+export function getOrBuildChatMessageView(entry: SessionTimelineEntry): ChatMessageView {
+  const cached = chatMessageViewCache.get(entry);
   if (cached) {
     return cached;
   }
-  const next = buildChatMessageView(message);
-  chatMessageViewCache.set(message, next);
+  const next = buildChatMessageView(entry);
+  chatMessageViewCache.set(entry, next);
   return next;
 }

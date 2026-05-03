@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
+import {
+  gatewayClientRpcMock,
+  hostSessionDeleteMock,
+  hostSessionPromptMock,
+  hostSessionWindowFetchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
 import { useSubagentsStore } from '@/stores/subagents';
 
@@ -9,6 +15,52 @@ function buildDraftOutput(
   return JSON.stringify({
     files,
   });
+}
+
+function buildHistoryWindow(output: string) {
+  return {
+    snapshot: {
+      sessionKey: 'agent:writer:subagent-draft',
+      entries: [
+        {
+          entryId: 'entry-1',
+          sessionKey: 'agent:writer:subagent-draft',
+          laneKey: 'main',
+          turnKey: 'main:entry-1',
+          role: 'assistant' as const,
+          status: 'final' as const,
+          text: output,
+          message: {
+            role: 'assistant' as const,
+            content: [
+              {
+                type: 'text',
+                text: output,
+              },
+            ],
+          },
+        },
+      ],
+      replayComplete: true,
+      runtime: {
+        sending: false,
+        activeRunId: null,
+        runPhase: 'done' as const,
+        streamingMessageId: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        updatedAt: 1,
+      },
+      window: {
+        totalEntryCount: 1,
+        windowStartOffset: 0,
+        windowEndOffset: 1,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
+    },
+  };
 }
 
 describe('subagents prompt pipeline', () => {
@@ -28,7 +80,6 @@ describe('subagents prompt pipeline', () => {
       draftApplySuccessByAgent: {},
       draftSessionKeyByAgent: {},
       draftRawOutputByAgent: {},
-      // writer 默认标记为“已加载但当前为空”，避免无关用例走基线加载分支
       persistedFilesByAgent: { writer: {} },
       selectedAgentId: 'writer',
       loadAgents: vi.fn().mockResolvedValue(undefined),
@@ -36,42 +87,39 @@ describe('subagents prompt pipeline', () => {
     });
   });
 
-  it('builds structured prompt, calls chat.send once, and parses draftByFile', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
+  it('builds structured prompt, calls session.prompt once, and parses draftByFile', async () => {
+    hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      result: {
-        output: buildDraftOutput([
-          {
-            name: 'AGENTS.md',
-            content: 'global rules',
-            reason: 'global policy',
-            confidence: 0.93,
-          },
-          {
-            name: 'USER.md',
-            content: 'user preferences',
-            reason: 'customization',
-            confidence: 0.41,
-          },
-        ]),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'AGENTS.md',
+        content: 'global rules',
+        reason: 'global policy',
+        confidence: 0.93,
+      },
+      {
+        name: 'USER.md',
+        content: 'user preferences',
+        reason: 'customization',
+        confidence: 0.41,
+      },
+    ])));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '帮我生成子agent规则');
 
-    expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc).toHaveBeenCalledWith(
-      'chat.send',
-      expect.objectContaining({
-        sessionKey: expect.stringContaining('subagent-draft'),
-        message: expect.stringContaining('AGENTS.md'),
-        idempotencyKey: expect.any(String),
-      }),
-      expect.any(Number)
-    );
-    expect(rpc.mock.calls[0]?.[1]).not.toHaveProperty('system');
-    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
+    expect(hostSessionPromptMock).toHaveBeenCalledTimes(1);
+    expect(hostSessionPromptMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: expect.stringContaining('subagent-draft'),
+      message: expect.stringContaining('AGENTS.md'),
+      idempotencyKey: expect.any(String),
+      promptId: expect.any(String),
+      deliver: false,
+    }));
+    const sentMessage = String((hostSessionPromptMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md');
     expect(sentMessage).toContain('"files":[{"name","content","reason","confidence"}]');
     expect(sentMessage).toContain('JSON');
@@ -84,46 +132,50 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('returns explicit error when model output is invalid JSON', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
-      success: true,
-      result: {
-        output: 'not-json',
-      },
-    }).mockResolvedValueOnce({
-      success: true,
-      result: {
-        output: 'not-json',
-      },
-    });
+    hostSessionPromptMock
+      .mockResolvedValueOnce({
+        success: true,
+        sessionKey: 'agent:writer:subagent-draft',
+        runId: null,
+        promptId: 'prompt-1',
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        sessionKey: 'agent:writer:subagent-draft',
+        runId: null,
+        promptId: 'prompt-2',
+      });
+    hostSessionWindowFetchMock
+      .mockResolvedValueOnce(buildHistoryWindow('not-json'))
+      .mockResolvedValueOnce(buildHistoryWindow('not-json'));
 
     await expect(
-      useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案')
+      useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案'),
     ).rejects.toThrow('Invalid JSON output from model');
-    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(hostSessionPromptMock).toHaveBeenCalledTimes(2);
     expect(useSubagentsStore.getState().draftRawOutputByAgent.writer).toBe('not-json');
   });
 
   it('parses draft JSON wrapped in markdown code fence', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
+    hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      result: {
-        output: [
-          '以下是草稿：',
-          '```json',
-          JSON.stringify({
-            files: [{
-              name: 'AGENTS.md',
-              content: 'wrapped rules',
-              reason: 'wrapped output',
-              confidence: 0.8,
-            }],
-          }),
-          '```',
-        ].join('\n'),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow([
+      '以下是草稿：',
+      '```json',
+      JSON.stringify({
+        files: [{
+          name: 'AGENTS.md',
+          content: 'wrapped rules',
+          reason: 'wrapped output',
+          confidence: 0.8,
+        }],
+      }),
+      '```',
+    ].join('\n')));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案');
 
@@ -131,38 +183,67 @@ describe('subagents prompt pipeline', () => {
   });
 
   it('returns explicit error when output contains non-target file', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
+    hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      result: {
-        output: buildDraftOutput([
-          {
-            name: 'MEMORY.md',
-            content: 'should fail',
-            reason: 'invalid target',
-            confidence: 0.9,
-          },
-        ]),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'MEMORY.md',
+        content: 'should fail',
+        reason: 'invalid target',
+        confidence: 0.9,
+      },
+    ])));
 
     await expect(
-      useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案')
+      useSubagentsStore.getState().generateDraftFromPrompt('writer', '生成草案'),
     ).rejects.toThrow('Unsupported target file: MEMORY.md');
   });
 
-  it('falls back to chat.history polling when chat.send returns run status only', async () => {
-    const rpc = gatewayClientRpcMock;
-    rpc.mockImplementation(async (method) => {
-      if (method === 'chat.send') {
-        return {
-          success: true,
-          result: {
-            runId: 'run-123',
-            status: 'started',
+  it('falls back to session transcript polling when session.prompt returns runId only', async () => {
+    hostSessionPromptMock.mockResolvedValueOnce({
+      success: true,
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: 'run-123',
+      promptId: 'prompt-1',
+    });
+    hostSessionWindowFetchMock
+      .mockResolvedValueOnce({
+        snapshot: {
+          sessionKey: 'agent:writer:subagent-draft',
+          entries: [],
+          replayComplete: true,
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'done' as const,
+            streamingMessageId: null,
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            updatedAt: 1,
           },
-        };
-      }
+          window: {
+            totalEntryCount: 0,
+            windowStartOffset: 0,
+            windowEndOffset: 0,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          },
+        },
+      })
+      .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+        {
+          name: 'AGENTS.md',
+          content: 'rules from history',
+          reason: 'history fallback',
+          confidence: 0.88,
+        },
+      ])));
+    gatewayClientRpcMock.mockImplementation(async (method) => {
       if (method === 'agent.wait') {
         return {
           success: true,
@@ -172,146 +253,89 @@ describe('subagents prompt pipeline', () => {
           },
         };
       }
-      if (method === 'chat.history') {
-        return {
-          success: true,
-          result: {
-            messages: [
-              {
-                role: 'assistant',
-                content: [
-                  {
-                    type: 'text',
-                    text: buildDraftOutput([
-                      {
-                        name: 'AGENTS.md',
-                        content: 'rules from history',
-                        reason: 'history fallback',
-                        confidence: 0.88,
-                      },
-                    ]),
-                  },
-                ],
-              },
-            ],
-          },
-        };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', 'generate config');
 
-    expect(rpc).toHaveBeenCalledWith(
+    expect(gatewayClientRpcMock).toHaveBeenCalledWith(
       'agent.wait',
       expect.objectContaining({
         runId: 'run-123',
       }),
       expect.any(Number),
     );
-    expect(rpc).toHaveBeenCalledWith(
-      'chat.history',
-      expect.objectContaining({
-        sessionKey: expect.stringContaining('subagent-draft'),
-        limit: 20,
-      }),
-      undefined,
-    );
+    expect(hostSessionWindowFetchMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: expect.stringContaining('subagent-draft'),
+      limit: 20,
+      mode: 'latest',
+      includeCanonical: true,
+    }));
     expect(useSubagentsStore.getState().draftByFile['AGENTS.md']?.content).toBe('rules from history');
   });
 
   it('rejects duplicate draft generation while same agent run is in-flight', async () => {
-    const rpc = gatewayClientRpcMock;
     let resolveFirst: ((value: unknown) => void) | undefined;
-    rpc
-      .mockImplementationOnce(() => new Promise((resolve) => {
-        resolveFirst = resolve;
-      }))
-      .mockResolvedValueOnce({
-        success: true,
-        result: {
-          output: buildDraftOutput([
-            {
-              name: 'AGENTS.md',
-              content: 'second response',
-              reason: 'unused',
-              confidence: 0.8,
-            },
-          ]),
-        },
-      });
+    hostSessionPromptMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFirst = resolve;
+    }));
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'AGENTS.md',
+        content: 'first response',
+        reason: 'first run',
+        confidence: 0.9,
+      },
+    ])));
 
     const firstRun = useSubagentsStore.getState().generateDraftFromPrompt('writer', 'first prompt');
     await Promise.resolve();
 
     await expect(
-      useSubagentsStore.getState().generateDraftFromPrompt('writer', 'second prompt')
+      useSubagentsStore.getState().generateDraftFromPrompt('writer', 'second prompt'),
     ).rejects.toThrow('Draft generation already in progress for this agent');
-    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(hostSessionPromptMock).toHaveBeenCalledTimes(1);
 
     resolveFirst?.({
       success: true,
-      result: {
-        output: buildDraftOutput([
-          {
-            name: 'AGENTS.md',
-            content: 'first response',
-            reason: 'first run',
-            confidence: 0.9,
-          },
-        ]),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
     await firstRun;
   });
 
   it('reuses the same draft session for sequential generations', async () => {
-    const rpc = gatewayClientRpcMock;
-    let sendCount = 0;
-    rpc.mockImplementation(async (method) => {
-      if (method === 'chat.send') {
-        sendCount += 1;
-        return {
-          success: true,
-          result: {
-            output: buildDraftOutput([
-              {
-                name: 'AGENTS.md',
-                content: sendCount === 1 ? 'first response' : 'second response',
-                reason: sendCount === 1 ? 'first run' : 'second run',
-                confidence: 0.9,
-              },
-            ]),
-          },
-        };
-      }
-      if (method === 'chat.history') {
-        return {
-          success: true,
-          result: {
-            messages: [
-              {
-                role: 'assistant',
-                content: [
-                  {
-                    type: 'text',
-                    text: buildDraftOutput([
-                      {
-                        name: 'AGENTS.md',
-                        content: 'history response',
-                        reason: 'history fallback',
-                        confidence: 0.9,
-                      },
-                    ]),
-                  },
-                ],
-              },
-            ],
-          },
-        };
-      }
-      return { success: true, result: {} };
-    });
+    hostSessionPromptMock
+      .mockResolvedValueOnce({
+        success: true,
+        sessionKey: 'agent:writer:subagent-draft',
+        runId: null,
+        promptId: 'prompt-1',
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        sessionKey: 'agent:writer:subagent-draft',
+        runId: null,
+        promptId: 'prompt-2',
+      });
+    hostSessionWindowFetchMock
+      .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+        {
+          name: 'AGENTS.md',
+          content: 'first response',
+          reason: 'first run',
+          confidence: 0.9,
+        },
+      ])))
+      .mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+        {
+          name: 'AGENTS.md',
+          content: 'second response',
+          reason: 'second run',
+          confidence: 0.9,
+        },
+      ])));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', 'first prompt');
     const firstSessionKey = useSubagentsStore.getState().draftSessionKeyByAgent.writer;
@@ -321,10 +345,7 @@ describe('subagents prompt pipeline', () => {
 
     expect(firstSessionKey).toBe('agent:writer:subagent-draft');
     expect(secondSessionKey).toBe(firstSessionKey);
-    expect(rpc).not.toHaveBeenCalledWith(
-      'sessions.delete',
-      expect.anything()
-    );
+    expect(hostSessionDeleteMock).not.toHaveBeenCalled();
   });
 
   it('uses persisted files as non-initial baseline context', async () => {
@@ -336,24 +357,24 @@ describe('subagents prompt pipeline', () => {
         },
       },
     });
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
+    hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      result: {
-        output: buildDraftOutput([
-          {
-            name: 'AGENTS.md',
-            content: 'refined from saved baseline',
-            reason: 'baseline refine',
-            confidence: 0.9,
-          },
-        ]),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'AGENTS.md',
+        content: 'refined from saved baseline',
+        reason: 'baseline refine',
+        confidence: 0.9,
+      },
+    ])));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续优化');
 
-    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
+    const sentMessage = String((hostSessionPromptMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).toContain('### SOUL.md');
     expect(sentMessage).toContain('### AGENTS.md');
     expect(sentMessage).toContain('saved agents baseline');
@@ -371,24 +392,24 @@ describe('subagents prompt pipeline', () => {
         writer: 'agent:writer:subagent-draft',
       },
     });
-    const rpc = gatewayClientRpcMock;
-    rpc.mockResolvedValueOnce({
+    hostSessionPromptMock.mockResolvedValueOnce({
       success: true,
-      result: {
-        output: buildDraftOutput([
-          {
-            name: 'AGENTS.md',
-            content: 'iterated content',
-            reason: 'iterative turn',
-            confidence: 0.9,
-          },
-        ]),
-      },
+      sessionKey: 'agent:writer:subagent-draft',
+      runId: null,
+      promptId: 'prompt-1',
     });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'AGENTS.md',
+        content: 'iterated content',
+        reason: 'iterative turn',
+        confidence: 0.9,
+      },
+    ])));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', '继续润色');
 
-    const sentMessage = String((rpc.mock.calls[0]?.[1] as { message?: unknown } | undefined)?.message ?? '');
+    const sentMessage = String((hostSessionPromptMock.mock.calls[0]?.[0] as { message?: unknown } | undefined)?.message ?? '');
     expect(sentMessage).not.toContain('### SOUL.md');
     expect(sentMessage).not.toContain('saved agents baseline');
   });
@@ -398,9 +419,8 @@ describe('subagents prompt pipeline', () => {
       persistedFilesByAgent: {},
     });
 
-    const rpc = gatewayClientRpcMock;
     const methods: string[] = [];
-    rpc.mockImplementation(async (method, params) => {
+    gatewayClientRpcMock.mockImplementation(async (method) => {
       methods.push(String(method));
       if (method === 'agents.files.get') {
         return {
@@ -412,34 +432,32 @@ describe('subagents prompt pipeline', () => {
           },
         };
       }
-      if (method === 'chat.send') {
-        const message = String((params as { message?: unknown }).message ?? '');
-        expect(message).toContain('### AGENTS.md');
-        expect(message).toContain('persisted baseline');
-        return {
-          success: true,
-          result: {
-            output: buildDraftOutput([
-              {
-                name: 'AGENTS.md',
-                content: 'generated content',
-                reason: 'first turn with loaded baseline',
-                confidence: 0.9,
-              },
-            ]),
-          },
-        };
-      }
       throw new Error(`Unexpected rpc method in test: ${String(method)}`);
     });
+    hostSessionPromptMock.mockImplementationOnce(async (params) => {
+      const message = String((params as { message?: unknown }).message ?? '');
+      expect(message).toContain('### AGENTS.md');
+      expect(message).toContain('persisted baseline');
+      return {
+        success: true,
+        sessionKey: 'agent:writer:subagent-draft',
+        runId: null,
+        promptId: 'prompt-1',
+      };
+    });
+    hostSessionWindowFetchMock.mockResolvedValueOnce(buildHistoryWindow(buildDraftOutput([
+      {
+        name: 'AGENTS.md',
+        content: 'generated content',
+        reason: 'first turn with loaded baseline',
+        confidence: 0.9,
+      },
+    ])));
 
     await useSubagentsStore.getState().generateDraftFromPrompt('writer', 'baseline race test');
 
     expect(methods.filter((item) => item === 'agents.files.get')).toHaveLength(5);
-    expect(methods.at(-1)).toBe('chat.send');
+    expect(hostSessionPromptMock).toHaveBeenCalledTimes(1);
     expect(useSubagentsStore.getState().persistedFilesByAgent.writer).toBeTruthy();
   });
 });
-
-
-

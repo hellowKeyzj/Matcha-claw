@@ -9,9 +9,11 @@ import {
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from '@/stores/chat';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
+  sessionKey?: string;
   messages?: RawMessage[];
   label?: string | null;
   lastActivityAt?: number | null;
@@ -22,6 +24,7 @@ function createSessionRecord(input?: {
     activeRunId?: string | null;
   };
 }) {
+  const sessionKey = input?.sessionKey ?? 'agent:test:session-1';
   const messages = input?.messages ?? [];
   return {
     meta: {
@@ -37,13 +40,11 @@ function createSessionRecord(input?: {
       pendingFinal: input?.runtime?.pendingFinal ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      streamingTools: [],
+      streamingMessageId: null,
       lastUserMessageAt: null,
-      pendingToolImages: [],
-      approvalStatus: 'idle' as const,
     },
+    timelineEntries: buildTimelineEntriesFromMessages(sessionKey, messages),
     window: createViewportWindowState({
-      messages,
       totalMessageCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
@@ -177,4 +178,3 @@ describe('chat session helpers', () => {
     });
   });
 });
-

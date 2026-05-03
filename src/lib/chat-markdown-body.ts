@@ -1,4 +1,5 @@
-import type { AttachedFileMeta, RawMessage } from '@/stores/chat';
+import type { AttachedFileMeta } from '@/stores/chat';
+import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
 import {
   buildMarkdownCacheKey,
   getOrBuildMarkdownBody,
@@ -6,7 +7,7 @@ import {
   prewarmMarkdownBody,
   type MarkdownBodyRenderResult,
 } from '@/pages/Chat/md-pipeline';
-import { extractText } from '@/pages/Chat/message-utils';
+import { extractEntryText } from '@/pages/Chat/message-utils';
 import {
   createFileHintPathResolver,
   linkifyFileHintsInMarkdown,
@@ -18,19 +19,21 @@ interface PreparedAssistantMarkdownBodyInput {
   markdown: string;
 }
 
-export function getMessageAttachedFiles(message: RawMessage): AttachedFileMeta[] {
-  return Array.isArray(message._attachedFiles) ? message._attachedFiles : [];
+export function getTimelineEntryAttachedFiles(entry: SessionTimelineEntry): AttachedFileMeta[] {
+  return Array.isArray(entry.message._attachedFiles)
+    ? entry.message._attachedFiles as unknown as AttachedFileMeta[]
+    : [];
 }
 
 export function buildAssistantMarkdownCacheKey(
-  message: RawMessage,
+  entry: SessionTimelineEntry,
 ): string {
-  const text = extractText(message);
-  const attachedFiles = getMessageAttachedFiles(message);
+  const text = extractEntryText(entry);
+  const attachedFiles = getTimelineEntryAttachedFiles(entry);
   const baseCacheKey = buildMarkdownCacheKey({
-    messageId: typeof message.id === 'string' ? message.id : undefined,
-    role: typeof message.role === 'string' ? message.role : undefined,
-    timestamp: typeof message.timestamp === 'number' ? message.timestamp : undefined,
+    messageId: entry.entryId,
+    role: entry.role,
+    timestamp: entry.timestamp,
     text,
     attachedFiles,
   });
@@ -38,10 +41,10 @@ export function buildAssistantMarkdownCacheKey(
 }
 
 function buildAssistantMarkdownBodyInput(
-  message: RawMessage,
+  entry: SessionTimelineEntry,
 ): PreparedAssistantMarkdownBodyInput {
-  const text = extractText(message);
-  const attachedFiles = getMessageAttachedFiles(message);
+  const text = extractEntryText(entry);
+  const attachedFiles = getTimelineEntryAttachedFiles(entry);
   const resolveFileHintPath = createFileHintPathResolver(attachedFiles);
   const markdown = linkifyFileHintsInMarkdown(
     migrateLegacyMarkdownFileLinks(text, resolveFileHintPath),
@@ -49,25 +52,25 @@ function buildAssistantMarkdownBodyInput(
   );
 
   return {
-    cacheKey: buildAssistantMarkdownCacheKey(message),
+    cacheKey: buildAssistantMarkdownCacheKey(entry),
     markdown,
   };
 }
 
 export function peekAssistantMarkdownBody(
-  message: RawMessage,
+  entry: SessionTimelineEntry,
 ): MarkdownBodyRenderResult | undefined {
-  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(message));
+  return peekRenderedMarkdownBody(buildAssistantMarkdownCacheKey(entry));
 }
 
 export function prewarmAssistantMarkdownBody(
-  message: RawMessage,
+  entry: SessionTimelineEntry,
 ): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(message);
+  const cached = peekAssistantMarkdownBody(entry);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(message);
+  const input = buildAssistantMarkdownBodyInput(entry);
   if (!input.markdown.trim()) {
     return undefined;
   }
@@ -77,24 +80,24 @@ export function prewarmAssistantMarkdownBody(
 }
 
 export function prewarmAssistantMarkdownBodies(
-  messages: RawMessage[],
+  entries: SessionTimelineEntry[],
 ): void {
-  for (const message of messages) {
-    if (message.role !== 'assistant') {
+  for (const entry of entries) {
+    if (entry.role !== 'assistant') {
       continue;
     }
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(entry);
   }
 }
 
 export function getOrBuildAssistantMarkdownBody(
-  message: RawMessage,
+  entry: SessionTimelineEntry,
 ): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(message);
+  const cached = peekAssistantMarkdownBody(entry);
   if (cached) {
     return cached;
   }
-  const input = buildAssistantMarkdownBodyInput(message);
+  const input = buildAssistantMarkdownBodyInput(entry);
   if (!input.markdown.trim()) {
     return undefined;
   }

@@ -1,6 +1,11 @@
 import { getAttachmentImageCacheStats } from '@/stores/chat/attachment-helpers';
-import { useChatStore, type AttachedFileMeta, type ChatStoreState, type RawMessage } from '@/stores/chat';
+import {
+  useChatStore,
+  type AttachedFileMeta,
+  type ChatStoreState,
+} from '@/stores/chat';
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
+import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
 import { getExecutionGraphCacheStats } from '@/pages/Chat/exec-graph-cache';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRowsCacheStats } from '@/pages/Chat/chat-rows-cache';
@@ -149,19 +154,23 @@ function estimateAttachedFiles(input: AttachedFileMeta[] | undefined): {
   };
 }
 
-function estimateMessageChars(message: RawMessage): {
+function estimateTimelineEntryChars(entry: SessionTimelineEntry): {
   contentChars: number;
   attachedFileCount: number;
   previewCharCount: number;
   dataUrlPreviewCharCount: number;
   approxChars: number;
 } {
-  const contentChars = estimateUnknownChars(message.content);
-  const attachedFiles = estimateAttachedFiles(message._attachedFiles);
-  const idChars = typeof message.id === 'string' ? message.id.length : 0;
-  const toolCallChars = typeof message.toolCallId === 'string' ? message.toolCallId.length : 0;
-  const toolNameChars = typeof message.toolName === 'string' ? message.toolName.length : 0;
-  const approxChars = contentChars + attachedFiles.approxChars + idChars + toolCallChars + toolNameChars + 48;
+  const contentChars = estimateUnknownChars(entry.message.content);
+  const attachedFiles = estimateAttachedFiles(entry.message._attachedFiles as AttachedFileMeta[] | undefined);
+  const idChars = [entry.entryId, entry.laneKey, entry.turnKey, entry.runId, entry.agentId]
+    .filter((value): value is string => typeof value === 'string')
+    .reduce((total, value) => total + value.length, 0);
+  const messageIdChars = typeof entry.message.id === 'string' ? entry.message.id.length : 0;
+  const toolCallChars = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.length : 0;
+  const toolNameChars = typeof entry.message.toolName === 'string' ? entry.message.toolName.length : 0;
+  const toolStatusesChars = estimateUnknownChars(entry.message.toolStatuses);
+  const approxChars = contentChars + attachedFiles.approxChars + toolStatusesChars + idChars + messageIdChars + toolCallChars + toolNameChars + 64;
 
   return {
     contentChars,
@@ -174,8 +183,7 @@ function estimateMessageChars(message: RawMessage): {
 
 function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): number {
   const runtime = state.loadedSessions[sessionKey]?.runtime;
-  const tooling = state.loadedSessions[sessionKey]?.tooling;
-  if (!runtime && !tooling) {
+  if (!runtime) {
     return 0;
   }
 
@@ -183,8 +191,6 @@ function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): n
   if (runtime?.streamingMessageId) {
     total += runtime.streamingMessageId.length;
   }
-  total += (tooling?.streamingTools.length ?? 0) * 64;
-  total += (tooling?.pendingToolImages.length ?? 0) * 64;
   return total;
 }
 
@@ -201,15 +207,15 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   let approxRetainedBytes = 0;
 
   for (const [sessionKey, record] of sessions) {
-    const messages = Array.isArray(record.messages) ? record.messages : [];
+    const entries = Array.isArray(record.timelineEntries) ? record.timelineEntries : [];
     let sessionContentChars = 0;
     let sessionAttachedFileCount = 0;
     let sessionPreviewCharCount = 0;
     let sessionDataUrlPreviewCharCount = 0;
     let sessionApproxChars = 0;
 
-    for (const message of messages) {
-      const stats = estimateMessageChars(message);
+    for (const entry of entries) {
+      const stats = estimateTimelineEntryChars(entry);
       sessionContentChars += stats.contentChars;
       sessionAttachedFileCount += stats.attachedFileCount;
       sessionPreviewCharCount += stats.previewCharCount;
@@ -221,7 +227,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     const sessionApproxBytes = (sessionApproxChars + runtimeStateCharCount) * 2;
     sessionSummaries.push({
       sessionKey,
-      messageCount: messages.length,
+      messageCount: entries.length,
       attachedFileCount: sessionAttachedFileCount,
       previewCharCount: sessionPreviewCharCount,
       contentCharCount: sessionContentChars,
@@ -234,7 +240,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     if (isSessionHistoryReady(record.meta.historyStatus)) {
       readySessionCount += 1;
     }
-    totalMessageCount += messages.length;
+    totalMessageCount += entries.length;
     totalAttachedFileCount += sessionAttachedFileCount;
     totalPreviewCharCount += sessionPreviewCharCount;
     totalDataUrlPreviewCharCount += sessionDataUrlPreviewCharCount;
