@@ -19,7 +19,7 @@ import {
   buildSyncPendingApprovalsPatch,
   groupApprovalsBySession,
 } from './approval-handlers';
-import { handleStoreConversationEvent } from './event-actions';
+import { handleStoreSessionUpdateEvent } from './event-actions';
 import { executeHistoryLoad } from './history-load-execution';
 import { CHAT_HISTORY_LOADING_TIMEOUT_MS } from './history-constants';
 import { executeStoreSend } from './send-handlers';
@@ -79,8 +79,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     switchSession: (key) => {
       executeSwitchSession(sessionInput, key);
     },
-    newSession: (agentId) => {
-      executeNewSession(sessionInput, agentId);
+    newSession: async (agentId) => {
+      await executeNewSession(sessionInput, agentId);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
     cleanupEmptySession: () => {
@@ -230,8 +230,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       await state.sendMessage(text);
       return true;
     },
-    handleConversationEvent: (event) => {
-      handleStoreConversationEvent({ set, get }, event);
+    handleSessionUpdateEvent: (event) => {
+      handleStoreSessionUpdateEvent({ set, get }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

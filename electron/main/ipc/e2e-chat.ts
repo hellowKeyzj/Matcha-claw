@@ -188,21 +188,30 @@ function findLatestRunningRunBySession(sessionKey: string): MockRun | null {
 }
 
 function emitRunStarted(runId: string, sessionKey: string): void {
-  emitHostEvent('gateway:conversation-event', {
-    type: 'run.phase',
-    phase: 'started',
+  emitHostEvent('session:update', {
+    sessionUpdate: 'session_info_update',
     runId,
     sessionKey,
+    phase: 'started',
+    laneKey: 'main',
   });
 }
 
 function emitDelta(runId: string, sessionKey: string, content: string): void {
-  emitHostEvent('gateway:conversation-event', {
-    type: 'chat.message',
-    event: {
-      state: 'delta',
-      runId,
+  emitHostEvent('session:update', {
+    sessionUpdate: 'agent_message_chunk',
+    runId,
+    sessionKey,
+    laneKey: 'main',
+    entry: {
+      entryId: `entry-${runId}-delta`,
       sessionKey,
+      laneKey: 'main',
+      turnKey: `main:${runId}`,
+      role: 'assistant',
+      status: 'streaming',
+      sequenceId: 1,
+      text: content,
       message: {
         role: 'assistant',
         content,
@@ -216,12 +225,20 @@ function emitFinal(runId: string, sessionKey: string, content: string): void {
     role: 'assistant',
     content,
   });
-  emitHostEvent('gateway:conversation-event', {
-    type: 'chat.message',
-    event: {
-      state: 'final',
-      runId,
+  emitHostEvent('session:update', {
+    sessionUpdate: 'agent_message',
+    runId,
+    sessionKey,
+    laneKey: 'main',
+    entry: {
+      entryId: `entry-${runId}-final`,
       sessionKey,
+      laneKey: 'main',
+      turnKey: `main:${runId}`,
+      role: 'assistant',
+      status: 'final',
+      sequenceId: 2,
+      text: content,
       message: {
         role: 'assistant',
         content,
@@ -235,11 +252,12 @@ function emitFinal(runId: string, sessionKey: string, content: string): void {
 }
 
 function emitAborted(runId: string, sessionKey: string): void {
-  emitHostEvent('gateway:conversation-event', {
-    type: 'run.phase',
-    phase: 'aborted',
+  emitHostEvent('session:update', {
+    sessionUpdate: 'session_info_update',
     runId,
     sessionKey,
+    phase: 'aborted',
+    laneKey: 'main',
   });
   const run = state.runsById[runId];
   if (run) {
@@ -527,6 +545,68 @@ export function handleE2EChatHostApiFetch(request: HostApiFetchRequest): HostApi
     return toSuccessEnvelope({
       success: true,
       result,
+    });
+  }
+
+  if (path === '/api/session/new' && method === 'POST') {
+    const payload = parseJsonBody(request.body);
+    const agentId = typeof payload.agentId === 'string' && payload.agentId.trim()
+      ? payload.agentId.trim()
+      : 'main';
+    const canonicalPrefix = typeof payload.canonicalPrefix === 'string' && payload.canonicalPrefix.trim()
+      ? payload.canonicalPrefix.trim()
+      : `agent:${agentId}`;
+    const sessionKey = `${canonicalPrefix}:session-${Date.now()}-${++state.counter}`;
+    ensureSession(sessionKey, sessionKey);
+    return toSuccessEnvelope({
+      success: true,
+      sessionKey,
+    });
+  }
+
+  if (path === '/api/session/load' && method === 'POST') {
+    const payload = parseJsonBody(request.body);
+    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
+    const messages = clone(state.histories[sessionKey] ?? []);
+    return toSuccessEnvelope({
+      sessionId: sessionKey,
+      sessionKey,
+      entries: messages.map((message, index) => ({
+        entryId: message.id,
+        sessionKey,
+        laneKey: 'main',
+        turnKey: `main:${message.id}`,
+        role: message.role,
+        status: 'final',
+        timestamp: message.timestamp,
+        text: message.content,
+        sequenceId: index + 1,
+        message: {
+          role: message.role,
+          content: message.content,
+          timestamp: message.timestamp,
+          id: message.id,
+          messageId: message.id,
+        },
+      })),
+      totalEntryCount: messages.length,
+      replayComplete: true,
+    });
+  }
+
+  if (path === '/api/session/prompt' && method === 'POST') {
+    const payload = parseJsonBody(request.body);
+    const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey : state.mainSessionKey;
+    const message = typeof payload.message === 'string' ? payload.message : '';
+    const mode: MockRun['mode'] = message.includes('[approval]')
+      ? 'approval'
+      : (message.includes('[long]') ? 'long' : 'default');
+    const result = createRun(sessionKey, message || '(empty)', mode);
+    return toSuccessEnvelope({
+      success: true,
+      sessionKey,
+      runId: result.runId,
+      promptId: typeof payload.promptId === 'string' ? payload.promptId : result.runId,
     });
   }
 

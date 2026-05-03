@@ -8,7 +8,6 @@ export { useChatStore } from './chat/store';
 
 export type {
   AttachedFileMeta,
-  RawMessage,
   ContentBlock,
   ChatSession,
   ChatSessionHistoryStatus,

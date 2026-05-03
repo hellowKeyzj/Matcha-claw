@@ -3,6 +3,13 @@ import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
+const hostSessionNewMock = vi.fn();
+
+vi.mock('@/lib/host-api', () => ({
+  hostSessionNew: (...args: unknown[]) => hostSessionNewMock(...args),
+  hostApiFetch: vi.fn(),
+}));
+
 function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
   const base = createEmptySessionRecord();
   return {
@@ -14,8 +21,34 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
+    timelineEntries: overrides?.timelineEntries ?? base.timelineEntries,
     messages: overrides?.messages ?? base.messages,
     window: overrides?.window ?? base.window,
+  };
+}
+
+function buildNewSessionSnapshot(sessionKey: string) {
+  return {
+    sessionKey,
+    entries: [],
+    replayComplete: true,
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      streamingMessageId: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      updatedAt: 1,
+    },
+    window: {
+      totalEntryCount: 0,
+      windowStartOffset: 0,
+      windowEndOffset: 0,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    },
   };
 }
 
@@ -24,6 +57,15 @@ describe('chat store newSession agent targeting', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    hostSessionNewMock.mockReset();
+    hostSessionNewMock.mockImplementation(async (payload?: { canonicalPrefix?: string }) => {
+      const sessionKey = `${payload?.canonicalPrefix ?? 'agent:main'}:session-${Date.now()}`;
+      return {
+        success: true,
+        sessionKey,
+        snapshot: buildNewSessionSnapshot(sessionKey),
+      };
+    });
     loadHistory.mockClear();
     useChatStore.setState({
       foregroundHistorySessionKey: null,
@@ -45,20 +87,20 @@ describe('chat store newSession agent targeting', () => {
     } as never);
   });
 
-  it('新会话应继承当前选中 agent，而不是 sessions 首项 agent', () => {
+  it('新会话应继承当前选中 agent，而不是 sessions 首项 agent', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_711_111_111_111);
 
-    useChatStore.getState().newSession();
+    await useChatStore.getState().newSession();
 
     expect(useChatStore.getState().currentSessionKey).toBe('agent:test:session-1711111111111');
     expect(useChatStore.getState().loadedSessions['agent:test:session-1711111111111']?.meta.historyStatus).toBe('ready');
     nowSpy.mockRestore();
   });
 
-  it('显式传入 agentId 时，应强制创建到目标 agent 会话下', () => {
+  it('显式传入 agentId 时，应强制创建到目标 agent 会话下', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_733_333_333_333);
 
-    useChatStore.getState().newSession('main');
+    await useChatStore.getState().newSession('main');
 
     expect(useChatStore.getState().currentSessionKey).toBe('agent:main:session-1733333333333');
     nowSpy.mockRestore();
@@ -196,7 +238,7 @@ describe('chat store newSession agent targeting', () => {
     expect(useChatStore.getState().loadedSessions['agent:test:session-c']).toBeUndefined();
   });
 
-  it('创建新会话时，应重置发送态，避免继承上一会话的等待状态', () => {
+  it('创建新会话时，应重置发送态，避免继承上一会话的等待状态', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_722_222_222_222);
     useChatStore.setState({
       loadedSessions: {
@@ -211,7 +253,7 @@ describe('chat store newSession agent targeting', () => {
       },
     } as never);
 
-    useChatStore.getState().newSession();
+    await useChatStore.getState().newSession();
 
     const state = useChatStore.getState();
     const runtime = state.loadedSessions[state.currentSessionKey]?.runtime;
@@ -222,10 +264,10 @@ describe('chat store newSession agent targeting', () => {
     nowSpy.mockRestore();
   });
 
-  it('newSession 只写 loadedSessions 主链，不改写 session catalog status shell', () => {
+  it('newSession 只写 loadedSessions 主链，不改写 session catalog status shell', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_744_444_444_444);
 
-    useChatStore.getState().newSession();
+    await useChatStore.getState().newSession();
 
     const state = useChatStore.getState();
     expect(state.currentSessionKey).toBe('agent:test:session-1744444444444');
@@ -234,4 +276,3 @@ describe('chat store newSession agent targeting', () => {
     nowSpy.mockRestore();
   });
 });
-

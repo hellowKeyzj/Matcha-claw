@@ -58,10 +58,6 @@ function createSessionRecord(input?: {
       pendingFinal: false,
       lastUserMessageAt: null,
     },
-    tooling: {
-      streamingTools: [],
-      pendingToolImages: [],
-    },
     messages,
     window: createViewportWindowState({
       totalMessageCount: messages.length,

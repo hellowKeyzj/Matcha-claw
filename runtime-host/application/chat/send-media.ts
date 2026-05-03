@@ -1,5 +1,6 @@
 import { access, readFile } from 'node:fs/promises';
 import type { OpenClawBridge } from '../../openclaw-bridge';
+import { buildGatewayChatSendParams } from '../../shared/gateway-chat-send-params';
 
 const VISION_MIME_TYPES = new Set([
   'image/png',
@@ -13,7 +14,15 @@ export type SendWithMediaInput = {
   message: string;
   deliver?: boolean;
   idempotencyKey: string;
-  media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+  uniqueId?: string;
+  requestId?: string;
+  media?: Array<{
+    filePath: string;
+    mimeType: string;
+    fileName: string;
+    fileSize?: number;
+    preview?: string | null;
+  }>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,12 +54,14 @@ export function normalizeSendWithMediaInput(value: unknown): SendWithMediaInput 
     sessionKey: value.sessionKey,
     message: value.message,
     idempotencyKey: value.idempotencyKey,
+    ...(typeof value.uniqueId === 'string' ? { uniqueId: value.uniqueId } : {}),
+    ...(typeof value.requestId === 'string' ? { requestId: value.requestId } : {}),
     ...(typeof value.deliver === 'boolean' ? { deliver: value.deliver } : {}),
     ...(media ? { media } : {}),
   };
 }
 
-async function buildGatewayChatSendParams(input: SendWithMediaInput): Promise<Record<string, unknown>> {
+async function buildSendWithMediaGatewayParams(input: SendWithMediaInput): Promise<Record<string, unknown>> {
   let message = input.message;
   const imageAttachments: Array<Record<string, string>> = [];
   const fileReferences: string[] = [];
@@ -81,13 +92,13 @@ async function buildGatewayChatSendParams(input: SendWithMediaInput): Promise<Re
     message = message ? `${message}\n\n${refs}` : refs;
   }
 
-  return {
+  return buildGatewayChatSendParams({
     sessionKey: input.sessionKey,
     message,
     deliver: input.deliver ?? false,
     idempotencyKey: input.idempotencyKey,
-    ...(imageAttachments.length > 0 ? { attachments: imageAttachments } : {}),
-  };
+    attachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+  });
 }
 
 export async function sendWithMediaViaOpenClawBridge(
@@ -95,7 +106,7 @@ export async function sendWithMediaViaOpenClawBridge(
   input: SendWithMediaInput,
 ): Promise<{ success: boolean; result?: unknown; error?: string }> {
   try {
-    const rpcParams = await buildGatewayChatSendParams(input);
+    const rpcParams = await buildSendWithMediaGatewayParams(input);
     const result = await openclawBridge.chatSend(rpcParams);
     return {
       success: true,

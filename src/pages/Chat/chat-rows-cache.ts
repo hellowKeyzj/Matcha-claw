@@ -1,17 +1,17 @@
-import type { RawMessage } from '@/stores/chat';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 import {
-  appendMessageRows,
-  buildMessageRowsWithMeta,
-  canAppendMessageList,
-  patchMessageRows,
-  canPrependMessageList,
-  prependMessageRows,
+  appendTimelineRows,
+  buildTimelineRowsWithMeta,
+  canAppendReferenceList,
+  canPrependReferenceList,
+  patchTimelineRows,
+  prependTimelineRows,
   type ChatMessageRow,
 } from './chat-row-model';
 import { getSessionCacheValue, rememberSessionCacheValue } from './chat-session-cache';
 
 export interface SessionStaticRowsCacheEntry {
-  messagesRef: RawMessage[];
+  timelineEntriesRef: SessionTimelineEntry[];
   rows: ChatMessageRow[];
   renderableCount: number;
 }
@@ -26,12 +26,12 @@ const globalStaticRowsCache = new Map<string, SessionStaticRowsCacheEntry>();
 
 function buildStaticRowsCacheEntry(
   sessionKey: string,
-  rowSourceMessages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
 ): SessionStaticRowsCacheEntry {
   const previousCache = getSessionCacheValue(globalStaticRowsCache, sessionKey);
   if (
     previousCache
-    && previousCache.messagesRef === rowSourceMessages
+    && previousCache.timelineEntriesRef === timelineEntries
   ) {
     return previousCache;
   }
@@ -40,66 +40,66 @@ function buildStaticRowsCacheEntry(
   let renderableCount: number;
   const canIncrementalAppend = Boolean(
     previousCache
-    && canAppendMessageList(previousCache.messagesRef, rowSourceMessages),
+    && canAppendReferenceList(previousCache.timelineEntriesRef, timelineEntries),
   );
   const canIncrementalPrepend = Boolean(
     previousCache
-    && canPrependMessageList(previousCache.messagesRef, rowSourceMessages),
+    && canPrependReferenceList(previousCache.timelineEntriesRef, timelineEntries),
   );
   const canPatchInPlace = Boolean(
     previousCache
-    && previousCache.messagesRef.length === rowSourceMessages.length,
+    && previousCache.timelineEntriesRef.length === timelineEntries.length,
   );
 
   if (canIncrementalAppend && previousCache) {
-    const appended = appendMessageRows(
+    const appended = appendTimelineRows(
       sessionKey,
       previousCache.rows,
-      rowSourceMessages,
-      previousCache.messagesRef.length,
+      timelineEntries,
+      previousCache.timelineEntriesRef.length,
       previousCache.renderableCount,
     );
     rows = appended.rows;
     renderableCount = appended.renderableCount;
   } else if (canIncrementalPrepend && previousCache) {
-    const prepended = prependMessageRows(
+    const prepended = prependTimelineRows(
       sessionKey,
       previousCache.rows,
-      rowSourceMessages,
-      rowSourceMessages.length - previousCache.messagesRef.length,
+      timelineEntries,
+      timelineEntries.length - previousCache.timelineEntriesRef.length,
       previousCache.renderableCount,
     );
     rows = prepended.rows;
     renderableCount = prepended.renderableCount;
   } else if (canPatchInPlace && previousCache) {
-    const patched = patchMessageRows(
+    const patched = patchTimelineRows(
       sessionKey,
       previousCache.rows,
-      previousCache.messagesRef,
-      rowSourceMessages,
+      previousCache.timelineEntriesRef,
+      timelineEntries,
     );
     if (patched) {
       rows = patched.rows;
       renderableCount = patched.renderableCount;
     } else {
-      const built = buildMessageRowsWithMeta({
+      const built = buildTimelineRowsWithMeta({
         sessionKey,
-        messages: rowSourceMessages,
+        entries: timelineEntries,
       });
       rows = built.rows;
       renderableCount = built.renderableCount;
     }
   } else {
-    const built = buildMessageRowsWithMeta({
+    const built = buildTimelineRowsWithMeta({
       sessionKey,
-      messages: rowSourceMessages,
+      entries: timelineEntries,
     });
     rows = built.rows;
     renderableCount = built.renderableCount;
   }
 
   const nextEntry = {
-    messagesRef: rowSourceMessages,
+    timelineEntriesRef: timelineEntries,
     rows,
     renderableCount,
   } satisfies SessionStaticRowsCacheEntry;
@@ -109,16 +109,16 @@ function buildStaticRowsCacheEntry(
 
 export function getOrBuildStaticRowsCacheEntry(
   sessionKey: string,
-  rowSourceMessages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
 ): SessionStaticRowsCacheEntry {
-  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages);
+  return buildStaticRowsCacheEntry(sessionKey, timelineEntries);
 }
 
-export function prewarmStaticRowsForMessages(
+export function prewarmStaticRowsForTimeline(
   sessionKey: string,
-  rowSourceMessages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
 ): SessionStaticRowsCacheEntry {
-  return buildStaticRowsCacheEntry(sessionKey, rowSourceMessages);
+  return buildStaticRowsCacheEntry(sessionKey, timelineEntries);
 }
 
 export function getStaticRowsCacheStats(): StaticRowsCacheStats {

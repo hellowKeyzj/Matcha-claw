@@ -1,4 +1,7 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionTimelineEntryStatus } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -9,6 +12,18 @@ export interface AttachedFileMeta {
   filePath?: string;
 }
 
+export interface MessageTimelineMeta {
+  entryId: string;
+  sessionKey: string;
+  laneKey: string;
+  turnKey: string;
+  status: SessionTimelineEntryStatus;
+  timestamp?: number;
+  runId?: string;
+  agentId?: string;
+  sequenceId?: number;
+}
+
 /** Raw message from OpenClaw chat.history */
 export interface RawMessage {
   role: 'user' | 'assistant' | 'system' | 'toolresult' | 'tool_result';
@@ -16,6 +31,7 @@ export interface RawMessage {
   timestamp?: number;
   id?: string;
   messageId?: string;
+  originMessageId?: string;
   clientId?: string;
   uniqueId?: string;
   status?: 'sending' | 'sent' | 'timeout' | 'error';
@@ -30,7 +46,9 @@ export interface RawMessage {
   name?: string;
   requestId?: string;
   details?: unknown;
+  toolStatuses?: ToolStatus[];
   isError?: boolean;
+  _timeline?: MessageTimelineMeta;
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
   _attachedFiles?: AttachedFileMeta[];
 }
@@ -109,11 +127,8 @@ export interface ChatSessionRuntimeState {
   streamingMessageId: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
-}
-
-export interface ChatSessionToolingState {
-  streamingTools: ToolStatus[];
-  pendingToolImages: AttachedFileMeta[];
+  pendingMessageSequenceByKey?: Record<string, number>;
+  bufferedMessageEventsByKey?: Record<string, Array<Record<string, unknown>>>;
 }
 
 export interface ChatSessionMetaState {
@@ -128,8 +143,7 @@ export interface ChatSessionMetaState {
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
-  tooling: ChatSessionToolingState;
-  messages: RawMessage[];
+  timelineEntries: SessionTimelineEntry[];
   window: ChatSessionViewportState;
 }
 
@@ -189,7 +203,7 @@ export interface ChatStoreActions {
   loadSessions: () => Promise<void>;
   openAgentConversation: (agentId: string) => void;
   switchSession: (key: string) => void;
-  newSession: (agentId?: string) => void;
+  newSession: (agentId?: string) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
@@ -205,7 +219,7 @@ export interface ChatStoreActions {
   getTaskInboxBridgeState: () => TaskInboxChatBridgeState;
   openTaskInboxSession: (sessionKey: string) => string;
   sendTaskInboxRecoveryPrompt: (sessionKey: string, prompt: string) => Promise<boolean>;
-  handleConversationEvent: (event: Record<string, unknown>) => void;
+  handleSessionUpdateEvent: (event: SessionUpdateEvent) => void;
   toggleThinking: () => void;
   refresh: () => Promise<void>;
   clearError: () => void;

@@ -41,11 +41,8 @@ function createSessionRecord(input?: {
       activeRunId: null,
       runPhase: 'idle' as const,
       streamingMessageId: null,
-      streamingTools: [],
       pendingFinal: false,
       lastUserMessageAt: null,
-      pendingToolImages: [],
-      approvalStatus: 'idle' as const,
     },
     messages,
     window: createViewportWindowState({

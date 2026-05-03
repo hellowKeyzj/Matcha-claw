@@ -1,6 +1,4 @@
 import { cacheSendAttachments } from './attachment-helpers';
-import { buildUserTransportMessage } from './message-helpers';
-import { resolveSessionLabelFromMessages } from './message-helpers';
 import { reduceSessionRuntime } from './runtime-state-reducer';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import {
@@ -17,15 +15,14 @@ import {
   setSendSafetyTimer,
 } from './timers';
 import {
-  getSessionMessages,
-  getSessionRuntime,
-  patchSessionMessagesAndViewport,
   patchSessionRecord,
-  resolveSessionRecord,
+  patchSessionSnapshot,
+  getSessionRuntime,
+  patchSessionMeta,
   hasTimeoutSignal,
   isRecoverableChatSendTimeout,
 } from './store-state-helpers';
-import type { ChatSendAttachment, ChatStoreState, RawMessage } from './types';
+import type { ChatSendAttachment, ChatStoreState } from './types';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -36,97 +33,37 @@ export type ChatStoreGetFn = () => ChatStoreState;
 
 export const NO_RESPONSE_RECEIVED_ERROR = 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.';
 
-interface BuildLocalUserMessageInput {
-  clientMessageId: string;
-  text: string;
-  nowMs: number;
-  attachments?: ChatSendAttachment[];
-}
-
-export function buildLocalUserMessage(input: BuildLocalUserMessageInput): RawMessage {
-  return {
-    id: input.clientMessageId,
-    clientId: input.clientMessageId,
-    messageId: input.clientMessageId,
-    role: 'user',
-    status: 'sending',
-    content: input.text || (input.attachments?.length ? '(file attached)' : ''),
-    timestamp: input.nowMs / 1000,
-    _attachedFiles: input.attachments?.map((attachment) => ({
-      fileName: attachment.fileName,
-      mimeType: attachment.mimeType,
-      fileSize: attachment.fileSize,
-      preview: attachment.preview,
-      filePath: attachment.stagedPath,
-    })),
-  };
-}
-
 interface ApplyStoreSendStartParams {
   set: ChatStoreSetFn;
   sessionKey: string;
-  localUserMessage: RawMessage;
+  text: string;
   nowMs: number;
 }
 
-function buildSendViewportPatch(
-  messageCountBeforeAppend: number,
-  messageCountAfterAppend: number,
-  window: ReturnType<typeof resolveSessionRecord>['window'],
-) {
-  const visibleCount = Math.max(1, window.windowEndOffset - window.windowStartOffset);
-  const detachedFromLatest = !window.isAtLatest || window.hasNewer || window.windowEndOffset < messageCountBeforeAppend;
-  if (detachedFromLatest) {
-    const windowEndOffset = messageCountAfterAppend;
-    const windowStartOffset = Math.max(0, windowEndOffset - visibleCount);
-    return {
-      totalMessageCount: messageCountAfterAppend,
-      windowStartOffset,
-      windowEndOffset,
-      hasMore: windowStartOffset > 0,
-      hasNewer: false,
-      isAtLatest: true,
-    };
-  }
-  return {
-    totalMessageCount: messageCountAfterAppend,
-    windowEndOffset: window.windowEndOffset + 1,
-    hasNewer: false,
-    isAtLatest: true,
-  };
-}
-
 export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
-  const { set, sessionKey, localUserMessage, nowMs } = params;
+  const { set, sessionKey, text, nowMs } = params;
   set((state) => {
-    const record = resolveSessionRecord(state.loadedSessions[sessionKey]);
-    const nextMessages = [...record.messages, localUserMessage];
-    const nextViewportPatch = buildSendViewportPatch(
-      record.messages.length,
-      nextMessages.length,
-      record.window,
-    );
     const nextSessionLabel = sessionKey.endsWith(':main')
-      ? ''
-      : resolveSessionLabelFromMessages(nextMessages);
-    const runtimePatch = reduceSessionRuntime(record.runtime, {
+      ? null
+      : text;
+    const runtime = getSessionRuntime(state, sessionKey);
+    const runtimePatch = reduceSessionRuntime(runtime, {
       type: 'send_submitted',
       nowMs,
     });
-    const nextLoadedSessions = patchSessionMessagesAndViewport(state, sessionKey, nextMessages, nextViewportPatch);
     return {
-      loadedSessions: patchSessionRecord(
-        { loadedSessions: nextLoadedSessions },
+      loadedSessions: patchSessionMeta(
+        {
+          loadedSessions: patchSessionRecord(state, sessionKey, {
+            runtime: runtimePatch === runtime
+              ? runtime
+              : { ...runtime, ...runtimePatch },
+          }),
+        },
         sessionKey,
         {
-          meta: {
-            ...record.meta,
-            label: nextSessionLabel || record.meta.label,
-            lastActivityAt: nowMs,
-          },
-          runtime: runtimePatch === record.runtime
-            ? record.runtime
-            : { ...record.runtime, ...runtimePatch },
+          label: nextSessionLabel ?? state.loadedSessions[sessionKey]?.meta.label ?? null,
+          lastActivityAt: nowMs,
         },
       ),
     };
@@ -220,26 +157,12 @@ export function startStoreSendWatchers(params: StartStoreSendWatchersParams): vo
         error: NO_RESPONSE_RECEIVED_ERROR,
         clearRun: true,
       });
-      const currentMessages = getSessionMessages(current, sessionKey);
-      const nextMessages = removeLastSendingUser(currentMessages);
       return {
-        loadedSessions: patchSessionRecord(
-          {
-            loadedSessions: patchSessionMessagesAndViewport(current, sessionKey, nextMessages, {
-              totalMessageCount: Math.max(
-                current.loadedSessions[sessionKey]?.window.totalMessageCount ?? 0,
-                nextMessages.length,
-              ),
-              windowEndOffset: (current.loadedSessions[sessionKey]?.window.windowStartOffset ?? 0) + nextMessages.length,
-            }),
-          },
-          sessionKey,
-          {
-            runtime: runtimePatch === currentRuntime
-              ? currentRuntime
-              : { ...currentRuntime, ...runtimePatch },
-          },
-        ),
+        loadedSessions: patchSessionRecord(current, sessionKey, {
+          runtime: runtimePatch === currentRuntime
+            ? currentRuntime
+            : { ...currentRuntime, ...runtimePatch },
+        }),
       };
     });
   };
@@ -258,18 +181,6 @@ export function resumeActiveStoreSend(
     source: 'resume',
     onSafetyTimeout: () => {},
   });
-}
-
-function removeLastSendingUser(messages: RawMessage[]): RawMessage[] {
-  const nextMessages = [...messages];
-  for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
-    const message = nextMessages[index];
-    if (message.role === 'user' && message.status === 'sending') {
-      nextMessages.splice(index, 1);
-      return nextMessages;
-    }
-  }
-  return messages;
 }
 
 interface MaybeEnterStoreWaitingApprovalParams {
@@ -326,20 +237,11 @@ function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void 
   set((state) => {
     const runtime = getSessionRuntime(state, state.currentSessionKey);
     const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_failed', error });
-    const currentMessages = getSessionMessages(state, state.currentSessionKey);
-    const nextMessages = removeLastSendingUser(currentMessages);
     return {
       error,
-      loadedSessions: patchSessionRecord(
-        { loadedSessions: patchSessionMessagesAndViewport(state, state.currentSessionKey, nextMessages, {
-          totalMessageCount: Math.max(state.loadedSessions[state.currentSessionKey]?.window.totalMessageCount ?? 0, nextMessages.length),
-          windowEndOffset: (state.loadedSessions[state.currentSessionKey]?.window.windowStartOffset ?? 0) + nextMessages.length,
-        }) },
-        state.currentSessionKey,
-        {
-          runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-        },
-      ),
+      loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
+        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+      }),
     };
   });
 }
@@ -367,19 +269,18 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     return;
   }
 
-  const { currentSessionKey } = get();
+  const stateBeforeSend = get();
+  const { currentSessionKey } = stateBeforeSend;
+  const runtimeBeforeSend = getSessionRuntime(stateBeforeSend, currentSessionKey);
+  if (runtimeBeforeSend.sending || runtimeBeforeSend.pendingFinal) {
+    return;
+  }
   const nowMs = Date.now();
   const clientMessageId = crypto.randomUUID();
-  const localUserMessage = buildLocalUserMessage({
-    clientMessageId,
-    text: trimmed,
-    nowMs,
-    attachments,
-  });
   applyStoreSendStart({
     set,
     sessionKey: currentSessionKey,
-    localUserMessage,
+    text: trimmed,
     nowMs,
   });
 
@@ -399,7 +300,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
     const sendResult = await sendChatTransport({
       sessionKey: currentSessionKey,
-      message: buildUserTransportMessage(trimmed, clientMessageId),
+      message: trimmed,
       idempotencyKey: clientMessageId,
       attachments,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
@@ -427,12 +328,24 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
 
     if (sendResult.runId) {
       set((state) => {
-        const runtime = getSessionRuntime(state, state.currentSessionKey);
+        const runtime = getSessionRuntime(state, currentSessionKey);
         const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_run_bound', runId: sendResult.runId });
         return {
-          loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-            runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-          }),
+          loadedSessions: patchSessionRecord(
+            {
+              loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
+            },
+            currentSessionKey,
+            {
+              runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+            },
+          ),
+        };
+      });
+    } else {
+      set((state) => {
+        return {
+          loadedSessions: patchSessionSnapshot(state, currentSessionKey, sendResult.snapshot),
         };
       });
     }

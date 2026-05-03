@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RawMessage } from '@/stores/chat';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 describe('chat row model', () => {
   it('builds rows from renderable messages and filters tool_result messages', () => {
@@ -12,12 +13,12 @@ describe('chat row model', () => {
 
     const rows = buildStaticChatRows({
       sessionKey: 'agent:main:main',
-      messages: rowSourceMessages,
+      entries: buildTimelineEntriesFromMessages('agent:main:main', rowSourceMessages),
     });
 
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.kind === 'message')).toBe(true);
-    expect(rows.map((row) => row.message.role)).toEqual(['assistant', 'user']);
+    expect(rows.map((row) => row.entry.message.role)).toEqual(['assistant', 'user']);
     expect(rows[0]).toMatchObject({
       role: 'assistant',
       text: 'a1',
@@ -33,45 +34,47 @@ describe('chat row model', () => {
 
     const rowsDuringStreaming = buildStaticChatRows({
       sessionKey,
-      messages: [
+      entries: buildTimelineEntriesFromMessages(sessionKey, [
         { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
         { role: 'assistant', content: 'hello', timestamp: 2, id: 'assistant-1', streaming: true },
-      ],
+      ]),
     });
     const finalRows = buildStaticChatRows({
       sessionKey,
-      messages: [
+      entries: buildTimelineEntriesFromMessages(sessionKey, [
         { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
         { role: 'assistant', content: 'hello world', timestamp: 2, id: 'assistant-1' },
-      ],
+      ]),
     });
 
     expect(rowsDuringStreaming[1]).toMatchObject({
       kind: 'message',
-      key: 'session:agent:main:main|id:assistant-1',
+      key: 'session:agent:main:main|entry:assistant-1',
     });
     expect(finalRows[1]).toMatchObject({
       kind: 'message',
-      key: 'session:agent:main:main|id:assistant-1',
+      key: 'session:agent:main:main|entry:assistant-1',
     });
   });
 
   it('does not create duplicate assistant rows once the transcript message exists', () => {
     const rows = buildStaticChatRows({
       sessionKey: 'agent:main:main',
-      messages: [
+      entries: buildTimelineEntriesFromMessages('agent:main:main', [
         { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
         { role: 'assistant', content: 'hello world', timestamp: 2, id: 'assistant-1' },
-      ],
+      ]),
     });
 
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({
       kind: 'message',
-      key: 'session:agent:main:main|id:assistant-1',
-      message: {
-        id: 'assistant-1',
-        content: 'hello world',
+      key: 'session:agent:main:main|entry:assistant-1',
+      entry: {
+        message: {
+          id: 'assistant-1',
+          content: 'hello world',
+        },
       },
     });
   });
@@ -79,20 +82,22 @@ describe('chat row model', () => {
   it('keeps streaming assistant content in the transcript row instead of creating a second runtime row', () => {
     const rows = buildStaticChatRows({
       sessionKey: 'agent:main:main',
-      messages: [
+      entries: buildTimelineEntriesFromMessages('agent:main:main', [
         { role: 'user', content: 'u1', timestamp: 1, id: 'user-1' },
         { role: 'assistant', content: 'hello world', timestamp: 2, id: 'assistant-stream-1', streaming: true },
-      ],
+      ]),
     });
 
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({
       kind: 'message',
-      key: 'session:agent:main:main|id:assistant-stream-1',
-      message: {
-        id: 'assistant-stream-1',
-        content: 'hello world',
-        streaming: true,
+      key: 'session:agent:main:main|entry:assistant-stream-1',
+      entry: {
+        message: {
+          id: 'assistant-stream-1',
+          content: 'hello world',
+          streaming: true,
+        },
       },
     });
   });
@@ -100,7 +105,7 @@ describe('chat row model', () => {
   it('builds no rows for an empty transcript', () => {
     const rows = buildStaticChatRows({
       sessionKey: 'agent:main:main',
-      messages: [],
+      entries: [],
     });
 
     expect(rows).toEqual([]);

@@ -1,53 +1,29 @@
-import { reduceSessionRuntime } from './runtime-state-reducer';
 import {
-  clearErrorRecoveryTimer,
   clearHistoryPoll,
   setLastChatEventAt,
 } from './timers';
-import {
-  canRuntimeEventReuseActiveRunId,
-  isRuntimeEventUsefulForPolling,
-  isUnboundLifecycleEvent,
-  shouldIgnoreRuntimeEvent,
-} from './event-routing';
-import { getMessageText } from './message-helpers';
-import { collectToolUpdates, upsertToolStatuses } from './event-helpers';
-import {
-  handleStoreErrorEvent,
-  handleStoreFinalEvent,
-} from './event-handlers';
-import {
-  armToolSnapshotTxnState,
-  consumeToolSnapshotTxnState,
-  getToolSnapshotTxnPhase,
-  resetToolSnapshotTxnState,
-} from './tool-snapshot-txn';
 import {
   bindChatRunIdTelemetry,
   finishChatRunTelemetry,
   maybeTrackSendToFirstToken,
 } from './telemetry';
 import {
-  getSessionMessages,
-  getSessionRuntime,
-  getSessionTooling,
-  patchSessionMessagesAndViewport,
-  patchSessionRecord,
-} from './store-state-helpers';
-import type {
-  ChatHistoryLoadMode,
-  ChatRuntimeEventPhase,
-  ChatStoreState,
-  RawMessage,
-} from './types';
+  isUnboundLifecycleEvent,
+  shouldIgnoreRuntimeEvent,
+} from './event-routing';
 import {
-  findCurrentStreamingMessage,
-  getStreamingMessageText,
-  removeMessageById,
-  resolveNextStreamingText,
-  resolveStreamingMessage,
-  upsertMessageById,
-} from './streaming-message';
+  getSessionRuntime,
+  getSessionTimelineEntries,
+  patchSessionRecord,
+  patchSessionTimelineAndViewport,
+  upsertSessionTimelineEntry,
+} from './store-state-helpers';
+import type { ChatStoreState } from './types';
+import type {
+  SessionMessageChunkUpdateEvent,
+  SessionMessageUpdateEvent,
+  SessionUpdateEvent,
+} from '../../../runtime-host/shared/session-adapter-types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -56,15 +32,9 @@ type ChatStoreSetFn = (
 
 type ChatStoreGetFn = () => ChatStoreState;
 
-type ConversationEventKind = 'chat.message' | 'chat.runtime.lifecycle';
-
-interface NormalizedConversationIngressEvent {
-  kind: ConversationEventKind;
-  phase: ChatRuntimeEventPhase;
-  runId: string;
-  sessionKey: string | null;
-  event: Record<string, unknown>;
-  message: unknown;
+interface BufferedSessionUpdateEvent {
+  sequenceId: number;
+  event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
 }
 
 interface CreateStoreRuntimeEventActionsInput {
@@ -72,327 +42,255 @@ interface CreateStoreRuntimeEventActionsInput {
   get: ChatStoreGetFn;
 }
 
-interface RuntimeEventDispatchBaseInput {
-  set: ChatStoreSetFn;
-  get: ChatStoreGetFn;
-  event: Record<string, unknown>;
-  message: unknown;
-  currentSessionKey: string;
-  eventRunId: string;
-}
-
-interface RuntimeEventFinalDispatchInput extends RuntimeEventDispatchBaseInput {
-  historyLoadModeOnMissingMessage?: ChatHistoryLoadMode;
-}
-
-interface RuntimeEventErrorDispatchInput extends RuntimeEventDispatchBaseInput {
-  onFinishFailedTelemetry: (errorMsg: string) => void;
-}
-
-interface RuntimeEventAbortedDispatchInput extends RuntimeEventDispatchBaseInput {
-  onFinishAbortedTelemetry: () => void;
-}
-
-interface RuntimeEventUnknownDispatchInput extends RuntimeEventDispatchBaseInput {
-  eventState: string;
-}
-
 function normalizeIdentifier(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function resolveStreamDeltaTextUpdate(
-  previousTargetText: string,
-  message: RawMessage | undefined,
-): {
-  text: string;
-  textMode: 'append' | 'snapshot' | 'keep';
-} {
-  const nextText = getMessageText(message?.content);
-  if (!nextText.trim()) {
-    return {
-      text: '',
-      textMode: 'keep',
-    };
+function normalizeSequenceId(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : null;
+}
+
+function buildSessionUpdateSequenceKey(
+  event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent,
+): string | null {
+  const sessionKey = normalizeIdentifier(event.sessionKey);
+  const laneKey = normalizeIdentifier(event.entry?.laneKey);
+  const turnKey = normalizeIdentifier(event.entry?.turnKey);
+  const role = normalizeIdentifier(event.entry?.role);
+  if (!sessionKey || !laneKey || !turnKey || !role) {
+    return null;
   }
-  if (!previousTargetText) {
-    return {
-      text: nextText,
-      textMode: 'snapshot',
-    };
+  return [sessionKey, laneKey, turnKey, role].join('|');
+}
+
+function readBufferedSessionUpdateEvents(
+  runtime: ReturnType<typeof getSessionRuntime>,
+  sequenceKey: string,
+): BufferedSessionUpdateEvent[] {
+  const buffered = runtime.bufferedMessageEventsByKey?.[sequenceKey];
+  if (!Array.isArray(buffered)) {
+    return [];
   }
-  if (nextText.startsWith(previousTargetText)) {
-    return {
-      text: nextText,
-      textMode: 'snapshot',
-    };
-  }
-  if (previousTargetText.startsWith(nextText)) {
-    return {
-      text: '',
-      textMode: 'keep',
-    };
+  return buffered
+    .map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const sequenceId = normalizeSequenceId(record.sequenceId);
+      const event = record.event;
+      if (sequenceId == null || !event || typeof event !== 'object' || Array.isArray(event)) {
+        return null;
+      }
+      const sessionUpdate = (event as { sessionUpdate?: unknown }).sessionUpdate;
+      if (sessionUpdate !== 'agent_message_chunk' && sessionUpdate !== 'agent_message') {
+        return null;
+      }
+      return {
+        sequenceId,
+        event: event as SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent,
+      } satisfies BufferedSessionUpdateEvent;
+    })
+    .filter((item): item is BufferedSessionUpdateEvent => item != null)
+    .sort((left, right) => left.sequenceId - right.sequenceId);
+}
+
+function writeBufferedSessionUpdateEvents(
+  runtime: ReturnType<typeof getSessionRuntime>,
+  sequenceKey: string,
+  bufferedEvents: BufferedSessionUpdateEvent[],
+): Pick<ReturnType<typeof getSessionRuntime>, 'bufferedMessageEventsByKey'> {
+  const nextBufferedByKey = { ...(runtime.bufferedMessageEventsByKey ?? {}) };
+  if (bufferedEvents.length === 0) {
+    delete nextBufferedByKey[sequenceKey];
+  } else {
+    nextBufferedByKey[sequenceKey] = bufferedEvents.map((item) => ({
+      sequenceId: item.sequenceId,
+      event: item.event,
+    }));
   }
   return {
-    text: nextText,
-    textMode: 'append',
+    bufferedMessageEventsByKey: nextBufferedByKey,
   };
 }
 
-function hasTokenContent(message: unknown): boolean {
-  if (!message || typeof message !== 'object') {
-    return false;
-  }
-  const content = getMessageText((message as RawMessage).content);
-  return content.trim().length > 0;
-}
-
-function buildNextStreamingState(params: {
-  state: ChatStoreState;
-  sessionKey: string;
-  runId: string;
-  message: RawMessage;
-  updates: ReturnType<typeof collectToolUpdates>;
-}): {
-  nextRuntime: ReturnType<typeof getSessionRuntime>;
-  nextTooling: ReturnType<typeof getSessionTooling>;
-  nextMessages: RawMessage[];
-} {
-  const {
-    state,
-    sessionKey,
-    runId,
-    message,
-    updates,
-  } = params;
-  const runtime = getSessionRuntime(state, sessionKey);
-  const tooling = getSessionTooling(state, sessionKey);
-  const currentMessages = getSessionMessages(state, sessionKey);
-  const currentStreamingMessage = findCurrentStreamingMessage(currentMessages, runtime.streamingMessageId);
-  const currentStreamingText = getStreamingMessageText(currentStreamingMessage);
-  const textUpdate = resolveStreamDeltaTextUpdate(currentStreamingText, message);
-  const resolvedMessageId = (
-    message.id
-    || message.messageId
-    || runtime.streamingMessageId
-    || `stream:${runId}`
-  ).trim();
-  const nextStreamingMessage = resolveStreamingMessage({
-    previousMessage: currentStreamingMessage,
-    incomingMessage: message,
-    messageId: resolvedMessageId,
-    targetText: resolveNextStreamingText(currentStreamingText, textUpdate),
-    lastUserMessageAt: runtime.lastUserMessageAt,
-  });
-  const runtimePatch = reduceSessionRuntime(runtime, {
-    type: 'stream_delta_queued',
-    runId,
-    messageId: resolvedMessageId,
-  });
+function writePendingMessageSequence(
+  runtime: ReturnType<typeof getSessionRuntime>,
+  sequenceKey: string,
+  nextSequenceId: number,
+): Pick<ReturnType<typeof getSessionRuntime>, 'pendingMessageSequenceByKey'> {
   return {
-    nextRuntime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-    nextTooling: updates.length > 0
-      ? { ...tooling, streamingTools: upsertToolStatuses(tooling.streamingTools, updates) }
-      : tooling,
-    nextMessages: upsertMessageById(currentMessages, nextStreamingMessage),
+    pendingMessageSequenceByKey: {
+      ...(runtime.pendingMessageSequenceByKey ?? {}),
+      [sequenceKey]: nextSequenceId,
+    },
   };
 }
 
-function normalizeConversationIngressEvent(
-  event: Record<string, unknown>,
-): NormalizedConversationIngressEvent | null {
-  const kind = event.kind;
-  if (kind !== 'chat.message' && kind !== 'chat.runtime.lifecycle') {
-    return null;
-  }
-  const phase = event.phase;
-  if (
-    phase !== 'started'
-    && phase !== 'delta'
-    && phase !== 'final'
-    && phase !== 'error'
-    && phase !== 'aborted'
-    && phase !== 'unknown'
-  ) {
-    return null;
-  }
-  const payload = event.event;
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return null;
-  }
-  const payloadRecord = payload as Record<string, unknown>;
-  return {
-    kind,
-    phase,
-    runId: normalizeIdentifier(event.runId),
-    sessionKey: normalizeIdentifier(event.sessionKey) || null,
-    event: payloadRecord,
-    message: payloadRecord.message,
-  };
-}
-
-function markRuntimePollingActivity(
-  set: ChatStoreSetFn,
-  currentSessionKey: string,
-  runId: string,
+function applySessionLifecycleEvent(
+  input: CreateStoreRuntimeEventActionsInput & {
+    currentSessionKey: string;
+    event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
+  },
 ): void {
-  clearHistoryPoll();
-  set((state) => {
-    const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, {
-      type: 'run_started',
-      runId,
-    });
-    return {
-      loadedSessions: patchSessionRecord(state, currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-      }),
-    };
-  });
-}
-
-function handleRuntimeStartedEvent(input: RuntimeEventDispatchBaseInput): void {
-  const { set, currentSessionKey, eventRunId } = input;
-  set((state) => {
-    const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_started', runId: eventRunId });
-    return {
-      loadedSessions: patchSessionRecord(state, currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-      }),
-    };
-  });
-}
-
-function handleRuntimeDeltaEvent(input: RuntimeEventDispatchBaseInput): void {
   const {
     set,
     get,
-    message,
     currentSessionKey,
-    eventRunId,
+    event,
   } = input;
 
-  clearErrorRecoveryTimer();
-  if (get().error) {
-    set({ error: null });
+  const eventSessionKey = normalizeIdentifier(event.sessionKey);
+  const eventRunId = normalizeIdentifier(event.runId);
+  const stateBeforeHandle = get();
+
+  if (
+    eventSessionKey
+    && (
+      event.phase === 'started'
+      || event.phase === 'final'
+      || event.phase === 'error'
+      || event.phase === 'aborted'
+    )
+    && (
+      eventSessionKey !== currentSessionKey
+      || !Object.prototype.hasOwnProperty.call(stateBeforeHandle.loadedSessions, eventSessionKey)
+    )
+  ) {
+    void stateBeforeHandle.loadSessions();
   }
-  set((state) => {
-    const runtime = getSessionRuntime(state, currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'delta_received' });
-    return {
-      loadedSessions: patchSessionRecord(state, currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-      }),
-    };
-  });
-  if (hasTokenContent(message)) {
-    maybeTrackSendToFirstToken(currentSessionKey, 'delta');
-  }
-  const updates = collectToolUpdates(message, 'delta');
-  set((state) => {
-    const { nextRuntime, nextTooling, nextMessages } = buildNextStreamingState({
-      state,
+
+  if (
+    (event.phase === 'error' || event.phase === 'aborted')
+    && (
+      !eventSessionKey
+      || eventSessionKey === currentSessionKey
+      || (eventRunId && getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId === eventRunId)
+    )
+  ) {
+    void stateBeforeHandle.loadHistory({
       sessionKey: currentSessionKey,
-      runId: eventRunId || (getSessionRuntime(state, currentSessionKey).activeRunId ?? 'run'),
-      message: (message as RawMessage | undefined) ?? { role: 'assistant', content: '' },
-      updates,
+      mode: 'quiet',
+      scope: 'foreground',
+      reason: 'session_runtime_lifecycle_reconcile',
     });
-    return {
-      loadedSessions: patchSessionRecord(
-        { loadedSessions: patchSessionMessagesAndViewport(state, currentSessionKey, nextMessages) },
-        currentSessionKey,
-        { runtime: nextRuntime, tooling: nextTooling },
-      ),
-    };
-  });
-  armToolSnapshotTxnState(
-    currentSessionKey,
-    eventRunId,
-    message,
-  );
-}
+  }
 
-function handleRuntimeFinalEvent(input: RuntimeEventFinalDispatchInput): void {
-  const {
-    set,
-    get,
-    event,
+  const activeRunId = getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId;
+  if (shouldIgnoreRuntimeEvent({
+    activeRunId,
     currentSessionKey,
-    eventRunId,
-    historyLoadModeOnMissingMessage,
-  } = input;
+    runId: eventRunId,
+    eventSessionKey,
+  })) {
+    return;
+  }
 
-  handleStoreFinalEvent({
-    set,
-    get,
-    event,
-    resolvedState: 'final',
-    currentSessionKey,
-    eventRunId,
-    snapshot: {
-      reset: resetToolSnapshotTxnState,
-      armIfIdle: (sessionKey, normalizedRunId, message) => {
-        if (getToolSnapshotTxnPhase() !== 'idle') {
-          return;
-        }
-        armToolSnapshotTxnState(sessionKey, normalizedRunId, message);
+  bindChatRunIdTelemetry(currentSessionKey, eventRunId);
+  setLastChatEventAt(Date.now());
+
+  if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
+    clearHistoryPoll();
+  }
+
+  if (isUnboundLifecycleEvent(event.phase, eventRunId)) {
+    void get().loadHistory({
+      sessionKey: currentSessionKey,
+      mode: 'quiet',
+      scope: 'foreground',
+      reason: `session_runtime_unbound_${event.phase}_reconcile`,
+    });
+    return;
+  }
+
+  set((state) => ({
+    error: event.phase === 'started' || event.phase === 'final' ? null : state.error,
+    loadedSessions: patchSessionRecord(state, currentSessionKey, {
+      runtime: {
+        ...getSessionRuntime(state, currentSessionKey),
+        sending: event.runtime.sending,
+        activeRunId: event.runtime.activeRunId,
+        runPhase: event.runtime.runPhase,
+        streamingMessageId: event.runtime.streamingMessageId,
+        pendingFinal: event.runtime.pendingFinal,
+        lastUserMessageAt: event.runtime.lastUserMessageAt,
       },
-      consume: consumeToolSnapshotTxnState,
-    },
-    onMaybeTrackFirstTokenFinal: () => {
-      maybeTrackSendToFirstToken(currentSessionKey, 'final');
-    },
-    historyLoadModeOnMissingMessage,
-  });
+    }),
+  }));
+
+  if (event.phase === 'final') {
+    finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_final' });
+  } else if (event.phase === 'aborted') {
+    finishChatRunTelemetry(currentSessionKey, 'aborted', { stage: 'session_update_aborted' });
+  }
 }
 
-function handleRuntimeErrorEvent(input: RuntimeEventErrorDispatchInput): void {
+function applySessionMessageEvent(
+  input: CreateStoreRuntimeEventActionsInput & {
+    currentSessionKey: string;
+    event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
+  },
+): void {
   const {
     set,
-    get,
+    currentSessionKey,
     event,
-    onFinishFailedTelemetry,
   } = input;
 
-  handleStoreErrorEvent({
-    set,
-    get,
-    event,
-    onFinishFailedTelemetry,
-    onResetSnapshotTxn: resetToolSnapshotTxnState,
-  });
-}
+  const authoritativeEntry = {
+    ...event.entry,
+    message: {
+      ...event.entry.message,
+      id: event.entry.message.id ?? event.entry.entryId,
+    },
+  };
 
-function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInput): void {
-  const { set, onFinishAbortedTelemetry } = input;
-  resetToolSnapshotTxnState();
-  clearHistoryPoll();
-  clearErrorRecoveryTimer();
-  onFinishAbortedTelemetry();
+  if (
+    authoritativeEntry.role === 'assistant'
+    && typeof authoritativeEntry.text === 'string'
+    && authoritativeEntry.text.trim()
+  ) {
+    maybeTrackSendToFirstToken(
+      currentSessionKey,
+      event.sessionUpdate === 'agent_message_chunk' ? 'delta' : 'final',
+    );
+  }
+
   set((state) => {
-    const runtime = getSessionRuntime(state, state.currentSessionKey);
-    const tooling = getSessionTooling(state, state.currentSessionKey);
-    const runtimePatch = reduceSessionRuntime(runtime, { type: 'run_aborted' });
+    const nextTimelineEntries = upsertSessionTimelineEntry(
+      getSessionTimelineEntries(state, currentSessionKey),
+      authoritativeEntry,
+    );
     return {
+      error: null,
       loadedSessions: patchSessionRecord(
         {
-          loadedSessions: patchSessionMessagesAndViewport(
+          loadedSessions: patchSessionTimelineAndViewport(
             state,
-            state.currentSessionKey,
-            removeMessageById(
-              getSessionMessages(state, state.currentSessionKey),
-              runtime.streamingMessageId,
-            ),
+            currentSessionKey,
+            nextTimelineEntries,
+            {
+              totalMessageCount: event.window.totalEntryCount,
+              windowStartOffset: event.window.windowStartOffset,
+              windowEndOffset: event.window.windowEndOffset,
+              hasMore: event.window.hasMore,
+              hasNewer: event.window.hasNewer,
+              isAtLatest: event.window.isAtLatest,
+            },
           ),
         },
-        state.currentSessionKey,
+        currentSessionKey,
         {
-          runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
-          tooling: {
-            ...tooling,
-            streamingTools: [],
-            pendingToolImages: [],
+          runtime: {
+            ...getSessionRuntime(state, currentSessionKey),
+            sending: event.runtime.sending,
+            activeRunId: event.runtime.activeRunId,
+            runPhase: event.runtime.runPhase,
+            streamingMessageId: event.runtime.streamingMessageId,
+            pendingFinal: event.runtime.pendingFinal,
+            lastUserMessageAt: event.runtime.lastUserMessageAt,
           },
         },
       ),
@@ -400,200 +298,138 @@ function handleRuntimeAbortedEvent(input: RuntimeEventAbortedDispatchInput): voi
   });
 }
 
-function handleRuntimeUnknownEvent(input: RuntimeEventUnknownDispatchInput): void {
-  const { set, get, message } = input;
-  const runtime = getSessionRuntime(get(), get().currentSessionKey);
-  if (runtime.sending && message && typeof message === 'object') {
-    const updates = collectToolUpdates(message, 'delta');
-    const sessionKey = get().currentSessionKey;
-    const runId = getSessionRuntime(get(), sessionKey).activeRunId ?? '';
+function dispatchBufferedOrDirectSessionMessageEvent(
+  input: CreateStoreRuntimeEventActionsInput & {
+    currentSessionKey: string;
+    event: SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent;
+  },
+): void {
+  const { set, currentSessionKey, event } = input;
+  const sequenceKey = buildSessionUpdateSequenceKey(event);
+  const sequenceId = normalizeSequenceId(event.entry.sequenceId);
+
+  if (sequenceKey && sequenceId != null) {
     set((state) => {
-      const { nextRuntime, nextTooling, nextMessages } = buildNextStreamingState({
-        state,
-        sessionKey,
-        runId: runId || 'run',
-        message: message as RawMessage,
-        updates,
-      });
+      const runtime = getSessionRuntime(state, currentSessionKey);
+      const expectedSequenceId = runtime.pendingMessageSequenceByKey?.[sequenceKey] ?? 1;
+      const existingBuffered = readBufferedSessionUpdateEvents(runtime, sequenceKey);
+      const deduped = existingBuffered.filter((item) => item.sequenceId !== sequenceId);
+      const nextBuffered = [...deduped, { sequenceId, event }].sort((left, right) => left.sequenceId - right.sequenceId);
+
+      let nextExpectedSequenceId = expectedSequenceId;
+      const remaining: BufferedSessionUpdateEvent[] = [];
+      const drainedEvents: Array<SessionMessageChunkUpdateEvent | SessionMessageUpdateEvent> = [];
+      for (const item of nextBuffered) {
+        if (item.sequenceId === nextExpectedSequenceId) {
+          drainedEvents.push(item.event);
+          nextExpectedSequenceId += 1;
+          continue;
+        }
+        remaining.push(item);
+      }
+
+      if (drainedEvents.length === 0) {
+        return {
+          loadedSessions: patchSessionRecord(state, currentSessionKey, {
+            runtime: {
+              ...runtime,
+              ...writeBufferedSessionUpdateEvents(runtime, sequenceKey, nextBuffered),
+              ...writePendingMessageSequence(runtime, sequenceKey, expectedSequenceId),
+            },
+          }),
+        };
+      }
+
+      let workingState = state;
+      let workingRuntime = runtime;
+      for (const drainedEvent of drainedEvents) {
+        applySessionMessageEvent({
+          set: (partial) => {
+            const patch = typeof partial === 'function' ? partial(workingState) : partial;
+            workingState = { ...workingState, ...patch } as ChatStoreState;
+          },
+          get: () => workingState,
+          currentSessionKey,
+          event: drainedEvent,
+        });
+        workingRuntime = getSessionRuntime(workingState, currentSessionKey);
+      }
+
       return {
-        loadedSessions: patchSessionRecord(
-          { loadedSessions: patchSessionMessagesAndViewport(state, sessionKey, nextMessages) },
-          sessionKey,
-          { runtime: nextRuntime, tooling: nextTooling },
-        ),
+        loadedSessions: patchSessionRecord(workingState, currentSessionKey, {
+          runtime: {
+            ...workingRuntime,
+            ...writeBufferedSessionUpdateEvents(workingRuntime, sequenceKey, remaining),
+            ...writePendingMessageSequence(workingRuntime, sequenceKey, nextExpectedSequenceId),
+          },
+        }),
       };
     });
-  }
-}
-
-export function handleStoreConversationEvent(
-  input: CreateStoreRuntimeEventActionsInput,
-  incomingEvent: Record<string, unknown>,
-): void {
-  const { set, get } = input;
-
-  const normalizedEvent = normalizeConversationIngressEvent(incomingEvent);
-  if (!normalizedEvent) {
     return;
   }
 
-  const stateBeforeHandle = get();
-  if (
-    normalizedEvent.kind === 'chat.runtime.lifecycle'
-    && normalizedEvent.sessionKey
-    && (
-      normalizedEvent.phase === 'started'
-      || normalizedEvent.phase === 'final'
-      || normalizedEvent.phase === 'error'
-      || normalizedEvent.phase === 'aborted'
-    )
-    && (
-      normalizedEvent.sessionKey !== stateBeforeHandle.currentSessionKey
-      || !Object.prototype.hasOwnProperty.call(stateBeforeHandle.loadedSessions, normalizedEvent.sessionKey)
-    )
-  ) {
-    void stateBeforeHandle.loadSessions();
-  }
-  if (
-    normalizedEvent.kind === 'chat.runtime.lifecycle'
-    && (normalizedEvent.phase === 'error' || normalizedEvent.phase === 'aborted')
-  ) {
-    const currentRuntime = getSessionRuntime(stateBeforeHandle, stateBeforeHandle.currentSessionKey);
-    const matchesCurrentSession = (
-      normalizedEvent.sessionKey == null
-      || normalizedEvent.sessionKey === stateBeforeHandle.currentSessionKey
-    );
-    const matchesActiveRun = (
-      Boolean(normalizedEvent.runId)
-      && currentRuntime.activeRunId != null
-      && normalizedEvent.runId === currentRuntime.activeRunId
-    );
-    if (matchesCurrentSession || matchesActiveRun || normalizedEvent.sessionKey == null) {
-      void stateBeforeHandle.loadHistory({
-        sessionKey: stateBeforeHandle.currentSessionKey,
-        mode: 'quiet',
-        scope: 'foreground',
-        reason: 'gateway_runtime_phase_refresh',
-      });
-    }
+  applySessionMessageEvent(input);
+}
+
+export function handleStoreSessionUpdateEvent(
+  input: CreateStoreRuntimeEventActionsInput,
+  sessionUpdate: SessionUpdateEvent,
+): void {
+  if (!sessionUpdate || typeof sessionUpdate !== 'object') {
+    return;
   }
 
-  const { currentSessionKey } = get();
-  const activeRunId = getSessionRuntime(get(), currentSessionKey).activeRunId;
+  const { set, get } = input;
+  const stateBeforeHandle = get();
+  const currentSessionKey = stateBeforeHandle.currentSessionKey;
+  const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
+  const eventRunId = normalizeIdentifier(sessionUpdate.runId);
+  const activeRunId = getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId;
+
+  if (sessionUpdate.sessionUpdate === 'session_info_update') {
+    applySessionLifecycleEvent({
+      set,
+      get,
+      currentSessionKey,
+      event: sessionUpdate,
+    });
+    return;
+  }
+
+  if (
+    sessionUpdate.sessionUpdate !== 'agent_message_chunk'
+    && sessionUpdate.sessionUpdate !== 'agent_message'
+  ) {
+    return;
+  }
+  if (!sessionUpdate.entry || !sessionUpdate.entry.message) {
+    return;
+  }
 
   if (shouldIgnoreRuntimeEvent({
     activeRunId,
     currentSessionKey,
-    runId: normalizedEvent.runId,
-    eventSessionKey: normalizedEvent.sessionKey,
+    runId: eventRunId,
+    eventSessionKey,
   })) {
     return;
   }
 
-  bindChatRunIdTelemetry(currentSessionKey, normalizedEvent.runId);
+  bindChatRunIdTelemetry(currentSessionKey, eventRunId);
   setLastChatEventAt(Date.now());
 
-  const isChatMessage = normalizedEvent.kind === 'chat.message';
-  if (isChatMessage && isRuntimeEventUsefulForPolling(normalizedEvent.phase)) {
-    markRuntimePollingActivity(set, currentSessionKey, normalizedEvent.runId);
-  } else if (!isChatMessage && (
-    normalizedEvent.phase === 'final'
-    || normalizedEvent.phase === 'error'
-    || normalizedEvent.phase === 'aborted'
-  )) {
-    clearHistoryPoll();
-  }
+  dispatchBufferedOrDirectSessionMessageEvent({
+    set,
+    get,
+    currentSessionKey,
+    event: sessionUpdate,
+  });
 
-  if (isUnboundLifecycleEvent(normalizedEvent.phase, normalizedEvent.runId)) {
-    void get().loadHistory({
-      sessionKey: currentSessionKey,
-      mode: 'quiet',
-      scope: 'foreground',
-      reason: isChatMessage
-        ? `unbound_${normalizedEvent.phase}_event_reconcile`
-        : `unbound_${normalizedEvent.phase}_lifecycle_reconcile`,
-    });
-    return;
-  }
-
-  const eventRunId = normalizedEvent.runId || (
-    isChatMessage && canRuntimeEventReuseActiveRunId(normalizedEvent.phase)
-      ? (activeRunId || '')
-      : ''
-  );
-  const normalizedMessage = isChatMessage ? normalizedEvent.message : undefined;
-  switch (normalizedEvent.phase) {
-    case 'started':
-      handleRuntimeStartedEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        currentSessionKey,
-        eventRunId,
-      });
-      return;
-    case 'delta':
-      handleRuntimeDeltaEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        currentSessionKey,
-        eventRunId,
-      });
-      return;
-    case 'final':
-      handleRuntimeFinalEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        currentSessionKey,
-        eventRunId,
-        historyLoadModeOnMissingMessage: normalizedEvent.kind === 'chat.runtime.lifecycle' ? 'quiet' : 'active',
-      });
-      return;
-    case 'error':
-      handleRuntimeErrorEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        currentSessionKey,
-        eventRunId,
-        onFinishFailedTelemetry: (errorMsg) => {
-          finishChatRunTelemetry(currentSessionKey, 'failed', {
-            stage: normalizedEvent.kind === 'chat.runtime.lifecycle' ? 'runtime_phase_error' : 'event_error',
-            error: errorMsg,
-          });
-        },
-      });
-      return;
-    case 'aborted':
-      handleRuntimeAbortedEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        currentSessionKey,
-        eventRunId,
-        onFinishAbortedTelemetry: () => {
-          finishChatRunTelemetry(currentSessionKey, 'aborted', {
-            stage: normalizedEvent.kind === 'chat.runtime.lifecycle' ? 'runtime_phase_aborted' : 'event_aborted',
-          });
-        },
-      });
-      return;
-    default:
-      handleRuntimeUnknownEvent({
-        set,
-        get,
-        event: normalizedEvent.event,
-        message: normalizedMessage,
-        eventState: normalizedEvent.phase,
-        currentSessionKey,
-        eventRunId,
-      });
+  if (sessionUpdate.sessionUpdate === 'agent_message') {
+    const role = normalizeIdentifier(sessionUpdate.entry.role);
+    if (role === 'assistant') {
+      finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_message_final' });
+      clearHistoryPoll();
+    }
   }
 }

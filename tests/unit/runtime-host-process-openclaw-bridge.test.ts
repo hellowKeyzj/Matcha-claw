@@ -20,13 +20,25 @@ describe('runtime-host openclaw bridge', () => {
     const client = createGatewayClientStub();
     const bridge = createOpenClawBridge(client);
 
-    await bridge.chatSend({ sessionKey: 'agent:main:main', message: 'hello' });
+    await bridge.chatSend({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-local-1',
+      uniqueId: 'user-local-1',
+      requestId: 'user-local-1',
+    });
 
     expect(client.gatewayRpc).toHaveBeenCalledWith(
       'chat.send',
-      expect.objectContaining({ sessionKey: 'agent:main:main', message: 'hello' }),
+      expect.objectContaining({
+        sessionKey: 'agent:main:main',
+        message: 'hello',
+        idempotencyKey: 'user-local-1',
+      }),
       120000,
     );
+    expect((client.gatewayRpc.mock.calls[0]?.[1] as { uniqueId?: string }).uniqueId).toBeUndefined();
+    expect((client.gatewayRpc.mock.calls[0]?.[1] as { requestId?: string }).requestId).toBeUndefined();
   });
 
   it('security.audit.query 通过 URL 参数构建器统一映射', async () => {

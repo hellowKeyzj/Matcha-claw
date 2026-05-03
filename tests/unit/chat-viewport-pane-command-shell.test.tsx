@@ -92,12 +92,10 @@ describe('chat list command shell', () => {
         currentSession={buildCurrentSession(true)}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={loadOlderFirst}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -119,12 +117,10 @@ describe('chat list command shell', () => {
         currentSession={buildCurrentSession(true)}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={loadOlderSecond}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -148,12 +144,10 @@ describe('chat list command shell', () => {
         currentSession={buildCurrentSession(false)}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -175,12 +169,10 @@ describe('chat list command shell', () => {
         currentSession={buildCurrentSession(false)}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
@@ -212,12 +204,10 @@ describe('chat list command shell', () => {
         }}
         agents={[]}
         isGatewayRunning={false}
-        gatewayRpc={vi.fn()}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        assistantAgentId="test"
-        assistantAgentName="Test Agent"
+        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={jumpToLatest}

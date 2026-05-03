@@ -1,102 +1,96 @@
 import { describe, expect, it } from 'vitest';
-import {
-  enrichWithCachedImages,
-  enrichWithToolResultFiles,
-} from '@/stores/chat/attachment-helpers';
-import type { RawMessage } from '@/stores/chat/types';
+import { hydrateAttachedFilesFromTimelineEntries } from '@/stores/chat/attachment-helpers';
+import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
+
+function buildEntry(input: Partial<SessionTimelineEntry>): SessionTimelineEntry {
+  const role = input.role ?? 'assistant';
+  const entryId = input.entryId ?? 'entry-1';
+  return {
+    entryId,
+    sessionKey: 'agent:test:main',
+    laneKey: 'main',
+    turnKey: `main:${entryId}`,
+    role,
+    status: 'final',
+    text: '',
+    message: {
+      role,
+      content: '',
+      ...input.message,
+    },
+    ...input,
+  };
+}
 
 describe('chat attachment helpers', () => {
   it('does not synthesize assistant attachments from raw absolute paths in assistant text', () => {
-    const messages: RawMessage[] = [
-      {
+    const entries = [buildEntry({
+      entryId: 'assistant-1',
+      role: 'assistant',
+      message: {
         role: 'assistant',
-        id: 'assistant-1',
-        content: [
-          'Windows 下 browser navigate 异常',
-          '',
-          "这个 Only URLs with a scheme... Received protocol 'e:' 很值得重点查",
-          '看起来像某个本地路径被当成 ESM loader 输入了',
-          'E:\\code\\Matcha-claw\\browser.md',
-        ].join('\n'),
+        content: ['path', 'E:\\code\\Matcha-claw\\browser.md'].join('\n'),
       },
-    ];
+    })];
 
-    const enriched = enrichWithCachedImages(messages);
+    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
 
-    expect(enriched[0]?._attachedFiles).toBeUndefined();
+    expect(hydrated[0]?.message._attachedFiles).toBeUndefined();
   });
 
-  it('does not inherit raw absolute paths from the previous user message into assistant attachments', () => {
-    const messages: RawMessage[] = [
-      {
+  it('keeps explicit authoritative attached files on user entries', () => {
+    const entries = [buildEntry({
+      entryId: 'user-1',
+      role: 'user',
+      message: {
         role: 'user',
-        id: 'user-1',
-        content: '请帮我看这个文件 E:\\code\\Matcha-claw\\browser.md',
-      },
-      {
-        role: 'assistant',
-        id: 'assistant-1',
-        content: '我先帮你看原因。',
-      },
-    ];
-
-    const enriched = enrichWithCachedImages(messages);
-
-    expect(enriched[1]?._attachedFiles).toBeUndefined();
-  });
-
-  it('keeps explicit media-attached references as attached files', () => {
-    const messages: RawMessage[] = [
-      {
-        role: 'user',
-        id: 'user-1',
         content: '[media attached: E:\\code\\Matcha-claw\\browser.md (text/markdown) | browser.md]',
+        _attachedFiles: [{
+          fileName: 'browser.md',
+          mimeType: 'text/markdown',
+          fileSize: 0,
+          preview: null,
+          filePath: 'E:\\code\\Matcha-claw\\browser.md',
+        }],
       },
-    ];
+    })];
 
-    const enriched = enrichWithCachedImages(messages);
+    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
 
-    expect(enriched[0]?._attachedFiles).toEqual([
-      {
-        fileName: 'browser.md',
-        mimeType: 'text/markdown',
-        fileSize: 0,
-        preview: null,
-        filePath: 'E:\\code\\Matcha-claw\\browser.md',
-      },
-    ]);
+    expect(hydrated[0]?.message._attachedFiles).toEqual([{
+      fileName: 'browser.md',
+      mimeType: 'text/markdown',
+      fileSize: 0,
+      preview: null,
+      filePath: 'E:\\code\\Matcha-claw\\browser.md',
+    }]);
   });
 
-  it('keeps structured tool-result images as assistant attachments', () => {
-    const messages: RawMessage[] = [
-      {
+  it('keeps structured tool-result images as assistant timeline attachments', () => {
+    const entries = [
+      buildEntry({
+        entryId: 'toolresult-1',
         role: 'toolresult',
-        id: 'toolresult-1',
-        toolCallId: 'tool-call-1',
-        content: [
-          {
-            type: 'image',
-            mimeType: 'image/png',
-            data: 'abc',
-          },
-        ],
-      },
-      {
+        message: {
+          role: 'toolresult',
+          toolCallId: 'tool-call-1',
+          content: [{ type: 'image', mimeType: 'image/png', data: 'abc' }],
+        },
+      }),
+      buildEntry({
+        entryId: 'assistant-1',
         role: 'assistant',
-        id: 'assistant-1',
-        content: '结果如下。',
-      },
+        message: { role: 'assistant', content: '结果如下。' },
+      }),
     ];
 
-    const enriched = enrichWithToolResultFiles(messages);
+    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
 
-    expect(enriched[1]?._attachedFiles).toEqual([
-      {
-        fileName: 'image',
-        mimeType: 'image/png',
-        fileSize: 0,
-        preview: 'data:image/png;base64,abc',
-      },
-    ]);
+    expect(hydrated[1]?.message._attachedFiles).toEqual([{
+      fileName: 'image',
+      mimeType: 'image/png',
+      fileSize: 0,
+      preview: 'data:image/png;base64,abc',
+    }]);
   });
 });

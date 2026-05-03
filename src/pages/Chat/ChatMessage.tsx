@@ -1,5 +1,4 @@
 import { useState, memo } from 'react';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ChatMessageRow } from './chat-row-model';
 import { AssistantMessageBody } from './assistant-message-body';
 import { MessageShell } from './chat-message-shell';
@@ -20,17 +19,13 @@ export const ChatMessage = memo(function ChatMessage({
   row,
   showThinking,
   suppressToolCards = false,
-  assistantAgentId,
-  assistantAgentName,
-  assistantAvatarSeed,
-  assistantAvatarStyle,
   userAvatarImageUrl,
   streamingTools = [],
 }: ChatMessageProps) {
-  const { message } = row;
+  const { entry } = row;
   const { messageView } = row;
   const isUser = row.role === 'user';
-  const isStreaming = Boolean(message.streaming);
+  const isStreaming = entry.status === 'streaming' || Boolean(entry.message.streaming);
   const hasText = row.text.trim().length > 0;
   const visibleThinking = showThinking ? messageView.thinking : null;
   const visibleTools = suppressToolCards ? [] : messageView.toolUses;
@@ -44,10 +39,10 @@ export const ChatMessage = memo(function ChatMessage({
     <>
       <MessageShell
         isUser={isUser}
-        assistantAgentId={assistantAgentId}
-        assistantAgentName={assistantAgentName}
-        assistantAvatarSeed={assistantAvatarSeed}
-        assistantAvatarStyle={assistantAvatarStyle}
+        assistantAgentId={row.assistantPresentation?.agentId}
+        assistantAgentName={row.assistantPresentation?.agentName}
+        assistantAvatarSeed={row.assistantPresentation?.avatarSeed}
+        assistantAvatarStyle={row.assistantPresentation?.avatarStyle}
         userAvatarImageUrl={userAvatarImageUrl}
       >
         {isStreaming && !isUser && streamingTools.length > 0 && (
@@ -96,8 +91,8 @@ export const ChatMessage = memo(function ChatMessage({
           />
         )}
 
-        {isUser && <UserMessageMetaBar timestamp={message.timestamp} />}
-        {!isUser && hasText && <AssistantMessageMetaBar text={row.text} timestamp={message.timestamp} />}
+        {isUser && <UserMessageMetaBar timestamp={entry.timestamp} />}
+        {!isUser && hasText && <AssistantMessageMetaBar text={row.text} timestamp={entry.timestamp} />}
       </MessageShell>
 
       {/* Image lightbox portal */}
@@ -117,10 +112,6 @@ interface ChatMessageProps {
   row: ChatMessageRow;
   showThinking: boolean;
   suppressToolCards?: boolean;
-  assistantAgentId?: string;
-  assistantAgentName?: string;
-  assistantAvatarSeed?: string;
-  assistantAvatarStyle?: AgentAvatarStyle;
   userAvatarImageUrl?: string | null;
   streamingTools?: Array<{
     id?: string;

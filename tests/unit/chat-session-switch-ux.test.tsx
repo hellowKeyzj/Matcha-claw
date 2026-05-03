@@ -8,6 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 class ResizeObserverStub {
@@ -36,7 +37,7 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    messages: overrides?.messages ?? base.messages,
+    timelineEntries: overrides?.timelineEntries ?? base.timelineEntries,
     window: overrides?.window ?? base.window,
   };
 }
@@ -56,6 +57,8 @@ function setupChatSessions() {
   const anotherSessionKey = 'agent:another:main';
   const currentMessages = buildMessages(12, 'current');
   const anotherMessages = buildMessages(6, 'another');
+  const currentEntries = buildTimelineEntriesFromMessages(currentSessionKey, currentMessages);
+  const anotherEntries = buildTimelineEntriesFromMessages(anotherSessionKey, anotherMessages);
 
   useGatewayStore.setState({
     status: { state: 'running', port: 18789 },
@@ -101,12 +104,12 @@ function setupChatSessions() {
     },
     loadedSessions: {
       [currentSessionKey]: buildSessionRecord({
-        messages: currentMessages,
+        timelineEntries: currentEntries,
         window: createViewportWindowState({
           ...createEmptySessionViewportState(),
-          totalMessageCount: currentMessages.length,
+          totalMessageCount: currentEntries.length,
           windowStartOffset: 0,
-          windowEndOffset: currentMessages.length,
+          windowEndOffset: currentEntries.length,
           hasMore: false,
           hasNewer: false,
           isAtLatest: true,
@@ -122,12 +125,12 @@ function setupChatSessions() {
         },
       }),
       [anotherSessionKey]: buildSessionRecord({
-        messages: anotherMessages,
+        timelineEntries: anotherEntries,
         window: createViewportWindowState({
           ...createEmptySessionViewportState(),
-          totalMessageCount: anotherMessages.length,
+          totalMessageCount: anotherEntries.length,
           windowStartOffset: 0,
-          windowEndOffset: anotherMessages.length,
+          windowEndOffset: anotherEntries.length,
           hasMore: false,
           hasNewer: false,
           isAtLatest: true,
@@ -173,7 +176,7 @@ describe('chat 会话切换 UX', () => {
     });
 
     const record = useChatStore.getState().loadedSessions[currentSessionKey];
-    expect(record?.messages).toHaveLength(12);
+    expect(record?.timelineEntries).toHaveLength(12);
     expect(record?.runtime.activeRunId).toBe('run-current');
     expect(record?.runtime.sending).toBe(true);
   });

@@ -4,12 +4,25 @@ import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import type { RawMessage } from '@/stores/chat';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 function buildRow(message: RawMessage) {
-  return buildStaticChatRows({
+  const row = buildStaticChatRows({
     sessionKey: 'agent:test:main',
-    messages: [message],
+    entries: buildTimelineEntriesFromMessages('agent:test:main', [message]),
   })[0]!;
+  if (row.role === 'assistant') {
+    return {
+      ...row,
+      assistantPresentation: {
+        agentId: 'writer',
+        agentName: 'Writer',
+        avatarSeed: 'agent:writer',
+        avatarStyle: 'bottts',
+      },
+    };
+  }
+  return row;
 }
 
 describe('chat message avatar', () => {
@@ -23,10 +36,6 @@ describe('chat message avatar', () => {
       <ChatMessage
         row={buildRow(message)}
         showThinking={false}
-        assistantAgentId="writer"
-        assistantAgentName="Writer"
-        assistantAvatarSeed="agent:writer"
-        assistantAvatarStyle="bottts"
       />,
     );
 
@@ -46,8 +55,6 @@ describe('chat message avatar', () => {
       <ChatMessage
         row={buildRow(message)}
         showThinking={false}
-        assistantAgentId="writer"
-        assistantAgentName="Writer"
       />,
     );
 

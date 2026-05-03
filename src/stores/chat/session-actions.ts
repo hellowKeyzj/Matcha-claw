@@ -1,4 +1,4 @@
-import { hostApiFetch } from '@/lib/host-api';
+import { hostApiFetch, hostSessionDelete, hostSessionList, hostSessionNew } from '@/lib/host-api';
 import {
   createErrorResourceStatusState,
   createLoadingResourceStatusState,
@@ -20,12 +20,13 @@ import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
 } from './timers';
-import { resetToolSnapshotTxnState } from './tool-snapshot-txn';
 import {
   createEmptySessionRecord,
+  getSessionMessageCount,
   getSessionMeta,
   getSessionViewportState,
   patchSessionMeta,
+  patchSessionSnapshot,
   patchSessionViewportState,
   removeSessionRecord,
   resolveSessionRecord,
@@ -35,6 +36,7 @@ import type {
   ChatSession,
   ChatStoreState,
 } from './types';
+import type { SessionLoadResult } from '../../../runtime-host/shared/session-adapter-types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -58,7 +60,6 @@ function clearSessionHistoryFingerprints(
   sessionKey: string,
 ): void {
   historyRuntime.historyFingerprintBySession.delete(sessionKey);
-  historyRuntime.historyQuickFingerprintBySession.delete(sessionKey);
   historyRuntime.historyRenderFingerprintBySession.delete(sessionKey);
 }
 
@@ -83,6 +84,39 @@ function normalizeCatalogString(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+async function requestSessionLifecycleSnapshot(
+  path: '/api/session/switch' | '/api/session/resume',
+  sessionKey: string,
+): Promise<SessionLoadResult> {
+  return await hostApiFetch(path, {
+    method: 'POST',
+    body: JSON.stringify({ sessionKey }),
+  });
+}
+
+function applyBackendSessionSnapshot(
+  input: {
+    set: ChatStoreSetFn;
+    sessionKey: string;
+    snapshot: SessionLoadResult['snapshot'];
+  },
+): void {
+  input.set((state) => {
+    const loadedSessions = patchSessionMeta(
+      {
+        loadedSessions: patchSessionSnapshot(state, input.sessionKey, input.snapshot),
+      },
+      input.sessionKey,
+      {
+        historyStatus: input.snapshot.replayComplete ? 'ready' : 'loading',
+      },
+    );
+    return {
+      loadedSessions,
+    };
+  });
+}
+
 function shouldMarkSessionLoadingOnSwitch(
   sessionKey: string,
   sessionRecord: ReturnType<typeof resolveSessionRecord>,
@@ -93,7 +127,7 @@ function shouldMarkSessionLoadingOnSwitch(
   if (sessionRecord.runtime.sending) {
     return false;
   }
-  return sessionRecord.meta.historyStatus !== 'ready' && sessionRecord.messages.length === 0;
+  return sessionRecord.meta.historyStatus !== 'ready' && getSessionMessageCount(sessionRecord) === 0;
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
@@ -108,15 +142,13 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
   try {
-    const data = await hostApiFetch<Record<string, unknown>>('/api/sessions/list');
+    const data = await hostSessionList();
     if (data) {
       const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
-      const sessions: ChatSession[] = rawSessions.map((session: Record<string, unknown>) => ({
-        key: String(session.key || ''),
-        label: session.label ? String(session.label) : undefined,
-        displayName: session.displayName ? String(session.displayName) : undefined,
-        thinkingLevel: session.thinkingLevel ? String(session.thinkingLevel) : undefined,
-        model: session.model ? String(session.model) : undefined,
+      const sessions: ChatSession[] = rawSessions.map((session) => ({
+        key: session.key || '',
+        label: typeof session.label === 'string' ? session.label : undefined,
+        displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
         updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
       })).filter((session: ChatSession) => session.key);
 
@@ -250,17 +282,30 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const { set, get, historyRuntime } = input;
   const currentState = get();
   if (key === currentState.currentSessionKey) {
-    void get().loadHistory({
-      sessionKey: key,
-      mode: 'active',
-      scope: 'foreground',
-      reason: 'switch_session_reselect',
-    });
+    void (async () => {
+      try {
+        const result = await requestSessionLifecycleSnapshot('/api/session/resume', key);
+        if (get().currentSessionKey !== key) {
+          return;
+        }
+        applyBackendSessionSnapshot({
+          set,
+          sessionKey: key,
+          snapshot: result.snapshot,
+        });
+      } catch {
+        void get().loadHistory({
+          sessionKey: key,
+          mode: 'active',
+          scope: 'foreground',
+          reason: 'switch_session_reselect',
+        });
+      }
+    })();
     return;
   }
   clearHistoryPoll();
   clearErrorRecoveryTimer();
-  resetToolSnapshotTxnState();
   const state = get();
   const { currentSessionKey } = state;
   const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
@@ -277,7 +322,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     });
     targetRecord = resolveSessionRecord(nextloadedSessions[key]);
   }
-  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || targetRecord.messages.length > 0;
+  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionMessageCount(targetRecord) > 0;
 
   set((stateValue) => ({
     sessionCatalogStatus: stateValue.sessionCatalogStatus,
@@ -293,12 +338,26 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
 
   resumeActiveStoreSend({ set, get, sessionKey: key });
 
-  void get().loadHistory({
-    sessionKey: key,
-    mode: targetSessionReady ? 'quiet' : 'active',
-    scope: 'foreground',
-    reason: 'switch_session_reconcile',
-  });
+  void (async () => {
+    try {
+      const result = await requestSessionLifecycleSnapshot('/api/session/switch', key);
+      if (get().currentSessionKey !== key) {
+        return;
+      }
+      applyBackendSessionSnapshot({
+        set,
+        sessionKey: key,
+        snapshot: result.snapshot,
+      });
+    } catch {
+      void get().loadHistory({
+        sessionKey: key,
+        mode: targetSessionReady ? 'quiet' : 'active',
+        scope: 'foreground',
+        reason: 'switch_session_reconcile',
+      });
+    }
+  })();
 }
 
 export async function executeLoadOlderMessages(
@@ -350,12 +409,8 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
   beginMutating();
   try {
     try {
-      await hostApiFetch<{
-        success: boolean;
-        error?: string;
-      }>('/api/sessions/delete', {
-        method: 'POST',
-        body: JSON.stringify({ sessionKey: key }),
+      await hostSessionDelete({
+        sessionKey: key,
       });
     } catch {
       void 0;
@@ -401,47 +456,69 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
   }
 }
 
-export function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string): void {
+export async function executeNewSession(input: CreateStoreSessionActionsInput, agentId?: string): Promise<void> {
   const {
     set,
     get,
+    beginMutating,
+    finishMutating,
     defaultCanonicalPrefix,
     historyRuntime,
   } = input;
-  clearHistoryPoll();
-  clearErrorRecoveryTimer();
-  const state = get();
-  const { currentSessionKey } = state;
-  const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
-  if (leavingEmpty) {
-    clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+  beginMutating();
+  try {
+    clearHistoryPoll();
+    clearErrorRecoveryTimer();
+    const state = get();
+    const { currentSessionKey } = state;
+    const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state);
+    if (leavingEmpty) {
+      clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
+    }
+    const prefix = resolveCanonicalPrefixForAgent(agentId)
+      ?? getCanonicalPrefixFromSessions(readSessionsFromState(get()), currentSessionKey)
+      ?? defaultCanonicalPrefix;
+    const created = await hostSessionNew({
+      agentId,
+      canonicalPrefix: prefix,
+    });
+    const newKey = created.sessionKey;
+    set((stateValue) => {
+      const baseLoadedSessions = leavingEmpty
+        ? removeSessionRecord(stateValue, currentSessionKey)
+        : stateValue.loadedSessions;
+      const loadedSessions = patchSessionMeta(
+        {
+          loadedSessions: patchSessionSnapshot(
+            { loadedSessions: baseLoadedSessions },
+            newKey,
+            created.snapshot,
+          ),
+        },
+        newKey,
+        {
+          historyStatus: created.snapshot.replayComplete ? 'ready' : 'loading',
+        },
+      );
+      return {
+        loadedSessions,
+        sessionCatalogStatus: stateValue.sessionCatalogStatus,
+        currentSessionKey: newKey,
+        pendingApprovalsBySession: leavingEmpty
+          ? Object.fromEntries(
+              Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
+            )
+          : stateValue.pendingApprovalsBySession,
+        error: null,
+      };
+    });
+  } catch (error) {
+    set({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    finishMutating();
   }
-  const prefix = resolveCanonicalPrefixForAgent(agentId)
-    ?? getCanonicalPrefixFromSessions(readSessionsFromState(get()), currentSessionKey)
-    ?? defaultCanonicalPrefix;
-  const newKey = `${prefix}:session-${Date.now()}`;
-  const newSessionRecord = createEmptySessionRecord();
-  newSessionRecord.meta = {
-    ...newSessionRecord.meta,
-    historyStatus: 'ready',
-  };
-  set((stateValue) => {
-    const loadedSessions = {
-      ...(leavingEmpty ? removeSessionRecord(stateValue, currentSessionKey) : stateValue.loadedSessions),
-      [newKey]: newSessionRecord,
-    };
-    return {
-      loadedSessions,
-      sessionCatalogStatus: stateValue.sessionCatalogStatus,
-      currentSessionKey: newKey,
-      pendingApprovalsBySession: leavingEmpty
-        ? Object.fromEntries(
-            Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
-          )
-        : stateValue.pendingApprovalsBySession,
-      error: null,
-    };
-  });
 }
 
 export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput): void {

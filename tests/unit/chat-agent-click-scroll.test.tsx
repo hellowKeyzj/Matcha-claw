@@ -10,9 +10,14 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { RawMessage } from '@/stores/chat';
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+function buildSessionRecord(
+  sessionKey: string,
+  overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & { messages?: RawMessage[] },
+) {
   const base = createEmptySessionRecord();
   return {
     meta: {
@@ -23,7 +28,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    messages: overrides?.messages ?? base.messages,
+    timelineEntries: overrides?.messages
+      ? buildTimelineEntriesFromMessages(sessionKey, overrides.messages)
+      : (overrides?.timelineEntries ?? base.timelineEntries),
     window: overrides?.window ?? base.window,
   };
 }
@@ -114,7 +121,7 @@ describe('chat 左侧点击链路回归', () => {
       },
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
-        'agent:main:main': buildSessionRecord({
+        'agent:main:main': buildSessionRecord('agent:main:main', {
           messages: [
             {
               role: 'user',
@@ -145,7 +152,7 @@ describe('chat 左侧点击链路回归', () => {
             ready: true,
           },
         }),
-        'agent:another:main': buildSessionRecord({
+        'agent:another:main': buildSessionRecord('agent:another:main', {
           messages: [
             {
               role: 'user',
@@ -227,4 +234,3 @@ describe('chat 左侧点击链路回归', () => {
     });
   });
 });
-

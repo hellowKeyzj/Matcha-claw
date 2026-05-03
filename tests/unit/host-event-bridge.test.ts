@@ -136,11 +136,12 @@ describe('host event bridge runtime-host lifecycle', () => {
       state: 'connected',
       updatedAt: 123,
     });
-    gatewayEventHandler?.('gateway:conversation-event', {
-      type: 'run.phase',
+    gatewayEventHandler?.('session:update', {
+      sessionUpdate: 'session_info_update',
       phase: 'started',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
+      laneKey: 'main',
     });
 
     expect(eventBus.emit).toHaveBeenCalledWith(
@@ -156,9 +157,9 @@ describe('host event bridge runtime-host lifecycle', () => {
       }),
     );
     expect(eventBus.emit).toHaveBeenCalledWith(
-      'gateway:conversation-event',
+      'session:update',
       expect.objectContaining({
-        type: 'run.phase',
+        sessionUpdate: 'session_info_update',
         phase: 'started',
       }),
     );

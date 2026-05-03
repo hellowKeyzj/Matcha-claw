@@ -2791,6 +2791,8 @@ describe('runtime-host process manager', () => {
               sessionKey?: string;
               message?: string;
               idempotencyKey?: string;
+              uniqueId?: string;
+              requestId?: string;
               deliver?: boolean;
             };
           };

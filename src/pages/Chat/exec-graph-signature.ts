@@ -1,21 +1,22 @@
-import type { RawMessage } from '@/stores/chat';
+import { resolveEntryAssistantLaneTurnMatchKey } from './chat-row-model';
 import {
-  EMPTY_MESSAGES,
+  EMPTY_TIMELINE_ENTRIES,
   type CompletionEventAnchor,
 } from './exec-graph-types';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
-export function buildHistoryFingerprint(messages: RawMessage[]): string {
-  const count = messages.length;
+export function buildHistoryFingerprint(timelineEntries: SessionTimelineEntry[]): string {
+  const count = timelineEntries.length;
   if (count === 0) {
     return '0';
   }
-  const first = messages[0];
-  const last = messages[count - 1];
+  const first = timelineEntries[0];
+  const last = timelineEntries[count - 1];
   return [
     count,
-    first?.id ?? '',
+    first?.entryId ?? '',
     first?.timestamp ?? '',
-    last?.id ?? '',
+    last?.entryId ?? '',
     last?.timestamp ?? '',
   ].join('|');
 }
@@ -26,6 +27,7 @@ function buildGraphSignature(input: {
   currentSessionKey: string;
   showThinking: boolean;
   subagentHistoryFingerprint: string;
+  anchorLaneFingerprint: string;
 }): string {
   const { anchor } = input;
   return [
@@ -39,6 +41,20 @@ function buildGraphSignature(input: {
     input.agentLabel,
     input.showThinking ? '1' : '0',
     input.subagentHistoryFingerprint,
+    input.anchorLaneFingerprint,
+  ].join('|');
+}
+
+function buildAnchorLaneFingerprint(
+  timelineEntries: SessionTimelineEntry[],
+  anchor: CompletionEventAnchor,
+): string {
+  const triggerEntry = timelineEntries[anchor.triggerIndex];
+  const replyEntry = anchor.replyIndex != null ? timelineEntries[anchor.replyIndex] : null;
+  return [
+    triggerEntry?.entryId ?? '',
+    replyEntry?.entryId ?? '',
+    resolveEntryAssistantLaneTurnMatchKey(replyEntry) ?? '',
   ].join('|');
 }
 
@@ -74,11 +90,49 @@ export function findFirstChangedCompletionAnchorIndex(
   return firstChanged;
 }
 
+export function findReusableGraphSignaturePrefix(input: {
+  previousAnchors: CompletionEventAnchor[] | undefined;
+  nextAnchors: CompletionEventAnchor[];
+  previousTimelineEntries: SessionTimelineEntry[] | undefined;
+  nextTimelineEntries: SessionTimelineEntry[];
+}): number {
+  const anchorPrefix = findFirstChangedCompletionAnchorIndex(
+    input.previousAnchors,
+    input.nextAnchors,
+  );
+  if (
+    anchorPrefix <= 0
+    || !input.previousAnchors
+    || !input.previousTimelineEntries
+  ) {
+    return anchorPrefix;
+  }
+
+  let reusablePrefix = 0;
+  const sharedLength = Math.min(anchorPrefix, input.previousAnchors.length, input.nextAnchors.length);
+  while (reusablePrefix < sharedLength) {
+    const previousFingerprint = buildAnchorLaneFingerprint(
+      input.previousTimelineEntries,
+      input.previousAnchors[reusablePrefix],
+    );
+    const nextFingerprint = buildAnchorLaneFingerprint(
+      input.nextTimelineEntries,
+      input.nextAnchors[reusablePrefix],
+    );
+    if (previousFingerprint !== nextFingerprint) {
+      return reusablePrefix;
+    }
+    reusablePrefix += 1;
+  }
+  return reusablePrefix;
+}
+
 export function buildGraphSignaturesByAnchor(input: {
   anchors: CompletionEventAnchor[];
   currentSessionKey: string;
   showThinking: boolean;
-  subagentHistoryBySession: Map<string, RawMessage[]>;
+  timelineEntries: SessionTimelineEntry[];
+  subagentHistoryBySession: Map<string, SessionTimelineEntry[]>;
   agentNameById: Map<string, string>;
   startIndex?: number;
   previousSignatures?: string[];
@@ -98,7 +152,7 @@ export function buildGraphSignaturesByAnchor(input: {
         return cached;
       }
       const fingerprint = buildHistoryFingerprint(
-        input.subagentHistoryBySession.get(anchor.sessionKey) ?? EMPTY_MESSAGES,
+        input.subagentHistoryBySession.get(anchor.sessionKey) ?? EMPTY_TIMELINE_ENTRIES,
       );
       subagentFingerprintBySession.set(anchor.sessionKey, fingerprint);
       return fingerprint;
@@ -112,6 +166,7 @@ export function buildGraphSignaturesByAnchor(input: {
       currentSessionKey: input.currentSessionKey,
       showThinking: input.showThinking,
       subagentHistoryFingerprint: sessionFingerprint,
+      anchorLaneFingerprint: buildAnchorLaneFingerprint(input.timelineEntries, anchor),
     }));
   }
   return signatures;

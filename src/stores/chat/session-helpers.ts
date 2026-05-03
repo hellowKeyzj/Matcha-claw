@@ -1,10 +1,11 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
-import { resolveSessionLabelFromMessages } from './message-helpers';
+import { resolveSessionLabelFromTimelineEntries } from './message-helpers';
 import {
   getSessionMeta,
-  getSessionMessages,
+  getSessionMessageCount,
   getSessionRecord,
   getSessionRuntime,
+  getSessionTimelineEntries,
   toMs,
 } from './store-state-helpers';
 
@@ -49,9 +50,9 @@ export function resolveSessionListLabel(
   sessionKey: string,
   fallbackLabel?: string | null,
 ): string | null {
-  const messages = getSessionMessages(state, sessionKey);
-  if (messages.length > 0) {
-    const viewportLabel = resolveSessionLabelFromMessages(messages);
+  const timelineEntries = getSessionTimelineEntries(state, sessionKey);
+  if (timelineEntries.length > 0) {
+    const viewportLabel = resolveSessionLabelFromTimelineEntries(timelineEntries);
     if (viewportLabel) {
       return viewportLabel;
     }
@@ -143,7 +144,7 @@ export function shouldRetainLocalSessionRecord(
   const record = getSessionRecord(state, sessionKey);
   const runtime = record.runtime;
   return (
-    record.messages.length > 0
+    getSessionMessageCount(record) > 0
     || Boolean(record.meta.label)
     || Boolean(record.meta.lastActivityAt)
     || runtime.sending
@@ -274,7 +275,7 @@ export function shouldKeepMissingCurrentSession(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
-  const hasMessages = record.messages.length > 0;
+  const hasMessages = getSessionMessageCount(record) > 0;
   const hasLabel = Boolean(record.meta.label);
   const hasActivity = Boolean(record.meta.lastActivityAt);
   const hasRuntime = Object.prototype.hasOwnProperty.call(state.loadedSessions, sessionKey);
@@ -302,10 +303,9 @@ export function isTrulyEmptyNonMainSession(
   currentSessionKey: string,
   state: Pick<ChatStoreState, 'loadedSessions'>,
 ): boolean {
-  const messages = getSessionMessages(state, currentSessionKey);
   const record = getSessionRecord(state, currentSessionKey);
   return !currentSessionKey.endsWith(':main')
-    && messages.length === 0
+    && getSessionMessageCount(record) === 0
     && !record.meta.lastActivityAt
     && !record.meta.label;
 }

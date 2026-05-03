@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   getOrBuildStaticRowsCacheEntry,
-  prewarmStaticRowsForMessages,
+  prewarmStaticRowsForTimeline,
 } from '@/pages/Chat/chat-rows-cache';
 import type { RawMessage } from '@/stores/chat';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -17,9 +18,10 @@ function buildMessages(count: number): RawMessage[] {
 describe('chat rows cache', () => {
   it('returns the same static rows cache entry for the same message reference', () => {
     const messages = buildMessages(40);
+    const timelineEntries = buildTimelineEntriesFromMessages('agent:cache:main', messages);
 
-    const firstEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', messages);
-    const secondEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', messages);
+    const firstEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', timelineEntries);
+    const secondEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', timelineEntries);
 
     expect(secondEntry).toBe(firstEntry);
     expect(secondEntry.rows).toBe(firstEntry.rows);
@@ -27,9 +29,9 @@ describe('chat rows cache', () => {
 
   it('reuses prewarmed static rows on later reads', () => {
     const sessionKey = 'agent:cache:main';
-    const transcript = buildMessages(12);
+    const transcript = buildTimelineEntriesFromMessages(sessionKey, buildMessages(12));
 
-    const prewarmed = prewarmStaticRowsForMessages(sessionKey, transcript);
+    const prewarmed = prewarmStaticRowsForTimeline(sessionKey, transcript);
     const reused = getOrBuildStaticRowsCacheEntry(sessionKey, transcript);
 
     expect(reused).toBe(prewarmed);
@@ -54,7 +56,8 @@ describe('chat rows cache', () => {
       },
     ];
 
-    const firstEntry = getOrBuildStaticRowsCacheEntry(sessionKey, initialMessages);
+    const initialTimelineEntries = buildTimelineEntriesFromMessages(sessionKey, initialMessages);
+    const firstEntry = getOrBuildStaticRowsCacheEntry(sessionKey, initialTimelineEntries);
     const nextMessages: RawMessage[] = [
       initialMessages[0]!,
       {
@@ -64,7 +67,11 @@ describe('chat rows cache', () => {
       },
     ];
 
-    const secondEntry = getOrBuildStaticRowsCacheEntry(sessionKey, nextMessages);
+    const nextAssistantEntry = buildTimelineEntriesFromMessages(sessionKey, [nextMessages[1]!])[0]!;
+    const secondEntry = getOrBuildStaticRowsCacheEntry(sessionKey, [
+      initialTimelineEntries[0]!,
+      nextAssistantEntry,
+    ]);
 
     expect(secondEntry.rows[0]).toBe(firstEntry.rows[0]);
     expect(secondEntry.rows[1]).not.toBe(firstEntry.rows[1]);

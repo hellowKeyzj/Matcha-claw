@@ -1,12 +1,17 @@
 import { hostGatewayRpc } from '@/lib/host-api';
 import { waitAgentRunWithProgress } from '@/services/openclaw/agent-runtime';
-import { findLatestAssistantText, type ChatMessage } from '@/services/openclaw/session-runtime';
+import {
+  fetchChatTimeline,
+  sendChatMessage,
+} from '@/services/openclaw/session-runtime';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
 import { deriveAutoBlockedDecision, deriveTaskTitleFromProposal, parseBlockedDecision } from '@/features/teams/domain/runner-automation';
 import { useGatewayStore } from '@/stores/gateway';
 import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
+import { findLatestAssistantTextFromTimelineEntries } from '@/stores/chat/timeline-message';
+import type { SessionTimelineEntry } from '../../../../runtime-host/shared/session-adapter-types';
 
 const ORCHESTRATOR_TICK_ACTIVE_MS = 2_500;
 const ORCHESTRATOR_TICK_IDLE_MS = 8_000;
@@ -15,8 +20,6 @@ const SNAPSHOT_REFRESH_ACTIVE_MS = 3_000;
 const SNAPSHOT_REFRESH_IDLE_MS = 10_000;
 const SNAPSHOT_REFRESH_BACKGROUND_MS = 25_000;
 const HEARTBEAT_TICK_MS = 20_000;
-const CHAT_SEND_TIMEOUT_MS = 180_000;
-const HISTORY_TIMEOUT_MS = 30_000;
 const HISTORY_LIMIT = 20;
 const SUMMARY_MAX_LENGTH = 400;
 const RESULT_POLL_INTERVAL_MS = 1_500;
@@ -75,39 +78,34 @@ async function callGatewayRpc<T>(
 }
 
 async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
-  return callGatewayRpc<T>(method, params, timeoutMs ?? HISTORY_TIMEOUT_MS);
+  return callGatewayRpc<T>(method, params, timeoutMs ?? 30_000);
 }
 
-function readAssistantProgress(messages?: ChatMessage[]): AssistantProgress {
-  if (!Array.isArray(messages) || messages.length === 0) {
+function readAssistantProgress(entries?: SessionTimelineEntry[]): AssistantProgress {
+  if (!Array.isArray(entries) || entries.length === 0) {
     return {
       assistantCount: 0,
       latestSummary: '',
     };
   }
   let assistantCount = 0;
-  for (const message of messages) {
-    const role = typeof message?.role === 'string' ? message.role.toLowerCase() : '';
-    if (role === 'assistant') {
+  for (const entry of entries) {
+    if (entry.role === 'assistant') {
       assistantCount += 1;
     }
   }
   return {
     assistantCount,
-    latestSummary: summarizeAssistantText(findLatestAssistantText(messages)),
+    latestSummary: summarizeAssistantText(findLatestAssistantTextFromTimelineEntries(entries)),
   };
 }
 
 async function fetchAssistantProgress(sessionKey: string): Promise<AssistantProgress> {
-  const history = await callGatewayRpc<{ messages?: ChatMessage[] }>(
-    'chat.history',
-    {
-      sessionKey,
-      limit: HISTORY_LIMIT,
-    },
-    HISTORY_TIMEOUT_MS,
-  );
-  return readAssistantProgress(history.messages);
+  const entries = await fetchChatTimeline({
+    sessionKey,
+    limit: HISTORY_LIMIT,
+  });
+  return readAssistantProgress(entries);
 }
 
 async function waitForNextAssistantSummary(
@@ -511,16 +509,12 @@ export class TeamsBackgroundOrchestrator {
         void heartbeat();
       }, HEARTBEAT_TICK_MS);
 
-      const sendResult = await callGatewayRpc<{ runId?: string }>(
-        'chat.send',
-        {
-          sessionKey: execSessionKey,
-          message: buildRunnerPrompt(claimedTask),
-          deliver: false,
-          idempotencyKey: generateId(),
-        },
-        CHAT_SEND_TIMEOUT_MS,
-      );
+      const sendResult = await sendChatMessage({
+        sessionKey: execSessionKey,
+        message: buildRunnerPrompt(claimedTask),
+        deliver: false,
+        idempotencyKey: generateId(),
+      });
 
       const runId = typeof sendResult?.runId === 'string' ? sendResult.runId.trim() : '';
       if (runId) {

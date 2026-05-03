@@ -17,6 +17,8 @@ import { createLocalBusinessDispatcher } from './dispatch/local-business-dispatc
 import { createParentTransportClient } from './dispatch/parent-transport';
 import { createOpenClawBridge, createGatewayClient } from '../openclaw-bridge';
 import { createRuntimeHostPlatformRoot } from './platform/runtime-root';
+import { getSessionRuntimeService } from './routes/session-routes';
+import { getOpenClawConfigDir } from './storage/paths';
 import {
   mergePluginCatalogSnapshots,
 } from '../application/plugins/catalog';
@@ -79,6 +81,7 @@ const {
   emitParentGatewayEvent,
   mapParentTransportResponse,
 } = parentTransportClient;
+let sessionRuntimeService: ReturnType<typeof getSessionRuntimeService> | null = null;
 const gatewayClient = createGatewayClient({
   onGatewayNotification: (notification) => {
     void emitParentGatewayEvent('gateway:notification', notification).catch(() => {
@@ -86,9 +89,12 @@ const gatewayClient = createGatewayClient({
     });
   },
   onGatewayConversationEvent: (payload) => {
-    void emitParentGatewayEvent('gateway:conversation-event', payload).catch(() => {
-      // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
-    });
+    const sessionUpdates = sessionRuntimeService?.consumeGatewayConversationEvent(payload) ?? [];
+    for (const sessionUpdate of sessionUpdates) {
+      void emitParentGatewayEvent('session:update', sessionUpdate).catch(() => {
+        // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
+      });
+    }
   },
   onGatewayChannelStatus: (payload) => {
     void emitParentGatewayEvent('gateway:channel-status', payload).catch(() => {
@@ -108,6 +114,11 @@ const gatewayClient = createGatewayClient({
 });
 const openclawBridge = createOpenClawBridge(gatewayClient);
 const platformRuntime = createRuntimeHostPlatformRoot(openclawBridge);
+sessionRuntimeService = getSessionRuntimeService({
+  getOpenClawConfigDir,
+  resolveDeletedPath: (path) => `${path}.deleted`,
+  openclawBridge,
+});
 
 let injectedPluginCatalog: Array<Record<string, any>> = [];
 try {

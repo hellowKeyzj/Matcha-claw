@@ -38,6 +38,17 @@ function getTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function getFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = Number(value.trim());
+    return Number.isFinite(normalized) ? normalized : null;
+  }
+  return null;
+}
+
 function extractMessageText(content: unknown): string {
   if (typeof content === 'string') {
     return content;
@@ -85,7 +96,6 @@ function stripLeadingUntrustedMetadataBlocks(text: string): string {
 function cleanGatewayUserTextForDedup(text: string): string {
   const cleaned = text
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
-    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
     .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^Sender\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
@@ -152,10 +162,18 @@ function normalizeGatewayChatEvent(payload: unknown): Record<string, unknown> | 
 
   const runId = getTrimmedString(input.runId ?? message.runId);
   const sessionKey = getTrimmedString(input.sessionKey ?? message.sessionKey);
+  const sequenceId = getFiniteNumber(input.sequenceId ?? input.sequence_id ?? message.sequenceId ?? message.sequence_id);
+  const requestId = getTrimmedString(input.requestId ?? input.request_id ?? message.requestId ?? message.request_id);
+  const uniqueId = getTrimmedString(input.uniqueId ?? input.unique_id ?? message.uniqueId ?? message.unique_id);
+  const agentId = getTrimmedString(input.agentId ?? input.agent_id ?? message.agentId ?? message.agent_id);
   return {
     state,
     ...(runId ? { runId } : {}),
     ...(sessionKey ? { sessionKey } : {}),
+    ...(sequenceId != null ? { sequenceId } : {}),
+    ...(requestId ? { requestId } : {}),
+    ...(uniqueId ? { uniqueId } : {}),
+    ...(agentId ? { agentId } : {}),
     message,
   };
 }

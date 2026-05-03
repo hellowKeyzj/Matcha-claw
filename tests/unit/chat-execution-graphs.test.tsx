@@ -3,11 +3,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RawMessage } from '@/stores/chat';
 import * as taskViz from '@/pages/Chat/task-viz';
 import { useExecutionGraphs } from '@/pages/Chat/useExecutionGraphs';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 const trackUiTimingMock = vi.hoisted(() => vi.fn());
+const fetchChatTimelineMock = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock('@/lib/telemetry', () => ({
   trackUiTiming: (...args: unknown[]) => trackUiTimingMock(...args),
+}));
+
+vi.mock('@/services/openclaw/session-runtime', () => ({
+  fetchChatTimeline: (...args: unknown[]) => fetchChatTimelineMock(...args),
 }));
 
 const INTERNAL_COMPLETION_EVENT = `[Internal task completion event]
@@ -80,14 +87,16 @@ const TWO_ANCHOR_MESSAGES: RawMessage[] = [
   },
 ];
 
-function buildProps(messages: RawMessage[]) {
+const BASE_TIMELINE_ENTRIES = buildTimelineEntriesFromMessages('agent:main:session-1', BASE_MESSAGES);
+const TWO_ANCHOR_TIMELINE_ENTRIES = buildTimelineEntriesFromMessages('agent:main:session-1', TWO_ANCHOR_MESSAGES);
+
+function buildProps(timelineEntries: SessionTimelineEntry[]) {
   return {
     enabled: true,
-    messages,
+    timelineEntries,
     currentSessionKey: 'agent:main:session-1',
     agents: [{ id: 'coder', name: 'Coder' }],
     isGatewayRunning: true,
-    gatewayRpc: vi.fn(() => new Promise<Record<string, unknown>>(() => {})),
     showThinking: true,
   };
 }
@@ -97,12 +106,13 @@ describe('useExecutionGraphs incremental compute', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     trackUiTimingMock.mockReset();
+    fetchChatTimelineMock.mockReset();
   });
 
   it('reuses unchanged anchor prefix when appending unrelated messages', async () => {
     vi.useFakeTimers();
     const deriveSpy = vi.spyOn(taskViz, 'deriveTaskSteps');
-    const initialProps = buildProps(BASE_MESSAGES);
+    const initialProps = buildProps(BASE_TIMELINE_ENTRIES);
     const { rerender, result } = renderHook((props: ReturnType<typeof buildProps>) => useExecutionGraphs(props), {
       initialProps,
     });
@@ -117,13 +127,13 @@ describe('useExecutionGraphs incremental compute', () => {
     expect(initialDeriveCalls).toBeGreaterThan(0);
 
     rerender(buildProps([
-      ...BASE_MESSAGES,
-      {
+      ...BASE_TIMELINE_ENTRIES,
+      buildTimelineEntriesFromMessages('agent:main:session-1', [{
         id: 'assistant-tail',
         role: 'assistant',
         content: '这是无关的尾部消息',
         timestamp: 4,
-      },
+      }])[0]!,
     ]));
 
     await act(async () => {
@@ -146,7 +156,7 @@ describe('useExecutionGraphs incremental compute', () => {
 
   it('does not restart the graph pipeline for token-only runtime changes when messages are unchanged', async () => {
     vi.useFakeTimers();
-    const initialProps = buildProps(BASE_MESSAGES);
+    const initialProps = buildProps(BASE_TIMELINE_ENTRIES);
     const { rerender } = renderHook((props: ReturnType<typeof buildProps>) => useExecutionGraphs(props), {
       initialProps,
     });
@@ -162,7 +172,7 @@ describe('useExecutionGraphs incremental compute', () => {
     expect(initialPipelineCalls).toBeGreaterThan(0);
 
     const nextProps = {
-      ...buildProps(BASE_MESSAGES),
+      ...buildProps(BASE_TIMELINE_ENTRIES),
       sending: true,
       pendingFinal: true,
       streamingMessage: {
@@ -193,7 +203,7 @@ describe('useExecutionGraphs incremental compute', () => {
   it('reuses unchanged suffix anchors when early anchor signature changes', async () => {
     vi.useFakeTimers();
     const initialProps = {
-      ...buildProps(TWO_ANCHOR_MESSAGES),
+      ...buildProps(TWO_ANCHOR_TIMELINE_ENTRIES),
       agents: [
         { id: 'coder', name: 'Coder' },
         { id: 'planner', name: 'Planner' },

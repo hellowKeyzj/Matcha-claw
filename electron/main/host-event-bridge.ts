@@ -17,7 +17,7 @@ type HostEventName =
   | 'gateway:error'
   | 'gateway:connection'
   | 'gateway:notification'
-  | 'gateway:conversation-event'
+  | 'session:update'
   | 'gateway:channel-status'
   | 'gateway:exit'
   | 'runtime-host:status'
@@ -199,8 +199,8 @@ export function registerHostEventBridge(deps: {
       emit('gateway:connection', payload);
       return;
     }
-    if (eventName === 'gateway:conversation-event') {
-      emit('gateway:conversation-event', payload);
+    if (eventName === 'session:update') {
+      emit('session:update', payload);
       return;
     }
     if (eventName === 'gateway:channel-status') {

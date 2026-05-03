@@ -7,7 +7,7 @@ import {
   peekRenderedMarkdownBody,
   prewarmMarkdownBody,
 } from '@/pages/Chat/md-pipeline';
-import type { RawMessage } from '@/stores/chat';
+import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
 
 describe('chat markdown pipeline cache', () => {
   beforeEach(() => {
@@ -46,26 +46,36 @@ describe('chat markdown pipeline cache', () => {
   });
 
   it('assistant markdown cache 命中时，peek 不应再做 markdown 预处理与重算', () => {
-    const message: RawMessage = {
-      id: 'assistant-cache-hit',
+    const entry: SessionTimelineEntry = {
+      entryId: 'assistant-cache-hit',
+      sessionKey: 'agent:main:test',
+      laneKey: 'main',
+      turnKey: 'main:assistant-cache-hit',
       role: 'assistant',
+      status: 'final',
       timestamp: 1_700_000_100,
-      content: '[TOOLS.md](TOOLS.md)',
-      _attachedFiles: [{
-        fileName: 'TOOLS.md',
-        mimeType: 'text/markdown',
-        fileSize: 1024,
-        preview: null,
-        filePath: 'C:/workspace/TOOLS.md',
-      }],
+      text: '[TOOLS.md](TOOLS.md)',
+      message: {
+        id: 'assistant-cache-hit',
+        role: 'assistant',
+        timestamp: 1_700_000_100,
+        content: '[TOOLS.md](TOOLS.md)',
+        _attachedFiles: [{
+          fileName: 'TOOLS.md',
+          mimeType: 'text/markdown',
+          fileSize: 1024,
+          preview: null,
+          filePath: 'C:/workspace/TOOLS.md',
+        }],
+      },
     };
 
-    prewarmAssistantMarkdownBody(message);
+    prewarmAssistantMarkdownBody(entry);
 
     clearUiTelemetry();
 
-    const cached = peekAssistantMarkdownBody(message)
-      ?? getOrBuildAssistantMarkdownBody(message);
+    const cached = peekAssistantMarkdownBody(entry)
+      ?? getOrBuildAssistantMarkdownBody(entry);
 
     expect(cached?.fullHtml).toContain('matchaclaw.local');
     expect(

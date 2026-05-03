@@ -1,8 +1,7 @@
-import type { RawMessage } from '@/stores/chat';
 import {
-  canAppendMessageList,
-  isRenderableChatMessage,
-  resolveMessageRowKey,
+  canAppendReferenceList,
+  isRenderableTimelineEntry,
+  resolveTimelineEntryRowKey,
 } from './chat-row-model';
 import { parseSubagentCompletionInfo } from './task-viz';
 import type {
@@ -10,25 +9,26 @@ import type {
   CompletionEventAnchor,
   MessageKeyIndexSnapshot,
 } from './exec-graph-types';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 export function buildMessageKeyIndex(
   sessionKey: string,
-  messages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
   previous?: MessageKeyIndexSnapshot,
 ): MessageKeyIndexSnapshot {
-  if (previous && canAppendMessageList(previous.messagesRef, messages)) {
+  if (previous && canAppendReferenceList(previous.timelineEntriesRef, timelineEntries)) {
     const keyByIndex = new Map(previous.keyByIndex);
     let renderableCount = previous.renderableCount;
-    for (let index = previous.messagesRef.length; index < messages.length; index += 1) {
-      const message = messages[index];
-      if (!isRenderableChatMessage(message)) {
+    for (let index = previous.timelineEntriesRef.length; index < timelineEntries.length; index += 1) {
+      const entry = timelineEntries[index];
+      if (!isRenderableTimelineEntry(entry)) {
         continue;
       }
-      keyByIndex.set(index, resolveMessageRowKey(sessionKey, message, renderableCount));
+      keyByIndex.set(index, resolveTimelineEntryRowKey(sessionKey, entry));
       renderableCount += 1;
     }
     return {
-      messagesRef: messages,
+      timelineEntriesRef: timelineEntries,
       keyByIndex,
       renderableCount,
     };
@@ -36,38 +36,46 @@ export function buildMessageKeyIndex(
 
   const keyByIndex = new Map<number, string>();
   let renderableCount = 0;
-  for (const [index, message] of messages.entries()) {
-    if (!isRenderableChatMessage(message)) {
+  for (const [index, entry] of timelineEntries.entries()) {
+    if (!isRenderableTimelineEntry(entry)) {
       continue;
     }
-    keyByIndex.set(index, resolveMessageRowKey(sessionKey, message, renderableCount));
+    keyByIndex.set(index, resolveTimelineEntryRowKey(sessionKey, entry));
     renderableCount += 1;
   }
   return {
-    messagesRef: messages,
+    timelineEntriesRef: timelineEntries,
     keyByIndex,
     renderableCount,
   };
 }
 
-function findCompletionEventAnchors(messages: RawMessage[]): CompletionEventAnchor[] {
+function findCompletionEventAnchors(
+  timelineEntries: SessionTimelineEntry[],
+): CompletionEventAnchor[] {
   const anchors: CompletionEventAnchor[] = [];
-  for (const [eventIndex, message] of messages.entries()) {
-    const completionInfo = parseSubagentCompletionInfo(message);
-    if (!completionInfo) continue;
+  for (const [eventIndex, entry] of timelineEntries.entries()) {
+    const completionInfo = parseSubagentCompletionInfo(entry);
+    if (!completionInfo) {
+      continue;
+    }
 
     let triggerIndex = eventIndex;
     for (let index = eventIndex - 1; index >= 0; index -= 1) {
-      const previous = messages[index];
-      if (previous.role !== 'user') continue;
-      if (parseSubagentCompletionInfo(previous)) continue;
+      const previousEntry = timelineEntries[index];
+      if (previousEntry.role !== 'user') {
+        continue;
+      }
+      if (parseSubagentCompletionInfo(previousEntry)) {
+        continue;
+      }
       triggerIndex = index;
       break;
     }
 
     let replyIndex: number | null = null;
-    for (let index = eventIndex + 1; index < messages.length; index += 1) {
-      if (messages[index]?.role === 'assistant') {
+    for (let index = eventIndex + 1; index < timelineEntries.length; index += 1) {
+      if (timelineEntries[index]?.role === 'assistant') {
         replyIndex = index;
         break;
       }
@@ -86,13 +94,13 @@ function findCompletionEventAnchors(messages: RawMessage[]): CompletionEventAnch
 }
 
 export function buildCompletionAnchors(
-  messages: RawMessage[],
+  timelineEntries: SessionTimelineEntry[],
   previous?: AnchorsSnapshot,
 ): AnchorsSnapshot {
-  if (!previous || !canAppendMessageList(previous.messagesRef, messages)) {
+  if (!previous || !canAppendReferenceList(previous.timelineEntriesRef, timelineEntries)) {
     return {
-      messagesRef: messages,
-      anchors: findCompletionEventAnchors(messages),
+      timelineEntriesRef: timelineEntries,
+      anchors: findCompletionEventAnchors(timelineEntries),
     };
   }
 
@@ -104,10 +112,10 @@ export function buildCompletionAnchors(
     }
   }
 
-  for (let index = previous.messagesRef.length; index < messages.length; index += 1) {
-    const message = messages[index];
+  for (let index = previous.timelineEntriesRef.length; index < timelineEntries.length; index += 1) {
+    const entry = timelineEntries[index];
 
-    if (message.role === 'assistant') {
+    if (entry.role === 'assistant') {
       while (unresolvedIndices.length > 0) {
         const unresolvedIndex = unresolvedIndices[0];
         if (anchors[unresolvedIndex].eventIndex < index) {
@@ -119,34 +127,37 @@ export function buildCompletionAnchors(
       }
     }
 
-    const completionInfo = parseSubagentCompletionInfo(message);
+    const completionInfo = parseSubagentCompletionInfo(entry);
     if (!completionInfo) {
       continue;
     }
 
     let triggerIndex = index;
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const previousMessage = messages[cursor];
-      if (previousMessage.role !== 'user') continue;
-      if (parseSubagentCompletionInfo(previousMessage)) continue;
+      const previousEntry = timelineEntries[cursor];
+      if (previousEntry.role !== 'user') {
+        continue;
+      }
+      if (parseSubagentCompletionInfo(previousEntry)) {
+        continue;
+      }
       triggerIndex = cursor;
       break;
     }
 
-    const nextAnchor: CompletionEventAnchor = {
+    anchors.push({
       eventIndex: index,
       triggerIndex,
       replyIndex: null,
       sessionKey: completionInfo.sessionKey,
       ...(completionInfo.sessionId ? { sessionId: completionInfo.sessionId } : {}),
       ...(completionInfo.agentId ? { agentId: completionInfo.agentId } : {}),
-    };
-    anchors.push(nextAnchor);
+    });
     unresolvedIndices.push(anchors.length - 1);
   }
 
   return {
-    messagesRef: messages,
+    timelineEntriesRef: timelineEntries,
     anchors,
   };
 }

@@ -25,6 +25,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
 import { resolveSessionListLabel } from '@/stores/chat/session-helpers';
+import { getSessionMessageCount } from '@/stores/chat/store-state-helpers';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
@@ -580,7 +581,7 @@ export function Sidebar({
           type="button"
           onClick={() => {
             const { currentSessionKey, loadedSessions } = useChatStore.getState();
-            const hasMessages = (loadedSessions[currentSessionKey]?.messages?.length ?? 0) > 0;
+            const hasMessages = getSessionMessageCount(loadedSessions[currentSessionKey]) > 0;
             if (isOnChat && hasMessages) {
               newSession();
             }

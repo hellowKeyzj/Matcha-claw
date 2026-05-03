@@ -1,6 +1,6 @@
-import type { RawMessage } from '@/stores/chat';
 import type { ExecutionGraphData } from './execution-graph-model';
 import type { TaskStep } from './task-viz';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 export const SUBAGENT_HISTORY_LIMIT = 200;
 export const SUBAGENT_HISTORY_CACHE_MAX_SESSIONS = 48;
@@ -11,7 +11,7 @@ export const EXECUTION_GRAPH_MAIN_STEPS_CACHE_MAX = 320;
 export const EXECUTION_GRAPH_CHILD_STEPS_CACHE_MAX = 320;
 export const EXECUTION_GRAPH_CACHE_MAX_SESSIONS = 20;
 
-export const EMPTY_MESSAGES: RawMessage[] = [];
+export const EMPTY_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
 export const EMPTY_TASK_STEPS: TaskStep[] = [];
 export const EMPTY_EXECUTION_GRAPHS: ExecutionGraphData[] = [];
 export const EMPTY_GRAPH_SIGNATURES: string[] = [];
@@ -33,18 +33,18 @@ export interface ExecutionGraphAgent {
 }
 
 export interface MessageKeyIndexSnapshot {
-  messagesRef: RawMessage[];
+  timelineEntriesRef: SessionTimelineEntry[];
   keyByIndex: Map<number, string>;
   renderableCount: number;
 }
 
 export interface AnchorsSnapshot {
-  messagesRef: RawMessage[];
+  timelineEntriesRef: SessionTimelineEntry[];
   anchors: CompletionEventAnchor[];
 }
 
 export interface SessionExecutionCache {
-  messagesRef: RawMessage[];
+  timelineEntriesRef: SessionTimelineEntry[];
   agentsRef: ExecutionGraphAgent[];
   subagentHistoryRevision: number;
   showThinking: boolean;

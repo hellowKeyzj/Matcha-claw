@@ -1,4 +1,5 @@
 import type { GatewayConnectionStatePayload } from './client';
+import { buildGatewayChatSendParams } from '../shared/gateway-chat-send-params';
 
 interface OpenClawGatewayClient {
   ensureGatewayReady: (timeoutMs?: number) => Promise<void>;
@@ -47,7 +48,15 @@ export function createOpenClawBridge(client: OpenClawGatewayClient): OpenClawBri
   return {
     ensureGatewayReady: (timeoutMs) => client.ensureGatewayReady(timeoutMs),
     gatewayRpc: (method, params = {}, timeoutMs) => client.gatewayRpc(method, params, timeoutMs),
-    chatSend: (params) => client.gatewayRpc('chat.send', params, 120000),
+    chatSend: (params) => client.gatewayRpc('chat.send', buildGatewayChatSendParams({
+      sessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : '',
+      message: typeof params.message === 'string' ? params.message : '',
+      deliver: typeof params.deliver === 'boolean' ? params.deliver : undefined,
+      idempotencyKey: typeof params.idempotencyKey === 'string' ? params.idempotencyKey : undefined,
+      attachments: Array.isArray(params.attachments)
+        ? params.attachments.filter((attachment) => Boolean(attachment && typeof attachment === 'object'))
+        : undefined,
+    }), 120000),
     channelsStatus: (probe = true) => client.gatewayRpc('channels.status', { probe }, 10000),
     channelsConnect: (channelId) => client.gatewayRpc('channels.connect', { channelId }, 10000),
     channelsDisconnect: (channelId) => client.gatewayRpc('channels.disconnect', { channelId }, 10000),

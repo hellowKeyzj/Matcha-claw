@@ -2,8 +2,8 @@ import type { ChatSession, ChatStoreState } from './types';
 import { readSessionCatalogStatusShell, readSessionsFromState, resolveSessionListLabel } from './session-helpers';
 import {
   getSessionMeta,
-  getSessionMessages,
   getSessionRuntime,
+  getSessionTimelineEntries,
 } from './store-state-helpers';
 import type { ChatSessionHistoryStatus } from './types';
 
@@ -88,8 +88,8 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
   };
 }
 
-export function selectCanonicalTranscript(state: ChatStoreState, sessionKey: string) {
-  return getSessionMessages(state, sessionKey);
+export function selectSessionTimeline(state: ChatStoreState, sessionKey: string) {
+  return getSessionTimelineEntries(state, sessionKey);
 }
 
 export function selectSessionMeta(state: ChatStoreState, sessionKey: string) {

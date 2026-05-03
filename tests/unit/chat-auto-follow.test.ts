@@ -1,16 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { buildChatAutoFollowSignal } from '@/pages/Chat/chat-auto-follow';
 import { buildStaticChatRows, type ChatRow } from '@/pages/Chat/chat-row-model';
+import { buildTimelineEntriesFromMessages } from '@/stores/chat/timeline-message';
 
 function buildMessageRow(id: string, role: 'user' | 'assistant', content: string, timestamp = 1): ChatRow {
   return buildStaticChatRows({
     sessionKey: 'agent:test:main',
-    messages: [{
+    entries: buildTimelineEntriesFromMessages('agent:test:main', [{
       id,
       role,
       content,
       timestamp,
-    }],
+    }]),
   })[0]!;
 }
 

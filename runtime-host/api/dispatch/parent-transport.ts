@@ -21,7 +21,7 @@ export type ParentShellAction =
 
 export type ParentGatewayForwardEventName =
   | 'gateway:notification'
-  | 'gateway:conversation-event'
+  | 'session:update'
   | 'gateway:channel-status'
   | 'gateway:error'
   | 'gateway:connection';

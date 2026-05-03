@@ -24,7 +24,7 @@ type RuntimeHostShellAction =
 
 type RuntimeHostGatewayForwardEventName =
   | 'gateway:notification'
-  | 'gateway:conversation-event'
+  | 'session:update'
   | 'gateway:channel-status'
   | 'gateway:error'
   | 'gateway:connection';
@@ -99,7 +99,7 @@ function isShellAction(value: unknown): value is RuntimeHostShellAction {
 
 function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayForwardEventName {
   return value === 'gateway:notification'
-    || value === 'gateway:conversation-event'
+    || value === 'session:update'
     || value === 'gateway:channel-status'
     || value === 'gateway:error'
     || value === 'gateway:connection';

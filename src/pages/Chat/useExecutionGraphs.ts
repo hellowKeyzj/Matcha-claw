@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { RawMessage } from '@/stores/chat';
+import { fetchChatTimeline } from '@/services/openclaw/session-runtime';
 import {
-  canAppendMessageList,
+  canAppendReferenceList,
 } from './chat-row-model';
 import type { ExecutionGraphData } from './execution-graph-model';
 import {
   EMPTY_ANCHOR_GRAPH_MAP,
   EMPTY_EXECUTION_GRAPHS,
   EMPTY_GRAPH_SIGNATURES,
-  EMPTY_MESSAGES,
+  EMPTY_TIMELINE_ENTRIES,
   EXECUTION_GRAPH_BATCH_SIZE,
   EXECUTION_GRAPH_FIRST_BATCH_SIZE,
   EXECUTION_GRAPH_IDLE_MIN_BUDGET_MS,
@@ -30,8 +30,8 @@ import { getIsChatScrollDraining } from './chat-scroll-drain';
 import { buildCompletionAnchors, buildMessageKeyIndex } from './exec-graph-index';
 import {
   buildGraphSignaturesByAnchor,
-  findFirstChangedCompletionAnchorIndex,
   findFirstChangedAnchorIndex,
+  findReusableGraphSignaturePrefix,
 } from './exec-graph-signature';
 import {
   materializeExecutionGraphAtIndex,
@@ -41,6 +41,7 @@ import {
   trackExecutionGraphPipelineMetric,
   type ExecutionGraphPipelineOutcome,
 } from './exec-graph-metrics';
+import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
 
 function areAnchorsEqual(
   left: ReadonlyArray<{
@@ -113,23 +114,21 @@ function areAgentsEquivalent(
 
 interface UseExecutionGraphsInput {
   enabled: boolean;
-  messages: RawMessage[];
+  timelineEntries: SessionTimelineEntry[];
   currentSessionKey: string;
   agents: ExecutionGraphAgent[];
   isGatewayRunning: boolean;
-  gatewayRpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   showThinking: boolean;
 }
 export function useExecutionGraphs({
   enabled,
-  messages,
+  timelineEntries,
   currentSessionKey,
   agents,
   isGatewayRunning,
-  gatewayRpc,
   showThinking,
 }: UseExecutionGraphsInput): ExecutionGraphData[] {
-  const subagentHistoryBySessionRef = useRef<Map<string, RawMessage[]>>(globalSubagentHistoryBySession);
+  const subagentHistoryBySessionRef = useRef<Map<string, SessionTimelineEntry[]>>(globalSubagentHistoryBySession);
   const [subagentHistoryRevision, setSubagentHistoryRevision] = useState(0);
   const subagentHistoryLoadingRef = useRef<Set<string>>(new Set());
   const idleHandleRef = useRef<IdleCallbackHandle | null>(null);
@@ -172,12 +171,12 @@ export function useExecutionGraphs({
   ), [cancelScheduledRenderState]);
 
   const rememberSubagentHistory = useMemo(() => (
-    (sessionKey: string, messages: RawMessage[]) => {
+    (sessionKey: string, entries: SessionTimelineEntry[]) => {
       const cache = subagentHistoryBySessionRef.current;
       if (cache.has(sessionKey)) {
         return;
       }
-      cache.set(sessionKey, messages);
+      cache.set(sessionKey, entries);
       while (cache.size > SUBAGENT_HISTORY_CACHE_MAX_SESSIONS) {
         const oldestKey = cache.keys().next().value;
         if (typeof oldestKey !== 'string') {
@@ -208,20 +207,20 @@ export function useExecutionGraphs({
 
       for (const sessionKey of pendingSessionKeys) {
         subagentHistoryLoadingRef.current.add(sessionKey);
-        void gatewayRpc<Record<string, unknown>>('chat.history', {
+        void fetchChatTimeline({
           sessionKey,
           limit: SUBAGENT_HISTORY_LIMIT,
         }).then((result) => {
-          const loaded = Array.isArray(result.messages) ? result.messages as RawMessage[] : EMPTY_MESSAGES;
+          const loaded = Array.isArray(result) ? result : EMPTY_TIMELINE_ENTRIES;
           rememberSubagentHistory(sessionKey, loaded);
         }).catch(() => {
-          rememberSubagentHistory(sessionKey, EMPTY_MESSAGES);
+          rememberSubagentHistory(sessionKey, EMPTY_TIMELINE_ENTRIES);
         }).finally(() => {
           subagentHistoryLoadingRef.current.delete(sessionKey);
         });
       }
     }
-  ), [gatewayRpc, isGatewayRunning, rememberSubagentHistory]);
+  ), [isGatewayRunning, rememberSubagentHistory]);
 
   useEffect(() => {
     cancelScheduledRenderState();
@@ -237,7 +236,7 @@ export function useExecutionGraphs({
     const cache = globalSessionExecutionCache.get(currentSessionKey);
     const hasExactCache = Boolean(
       cache
-      && cache.messagesRef === messages
+      && cache.timelineEntriesRef === timelineEntries
       && areAgentsEquivalent(cache.agentsRef, agents)
       && cache.subagentHistoryRevision === subagentHistoryRevision
       && cache.showThinking === showThinking
@@ -293,11 +292,11 @@ export function useExecutionGraphs({
         fetchedSubagentSessions: fetchedSubagentSessionKeys.size,
       });
     };
-    const anchors = buildCompletionAnchors(messages, previousCache?.anchors);
-    const keyIndex = buildMessageKeyIndex(currentSessionKey, messages, previousCache?.keyIndex);
+    const anchors = buildCompletionAnchors(timelineEntries, previousCache?.anchors);
+    const keyIndex = buildMessageKeyIndex(currentSessionKey, timelineEntries, previousCache?.keyIndex);
     if (anchors.anchors.length === 0) {
       const nextCache: SessionExecutionCache = {
-        messagesRef: messages,
+        timelineEntriesRef: timelineEntries,
         agentsRef: agents,
         subagentHistoryRevision,
         showThinking,
@@ -328,7 +327,7 @@ export function useExecutionGraphs({
 
     const canReuseClosedAnchors = Boolean(
       previousCache
-      && canAppendMessageList(previousCache.messagesRef, messages)
+      && canAppendReferenceList(previousCache.timelineEntriesRef, timelineEntries)
       && areAgentsEquivalent(previousCache.agentsRef, agents)
       && previousCache.subagentHistoryRevision === subagentHistoryRevision
       && previousCache.showThinking === showThinking
@@ -340,7 +339,7 @@ export function useExecutionGraphs({
       pipelineReusedAnchors = anchors.anchors.length;
       const nextCache: SessionExecutionCache = {
         ...previousCache,
-        messagesRef: messages,
+        timelineEntriesRef: timelineEntries,
         agentsRef: agents,
         subagentHistoryRevision,
         showThinking,
@@ -371,12 +370,18 @@ export function useExecutionGraphs({
       && areAgentsEquivalent(previousCache.agentsRef, agents)
     );
     const reusableSignaturePrefix = canReuseSignaturePrefix
-      ? findFirstChangedCompletionAnchorIndex(previousCache?.anchors.anchors, anchors.anchors)
+      ? findReusableGraphSignaturePrefix({
+        previousAnchors: previousCache?.anchors.anchors,
+        nextAnchors: anchors.anchors,
+        previousTimelineEntries: previousCache?.timelineEntriesRef,
+        nextTimelineEntries: timelineEntries,
+      })
       : 0;
     const graphSignaturesByAnchor = buildGraphSignaturesByAnchor({
       anchors: anchors.anchors,
       currentSessionKey,
       showThinking,
+      timelineEntries,
       subagentHistoryBySession: subagentHistoryBySessionRef.current,
       agentNameById,
       startIndex: reusableSignaturePrefix,
@@ -394,7 +399,7 @@ export function useExecutionGraphs({
       pipelineReusedAnchors = anchors.anchors.length;
       const nextCache: SessionExecutionCache = {
         ...previousCache,
-        messagesRef: messages,
+        timelineEntriesRef: timelineEntries,
         agentsRef: agents,
         subagentHistoryRevision,
         showThinking,
@@ -481,7 +486,7 @@ export function useExecutionGraphs({
     const commitFinalState = () => {
       const finalExecutionGraphs = snapshotExecutionGraphs(executionGraphs);
       const nextCache: SessionExecutionCache = {
-        messagesRef: messages,
+        timelineEntriesRef: timelineEntries,
         agentsRef: agents,
         subagentHistoryRevision,
         showThinking,
@@ -551,7 +556,7 @@ export function useExecutionGraphs({
             graphSignature: graphSignaturesByAnchor[cursor] ?? '',
             graphByAnchor,
             keyIndex,
-            messages,
+            timelineEntries,
             currentSessionKey,
             showThinking,
             subagentHistoryBySession: subagentHistoryBySessionRef.current,
@@ -622,7 +627,7 @@ export function useExecutionGraphs({
     enabled,
     fetchMissingSubagentHistories,
     isGatewayRunning,
-    messages,
+    timelineEntries,
     cancelScheduledRenderState,
     scheduleRenderState,
     showThinking,

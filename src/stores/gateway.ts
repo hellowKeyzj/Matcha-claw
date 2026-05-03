@@ -5,13 +5,12 @@
 import { create } from 'zustand';
 import { hostApiFetch, hostGatewayRpc } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import type { SessionUpdateEvent } from '../../runtime-host/shared/session-adapter-types';
 import type { GatewayStatus } from '../types/gateway';
 import {
   normalizeGatewayNotificationEvent,
   type ChatDomainEvent,
-  type ChatConversationDomainEvent,
 } from './chat/event-normalizer';
-import { subscribeChatConversationEvents } from './chat/transport-adapter';
 import { useChatStore } from './chat';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
@@ -186,12 +185,11 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
 function handleChatDomainEvent(event: ChatDomainEvent): void {
   try {
     const state = useChatStore.getState();
-    if (event.kind === 'chat.message' || event.kind === 'chat.runtime.lifecycle') {
-      state.handleConversationEvent(event as unknown as Record<string, unknown>);
-      return;
-    }
     if (event.kind === 'chat.approval.requested') {
       state.handleApprovalRequested(event.payload);
+      return;
+    }
+    if (event.kind === 'chat.message' || event.kind === 'chat.runtime.lifecycle') {
       return;
     }
     state.handleApprovalResolved(event.payload);
@@ -200,8 +198,12 @@ function handleChatDomainEvent(event: ChatDomainEvent): void {
   }
 }
 
-function handleGatewayConversationEvent(event: ChatConversationDomainEvent): void {
-  handleChatDomainEvent(event);
+function handleSessionUpdateEvent(event: SessionUpdateEvent): void {
+  try {
+    useChatStore.getState().handleSessionUpdateEvent(event);
+  } catch {
+    // ignore
+  }
 }
 
 function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconnected' | 'error' {
@@ -293,8 +295,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               handleGatewayNotification(payload);
             },
           ));
-          unsubscribers.push(subscribeChatConversationEvents((event) => {
-            handleGatewayConversationEvent(event);
+          unsubscribers.push(subscribeHostEvent<SessionUpdateEvent>('session:update', (payload) => {
+            handleSessionUpdateEvent(payload);
           }));
           unsubscribers.push(subscribeHostEvent<{ channelId?: string; status?: string }>(
             'gateway:channel-status',

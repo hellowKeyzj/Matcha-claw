@@ -33,7 +33,6 @@ import {
 } from '@/features/subagents/domain/workspace';
 import {
   buildSubagentPromptPayload,
-  extractChatSendOutput,
   parseDraftPayload,
 } from '@/features/subagents/domain/prompt';
 import { useProviderStore } from '@/stores/providers';
@@ -52,7 +51,6 @@ import type {
 const MAIN_AGENT_ID = 'main';
 const DRAFT_HISTORY_POLL_INTERVAL_MS = 500;
 const DRAFT_HISTORY_READ_TIMEOUT_MS = 180000;
-const DRAFT_CHAT_SEND_RPC_TIMEOUT_MS = 30000;
 const DRAFT_AGENT_NO_PROGRESS_TIMEOUT_MS = 180000;
 const DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS = 15000;
 const DRAFT_RPC_TIMEOUT_BUFFER_MS = 10000;
@@ -875,7 +873,7 @@ async function waitForDraftOutputFromHistoryWithTimeout(
 ): Promise<string> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const output = await fetchLatestAssistantText(rpc, {
+    const output = await fetchLatestAssistantText({
       sessionKey,
       limit: 20,
     });
@@ -899,7 +897,7 @@ async function waitForRunCompletion(runId: string, sessionKey: string): Promise<
 }
 
 async function cleanupSession(sessionKey: string): Promise<void> {
-  await deleteSession(rpc, { key: sessionKey, deleteTranscript: true });
+  await deleteSession({ key: sessionKey });
 }
 
 async function cleanupDraftSessionForAgent(agentId: string, getState: () => SubagentsState): Promise<void> {
@@ -1597,25 +1595,21 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       const payload = buildSubagentPromptPayload(trimmedPrompt, persistedFiles ?? {});
       const baseMessage = `${payload.systemPrompt}\n\n${payload.userPrompt}`;
       const sendDraftMessage = async (message: string): Promise<string> => {
-        const result = await sendChatMessage<Record<string, unknown>>(rpc, {
+        const result = await sendChatMessage({
           sessionKey,
           message,
           deliver: false,
           idempotencyKey: crypto.randomUUID(),
-        }, DRAFT_CHAT_SEND_RPC_TIMEOUT_MS + DRAFT_RPC_TIMEOUT_BUFFER_MS);
-        try {
-          return extractChatSendOutput(result);
-        } catch {
-          const runId = typeof result.runId === 'string' ? result.runId.trim() : '';
-          if (runId) {
-            await waitForRunCompletion(runId, sessionKey);
-            return waitForDraftOutputFromHistoryWithTimeout(
-              sessionKey,
-              DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS,
-            );
-          }
-          return waitForDraftOutputFromHistory(sessionKey);
+        });
+        const runId = typeof result.runId === 'string' ? result.runId.trim() : '';
+        if (runId) {
+          await waitForRunCompletion(runId, sessionKey);
+          return waitForDraftOutputFromHistoryWithTimeout(
+            sessionKey,
+            DRAFT_HISTORY_AFTER_WAIT_TIMEOUT_MS,
+          );
         }
+        return waitForDraftOutputFromHistory(sessionKey);
       };
 
       let outputText = await sendDraftMessage(baseMessage);

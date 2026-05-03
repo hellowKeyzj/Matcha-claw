@@ -1,21 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState, RawMessage } from '@/stores/chat/types';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import {
+  createEmptySessionRecord,
+  getSessionTimelineEntries,
+} from '@/stores/chat/store-state-helpers';
+import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from '@/stores/chat/timeline-message';
 
 const fetchHistoryWindowMock = vi.fn();
-const loadCronFallbackMessagesMock = vi.fn();
-const normalizeHistoryMessagesMock = vi.fn();
 
 vi.mock('@/stores/chat/history-fetch-helpers', () => ({
-  CHAT_HISTORY_FULL_LIMIT: 200,
-  CHAT_HISTORY_LOADING_TIMEOUT_MS: 1000,
   fetchHistoryWindow: (...args: unknown[]) => fetchHistoryWindowMock(...args),
-  loadCronFallbackMessages: (...args: unknown[]) => loadCronFallbackMessagesMock(...args),
-}));
-
-vi.mock('@/stores/chat/history-normalizer-worker-client', () => ({
-  normalizeHistoryMessages: (...args: unknown[]) => normalizeHistoryMessagesMock(...args),
 }));
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
@@ -29,8 +24,46 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
     replaceHistoryLoadAbortController: () => null,
     clearHistoryLoadAbortController: () => {},
     historyFingerprintBySession: new Map<string, string>(),
-    historyQuickFingerprintBySession: new Map<string, string>(),
     historyRenderFingerprintBySession: new Map<string, string>(),
+  };
+}
+
+function createSnapshot(sessionKey: string, messages: RawMessage[]) {
+  const entries = buildTimelineEntriesFromMessages(sessionKey, messages);
+  return {
+    sessionKey,
+    entries,
+    replayComplete: true,
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'done' as const,
+      streamingMessageId: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      updatedAt: 1,
+    },
+    window: {
+      totalEntryCount: entries.length,
+      windowStartOffset: 0,
+      windowEndOffset: entries.length,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    },
+  };
+}
+
+function createWindowResult(sessionKey: string, messages: RawMessage[] = []) {
+  return {
+    snapshot: createSnapshot(sessionKey, messages),
+    thinkingLevel: null,
+    totalMessageCount: messages.length,
+    windowStartOffset: 0,
+    windowEndOffset: messages.length,
+    hasMore: false,
+    hasNewer: false,
+    isAtLatest: true,
   };
 }
 
@@ -67,31 +100,12 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
   };
 }
 
-function createWindowResult(messages: RawMessage[] = []) {
-  return {
-    rawMessages: messages,
-    canonicalRawMessages: messages,
-    thinkingLevel: null,
-    totalMessageCount: messages.length,
-    windowStartOffset: 0,
-    windowEndOffset: messages.length,
-    hasMore: false,
-    hasNewer: false,
-    isAtLatest: true,
-  };
-}
-
 describe('chat history load execution', () => {
   beforeEach(() => {
     fetchHistoryWindowMock.mockReset();
-    loadCronFallbackMessagesMock.mockReset();
-    normalizeHistoryMessagesMock.mockReset();
-    fetchHistoryWindowMock.mockResolvedValue(createWindowResult());
-    loadCronFallbackMessagesMock.mockResolvedValue([]);
-    normalizeHistoryMessagesMock.mockImplementation(async (messages: RawMessage[]) => messages);
   });
 
-  it('active foreground load toggles loading state around one direct fetch/apply pass', async () => {
+  it('active foreground load applies authoritative snapshot and clears loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:main:main';
     const resultMessages: RawMessage[] = [
@@ -111,14 +125,13 @@ describe('chat history load execution', () => {
         && current.error === null
         && current.loadedSessions[requestedSessionKey]?.meta.historyStatus === 'loading'
       );
-      return createWindowResult(resultMessages);
+      return createWindowResult(requestedSessionKey, resultMessages);
     });
-    const historyRuntime = createHistoryRuntimeHarness();
 
     await executeHistoryLoad({
       set,
       get,
-      historyRuntime,
+      historyRuntime: createHistoryRuntimeHarness(),
       loadingTimeoutMs: 1000,
     }, {
       sessionKey: requestedSessionKey,
@@ -127,37 +140,32 @@ describe('chat history load execution', () => {
     });
 
     expect(sawLoadingState).toBe(true);
-    expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(1);
-    expect(normalizeHistoryMessagesMock).toHaveBeenCalledWith(resultMessages, expect.objectContaining({
-      abortSignal: expect.any(AbortSignal),
-    }));
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(resultMessages);
+    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), requestedSessionKey))).toMatchObject(resultMessages);
   });
 
-  it('background load does not touch foreground loading ui', async () => {
+  it('background load updates the target session without touching foreground loading ui', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
+    const requestedSessionKey = 'agent:worker:main';
     const loadedMessages: RawMessage[] = [
       { role: 'assistant', content: 'background refresh', timestamp: 1, id: 'assistant-1' },
     ];
     const { set, get } = createStateHarness({
-      currentSessionKey: requestedSessionKey,
+      currentSessionKey: 'agent:main:main',
       foregroundHistorySessionKey: null,
+      loadedSessions: {
+        'agent:main:main': createEmptySessionRecord(),
+        [requestedSessionKey]: createEmptySessionRecord(),
+      },
       error: 'keep',
     });
-    fetchHistoryWindowMock.mockImplementationOnce(async () => {
-      expect(get().foregroundHistorySessionKey).toBeNull();
-      expect(get().error).toBe('keep');
-      return createWindowResult(loadedMessages);
-    });
-    const historyRuntime = createHistoryRuntimeHarness();
+    fetchHistoryWindowMock.mockResolvedValueOnce(createWindowResult(requestedSessionKey, loadedMessages));
 
     await executeHistoryLoad({
       set,
       get,
-      historyRuntime,
+      historyRuntime: createHistoryRuntimeHarness(),
       loadingTimeoutMs: 1000,
     }, {
       sessionKey: requestedSessionKey,
@@ -167,41 +175,15 @@ describe('chat history load execution', () => {
 
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().error).toBe('keep');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(loadedMessages);
+    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), requestedSessionKey))).toMatchObject(loadedMessages);
   });
 
-  it('recovers through cron fallback when fetch fails and fallback data exists', async () => {
+  it('active foreground load marks error when authoritative snapshot fetch fails', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:main:main';
     const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
-    fetchHistoryWindowMock.mockRejectedValueOnce(new Error('window failed'));
-    const fallbackMessages: RawMessage[] = [{ role: 'assistant', content: 'fallback', timestamp: 1, id: 'assistant-fallback' }];
-    loadCronFallbackMessagesMock.mockResolvedValueOnce(fallbackMessages);
     const historyRuntime = createHistoryRuntimeHarness();
-
-    await executeHistoryLoad({
-      set,
-      get,
-      historyRuntime,
-      loadingTimeoutMs: 1000,
-    }, {
-      sessionKey: requestedSessionKey,
-      mode: 'active',
-      scope: 'foreground',
-    });
-
-    expect(loadCronFallbackMessagesMock).toHaveBeenCalledWith(requestedSessionKey, 200);
-    expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual(fallbackMessages);
-  });
-
-  it('marks active foreground load as error when fetch fails and no fallback exists', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
-    const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
     fetchHistoryWindowMock.mockRejectedValueOnce(new Error('window failed'));
-    loadCronFallbackMessagesMock.mockResolvedValueOnce([]);
-    const historyRuntime = createHistoryRuntimeHarness();
 
     await executeHistoryLoad({
       set,
@@ -217,38 +199,10 @@ describe('chat history load execution', () => {
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
     expect(get().error).toBe('window failed');
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(true);
-    expect(historyRuntime.historyQuickFingerprintBySession.has(requestedSessionKey)).toBe(true);
     expect(historyRuntime.historyRenderFingerprintBySession.has(requestedSessionKey)).toBe(true);
   });
 
-  it('treats abort error as aborted outcome without failure recovery', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
-    const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey, error: null });
-    fetchHistoryWindowMock.mockImplementationOnce(async () => {
-      const error = new Error('history aborted');
-      error.name = 'AbortError';
-      throw error;
-    });
-    const historyRuntime = createHistoryRuntimeHarness();
-
-    await executeHistoryLoad({
-      set,
-      get,
-      historyRuntime,
-      loadingTimeoutMs: 1000,
-    }, {
-      sessionKey: requestedSessionKey,
-      mode: 'active',
-      scope: 'foreground',
-    });
-
-    expect(loadCronFallbackMessagesMock).not.toHaveBeenCalled();
-    expect(get().error).toBeNull();
-    expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('loading');
-  });
-
-  it('aborts before fetch when foreground session already changed', async () => {
+  it('aborts before apply when foreground session already changed', async () => {
     const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
     const requestedSessionKey = 'agent:main:main';
     const { set, get } = createStateHarness({ currentSessionKey: 'agent:main:other', error: null });
@@ -266,33 +220,6 @@ describe('chat history load execution', () => {
     });
 
     expect(fetchHistoryWindowMock).not.toHaveBeenCalled();
-    expect(normalizeHistoryMessagesMock).not.toHaveBeenCalled();
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(false);
-  });
-
-  it('stops when abort is raised after window fetch', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
-    const requestedSessionKey = 'agent:main:main';
-    const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey, error: null });
-    const historyRuntime = createHistoryRuntimeHarness();
-    fetchHistoryWindowMock.mockImplementationOnce(async () => {
-      historyRuntime.nextHistoryLoadRunId();
-      return createWindowResult([{ role: 'assistant', content: 'late', timestamp: 1, id: 'assistant-late' }]);
-    });
-
-    await executeHistoryLoad({
-      set,
-      get,
-      historyRuntime,
-      loadingTimeoutMs: 1000,
-    }, {
-      sessionKey: requestedSessionKey,
-      mode: 'quiet',
-      scope: 'foreground',
-    });
-
-    expect(normalizeHistoryMessagesMock).not.toHaveBeenCalled();
-    expect(loadCronFallbackMessagesMock).not.toHaveBeenCalled();
-    expect(get().loadedSessions[requestedSessionKey]?.messages).toEqual([]);
   });
 });
