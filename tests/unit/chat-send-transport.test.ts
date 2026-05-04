@@ -6,28 +6,32 @@ vi.mock('@/lib/host-api', () => ({
   hostSessionPrompt: (...args: unknown[]) => hostSessionPromptMock(...args),
 }));
 
-function buildPromptSnapshot(entryId: string, content: string) {
+function buildPromptSnapshot(rowId: string, content: string) {
   return {
     sessionKey: 'agent:main:main',
     replayComplete: true,
-    entries: [
+    rows: [
       {
-        entryId,
+        key: `session:agent:main:main|row:${rowId}`,
+        kind: 'message',
         sessionKey: 'agent:main:main',
+        rowId,
         laneKey: 'main',
-        turnKey: `main:${entryId}`,
+        turnKey: `main:${rowId}`,
         role: 'user',
         status: 'final',
         text: content,
-        timestamp: 1,
-        message: {
-          role: 'user',
-          id: entryId,
-          messageId: entryId,
-          content,
-          status: 'sent',
-          timestamp: 1,
-        },
+        createdAt: 1,
+        thinking: null,
+        images: [],
+        toolUses: [],
+        attachedFiles: [],
+        toolStatuses: [],
+        isStreaming: false,
+        messageId: rowId,
+        clientId: rowId,
+        uniqueId: rowId,
+        requestId: rowId,
       },
     ],
     runtime: {
@@ -40,7 +44,7 @@ function buildPromptSnapshot(entryId: string, content: string) {
       updatedAt: 1,
     },
     window: {
-      totalEntryCount: 1,
+      totalRowCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,

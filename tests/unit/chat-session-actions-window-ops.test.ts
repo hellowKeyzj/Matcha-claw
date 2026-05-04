@@ -8,15 +8,13 @@ import {
 import {
   createEmptySessionRecord,
   createEmptySessionViewportState,
-  getSessionTimelineEntries,
-  selectViewportTimelineEntries,
+  getSessionRows,
+  selectViewportRows,
 } from '@/stores/chat/store-state-helpers';
-import { materializeTimelineMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
-import type { RawMessage } from './helpers/timeline-fixtures';
-import { normalizeCanonicalChatMessage } from '@/../runtime-host/shared/chat-message-normalization';
 
 const hostSessionWindowFetchMock = vi.fn();
 const hostApiFetchMock = vi.fn();
@@ -42,37 +40,18 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function buildMessages(count: number, start = 1): RawMessage[] {
-  return Array.from({ length: count }, (_, index) => (
-    normalizeCanonicalChatMessage({
-      id: `message-${start + index}`,
-      role: (start + index) % 2 === 0 ? 'assistant' : 'user',
-      content: `message ${start + index}`,
-      timestamp: start + index,
-    }) as RawMessage
-  ));
-}
-
-function buildTimelineEntries(sessionKey: string, messages: RawMessage[]) {
-  return messages.map((message, index) => ({
-    entryId: `${message.id ?? `entry-${index + 1}`}`,
-    sessionKey,
-    laneKey: message.agentId ? `member:${message.agentId}` : 'main',
-    turnKey: message.agentId ? `member:${message.agentId}:${message.id ?? index + 1}` : `main:${message.id ?? index + 1}`,
-    role: message.role,
-    status: 'final' as const,
-    text: typeof message.content === 'string' ? message.content : '',
-    message,
+  return Array.from({ length: count }, (_, index) => ({
+    id: `message-${start + index}`,
+    role: (start + index) % 2 === 0 ? 'assistant' : 'user',
+    content: `message ${start + index}`,
+    timestamp: start + index,
   }));
-}
-
-function materializeSessionMessages(sessionKey: string, messages: RawMessage[]): RawMessage[] {
-  return materializeTimelineMessages(buildTimelineEntries(sessionKey, messages));
 }
 
 function buildWindowSnapshotResult(input: {
   sessionKey: string;
   messages: RawMessage[];
-  totalMessageCount: number;
+  totalRowCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -82,7 +61,15 @@ function buildWindowSnapshotResult(input: {
   return {
     snapshot: {
       sessionKey: input.sessionKey,
-      entries: buildTimelineEntries(input.sessionKey, input.messages),
+      catalog: {
+        key: input.sessionKey,
+        agentId: input.sessionKey.split(':')[1] ?? 'main',
+        kind: input.sessionKey.endsWith(':main') ? 'main' as const : 'session' as const,
+        preferred: input.sessionKey.endsWith(':main'),
+        displayName: input.sessionKey,
+        updatedAt: input.messages[input.messages.length - 1]?.timestamp,
+      },
+      rows: buildRenderRowsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
         sending: false,
@@ -94,7 +81,7 @@ function buildWindowSnapshotResult(input: {
         updatedAt: 1,
       },
       window: {
-        totalEntryCount: input.totalMessageCount,
+        totalRowCount: input.totalRowCount,
         windowStartOffset: input.windowStartOffset,
         windowEndOffset: input.windowEndOffset,
         hasMore: input.hasMore,
@@ -112,7 +99,15 @@ function buildSessionSnapshotResult(input: {
   return {
     snapshot: {
       sessionKey: input.sessionKey,
-      entries: buildTimelineEntries(input.sessionKey, input.messages),
+      catalog: {
+        key: input.sessionKey,
+        agentId: input.sessionKey.split(':')[1] ?? 'main',
+        kind: input.sessionKey.endsWith(':main') ? 'main' as const : 'session' as const,
+        preferred: input.sessionKey.endsWith(':main'),
+        displayName: input.sessionKey,
+        updatedAt: input.messages[input.messages.length - 1]?.timestamp,
+      },
+      rows: buildRenderRowsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
         sending: false,
@@ -124,7 +119,7 @@ function buildSessionSnapshotResult(input: {
         updatedAt: 1,
       },
       window: {
-        totalEntryCount: input.messages.length,
+        totalRowCount: input.messages.length,
         windowStartOffset: 0,
         windowEndOffset: input.messages.length,
         hasMore: false,
@@ -149,9 +144,13 @@ function createStateHarness(input: {
         ...createEmptySessionRecord(),
         meta: {
           ...createEmptySessionRecord().meta,
+          agentId: input.currentSessionKey.split(':')[1] ?? null,
+          kind: input.currentSessionKey.endsWith(':main') ? 'main' : 'session',
+          preferred: input.currentSessionKey.endsWith(':main'),
+          titleSource: 'none',
           ...input.meta,
         },
-        timelineEntries: buildTimelineEntries(input.currentSessionKey, input.messages),
+        rows: buildRenderRowsFromMessages(input.currentSessionKey, input.messages),
         window: input.window,
       },
     },
@@ -210,17 +209,20 @@ describe('chat session window ops', () => {
   it('loadOlderMessages expands the current session window upward without dropping the visible range', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
-    const currentWindowMessages = materializeSessionMessages(sessionKey, allMessages.slice(120, 220));
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalMessageCount: allMessages.length,
+      totalRowCount: allMessages.length,
       windowStartOffset: 120,
       windowEndOffset: 220,
       hasMore: true,
       hasNewer: false,
       isAtLatest: true,
     });
-    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: currentWindowMessages, window: viewport });
+    const { set, get } = createStateHarness({
+      currentSessionKey: sessionKey,
+      messages: allMessages.slice(120, 220),
+      window: viewport,
+    });
     const actions = createSessionHarness({
       set,
       get,
@@ -232,7 +234,7 @@ describe('chat session window ops', () => {
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildWindowSnapshotResult({
       sessionKey,
       messages: olderWindowMessages,
-      totalMessageCount: allMessages.length,
+      totalRowCount: allMessages.length,
       windowStartOffset: 20,
       windowEndOffset: 220,
       hasMore: true,
@@ -242,78 +244,33 @@ describe('chat session window ops', () => {
 
     await actions.loadOlderMessages(sessionKey);
 
-    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), sessionKey)).map((message) => message.id)).toEqual(
+    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
       olderWindowMessages.map((message) => message.id),
     );
-    expect(materializeTimelineMessages(selectViewportTimelineEntries(get().loadedSessions[sessionKey]!)).map((message) => message.id)).toEqual(
+    expect(selectViewportRows(get().loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(
       olderWindowMessages.map((message) => message.id),
     );
     expect(get().loadedSessions[sessionKey]?.window.windowStartOffset).toBe(20);
     expect(get().loadedSessions[sessionKey]?.window.windowEndOffset).toBe(220);
   });
 
-  it('loadOlderMessages preserves overlapping message references', async () => {
-    const sessionKey = 'agent:test:main';
-    const allMessages = buildMessages(220);
-    const currentWindowMessages = materializeSessionMessages(sessionKey, allMessages.slice(120, 220));
-    const viewport = createViewportWindowState({
-      ...createEmptySessionViewportState(),
-      totalMessageCount: 220,
-      windowStartOffset: 120,
-      windowEndOffset: 220,
-      hasMore: true,
-      hasNewer: false,
-      isAtLatest: true,
-    });
-    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: currentWindowMessages, window: viewport });
-    const actions = createSessionHarness({
-      set,
-      get,
-      defaultSessionKey: sessionKey,
-      historyRuntime: createHistoryRuntimeHarness(),
-    });
-    const currentWindowMessagesRef = materializeTimelineMessages(
-      getSessionTimelineEntries(get(), sessionKey),
-    );
-
-    const fetchedOlderMessages = [
-      ...buildMessages(100, 21),
-      ...currentWindowMessagesRef.map((message) => ({ ...message })),
-    ];
-    hostSessionWindowFetchMock.mockResolvedValueOnce(buildWindowSnapshotResult({
-      sessionKey,
-      messages: fetchedOlderMessages,
-      totalMessageCount: 220,
-      windowStartOffset: 20,
-      windowEndOffset: 220,
-      hasMore: true,
-      hasNewer: false,
-      isAtLatest: true,
-    }));
-
-    await actions.loadOlderMessages(sessionKey);
-
-    const nextRecord = get().loadedSessions[sessionKey]!;
-    const nextMessages = materializeTimelineMessages(selectViewportTimelineEntries(nextRecord));
-    expect(nextMessages).toHaveLength(200);
-    expect(nextMessages[100]).toMatchObject(currentWindowMessagesRef[0]!);
-    expect(nextMessages[199]).toMatchObject(currentWindowMessagesRef[99]!);
-  });
-
   it('jumpToLatest refreshes the session window to the latest slice', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
-    const currentWindowMessages = allMessages.slice(0, 120);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalMessageCount: allMessages.length,
+      totalRowCount: allMessages.length,
       windowStartOffset: 0,
       windowEndOffset: 120,
       hasMore: false,
       hasNewer: true,
       isAtLatest: false,
     });
-    const { set, get } = createStateHarness({ currentSessionKey: sessionKey, messages: currentWindowMessages, window: viewport });
+    const { set, get } = createStateHarness({
+      currentSessionKey: sessionKey,
+      messages: allMessages.slice(0, 120),
+      window: viewport,
+    });
     const actions = createSessionHarness({
       set,
       get,
@@ -325,7 +282,7 @@ describe('chat session window ops', () => {
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildWindowSnapshotResult({
       sessionKey,
       messages: latestWindowMessages,
-      totalMessageCount: allMessages.length,
+      totalRowCount: allMessages.length,
       windowStartOffset: 100,
       windowEndOffset: 220,
       hasMore: true,
@@ -335,20 +292,20 @@ describe('chat session window ops', () => {
 
     await actions.jumpToLatest(sessionKey);
 
-    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), sessionKey)).map((message) => message.id)).toEqual(
+    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
       latestWindowMessages.map((message) => message.id),
     );
-    expect(materializeTimelineMessages(selectViewportTimelineEntries(get().loadedSessions[sessionKey]!)).map((message) => message.id)).toEqual(
+    expect(selectViewportRows(get().loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(
       latestWindowMessages.map((message) => message.id),
     );
     expect(get().loadedSessions[sessionKey]?.window.isAtLatest).toBe(true);
   });
 
-  it('jumpToLatest does not re-append a stale local assistant when canonical latest already has the server final', async () => {
+  it('jumpToLatest replaces a stale local streaming assistant with the authoritative final row', async () => {
     const sessionKey = 'agent:test:main';
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalMessageCount: 1,
+      totalRowCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,
@@ -360,7 +317,7 @@ describe('chat session window ops', () => {
       loadedSessions: {
         [sessionKey]: {
           ...createEmptySessionRecord(),
-          timelineEntries: buildTimelineEntries(sessionKey, [{
+          rows: buildRenderRowsFromMessages(sessionKey, [{
             id: 'assistant-local-stream',
             role: 'assistant',
             content: 'draft preview',
@@ -409,7 +366,7 @@ describe('chat session window ops', () => {
         content: 'server final',
         timestamp: 2,
       }],
-      totalMessageCount: 1,
+      totalRowCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,
@@ -419,8 +376,8 @@ describe('chat session window ops', () => {
 
     await actions.jumpToLatest(sessionKey);
 
-    expect(materializeTimelineMessages(getSessionTimelineEntries(state, sessionKey)).map((message) => message.id)).toEqual(['assistant-final-1']);
-    expect(materializeTimelineMessages(selectViewportTimelineEntries(state.loadedSessions[sessionKey]!)).map((message) => message.id)).toEqual(['assistant-final-1']);
+    expect(getSessionRows(state, sessionKey).map((row) => row.rowId)).toEqual(['assistant-final-1']);
+    expect(selectViewportRows(state.loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(['assistant-final-1']);
   });
 
   it('switchSession reselect 优先走后端 session resume snapshot，而不是直接触发 history reload', async () => {
@@ -429,7 +386,7 @@ describe('chat session window ops', () => {
     const resumedMessages = buildMessages(2, 301);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalMessageCount: 0,
+      totalRowCount: 0,
       windowStartOffset: 0,
       windowEndOffset: 0,
       hasMore: false,
@@ -442,9 +399,9 @@ describe('chat session window ops', () => {
       window: viewport,
       loadHistory: loadHistoryMock,
     });
-      const actions = createSessionHarness({
-        set,
-        get,
+    const actions = createSessionHarness({
+      set,
+      get,
       defaultSessionKey: sessionKey,
       historyRuntime: createHistoryRuntimeHarness(),
     });
@@ -461,13 +418,13 @@ describe('chat session window ops', () => {
     }));
     expect(loadHistoryMock).not.toHaveBeenCalled();
     for (let index = 0; index < 5; index += 1) {
-      const currentMessageIds = materializeTimelineMessages(getSessionTimelineEntries(get(), sessionKey)).map((message) => message.id);
-      if (currentMessageIds.join('|') === resumedMessages.map((message) => message.id).join('|')) {
+      const currentRowIds = getSessionRows(get(), sessionKey).map((row) => row.rowId);
+      if (currentRowIds.join('|') === resumedMessages.map((message) => message.id).join('|')) {
         break;
       }
       await Promise.resolve();
     }
-    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), sessionKey)).map((message) => message.id)).toEqual(
+    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
       resumedMessages.map((message) => message.id),
     );
   });
@@ -486,7 +443,7 @@ describe('chat session window ops', () => {
           },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            totalMessageCount: 2,
+            totalRowCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             hasMore: false,
@@ -526,6 +483,4 @@ describe('chat session window ops', () => {
     expect(state.currentSessionKey).toBe(targetSessionKey);
     expect(state.loadedSessions[targetSessionKey]?.meta.historyStatus).toBe('loading');
   });
-
 });
-

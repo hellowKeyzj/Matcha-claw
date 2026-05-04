@@ -1,10 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
-import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
+import { applyAssistantPresentationToRows } from '@/pages/Chat/chat-row-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import type { SessionMessageRow } from '../../runtime-host/shared/session-adapter-types';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 const invokeIpcMock = vi.fn();
 
@@ -13,14 +14,15 @@ vi.mock('@/lib/api-client', () => ({
 }));
 
 function buildRow(message: RawMessage) {
-  return buildStaticChatRows({
-    sessionKey: 'agent:test:main',
-    entries: buildTimelineEntriesFromMessages('agent:test:main', [message]),
-  })[0]!;
-}
-
-function buildEntry(message: RawMessage) {
-  return buildTimelineEntriesFromMessages('agent:test:main', [message])[0]!;
+  const row = applyAssistantPresentationToRows({
+    rows: buildRenderRowsFromMessages('agent:test:main', [message]),
+    agents: [],
+    defaultAssistant: null,
+  })[0];
+  if (!row || row.kind !== 'message') {
+    throw new Error('expected message row');
+  }
+  return row;
 }
 
 describe('chat message links', () => {
@@ -43,7 +45,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(buildEntry(message));
+    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -67,7 +69,7 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(buildEntry(message));
+    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -94,7 +96,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
-    prewarmAssistantMarkdownBody(buildEntry(message));
+    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 
@@ -139,7 +141,7 @@ describe('chat message links', () => {
       role: 'assistant',
       content: longMarkdown,
     };
-    prewarmAssistantMarkdownBody(buildEntry(message));
+    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
 
     render(<ChatMessage row={buildRow(message)} showThinking={false} />);
 

@@ -3,14 +3,14 @@ import { normalizeTaskCompletionEvents } from '../../runtime-host/application/se
 
 describe('task completion events normalization', () => {
   it('only accepts structured completion events', () => {
-    expect(normalizeTaskCompletionEvents({
-      taskCompletionEvents: [{
+    expect(normalizeTaskCompletionEvents([
+      {
         kind: 'task_completion',
         source: 'subagent',
         childSessionKey: 'agent:coder:main',
         childSessionId: 'child-1',
-      }],
-    })).toEqual([{
+      },
+    ])).toEqual([{
       kind: 'task_completion',
       source: 'subagent',
       childSessionKey: 'agent:coder:main',
@@ -20,9 +20,6 @@ describe('task completion events normalization', () => {
   });
 
   it('does not parse injected completion text fallback', () => {
-    expect(normalizeTaskCompletionEvents({
-      taskCompletionEvents: [],
-      internalEvents: [],
-    })).toBeUndefined();
+    expect(normalizeTaskCompletionEvents([])).toBeUndefined();
   });
 });

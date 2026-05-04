@@ -3,7 +3,7 @@ import {
   readSessionAssistantTurnState,
 } from '@/stores/chat/session-turn-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 function createSession(input: {
   messages: RawMessage[];
@@ -11,7 +11,7 @@ function createSession(input: {
 }) {
   const sessionKey = 'agent:test:main';
   return {
-    timelineEntries: buildTimelineEntriesFromMessages(sessionKey, input.messages),
+    rows: buildRenderRowsFromMessages(sessionKey, input.messages),
     runtime: {
       sending: true,
       activeRunId: 'run-1',
@@ -92,12 +92,12 @@ describe('chat session turn state', () => {
       'team-turn-1',
     ]);
     expect(turnState.activeTurn?.turnKey).toBe('team-turn-1');
-    expect(turnState.lanes.map((lane) => lane.entry.message.id)).toEqual([
+    expect(turnState.lanes.map((lane) => lane.row.rowId)).toEqual([
       'assistant-agent-a',
       'assistant-agent-b',
     ]);
-    expect(turnState.currentStreamingTurn?.message.id).toBe('assistant-agent-b');
-    expect(turnState.currentTurn?.message.id).toBe('assistant-agent-b');
+    expect(turnState.currentStreamingTurn?.rowId).toBe('assistant-agent-b');
+    expect(turnState.currentTurn?.rowId).toBe('assistant-agent-b');
     expect(turnState.lanes.flatMap((lane) => lane.toolStatuses)).toMatchObject([
       {
         id: 'tool-a',
@@ -154,7 +154,7 @@ describe('chat session turn state', () => {
       'team-turn-new',
     ]);
     expect(turnState.activeTurn?.turnKey).toBe('team-turn-new');
-    expect(turnState.lanes.map((lane) => lane.entry.message.id)).toEqual([
+    expect(turnState.lanes.map((lane) => lane.row.rowId)).toEqual([
       'assistant-agent-a-new',
       'assistant-agent-b-new',
     ]);

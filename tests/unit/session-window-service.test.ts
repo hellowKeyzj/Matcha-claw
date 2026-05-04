@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/session-runtime/service';
+import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
 
 function buildTranscriptLine(index: number) {
   return JSON.stringify({
@@ -63,7 +63,7 @@ describe('session runtime service window', () => {
     expect(response.data).toMatchObject({
       snapshot: {
         window: {
-          totalEntryCount: 5,
+          totalRowCount: 5,
           windowStartOffset: 2,
           windowEndOffset: 5,
           hasMore: true,
@@ -72,7 +72,7 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((response.data as { snapshot: { entries: Array<{ message: { id: string } }> } }).snapshot.entries.map((entry) => entry.message.id)).toEqual([
+    expect((response.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
       'message-3',
       'message-4',
       'message-5',
@@ -123,7 +123,7 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((older.data as { snapshot: { entries: Array<{ message: { id: string } }> } }).snapshot.entries.map((entry) => entry.message.id)).toEqual([
+    expect((older.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
       'message-3',
       'message-4',
       'message-5',
@@ -148,7 +148,7 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((newer.data as { snapshot: { entries: Array<{ message: { id: string } }> } }).snapshot.entries.map((entry) => entry.message.id)).toEqual([
+    expect((newer.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
       'message-5',
       'message-6',
     ]);
@@ -186,8 +186,8 @@ describe('session runtime service window', () => {
 
     expect(response.status).toBe(200);
     expect((response.data as {
-      snapshot: { entries: Array<{ message: { id: string } }> };
-    }).snapshot.entries.map((entry) => entry.message.id)).toEqual(['message-3', 'message-4']);
+      snapshot: { rows: Array<{ messageId?: string; rowId?: string }> };
+    }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['message-3', 'message-4']);
   });
 
   it('preserves transcript identity fields needed to reconcile optimistic user messages', async () => {
@@ -229,35 +229,28 @@ describe('session runtime service window', () => {
 
     expect(response.status).toBe(200);
     expect((response.data as {
-      snapshot: { entries: Array<{
+      snapshot: { rows: Array<{
         laneKey?: string;
         turnKey?: string;
-        message: {
-          id?: string;
-          messageId?: string;
-          originMessageId?: string;
-          clientId?: string;
-          uniqueId?: string;
-          requestId?: string;
-          agentId?: string;
-        };
+        messageId?: string;
+        originMessageId?: string;
+        clientId?: string;
+        uniqueId?: string;
+        requestId?: string;
+        agentId?: string;
+        text?: string;
       }> };
-    }).snapshot.entries).toMatchObject([
+    }).snapshot.rows).toMatchObject([
       {
         laneKey: 'member:agent-main',
         turnKey: 'member:agent-main:transcript-user-1',
-        message: {
-          role: 'user',
-          content: 'hello world',
-          timestamp: Date.parse('2026-04-01T10:00:00.000Z'),
-          id: 'transcript-user-1',
-          messageId: 'transcript-user-1',
-          originMessageId: 'origin-user-1',
-          clientId: 'client-user-1',
-          uniqueId: 'transcript-user-1',
-          requestId: 'client-user-1',
-          agentId: 'agent-main',
-        },
+        messageId: 'transcript-user-1',
+        originMessageId: 'origin-user-1',
+        clientId: 'client-user-1',
+        uniqueId: 'transcript-user-1',
+        requestId: 'client-user-1',
+        agentId: 'agent-main',
+        text: 'hello world',
       },
     ]);
   });

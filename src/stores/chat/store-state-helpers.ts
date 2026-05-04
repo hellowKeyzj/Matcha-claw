@@ -55,7 +55,11 @@ export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[])
     const b = right[index];
     if (
       a.key !== b.key
+      || (a.agentId ?? null) !== (b.agentId ?? null)
+      || (a.kind ?? null) !== (b.kind ?? null)
+      || (a.preferred ?? false) !== (b.preferred ?? false)
       || (a.label ?? null) !== (b.label ?? null)
+      || (a.titleSource ?? null) !== (b.titleSource ?? null)
       || (a.displayName ?? null) !== (b.displayName ?? null)
       || (a.thinkingLevel ?? null) !== (b.thinkingLevel ?? null)
       || (a.model ?? null) !== (b.model ?? null)
@@ -119,7 +123,7 @@ export function buildRowRenderFingerprint(rows: SessionRenderRow[]): string {
 const EMPTY_ROWS: SessionRenderRow[] = [];
 const EMPTY_APPROVALS: ApprovalItem[] = [];
 const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
-  totalMessageCount: 0,
+  totalRowCount: 0,
   windowStartOffset: 0,
   windowEndOffset: 0,
   hasMore: false,
@@ -143,7 +147,11 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
 
 export function createEmptySessionMeta(): ChatSessionMetaState {
   return {
+    agentId: null,
+    kind: null,
+    preferred: false,
     label: null,
+    titleSource: 'none',
     displayName: null,
     model: null,
     lastActivityAt: null,
@@ -189,7 +197,7 @@ export function resolveSessionRows(
   return Array.isArray(session?.rows) ? session.rows : EMPTY_ROWS;
 }
 
-export function getSessionMessageCount(
+export function getSessionRowCount(
   session: Pick<ChatSessionRecord, 'rows'> | undefined,
 ): number {
   return Array.isArray(session?.rows) ? session.rows.length : 0;
@@ -358,7 +366,7 @@ export function selectViewportRows(
   if (rows.length === 0) {
     return EMPTY_ROWS;
   }
-  const totalCount = Math.max(record.window.totalMessageCount, rows.length);
+  const totalCount = Math.max(record.window.totalRowCount, rows.length);
   const start = Math.max(0, Math.min(record.window.windowStartOffset, rows.length));
   const end = Math.max(start, Math.min(record.window.windowEndOffset, rows.length));
   const expectedWindowSize = Math.max(0, Math.min(record.window.windowEndOffset, totalCount) - Math.min(record.window.windowStartOffset, totalCount));
@@ -384,7 +392,7 @@ export function patchSessionRowsAndViewport(
   const current = getSessionRecord(state, sessionKey);
   const nextRowCount = rows.length;
   const nextViewport = syncViewportState(current.window, {
-    totalMessageCount: viewportPatch?.totalMessageCount ?? Math.max(current.window.totalMessageCount, rows.length),
+    totalRowCount: viewportPatch?.totalRowCount ?? Math.max(current.window.totalRowCount, rows.length),
     windowStartOffset: viewportPatch?.windowStartOffset ?? current.window.windowStartOffset,
     windowEndOffset: viewportPatch?.windowEndOffset ?? (
       (viewportPatch?.windowStartOffset ?? current.window.windowStartOffset) + nextRowCount
@@ -408,7 +416,18 @@ export function patchSessionSnapshot(
   snapshot: SessionStateSnapshot,
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
+  const catalog = snapshot.catalog;
   return patchSessionRecord(state, sessionKey, {
+    meta: {
+      ...current.meta,
+      agentId: catalog.agentId,
+      kind: catalog.kind,
+      preferred: catalog.preferred,
+      label: catalog.label ?? null,
+      titleSource: catalog.titleSource ?? 'none',
+      displayName: catalog.displayName ?? current.meta.displayName,
+      lastActivityAt: typeof catalog.updatedAt === 'number' ? catalog.updatedAt : current.meta.lastActivityAt,
+    },
     rows: snapshot.rows,
     runtime: {
       ...current.runtime,
@@ -420,7 +439,7 @@ export function patchSessionSnapshot(
       lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
     },
     window: syncViewportState(current.window, {
-      totalMessageCount: snapshot.window.totalEntryCount,
+      totalRowCount: snapshot.window.totalRowCount,
       windowStartOffset: snapshot.window.windowStartOffset,
       windowEndOffset: snapshot.window.windowEndOffset,
       hasMore: snapshot.window.hasMore,

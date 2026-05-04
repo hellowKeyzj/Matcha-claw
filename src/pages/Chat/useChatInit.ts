@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/stores/chat';
 import { hasSessionCatalogLoaded } from '@/stores/chat/session-helpers';
-import { getSessionMessageCount } from '@/stores/chat/store-state-helpers';
+import { getSessionRowCount } from '@/stores/chat/store-state-helpers';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 
@@ -147,7 +147,7 @@ export function useChatInit(input: UseChatInitInput): void {
       const currentSessionRecord = currentChatState.loadedSessions[currentChatState.currentSessionKey];
       const hasCurrentViewportSnapshot = (
         currentSessionRecord?.meta.historyStatus === 'ready'
-        || getSessionMessageCount(currentSessionRecord) > 0
+        || getSessionRowCount(currentSessionRecord) > 0
       );
       if (hasCurrentViewportSnapshot) {
         initialHistoryIdleHandleRef.current = scheduleIdleTask(() => {

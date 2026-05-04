@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
 import { useChatStore, type ChatStoreState } from '@/stores/chat';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 function createStateWithSessions(
   loadedSessions: ChatStoreState['loadedSessions'],
@@ -16,7 +17,7 @@ describe('chat memory diagnostics', () => {
   it('summarizes window, preview, and runtime-state memory by session', () => {
     const state = createStateWithSessions({
       'agent:main:main': {
-        messages: [
+        rows: buildRenderRowsFromMessages('agent:main:main', [
           {
             role: 'user',
             id: 'user-1',
@@ -38,9 +39,9 @@ describe('chat memory diagnostics', () => {
             timestamp: 2,
             content: [{ type: 'text', text: 'answer body' }],
           },
-        ],
+        ]),
         window: createViewportWindowState({
-          totalMessageCount: 2,
+          totalRowCount: 2,
           windowStartOffset: 0,
           windowEndOffset: 2,
           isAtLatest: true,
@@ -57,16 +58,16 @@ describe('chat memory diagnostics', () => {
         },
       },
       'agent:other:main': {
-        messages: [
+        rows: buildRenderRowsFromMessages('agent:other:main', [
           {
             role: 'assistant',
             id: 'assistant-2',
             timestamp: 5,
             content: 'short',
           },
-        ],
+        ]),
         window: createViewportWindowState({
-          totalMessageCount: 1,
+          totalRowCount: 1,
           windowStartOffset: 0,
           windowEndOffset: 1,
           isAtLatest: true,
@@ -85,14 +86,14 @@ describe('chat memory diagnostics', () => {
 
     expect(summary.sessionCount).toBe(2);
     expect(summary.readySessionCount).toBe(1);
-    expect(summary.totalMessageCount).toBe(3);
+    expect(summary.totalRowCount).toBe(3);
     expect(summary.totalAttachedFileCount).toBe(1);
     expect(summary.totalPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
     expect(summary.totalDataUrlPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
     expect(summary.totalRuntimeStateCharCount).toBeGreaterThan(0);
     expect(summary.approxRetainedBytes).toBeGreaterThan(0);
     expect(summary.largestSessions[0]?.sessionKey).toBe('agent:main:main');
-    expect(summary.largestSessions[0]?.messageCount).toBe(2);
+    expect(summary.largestSessions[0]?.rowCount).toBe(2);
     expect(summary.largestSessions[0]?.attachedFileCount).toBe(1);
     expect(summary.largestSessions[0]?.runtimeStateCharCount).toBeGreaterThan(0);
   });

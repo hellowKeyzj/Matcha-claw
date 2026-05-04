@@ -12,8 +12,6 @@ import type {
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
-  SessionStateSnapshot,
-  SessionTimelineEntry,
   SessionWindowResult,
 } from '../../runtime-host/shared/session-adapter-types';
 
@@ -32,19 +30,6 @@ export type HostGatewayRpcResult<TResult = unknown> = {
   error?: string;
 };
 
-export interface GatewayClient {
-  request<TResult = unknown>(
-    method: string,
-    payload?: unknown,
-    timeoutMs?: number,
-  ): Promise<HostGatewayRpcResult<TResult>>;
-  rpc<TResult = unknown>(
-    method: string,
-    payload?: unknown,
-    timeoutMs?: number,
-  ): Promise<TResult>;
-}
-
 export interface OpenClawStatusPayload {
   packageExists: boolean;
   isBuilt: boolean;
@@ -58,10 +43,7 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
-export type HostSessionTimelineEntry = SessionTimelineEntry;
 export type HostSessionCatalogItem = SessionCatalogItem;
-export type HostSessionWindowPayload = SessionWindowResult;
-export type HostSessionSnapshot = SessionStateSnapshot;
 
 function headersToRecord(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -170,19 +152,6 @@ export async function hostGatewayRpc<TResult = unknown>(
   }
   return response.result as TResult;
 }
-
-/**
- * @deprecated 正式业务请改用 hostGatewayRequest / hostGatewayRpc。
- * 这里只保留给旧测试和高级调试别名，避免业务层再次依赖 gatewayClient 语义。
- */
-export const gatewayClient: GatewayClient = {
-  request: hostGatewayRequest,
-  rpc: async <TResult = unknown>(
-    method: string,
-    payload?: unknown,
-    timeoutMs?: number,
-  ): Promise<TResult> => await hostGatewayRpc<TResult>(method, payload, timeoutMs),
-};
 
 export async function createHostEventSource(path = '/api/events'): Promise<EventSource> {
   const token = await getHostApiToken();

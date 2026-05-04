@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-load-execution';
 import {
   createEmptySessionRecord,
-  getSessionTimelineEntries,
+  getSessionRows,
 } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
+import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -26,10 +26,41 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {}) {
-  const entries = buildTimelineEntriesFromMessages(sessionKey, messages);
+  const rows: SessionRenderRow[] = messages.map((message, index) => ({
+    key: `session:${sessionKey}|row:${message.id ?? `entry-${index + 1}`}`,
+    kind: 'message',
+    sessionKey,
+    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
+    text: typeof message.content === 'string' ? message.content : '',
+    createdAt: message.timestamp,
+    status: message.status === 'sending' ? 'pending' : 'final',
+    rowId: String(message.id ?? `entry-${index + 1}`),
+    laneKey: 'main',
+    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
+    thinking: null,
+    images: [],
+    toolUses: [],
+    attachedFiles: [],
+    toolStatuses: [],
+      isStreaming: false,
+      messageId: String(message.messageId ?? message.id ?? `entry-${index + 1}`),
+  }));
+  const agentId = sessionKey.split(':')[1] ?? 'main';
+  const suffix = sessionKey.split(':').slice(2).join(':');
+  const kind = suffix === 'main'
+    ? 'main'
+    : (suffix.startsWith('subagent:') ? 'subsession' : 'session');
   return {
     sessionKey,
-    entries,
+    catalog: {
+      key: sessionKey,
+      agentId,
+      kind,
+      preferred: kind === 'main',
+      displayName: sessionKey,
+      updatedAt: rows[rows.length - 1]?.createdAt,
+    },
+    rows,
     replayComplete: true,
     runtime: {
       sending: false,
@@ -42,9 +73,9 @@ function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverr
       ...runtimeOverrides,
     },
     window: {
-      totalEntryCount: entries.length,
+      totalRowCount: rows.length,
       windowStartOffset: 0,
-      windowEndOffset: entries.length,
+      windowEndOffset: rows.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
@@ -57,10 +88,11 @@ function createHistoryWindow(
   messages: RawMessage[],
   overrides: Partial<HistoryWindowResult> = {},
 ): HistoryWindowResult {
+  const snapshot = overrides.snapshot ?? createSnapshot(sessionKey, messages);
   return {
-    snapshot: createSnapshot(sessionKey, messages),
+    snapshot,
     thinkingLevel: overrides.thinkingLevel ?? null,
-    totalMessageCount: messages.length,
+    totalRowCount: messages.length,
     windowStartOffset: 0,
     windowEndOffset: messages.length,
     hasMore: false,
@@ -114,7 +146,10 @@ describe('chat history apply pipeline', () => {
     await applyLoadedMessages(createHistoryWindow(sessionKey, rawMessages));
 
     expect(harness.get().loadedSessions[sessionKey]?.meta.historyStatus).toBe('ready');
-    expect(materializeTimelineMessages(getSessionTimelineEntries(harness.get(), sessionKey))).toMatchObject(rawMessages);
+    expect(getSessionRows(harness.get(), sessionKey)).toMatchObject([
+      expect.objectContaining({ text: 'hello' }),
+      expect.objectContaining({ text: 'done' }),
+    ]);
     expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
   });
 
@@ -133,14 +168,14 @@ describe('chat history apply pipeline', () => {
       loadedSessions: {
         [currentSessionKey]: {
           ...createEmptySessionRecord(),
-          timelineEntries: buildTimelineEntriesFromMessages(currentSessionKey, currentMessages),
+          rows: createSnapshot(currentSessionKey, currentMessages).rows,
         },
         [requestedSessionKey]: createEmptySessionRecord(),
       },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
     } as ChatStoreState);
-    const currentEntriesRef = getSessionTimelineEntries(harness.get(), currentSessionKey);
+    const currentRowsRef = getSessionRows(harness.get(), currentSessionKey);
 
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
@@ -154,8 +189,10 @@ describe('chat history apply pipeline', () => {
 
     await applyLoadedMessages(createHistoryWindow(requestedSessionKey, targetMessages));
 
-    expect(getSessionTimelineEntries(harness.get(), currentSessionKey)).toBe(currentEntriesRef);
-    expect(materializeTimelineMessages(getSessionTimelineEntries(harness.get(), requestedSessionKey))).toMatchObject(targetMessages);
+    expect(getSessionRows(harness.get(), currentSessionKey)).toBe(currentRowsRef);
+    expect(getSessionRows(harness.get(), requestedSessionKey)).toMatchObject([
+      expect.objectContaining({ text: 'worker update' }),
+    ]);
   });
 
   it('authoritative snapshot replaces stale local optimistic messages instead of front-end canonical reconcile', async () => {
@@ -190,7 +227,7 @@ describe('chat history apply pipeline', () => {
       loadedSessions: {
         [sessionKey]: {
           ...createEmptySessionRecord(),
-          timelineEntries: buildTimelineEntriesFromMessages(sessionKey, localOptimistic),
+          rows: createSnapshot(sessionKey, localOptimistic).rows,
         },
       },
       pendingApprovalsBySession: {},
@@ -209,8 +246,11 @@ describe('chat history apply pipeline', () => {
 
     await applyLoadedMessages(createHistoryWindow(sessionKey, authoritative));
 
-    expect(materializeTimelineMessages(getSessionTimelineEntries(harness.get(), sessionKey))).toMatchObject(authoritative);
-    expect(getSessionTimelineEntries(harness.get(), sessionKey)).toHaveLength(2);
+    expect(getSessionRows(harness.get(), sessionKey)).toMatchObject([
+      expect.objectContaining({ rowId: 'user-server-1' }),
+      expect.objectContaining({ rowId: 'assistant-1' }),
+    ]);
+    expect(getSessionRows(harness.get(), sessionKey)).toHaveLength(2);
   });
 
   it('completed snapshot clears pending run state through authoritative runtime', async () => {

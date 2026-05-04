@@ -320,44 +320,52 @@ describe('runtime-host API 真实链路 contract', () => {
     );
 
     const latest = await harness.dispatchOk<{
-      messages: Array<{ id: string }>;
-      totalMessageCount: number;
-      windowStartOffset: number;
-      windowEndOffset: number;
-      hasMore: boolean;
-      hasNewer: boolean;
-      isAtLatest: boolean;
+      snapshot: {
+        rows: Array<{ rowId?: string; messageId?: string }>;
+        window: {
+          totalRowCount: number;
+          windowStartOffset: number;
+          windowEndOffset: number;
+          hasMore: boolean;
+          hasNewer: boolean;
+          isAtLatest: boolean;
+        };
+      };
     }>('POST', '/api/sessions/window', {
       sessionKey: 'agent:main:session-window',
       mode: 'latest',
       limit: 2,
     });
-    expect(latest.totalMessageCount).toBe(4);
-    expect(latest.windowStartOffset).toBe(2);
-    expect(latest.windowEndOffset).toBe(4);
-    expect(latest.hasMore).toBe(true);
-    expect(latest.hasNewer).toBe(false);
-    expect(latest.isAtLatest).toBe(true);
-    expect(latest.messages.map((message) => message.id)).toEqual(['m3', 'm4']);
+    expect(latest.snapshot.window.totalRowCount).toBe(4);
+    expect(latest.snapshot.window.windowStartOffset).toBe(2);
+    expect(latest.snapshot.window.windowEndOffset).toBe(4);
+    expect(latest.snapshot.window.hasMore).toBe(true);
+    expect(latest.snapshot.window.hasNewer).toBe(false);
+    expect(latest.snapshot.window.isAtLatest).toBe(true);
+    expect(latest.snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['m3', 'm4']);
 
     const older = await harness.dispatchOk<{
-      messages: Array<{ id: string }>;
-      windowStartOffset: number;
-      windowEndOffset: number;
-      hasMore: boolean;
-      hasNewer: boolean;
-      isAtLatest: boolean;
+      snapshot: {
+        rows: Array<{ rowId?: string; messageId?: string }>;
+        window: {
+          windowStartOffset: number;
+          windowEndOffset: number;
+          hasMore: boolean;
+          hasNewer: boolean;
+          isAtLatest: boolean;
+        };
+      };
     }>('POST', '/api/sessions/window', {
       sessionKey: 'agent:main:session-window',
       mode: 'older',
       limit: 2,
-      offset: latest.windowStartOffset,
+      offset: latest.snapshot.window.windowStartOffset,
     });
-    expect(older.windowStartOffset).toBe(0);
-    expect(older.windowEndOffset).toBe(2);
-    expect(older.hasMore).toBe(false);
-    expect(older.hasNewer).toBe(true);
-    expect(older.isAtLatest).toBe(false);
-    expect(older.messages.map((message) => message.id)).toEqual(['m1', 'm2']);
+    expect(older.snapshot.window.windowStartOffset).toBe(0);
+    expect(older.snapshot.window.windowEndOffset).toBe(4);
+    expect(older.snapshot.window.hasMore).toBe(false);
+    expect(older.snapshot.window.hasNewer).toBe(false);
+    expect(older.snapshot.window.isAtLatest).toBe(true);
+    expect(older.snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['m1', 'm2', 'm3', 'm4']);
   });
 });

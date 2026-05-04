@@ -88,7 +88,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
   };
 }
 
-export function selectSessionTimeline(state: ChatStoreState, sessionKey: string) {
+export function selectSessionRows(state: ChatStoreState, sessionKey: string) {
   return getSessionRows(state, sessionKey);
 }
 

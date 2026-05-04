@@ -13,7 +13,7 @@ vi.mock('@/lib/host-api', () => ({
 }));
 
 describe('chat history fetch pipeline helpers', () => {
-  it('returns host session load result directly when adapter already provides timeline entries', async () => {
+  it('returns host session load result directly when adapter already provides rows', async () => {
     const requestedSessionKey = 'agent:main:main';
     const sourceMessages: RawMessage[] = [
       { role: 'assistant', content: 'a', timestamp: 1 },
@@ -21,17 +21,24 @@ describe('chat history fetch pipeline helpers', () => {
     ];
     hostSessionLoadMock.mockReset();
     hostSessionLoadMock.mockResolvedValueOnce({
-        snapshot: {
-          sessionKey: requestedSessionKey,
-        entries: sourceMessages.map((message, index) => ({
-          entryId: `entry-${index + 1}`,
+      snapshot: {
+        sessionKey: requestedSessionKey,
+        rows: sourceMessages.map((message, index) => ({
+          key: `session:${requestedSessionKey}|row:row-${index + 1}`,
+          kind: 'message',
           sessionKey: requestedSessionKey,
           laneKey: 'main',
-          turnKey: `main:entry-${index + 1}`,
-          role: message.role,
+          turnKey: `main:row-${index + 1}`,
+          role: 'assistant',
           status: 'final',
           text: typeof message.content === 'string' ? message.content : '',
-          message,
+          thinking: null,
+          images: [],
+          toolUses: [],
+          attachedFiles: [],
+          toolStatuses: [],
+          isStreaming: false,
+          rowId: `row-${index + 1}`,
         })),
         replayComplete: true,
         runtime: {
@@ -44,7 +51,7 @@ describe('chat history fetch pipeline helpers', () => {
           updatedAt: null,
         },
         window: {
-          totalEntryCount: sourceMessages.length,
+          totalRowCount: sourceMessages.length,
           windowStartOffset: 0,
           windowEndOffset: sourceMessages.length,
           hasMore: false,
@@ -62,30 +69,24 @@ describe('chat history fetch pipeline helpers', () => {
 
     expect(result).toEqual(expect.objectContaining({
       thinkingLevel: 'medium',
-      totalMessageCount: sourceMessages.length,
+      totalRowCount: sourceMessages.length,
       windowStartOffset: 0,
       windowEndOffset: sourceMessages.length,
     }));
-    expect(result.snapshot?.entries).toMatchObject([
+    expect(result.snapshot?.rows).toMatchObject([
       {
-        message: {
-          role: 'assistant',
-          content: 'a',
-          timestamp: 1,
-        },
-        entryId: 'entry-1',
+        rowId: 'row-1',
+        role: 'assistant',
+        text: 'a',
         laneKey: 'main',
-        turnKey: 'main:entry-1',
+        turnKey: 'main:row-1',
       },
       {
-        message: {
-          role: 'assistant',
-          content: 'b',
-          timestamp: 2,
-        },
-        entryId: 'entry-2',
+        rowId: 'row-2',
+        role: 'assistant',
+        text: 'b',
         laneKey: 'main',
-        turnKey: 'main:entry-2',
+        turnKey: 'main:row-2',
       },
     ]);
   });
@@ -96,7 +97,7 @@ describe('chat history fetch pipeline helpers', () => {
     hostSessionLoadMock.mockResolvedValueOnce({
       snapshot: {
         sessionKey: requestedSessionKey,
-        entries: [],
+        rows: [],
         replayComplete: true,
         runtime: {
           sending: false,
@@ -108,7 +109,7 @@ describe('chat history fetch pipeline helpers', () => {
           updatedAt: null,
         },
         window: {
-          totalEntryCount: 0,
+          totalRowCount: 0,
           windowStartOffset: 0,
           windowEndOffset: 0,
           hasMore: false,
@@ -127,8 +128,8 @@ describe('chat history fetch pipeline helpers', () => {
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
     });
-    expect(result.snapshot?.entries).toEqual([]);
-    expect(result.totalMessageCount).toBe(0);
+    expect(result.snapshot?.rows).toEqual([]);
+    expect(result.totalRowCount).toBe(0);
     expect(result.isAtLatest).toBe(true);
   });
 });

@@ -128,19 +128,6 @@ export function readSessionSuffix(sessionKey: string): string {
   return suffix || sessionKey;
 }
 
-function parseSessionTimestamp(sessionKey: string): number | null {
-  const suffix = readSessionSuffix(sessionKey);
-  const matched = suffix.match(/session-(\d{8,16})/i);
-  if (!matched) {
-    return null;
-  }
-  const raw = Number(matched[1]);
-  if (!Number.isFinite(raw)) {
-    return null;
-  }
-  return matched[1].length <= 10 ? raw * 1000 : raw;
-}
-
 function normalizeSessionTitle(text: string): string {
   const cleaned = text.replace(/\s+/g, ' ').trim();
   if (!cleaned) {
@@ -152,11 +139,10 @@ function normalizeSessionTitle(text: string): string {
   return `${cleaned.slice(0, SESSION_TITLE_MAX_LENGTH - 3)}...`;
 }
 
-function resolvePreferredSessionKey(agentId: string, sessions: ChatSession[]): string | null {
-  const canonical = `agent:${agentId}:main`;
-  const canonicalMatch = sessions.find((session) => session.key === canonical);
-  if (canonicalMatch) {
-    return canonicalMatch.key;
+function resolvePreferredSessionKey(sessions: ChatSession[]): string | null {
+  const preferred = sessions.find((session) => session.preferred);
+  if (preferred) {
+    return preferred.key;
   }
   if (sessions.length > 0) {
     return sessions[0].key;
@@ -175,7 +161,7 @@ function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionTimestamp(session.key) ?? 0;
+  return 0;
 }
 
 function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEntry): number {
@@ -232,7 +218,7 @@ function buildIncrementalSessionActivityIndex(input: {
     const session = entry.session;
     const key = session.key;
     seen.add(key);
-    const agentId = parseAgentIdFromSessionKey(key);
+    const agentId = session.agentId ?? parseAgentIdFromSessionKey(key);
     if (!agentId) {
       if (entriesByKey.has(key)) {
         entriesByKey.delete(key);
@@ -337,7 +323,7 @@ function buildSessionBuckets(
 }
 
 function formatSessionMeta(session: ChatSession, activityMs: number, locale: string): string {
-  const ts = activityMs || parseSessionTimestamp(session.key);
+  const ts = activityMs;
   if (ts) {
     return new Date(ts).toLocaleString(locale, {
       month: '2-digit',
@@ -354,14 +340,13 @@ export function inferUntitledSessionLabel(
   session: ChatSession,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
-  const suffix = readSessionSuffix(session.key).trim().toLowerCase();
-  if (suffix.startsWith('subagent:')) {
+  if (session.kind === 'subsession') {
     return t('sidebar.subSession');
   }
-  if (/^session-\d{8,16}$/i.test(suffix)) {
+  if (session.kind === 'session') {
     return t('sidebar.newSession');
   }
-  if (suffix === 'main') {
+  if (session.kind === 'main') {
     return t('sidebar.defaultSession');
   }
   return t('sidebar.untitledSession');
@@ -411,7 +396,7 @@ export function useAgentSessionsPaneViewModel(
   const preferredSessionKeyByAgent = useMemo(() => {
     return new Map(
       Array.from(sessionAggregation.sessionsByAgent.entries()).map(([agentId, agentSessions]) => (
-        [agentId, resolvePreferredSessionKey(agentId, agentSessions)] as const
+        [agentId, resolvePreferredSessionKey(agentSessions)] as const
       )),
     );
   }, [sessionAggregation.sessionsByAgent]);
@@ -491,8 +476,8 @@ export function useAgentSessionsPaneViewModel(
       map.set(session.key, {
         title: sessionTitle,
         meta: sessionMeta,
-        agentId: sessionOwner?.agentId ?? parseAgentIdFromSessionKey(session.key) ?? 'main',
-        agentName: sessionOwner?.agentName ?? parseAgentIdFromSessionKey(session.key) ?? 'main',
+        agentId: sessionOwner?.agentId ?? session.agentId ?? 'main',
+        agentName: sessionOwner?.agentName ?? session.agentId ?? 'main',
         avatarSeed: sessionOwner?.avatarSeed,
         avatarStyle: sessionOwner?.avatarStyle,
         deleteLabel: input.t('sidebar.deleteSessionAria', { title: sessionTitle }),
@@ -521,4 +506,3 @@ export function useAgentSessionsPaneViewModel(
     sessionErrorMessage: input.sessionEntries.length === 0 ? input.sessionsError : null,
   };
 }
-

@@ -4,9 +4,9 @@ import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
-  getSessionTimelineEntries,
+  getSessionRows,
 } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
+import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
 
 const fetchHistoryWindowMock = vi.fn();
 
@@ -30,10 +30,39 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function createSnapshot(sessionKey: string, messages: RawMessage[]) {
-  const entries = buildTimelineEntriesFromMessages(sessionKey, messages);
+  const rows: SessionRenderRow[] = messages.map((message, index) => ({
+    key: `session:${sessionKey}|row:${message.id ?? `entry-${index + 1}`}`,
+    kind: 'message',
+    sessionKey,
+    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
+    text: typeof message.content === 'string' ? message.content : '',
+    createdAt: message.timestamp,
+    status: 'final',
+    rowId: String(message.id ?? `entry-${index + 1}`),
+    laneKey: 'main',
+    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
+    thinking: null,
+    images: [],
+    toolUses: [],
+    attachedFiles: [],
+    toolStatuses: [],
+    isStreaming: false,
+    messageId: String(message.id ?? `entry-${index + 1}`),
+  }));
   return {
     sessionKey,
-    entries,
+    catalog: {
+      key: sessionKey,
+      agentId: 'main',
+      kind: 'main' as const,
+      preferred: true,
+      ...(messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
+        ? { label: String(messages[messages.length - 1]?.content) }
+        : {}),
+      displayName: sessionKey,
+      updatedAt: messages.length > 0 ? messages[messages.length - 1]?.timestamp : undefined,
+    },
+    rows,
     replayComplete: true,
     runtime: {
       sending: false,
@@ -45,9 +74,9 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
       updatedAt: 1,
     },
     window: {
-      totalEntryCount: entries.length,
+      totalRowCount: rows.length,
       windowStartOffset: 0,
-      windowEndOffset: entries.length,
+      windowEndOffset: rows.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
@@ -59,7 +88,7 @@ function createWindowResult(sessionKey: string, messages: RawMessage[] = []) {
   return {
     snapshot: createSnapshot(sessionKey, messages),
     thinkingLevel: null,
-    totalMessageCount: messages.length,
+    totalRowCount: messages.length,
     windowStartOffset: 0,
     windowEndOffset: messages.length,
     hasMore: false,
@@ -143,7 +172,11 @@ describe('chat history load execution', () => {
     expect(sawLoadingState).toBe(true);
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), requestedSessionKey))).toMatchObject(resultMessages);
+    expect(getSessionRows(get(), requestedSessionKey)).toMatchObject([
+      expect.objectContaining({
+        text: 'loaded once',
+      }),
+    ]);
   });
 
   it('background load updates the target session without touching foreground loading ui', async () => {
@@ -176,7 +209,11 @@ describe('chat history load execution', () => {
 
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().error).toBe('keep');
-    expect(materializeTimelineMessages(getSessionTimelineEntries(get(), requestedSessionKey))).toMatchObject(loadedMessages);
+    expect(getSessionRows(get(), requestedSessionKey)).toMatchObject([
+      expect.objectContaining({
+        text: 'background refresh',
+      }),
+    ]);
   });
 
   it('active foreground load marks error when authoritative snapshot fetch fails', async () => {

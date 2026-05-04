@@ -2,15 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import { ChatToolActivityRowView } from '@/pages/Chat/ChatToolActivityRow';
-import { buildStaticChatRows } from '@/pages/Chat/chat-row-model';
+import { applyAssistantPresentationToRows } from '@/pages/Chat/chat-row-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 function buildRow(message: RawMessage) {
-  return buildStaticChatRows({
-    sessionKey: 'agent:test:main',
-    entries: buildTimelineEntriesFromMessages('agent:test:main', [message]),
+  return applyAssistantPresentationToRows({
+    rows: buildRenderRowsFromMessages('agent:test:main', [message]),
+    agents: [],
+    defaultAssistant: null,
   })[0]!;
 }
 

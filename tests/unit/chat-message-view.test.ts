@@ -1,50 +1,36 @@
 import { describe, expect, it } from 'vitest';
 import { getOrBuildChatMessageView } from '@/pages/Chat/chat-message-view';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionMessageRow, SessionToolActivityRow } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
-function buildEntry(input: Partial<SessionTimelineEntry>): SessionTimelineEntry {
-  const message = {
-    role: input.role ?? 'assistant',
-    content: '',
-    ...input.message,
-  };
-  const { message: _message, ...entryPatch } = input;
-  void _message;
-  return {
-    entryId: 'entry-1',
-    sessionKey: 'agent:test:main',
-    laneKey: 'main',
-    turnKey: 'main:entry-1',
+function buildMessageRow(content: unknown): SessionMessageRow | SessionToolActivityRow {
+  const row = buildRenderRowsFromMessages('agent:test:main', [{
     role: 'assistant',
-    status: 'final',
-    text: '',
-    ...entryPatch,
-    message,
-  };
+    content,
+    _attachedFiles: [{
+      fileName: 'README.md',
+      mimeType: 'text/markdown',
+      fileSize: 123,
+      preview: null,
+      filePath: 'C:/workspace/README.md',
+    }],
+  }])[0];
+  if (!row || (row.kind !== 'message' && row.kind !== 'tool-activity')) {
+    throw new Error('expected assistant content row');
+  }
+  return row;
 }
 
 describe('chat message view', () => {
-  it('extracts render fields directly from the timeline entry', () => {
-    const entry = buildEntry({
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'hello' },
-          { type: 'thinking', thinking: 'reviewing options' },
-          { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'README.md' } },
-          { type: 'image', data: 'base64-image', mimeType: 'image/png' },
-        ],
-        _attachedFiles: [{
-          fileName: 'README.md',
-          mimeType: 'text/markdown',
-          fileSize: 123,
-          preview: null,
-          filePath: 'C:/workspace/README.md',
-        }],
-      },
-    });
+  it('exposes render fields from the row protocol object', () => {
+    const row = buildMessageRow([
+      { type: 'text', text: 'hello' },
+      { type: 'thinking', thinking: 'reviewing options' },
+      { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'README.md' } },
+      { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+    ]);
 
-    const view = getOrBuildChatMessageView(entry);
+    const view = getOrBuildChatMessageView(row);
 
     expect(view.thinking).toBe('reviewing options');
     expect(view.toolUses).toEqual([{
@@ -60,34 +46,21 @@ describe('chat message view', () => {
     expect(view.attachedFiles[0]?.fileName).toBe('README.md');
   });
 
-  it('reuses the same derived view for the same timeline entry object', () => {
-    const entry = buildEntry({
-      message: {
-        role: 'assistant',
-        content: 'hello',
-      },
-    });
+  it('returns the latest row fields on repeated reads', () => {
+    const row = buildMessageRow('hello');
 
-    const first = getOrBuildChatMessageView(entry);
-    const second = getOrBuildChatMessageView(entry);
-
-    expect(second).toBe(first);
+    expect(getOrBuildChatMessageView(row)).toStrictEqual(getOrBuildChatMessageView(row));
   });
 
-  it('extracts tool cards from live agent toolCall content blocks', () => {
-    const entry = buildEntry({
-      message: {
-        role: 'assistant',
-        content: [{
-          type: 'toolCall',
-          id: 'tool-3',
-          name: 'read',
-          input: { filePath: 'README.md' },
-        }],
-      },
-    });
+  it('extracts tool cards from live assistant tool blocks', () => {
+    const row = buildMessageRow([{
+      type: 'toolCall',
+      id: 'tool-3',
+      name: 'read',
+      input: { filePath: 'README.md' },
+    }]) as SessionToolActivityRow;
 
-    expect(getOrBuildChatMessageView(entry).toolUses).toEqual([{
+    expect(getOrBuildChatMessageView(row).toolUses).toEqual([{
       id: 'tool-3',
       name: 'read',
       input: { filePath: 'README.md' },

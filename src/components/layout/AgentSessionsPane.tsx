@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button';
 import { useShallow } from 'zustand/react/shallow';
 import {
   inferUntitledSessionLabel,
-  parseAgentIdFromSessionKey,
   readSessionSuffix,
   type AgentSessionNode,
   type SessionBucketId,
@@ -171,7 +170,7 @@ const SessionListItem = memo(function SessionListItem({
           <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">{sessionMeta}</span>
         </span>
       </button>
-      {!session.key.endsWith(':main') && (
+      {session.kind !== 'main' && !session.preferred && (
         <button
           type="button"
           className="mr-1 shrink-0 rounded-full p-1 text-current/70 opacity-0 transition hover:bg-destructive/15 hover:text-destructive-foreground group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
@@ -338,8 +337,8 @@ const SessionListSection = memo(function SessionListSection({
                       session={session}
                       sessionTitle={viewModel?.title ?? fallbackUntitledLabel(session)}
                       sessionMeta={viewModel?.meta ?? readSessionSuffix(session.key)}
-                      agentId={viewModel?.agentId ?? parseAgentIdFromSessionKey(session.key) ?? 'main'}
-                      agentName={viewModel?.agentName ?? parseAgentIdFromSessionKey(session.key) ?? 'main'}
+                      agentId={viewModel?.agentId ?? session.agentId ?? 'main'}
+                      agentName={viewModel?.agentName ?? session.agentId ?? 'main'}
                       avatarSeed={viewModel?.avatarSeed}
                       avatarStyle={viewModel?.avatarStyle}
                       isCurrent={currentSessionKey === session.key}
@@ -436,7 +435,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane({
   }, []);
 
   const requestDeleteSession = useCallback((session: ChatSession) => {
-    if (session.key.endsWith(':main')) {
+    if (session.kind === 'main' || session.preferred) {
       return;
     }
     const title = paneViewModel.sessionViewModelByKey.get(session.key)?.title

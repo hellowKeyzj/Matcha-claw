@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/session-runtime/service';
+import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
 
 function buildTranscriptLine(input: {
   timestamp: string;
@@ -80,14 +80,22 @@ describe('session adapter service catalog', () => {
     expect(response.data).toEqual({
       sessions: [
         {
+          agentId: 'alpha',
           key: 'agent:alpha:session-2',
+          kind: 'named',
           label: '没有 user 时用 assistant 兜底',
+          preferred: false,
+          titleSource: 'assistant',
           displayName: 'agent:alpha:session-2',
           updatedAt: Date.parse('2026-04-11T08:00:00.000Z'),
         },
         {
+          agentId: 'alpha',
           key: 'agent:alpha:session-1',
+          kind: 'named',
           label: '最终标题来自这里',
+          preferred: false,
+          titleSource: 'user',
           displayName: 'agent:alpha:session-1',
           updatedAt: Date.parse('2026-04-10T10:10:00.000Z'),
         },
@@ -145,16 +153,65 @@ describe('session adapter service catalog', () => {
     expect(response.data).toEqual({
       sessions: [
         {
+          agentId: 'alpha',
           key: 'agent:alpha:session-2',
+          kind: 'named',
           label: 'alpha session two',
+          preferred: false,
+          titleSource: 'assistant',
           displayName: 'agent:alpha:session-2',
           updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
         },
         {
+          agentId: 'alpha',
           key: 'agent:alpha:main',
+          kind: 'main',
           label: 'alpha main title',
+          preferred: true,
+          titleSource: 'user',
           displayName: 'agent:alpha:main',
           updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
+        },
+      ],
+    });
+  });
+
+  it('falls back to raw jsonl discovery when an agent has transcripts but no sessions.json', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    const sessionsDir = join(configDir, 'agents', 'orphan-agent', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'session-1778000000000.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-15T10:00:00.000Z',
+        role: 'user',
+        content: 'orphan transcript title',
+        id: 'message-1',
+      }),
+    ].join('\n'));
+
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({}),
+      },
+    });
+
+    const response = await service.listSessions();
+
+    expect(response.status).toBe(200);
+    expect(response.data).toEqual({
+      sessions: [
+        {
+          agentId: 'orphan-agent',
+          key: 'agent:orphan-agent:session-1778000000000',
+          kind: 'session',
+          label: 'orphan transcript title',
+          preferred: false,
+          titleSource: 'user',
+          displayName: 'agent:orphan-agent:session-1778000000000',
+          updatedAt: Date.parse('2026-04-15T10:00:00.000Z'),
         },
       ],
     });

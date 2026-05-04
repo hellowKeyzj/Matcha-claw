@@ -105,18 +105,32 @@ function stripLeadingInternalPromptArtifacts(text: string): string {
   return output;
 }
 
+function stripLeadingConversationEnvelopeArtifacts(text: string): string {
+  let output = text;
+  while (true) {
+    const next = output
+      .replace(
+        /^\s*(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):\s*(?:```[a-z]*\n[\s\S]*?```\s*|\{[\s\S]*?\}\s*)/i,
+        '',
+      )
+      .replace(/^\s*(?:Conversation info|Sender|Forwarded message context)\s*\([^)]*\):\s*/i, '')
+      .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '');
+    if (next === output) {
+      break;
+    }
+    output = next;
+  }
+  return output;
+}
+
+function stripLeadingDisplayEnvelopeArtifacts(text: string): string {
+  return stripLeadingConversationEnvelopeArtifacts(stripLeadingInternalPromptArtifacts(text));
+}
+
 export function sanitizeCanonicalUserText(text: string): string {
-  const cleaned = text
-    .replace(/^\s*<relevant-memories>\s*[\s\S]*?<\/relevant-memories>\s*/i, '')
-    .replace(/^\s*\[UNTRUSTED DATA[^\n]*\][\s\S]*?\[END UNTRUSTED DATA\]\s*/i, '')
-    .replace(/\s*\[media attached:[^\]]*\]/gi, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
-    .replace(/^\s*[^\n:]{1,80}\s*\(\s*untrusted metadata\s*\):\s*/i, '');
-  return stripLeadingUntrustedMetadataBlocks(stripLeadingInternalPromptArtifacts(cleaned)).trim();
+  const cleaned = stripLeadingDisplayEnvelopeArtifacts(text)
+    .replace(/\s*\[media attached:[^\]]*\]/gi, '');
+  return stripLeadingUntrustedMetadataBlocks(cleaned).trim();
 }
 
 export function sanitizeCanonicalUserContent(content: unknown): unknown {
@@ -152,8 +166,16 @@ export function stripAssistantReplyDirectivePrefix(text: string): string {
     .trim();
 }
 
+export function sanitizeAssistantDisplayText(content: unknown): string {
+  const text = typeof content === 'string' ? content : extractMessageText(content);
+  return stripLeadingDisplayEnvelopeArtifacts(stripAssistantReplyDirectivePrefix(text))
+    .replace(/\s*\[media attached:[^\]]*\]/gi, '')
+    .replace(/\r\n?/g, '\n')
+    .trim();
+}
+
 export function normalizeAssistantFinalText(content: unknown): string {
-  return stripAssistantReplyDirectivePrefix(extractMessageText(content))
+  return sanitizeAssistantDisplayText(content)
     .replace(/\r\n?/g, '\n')
     .replace(/\s+/g, ' ')
     .trim();

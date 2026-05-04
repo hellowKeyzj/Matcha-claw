@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { getSessionTimelineEntries } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
+import { getSessionRows } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
@@ -24,6 +24,25 @@ function createSessionRecord(input?: {
   }>;
 }) {
   const messages = input?.messages ?? [];
+  const rows: SessionRenderRow[] = messages.map((message, index) => ({
+    key: `session:agent:main:main|row:${message.id ?? `entry-${index + 1}`}`,
+    kind: 'message',
+    sessionKey: 'agent:main:main',
+    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
+    text: typeof message.content === 'string' ? message.content : '',
+    createdAt: message.timestamp,
+    status: message.status === 'sending' ? 'pending' : 'final',
+    rowId: String(message.id ?? `entry-${index + 1}`),
+    laneKey: 'main',
+    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
+    thinking: null,
+    images: [],
+    toolUses: [],
+    attachedFiles: [],
+    toolStatuses: [],
+    isStreaming: false,
+    messageId: String(message.messageId ?? message.id ?? `entry-${index + 1}`),
+  }));
   return {
     meta: {
       label: null,
@@ -39,9 +58,9 @@ function createSessionRecord(input?: {
       streamingMessageId: null,
       lastUserMessageAt: null,
     },
-    timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', messages),
+    rows,
     window: createViewportWindowState({
-      totalMessageCount: messages.length,
+      totalRowCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -59,29 +78,33 @@ function createSessionInfoUpdate(payload: {
     phase: payload.phase,
     runId: payload.runId ?? null,
     sessionKey: payload.sessionKey ?? null,
-    laneKey: 'main',
-    runtime: {
-      sending: payload.phase === 'started',
-      activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
-      runPhase: payload.phase === 'started' ? 'submitted' : (
-        payload.phase === 'final' ? 'done' : (
-          payload.phase === 'error' ? 'error' : (
-            payload.phase === 'aborted' ? 'aborted' : 'idle'
+    snapshot: {
+      sessionKey: payload.sessionKey ?? '',
+      rows: [],
+      replayComplete: true,
+      runtime: {
+        sending: payload.phase === 'started',
+        activeRunId: payload.phase === 'started' ? (payload.runId ?? null) : null,
+        runPhase: payload.phase === 'started' ? 'submitted' : (
+          payload.phase === 'final' ? 'done' : (
+            payload.phase === 'error' ? 'error' : (
+              payload.phase === 'aborted' ? 'aborted' : 'idle'
+            )
           )
-        )
-      ),
-      streamingMessageId: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      updatedAt: 1,
-    },
-    window: {
-      totalEntryCount: 0,
-      windowStartOffset: 0,
-      windowEndOffset: 0,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
+        ),
+        streamingMessageId: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        updatedAt: 1,
+      },
+      window: {
+        totalRowCount: 0,
+        windowStartOffset: 0,
+        windowEndOffset: 0,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
     },
   };
 }
@@ -93,7 +116,7 @@ function createSessionMessageUpdate(payload: {
   sequenceId?: number;
   message: Record<string, unknown>;
 }) {
-  const entryId = String(
+  const rowId = String(
     payload.message.id
     ?? payload.message.messageId
     ?? (
@@ -109,12 +132,15 @@ function createSessionMessageUpdate(payload: {
     ?? 'turn',
   );
   return {
-    sessionUpdate: payload.kind,
+    sessionUpdate: payload.kind === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
     runId: payload.runId ?? null,
     sessionKey: payload.sessionKey ?? null,
-    laneKey: 'main',
-    entry: {
-      entryId,
+    row: {
+      key: `session:${payload.sessionKey ?? ''}|row:${rowId}`,
+      kind: Array.isArray(payload.message.content) && payload.message.content.some((item) => (
+        item && typeof item === 'object' && (item as { type?: unknown }).type === 'toolCall'
+      )) ? 'tool-activity' : 'message',
+      rowId,
       sessionKey: payload.sessionKey ?? '',
       laneKey: 'main',
       turnKey: `main:${turnIdentity}`,
@@ -122,24 +148,81 @@ function createSessionMessageUpdate(payload: {
       status: payload.kind === 'agent_message_chunk' ? 'streaming' : 'final',
       ...(payload.sequenceId != null ? { sequenceId: payload.sequenceId } : {}),
       text: typeof payload.message.content === 'string' ? payload.message.content : '',
-      message: payload.message,
+      createdAt: 1,
+      ...(Array.isArray(payload.message.content)
+        ? {
+            toolUses: payload.message.content.map((item) => ({
+              id: (item as { id?: string }).id ?? 'tool',
+              name: (item as { name?: string }).name ?? 'tool',
+              input: (item as { input?: unknown }).input,
+            })),
+            toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses : [],
+            isStreaming: payload.kind === 'agent_message_chunk',
+          }
+        : {
+            thinking: null,
+            images: [],
+            toolUses: [],
+            attachedFiles: [],
+            toolStatuses: [],
+            isStreaming: payload.kind === 'agent_message_chunk',
+            messageId: rowId,
+          }),
     },
-    runtime: {
-      sending: payload.kind === 'agent_message_chunk',
-      activeRunId: payload.runId ?? null,
-      runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
-      streamingMessageId: payload.kind === 'agent_message_chunk' ? entryId : null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      updatedAt: 1,
-    },
-    window: {
-      totalEntryCount: 1,
-      windowStartOffset: 0,
-      windowEndOffset: 1,
-      hasMore: false,
-      hasNewer: false,
-      isAtLatest: true,
+    snapshot: {
+      sessionKey: payload.sessionKey ?? '',
+      rows: [{
+        key: `session:${payload.sessionKey ?? ''}|row:${rowId}`,
+        kind: Array.isArray(payload.message.content) && payload.message.content.some((item) => (
+          item && typeof item === 'object' && (item as { type?: unknown }).type === 'toolCall'
+        )) ? 'tool-activity' : 'message',
+        rowId,
+        sessionKey: payload.sessionKey ?? '',
+        laneKey: 'main',
+        turnKey: `main:${turnIdentity}`,
+        role: payload.message.role,
+        status: payload.kind === 'agent_message_chunk' ? 'streaming' : 'final',
+        ...(payload.sequenceId != null ? { sequenceId: payload.sequenceId } : {}),
+        text: typeof payload.message.content === 'string' ? payload.message.content : '',
+        createdAt: 1,
+        ...(Array.isArray(payload.message.content)
+          ? {
+              toolUses: payload.message.content.map((item) => ({
+                id: (item as { id?: string }).id ?? 'tool',
+                name: (item as { name?: string }).name ?? 'tool',
+                input: (item as { input?: unknown }).input,
+              })),
+              toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses : [],
+              isStreaming: payload.kind === 'agent_message_chunk',
+            }
+          : {
+              thinking: null,
+              images: [],
+              toolUses: [],
+              attachedFiles: [],
+              toolStatuses: [],
+              isStreaming: payload.kind === 'agent_message_chunk',
+              messageId: rowId,
+            }),
+      }],
+      replayComplete: true,
+      runtime: {
+        sending: payload.kind === 'agent_message_chunk',
+        activeRunId: payload.runId ?? null,
+        runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
+        streamingMessageId: payload.kind === 'agent_message_chunk' ? rowId : null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        updatedAt: 1,
+      },
+      window: {
+        totalRowCount: 1,
+        windowStartOffset: 0,
+        windowEndOffset: 1,
+        hasMore: false,
+        hasNewer: false,
+        isAtLatest: true,
+      },
     },
   };
 }
@@ -401,16 +484,13 @@ describe('gateway store event wiring', () => {
     }));
 
     const state = useChatStore.getState();
-    expect(materializeTimelineMessages(getSessionTimelineEntries(state, 'agent:main:main'))).toMatchObject([{
-      id: 'run:run-delta-direct-1:seq:1',
+    expect(getSessionRows(state, 'agent:main:main')).toMatchObject([{
+      rowId: 'run:run-delta-direct-1:seq:1',
       role: 'assistant',
-      content: 'hello timeline',
-      streaming: true,
-      _timeline: {
-        entryId: 'run:run-delta-direct-1:seq:1',
-        laneKey: 'main',
-        turnKey: 'main:run-delta-direct-1',
-      },
+      text: 'hello timeline',
+      status: 'streaming',
+      laneKey: 'main',
+      turnKey: 'main:run-delta-direct-1',
     }]);
   });
 
@@ -467,17 +547,16 @@ describe('gateway store event wiring', () => {
     }));
 
     const state = useChatStore.getState();
-    const [entry] = getSessionTimelineEntries(state, 'agent:main:main');
-    expect(entry).toMatchObject({
-      entryId: 'run:run-tool-direct-1:tool:tool-1',
+    const [row] = getSessionRows(state, 'agent:main:main');
+    expect(row).toMatchObject({
+      kind: 'tool-activity',
+      rowId: 'run:run-tool-direct-1:tool:tool-1',
       sequenceId: 8,
-      message: {
-        toolStatuses: [{
-          toolCallId: 'tool-1',
-          name: 'memory_store',
-          status: 'running',
-        }],
-      },
+      toolStatuses: [{
+        toolCallId: 'tool-1',
+        name: 'memory_store',
+        status: 'running',
+      }],
     });
   });
 
