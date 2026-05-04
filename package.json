@@ -14,6 +14,7 @@
       "sharp"
     ],
     "overrides": {
+      "@whiskeysockets/baileys>libsignal": "git+https://github.com/whiskeysockets/libsignal-node.git#1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67",
       "isbinaryfile": "^5.0.0"
     },
     "supportedArchitectures": {
