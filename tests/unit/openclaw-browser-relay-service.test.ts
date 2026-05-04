@@ -75,6 +75,7 @@ type RelayMock = Pick<
   | 'listAttachments'
   | 'listTabs'
   | 'onExtensionConnected'
+  | 'ensureExecutionWindowSelectionForBrowserUse'
   | 'resolveReadyTarget'
   | 'selectExecutionWindowForTargetIfUnset'
   | 'updateTargetUrl'
@@ -131,6 +132,7 @@ function createRelayMock(overrides: Partial<Omit<RelayMock, 'onExtensionConnecte
       readyState: 'complete',
       executionContextReady: true,
     }),
+    ensureExecutionWindowSelectionForBrowserUse: async () => false,
     selectExecutionWindowForTargetIfUnset: async () => false,
     updateTargetUrl: () => {},
     getCookies: async () => [],
@@ -1114,6 +1116,58 @@ describe('browser relay service', () => {
     expect(selectExecutionWindowForTargetIfUnset).toHaveBeenCalledWith('browser-a|tid|opened:https://example.com/opened')
   })
 
+  it('ensures relay selection before first playwright action when no explicit targetId is provided', async () => {
+    const ensureExecutionWindowSelectionForBrowserUse = vi.fn(async () => true)
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-a',
+            browserName: 'browser-a',
+            windowId: 3,
+            tabId: 7,
+            active: true,
+            sessionId: 'browser-a|sid|page-session',
+            targetId: 'browser-a|tid|page-target',
+            title: 'Selected Page',
+            url: 'https://example.com/selected',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+        ensureExecutionWindowSelectionForBrowserUse,
+      }),
+    })
+
+    const snapshot = vi.fn(async () => ({
+      snapshot: 'snapshot',
+      refs: {},
+      stats: { lines: 1, chars: 8, refs: 0, interactive: 0 },
+      pageUrl: 'https://example.com/selected',
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(ensureExecutionWindowSelectionForBrowserUse).toHaveBeenCalledTimes(1)
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'browser-a|tid|page-target',
+      mode: 'relay',
+    }))
+    expect(result).toMatchObject({
+      ok: true,
+      targetId: 'browser-a|tid|page-target',
+      url: 'https://example.com/selected',
+    })
+  })
+
   it('fails clearly when no current relay target exists', async () => {
     service = new BrowserControlService({
       logger,
@@ -1188,6 +1242,58 @@ describe('browser relay service', () => {
       error: 'No current browser target available. Open or focus a page before using browser actions.',
       recoverable: true,
       suggestedNextActions: ['tabs', 'open', 'focus'],
+    })
+  })
+
+  it('uses the newly provisioned controlled window when browser use auto-select creates one in a multi-browser setup', async () => {
+    const ensureExecutionWindowSelectionForBrowserUse = vi.fn(async () => true)
+    service = new BrowserControlService({
+      logger,
+      relay: createRelayMock({
+        hasExtensionConnection: true,
+        relayPort: 9236,
+        authHeaders: {},
+        listAttachments: () => [
+          {
+            browserInstanceId: 'browser-b',
+            browserName: 'browser-b',
+            windowId: 9,
+            tabId: 91,
+            active: true,
+            sessionId: 'browser-b|sid|page-fresh',
+            targetId: 'browser-b|tid|target-fresh',
+            title: 'Fresh Controlled Page',
+            url: 'about:blank',
+            selectedBrowser: true,
+            selectedWindow: true,
+            selected: true,
+            primary: true,
+          },
+        ],
+        listTabs: () => [],
+        ensureExecutionWindowSelectionForBrowserUse,
+      }),
+    })
+
+    const snapshot = vi.fn(async () => ({
+      snapshot: 'snapshot',
+      refs: {},
+      stats: { lines: 1, chars: 8, refs: 0, interactive: 0 },
+      pageUrl: 'about:blank',
+    }))
+    ;(service as BrowserControlServiceWithActions).actions.snapshot = snapshot
+
+    const result = await service.handleRequest({ action: 'snapshot' })
+
+    expect(ensureExecutionWindowSelectionForBrowserUse).toHaveBeenCalledTimes(1)
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'browser-b|tid|target-fresh',
+      mode: 'relay',
+    }))
+    expect(result).toMatchObject({
+      ok: true,
+      targetId: 'browser-b|tid|target-fresh',
+      url: 'about:blank',
     })
   })
 

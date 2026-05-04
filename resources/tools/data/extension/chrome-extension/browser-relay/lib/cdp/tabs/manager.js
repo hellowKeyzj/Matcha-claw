@@ -59,8 +59,12 @@ export class TabManager {
   #agentTabs = new Map()
   /** @type {Set<number>} */
   #autoAttachBlocked = new Set()
+  /** @type {Set<number>} */
+  #expectedDetach = new Set()
   /** @type {Map<number, Promise<boolean>>} tabId → pending attach promise */
   #pending = new Map()
+  /** @type {Map<number, number>} */
+  #attachGeneration = new Map()
   /** @type {Map<number, {attempt: number, nextAttemptAt: number, reason: string}>} */
   #recovery = new Map()
   #retainedCount = 0
@@ -78,12 +82,16 @@ export class TabManager {
   #recoveryRunning = false
   /** @type {boolean} */
   #healthCheckRunning = false
+  /** @type {Promise<unknown>} */
+  #executionScopeChain = Promise.resolve()
   /** @type {(payload: any) => void} */
   #sendToRelay
   /** @type {() => string} */
   #getBrowserInstanceId
   /** @type {() => number|null} */
   #getSelectedWindowId
+  /** @type {() => boolean} */
+  #getIsCurrentBrowserSelected
 
   /** @type {SessionIndicators} */
   #indicators
@@ -99,6 +107,9 @@ export class TabManager {
     this.#getSelectedWindowId = typeof options.getSelectedWindowId === 'function'
       ? options.getSelectedWindowId
       : () => null
+    this.#getIsCurrentBrowserSelected = typeof options.getIsCurrentBrowserSelected === 'function'
+      ? options.getIsCurrentBrowserSelected
+      : () => true
     this.#indicators = new SessionIndicators({
       getTabEntries: () => this.#tabs.entries(),
       detachTab: (tabId, reason) => void this.detach(tabId, reason),
@@ -304,6 +315,7 @@ export class TabManager {
   get agentTabs() { return this.#agentTabs }
   get browserInstanceId() { return this.#getBrowserInstanceId() }
   get selectedWindowId() { return this.#getSelectedWindowId() }
+  get isCurrentBrowserSelected() { return this.#getIsCurrentBrowserSelected() }
 
   // ── Lookup ──
 
@@ -320,6 +332,7 @@ export class TabManager {
   }
 
   resolveSelectedPhysicalTarget() {
+    if (!this.isCurrentBrowserSelected) return null
     const selectedWindowId = this.selectedWindowId
     for (const [tabId, entry] of this.#tabs) {
       if (
@@ -364,6 +377,46 @@ export class TabManager {
   clearAutoAttachBlocked(tabId) {
     this.#autoAttachBlocked.delete(tabId)
     this.#schedulePersist()
+  }
+
+  async reconcileExecutionScope(activeTabId = null, reason = 'execution-scope-changed') {
+    await this.applyExecutionScope(activeTabId, { reason })
+  }
+
+  async applyExecutionScope(activeTabId = null, options = {}) {
+    const manual = options.manual === true
+    const reason = typeof options.reason === 'string' && options.reason
+      ? options.reason
+      : 'execution-scope-changed'
+
+    const run = async () => {
+      for (const [tabId, entry] of this.#tabs) {
+        if (this.#shouldKeepEntryAttached(tabId, entry, activeTabId, manual)) {
+          continue
+        }
+
+        if (entry.state === 'connected' || entry.state === 'attaching') {
+          await this.#detachEntryToVirtual(tabId, entry, reason)
+          continue
+        }
+
+        this.#setEntryVirtual(tabId, entry)
+      }
+
+      if (Number.isInteger(activeTabId) && await this.#shouldAttachTabForScope(activeTabId, manual)) {
+        return await this.attach(activeTabId, { manual })
+      }
+
+      this.#schedulePersist()
+      return null
+    }
+
+    const scopeRun = this.#executionScopeChain.then(run, run)
+    this.#executionScopeChain = scopeRun.then(
+      () => undefined,
+      () => undefined,
+    )
+    return await scopeRun
   }
 
   // ── Agent tab tracking ──
@@ -485,6 +538,7 @@ export class TabManager {
 
   async ensureAttached(tabId, options = {}) {
     const manual = options.manual === true
+    this.#expectedDetach.delete(tabId)
     if (this.#autoAttachBlocked.has(tabId) && !manual) {
       log.info('ensureAttached: auto-attach blocked for tab', tabId)
       return false
@@ -508,6 +562,8 @@ export class TabManager {
   async #physicalAttach(tabId, entry) {
     const t0 = performance.now()
     if (this.#shuttingDown) return false
+    const attachGeneration = (this.#attachGeneration.get(tabId) ?? 0) + 1
+    this.#attachGeneration.set(tabId, attachGeneration)
     entry.state = 'attaching'
     log.info('physicalAttach: begin', tabId)
 
@@ -523,9 +579,9 @@ export class TabManager {
       })
 
       // Guard: tab may have been removed by clearAll/detach while we were awaiting
-      if (!this.#tabs.has(tabId)) {
+      if (!this.#tabs.has(tabId) || this.#attachGeneration.get(tabId) !== attachGeneration) {
         log.warn('physicalAttach: tab removed during attach, cleaning up', tabId)
-        void detachDebugger(tabId)
+        void this.#detachPhysicalDebugger(tabId)
         return false
       }
 
@@ -571,7 +627,7 @@ export class TabManager {
       return true
     } catch (err) {
       log.warn('physicalAttach: failed', tabId, (performance.now() - t0).toFixed(1), 'ms', err)
-      void detachDebugger(tabId)
+      void this.#detachPhysicalDebugger(tabId)
       if (this.#tabs.has(tabId)) entry.state = 'virtual'
       this.#schedulePersist()
       return false
@@ -630,6 +686,10 @@ export class TabManager {
     log.info('detach:', tabId, reason, 'state:', entry?.state)
 
     const wasPhysical = entry?.state === 'connected' || entry?.state === 'attaching'
+    if (wasPhysical) {
+      await this.#detachPhysicalDebugger(tabId)
+      log.debug('detach: chrome.debugger cleanup', tabId, (performance.now() - t0).toFixed(1), 'ms')
+    }
 
     if (entry?.sessionId) {
       if (wasPhysical && entry.targetId) {
@@ -646,11 +706,6 @@ export class TabManager {
     }
 
     this.#removeEntry(tabId)
-
-    if (wasPhysical) {
-      await detachDebugger(tabId)
-      log.debug('detach: chrome.debugger cleanup', tabId, (performance.now() - t0).toFixed(1), 'ms')
-    }
     this.#schedulePersist()
   }
 
@@ -736,6 +791,7 @@ export class TabManager {
     const tabId = source.tabId
     log.info('onDebuggerDetach:', tabId, reason, 'tracked:', this.#tabs.has(tabId))
     if (!tabId || !this.#tabs.has(tabId)) return
+    if (this.#expectedDetach.delete(tabId)) return
     if (reason === 'canceled_by_user') {
       const entry = this.#tabs.get(tabId)
       if (!entry) return
@@ -1044,6 +1100,8 @@ export class TabManager {
     if (entry.sessionId) this.#bySession.delete(entry.sessionId)
     if (entry.targetId) this.#byTarget.delete(entry.targetId)
     this.#tabs.delete(tabId)
+    this.#attachGeneration.delete(tabId)
+    this.#expectedDetach.delete(tabId)
     this.#indicators.removeTab(tabId)
     cleanupTabQueue(tabId)
     this.#clearRecovery(tabId)
@@ -1147,10 +1205,7 @@ export class TabManager {
   }
 
   #shouldAutoAttachEntry(tabId, entry) {
-    const selectedWindowId = this.selectedWindowId
-    return !this.#autoAttachBlocked.has(tabId)
-      && Number.isInteger(selectedWindowId)
-      && entry.windowId === selectedWindowId
+    return this.#shouldKeepEntryAttached(tabId, entry, tabId, false)
   }
 
   #setEntryVirtual(tabId, entry) {
@@ -1161,6 +1216,53 @@ export class TabManager {
       this.#byTarget.delete(entry.targetId)
       entry.targetId = entry.targetKey
       this.#byTarget.set(entry.targetId, tabId)
+    }
+  }
+
+  #shouldKeepEntryAttached(tabId, entry, activeTabId, manual = false) {
+    const selectedWindowId = this.selectedWindowId
+    return this.isCurrentBrowserSelected
+      && (manual || !this.#autoAttachBlocked.has(tabId))
+      && Number.isInteger(selectedWindowId)
+      && entry.windowId === selectedWindowId
+      && entry.active === true
+      && tabId === activeTabId
+  }
+
+  async #detachEntryToVirtual(tabId, entry, reason) {
+    this.#attachGeneration.set(tabId, (this.#attachGeneration.get(tabId) ?? 0) + 1)
+    this.#expectedDetach.add(tabId)
+    try {
+      await this.#detachPhysicalDebugger(tabId)
+    } catch (error) {
+      this.#expectedDetach.delete(tabId)
+      throw error
+    }
+    this.#emitDetached(entry, reason)
+    this.#setEntryVirtual(tabId, entry)
+  }
+
+  async #shouldAttachTabForScope(tabId, manual) {
+    if (!this.isCurrentBrowserSelected) return false
+    const selectedWindowId = this.selectedWindowId
+    if (!Number.isInteger(selectedWindowId)) return false
+    if (!manual && this.#autoAttachBlocked.has(tabId)) return false
+
+    const entry = this.#tabs.get(tabId)
+    if (entry) {
+      return entry.windowId === selectedWindowId && entry.active === true
+    }
+
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    return Number.isInteger(tab?.windowId)
+      && tab.windowId === selectedWindowId
+      && tab.active === true
+  }
+
+  async #detachPhysicalDebugger(tabId) {
+    const result = await detachDebugger(tabId)
+    if (result?.status === 'failed') {
+      throw new Error(result.message || `Failed to detach debugger from tab ${tabId}`)
     }
   }
 

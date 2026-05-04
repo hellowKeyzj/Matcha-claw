@@ -202,7 +202,7 @@ describe('accio browser relay tab manager', () => {
     ])
   })
 
-  it('restores persisted tabs, group state, and re-announces tracked sessions after transport recovery', async () => {
+  it('restores persisted tabs, group state, and only re-attaches the selected window active page after transport recovery', async () => {
     sessionState.accio_tabManagerState = {
       tabs: [
         {
@@ -253,10 +253,10 @@ describe('accio browser relay tab manager', () => {
       targetId: 'vtab:browser-instance:1',
     })
     expect(mgr.get(2)).toMatchObject({
-      state: 'connected',
+      state: 'virtual',
       sessionId: 'cb-tab:browser-instance:2',
       targetKey: 'vtab:browser-instance:2',
-      targetId: 'target-2',
+      targetId: 'vtab:browser-instance:2',
     })
     expect(sendToRelay).toHaveBeenCalledWith({
       method: 'forwardCDPEvent',
@@ -281,7 +281,7 @@ describe('accio browser relay tab manager', () => {
     expect(sendToRelay).toHaveBeenCalledWith({
       method: 'forwardCDPEvent',
       params: {
-        method: 'Target.attachedToTarget',
+        method: 'Extension.tabDiscovered',
         params: {
           sessionId: 'cb-tab:browser-instance:2',
           tabId: 2,
@@ -289,13 +289,12 @@ describe('accio browser relay tab manager', () => {
           active: false,
           targetKey: 'vtab:browser-instance:2',
           targetInfo: {
-            targetId: 'target-2',
+            targetId: 'vtab:browser-instance:2',
             type: 'page',
             title: 'Docs',
             url: 'https://example.org',
-            attached: true,
+            attached: false,
           },
-          waitingForDebugger: false,
         },
       },
     })
@@ -468,5 +467,82 @@ describe('accio browser relay tab manager', () => {
       targetId: 'target-1b',
     })
     expect(mgr.isAutoAttachBlocked(1)).toBe(false)
+  })
+
+  it('detaches tabs outside the selected window back to virtual during execution scope reconcile', async () => {
+    const sendToRelay = vi.fn()
+    const TabManager = await loadTabManager()
+    const mgr = new TabManager(sendToRelay, {
+      getSelectedWindowId: () => selectedWindowId,
+      getIsCurrentBrowserSelected: () => true,
+    })
+
+    await mgr.attach(1)
+    tabsById.set(2, { id: 2, url: 'https://example.org', title: 'Docs', windowId: 12, active: true })
+    attachDebugger.mockResolvedValueOnce({ realTargetId: 'target-2' })
+    await mgr.attach(2, { manual: true })
+    await flushTasks()
+    sendToRelay.mockClear()
+    detachDebugger.mockClear()
+
+    selectedWindowId = 12
+    await mgr.reconcileExecutionScope(2)
+    await flushTasks()
+
+    expect(detachDebugger).toHaveBeenCalledWith(1)
+    expect(mgr.get(1)).toMatchObject({
+      state: 'virtual',
+      targetId: 'vtab:browser-instance:1',
+      windowId: 11,
+    })
+    expect(mgr.get(2)?.state).toBe('connected')
+    expect(sendToRelay).toHaveBeenCalledWith({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: 'cb-tab:browser-instance:1',
+          tabId: 1,
+          windowId: 11,
+          active: true,
+          targetKey: 'vtab:browser-instance:1',
+          targetId: 'target-1',
+          reason: 'execution-scope-changed',
+        },
+      },
+    })
+  })
+
+  it('does not downgrade a physical tab to virtual before debugger detach succeeds', async () => {
+    const sendToRelay = vi.fn()
+    const TabManager = await loadTabManager()
+    const mgr = new TabManager(sendToRelay, {
+      getSelectedWindowId: () => selectedWindowId,
+      getIsCurrentBrowserSelected: () => true,
+    })
+
+    await mgr.attach(1)
+    tabsById.set(2, { id: 2, url: 'https://example.org', title: 'Docs', windowId: 12, active: true })
+    attachDebugger.mockResolvedValueOnce({ realTargetId: 'target-2' })
+    await mgr.attach(2, { manual: true })
+    await flushTasks()
+    sendToRelay.mockClear()
+
+    selectedWindowId = 12
+    detachDebugger.mockRejectedValueOnce(new Error('detach failed'))
+
+    await expect(mgr.reconcileExecutionScope(2)).rejects.toThrow('detach failed')
+
+    expect(mgr.get(1)).toMatchObject({
+      state: 'connected',
+      targetId: 'target-1',
+      windowId: 11,
+    })
+    expect(sendToRelay).not.toHaveBeenCalledWith(expect.objectContaining({
+      method: 'forwardCDPEvent',
+      params: expect.objectContaining({
+        method: 'Target.detachedFromTarget',
+      }),
+    }))
   })
 })

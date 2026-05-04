@@ -57,8 +57,17 @@ export async function attachDebugger(tabId) {
 export async function detachDebugger(tabId) {
   try {
     await chrome.debugger.detach({ tabId })
+    return { status: 'detached' }
   } catch {
-    // Already detached or tab closed
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
+      return {
+        status: 'failed',
+        message: `Debugger remained attached after detach attempt for tab ${tabId}`,
+      }
+    } catch {
+      return { status: 'already_detached' }
+    }
   }
 }
 

@@ -47,6 +47,14 @@ class MockTabManager {
     sessionId: `cb-tab:browser-a:${tabId}`,
     targetId: `target-${tabId}`,
   }))
+  applyExecutionScope = vi.fn(async (tabId: number | null) => (
+    tabId == null
+      ? null
+      : {
+          sessionId: `cb-tab:browser-a:${tabId}`,
+          targetId: `target-${tabId}`,
+        }
+  ))
   announceCurrentTarget = vi.fn()
   setActiveTab = vi.fn()
   updateTab = vi.fn()
@@ -55,6 +63,7 @@ class MockTabManager {
   entries = vi.fn(() => new Map().entries())
   restoreState = vi.fn(async () => {})
   refreshAfterTransportReady = vi.fn(async () => {})
+  reconcileExecutionScope = vi.fn(async () => {})
   startSessionIndicators = vi.fn()
   discoverAll = vi.fn(async () => {})
   handleTransportClosed = vi.fn()
@@ -245,7 +254,7 @@ describe('accio browser relay background', () => {
     await flushTasks()
 
     expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(22, { manual: false })
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(22, { manual: false })
     expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(22)
   })
 
@@ -262,6 +271,7 @@ describe('accio browser relay background', () => {
     })
     await flushTasks()
     MockTabManager.latest?.attach.mockClear()
+    MockTabManager.latest?.applyExecutionScope.mockClear()
     MockTabManager.latest?.announceCurrentTarget.mockClear()
 
     currentTabs = [
@@ -276,7 +286,7 @@ describe('accio browser relay background', () => {
     await flushTasks()
 
     expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
-    expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
+    expect(MockTabManager.latest?.applyExecutionScope).not.toHaveBeenCalled()
     expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
   })
 
@@ -300,11 +310,11 @@ describe('accio browser relay background', () => {
     })
     await flushTasks()
 
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(11, { manual: true })
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(11, { manual: true })
     expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(11)
   })
 
-  it('auto-selects the only normal window when relay reports no current selection for a single browser instance', async () => {
+  it('does not auto-select a window when relay reports no current selection', async () => {
     currentTabs = [
       { id: 31, url: 'https://example.com/only', title: 'Only Tab', windowId: 9, active: true },
     ]
@@ -323,12 +333,31 @@ describe('accio browser relay background', () => {
     })
     await flushTasks()
 
-    expect(trySendToRelay).toHaveBeenCalledWith({
+    expect(trySendToRelay).not.toHaveBeenCalledWith({
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 9 },
     })
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(31, { manual: true })
-    expect(MockTabManager.latest?.announceCurrentTarget).toHaveBeenCalledWith(31)
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(null)
+    expect(MockTabManager.latest?.applyExecutionScope).not.toHaveBeenCalledWith(31, expect.anything())
+    expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
+  })
+
+  it('reconciles away this browser attachments when another browser instance becomes selected', async () => {
+    await loadBackground()
+    await flushTasks()
+
+    await relayCallbacks.onControlMessage?.({
+      method: 'Extension.selectionChanged',
+      params: {
+        selectedBrowserInstanceId: 'browser-b',
+        selectedWindowId: 2,
+      },
+    })
+    await flushTasks()
+
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(null)
+    expect(MockTabManager.latest?.applyExecutionScope).not.toHaveBeenCalledWith(expect.any(Number), expect.anything())
+    expect(MockTabManager.latest?.announceCurrentTarget).not.toHaveBeenCalled()
   })
 
   it('manual attach selects the tab window and promotes it to current target', async () => {
@@ -343,7 +372,7 @@ describe('accio browser relay background', () => {
     expect(result).toBe(true)
     await flushTasks()
 
-    expect(MockTabManager.latest?.attach).toHaveBeenCalledWith(22, { manual: true })
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(22, { manual: true })
     expect(MockTabManager.latest?.setActiveTab).toHaveBeenCalledWith(22, 2)
     expect(MockTabManager.latest?.updateTab).toHaveBeenCalledWith(22, 'https://example.com/b', 'Page B', {
       windowId: 2,
@@ -374,7 +403,6 @@ describe('accio browser relay background', () => {
       params: {
         selectedBrowserInstanceId: 'browser-a',
         selectedWindowId: 1,
-        autoSelectEnabled: true,
       },
     })
     await flushTasks()
@@ -413,7 +441,6 @@ describe('accio browser relay background', () => {
         selectedBrowserInstanceId: null,
         selectedWindowId: null,
         browserCount: 1,
-        autoSelectEnabled: false,
       },
     })
     await flushTasks()
@@ -422,6 +449,6 @@ describe('accio browser relay background', () => {
       method: 'Extension.selectExecutionWindow',
       params: { windowId: 1 },
     })
-    expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
+    expect(MockTabManager.latest?.applyExecutionScope).toHaveBeenCalledWith(null)
   })
 })

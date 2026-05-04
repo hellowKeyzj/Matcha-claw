@@ -2046,8 +2046,9 @@ describe('openclaw browser relay plugin', () => {
     tempStateDir = await ensureTempStateDir('matchaclaw-relay-selection-repair-')
     await writeRelaySelection(
       {
-        selectedBrowserInstanceId: 'browser-a',
-        selectedWindowId: 1,
+        kind: 'manual',
+        browserInstanceId: 'browser-a',
+        windowId: 1,
       },
       tempStateDir,
     )
@@ -2097,9 +2098,9 @@ describe('openclaw browser relay plugin', () => {
     expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
     expect(server!.status.selectedWindowId).toBe(1)
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
-      selectedBrowserInstanceId: 'browser-a',
-      selectedWindowId: 1,
-      autoSelect: true,
+      kind: 'manual',
+      browserInstanceId: 'browser-a',
+      windowId: 1,
     })
 
     extension.close()
@@ -2109,9 +2110,9 @@ describe('openclaw browser relay plugin', () => {
     tempStateDir = await ensureTempStateDir('matchaclaw-relay-selection-stale-same-browser-')
     await writeRelaySelection(
       {
-        selectedBrowserInstanceId: 'browser-a',
-        selectedWindowId: 7,
-        autoSelect: true,
+        kind: 'manual',
+        browserInstanceId: 'browser-a',
+        windowId: 7,
       },
       tempStateDir,
     )
@@ -2149,9 +2150,9 @@ describe('openclaw browser relay plugin', () => {
     expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
     expect(server!.status.selectedWindowId).toBeNull()
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
-      selectedBrowserInstanceId: 'browser-a',
-      selectedWindowId: null,
-      autoSelect: true,
+      kind: 'manual',
+      browserInstanceId: 'browser-a',
+      windowId: null,
     })
 
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
@@ -2179,15 +2180,15 @@ describe('openclaw browser relay plugin', () => {
     expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
     expect(server!.status.selectedWindowId).toBe(9)
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
-      selectedBrowserInstanceId: 'browser-a',
-      selectedWindowId: 9,
-      autoSelect: true,
+      kind: 'manual',
+      browserInstanceId: 'browser-a',
+      windowId: 9,
     })
 
     extension.close()
   })
 
-  it('clears selection and disables auto-select when extension explicitly revokes execution window control', async () => {
+  it('clears selection when extension explicitly revokes execution window control', async () => {
     tempStateDir = await ensureTempStateDir('matchaclaw-relay-clear-selection-')
     await startRelayServer()
 
@@ -2226,8 +2227,7 @@ describe('openclaw browser relay plugin', () => {
       sessionKey,
       (message) => message.method === 'Extension.selectionChanged'
         && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === null
-        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === null
-        && (message.params as Record<string, unknown> | undefined)?.autoSelectEnabled === false,
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === null,
     )
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
       method: 'Extension.clearExecutionWindowSelection',
@@ -2237,10 +2237,268 @@ describe('openclaw browser relay plugin', () => {
 
     expect(server!.status.selectedBrowserInstanceId).toBeNull()
     expect(server!.status.selectedWindowId).toBeNull()
+    await expect(readRelaySelection(tempStateDir)).resolves.toBeNull()
+
+    extension.close()
+  })
+
+  it('does not re-select a window after explicit clear and detach', async () => {
+    tempStateDir = await ensureTempStateDir('matchaclaw-relay-clear-selection-detach-')
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKey = randomBytes(32)
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-clear-selection-detach' },
+    })
+    await waitForOpen(extension)
+
+    const helloAckPromise = waitForMessage(extension)
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+    await helloAckPromise
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 7,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const selectionChanged1 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 7,
+    )
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 7 },
+    })))
+    await selectionChanged1
+
+    const selectionChanged2 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === null
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === null,
+    )
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.clearExecutionWindowSelection',
+      params: {},
+    })))
+    await selectionChanged2
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.detachedFromTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 7,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetId: 'target-a',
+          reason: 'canceled_by_user',
+        },
+      },
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(server!.status.selectedBrowserInstanceId).toBeNull()
+    expect(server!.status.selectedWindowId).toBeNull()
+    await expect(readRelaySelection(tempStateDir)).resolves.toBeNull()
+
+    extension.close()
+  })
+
+  it('creates and auto-selects a fresh controlled window after manual selection was cleared in a multi-browser setup', async () => {
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKeyA = randomBytes(32)
+    const sessionKeyB = randomBytes(32)
+    const extensionA = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-multi-a' },
+    })
+    const extensionB = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-multi-b' },
+    })
+    await waitForOpen(extensionA)
+    await waitForOpen(extensionB)
+
+    const helloAckA = waitForMessage(extensionA)
+    extensionA.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKeyA),
+      },
+    }))
+    await helloAckA
+
+    const helloAckB = waitForMessage(extensionB)
+    extensionB.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-b',
+        encryptedSessionKey: encryptSessionKey(sessionKeyB),
+      },
+    }))
+    await helloAckB
+
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      extensionA,
+      sessionKeyA,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-a'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 7,
+    )
+    extensionA.send(encryptWireMessage(sessionKeyA, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 7 },
+    })))
+    await selectionChanged
+
+    extensionA.send(encryptWireMessage(sessionKeyA, JSON.stringify({
+      method: 'Extension.clearExecutionWindowSelection',
+      params: {},
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(server!.status.selectedBrowserInstanceId).toBeNull()
+    expect(server!.status.selectedWindowId).toBeNull()
+
+    const createTargetCommand = waitForEncryptedJsonMessageMatching(
+      extensionB,
+      sessionKeyB,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Target.createTarget',
+    )
+    const ensurePromise = server!.ensureExecutionWindowSelectionForBrowserUse()
+    const createTargetRequest = await createTargetCommand
+
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      id: createTargetRequest.id,
+      result: { targetId: 'target-fresh' },
+    })))
+
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-fresh',
+          tabId: 91,
+          windowId: 9,
+          active: true,
+          targetKey: 'vtab:browser-b:91',
+          targetInfo: {
+            targetId: 'target-fresh',
+            type: 'page',
+            title: 'Fresh Controlled Page',
+            url: 'about:blank',
+          },
+        },
+      },
+    })))
+
+    await expect(ensurePromise).resolves.toBe(true)
+    await waitForEncryptedJsonMessageMatching(
+      extensionB,
+      sessionKeyB,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-b'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 9,
+    )
+    expect(server!.status.selectedBrowserInstanceId).toBe('browser-b')
+    expect(server!.status.selectedWindowId).toBe(9)
+
+    extensionA.close()
+    extensionB.close()
+  })
+
+  it('auto-selects the only known window when browser use is requested in a single-browser setup', async () => {
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKey = randomBytes(32)
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-single-browser-use' },
+    })
+    await waitForOpen(extension)
+
+    const helloAckPromise = waitForMessage(extension)
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+    await helloAckPromise
+
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-a',
+          tabId: 11,
+          windowId: 7,
+          active: true,
+          targetKey: 'vtab:browser-a:11',
+          targetInfo: {
+            targetId: 'target-a',
+            type: 'page',
+            title: 'Page A',
+            url: 'https://a.example.com',
+          },
+        },
+      },
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const selectionChanged = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-a'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 7,
+    )
+
+    await expect(server!.ensureExecutionWindowSelectionForBrowserUse()).resolves.toBe(true)
+    await selectionChanged
+    expect(server!.status.selectedBrowserInstanceId).toBe('browser-a')
+    expect(server!.status.selectedWindowId).toBe(7)
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
-      selectedBrowserInstanceId: null,
-      selectedWindowId: null,
-      autoSelect: false,
+      kind: 'auto',
+      browserInstanceId: 'browser-a',
+      windowId: 7,
     })
 
     extension.close()
