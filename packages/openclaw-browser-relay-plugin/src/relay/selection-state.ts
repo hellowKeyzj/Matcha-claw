@@ -4,11 +4,15 @@ import { resolveRelayPluginStatePath } from './paths.js'
 
 const SELECTION_FILE_NAME = 'relay-selection.json'
 
-export type RelaySelectionRecord = {
-  selectedBrowserInstanceId: string | null
-  selectedWindowId: number | null
-  autoSelect: boolean
-}
+export type RelaySelectionRecord =
+  | {
+      kind: 'none'
+    }
+  | {
+      kind: 'manual' | 'auto'
+      browserInstanceId: string
+      windowId: number | null
+    }
 
 export function getRelaySelectionFilePath(stateDir?: string): string {
   return resolveRelayPluginStatePath(SELECTION_FILE_NAME, stateDir)
@@ -18,23 +22,27 @@ export async function readRelaySelection(stateDir?: string): Promise<RelaySelect
   try {
     const raw = await readFile(getRelaySelectionFilePath(stateDir), 'utf8')
     const parsed = JSON.parse(raw) as Partial<RelaySelectionRecord>
-    const selectedBrowserInstanceId =
-      typeof parsed.selectedBrowserInstanceId === 'string' && parsed.selectedBrowserInstanceId.trim()
-        ? parsed.selectedBrowserInstanceId.trim()
-        : null
-    const selectedWindowId = parsed.selectedWindowId ?? null
-    const autoSelect = parsed.autoSelect !== false
+    if (parsed.kind === 'none') {
+      return { kind: 'none' }
+    }
+
+    const browserInstanceId =
+      typeof parsed.browserInstanceId === 'string' && parsed.browserInstanceId.trim()
+        ? parsed.browserInstanceId.trim()
+        : ''
+    const windowId = parsed.windowId ?? null
     if (
-      (selectedBrowserInstanceId === null && selectedWindowId !== null)
-      || (selectedWindowId !== null && !Number.isInteger(selectedWindowId))
-      || typeof autoSelect !== 'boolean'
+      (parsed.kind !== 'manual' && parsed.kind !== 'auto')
+      || !browserInstanceId
+      || (windowId !== null && !Number.isInteger(windowId))
     ) {
       return null
     }
+
     return {
-      selectedBrowserInstanceId,
-      selectedWindowId,
-      autoSelect,
+      kind: parsed.kind,
+      browserInstanceId,
+      windowId,
     }
   } catch {
     return null

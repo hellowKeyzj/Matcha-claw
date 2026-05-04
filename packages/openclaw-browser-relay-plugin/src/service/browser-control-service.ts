@@ -717,6 +717,9 @@ export class BrowserControlService {
     const mode = connectionMode
     const cdpUrl = endpoint.preferredUrl
     const workspaceDir = asString(params.workspaceDir)
+    if (mode === 'relay' && !asString(params.targetId)) {
+      await this.options.relay.ensureExecutionWindowSelectionForBrowserUse()
+    }
     const targetId = mode === 'relay'
       ? await this.resolveRelayExecutionTarget(asString(params.targetId))
       : this.resolveDirectExecutionTarget(asString(params.targetId))

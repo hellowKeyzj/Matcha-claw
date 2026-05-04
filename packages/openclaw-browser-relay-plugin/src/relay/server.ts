@@ -9,7 +9,7 @@ import {
   ensureRelayPortOwnership,
   releaseRelayPortOwnership,
 } from './ownership.js'
-import { clearRelaySelection, readRelaySelection, writeRelaySelection } from './selection-state.js'
+import { clearRelaySelection, readRelaySelection, writeRelaySelection, type RelaySelectionRecord } from './selection-state.js'
 
 export const RELAY_PROTOCOL_VERSION = 1
 export const RELAY_AUTH_HEADER = 'x-phoenix-relay-token'
@@ -108,11 +108,22 @@ type ExtensionClient = {
   handshakeOk: boolean
   browserInstanceId: string
   browserName: string
+  connectedAt: number
   nextRequestId: number
   pendingRequests: Map<number, PendingExtensionRequest>
   connectedTargets: Map<string, ConnectedTarget>
   currentSessionId: string | null
 }
+
+type SelectionState =
+  | {
+      kind: 'none'
+    }
+  | {
+      kind: 'manual' | 'auto'
+      browserInstanceId: string
+      windowId: number | null
+    }
 
 export type BrowserRelayServerOptions = {
   port: number
@@ -315,9 +326,7 @@ export class BrowserRelayServer {
   private pendingTargetUrls = new Map<string, string>()
   private pendingOpenReadyHints = new Map<string, { mainFrameUrl: string; readyState: string; executionContextReady: boolean }>()
   private pendingTargetAttachments = new Map<string, Set<PendingTargetAttachmentRequest>>()
-  private selectedBrowserInstanceId: string | null = null
-  private selectedWindowId: number | null = null
-  private allowAutoSelect = true
+  private selectionState: SelectionState = { kind: 'none' }
   private actualPort: number | null = null
   private nextBrowserSessionId = 1
   private nextAttachedSessionId = 1
@@ -342,6 +351,22 @@ export class BrowserRelayServer {
 
   get authHeaders(): Record<string, string> {
     return { [RELAY_AUTH_HEADER]: this.authToken }
+  }
+
+  private get selectedBrowserInstanceId(): string | null {
+    return this.selectionState.kind === 'none' ? null : this.selectionState.browserInstanceId
+  }
+
+  private get selectedWindowId(): number | null {
+    return this.selectionState.kind === 'none' ? null : this.selectionState.windowId
+  }
+
+  private get hasSelection(): boolean {
+    return this.selectionState.kind !== 'none'
+  }
+
+  private get hasManualSelection(): boolean {
+    return this.selectionState.kind === 'manual'
   }
 
   get status(): BrowserRelayStatus {
@@ -567,8 +592,7 @@ export class BrowserRelayServer {
     this.pendingTargetUrls.clear()
     this.pendingOpenReadyHints.clear()
     this.rejectAllPendingTargetAttachments('Relay stopping')
-    this.selectedBrowserInstanceId = null
-    this.selectedWindowId = null
+    this.selectionState = { kind: 'none' }
     this.browserSessions.clear()
     this.attachedClientSessions.clear()
 
@@ -608,8 +632,7 @@ export class BrowserRelayServer {
     this.pendingTargetUrls.clear()
     this.pendingOpenReadyHints.clear()
     this.rejectAllPendingTargetAttachments('Relay failed to start')
-    this.selectedBrowserInstanceId = null
-    this.selectedWindowId = null
+    this.selectionState = { kind: 'none' }
     this.browserSessions.clear()
     this.attachedClientSessions.clear()
     this.cdpClients.clear()
@@ -636,21 +659,7 @@ export class BrowserRelayServer {
   }
 
   async openTarget(url: string): Promise<{ targetId: string }> {
-    const client = this.resolveClientForDefaultAction()
-    const result = await this.sendToExtension(client, 'Target.createTarget', { url })
-    const rawTargetId = readTargetIdFromResult(result)
-    if (!rawTargetId) throw new Error('Target.createTarget returned no targetId')
-    const targetId = ensureExternalTargetId(client.browserInstanceId, rawTargetId)
-    this.logger.info(
-      `[browser-relay] Target.createTarget url="${url}" browserInstanceId=${client.browserInstanceId} rawTargetId=${rawTargetId} externalTargetId=${targetId}`,
-    )
-    this.pendingTargetUrls.set(targetId, url)
-    this.pendingOpenReadyHints.set(targetId, {
-      mainFrameUrl: url,
-      readyState: 'complete',
-      executionContextReady: true,
-    })
-    return { targetId }
+    return await this.createTargetInClient(this.resolveClientForDefaultAction(), url)
   }
 
   async waitForAttachedTarget(targetId: string, timeoutMs = TARGET_ATTACH_TIMEOUT_MS): Promise<AttachedRelayTarget> {
@@ -749,15 +758,32 @@ export class BrowserRelayServer {
 
   async selectExecutionWindowForTargetIfUnset(targetId: string): Promise<boolean> {
     const target = this.findTargetByTargetId(targetId)
-    if (!target?.windowId || this.selectedWindowId !== null) {
+    if (!target?.windowId || this.hasSelection) {
       return false
     }
 
-    const changed = await this.updateSelectedExecutionWindow(target.browserInstanceId, target.windowId)
+    const changed = await this.setSelectionState({
+      kind: 'auto',
+      browserInstanceId: target.browserInstanceId,
+      windowId: target.windowId,
+    })
     if (changed) {
       this.broadcastBrowserSelection()
     }
     return changed
+  }
+
+  async ensureExecutionWindowSelectionForBrowserUse(): Promise<boolean> {
+    const nextSelection = this.resolveSelectionForExplicitBrowserUse()
+    if (nextSelection) {
+      const changed = await this.setSelectionState(nextSelection)
+      if (changed) {
+        this.broadcastBrowserSelection()
+      }
+      return changed
+    }
+
+    return await this.provisionExecutionWindowSelectionForBrowserUse()
   }
 
   resolveSelectedSessionId(): string {
@@ -766,46 +792,30 @@ export class BrowserRelayServer {
 
   private async restoreSelectionState(): Promise<void> {
     const selection = await readRelaySelection(this.stateDir)
-    if (!selection) {
-      this.selectedBrowserInstanceId = null
-      this.selectedWindowId = null
-      this.allowAutoSelect = true
-      return
-    }
-    this.selectedBrowserInstanceId = selection.selectedBrowserInstanceId
-    this.selectedWindowId = selection.selectedWindowId
-    this.allowAutoSelect = selection.autoSelect
+    this.selectionState = selection ?? { kind: 'none' }
   }
 
   private async persistSelectionState(): Promise<void> {
-    if (!this.selectedBrowserInstanceId && this.allowAutoSelect) {
+    if (this.selectionState.kind === 'none') {
       await clearRelaySelection(this.stateDir)
       return
     }
+
+    const record: RelaySelectionRecord = {
+      kind: this.selectionState.kind,
+      browserInstanceId: this.selectionState.browserInstanceId,
+      windowId: this.selectionState.windowId,
+    }
+
     await writeRelaySelection(
-      {
-        selectedBrowserInstanceId: this.selectedBrowserInstanceId,
-        selectedWindowId: this.selectedWindowId,
-        autoSelect: this.allowAutoSelect,
-      },
+      record,
       this.stateDir,
     )
   }
 
-  private async updateSelectedExecutionWindow(
-    browserInstanceId: string | null,
-    windowId: number | null,
-    options: { allowAutoSelect?: boolean } = {},
-  ): Promise<boolean> {
-    const nextAllowAutoSelect = options.allowAutoSelect ?? this.allowAutoSelect
-    const changed =
-      this.selectedBrowserInstanceId !== browserInstanceId
-      || this.selectedWindowId !== windowId
-      || this.allowAutoSelect !== nextAllowAutoSelect
-
-    this.selectedBrowserInstanceId = browserInstanceId
-    this.selectedWindowId = windowId
-    this.allowAutoSelect = nextAllowAutoSelect
+  private async setSelectionState(next: SelectionState): Promise<boolean> {
+    const changed = this.selectionStatesDiffer(this.selectionState, next)
+    this.selectionState = next
     try {
       await this.persistSelectionState()
     } catch (error) {
@@ -814,12 +824,25 @@ export class BrowserRelayServer {
     return changed
   }
 
-  private async setSelectedExecutionWindow(browserInstanceId: string, windowId: number): Promise<boolean> {
-    return await this.updateSelectedExecutionWindow(browserInstanceId, windowId, { allowAutoSelect: true })
+  private selectionStatesDiffer(left: SelectionState, right: SelectionState): boolean {
+    return left.kind !== right.kind
+      || left.kind !== 'none' && (
+        right.kind === 'none'
+        || left.browserInstanceId !== right.browserInstanceId
+        || left.windowId !== right.windowId
+      )
   }
 
-  private async clearSelectedExecutionWindow(options: { allowAutoSelect?: boolean } = {}): Promise<boolean> {
-    return await this.updateSelectedExecutionWindow(null, null, options)
+  private async setManualSelection(browserInstanceId: string, windowId: number): Promise<boolean> {
+    return await this.setSelectionState({
+      kind: 'manual',
+      browserInstanceId,
+      windowId,
+    })
+  }
+
+  private async clearSelection(): Promise<boolean> {
+    return await this.setSelectionState({ kind: 'none' })
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -1048,6 +1071,7 @@ export class BrowserRelayServer {
           browserName: typeof params.browserName === 'string' && params.browserName.trim()
             ? params.browserName.trim()
             : browserInstanceId,
+          connectedAt: Date.now(),
           nextRequestId: 1,
           pendingRequests: new Map(),
           connectedTargets: new Map(),
@@ -1072,7 +1096,6 @@ export class BrowserRelayServer {
             browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
-            autoSelectEnabled: this.allowAutoSelect,
             selected: this.selectedBrowserInstanceId === browserInstanceId,
             selectedBrowser: this.selectedBrowserInstanceId === browserInstanceId,
             selectedWindow:
@@ -1406,14 +1429,14 @@ export class BrowserRelayServer {
       if (selectedWindowId === null) {
         return
       }
-      if (await this.setSelectedExecutionWindow(client.browserInstanceId, selectedWindowId)) {
+      if (await this.setManualSelection(client.browserInstanceId, selectedWindowId)) {
         this.broadcastBrowserSelection()
       }
       return
     }
 
     if (message.method === 'Extension.clearExecutionWindowSelection') {
-      if (await this.clearSelectedExecutionWindow({ allowAutoSelect: false })) {
+      if (await this.clearSelection()) {
         this.broadcastBrowserSelection()
       }
       return
@@ -2312,74 +2335,171 @@ export class BrowserRelayServer {
     )]
   }
 
-  private resolveAutoSelectedWindowId(client: ExtensionClient): number | null {
+  private resolveSingleKnownWindowId(client: ExtensionClient): number | null {
     const knownWindowIds = this.getKnownWindowIdsForClient(client)
-    if (knownWindowIds.length === 1) {
-      return knownWindowIds[0]
-    }
-
-    const activeWindowIds = [...new Set(
-      [...client.connectedTargets.values()]
-        .filter((target) => target.active && target.windowId !== null)
-        .map((target) => target.windowId as number),
-    )]
-    if (activeWindowIds.length === 1) {
-      return activeWindowIds[0]
-    }
-
-    return null
+    return knownWindowIds.length === 1 ? knownWindowIds[0] : null
   }
 
-  private resolveConnectedSelectionForCurrentBrowser(): { browserInstanceId: string; windowId: number | null } | null {
-    if (!this.selectedBrowserInstanceId) {
+  private resolveSelectionForExplicitBrowserUse(): SelectionState | null {
+    if (this.selectionState.kind === 'manual') {
+      return this.selectionState
+    }
+
+    if (this.selectionState.kind === 'auto') {
+      const client = this.extensionClients.get(this.selectionState.browserInstanceId)
+      if (!client) {
+        return { kind: 'none' }
+      }
+      const windowId = this.selectionState.windowId
+      if (windowId === null || this.getKnownWindowIdsForClient(client).includes(windowId)) {
+        return this.selectionState
+      }
+      const nextWindowId = this.resolveSingleKnownWindowId(client)
+      return nextWindowId === null
+        ? { kind: 'none' }
+        : {
+            kind: 'auto',
+            browserInstanceId: client.browserInstanceId,
+            windowId: nextWindowId,
+          }
+    }
+
+    if (this.extensionClients.size !== 1) {
       return null
     }
 
-    const client = this.extensionClients.get(this.selectedBrowserInstanceId)
+    const [client] = this.extensionClients.values()
     if (!client) {
       return null
     }
 
-    if (this.selectedWindowId === null) {
-      return {
-        browserInstanceId: client.browserInstanceId,
-        windowId: this.resolveAutoSelectedWindowId(client),
-      }
-    }
-
-    const knownWindowIds = this.getKnownWindowIdsForClient(client)
-    if (knownWindowIds.includes(this.selectedWindowId)) {
-      return {
-        browserInstanceId: client.browserInstanceId,
-        windowId: this.selectedWindowId,
-      }
+    const windowId = this.resolveSingleKnownWindowId(client)
+    if (windowId === null) {
+      return null
     }
 
     return {
+      kind: 'auto',
       browserInstanceId: client.browserInstanceId,
-      windowId: this.resolveAutoSelectedWindowId(client),
+      windowId,
     }
   }
 
+  private async createTargetInClient(client: ExtensionClient, url: string): Promise<{ targetId: string }> {
+    const result = await this.sendToExtension(client, 'Target.createTarget', { url })
+    const rawTargetId = readTargetIdFromResult(result)
+    if (!rawTargetId) throw new Error('Target.createTarget returned no targetId')
+    const targetId = ensureExternalTargetId(client.browserInstanceId, rawTargetId)
+    this.logger.info(
+      `[browser-relay] Target.createTarget url="${url}" browserInstanceId=${client.browserInstanceId} rawTargetId=${rawTargetId} externalTargetId=${targetId}`,
+    )
+    this.pendingTargetUrls.set(targetId, url)
+    this.pendingOpenReadyHints.set(targetId, {
+      mainFrameUrl: url,
+      readyState: 'complete',
+      executionContextReady: true,
+    })
+    return { targetId }
+  }
+
+  private async provisionExecutionWindowSelectionForBrowserUse(): Promise<boolean> {
+    const client = this.resolveClientForProvisionedBrowserUse()
+    if (!client) {
+      return false
+    }
+
+    const created = await this.createTargetInClient(client, 'about:blank')
+    const readyTarget = await this.resolveReadyTarget(created.targetId)
+    if (readyTarget.windowId === null) {
+      return false
+    }
+
+    const changed = await this.setSelectionState({
+      kind: 'auto',
+      browserInstanceId: readyTarget.browserInstanceId,
+      windowId: readyTarget.windowId,
+    })
+    if (changed) {
+      this.broadcastBrowserSelection()
+    }
+    return changed
+  }
+
+  private resolveClientForProvisionedBrowserUse(): ExtensionClient | null {
+    const clients = [...this.extensionClients.values()]
+    if (clients.length === 0) {
+      return null
+    }
+
+    clients.sort((left, right) => right.connectedAt - left.connectedAt)
+    return clients[0] ?? null
+  }
+
   private async reconcileSelection(broadcast = true): Promise<void> {
-    const connectedSelection = this.resolveConnectedSelectionForCurrentBrowser()
-    if (connectedSelection) {
-      if (
-        await this.updateSelectedExecutionWindow(
-          connectedSelection.browserInstanceId,
-          connectedSelection.windowId,
-          { allowAutoSelect: true },
-        )
-        && broadcast
-      ) {
-        this.broadcastBrowserSelection()
-      }
+    const nextSelection = this.resolveSelectionAfterTopologyChange()
+    if (!nextSelection) {
       return
     }
 
-    if (!this.selectedBrowserInstanceId && await this.clearSelectedExecutionWindow({ allowAutoSelect: true }) && broadcast) {
+    if (await this.setSelectionState(nextSelection) && broadcast) {
       this.broadcastBrowserSelection()
     }
+  }
+
+  private resolveSelectionAfterTopologyChange(): SelectionState | null {
+    if (this.selectionState.kind === 'none') {
+      return null
+    }
+
+    const client = this.extensionClients.get(this.selectionState.browserInstanceId)
+    if (!client) {
+      return this.selectionState.kind === 'manual'
+        ? null
+        : { kind: 'none' }
+    }
+
+    if (this.selectionState.windowId === null) {
+      if (this.selectionState.kind === 'manual') {
+        const nextWindowId = this.resolveSingleKnownWindowId(client)
+        return nextWindowId === null
+          ? null
+          : {
+              kind: 'manual',
+              browserInstanceId: client.browserInstanceId,
+              windowId: nextWindowId,
+            }
+      }
+      const nextWindowId = this.resolveSingleKnownWindowId(client)
+      return nextWindowId === null
+        ? { kind: 'none' }
+        : {
+            kind: 'auto',
+            browserInstanceId: client.browserInstanceId,
+            windowId: nextWindowId,
+          }
+    }
+
+    const knownWindowIds = this.getKnownWindowIdsForClient(client)
+    if (knownWindowIds.includes(this.selectionState.windowId)) {
+      return null
+    }
+
+    if (this.selectionState.kind === 'manual') {
+      return {
+        kind: 'manual',
+        browserInstanceId: client.browserInstanceId,
+        windowId: null,
+      }
+    }
+
+    const nextWindowId = this.resolveSingleKnownWindowId(client)
+    return nextWindowId === null
+      ? { kind: 'none' }
+      : {
+          kind: 'auto',
+          browserInstanceId: client.browserInstanceId,
+          windowId: nextWindowId,
+        }
   }
 
   private getSelectedCurrentTarget(): ConnectedTarget | null {
@@ -2415,7 +2535,7 @@ export class BrowserRelayServer {
   }
 
   private requireSelectedClient(): ExtensionClient {
-    if (!this.selectedBrowserInstanceId) {
+    if (!this.hasSelection || !this.selectedBrowserInstanceId) {
       throw new Error('No browser instance selected. Select a browser before using browser control.')
     }
     const client = this.extensionClients.get(this.selectedBrowserInstanceId)
@@ -2760,7 +2880,6 @@ export class BrowserRelayServer {
             browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
-            autoSelectEnabled: this.allowAutoSelect,
             selected: client.browserInstanceId === this.selectedBrowserInstanceId,
             selectedBrowser: client.browserInstanceId === this.selectedBrowserInstanceId,
             selectedWindow:

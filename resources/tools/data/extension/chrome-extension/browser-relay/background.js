@@ -42,7 +42,6 @@ const runtimeState = {
   browserInstanceId: '',
   selectedBrowserInstanceId: null,
   selectedWindowId: null,
-  autoSelectEnabled: true,
 }
 
 let runtimeReadyPromise = null
@@ -57,10 +56,6 @@ function currentSelectedBrowserInstanceId() {
 
 function currentSelectedWindowId() {
   return runtimeState.selectedWindowId
-}
-
-function currentAutoSelectEnabled() {
-  return runtimeState.autoSelectEnabled !== false
 }
 
 function requireBrowserInstanceId() {
@@ -95,7 +90,6 @@ function mirrorSelectionState(params = {}) {
       ? params.selectedBrowserInstanceId.trim()
       : null
   runtimeState.selectedWindowId = toSelectedWindowId(params.selectedWindowId)
-  runtimeState.autoSelectEnabled = params.autoSelectEnabled !== false
 }
 
 async function initializeRuntimeState() {
@@ -128,6 +122,7 @@ function runWhenRuntimeReady(task, label) {
 const mgr = new TabManager(trySendToRelay, {
   getBrowserInstanceId: requireBrowserInstanceId,
   getSelectedWindowId: currentSelectedWindowId,
+  getIsCurrentBrowserSelected: isCurrentBrowserSelected,
 })
 const handleCdp = createDispatcher(mgr)
 
@@ -167,14 +162,6 @@ async function getCurrentTabForSelectedWindow() {
   return activeTab
 }
 
-async function getSingleNormalWindowId() {
-  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] }).catch(() => [])
-  const windowIds = windows
-    .map((entry) => entry?.id)
-    .filter((windowId) => Number.isInteger(windowId))
-  return windowIds.length === 1 ? windowIds[0] : null
-}
-
 async function applyExecutionWindowSelection(windowId, options = {}) {
   const announce = options.announce !== false
   mirrorSelectionState({
@@ -187,38 +174,18 @@ async function applyExecutionWindowSelection(windowId, options = {}) {
   await syncSelectedBrowserCurrentTarget({ manual: true })
 }
 
-async function maybeAutoSelectCurrentBrowserWindow(params = {}) {
-  if (!isRelayConnected()) return false
-  if (!currentAutoSelectEnabled()) return false
-  if (currentSelectedWindowId() !== null) return false
-
-  const selectedBrowserInstanceId = currentSelectedBrowserInstanceId()
-  const browserCount = Number.isInteger(params.browserCount) ? params.browserCount : null
-
-  if (selectedBrowserInstanceId && !isCurrentBrowserSelected()) {
-    return false
-  }
-  if (!selectedBrowserInstanceId && browserCount !== 1) {
-    return false
-  }
-
-  const windowId = await getSingleNormalWindowId()
-  if (!Number.isInteger(windowId)) return false
-
-  await applyExecutionWindowSelection(windowId)
-  return true
-}
-
 async function syncSelectedBrowserCurrentTarget(options = {}) {
   const manual = options.manual === true
   await ensureRuntimeReady()
   if (!isCurrentBrowserSelected() || currentSelectedWindowId() === null || !isRelayConnected()) {
+    await mgr.applyExecutionScope(null)
     clearCurrentTarget()
     return
   }
 
   const tab = await getCurrentTabForSelectedWindow()
   if (!tab?.id) {
+    await mgr.applyExecutionScope(null)
     clearCurrentTarget()
     return
   }
@@ -228,9 +195,8 @@ async function syncSelectedBrowserCurrentTarget(options = {}) {
     windowId: tab.windowId ?? null,
     active: true,
   })
-
-  const attached = await mgr.attach(tab.id, { manual }).catch((error) => {
-    log.warn('syncSelectedBrowserCurrentTarget attach failed:', tab.id, error)
+  const attached = await mgr.applyExecutionScope(tab.id, { manual }).catch((error) => {
+    log.warn('syncSelectedBrowserCurrentTarget execution scope apply failed:', tab.id, error)
     return null
   })
   if (!attached) {
@@ -287,12 +253,10 @@ initRelay({
     await ensureRuntimeReady()
     if (msg?.method !== 'Extension.selectionChanged') return
     mirrorSelectionState(msg.params)
-    if (await maybeAutoSelectCurrentBrowserWindow(msg.params ?? {})) {
-      return
-    }
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
       await syncSelectedBrowserCurrentTarget({ manual: true })
     } else {
+      await mgr.applyExecutionScope(null)
       clearCurrentTarget()
     }
   },
@@ -313,7 +277,9 @@ initRelay({
     void mgr.discoverAll(isRelayConnected)
     if (isCurrentBrowserSelected() && currentSelectedWindowId() !== null) {
       await syncSelectedBrowserCurrentTarget({ manual: true })
+      return
     }
+    await mgr.applyExecutionScope(null)
   },
   installDebuggerListeners() {
     chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -327,7 +293,6 @@ initRelay({
           mirrorSelectionState({
             selectedBrowserInstanceId: null,
             selectedWindowId: null,
-            autoSelectEnabled: false,
           })
           clearExecutionWindowSelection()
           clearCurrentTarget()
@@ -595,11 +560,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       try {
         await ensureRuntimeReady()
         log.info('attachTab request:', tabId)
-        const attached = await mgr.attach(tabId, { manual: true })
-        if (!attached) {
-          sendResponse({ ok: false, error: `attach failed for tab ${tabId}` })
-          return
-        }
+        let attached = null
 
         try {
           const tab = await chrome.tabs.get(tabId)
@@ -615,6 +576,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             windowId: tab.windowId ?? null,
             active: true,
           })
+          attached = await mgr.applyExecutionScope(tabId, { manual: true })
+          if (!attached) {
+            sendResponse({ ok: false, error: `attach failed for tab ${tabId}` })
+            return
+          }
           await chrome.tabs.update(tabId, { active: true })
           if (Number.isInteger(tab.windowId)) {
             await chrome.windows.update(tab.windowId, { focused: true })
@@ -622,6 +588,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           mgr.announceCurrentTarget(tabId)
         } catch (focusError) {
           log.warn('attachTab focus failed:', tabId, focusError)
+        }
+
+        if (!attached) {
+          sendResponse({ ok: false, error: `attach failed for tab ${tabId}` })
+          return
         }
 
         log.info('attachTab done:', tabId, attached.targetId)
