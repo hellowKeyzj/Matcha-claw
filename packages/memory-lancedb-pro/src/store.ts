@@ -11,8 +11,6 @@ import {
   mkdirSync,
   realpathSync,
   lstatSync,
-  rmSync,
-  statSync,
   unlinkSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -224,30 +222,26 @@ export class MemoryStore {
 
   constructor(private readonly config: StoreConfig) { }
 
+  private cleanupLegacyWriteLockFile(lockPath: string): void {
+    if (!existsSync(lockPath)) return;
+
+    try {
+      const stats = lstatSync(lockPath);
+      if (!stats.isDirectory()) {
+        unlinkSync(lockPath);
+      }
+    } catch {}
+  }
+
   private async runWithFileLock<T>(fn: () => Promise<T>): Promise<T> {
     const lockfile = await loadLockfile();
     const lockPath = join(this.config.dbPath, ".memory-write.lock");
+    // Older builds created a sentinel file at the same path. The actual
+    // proper-lockfile lock object is a directory, so clear legacy files first.
+    this.cleanupLegacyWriteLockFile(lockPath);
 
-    // Ensure lock file exists before locking (proper-lockfile requires it)
-    if (!existsSync(lockPath)) {
-      try { mkdirSync(dirname(lockPath), { recursive: true }); } catch {}
-      try { const { writeFileSync } = await import("node:fs"); writeFileSync(lockPath, "", { flag: "wx" }); } catch {}
-    }
-
-    // Proactive cleanup of stale lock artifacts (fixes stale-lock ECOMPROMISED)
-    if (existsSync(lockPath)) {
-      try {
-        const stat = statSync(lockPath);
-        const ageMs = Date.now() - stat.mtimeMs;
-        const staleThresholdMs = 5 * 60 * 1000;
-        if (ageMs > staleThresholdMs) {
-          try { unlinkSync(lockPath); } catch {}
-          console.warn(`[memory-lancedb-pro] cleared stale lock: ${lockPath} ageMs=${ageMs}`);
-        }
-      } catch {}
-    }
-
-    const release = await lockfile.lock(lockPath, {
+    const release = await lockfile.lock(this.config.dbPath, {
+      lockfilePath: lockPath,
       retries: { retries: 10, factor: 2, minTimeout: 200, maxTimeout: 5000 },
       stale: 10000,
     });
