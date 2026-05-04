@@ -136,10 +136,13 @@ function normalizeOrder(value: unknown): number | undefined {
 
 function resolveCandidates() {
   const cwd = process.cwd();
+  const resourcesPath = typeof process.resourcesPath === 'string' && process.resourcesPath.trim().length > 0
+    ? process.resourcesPath.trim()
+    : '';
   const candidates = [
     process.env.MATCHACLAW_SUBAGENT_TEMPLATE_DIR,
+    resourcesPath ? join(resourcesPath, 'resources', 'subagent-templates') : '',
     join(cwd, 'src', 'features', 'subagents', 'templates'),
-    join(cwd, 'resources', 'subagent-templates'),
     join(homedir(), '.openclaw', 'agency-agents'),
   ]
     .filter((value) => typeof value === 'string' && value.trim().length > 0)
