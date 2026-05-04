@@ -317,6 +317,7 @@ export class BrowserRelayServer {
   private pendingTargetAttachments = new Map<string, Set<PendingTargetAttachmentRequest>>()
   private selectedBrowserInstanceId: string | null = null
   private selectedWindowId: number | null = null
+  private allowAutoSelect = true
   private actualPort: number | null = null
   private nextBrowserSessionId = 1
   private nextAttachedSessionId = 1
@@ -768,14 +769,16 @@ export class BrowserRelayServer {
     if (!selection) {
       this.selectedBrowserInstanceId = null
       this.selectedWindowId = null
+      this.allowAutoSelect = true
       return
     }
     this.selectedBrowserInstanceId = selection.selectedBrowserInstanceId
     this.selectedWindowId = selection.selectedWindowId
+    this.allowAutoSelect = selection.autoSelect
   }
 
   private async persistSelectionState(): Promise<void> {
-    if (!this.selectedBrowserInstanceId) {
+    if (!this.selectedBrowserInstanceId && this.allowAutoSelect) {
       await clearRelaySelection(this.stateDir)
       return
     }
@@ -783,6 +786,7 @@ export class BrowserRelayServer {
       {
         selectedBrowserInstanceId: this.selectedBrowserInstanceId,
         selectedWindowId: this.selectedWindowId,
+        autoSelect: this.allowAutoSelect,
       },
       this.stateDir,
     )
@@ -791,13 +795,17 @@ export class BrowserRelayServer {
   private async updateSelectedExecutionWindow(
     browserInstanceId: string | null,
     windowId: number | null,
+    options: { allowAutoSelect?: boolean } = {},
   ): Promise<boolean> {
+    const nextAllowAutoSelect = options.allowAutoSelect ?? this.allowAutoSelect
     const changed =
       this.selectedBrowserInstanceId !== browserInstanceId
       || this.selectedWindowId !== windowId
+      || this.allowAutoSelect !== nextAllowAutoSelect
 
     this.selectedBrowserInstanceId = browserInstanceId
     this.selectedWindowId = windowId
+    this.allowAutoSelect = nextAllowAutoSelect
     try {
       await this.persistSelectionState()
     } catch (error) {
@@ -807,11 +815,11 @@ export class BrowserRelayServer {
   }
 
   private async setSelectedExecutionWindow(browserInstanceId: string, windowId: number): Promise<boolean> {
-    return await this.updateSelectedExecutionWindow(browserInstanceId, windowId)
+    return await this.updateSelectedExecutionWindow(browserInstanceId, windowId, { allowAutoSelect: true })
   }
 
-  private async clearSelectedExecutionWindow(): Promise<boolean> {
-    return await this.updateSelectedExecutionWindow(null, null)
+  private async clearSelectedExecutionWindow(options: { allowAutoSelect?: boolean } = {}): Promise<boolean> {
+    return await this.updateSelectedExecutionWindow(null, null, options)
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -1064,6 +1072,7 @@ export class BrowserRelayServer {
             browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
+            autoSelectEnabled: this.allowAutoSelect,
             selected: this.selectedBrowserInstanceId === browserInstanceId,
             selectedBrowser: this.selectedBrowserInstanceId === browserInstanceId,
             selectedWindow:
@@ -1398,6 +1407,13 @@ export class BrowserRelayServer {
         return
       }
       if (await this.setSelectedExecutionWindow(client.browserInstanceId, selectedWindowId)) {
+        this.broadcastBrowserSelection()
+      }
+      return
+    }
+
+    if (message.method === 'Extension.clearExecutionWindowSelection') {
+      if (await this.clearSelectedExecutionWindow({ allowAutoSelect: false })) {
         this.broadcastBrowserSelection()
       }
       return
@@ -2352,6 +2368,7 @@ export class BrowserRelayServer {
         await this.updateSelectedExecutionWindow(
           connectedSelection.browserInstanceId,
           connectedSelection.windowId,
+          { allowAutoSelect: true },
         )
         && broadcast
       ) {
@@ -2360,7 +2377,7 @@ export class BrowserRelayServer {
       return
     }
 
-    if (!this.selectedBrowserInstanceId && await this.clearSelectedExecutionWindow() && broadcast) {
+    if (!this.selectedBrowserInstanceId && await this.clearSelectedExecutionWindow({ allowAutoSelect: true }) && broadcast) {
       this.broadcastBrowserSelection()
     }
   }
@@ -2743,6 +2760,7 @@ export class BrowserRelayServer {
             browserCount: this.extensionClients.size,
             selectedBrowserInstanceId: this.selectedBrowserInstanceId,
             selectedWindowId: this.selectedWindowId,
+            autoSelectEnabled: this.allowAutoSelect,
             selected: client.browserInstanceId === this.selectedBrowserInstanceId,
             selectedBrowser: client.browserInstanceId === this.selectedBrowserInstanceId,
             selectedWindow:

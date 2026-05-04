@@ -2099,6 +2099,7 @@ describe('openclaw browser relay plugin', () => {
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
       selectedBrowserInstanceId: 'browser-a',
       selectedWindowId: 1,
+      autoSelect: true,
     })
 
     extension.close()
@@ -2110,6 +2111,7 @@ describe('openclaw browser relay plugin', () => {
       {
         selectedBrowserInstanceId: 'browser-a',
         selectedWindowId: 7,
+        autoSelect: true,
       },
       tempStateDir,
     )
@@ -2149,6 +2151,7 @@ describe('openclaw browser relay plugin', () => {
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
       selectedBrowserInstanceId: 'browser-a',
       selectedWindowId: null,
+      autoSelect: true,
     })
 
     extension.send(encryptWireMessage(sessionKey, JSON.stringify({
@@ -2178,6 +2181,66 @@ describe('openclaw browser relay plugin', () => {
     await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
       selectedBrowserInstanceId: 'browser-a',
       selectedWindowId: 9,
+      autoSelect: true,
+    })
+
+    extension.close()
+  })
+
+  it('clears selection and disables auto-select when extension explicitly revokes execution window control', async () => {
+    tempStateDir = await ensureTempStateDir('matchaclaw-relay-clear-selection-')
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKey = randomBytes(32)
+    const extension = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-clear-selection' },
+    })
+    await waitForOpen(extension)
+
+    const helloAckPromise = waitForMessage(extension)
+    extension.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKey),
+      },
+    }))
+    await helloAckPromise
+
+    const selectionChanged1 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 7,
+    )
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 7 },
+    })))
+    await selectionChanged1
+
+    const selectionChanged2 = waitForEncryptedJsonMessageMatching(
+      extension,
+      sessionKey,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === null
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === null
+        && (message.params as Record<string, unknown> | undefined)?.autoSelectEnabled === false,
+    )
+    extension.send(encryptWireMessage(sessionKey, JSON.stringify({
+      method: 'Extension.clearExecutionWindowSelection',
+      params: {},
+    })))
+    await selectionChanged2
+
+    expect(server!.status.selectedBrowserInstanceId).toBeNull()
+    expect(server!.status.selectedWindowId).toBeNull()
+    await expect(readRelaySelection(tempStateDir)).resolves.toEqual({
+      selectedBrowserInstanceId: null,
+      selectedWindowId: null,
+      autoSelect: false,
     })
 
     extension.close()

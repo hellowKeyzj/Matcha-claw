@@ -42,6 +42,7 @@ const runtimeState = {
   browserInstanceId: '',
   selectedBrowserInstanceId: null,
   selectedWindowId: null,
+  autoSelectEnabled: true,
 }
 
 let runtimeReadyPromise = null
@@ -56,6 +57,10 @@ function currentSelectedBrowserInstanceId() {
 
 function currentSelectedWindowId() {
   return runtimeState.selectedWindowId
+}
+
+function currentAutoSelectEnabled() {
+  return runtimeState.autoSelectEnabled !== false
 }
 
 function requireBrowserInstanceId() {
@@ -90,6 +95,7 @@ function mirrorSelectionState(params = {}) {
       ? params.selectedBrowserInstanceId.trim()
       : null
   runtimeState.selectedWindowId = toSelectedWindowId(params.selectedWindowId)
+  runtimeState.autoSelectEnabled = params.autoSelectEnabled !== false
 }
 
 async function initializeRuntimeState() {
@@ -130,6 +136,14 @@ function announceWindowSelection(windowId) {
   trySendToRelay({
     method: 'Extension.selectExecutionWindow',
     params: { windowId },
+  })
+}
+
+function clearExecutionWindowSelection() {
+  if (!isRelayConnected()) return
+  trySendToRelay({
+    method: 'Extension.clearExecutionWindowSelection',
+    params: {},
   })
 }
 
@@ -175,6 +189,7 @@ async function applyExecutionWindowSelection(windowId, options = {}) {
 
 async function maybeAutoSelectCurrentBrowserWindow(params = {}) {
   if (!isRelayConnected()) return false
+  if (!currentAutoSelectEnabled()) return false
   if (currentSelectedWindowId() !== null) return false
 
   const selectedBrowserInstanceId = currentSelectedBrowserInstanceId()
@@ -306,6 +321,18 @@ initRelay({
     })
     chrome.debugger.onDetach.addListener((source, reason) => {
       log.info('chrome.debugger.onDetach:', source.tabId, reason)
+      if (reason === 'canceled_by_user') {
+        const entry = Number.isInteger(source?.tabId) ? mgr.get(source.tabId) : null
+        if (entry?.windowId != null && isSelectedWindow(entry.windowId)) {
+          mirrorSelectionState({
+            selectedBrowserInstanceId: null,
+            selectedWindowId: null,
+            autoSelectEnabled: false,
+          })
+          clearExecutionWindowSelection()
+          clearCurrentTarget()
+        }
+      }
       void mgr.onDebuggerDetach(source, reason)
     })
   },

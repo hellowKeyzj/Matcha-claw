@@ -5,8 +5,9 @@ import { resolveRelayPluginStatePath } from './paths.js'
 const SELECTION_FILE_NAME = 'relay-selection.json'
 
 export type RelaySelectionRecord = {
-  selectedBrowserInstanceId: string
+  selectedBrowserInstanceId: string | null
   selectedWindowId: number | null
+  autoSelect: boolean
 }
 
 export function getRelaySelectionFilePath(stateDir?: string): string {
@@ -17,16 +18,23 @@ export async function readRelaySelection(stateDir?: string): Promise<RelaySelect
   try {
     const raw = await readFile(getRelaySelectionFilePath(stateDir), 'utf8')
     const parsed = JSON.parse(raw) as Partial<RelaySelectionRecord>
+    const selectedBrowserInstanceId =
+      typeof parsed.selectedBrowserInstanceId === 'string' && parsed.selectedBrowserInstanceId.trim()
+        ? parsed.selectedBrowserInstanceId.trim()
+        : null
+    const selectedWindowId = parsed.selectedWindowId ?? null
+    const autoSelect = parsed.autoSelect !== false
     if (
-      typeof parsed.selectedBrowserInstanceId !== 'string'
-      || !parsed.selectedBrowserInstanceId.trim()
-      || (parsed.selectedWindowId !== null && !Number.isInteger(parsed.selectedWindowId))
+      (selectedBrowserInstanceId === null && selectedWindowId !== null)
+      || (selectedWindowId !== null && !Number.isInteger(selectedWindowId))
+      || typeof autoSelect !== 'boolean'
     ) {
       return null
     }
     return {
-      selectedBrowserInstanceId: parsed.selectedBrowserInstanceId.trim(),
-      selectedWindowId: parsed.selectedWindowId ?? null,
+      selectedBrowserInstanceId,
+      selectedWindowId,
+      autoSelect,
     }
   } catch {
     return null
