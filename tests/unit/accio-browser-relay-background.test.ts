@@ -83,6 +83,7 @@ vi.mock('../../resources/tools/data/extension/chrome-extension/browser-relay/lib
   initRelay: (callbacks: RelayCallbacks) => {
     relayCallbacks = callbacks
     initRelay(callbacks)
+    callbacks.installDebuggerListeners?.()
   },
   trySendToRelay,
   isRelayConnected,
@@ -362,5 +363,65 @@ describe('accio browser relay background', () => {
         targetId: 'target-22',
       },
     })
+  })
+
+  it('clears selected execution window when user cancels debugger from the selected window', async () => {
+    await loadBackground()
+    await flushTasks()
+
+    await relayCallbacks.onControlMessage?.({
+      method: 'Extension.selectionChanged',
+      params: {
+        selectedBrowserInstanceId: 'browser-a',
+        selectedWindowId: 1,
+        autoSelectEnabled: true,
+      },
+    })
+    await flushTasks()
+    trySendToRelay.mockClear()
+
+    const onDetach = listeners['debugger.onDetach']
+    expect(onDetach).toBeTypeOf('function')
+
+    await onDetach?.({ tabId: 11 }, 'canceled_by_user')
+    await flushTasks()
+
+    expect(trySendToRelay).toHaveBeenCalledWith({
+      method: 'Extension.clearExecutionWindowSelection',
+      params: {},
+    })
+    expect(trySendToRelay).toHaveBeenCalledWith({
+      method: 'Extension.currentTargetChanged',
+      params: {},
+    })
+    expect(MockTabManager.latest?.onDebuggerDetach).toHaveBeenCalledWith({ tabId: 11 }, 'canceled_by_user')
+  })
+
+  it('does not auto-select again after selection was explicitly cleared', async () => {
+    currentTabs = [
+      { id: 11, url: 'https://example.com/a', title: 'Page A', windowId: 1, active: true },
+    ]
+
+    await loadBackground()
+    await flushTasks()
+    trySendToRelay.mockClear()
+    MockTabManager.latest?.attach.mockClear()
+
+    await relayCallbacks.onControlMessage?.({
+      method: 'Extension.selectionChanged',
+      params: {
+        selectedBrowserInstanceId: null,
+        selectedWindowId: null,
+        browserCount: 1,
+        autoSelectEnabled: false,
+      },
+    })
+    await flushTasks()
+
+    expect(trySendToRelay).not.toHaveBeenCalledWith({
+      method: 'Extension.selectExecutionWindow',
+      params: { windowId: 1 },
+    })
+    expect(MockTabManager.latest?.attach).not.toHaveBeenCalled()
   })
 })
