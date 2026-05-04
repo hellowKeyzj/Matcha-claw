@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import jitiFactory from "jiti";
@@ -26,11 +26,11 @@ function makeEntry(i) {
 }
 
 describe("Cross-process file lock", () => {
-  it("creates .memory-write.lock file on first write", async () => {
+  it("does not leave .memory-write.lock behind after a successful write", async () => {
     const { store, dir } = makeStore();
     try {
       await store.store(makeEntry(1));
-      assert.ok(existsSync(join(dir, ".memory-write.lock")), "lock file should exist");
+      assert.strictEqual(existsSync(join(dir, ".memory-write.lock")), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -112,6 +112,30 @@ describe("Cross-process file lock", () => {
 
       const all = await store.list(undefined, undefined, 20, 0);
       assert.strictEqual(all.length, 2, "should have 2 entries after store+store+delete+store");
+      assert.strictEqual(existsSync(join(dir, ".memory-write.lock")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates .memory-write.lock as a directory while an operation is holding the lock", async () => {
+    const { dir } = makeStore();
+
+    try {
+      const lockfileModule = await import("proper-lockfile");
+      const lockfile = lockfileModule.default ?? lockfileModule;
+      const lockPath = join(dir, ".memory-write.lock");
+
+      const release = await lockfile.lock(dir, {
+        lockfilePath: lockPath,
+        stale: 10000,
+        retries: 0,
+      });
+
+      assert.strictEqual(existsSync(lockPath), true);
+      assert.strictEqual(lstatSync(lockPath).isDirectory(), true);
+      await release();
+      assert.strictEqual(existsSync(lockPath), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
