@@ -1,10 +1,11 @@
 import type {
-  SessionExecutionGraphRow,
+  SessionAssistantTurnItem,
+  SessionExecutionGraphItem,
   SessionExecutionGraphStep,
-  SessionMessageRow,
-  SessionRenderRow,
-  SessionTaskCompletionRow,
-  SessionToolActivityRow,
+  SessionTimelineEntry,
+  SessionTimelineMessageEntry,
+  SessionTimelineTaskCompletionEntry,
+  SessionTimelineToolActivityEntry,
 } from '../../shared/session-adapter-types';
 
 const MAX_GRAPH_STEPS = 32;
@@ -17,21 +18,21 @@ function normalizeText(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export function isAssistantActivityRow(
-  row: SessionRenderRow,
-): row is SessionMessageRow | SessionToolActivityRow {
-  return row.role === 'assistant' && (row.kind === 'message' || row.kind === 'tool-activity');
+export function isAssistantActivityEntry(
+  entry: SessionTimelineEntry,
+): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry {
+  return entry.role === 'assistant' && (entry.kind === 'message' || entry.kind === 'tool-activity');
 }
 
-export function isTaskCompletionRow(row: SessionRenderRow): row is SessionTaskCompletionRow {
-  return row.kind === 'task-completion';
+export function isTaskCompletionEntry(entry: SessionTimelineEntry): entry is SessionTimelineTaskCompletionEntry {
+  return entry.kind === 'task-completion';
 }
 
 function makeToolId(prefix: string, toolName: string, index: number): string {
   return `${prefix}:${toolName}:${index}`;
 }
 
-export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExecutionGraphStep[] {
+export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): SessionExecutionGraphStep[] {
   const steps: SessionExecutionGraphStep[] = [];
   const seenIds = new Set<string>();
   const activeToolNames = new Set<string>();
@@ -44,11 +45,11 @@ export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExec
     steps.push(step);
   };
 
-  const streamingRow = [...rows].reverse().find((row) => isAssistantActivityRow(row) && row.status === 'streaming') ?? null;
-  const streamingStatuses = streamingRow?.toolStatuses ?? [];
+  const streamingEntry = [...entries].reverse().find((entry) => isAssistantActivityEntry(entry) && entry.status === 'streaming') ?? null;
+  const streamingStatuses = streamingEntry?.toolStatuses ?? [];
 
-  if (streamingRow?.kind === 'message') {
-    const thinking = normalizeText(streamingRow.thinking);
+  if (streamingEntry?.kind === 'message') {
+    const thinking = normalizeText(streamingEntry.thinking);
     if (thinking) {
       pushStep({
         id: 'stream-thinking',
@@ -73,8 +74,8 @@ export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExec
     });
   }
 
-  if (streamingRow) {
-    for (const [index, tool] of streamingRow.toolUses.entries()) {
+  if (streamingEntry) {
+    for (const [index, tool] of streamingEntry.toolUses.entries()) {
       if (activeToolNames.has(tool.name)) {
         continue;
       }
@@ -89,22 +90,22 @@ export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExec
     }
   }
 
-  const relevantAssistantRows = rows.filter((row) => (
-    isAssistantActivityRow(row)
+  const relevantAssistantEntries = entries.filter((entry) => (
+    isAssistantActivityEntry(entry)
     && (
-      row.toolUses.length > 0
-      || (row.kind === 'message' && Boolean(normalizeText(row.thinking)))
+      entry.toolUses.length > 0
+      || (entry.kind === 'message' && Boolean(normalizeText(entry.thinking)))
     )
   ));
 
-  for (const [rowIndex, assistantRow] of relevantAssistantRows.entries()) {
-    if (assistantRow.kind === 'message') {
-      const thinking = normalizeText(assistantRow.thinking);
+  for (const [entryIndex, assistantEntry] of relevantAssistantEntries.entries()) {
+    if (assistantEntry.kind === 'message') {
+      const thinking = normalizeText(assistantEntry.thinking);
       if (thinking) {
         pushStep({
-          id: `history-thinking-${assistantRow.rowId || assistantRow.messageId || rowIndex}`,
+          id: `history-thinking-${assistantEntry.entryId || assistantEntry.messageId || entryIndex}`,
           label: 'Thinking',
-          status: assistantRow.status === 'error' ? 'error' : 'completed',
+          status: assistantEntry.status === 'error' ? 'error' : 'completed',
           kind: 'thinking',
           detail: thinking,
           depth: 1,
@@ -112,14 +113,14 @@ export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExec
       }
     }
 
-    for (const [toolIndex, tool] of assistantRow.toolUses.entries()) {
-      const status = assistantRow.toolStatuses.find((candidate) => (
+    for (const [toolIndex, tool] of assistantEntry.toolUses.entries()) {
+      const status = assistantEntry.toolStatuses.find((candidate) => (
         (candidate.toolCallId && candidate.toolCallId === tool.id)
         || (candidate.id && candidate.id === tool.id)
         || candidate.name === tool.name
       ))?.status ?? 'completed';
       pushStep({
-        id: tool.id || makeToolId(`history-tool-${assistantRow.rowId || assistantRow.key || rowIndex}`, tool.name, toolIndex),
+        id: tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.key || entryIndex}`, tool.name, toolIndex),
         label: tool.name,
         status,
         kind: 'tool',
@@ -133,23 +134,24 @@ export function deriveExecutionGraphSteps(rows: SessionRenderRow[]): SessionExec
 }
 
 function resolveAnchorIdentity(
-  replyRow: SessionMessageRow | SessionToolActivityRow | null,
-): Pick<SessionExecutionGraphRow, 'laneKey' | 'turnKey' | 'agentId' | 'assistantTurnKey' | 'assistantLaneKey' | 'assistantLaneAgentId'> {
+  replyRow: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry | SessionAssistantTurnItem | null,
+): Pick<SessionExecutionGraphItem, 'laneKey' | 'turnKey' | 'agentId' | 'assistantTurnKey' | 'assistantLaneKey' | 'assistantLaneAgentId'> {
   if (!replyRow) {
     return {};
   }
+  const isAssistantTurnItem = replyRow.kind === 'assistant-turn';
   return {
     laneKey: replyRow.laneKey,
     turnKey: replyRow.turnKey,
     agentId: replyRow.agentId,
-    assistantTurnKey: replyRow.assistantTurnKey ?? null,
-    assistantLaneKey: replyRow.assistantLaneKey ?? null,
-    assistantLaneAgentId: replyRow.assistantLaneAgentId ?? null,
+    assistantTurnKey: isAssistantTurnItem ? (replyRow.turnKey ?? null) : (replyRow.assistantTurnKey ?? null),
+    assistantLaneKey: isAssistantTurnItem ? (replyRow.laneKey ?? null) : (replyRow.assistantLaneKey ?? null),
+    assistantLaneAgentId: isAssistantTurnItem ? (replyRow.agentId ?? null) : (replyRow.assistantLaneAgentId ?? null),
   };
 }
 
 function buildExecutionGraphSteps(
-  graph: SessionExecutionGraphRow,
+  graph: SessionExecutionGraphItem,
   childSteps: SessionExecutionGraphStep[],
 ): SessionExecutionGraphStep[] {
   const steps: SessionExecutionGraphStep[] = [...graph.steps.filter((step) => !step.id.startsWith('child-root:') && !step.id.startsWith(`child:${graph.childSessionKey}:`))];
@@ -176,10 +178,10 @@ function buildExecutionGraphSteps(
   return steps.slice(0, MAX_GRAPH_STEPS);
 }
 
-export function createExecutionGraphRow(
-  completionRow: SessionTaskCompletionRow,
-  triggerRow: SessionRenderRow,
-): SessionExecutionGraphRow {
+export function createExecutionGraphItem(
+  completionRow: SessionTimelineTaskCompletionEntry,
+  triggerRow: SessionTimelineEntry,
+): SessionExecutionGraphItem {
   const childAgentId = completionRow.childAgentId ?? undefined;
   const graphId = `${completionRow.sessionKey}:${completionRow.childSessionKey}:${completionRow.key}`;
   return {
@@ -190,10 +192,10 @@ export function createExecutionGraphRow(
     text: '',
     createdAt: triggerRow.createdAt ?? completionRow.createdAt,
     status: 'final',
-    rowId: `graph:${graphId}`,
+    entryId: `graph:${graphId}`,
     graphId,
-    completionRowKey: completionRow.key,
-    anchorRowKey: triggerRow.key,
+    completionItemKey: completionRow.key,
+    anchorItemKey: triggerRow.key,
     childSessionKey: completionRow.childSessionKey,
     ...(completionRow.childSessionId ? { childSessionId: completionRow.childSessionId } : {}),
     ...(childAgentId ? { childAgentId } : {}),
@@ -201,27 +203,27 @@ export function createExecutionGraphRow(
     sessionLabel: completionRow.childSessionId || completionRow.childSessionKey,
     steps: [],
     active: true,
-    triggerRowKey: triggerRow.key,
+    triggerItemKey: triggerRow.key,
   };
 }
 
 export function attachExecutionGraphReply(
-  graph: SessionExecutionGraphRow,
-  replyRow: SessionMessageRow | SessionToolActivityRow | null,
-): SessionExecutionGraphRow {
+  graph: SessionExecutionGraphItem,
+  replyRow: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry | SessionAssistantTurnItem | null,
+): SessionExecutionGraphItem {
   if (!replyRow) {
     return {
       ...graph,
-      replyRowKey: undefined,
-      anchorRowKey: graph.triggerRowKey,
+      replyItemKey: undefined,
+      anchorItemKey: graph.triggerItemKey,
       active: true,
       ...resolveAnchorIdentity(null),
     };
   }
   return {
     ...graph,
-    replyRowKey: replyRow.key,
-    anchorRowKey: replyRow.key,
+    replyItemKey: replyRow.key,
+    anchorItemKey: replyRow.key,
     createdAt: replyRow.createdAt ?? graph.createdAt,
     active: false,
     ...resolveAnchorIdentity(replyRow),
@@ -229,9 +231,9 @@ export function attachExecutionGraphReply(
 }
 
 export function updateExecutionGraphMainSteps(
-  graph: SessionExecutionGraphRow,
+  graph: SessionExecutionGraphItem,
   mainSteps: SessionExecutionGraphStep[],
-): SessionExecutionGraphRow {
+): SessionExecutionGraphItem {
   const childSteps = graph.steps
     .filter((step) => step.id.startsWith(`child:${graph.childSessionKey}:`))
     .map((step) => ({
@@ -250,9 +252,9 @@ export function updateExecutionGraphMainSteps(
 }
 
 export function updateExecutionGraphChildSteps(
-  graph: SessionExecutionGraphRow,
+  graph: SessionExecutionGraphItem,
   childSteps: SessionExecutionGraphStep[],
-): SessionExecutionGraphRow {
+): SessionExecutionGraphItem {
   const mainSteps = graph.steps.filter((step) => !step.id.startsWith('child-root:') && !step.id.startsWith(`child:${graph.childSessionKey}:`));
   return {
     ...graph,

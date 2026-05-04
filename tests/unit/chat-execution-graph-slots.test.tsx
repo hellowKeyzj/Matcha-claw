@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ChatListSurface } from '@/pages/Chat/components/ChatList';
-import { applyAssistantPresentationToRows } from '@/pages/Chat/chat-row-model';
+import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
-function renderSurface(rows: SessionRenderRow[]) {
+function renderSurface(items: SessionRenderItem[]) {
   return render(
     <ChatListSurface
       messagesViewportRef={{ current: null }}
@@ -19,8 +19,8 @@ function renderSurface(rows: SessionRenderRow[]) {
       onScroll={() => {}}
       onTouchMove={() => {}}
       onWheel={() => {}}
-      rows={applyAssistantPresentationToRows({
-        rows,
+      items={applyAssistantPresentationToItems({
+        items,
         agents: [],
         defaultAssistant: null,
       })}
@@ -36,42 +36,44 @@ function renderSurface(rows: SessionRenderRow[]) {
       })}
       showThinking={false}
       userAvatarImageUrl={null}
-      onJumpToRowKey={() => {}}
+      onJumpToItemKey={() => {}}
     />,
   );
 }
 
-describe('chat execution graph rows', () => {
-  it('renders execution graph rows inline after their anchor message row', () => {
-    const messageRows = buildRenderRowsFromMessages('agent:test:main', [
+describe('chat execution graph items', () => {
+  it('renders execution graph items inline after their anchor message item', () => {
+    const messageItems = buildRenderItemsFromMessages('agent:test:main', [
       { role: 'user', content: 'u1', timestamp: 1, id: 'u1' },
       { role: 'assistant', content: 'a1', timestamp: 2, id: 'a1' },
     ]);
-    const rows = [
-      messageRows[0]!,
-      messageRows[1]!,
+    const items = [
+      messageItems[0]!,
+      messageItems[1]!,
       {
         key: 'session:agent:test:main|graph:graph-1',
         kind: 'execution-graph' as const,
         sessionKey: 'agent:test:main',
         role: 'assistant' as const,
         text: '',
+        createdAt: 2,
+        updatedAt: 2,
         status: 'final' as const,
-        entryId: 'a1',
-        assistantTurnKey: messageRows[1]!.turnKey ?? null,
-        assistantLaneKey: messageRows[1]!.laneKey ?? null,
-        assistantLaneAgentId: messageRows[1]!.agentId ?? null,
+        laneKey: messageItems[1]!.laneKey,
+        turnKey: messageItems[1]!.turnKey,
+        agentId: messageItems[1]!.agentId,
         graphId: 'graph-1',
+        completionItemKey: messageItems[1]!.key,
         childSessionKey: 'child-1',
         agentLabel: 'agent',
         sessionLabel: 'session',
         steps: [],
         active: false,
-        triggerRowKey: messageRows[1]!.key,
+        triggerItemKey: messageItems[1]!.key,
       },
-    ] satisfies SessionRenderRow[];
+    ] satisfies SessionRenderItem[];
 
-    renderSurface(rows);
+    renderSurface(items);
 
     expect(screen.getByTestId('chat-execution-graph-rail')).toBeInTheDocument();
   });

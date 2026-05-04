@@ -27,11 +27,11 @@ import {
   executeCleanupEmptySession,
   executeDeleteSession,
   executeJumpToLatest,
-  executeLoadOlderMessages,
+  executeLoadOlderItems,
   executeLoadSessions,
   executeNewSession,
   executeOpenAgentConversation,
-  executeSetViewportLastVisibleMessageId,
+  executeSetViewportLastVisibleItemKey,
   executeSwitchSession,
 } from './session-actions';
 import { buildTaskInboxBridgeState, normalizeTaskInboxSessionKey } from './session-helpers';
@@ -101,10 +101,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         sessionKey: normalizedSessionKey,
       });
     },
-    loadOlderMessages: (sessionKey) => executeLoadOlderMessages(sessionInput, sessionKey),
+    loadOlderItems: (sessionKey) => executeLoadOlderItems(sessionInput, sessionKey),
     jumpToLatest: (sessionKey) => executeJumpToLatest(sessionInput, sessionKey),
-    setViewportLastVisibleMessageId: (messageId, sessionKey) => {
-      executeSetViewportLastVisibleMessageId(sessionInput, messageId, sessionKey);
+    setViewportLastVisibleItemKey: (itemKey, sessionKey) => {
+      executeSetViewportLastVisibleItemKey(sessionInput, itemKey, sessionKey);
     },
     sendMessage: (text, attachments) => executeStoreSend({
       set,

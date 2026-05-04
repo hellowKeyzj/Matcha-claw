@@ -9,7 +9,7 @@ function buildRuntimeState(
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingMessageId: null,
+    streamingAnchorKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
     ...partial,
@@ -51,36 +51,36 @@ describe('chat runtime state reducer', () => {
 
   it('commits tool-result runtime state via reducer patch', () => {
     const patch = reduceSessionRuntime(buildRuntimeState({
-      streamingMessageId: 'assistant-1',
+      streamingAnchorKey: 'assistant-1',
     }), {
       type: 'tool_result_committed',
     });
 
     expect(patch.runPhase).toBe('waiting_tool');
     expect(patch.pendingFinal).toBe(true);
-    expect(patch.streamingMessageId).toBeNull();
+    expect(patch.streamingAnchorKey).toBeNull();
   });
 
-  it('queues stream delta into the active streaming message id', () => {
+  it('queues stream delta into the active streaming anchor', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'submitted',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingMessageId: 'assistant-1',
+      streamingAnchorKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      messageId: 'assistant-1',
+      anchorKey: 'assistant-1',
     });
 
     expect(patch.runPhase).toBe('streaming');
-    expect(patch.streamingMessageId ?? state.streamingMessageId).toBe('assistant-1');
+    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
   });
 
-  it('adopts a new stream message id when delta first binds', () => {
+  it('adopts a new stream anchor when delta first binds', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
@@ -91,37 +91,37 @@ describe('chat runtime state reducer', () => {
     const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      messageId: 'assistant-1',
+      anchorKey: 'assistant-1',
     });
 
-    expect(patch.streamingMessageId).toBe('assistant-1');
+    expect(patch.streamingAnchorKey).toBe('assistant-1');
   });
 
-  it('keeps existing active message id when a tool-only delta arrives', () => {
+  it('keeps existing active anchor when a tool-only delta arrives', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingMessageId: 'assistant-1',
+      streamingAnchorKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
       type: 'stream_delta_queued',
       runId: 'run-1',
-      messageId: 'assistant-1',
+      anchorKey: 'assistant-1',
     });
 
-    expect(patch.streamingMessageId ?? state.streamingMessageId).toBe('assistant-1');
+    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
   });
 
-  it('clears the active streaming message id immediately when final assistant message is committed', () => {
+  it('clears the active streaming anchor immediately when final assistant message is committed', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingMessageId: 'assistant-1',
+      streamingAnchorKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -130,7 +130,7 @@ describe('chat runtime state reducer', () => {
       toolOnly: false,
     });
 
-    expect(patch.streamingMessageId).toBeNull();
+    expect(patch.streamingAnchorKey).toBeNull();
     expect(patch.sending).toBe(false);
     expect(patch.activeRunId).toBeNull();
     expect(patch.pendingFinal).toBe(false);
@@ -157,13 +157,13 @@ describe('chat runtime state reducer', () => {
     expect(patch.runPhase).toBe('done');
   });
 
-  it('keeps the current stream message id available when history settles the run', () => {
+  it('keeps the current stream anchor available when history settles the run', () => {
     const state = buildRuntimeState({
       sending: true,
       activeRunId: 'run-1',
       pendingFinal: true,
       runPhase: 'finalizing',
-      streamingMessageId: 'assistant-1',
+      streamingAnchorKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -176,7 +176,7 @@ describe('chat runtime state reducer', () => {
     expect(patch.activeRunId).toBeNull();
     expect(patch.pendingFinal).toBe(false);
     expect(patch.runPhase).toBe('done');
-    expect(patch.streamingMessageId ?? state.streamingMessageId).toBe('assistant-1');
+    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
   });
 
 });

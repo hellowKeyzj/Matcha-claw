@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   executeJumpToLatest,
-  executeLoadOlderMessages,
-  executeSetViewportLastVisibleMessageId,
+  executeLoadOlderItems,
+  executeSetViewportLastVisibleItemKey,
   executeSwitchSession,
 } from '@/stores/chat/session-actions';
 import {
   createEmptySessionRecord,
   createEmptySessionViewportState,
-  getSessionRows,
-  selectViewportRows,
+  getSessionItems,
+  selectViewportItems,
 } from '@/stores/chat/store-state-helpers';
-import { buildRenderRowsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
@@ -51,7 +51,7 @@ function buildMessages(count: number, start = 1): RawMessage[] {
 function buildWindowSnapshotResult(input: {
   sessionKey: string;
   messages: RawMessage[];
-  totalRowCount: number;
+  totalItemCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -69,19 +69,19 @@ function buildWindowSnapshotResult(input: {
         displayName: input.sessionKey,
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
-      rows: buildRenderRowsFromMessages(input.sessionKey, input.messages),
+      items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
-        streamingMessageId: null,
+        streamingAnchorKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
       window: {
-        totalRowCount: input.totalRowCount,
+        totalItemCount: input.totalItemCount,
         windowStartOffset: input.windowStartOffset,
         windowEndOffset: input.windowEndOffset,
         hasMore: input.hasMore,
@@ -107,19 +107,19 @@ function buildSessionSnapshotResult(input: {
         displayName: input.sessionKey,
         updatedAt: input.messages[input.messages.length - 1]?.timestamp,
       },
-      rows: buildRenderRowsFromMessages(input.sessionKey, input.messages),
+      items: buildRenderItemsFromMessages(input.sessionKey, input.messages),
       replayComplete: true,
       runtime: {
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
-        streamingMessageId: null,
+        streamingAnchorKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
       window: {
-        totalRowCount: input.messages.length,
+        totalItemCount: input.messages.length,
         windowStartOffset: 0,
         windowEndOffset: input.messages.length,
         hasMore: false,
@@ -150,7 +150,7 @@ function createStateHarness(input: {
           titleSource: 'none',
           ...input.meta,
         },
-        rows: buildRenderRowsFromMessages(input.currentSessionKey, input.messages),
+        items: buildRenderItemsFromMessages(input.currentSessionKey, input.messages),
         window: input.window,
       },
     },
@@ -193,10 +193,10 @@ function createSessionHarness(input: {
     historyRuntime: input.historyRuntime,
   };
   return {
-    loadOlderMessages: (sessionKey?: string) => executeLoadOlderMessages(shared, sessionKey),
+    loadOlderItems: (sessionKey?: string) => executeLoadOlderItems(shared, sessionKey),
     jumpToLatest: (sessionKey?: string) => executeJumpToLatest(shared, sessionKey),
     switchSession: (key: string) => executeSwitchSession(shared, key),
-    setViewportLastVisibleMessageId: (messageId: string | null, sessionKey?: string) => executeSetViewportLastVisibleMessageId(shared, messageId, sessionKey),
+    setViewportLastVisibleItemKey: (itemKey: string | null, sessionKey?: string) => executeSetViewportLastVisibleItemKey(shared, itemKey, sessionKey),
   };
 }
 
@@ -206,12 +206,12 @@ describe('chat session window ops', () => {
     hostApiFetchMock.mockReset();
   });
 
-  it('loadOlderMessages expands the current session window upward without dropping the visible range', async () => {
+  it('loadOlderItems expands the current session window upward without dropping the visible range', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalRowCount: allMessages.length,
+      totalItemCount: allMessages.length,
       windowStartOffset: 120,
       windowEndOffset: 220,
       hasMore: true,
@@ -234,7 +234,7 @@ describe('chat session window ops', () => {
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildWindowSnapshotResult({
       sessionKey,
       messages: olderWindowMessages,
-      totalRowCount: allMessages.length,
+      totalItemCount: allMessages.length,
       windowStartOffset: 20,
       windowEndOffset: 220,
       hasMore: true,
@@ -242,13 +242,13 @@ describe('chat session window ops', () => {
       isAtLatest: true,
     }));
 
-    await actions.loadOlderMessages(sessionKey);
+    await actions.loadOlderItems(sessionKey);
 
-    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
-      olderWindowMessages.map((message) => message.id),
+    expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, olderWindowMessages).map((item) => item.key),
     );
-    expect(selectViewportRows(get().loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(
-      olderWindowMessages.map((message) => message.id),
+    expect(selectViewportItems(get().loadedSessions[sessionKey]!).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, olderWindowMessages).map((item) => item.key),
     );
     expect(get().loadedSessions[sessionKey]?.window.windowStartOffset).toBe(20);
     expect(get().loadedSessions[sessionKey]?.window.windowEndOffset).toBe(220);
@@ -259,7 +259,7 @@ describe('chat session window ops', () => {
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalRowCount: allMessages.length,
+      totalItemCount: allMessages.length,
       windowStartOffset: 0,
       windowEndOffset: 120,
       hasMore: false,
@@ -282,7 +282,7 @@ describe('chat session window ops', () => {
     hostSessionWindowFetchMock.mockResolvedValueOnce(buildWindowSnapshotResult({
       sessionKey,
       messages: latestWindowMessages,
-      totalRowCount: allMessages.length,
+      totalItemCount: allMessages.length,
       windowStartOffset: 100,
       windowEndOffset: 220,
       hasMore: true,
@@ -292,11 +292,11 @@ describe('chat session window ops', () => {
 
     await actions.jumpToLatest(sessionKey);
 
-    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
-      latestWindowMessages.map((message) => message.id),
+    expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, latestWindowMessages).map((item) => item.key),
     );
-    expect(selectViewportRows(get().loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(
-      latestWindowMessages.map((message) => message.id),
+    expect(selectViewportItems(get().loadedSessions[sessionKey]!).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, latestWindowMessages).map((item) => item.key),
     );
     expect(get().loadedSessions[sessionKey]?.window.isAtLatest).toBe(true);
   });
@@ -305,7 +305,7 @@ describe('chat session window ops', () => {
     const sessionKey = 'agent:test:main';
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalRowCount: 1,
+      totalItemCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,
@@ -317,7 +317,7 @@ describe('chat session window ops', () => {
       loadedSessions: {
         [sessionKey]: {
           ...createEmptySessionRecord(),
-          rows: buildRenderRowsFromMessages(sessionKey, [{
+          items: buildRenderItemsFromMessages(sessionKey, [{
             id: 'assistant-local-stream',
             role: 'assistant',
             content: 'draft preview',
@@ -329,7 +329,7 @@ describe('chat session window ops', () => {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming' as const,
-            streamingMessageId: 'assistant-local-stream',
+            streamingAnchorKey: 'session:agent:test:main|assistant-turn:main:assistant-local-stream:main',
           },
           window: viewport,
         },
@@ -366,7 +366,7 @@ describe('chat session window ops', () => {
         content: 'server final',
         timestamp: 2,
       }],
-      totalRowCount: 1,
+      totalItemCount: 1,
       windowStartOffset: 0,
       windowEndOffset: 1,
       hasMore: false,
@@ -376,8 +376,22 @@ describe('chat session window ops', () => {
 
     await actions.jumpToLatest(sessionKey);
 
-    expect(getSessionRows(state, sessionKey).map((row) => row.rowId)).toEqual(['assistant-final-1']);
-    expect(selectViewportRows(state.loadedSessions[sessionKey]!).map((row) => row.rowId)).toEqual(['assistant-final-1']);
+    expect(getSessionItems(state, sessionKey).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, [{
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'server final',
+        timestamp: 2,
+      }]).map((item) => item.key),
+    );
+    expect(selectViewportItems(state.loadedSessions[sessionKey]!).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, [{
+        id: 'assistant-final-1',
+        role: 'assistant',
+        content: 'server final',
+        timestamp: 2,
+      }]).map((item) => item.key),
+    );
   });
 
   it('switchSession reselect 优先走后端 session resume snapshot，而不是直接触发 history reload', async () => {
@@ -386,7 +400,7 @@ describe('chat session window ops', () => {
     const resumedMessages = buildMessages(2, 301);
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
-      totalRowCount: 0,
+      totalItemCount: 0,
       windowStartOffset: 0,
       windowEndOffset: 0,
       hasMore: false,
@@ -418,14 +432,14 @@ describe('chat session window ops', () => {
     }));
     expect(loadHistoryMock).not.toHaveBeenCalled();
     for (let index = 0; index < 5; index += 1) {
-      const currentRowIds = getSessionRows(get(), sessionKey).map((row) => row.rowId);
-      if (currentRowIds.join('|') === resumedMessages.map((message) => message.id).join('|')) {
+      const currentItemKeys = getSessionItems(get(), sessionKey).map((item) => item.key);
+      if (currentItemKeys.join('|') === buildRenderItemsFromMessages(sessionKey, resumedMessages).map((item) => item.key).join('|')) {
         break;
       }
       await Promise.resolve();
     }
-    expect(getSessionRows(get(), sessionKey).map((row) => row.rowId)).toEqual(
-      resumedMessages.map((message) => message.id),
+    expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
+      buildRenderItemsFromMessages(sessionKey, resumedMessages).map((item) => item.key),
     );
   });
 
@@ -443,7 +457,7 @@ describe('chat session window ops', () => {
           },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            totalRowCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             hasMore: false,

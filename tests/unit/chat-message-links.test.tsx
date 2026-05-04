@@ -1,11 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { ChatMessage } from '@/pages/Chat/ChatMessage';
-import { applyAssistantPresentationToRows } from '@/pages/Chat/chat-row-model';
+import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
+import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import type { SessionMessageRow } from '../../runtime-host/shared/session-adapter-types';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const invokeIpcMock = vi.fn();
 
@@ -13,16 +12,16 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
-function buildRow(message: RawMessage) {
-  const row = applyAssistantPresentationToRows({
-    rows: buildRenderRowsFromMessages('agent:test:main', [message]),
+function buildItem(message: RawMessage) {
+  const item = applyAssistantPresentationToItems({
+    items: buildRenderItemsFromMessages('agent:test:main', [message]),
     agents: [],
     defaultAssistant: null,
   })[0];
-  if (!row || row.kind !== 'message') {
-    throw new Error('expected message row');
+  if (!item || item.kind !== 'assistant-turn') {
+    throw new Error('expected assistant turn');
   }
-  return row;
+  return item;
 }
 
 describe('chat message links', () => {
@@ -45,13 +44,13 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
+    prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
-    fireEvent.click(screen.getByRole('link', { name: 'TOOLS.md' }));
+    fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
-    expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
+    expect(invokeIpcMock).toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
   it('legacy markdown relative file link should open mapped absolute path from attached files', () => {
@@ -69,9 +68,9 @@ describe('chat message links', () => {
         },
       ],
     };
-    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
+    prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
 
@@ -84,7 +83,7 @@ describe('chat message links', () => {
       content: '[TOOLS.md](TOOLS.md)',
     };
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.queryByRole('button', { name: 'TOOLS.md' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'TOOLS.md' })).toBeNull();
@@ -96,9 +95,9 @@ describe('chat message links', () => {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
-    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
+    prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     const link = screen.getByRole('link', { name: 'OpenAI' });
     expect(link).toHaveAttribute('href', 'https://openai.com');
@@ -122,7 +121,7 @@ describe('chat message links', () => {
       ],
     };
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
@@ -141,9 +140,9 @@ describe('chat message links', () => {
       role: 'assistant',
       content: longMarkdown,
     };
-    prewarmAssistantMarkdownBody(buildRow(message) as SessionMessageRow);
+    prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
@@ -153,11 +152,12 @@ describe('chat message links', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
+      streaming: true,
     };
 
     render(
-      <ChatMessage
-        row={buildRow(message)}
+      <ChatAssistantTurn
+        item={buildItem(message)}
         showThinking={false}
       />,
     );
@@ -174,7 +174,7 @@ describe('chat message links', () => {
       content,
     };
 
-    render(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
     expect(screen.queryByText(content)).toBeNull();
@@ -188,15 +188,15 @@ describe('chat message links', () => {
     };
 
     const view = render(
-      <ChatMessage
-        row={buildRow({ ...message, streaming: true })}
+      <ChatAssistantTurn
+        item={buildItem({ ...message, streaming: true })}
         showThinking={false}
       />,
     );
 
     expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
 
-    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getByRole('link', { name: 'OpenAI Stream Final' })).toHaveAttribute('href', 'https://openai.com/?stream-final=1');
     expect(screen.queryByText(content)).toBeNull();
@@ -209,8 +209,8 @@ describe('chat message links', () => {
     };
 
     const view = render(
-      <ChatMessage
-        row={buildRow({ ...message, streaming: true })}
+      <ChatAssistantTurn
+        item={buildItem({ ...message, streaming: true })}
         showThinking={false}
       />,
     );
@@ -218,7 +218,7 @@ describe('chat message links', () => {
     const streamingBody = view.container.querySelector('[data-chat-body-mode=\"streaming\"] > div');
     expect(streamingBody?.children).toHaveLength(1);
 
-    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     const settledBody = view.container.querySelector('[data-chat-body-mode=\"settled\"] > div');
     expect(settledBody?.children).toHaveLength(1);
@@ -236,8 +236,8 @@ describe('chat message links', () => {
     };
 
     const view = render(
-      <ChatMessage
-        row={buildRow({ ...message, streaming: true })}
+      <ChatAssistantTurn
+        item={buildItem({ ...message, streaming: true })}
         showThinking={false}
       />,
     );
@@ -247,7 +247,7 @@ describe('chat message links', () => {
     )).length).toBeGreaterThan(0);
     expect(screen.queryByRole('table')).toBeNull();
 
-    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getAllByText((_, element) => (
       element?.textContent?.includes('Task,Week,Owner,Status') ?? false
@@ -267,8 +267,8 @@ describe('chat message links', () => {
     };
 
     const view = render(
-      <ChatMessage
-        row={buildRow({ ...message, streaming: true })}
+      <ChatAssistantTurn
+        item={buildItem({ ...message, streaming: true })}
         showThinking={false}
       />,
     );
@@ -277,7 +277,7 @@ describe('chat message links', () => {
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
 
-    view.rerender(<ChatMessage row={buildRow(message)} showThinking={false} />);
+    view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getByRole('table')).toBeInTheDocument();
     expect(screen.getByRole('columnheader', { name: 'Task' })).toBeInTheDocument();

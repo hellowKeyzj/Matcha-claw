@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend } from '@/stores/chat/send-handlers';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { getSessionRows } from '@/stores/chat/store-state-helpers';
+import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const sendChatTransportMock = vi.fn();
 
@@ -19,31 +20,7 @@ function createSessionRecord(input?: {
 }) {
   const sessionKey = input?.sessionKey ?? 'agent:main:session-1';
   const messages = input?.messages ?? [];
-  const rows: SessionRenderRow[] = messages.map((message, index) => {
-    const rowId = String(message.id ?? `row-${index + 1}`);
-    return {
-      key: `session:${sessionKey}|row:${rowId}`,
-      kind: 'message',
-      sessionKey,
-      role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
-      text: typeof message.content === 'string' ? message.content : '',
-      createdAt: message.timestamp,
-      status: message.status === 'sending' ? 'pending' : 'final',
-      rowId,
-      laneKey: 'main',
-      turnKey: `main:${rowId}`,
-      thinking: null,
-      images: [],
-      toolUses: [],
-      attachedFiles: [],
-      toolStatuses: [],
-      isStreaming: false,
-      messageId: String(message.messageId ?? message.id ?? rowId),
-      ...(message.clientId ? { clientId: message.clientId } : {}),
-      ...(message.uniqueId ? { uniqueId: message.uniqueId } : {}),
-      ...(message.requestId ? { requestId: message.requestId } : {}),
-    };
-  });
+  const items: SessionRenderItem[] = buildRenderItemsFromMessages(sessionKey, messages);
   return {
     meta: {
       agentId: sessionKey.split(':')[1] ?? null,
@@ -59,13 +36,13 @@ function createSessionRecord(input?: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
       lastUserMessageAt: null,
     },
-    rows,
+    items,
     window: createViewportWindowState({
-      totalRowCount: messages.length,
+      totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       hasMore: false,
@@ -110,10 +87,10 @@ describe('chat send handlers', () => {
     expect(record.runtime.lastUserMessageAt).toBe(nowMs);
     expect(record.runtime.sending).toBe(true);
     expect(record.runtime.runPhase).toBe('submitted');
-    expect(record.rows).toEqual([]);
+    expect(record.items).toEqual([]);
   });
 
-  it('send success 会把 runtime-host 返回的 authoritative user row 写入 row timeline', async () => {
+  it('send success 会把 runtime-host 返回的 authoritative user item 写入 render items', async () => {
     const sessionKey = 'agent:main:session-1';
     sendChatTransportMock.mockResolvedValueOnce({
       ok: true,
@@ -130,39 +107,30 @@ describe('chat send handlers', () => {
           displayName: sessionKey,
           updatedAt: 1,
         },
-        rows: [{
-          key: `session:${sessionKey}|row:user-local-1`,
-          kind: 'message',
+        items: [{
+          key: `session:${sessionKey}|entry:user-local-1`,
+          kind: 'user-message',
           sessionKey,
           role: 'user',
-          status: 'final',
           text: 'latest reply',
-          rowId: 'user-local-1',
-          laneKey: 'main',
-          turnKey: 'main:user-local-1',
-          thinking: null,
           images: [],
-          toolUses: [],
           attachedFiles: [],
-          toolStatuses: [],
-          isStreaming: false,
+          createdAt: 1,
+          updatedAt: 1,
           messageId: 'user-local-1',
-          clientId: 'user-local-1',
-          uniqueId: 'user-local-1',
-          requestId: 'user-local-1',
         }],
         replayComplete: true,
         runtime: {
           sending: true,
           activeRunId: null,
           runPhase: 'submitted',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
           lastUserMessageAt: 1,
           updatedAt: 1,
         },
         window: {
-          totalRowCount: 1,
+          totalItemCount: 1,
           windowStartOffset: 0,
           windowEndOffset: 1,
           hasMore: false,
@@ -201,10 +169,9 @@ describe('chat send handlers', () => {
 
     const record = state.loadedSessions[sessionKey]!;
     expect(record.runtime.activeRunId).toBe('run-1');
-    expect(getSessionRows(state, sessionKey).map((row) => row.rowId)).toEqual(['user-local-1']);
-    expect(getSessionRows(state, sessionKey)[0]).toMatchObject({
+    expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
+    expect(getSessionItems(state, sessionKey)[0]).toMatchObject({
       messageId: 'user-local-1',
-      requestId: 'user-local-1',
     });
   });
 
@@ -234,7 +201,7 @@ describe('chat send handlers', () => {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'submitted' as const,
-            streamingMessageId: null,
+            streamingAnchorKey: null,
             pendingFinal: false,
             lastUserMessageAt: 1,
           },
@@ -265,6 +232,6 @@ describe('chat send handlers', () => {
     expect(sendChatTransportMock).not.toHaveBeenCalled();
     expect(beginMutating).not.toHaveBeenCalled();
     expect(finishMutating).not.toHaveBeenCalled();
-    expect(getSessionRows(state, sessionKey).map((row) => row.rowId)).toEqual(['user-local-1']);
+    expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
   });
 });

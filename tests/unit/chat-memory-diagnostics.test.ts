@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
 import { useChatStore, type ChatStoreState } from '@/stores/chat';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function createStateWithSessions(
   loadedSessions: ChatStoreState['loadedSessions'],
@@ -17,7 +17,7 @@ describe('chat memory diagnostics', () => {
   it('summarizes window, preview, and runtime-state memory by session', () => {
     const state = createStateWithSessions({
       'agent:main:main': {
-        rows: buildRenderRowsFromMessages('agent:main:main', [
+        items: buildRenderItemsFromMessages('agent:main:main', [
           {
             role: 'user',
             id: 'user-1',
@@ -41,7 +41,7 @@ describe('chat memory diagnostics', () => {
           },
         ]),
         window: createViewportWindowState({
-          totalRowCount: 2,
+          totalItemCount: 2,
           windowStartOffset: 0,
           windowEndOffset: 2,
           isAtLatest: true,
@@ -54,11 +54,11 @@ describe('chat memory diagnostics', () => {
         },
         runtime: {
           ...useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
-          streamingMessageId: 'overlay-1',
+          streamingAnchorKey: 'overlay-1',
         },
       },
       'agent:other:main': {
-        rows: buildRenderRowsFromMessages('agent:other:main', [
+        items: buildRenderItemsFromMessages('agent:other:main', [
           {
             role: 'assistant',
             id: 'assistant-2',
@@ -67,7 +67,7 @@ describe('chat memory diagnostics', () => {
           },
         ]),
         window: createViewportWindowState({
-          totalRowCount: 1,
+          totalItemCount: 1,
           windowStartOffset: 0,
           windowEndOffset: 1,
           isAtLatest: true,
@@ -86,14 +86,14 @@ describe('chat memory diagnostics', () => {
 
     expect(summary.sessionCount).toBe(2);
     expect(summary.readySessionCount).toBe(1);
-    expect(summary.totalRowCount).toBe(3);
+    expect(summary.totalItemCount).toBe(3);
     expect(summary.totalAttachedFileCount).toBe(1);
     expect(summary.totalPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
     expect(summary.totalDataUrlPreviewCharCount).toBe('data:image/png;base64,AAAA'.length);
     expect(summary.totalRuntimeStateCharCount).toBeGreaterThan(0);
     expect(summary.approxRetainedBytes).toBeGreaterThan(0);
     expect(summary.largestSessions[0]?.sessionKey).toBe('agent:main:main');
-    expect(summary.largestSessions[0]?.rowCount).toBe(2);
+    expect(summary.largestSessions[0]?.itemCount).toBe(2);
     expect(summary.largestSessions[0]?.attachedFileCount).toBe(1);
     expect(summary.largestSessions[0]?.runtimeStateCharCount).toBeGreaterThan(0);
   });

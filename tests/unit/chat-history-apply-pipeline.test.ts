@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-load-execution';
 import {
   createEmptySessionRecord,
-  getSessionRows,
+  getSessionItems,
 } from '@/stores/chat/store-state-helpers';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function createHistoryRuntimeHarness(): StoreHistoryCache {
   let runId = 0;
@@ -26,25 +26,7 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverrides: Partial<HistoryWindowResult['snapshot']['runtime']> = {}) {
-  const rows: SessionRenderRow[] = messages.map((message, index) => ({
-    key: `session:${sessionKey}|row:${message.id ?? `entry-${index + 1}`}`,
-    kind: 'message',
-    sessionKey,
-    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
-    text: typeof message.content === 'string' ? message.content : '',
-    createdAt: message.timestamp,
-    status: message.status === 'sending' ? 'pending' : 'final',
-    rowId: String(message.id ?? `entry-${index + 1}`),
-    laneKey: 'main',
-    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
-    thinking: null,
-    images: [],
-    toolUses: [],
-    attachedFiles: [],
-    toolStatuses: [],
-      isStreaming: false,
-      messageId: String(message.messageId ?? message.id ?? `entry-${index + 1}`),
-  }));
+  const items = buildRenderItemsFromMessages(sessionKey, messages);
   const agentId = sessionKey.split(':')[1] ?? 'main';
   const suffix = sessionKey.split(':').slice(2).join(':');
   const kind = suffix === 'main'
@@ -58,24 +40,24 @@ function createSnapshot(sessionKey: string, messages: RawMessage[], runtimeOverr
       kind,
       preferred: kind === 'main',
       displayName: sessionKey,
-      updatedAt: rows[rows.length - 1]?.createdAt,
+      updatedAt: items[items.length - 1]?.createdAt,
     },
-    rows,
+    items,
     replayComplete: true,
     runtime: {
       sending: false,
       activeRunId: null,
       runPhase: 'done' as const,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
       ...runtimeOverrides,
     },
     window: {
-      totalRowCount: rows.length,
+      totalItemCount: items.length,
       windowStartOffset: 0,
-      windowEndOffset: rows.length,
+      windowEndOffset: items.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
@@ -92,7 +74,7 @@ function createHistoryWindow(
   return {
     snapshot,
     thinkingLevel: overrides.thinkingLevel ?? null,
-    totalRowCount: messages.length,
+    totalItemCount: snapshot.window.totalItemCount,
     windowStartOffset: 0,
     windowEndOffset: messages.length,
     hasMore: false,
@@ -146,7 +128,7 @@ describe('chat history apply pipeline', () => {
     await applyLoadedMessages(createHistoryWindow(sessionKey, rawMessages));
 
     expect(harness.get().loadedSessions[sessionKey]?.meta.historyStatus).toBe('ready');
-    expect(getSessionRows(harness.get(), sessionKey)).toMatchObject([
+    expect(getSessionItems(harness.get(), sessionKey)).toMatchObject([
       expect.objectContaining({ text: 'hello' }),
       expect.objectContaining({ text: 'done' }),
     ]);
@@ -168,14 +150,14 @@ describe('chat history apply pipeline', () => {
       loadedSessions: {
         [currentSessionKey]: {
           ...createEmptySessionRecord(),
-          rows: createSnapshot(currentSessionKey, currentMessages).rows,
+          items: createSnapshot(currentSessionKey, currentMessages).items,
         },
         [requestedSessionKey]: createEmptySessionRecord(),
       },
       pendingApprovalsBySession: {},
       foregroundHistorySessionKey: null,
     } as ChatStoreState);
-    const currentRowsRef = getSessionRows(harness.get(), currentSessionKey);
+    const currentItemsRef = getSessionItems(harness.get(), currentSessionKey);
 
     const applyLoadedMessages = createApplyLoadedMessagesPipeline({
       set: harness.set,
@@ -189,8 +171,8 @@ describe('chat history apply pipeline', () => {
 
     await applyLoadedMessages(createHistoryWindow(requestedSessionKey, targetMessages));
 
-    expect(getSessionRows(harness.get(), currentSessionKey)).toBe(currentRowsRef);
-    expect(getSessionRows(harness.get(), requestedSessionKey)).toMatchObject([
+    expect(getSessionItems(harness.get(), currentSessionKey)).toBe(currentItemsRef);
+    expect(getSessionItems(harness.get(), requestedSessionKey)).toMatchObject([
       expect.objectContaining({ text: 'worker update' }),
     ]);
   });
@@ -227,7 +209,7 @@ describe('chat history apply pipeline', () => {
       loadedSessions: {
         [sessionKey]: {
           ...createEmptySessionRecord(),
-          rows: createSnapshot(sessionKey, localOptimistic).rows,
+          items: createSnapshot(sessionKey, localOptimistic).items,
         },
       },
       pendingApprovalsBySession: {},
@@ -246,11 +228,11 @@ describe('chat history apply pipeline', () => {
 
     await applyLoadedMessages(createHistoryWindow(sessionKey, authoritative));
 
-    expect(getSessionRows(harness.get(), sessionKey)).toMatchObject([
-      expect.objectContaining({ rowId: 'user-server-1' }),
-      expect.objectContaining({ rowId: 'assistant-1' }),
+    expect(getSessionItems(harness.get(), sessionKey)).toMatchObject([
+      expect.objectContaining({ kind: 'user-message', key: 'session:agent:main:main|entry:user-server-1', text: 'hello' }),
+      expect.objectContaining({ kind: 'assistant-turn', text: 'done' }),
     ]);
-    expect(getSessionRows(harness.get(), sessionKey)).toHaveLength(2);
+    expect(getSessionItems(harness.get(), sessionKey)).toHaveLength(2);
   });
 
   it('completed snapshot clears pending run state through authoritative runtime', async () => {

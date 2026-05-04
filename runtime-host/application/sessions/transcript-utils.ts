@@ -9,12 +9,12 @@ import {
 } from '../../shared/chat-message-normalization';
 import type {
   SessionCatalogTitleSource,
-  SessionMessageRow,
-  SessionRenderRow,
-  SessionRowStatus,
+  SessionTimelineEntryStatus,
   SessionTaskCompletionEvent,
-  SessionTaskCompletionRow,
-  SessionToolActivityRow,
+  SessionTimelineEntry,
+  SessionTimelineMessageEntry,
+  SessionTimelineTaskCompletionEntry,
+  SessionTimelineToolActivityEntry,
 } from '../../shared/session-adapter-types';
 import { normalizeTaskCompletionEvents } from './task-completion-events';
 
@@ -189,7 +189,7 @@ function resolveTurnIdentity(
     ?? '';
 }
 
-function resolveRowId(
+function resolveEntryId(
   message: SessionTranscriptMessage,
   index: number,
   options: {
@@ -212,7 +212,7 @@ function resolveRowId(
         ? `run:${runId}:agent:${agentId}:${message.role || 'message'}:${index}`
         : `run:${runId}:${message.role || 'message'}:${index}`;
     }
-    return `row-${index}`;
+    return `entry-${index}`;
   })();
 }
 
@@ -249,12 +249,12 @@ function extractThinking(message: SessionTranscriptMessage): string | null {
   return combined || null;
 }
 
-function extractImages(message: SessionTranscriptMessage): SessionMessageRow['images'] {
+function extractImages(message: SessionTranscriptMessage): SessionTimelineMessageEntry['images'] {
   const content = readMessageContent(message);
   if (!Array.isArray(content)) {
     return [];
   }
-  const images: SessionMessageRow['images'] = [];
+  const images: SessionTimelineMessageEntry['images'] = [];
   for (const block of content as ContentBlockLike[]) {
     if (block.type !== 'image') {
       continue;
@@ -283,9 +283,9 @@ function extractImages(message: SessionTranscriptMessage): SessionMessageRow['im
   return images;
 }
 
-function extractToolUses(message: SessionTranscriptMessage): SessionMessageRow['toolUses'] {
+function extractToolUses(message: SessionTranscriptMessage): SessionTimelineMessageEntry['toolUses'] {
   const content = readMessageContent(message);
-  const tools: SessionMessageRow['toolUses'] = [];
+  const tools: SessionTimelineMessageEntry['toolUses'] = [];
   if (Array.isArray(content)) {
     for (const block of content as ContentBlockLike[]) {
       const type = typeof block.type === 'string' ? block.type : '';
@@ -334,7 +334,7 @@ function extractToolUses(message: SessionTranscriptMessage): SessionMessageRow['
   });
 }
 
-function readAttachedFiles(message: SessionTranscriptMessage): SessionMessageRow['attachedFiles'] {
+function readAttachedFiles(message: SessionTranscriptMessage): SessionTimelineMessageEntry['attachedFiles'] {
   const attachedFiles = message._attachedFiles;
   if (!Array.isArray(attachedFiles)) {
     return [];
@@ -359,7 +359,7 @@ function readAttachedFiles(message: SessionTranscriptMessage): SessionMessageRow
   });
 }
 
-function readToolStatuses(message: SessionTranscriptMessage): SessionMessageRow['toolStatuses'] {
+function readToolStatuses(message: SessionTranscriptMessage): SessionTimelineMessageEntry['toolStatuses'] {
   const toolStatuses = message.toolStatuses;
   if (!Array.isArray(toolStatuses)) {
     return [];
@@ -406,11 +406,11 @@ function readMediaRefs(text: string): Array<{ filePath: string; mimeType: string
   return refs;
 }
 
-function extractImagesAsAttachedFiles(content: unknown): SessionMessageRow['attachedFiles'] {
+function extractImagesAsAttachedFiles(content: unknown): SessionTimelineMessageEntry['attachedFiles'] {
   if (!Array.isArray(content)) {
     return [];
   }
-  const files: SessionMessageRow['attachedFiles'] = [];
+  const files: SessionTimelineMessageEntry['attachedFiles'] = [];
   for (const block of content as ContentBlockLike[]) {
     if (block.type === 'image') {
       if (block.source?.type === 'base64' && typeof block.source.media_type === 'string' && typeof block.source.data === 'string') {
@@ -445,9 +445,9 @@ function extractImagesAsAttachedFiles(content: unknown): SessionMessageRow['atta
 }
 
 function mergeAttachedFiles(
-  existingFiles: ReadonlyArray<SessionMessageRow['attachedFiles'][number]>,
-  incomingFiles: ReadonlyArray<SessionMessageRow['attachedFiles'][number]>,
-): SessionMessageRow['attachedFiles'] {
+  existingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
+  incomingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
+): SessionTimelineMessageEntry['attachedFiles'] {
   const merged = existingFiles.map((file) => ({ ...file }));
   for (const file of incomingFiles) {
     const exists = merged.some((candidate) => (
@@ -465,10 +465,10 @@ function mergeAttachedFiles(
 }
 
 function findLatestAssistantContentRow(
-  rows: SessionRenderRow[],
+  rows: SessionTimelineEntry[],
   laneKey: string,
   turnKey: string,
-): SessionMessageRow | SessionToolActivityRow | null {
+): SessionTimelineMessageEntry | SessionTimelineToolActivityEntry | null {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index];
     if (!row || row.role !== 'assistant') {
@@ -485,17 +485,17 @@ function findLatestAssistantContentRow(
 function materializeToolResultRows(input: {
   sessionKey: string;
   message: SessionTranscriptMessage;
-  status: SessionRowStatus;
+  status: SessionTimelineEntryStatus;
   runId?: string;
   sequenceId?: number;
   createdAt?: number;
-  rowId: string;
+  entryId: string;
   laneKey: string;
   turnKey: string;
   agentId: string;
   text: string;
-  existingRows: SessionRenderRow[];
-}): SessionRenderRow[] {
+  existingRows: SessionTimelineEntry[];
+}): SessionTimelineEntry[] {
   const attachedFiles = mergeAttachedFiles(
     readAttachedFiles(input.message),
     [
@@ -527,7 +527,7 @@ function materializeToolResultRows(input: {
     }];
   }
   return [{
-    key: existingAssistantRow?.key ?? `session:${input.sessionKey}|tool-activity:${input.rowId}`,
+    key: existingAssistantRow?.key ?? `session:${input.sessionKey}|tool-activity:${input.entryId}`,
     kind: 'tool-activity',
     sessionKey: input.sessionKey,
     role: 'assistant',
@@ -536,7 +536,7 @@ function materializeToolResultRows(input: {
     status: input.status,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.sequenceId != null ? { sequenceId: input.sequenceId } : {}),
-    rowId: existingAssistantRow?.rowId ?? input.rowId,
+    entryId: existingAssistantRow?.entryId ?? input.entryId,
     laneKey: input.laneKey,
     turnKey: input.turnKey,
     ...(input.agentId ? { agentId: input.agentId } : {}),
@@ -551,7 +551,7 @@ function materializeToolResultRows(input: {
   }];
 }
 
-function buildTaskCompletionText(row: SessionTaskCompletionRow): string {
+function buildTaskCompletionText(row: SessionTimelineTaskCompletionEntry): string {
   return [
     row.taskLabel,
     row.statusLabel,
@@ -560,15 +560,15 @@ function buildTaskCompletionText(row: SessionTaskCompletionRow): string {
 }
 
 function resolveCompletionTriggerRow(
-  rows: SessionRenderRow[],
-  fallbackRowId: string,
-): SessionRenderRow | null {
+  rows: SessionTimelineEntry[],
+  fallbackEntryId: string,
+): SessionTimelineEntry | null {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index];
     if (!row || row.role !== 'user') {
       continue;
     }
-    if (row.kind === 'task-completion' || row.rowId === fallbackRowId) {
+    if (row.kind === 'task-completion' || row.entryId === fallbackEntryId) {
       continue;
     }
     return row;
@@ -576,7 +576,7 @@ function resolveCompletionTriggerRow(
   return null;
 }
 
-export function resolveTranscriptEntryStatus(message: SessionTranscriptMessage): SessionRowStatus {
+export function resolveTranscriptEntryStatus(message: SessionTranscriptMessage): SessionTimelineEntryStatus {
   if (message.streaming) {
     return 'streaming';
   }
@@ -589,30 +589,30 @@ export function resolveTranscriptEntryStatus(message: SessionTranscriptMessage):
   return 'final';
 }
 
-export function buildRowsFromTranscriptMessage(
+export function buildTimelineEntriesFromTranscriptMessage(
   sessionKey: string,
   message: SessionTranscriptMessage,
   options: {
     runId?: string;
     sequenceId?: number;
-    status?: SessionRowStatus;
+    status?: SessionTimelineEntryStatus;
     index: number;
-    existingRows?: SessionRenderRow[];
+    existingRows?: SessionTimelineEntry[];
   },
-): SessionRenderRow[] {
+): SessionTimelineEntry[] {
   const agentId = normalizeOptionalString(message.agentId) ?? '';
   const laneKey = resolveSessionLaneKey(agentId);
   const turnIdentity = resolveTurnIdentity(message, {
     runId: options.runId,
   });
-  const rowId = resolveRowId(message, options.index, {
+  const entryId = resolveEntryId(message, options.index, {
     runId: options.runId,
     sequenceId: options.sequenceId,
   });
   const status = options.status ?? 'final';
   const createdAt = message.timestamp;
   const text = resolveDisplayText(message);
-  const turnKey = turnIdentity ? `${laneKey}:${turnIdentity}` : `${laneKey}:row:${rowId}`;
+  const turnKey = turnIdentity ? `${laneKey}:${turnIdentity}` : `${laneKey}:entry:${entryId}`;
   const existingRows = options.existingRows ?? [];
 
   if (message.role === 'toolresult' || message.role === 'tool_result') {
@@ -623,7 +623,7 @@ export function buildRowsFromTranscriptMessage(
       runId: options.runId,
       sequenceId: options.sequenceId,
       createdAt,
-      rowId,
+      entryId,
       laneKey,
       turnKey,
       agentId,
@@ -639,7 +639,7 @@ export function buildRowsFromTranscriptMessage(
   const attachedFiles = readAttachedFiles(message);
   const role = message.role === 'user' || message.role === 'system' ? message.role : 'assistant';
   const base = {
-    key: `session:${sessionKey}|row:${rowId}`,
+    key: `session:${sessionKey}|entry:${entryId}`,
     sessionKey,
     role,
     text,
@@ -647,7 +647,7 @@ export function buildRowsFromTranscriptMessage(
     status,
     ...(options.runId ? { runId: options.runId } : {}),
     ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
-    rowId,
+    entryId,
     laneKey,
     turnKey,
     ...(agentId ? { agentId } : {}),
@@ -668,7 +668,7 @@ export function buildRowsFromTranscriptMessage(
     && attachedFiles.length === 0
   );
 
-  const rows: SessionRenderRow[] = [];
+  const rows: SessionTimelineEntry[] = [];
   if (isToolActivity) {
     rows.push({
       ...base,
@@ -689,7 +689,7 @@ export function buildRowsFromTranscriptMessage(
       attachedFiles,
       toolStatuses,
       isStreaming: status === 'streaming' || Boolean(message.streaming),
-      ...(message.messageId || rowId ? { messageId: message.messageId || rowId } : {}),
+      ...(message.messageId || entryId ? { messageId: message.messageId || entryId } : {}),
       ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
       ...(message.clientId ? { clientId: message.clientId } : {}),
       ...(message.uniqueId ? { uniqueId: message.uniqueId } : {}),
@@ -699,9 +699,9 @@ export function buildRowsFromTranscriptMessage(
 
   const completionEvents = Array.isArray(message.taskCompletionEvents) ? message.taskCompletionEvents : [];
   for (const [completionIndex, event] of completionEvents.entries()) {
-    const triggerRow = resolveCompletionTriggerRow(existingRows, rowId);
-    const completionRow: SessionTaskCompletionRow = {
-      key: `session:${sessionKey}|completion:${rowId}:${completionIndex}`,
+    const triggerRow = resolveCompletionTriggerRow(existingRows, entryId);
+    const completionRow: SessionTimelineTaskCompletionEntry = {
+      key: `session:${sessionKey}|completion:${entryId}:${completionIndex}`,
       kind: 'task-completion',
       sessionKey,
       role: 'system',
@@ -714,7 +714,7 @@ export function buildRowsFromTranscriptMessage(
       status: 'final',
       ...(options.runId ? { runId: options.runId } : {}),
       ...(options.sequenceId != null ? { sequenceId: options.sequenceId } : {}),
-      rowId,
+      entryId,
       childSessionKey: event.childSessionKey,
       ...(event.childSessionId ? { childSessionId: event.childSessionId } : {}),
       ...(event.childAgentId ? { childAgentId: event.childAgentId } : {}),
@@ -723,7 +723,7 @@ export function buildRowsFromTranscriptMessage(
       ...(event.result ? { result: event.result } : {}),
       ...(event.statsLine ? { statsLine: event.statsLine } : {}),
       ...(event.replyInstruction ? { replyInstruction: event.replyInstruction } : {}),
-      ...(triggerRow?.key ? { triggerRowKey: triggerRow.key } : {}),
+      ...(triggerRow?.key ? { triggerItemKey: triggerRow.key } : {}),
     };
     if (!completionRow.text) {
       completionRow.text = buildTaskCompletionText(completionRow);
@@ -800,32 +800,32 @@ export function parseTranscriptMessages(content: string): SessionTranscriptMessa
   return messages;
 }
 
-export function materializeTranscriptRows(
+export function materializeTranscriptTimelineEntries(
   sessionKey: string,
   messages: SessionTranscriptMessage[],
-): SessionRenderRow[] {
-  const rows: SessionRenderRow[] = [];
+): SessionTimelineEntry[] {
+  const entries: SessionTimelineEntry[] = [];
   for (const [index, message] of messages.entries()) {
-    rows.push(...buildRowsFromTranscriptMessage(sessionKey, message, {
+    entries.push(...buildTimelineEntriesFromTranscriptMessage(sessionKey, message, {
       index,
       status: resolveTranscriptEntryStatus(message),
-      existingRows: rows,
+      existingRows: entries,
     }));
   }
-  return rows;
+  return entries;
 }
 
-export function resolveSessionLabelFromRows(rows: SessionRenderRow[]): string | null {
-  return resolveSessionLabelDetailsFromRows(rows).label;
+export function resolveSessionLabelFromTimelineEntries(entries: SessionTimelineEntry[]): string | null {
+  return resolveSessionLabelDetailsFromTimelineEntries(entries).label;
 }
 
-export function resolveSessionLabelDetailsFromRows(rows: SessionRenderRow[]): SessionResolvedLabel {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row?.kind !== 'message' || row.role !== 'user') {
+export function resolveSessionLabelDetailsFromTimelineEntries(entries: SessionTimelineEntry[]): SessionResolvedLabel {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.kind !== 'message' || entry.role !== 'user') {
       continue;
     }
-    const candidate = resolveUserLabelCandidate(row.text);
+    const candidate = resolveUserLabelCandidate(entry.text);
     if (candidate) {
       return {
         label: candidate,
@@ -834,12 +834,12 @@ export function resolveSessionLabelDetailsFromRows(rows: SessionRenderRow[]): Se
     }
   }
 
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row?.kind !== 'message' || row.role !== 'assistant') {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.kind !== 'message' || entry.role !== 'assistant') {
       continue;
     }
-    const candidate = resolveAssistantLabelCandidate(row.text);
+    const candidate = resolveAssistantLabelCandidate(entry.text);
     if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
       return {
         label: candidate,

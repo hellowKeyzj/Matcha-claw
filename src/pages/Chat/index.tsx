@@ -17,7 +17,7 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
-  getSessionRowCount,
+  getSessionItemCount,
 } from '@/stores/chat/store-state-helpers';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
@@ -55,7 +55,7 @@ function selectChatPageState(state: ChatStoreState) {
     showThinking: state.showThinking,
     refresh: state.refresh,
     toggleThinking: state.toggleThinking,
-    loadOlderMessages: state.loadOlderMessages,
+    loadOlderItems: state.loadOlderItems,
     jumpToLatest: state.jumpToLatest,
     sendMessage: state.sendMessage,
     abortRun: state.abortRun,
@@ -92,7 +92,7 @@ export function Chat({ isActive = true }: ChatProps) {
     showThinking,
     refresh,
     toggleThinking,
-    loadOlderMessages,
+    loadOlderItems,
     jumpToLatest,
     sendMessage,
     abortRun,
@@ -176,7 +176,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
-    rowCount: getSessionRowCount(currentSession),
+    itemCount: getSessionItemCount(currentSession),
     sending: currentSession.runtime.sending,
     refreshing,
     mutating,
@@ -273,7 +273,7 @@ export function Chat({ isActive = true }: ChatProps) {
               avatarStyle: currentAgent?.avatarStyle,
             }}
             onLoadOlder={() => {
-              void loadOlderMessages(currentSessionKey);
+              void loadOlderItems(currentSessionKey);
             }}
             loadOlderLabel={t('liveThread.loadOlder')}
             onJumpToLatest={() => {

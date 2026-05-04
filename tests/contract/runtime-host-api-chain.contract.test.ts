@@ -321,9 +321,9 @@ describe('runtime-host API 真实链路 contract', () => {
 
     const latest = await harness.dispatchOk<{
       snapshot: {
-        rows: Array<{ rowId?: string; messageId?: string }>;
+        items: Array<{ key: string; kind: string; messageId?: string; turnKey?: string }>;
         window: {
-          totalRowCount: number;
+          totalItemCount: number;
           windowStartOffset: number;
           windowEndOffset: number;
           hasMore: boolean;
@@ -336,17 +336,20 @@ describe('runtime-host API 真实链路 contract', () => {
       mode: 'latest',
       limit: 2,
     });
-    expect(latest.snapshot.window.totalRowCount).toBe(4);
+    expect(latest.snapshot.window.totalItemCount).toBe(4);
     expect(latest.snapshot.window.windowStartOffset).toBe(2);
     expect(latest.snapshot.window.windowEndOffset).toBe(4);
     expect(latest.snapshot.window.hasMore).toBe(true);
     expect(latest.snapshot.window.hasNewer).toBe(false);
     expect(latest.snapshot.window.isAtLatest).toBe(true);
-    expect(latest.snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['m3', 'm4']);
+    expect(latest.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-window|entry:m3',
+      'session:agent:main:session-window|assistant-turn:main:m4:main',
+    ]);
 
     const older = await harness.dispatchOk<{
       snapshot: {
-        rows: Array<{ rowId?: string; messageId?: string }>;
+        items: Array<{ key: string; kind: string; messageId?: string; turnKey?: string }>;
         window: {
           windowStartOffset: number;
           windowEndOffset: number;
@@ -366,6 +369,11 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(older.snapshot.window.hasMore).toBe(false);
     expect(older.snapshot.window.hasNewer).toBe(false);
     expect(older.snapshot.window.isAtLatest).toBe(true);
-    expect(older.snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['m1', 'm2', 'm3', 'm4']);
+    expect(older.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-window|entry:m1',
+      'session:agent:main:session-window|assistant-turn:main:m2:main',
+      'session:agent:main:session-window|entry:m3',
+      'session:agent:main:session-window|assistant-turn:main:m4:main',
+    ]);
   });
 });

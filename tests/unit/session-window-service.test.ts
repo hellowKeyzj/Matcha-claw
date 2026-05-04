@@ -29,7 +29,7 @@ describe('session runtime service window', () => {
     }
   });
 
-  it('returns the latest window with real offsets and flags', async () => {
+  it('returns the latest item window with real offsets and flags', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-window-'));
     tempDirs.push(configDir);
     const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
@@ -63,7 +63,7 @@ describe('session runtime service window', () => {
     expect(response.data).toMatchObject({
       snapshot: {
         window: {
-          totalRowCount: 5,
+          totalItemCount: 5,
           windowStartOffset: 2,
           windowEndOffset: 5,
           hasMore: true,
@@ -72,14 +72,14 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((response.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
-      'message-3',
-      'message-4',
-      'message-5',
+    expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-a|entry:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+      'session:agent:main:session-a|entry:message-5',
     ]);
   });
 
-  it('returns older and newer windows from explicit offsets', async () => {
+  it('returns older and newer item windows from explicit offsets', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-window-'));
     tempDirs.push(configDir);
     const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
@@ -123,11 +123,11 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((older.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
-      'message-3',
-      'message-4',
-      'message-5',
-      'message-6',
+    expect(older.data.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-a|entry:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+      'session:agent:main:session-a|entry:message-5',
+      'session:agent:main:session-a|assistant-turn:main:message-6:main',
     ]);
 
     const newer = await service.getSessionWindow({
@@ -148,9 +148,9 @@ describe('session runtime service window', () => {
         },
       },
     });
-    expect((newer.data as { snapshot: { rows: Array<{ messageId?: string; rowId?: string }> } }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual([
-      'message-5',
-      'message-6',
+    expect(newer.data.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-a|entry:message-5',
+      'session:agent:main:session-a|assistant-turn:main:message-6:main',
     ]);
   });
 
@@ -185,12 +185,13 @@ describe('session runtime service window', () => {
     });
 
     expect(response.status).toBe(200);
-    expect((response.data as {
-      snapshot: { rows: Array<{ messageId?: string; rowId?: string }> };
-    }).snapshot.rows.map((row) => row.messageId ?? row.rowId)).toEqual(['message-3', 'message-4']);
+    expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
+      'session:agent:main:session-a|entry:message-3',
+      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+    ]);
   });
 
-  it('preserves transcript identity fields needed to reconcile optimistic user messages', async () => {
+  it('preserves user render-item identity needed for optimistic reconciliation', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-window-'));
     tempDirs.push(configDir);
     const sessionsDir = join(configDir, 'agents', 'main', 'sessions');
@@ -228,28 +229,11 @@ describe('session runtime service window', () => {
     });
 
     expect(response.status).toBe(200);
-    expect((response.data as {
-      snapshot: { rows: Array<{
-        laneKey?: string;
-        turnKey?: string;
-        messageId?: string;
-        originMessageId?: string;
-        clientId?: string;
-        uniqueId?: string;
-        requestId?: string;
-        agentId?: string;
-        text?: string;
-      }> };
-    }).snapshot.rows).toMatchObject([
+    expect(response.data.snapshot.items).toMatchObject([
       {
-        laneKey: 'member:agent-main',
-        turnKey: 'member:agent-main:transcript-user-1',
+        kind: 'user-message',
+        key: 'session:agent:main:session-a|entry:transcript-user-1',
         messageId: 'transcript-user-1',
-        originMessageId: 'origin-user-1',
-        clientId: 'client-user-1',
-        uniqueId: 'transcript-user-1',
-        requestId: 'client-user-1',
-        agentId: 'agent-main',
         text: 'hello world',
       },
     ]);

@@ -1,8 +1,8 @@
 import { hostSessionWindowFetch } from '@/lib/host-api';
 import {
-  hasPendingRowPreviewLoads,
-  hydrateAttachedFilesFromRows,
-  loadMissingRowPreviews,
+  hasPendingItemPreviewLoads,
+  hydrateAttachedFilesFromItems,
+  loadMissingItemPreviews,
 } from './attachment-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
@@ -14,9 +14,9 @@ import {
 import { finishChatRunTelemetry } from './telemetry';
 import { clearHistoryPoll } from './timers';
 import {
-  buildRowHistoryFingerprint,
-  buildRowRenderFingerprint,
-  getSessionRows,
+  buildItemHistoryFingerprint,
+  buildItemRenderFingerprint,
+  getSessionItems,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
@@ -27,7 +27,7 @@ import { readSessionsFromState } from './session-helpers';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
-import type { SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -58,8 +58,8 @@ interface CreateApplyLoadedMessagesInput {
   shouldAbortHistoryProcessing: () => boolean;
 }
 
-function resolveViewportFetchLimit(rowCount: number): number {
-  return Math.min(Math.max(rowCount || 80, 40), 200);
+function resolveViewportFetchLimit(itemCount: number): number {
+  return Math.min(Math.max(itemCount || 80, 40), 200);
 }
 
 function resolveViewportWindowRequestState(input: {
@@ -122,11 +122,11 @@ export async function executeViewportWindowLoad(
 
   try {
     const currentState = deps.get();
-    const currentRows = getSessionRows(currentState, sessionKey);
+    const currentItems = getSessionItems(currentState, sessionKey);
     const payload = await hostSessionWindowFetch({
       sessionKey,
       mode: request.mode,
-      limit: resolveViewportFetchLimit(currentRows.length),
+      limit: resolveViewportFetchLimit(currentItems.length),
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
     });
@@ -134,7 +134,7 @@ export async function executeViewportWindowLoad(
     deps.set((state) => ({
       loadedSessions: patchSessionSnapshot(state, sessionKey, {
         ...payload.snapshot,
-        rows: hydrateAttachedFilesFromRows(payload.snapshot.rows),
+        items: hydrateAttachedFilesFromItems(payload.snapshot.items),
         window: {
           ...payload.snapshot.window,
           ...nextViewportRequestState,
@@ -162,15 +162,15 @@ function shouldSkipForegroundApply(
 function buildHistoryPreviewHydrationPatch(
   state: ChatStoreState,
   requestedSessionKey: string,
-  hydratedRows: SessionRenderRow[],
+  hydratedItems: SessionRenderItem[],
 ): Partial<ChatStoreState> | ChatStoreState {
-  const currentRows = getSessionRows(state, requestedSessionKey);
-  if (currentRows === hydratedRows) {
+  const currentItems = getSessionItems(state, requestedSessionKey);
+  if (currentItems === hydratedItems) {
     return state;
   }
   return {
     loadedSessions: patchSessionRecord(state, requestedSessionKey, {
-      rows: hydratedRows,
+      items: hydratedItems,
     }),
   };
 }
@@ -198,8 +198,8 @@ export function createApplyLoadedMessagesPipeline(
       return;
     }
 
-    const hydratedRows = hydrateAttachedFilesFromRows(snapshot.rows);
-    const renderFingerprint = buildRowRenderFingerprint(hydratedRows);
+    const hydratedItems = hydrateAttachedFilesFromItems(snapshot.items);
+    const renderFingerprint = buildItemRenderFingerprint(hydratedItems);
     const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
     const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
 
@@ -208,7 +208,7 @@ export function createApplyLoadedMessagesPipeline(
         {
           loadedSessions: patchSessionSnapshot(state, requestedSessionKey, {
             ...snapshot,
-            rows: hydratedRows,
+            items: hydratedItems,
           }),
         },
         requestedSessionKey,
@@ -223,21 +223,21 @@ export function createApplyLoadedMessagesPipeline(
     if (
       isForeground
       && snapshot.runtime.runPhase === 'done'
-      && hydratedRows.some((row) => row.role === 'assistant' && row.kind === 'message')
+      && hydratedItems.some((item) => item.kind === 'assistant-turn')
     ) {
       finishChatRunTelemetry(requestedSessionKey, 'completed', { stage: 'history_applied' });
       clearHistoryPoll();
     }
 
-    if ((didMessageListChange || scope === 'background') && hasPendingRowPreviewLoads(hydratedRows)) {
-      void loadMissingRowPreviews(hydratedRows, abortSignal).then((updatedRows) => {
-        if (!updatedRows || abortSignal.aborted || shouldAbortHistoryProcessing()) {
+    if ((didMessageListChange || scope === 'background') && hasPendingItemPreviewLoads(hydratedItems)) {
+      void loadMissingItemPreviews(hydratedItems, abortSignal).then((updatedItems) => {
+        if (!updatedItems || abortSignal.aborted || shouldAbortHistoryProcessing()) {
           return;
         }
         set((state) => buildHistoryPreviewHydrationPatch(
           state,
           requestedSessionKey,
-          updatedRows,
+          updatedItems,
         ));
       });
     }
@@ -320,10 +320,10 @@ export async function executeHistoryLoad(
     if (shouldSkipForegroundApply(get, scope, requestedSessionKey)) {
       return;
     }
-    const snapshotRows = window.snapshot?.rows ?? [];
+    const snapshotItems = window.snapshot?.items ?? [];
     historyRuntime.historyFingerprintBySession.set(
       requestedSessionKey,
-      buildRowHistoryFingerprint(snapshotRows, window.thinkingLevel),
+      buildItemHistoryFingerprint(snapshotItems, window.thinkingLevel),
     );
     await applyLoadedMessages(window);
   } catch (err) {
@@ -337,11 +337,11 @@ export async function executeHistoryLoad(
       }
       historyRuntime.historyFingerprintBySession.set(
         requestedSessionKey,
-        buildRowHistoryFingerprint([], null),
+        buildItemHistoryFingerprint([], null),
       );
       historyRuntime.historyRenderFingerprintBySession.set(
         requestedSessionKey,
-        buildRowRenderFingerprint([]),
+        buildItemRenderFingerprint([]),
       );
       if (scope === 'foreground') {
         set({

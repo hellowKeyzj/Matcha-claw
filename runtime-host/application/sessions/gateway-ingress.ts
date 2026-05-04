@@ -1,6 +1,6 @@
-import type { SessionRenderRow, SessionRowStatus } from '../../shared/session-adapter-types';
+import type { SessionTimelineEntry, SessionTimelineEntryStatus } from '../../shared/session-adapter-types';
 import {
-  buildRowsFromTranscriptMessage,
+  buildTimelineEntriesFromTranscriptMessage,
   resolveSessionLaneKey,
   type SessionTranscriptMessage,
 } from './transcript-utils';
@@ -45,18 +45,18 @@ export interface SessionInfoIngressEvent {
   _meta?: Record<string, unknown>;
 }
 
-export interface SessionRowIngressEvent {
+export interface SessionTimelineIngressEvent {
   sessionUpdate: 'agent_message_chunk' | 'agent_message';
   sessionKey: string | null;
   runId: string | null;
   laneKey: string;
-  rows: SessionRenderRow[];
+  entries: SessionTimelineEntry[];
   _meta?: Record<string, unknown>;
 }
 
 export type GatewaySessionIngressEvent =
   | SessionInfoIngressEvent
-  | SessionRowIngressEvent;
+  | SessionTimelineIngressEvent;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -96,7 +96,7 @@ function normalizeSessionPhase(value: unknown): 'started' | 'final' | 'error' | 
   return 'unknown';
 }
 
-function normalizeSessionRowStatus(value: unknown): SessionRowStatus {
+function normalizeTimelineEntryStatus(value: unknown): SessionTimelineEntryStatus {
   const normalized = normalizeString(value).toLowerCase();
   if (normalized === 'delta' || normalized === 'stream' || normalized === 'streaming') {
     return 'streaming';
@@ -142,7 +142,7 @@ function buildMemberMeta(agentId: string): Record<string, unknown> | undefined {
 
 function normalizeConversationMessagePayload(
   payload: GatewayConversationMessagePayload,
-): { sessionKey: string | null; runId: string | null; sequenceId?: number; message: SessionTranscriptMessage | null; status: SessionRowStatus } {
+): { sessionKey: string | null; runId: string | null; sequenceId?: number; message: SessionTranscriptMessage | null; status: SessionTimelineEntryStatus } {
   const sessionKey = normalizeString(payload.sessionKey) || null;
   const runId = normalizeString(payload.runId) || null;
   const state = normalizeString(payload.state);
@@ -154,7 +154,7 @@ function normalizeConversationMessagePayload(
       runId,
       ...(sequenceId != null ? { sequenceId } : {}),
       message: null,
-      status: normalizeSessionRowStatus(state),
+      status: normalizeTimelineEntryStatus(state),
     };
   }
 
@@ -190,7 +190,7 @@ function normalizeConversationMessagePayload(
     runId,
     ...(sequenceId != null ? { sequenceId } : {}),
     message: normalizedMessage,
-    status: normalizeSessionRowStatus(state),
+    status: normalizeTimelineEntryStatus(state),
   };
 }
 
@@ -282,7 +282,7 @@ function normalizeToolLifecyclePayload(
 export function buildSessionUpdateEventsFromGatewayConversationEvent(
   payload: unknown,
   options: {
-    existingRows?: SessionRenderRow[];
+    existingEntries?: SessionTimelineEntry[];
   } = {},
 ): GatewaySessionIngressEvent[] {
   const input = isRecord(payload) ? payload : null;
@@ -308,7 +308,7 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
     if (!toolLifecycle) {
       return [];
     }
-    const rows = buildRowsFromTranscriptMessage(
+    const entries = buildTimelineEntriesFromTranscriptMessage(
       toolLifecycle.sessionKey,
       toolLifecycle.message,
       {
@@ -318,18 +318,18 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
           ? (toolLifecycle.message.isError ? 'error' : 'final')
           : 'streaming',
         index: 0,
-        existingRows: options.existingRows,
+        existingRows: options.existingEntries,
       },
     );
-    if (rows.length === 0) {
+    if (entries.length === 0) {
       return [];
     }
     return [{
       sessionUpdate: 'agent_message_chunk',
       sessionKey: toolLifecycle.sessionKey,
       runId: toolLifecycle.runId,
-      laneKey: rows[0]?.laneKey ?? 'main',
-      rows,
+      laneKey: entries[0]?.laneKey ?? 'main',
+      entries,
     }];
   }
 
@@ -342,7 +342,7 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
     return [];
   }
   const laneKey = resolveSessionLaneKey(normalizeString(conversation.message.agentId));
-  const rows = buildRowsFromTranscriptMessage(
+  const entries = buildTimelineEntriesFromTranscriptMessage(
     conversation.sessionKey ?? '',
     conversation.message,
     {
@@ -350,10 +350,10 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
       sequenceId: conversation.sequenceId,
       status: conversation.status,
       index: 0,
-      existingRows: options.existingRows,
+      existingRows: options.existingEntries,
     },
   );
-  if (rows.length === 0) {
+  if (entries.length === 0) {
     return [];
   }
   const meta = buildMemberMeta(normalizeString(conversation.message.agentId));
@@ -363,7 +363,7 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
       sessionKey: conversation.sessionKey,
       runId: conversation.runId,
       laneKey,
-      rows,
+      entries,
       ...(meta ? { _meta: meta } : {}),
     }];
   }
@@ -372,7 +372,7 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
     sessionKey: conversation.sessionKey,
     runId: conversation.runId,
     laneKey,
-    rows,
+    entries,
     ...(meta ? { _meta: meta } : {}),
   }];
 }

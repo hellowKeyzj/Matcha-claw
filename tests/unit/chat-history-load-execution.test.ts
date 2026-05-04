@@ -4,9 +4,9 @@ import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
-  getSessionRows,
+  getSessionItems,
 } from '@/stores/chat/store-state-helpers';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
 
@@ -30,25 +30,7 @@ function createHistoryRuntimeHarness(): StoreHistoryCache {
 }
 
 function createSnapshot(sessionKey: string, messages: RawMessage[]) {
-  const rows: SessionRenderRow[] = messages.map((message, index) => ({
-    key: `session:${sessionKey}|row:${message.id ?? `entry-${index + 1}`}`,
-    kind: 'message',
-    sessionKey,
-    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
-    text: typeof message.content === 'string' ? message.content : '',
-    createdAt: message.timestamp,
-    status: 'final',
-    rowId: String(message.id ?? `entry-${index + 1}`),
-    laneKey: 'main',
-    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
-    thinking: null,
-    images: [],
-    toolUses: [],
-    attachedFiles: [],
-    toolStatuses: [],
-    isStreaming: false,
-    messageId: String(message.id ?? `entry-${index + 1}`),
-  }));
+  const items = buildRenderItemsFromMessages(sessionKey, messages);
   return {
     sessionKey,
     catalog: {
@@ -62,21 +44,21 @@ function createSnapshot(sessionKey: string, messages: RawMessage[]) {
       displayName: sessionKey,
       updatedAt: messages.length > 0 ? messages[messages.length - 1]?.timestamp : undefined,
     },
-    rows,
+    items,
     replayComplete: true,
     runtime: {
       sending: false,
       activeRunId: null,
       runPhase: 'done' as const,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
     },
     window: {
-      totalRowCount: rows.length,
+      totalItemCount: items.length,
       windowStartOffset: 0,
-      windowEndOffset: rows.length,
+      windowEndOffset: items.length,
       hasMore: false,
       hasNewer: false,
       isAtLatest: true,
@@ -88,7 +70,7 @@ function createWindowResult(sessionKey: string, messages: RawMessage[] = []) {
   return {
     snapshot: createSnapshot(sessionKey, messages),
     thinkingLevel: null,
-    totalRowCount: messages.length,
+    totalItemCount: messages.length,
     windowStartOffset: 0,
     windowEndOffset: messages.length,
     hasMore: false,
@@ -172,7 +154,7 @@ describe('chat history load execution', () => {
     expect(sawLoadingState).toBe(true);
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
-    expect(getSessionRows(get(), requestedSessionKey)).toMatchObject([
+    expect(getSessionItems(get(), requestedSessionKey)).toMatchObject([
       expect.objectContaining({
         text: 'loaded once',
       }),
@@ -209,7 +191,7 @@ describe('chat history load execution', () => {
 
     expect(get().foregroundHistorySessionKey).toBeNull();
     expect(get().error).toBe('keep');
-    expect(getSessionRows(get(), requestedSessionKey)).toMatchObject([
+    expect(getSessionItems(get(), requestedSessionKey)).toMatchObject([
       expect.objectContaining({
         text: 'background refresh',
       }),

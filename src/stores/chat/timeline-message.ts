@@ -1,34 +1,31 @@
 import type {
-  SessionMessageRow,
-  SessionRenderRow,
-  SessionToolActivityRow,
+  SessionAssistantTurnItem,
+  SessionRenderItem,
 } from '../../../runtime-host/shared/session-adapter-types';
 
-function isAssistantContentRow(
-  row: SessionRenderRow,
-): row is SessionMessageRow | SessionToolActivityRow {
-  return row.role === 'assistant' && (row.kind === 'message' || row.kind === 'tool-activity');
+function isAssistantTurnItem(item: SessionRenderItem): item is SessionAssistantTurnItem {
+  return item.kind === 'assistant-turn';
 }
 
-function readRowToolNames(row: SessionMessageRow | SessionToolActivityRow): string[] {
-  return Array.isArray(row.toolUses)
-    ? row.toolUses.map((tool) => tool.name).filter((name) => typeof name === 'string' && name.trim())
+function readTurnToolNames(item: SessionAssistantTurnItem): string[] {
+  return Array.isArray(item.toolCalls)
+    ? item.toolCalls.map((tool) => tool.name).filter((name) => typeof name === 'string' && name.trim())
     : [];
 }
 
-export function findLatestAssistantTextFromRows(
-  rows: SessionRenderRow[],
+export function findLatestAssistantTextFromItems(
+  items: SessionRenderItem[],
 ): string {
-  if (!Array.isArray(rows) || rows.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return '';
   }
 
   let latestAssistant = '';
-  for (const row of rows) {
-    if (!isAssistantContentRow(row)) {
+  for (const item of items) {
+    if (!isAssistantTurnItem(item)) {
       continue;
     }
-    const text = row.text.trim();
+    const text = item.text.trim();
     if (text) {
       latestAssistant = text;
     }
@@ -37,8 +34,13 @@ export function findLatestAssistantTextFromRows(
     return latestAssistant;
   }
 
-  for (const row of rows) {
-    const text = row.text.trim();
+  for (const item of items) {
+    if (item.kind !== 'user-message' && item.kind !== 'task-completion' && item.kind !== 'system') {
+      continue;
+    }
+    const text = 'text' in item && typeof item.text === 'string'
+      ? item.text.trim()
+      : '';
     if (text) {
       return text;
     }
@@ -46,27 +48,27 @@ export function findLatestAssistantTextFromRows(
   return '';
 }
 
-export function findLatestAssistantSnapshotFromRows(
-  rows: SessionRenderRow[],
+export function findLatestAssistantSnapshotFromItems(
+  items: SessionRenderItem[],
 ): { text: string; toolNames: string[] } {
-  if (!Array.isArray(rows) || rows.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return { text: '', toolNames: [] };
   }
 
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (!isAssistantContentRow(row)) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!isAssistantTurnItem(item)) {
       continue;
     }
-    const text = row.text.trim();
-    const toolNames = readRowToolNames(row);
+    const text = item.text.trim();
+    const toolNames = readTurnToolNames(item);
     if (text || toolNames.length > 0) {
       return { text, toolNames };
     }
   }
 
   return {
-    text: findLatestAssistantTextFromRows(rows),
+    text: findLatestAssistantTextFromItems(items),
     toolNames: [],
   };
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { selectViewportRows } from '@/stores/chat/store-state-helpers';
+import { selectViewportItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState, syncViewportState } from '@/stores/chat/viewport-state';
-import { buildRenderRowsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -13,10 +13,10 @@ function buildMessages(count: number): RawMessage[] {
 }
 
 describe('viewport window state', () => {
-  it('preserves only viewport metadata and derives the visible slice from rows + offsets', () => {
-    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(40));
+  it('preserves only viewport metadata and derives the visible slice from items + offsets', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(40));
     const window = createViewportWindowState({
-      totalRowCount: 40,
+      totalItemCount: 40,
       windowStartOffset: 10,
       windowEndOffset: 40,
       hasMore: true,
@@ -26,25 +26,25 @@ describe('viewport window state', () => {
 
     expect(window.windowStartOffset).toBe(10);
     expect(window.windowEndOffset).toBe(40);
-    expect(window.totalRowCount).toBe(40);
+    expect(window.totalItemCount).toBe(40);
     expect(window.hasMore).toBe(true);
     expect(window.isAtLatest).toBe(true);
-    expect(selectViewportRows({ rows, window }).map((row) => row.rowId)).toEqual(
-      rows.slice(10).map((row) => row.rowId),
+    expect(selectViewportItems({ items, window }).map((item) => item.key)).toEqual(
+      items.slice(10).map((item) => item.key),
     );
   });
 
-  it('syncViewportState updates paging metadata without owning row instances', () => {
-    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(6));
+  it('syncViewportState updates paging metadata without owning item instances', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(6));
     const baseWindow = createViewportWindowState({
-      totalRowCount: 6,
+      totalItemCount: 6,
       windowStartOffset: 0,
       windowEndOffset: 6,
       isAtLatest: true,
     });
 
     const trimmedWindow = syncViewportState(baseWindow, createViewportWindowState({
-      totalRowCount: 6,
+      totalItemCount: 6,
       windowStartOffset: 2,
       windowEndOffset: 6,
       hasMore: true,
@@ -54,18 +54,18 @@ describe('viewport window state', () => {
     expect(trimmedWindow.windowStartOffset).toBe(2);
     expect(trimmedWindow.windowEndOffset).toBe(6);
     expect(trimmedWindow.hasMore).toBe(true);
-    expect(selectViewportRows({ rows, window: trimmedWindow }).map((row) => row.rowId)).toEqual([
-      'message-3',
-      'message-4',
-      'message-5',
-      'message-6',
+    expect(selectViewportItems({ items, window: trimmedWindow }).map((item) => item.key)).toEqual([
+      items[2]!.key,
+      items[3]!.key,
+      items[4]!.key,
+      items[5]!.key,
     ]);
   });
 
-  it('can select the viewport slice directly from authoritative rows', () => {
-    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(5));
+  it('can select the viewport slice directly from authoritative items', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(5));
     const window = createViewportWindowState({
-      totalRowCount: 5,
+      totalItemCount: 5,
       windowStartOffset: 1,
       windowEndOffset: 4,
       hasMore: true,
@@ -73,16 +73,16 @@ describe('viewport window state', () => {
       isAtLatest: false,
     });
 
-    const viewportRows = selectViewportRows({
-      rows,
+    const viewportItems = selectViewportItems({
+      items,
       window,
     });
 
-    expect(viewportRows.map((row) => row.rowId)).toEqual([
-      'message-2',
-      'message-3',
-      'message-4',
+    expect(viewportItems.map((item) => item.key)).toEqual([
+      items[1]!.key,
+      items[2]!.key,
+      items[3]!.key,
     ]);
-    expect(viewportRows.every((row) => Boolean(row.rowId))).toBe(true);
+    expect(viewportItems.every((item) => Boolean(item.key))).toBe(true);
   });
 });

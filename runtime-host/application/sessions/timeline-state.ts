@@ -1,30 +1,30 @@
 import type {
-  SessionMessageRow,
-  SessionRenderRow,
   SessionRuntimeStateSnapshot,
-  SessionToolActivityRow,
+  SessionTimelineEntry,
+  SessionTimelineMessageEntry,
+  SessionTimelineToolActivityEntry,
 } from '../../shared/session-adapter-types';
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function cloneRows(rows: SessionRenderRow[]): SessionRenderRow[] {
-  return structuredClone(rows);
+function cloneTimelineEntries(entries: SessionTimelineEntry[]): SessionTimelineEntry[] {
+  return structuredClone(entries);
 }
 
-function isMessageRow(row: SessionRenderRow): row is SessionMessageRow {
-  return row.kind === 'message';
+function isMessageEntry(entry: SessionTimelineEntry): entry is SessionTimelineMessageEntry {
+  return entry.kind === 'message';
 }
 
-function isToolActivityRow(row: SessionRenderRow): row is SessionToolActivityRow {
-  return row.kind === 'tool-activity';
+function isToolActivityEntry(entry: SessionTimelineEntry): entry is SessionTimelineToolActivityEntry {
+  return entry.kind === 'tool-activity';
 }
 
 function mergeAttachedFiles(
-  existingFiles: ReadonlyArray<SessionMessageRow['attachedFiles'][number]>,
-  incomingFiles: ReadonlyArray<SessionMessageRow['attachedFiles'][number]>,
-): SessionMessageRow['attachedFiles'] {
+  existingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
+  incomingFiles: ReadonlyArray<SessionTimelineMessageEntry['attachedFiles'][number]>,
+): SessionTimelineMessageEntry['attachedFiles'] {
   const merged = existingFiles.map((file) => ({ ...file }));
   for (const file of incomingFiles) {
     const exists = merged.some((candidate) => (
@@ -42,9 +42,9 @@ function mergeAttachedFiles(
 }
 
 function mergeToolStatuses(
-  existingStatuses: ReadonlyArray<SessionMessageRow['toolStatuses'][number]>,
-  incomingStatuses: ReadonlyArray<SessionMessageRow['toolStatuses'][number]>,
-): SessionMessageRow['toolStatuses'] {
+  existingStatuses: ReadonlyArray<SessionTimelineMessageEntry['toolStatuses'][number]>,
+  incomingStatuses: ReadonlyArray<SessionTimelineMessageEntry['toolStatuses'][number]>,
+): SessionTimelineMessageEntry['toolStatuses'] {
   const merged = existingStatuses.map((status) => ({ ...status }));
   const indexByKey = new Map<string, number>();
   for (const [index, status] of merged.entries()) {
@@ -76,9 +76,9 @@ function mergeToolStatuses(
 }
 
 function mergeToolUses(
-  existingUses: ReadonlyArray<SessionMessageRow['toolUses'][number]>,
-  incomingUses: ReadonlyArray<SessionMessageRow['toolUses'][number]>,
-): SessionMessageRow['toolUses'] {
+  existingUses: ReadonlyArray<SessionTimelineMessageEntry['toolUses'][number]>,
+  incomingUses: ReadonlyArray<SessionTimelineMessageEntry['toolUses'][number]>,
+): SessionTimelineMessageEntry['toolUses'] {
   if (incomingUses.length === 0) {
     return existingUses.map((tool) => ({ ...tool }));
   }
@@ -127,9 +127,9 @@ function appendMonotonicText(currentText: string, incomingText: string): string 
   return `${currentText}${incomingText}`;
 }
 
-function resolveMergedRowText(
-  existing: SessionRenderRow | null,
-  incoming: SessionRenderRow,
+function resolveMergedEntryText(
+  existing: SessionTimelineEntry | null,
+  incoming: SessionTimelineEntry,
 ): string {
   if (!existing) {
     return incoming.text;
@@ -140,10 +140,10 @@ function resolveMergedRowText(
   return incoming.text || existing.text;
 }
 
-function mergeRow(
-  existing: SessionRenderRow | null,
-  incoming: SessionRenderRow,
-): SessionRenderRow {
+function mergeTimelineEntry(
+  existing: SessionTimelineEntry | null,
+  incoming: SessionTimelineEntry,
+): SessionTimelineEntry {
   if (!existing) {
     return structuredClone(incoming);
   }
@@ -151,16 +151,16 @@ function mergeRow(
   const mergedBase = {
     ...structuredClone(existing),
     ...structuredClone(incoming),
-    text: resolveMergedRowText(existing, incoming),
-    rowId: existing.rowId ?? incoming.rowId,
+    text: resolveMergedEntryText(existing, incoming),
+    entryId: existing.entryId ?? incoming.entryId,
     laneKey: incoming.laneKey || existing.laneKey,
     turnKey: incoming.turnKey || existing.turnKey,
   };
 
-  if (isMessageRow(existing) || isMessageRow(incoming)) {
-    const existingMessage = isMessageRow(existing) ? existing : null;
-    const incomingMessage = isMessageRow(incoming) ? incoming : null;
-    const mergedMessageRow: SessionMessageRow = {
+  if (isMessageEntry(existing) || isMessageEntry(incoming)) {
+    const existingMessage = isMessageEntry(existing) ? existing : null;
+    const incomingMessage = isMessageEntry(incoming) ? incoming : null;
+    const mergedMessageEntry: SessionTimelineMessageEntry = {
       ...mergedBase,
       kind: 'message',
       thinking: incomingMessage?.thinking ?? existingMessage?.thinking ?? null,
@@ -179,25 +179,25 @@ function mergeRow(
       requestId: incomingMessage?.requestId ?? existingMessage?.requestId,
     };
     const shouldRemainToolActivity = (
-      mergedMessageRow.role === 'assistant'
-      && mergedMessageRow.toolUses.length > 0
-      && mergedMessageRow.text.trim().length === 0
-      && !mergedMessageRow.thinking
-      && mergedMessageRow.images.length === 0
-      && mergedMessageRow.attachedFiles.length === 0
+      mergedMessageEntry.role === 'assistant'
+      && mergedMessageEntry.toolUses.length > 0
+      && mergedMessageEntry.text.trim().length === 0
+      && !mergedMessageEntry.thinking
+      && mergedMessageEntry.images.length === 0
+      && mergedMessageEntry.attachedFiles.length === 0
     );
     if (shouldRemainToolActivity) {
       return {
         ...mergedBase,
         kind: 'tool-activity',
         role: 'assistant',
-        toolUses: mergedMessageRow.toolUses,
-        toolStatuses: mergedMessageRow.toolStatuses,
+        toolUses: mergedMessageEntry.toolUses,
+        toolStatuses: mergedMessageEntry.toolStatuses,
         attachedFiles: [],
-        isStreaming: mergedMessageRow.isStreaming,
+        isStreaming: mergedMessageEntry.isStreaming,
       };
     }
-    return mergedMessageRow;
+    return mergedMessageEntry;
   }
 
   if (existing.kind === 'task-completion' || incoming.kind === 'task-completion') {
@@ -205,33 +205,33 @@ function mergeRow(
   }
 
   return {
-    ...mergedBase,
-    kind: 'tool-activity',
-    role: 'assistant',
+      ...mergedBase,
+      kind: 'tool-activity',
+      role: 'assistant',
     toolUses: mergeToolUses(existing.toolUses ?? [], incoming.toolUses ?? []),
     toolStatuses: mergeToolStatuses(existing.toolStatuses ?? [], incoming.toolStatuses ?? []),
     attachedFiles: mergeAttachedFiles(
-      isToolActivityRow(existing) ? existing.attachedFiles : [],
-      isToolActivityRow(incoming) ? incoming.attachedFiles : [],
+      isToolActivityEntry(existing) ? existing.attachedFiles : [],
+      isToolActivityEntry(incoming) ? incoming.attachedFiles : [],
     ),
-    isStreaming: incoming.status === 'streaming' || (isToolActivityRow(incoming) ? incoming.isStreaming : false),
+    isStreaming: incoming.status === 'streaming' || (isToolActivityEntry(incoming) ? incoming.isStreaming : false),
   };
 }
 
-export function findRowIndex(
-  rows: SessionRenderRow[],
-  incoming: SessionRenderRow,
+export function findTimelineEntryIndex(
+  entries: SessionTimelineEntry[],
+  incoming: SessionTimelineEntry,
 ): number {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (rows[index]!.key === incoming.key) {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]!.key === incoming.key) {
       return index;
     }
   }
 
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const candidate = rows[index]!;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const candidate = entries[index]!;
     const shouldAllowFallbackMerge = (
-      candidate.rowId === incoming.rowId
+      candidate.entryId === incoming.entryId
       || candidate.status === 'streaming'
       || incoming.status === 'streaming'
     );
@@ -252,18 +252,18 @@ export function findRowIndex(
   return -1;
 }
 
-export function upsertRow(
-  rows: SessionRenderRow[],
-  incoming: SessionRenderRow,
-): SessionRenderRow[] {
-  const index = findRowIndex(rows, incoming);
+export function upsertTimelineEntry(
+  entries: SessionTimelineEntry[],
+  incoming: SessionTimelineEntry,
+): SessionTimelineEntry[] {
+  const index = findTimelineEntryIndex(entries, incoming);
   const resolveInsertionIndex = (
-    candidates: SessionRenderRow[],
-    row: SessionRenderRow,
+    candidates: SessionTimelineEntry[],
+    entry: SessionTimelineEntry,
     fallbackIndex: number,
   ): number => {
-    const runId = normalizeString(row.runId);
-    const sequenceId = row.sequenceId;
+    const runId = normalizeString(entry.runId);
+    const sequenceId = entry.sequenceId;
     if (!runId || sequenceId == null) {
       return fallbackIndex;
     }
@@ -291,37 +291,37 @@ export function upsertRow(
   };
 
   if (index < 0) {
-    const nextRows = cloneRows(rows);
-    const insertionIndex = resolveInsertionIndex(nextRows, incoming, nextRows.length);
-    nextRows.splice(insertionIndex, 0, structuredClone(incoming));
-    return nextRows;
+    const nextEntries = cloneTimelineEntries(entries);
+    const insertionIndex = resolveInsertionIndex(nextEntries, incoming, nextEntries.length);
+    nextEntries.splice(insertionIndex, 0, structuredClone(incoming));
+    return nextEntries;
   }
 
-  const mergedRow = mergeRow(rows[index]!, incoming);
-  const nextRows = cloneRows(rows);
-  nextRows.splice(index, 1);
-  const insertionIndex = resolveInsertionIndex(nextRows, mergedRow, Math.min(index, nextRows.length));
-  nextRows.splice(insertionIndex, 0, mergedRow);
-  return nextRows;
+  const mergedEntry = mergeTimelineEntry(entries[index]!, incoming);
+  const nextEntries = cloneTimelineEntries(entries);
+  nextEntries.splice(index, 1);
+  const insertionIndex = resolveInsertionIndex(nextEntries, mergedEntry, Math.min(index, nextEntries.length));
+  nextEntries.splice(insertionIndex, 0, mergedEntry);
+  return nextEntries;
 }
 
-export function mergeRows(
-  transcriptRows: SessionRenderRow[],
-  overlayRows: SessionRenderRow[],
-): SessionRenderRow[] {
-  let mergedRows = cloneRows(transcriptRows);
-  for (const row of overlayRows) {
-    mergedRows = upsertRow(mergedRows, row);
+export function mergeTimelineEntries(
+  transcriptEntries: SessionTimelineEntry[],
+  overlayEntries: SessionTimelineEntry[],
+): SessionTimelineEntry[] {
+  let mergedEntries = cloneTimelineEntries(transcriptEntries);
+  for (const entry of overlayEntries) {
+    mergedEntries = upsertTimelineEntry(mergedEntries, entry);
   }
-  return mergedRows;
+  return mergedEntries;
 }
 
-export function resolveLastActivityAt(
-  rows: SessionRenderRow[],
+export function resolveTimelineLastActivityAt(
+  entries: SessionTimelineEntry[],
   runtime: SessionRuntimeStateSnapshot,
 ): number | undefined {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const timestamp = rows[index]?.createdAt;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const timestamp = entries[index]?.createdAt;
     if (typeof timestamp === 'number' && Number.isFinite(timestamp)) {
       return timestamp;
     }

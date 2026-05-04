@@ -15,13 +15,13 @@ export interface ChatViewportMetrics {
 }
 
 interface ViewportAnchor {
-  messageId?: string;
+  itemKey?: string;
   timestamp?: number;
   offsetWithinViewport: number;
 }
 
-interface TailMessageMetrics {
-  rowKey: string;
+interface TailItemMetrics {
+  itemKey: string;
   height: number;
 }
 
@@ -35,7 +35,7 @@ interface FollowSnapshot {
   viewportHeight: number | null;
   viewportWidth: number | null;
   scrollHeight: number | null;
-  tailMetrics: TailMessageMetrics | null;
+  tailMetrics: TailItemMetrics | null;
 }
 
 interface ScrollScopeState {
@@ -118,14 +118,14 @@ function readViewportMetrics(viewport: HTMLDivElement | null): ChatViewportMetri
   };
 }
 
-function hasRenderableChatRows(
+function hasRenderableChatItems(
   content: HTMLDivElement | null,
   viewport: HTMLDivElement | null,
 ): boolean {
-  if (content?.querySelector('[data-chat-row-key]') != null) {
+  if (content?.querySelector('[data-chat-item-key]') != null) {
     return true;
   }
-  return viewport?.querySelector('[data-chat-row-key]') != null;
+  return viewport?.querySelector('[data-chat-item-key]') != null;
 }
 
 function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor | null {
@@ -133,22 +133,22 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
     return null;
   }
   const viewportRect = viewport.getBoundingClientRect();
-  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]');
-  for (const row of rows) {
-    const rect = row.getBoundingClientRect();
+  const items = viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]');
+  for (const item of items) {
+    const rect = item.getBoundingClientRect();
     const intersectsViewport = rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
     if (!intersectsViewport) {
       continue;
     }
-    const messageId = typeof row.dataset.chatMessageId === 'string' && row.dataset.chatMessageId.trim()
-      ? row.dataset.chatMessageId
+    const itemKey = typeof item.dataset.chatItemKey === 'string' && item.dataset.chatItemKey.trim()
+      ? item.dataset.chatItemKey
       : undefined;
-    const timestampText = row.dataset.chatMessageTimestamp;
+    const timestampText = item.dataset.chatMessageTimestamp;
     const timestamp = typeof timestampText === 'string' && timestampText.trim()
       ? Number(timestampText)
       : undefined;
     return {
-      messageId,
+      itemKey,
       timestamp: Number.isFinite(timestamp) ? timestamp : undefined,
       offsetWithinViewport: rect.top - viewportRect.top,
     };
@@ -156,30 +156,30 @@ function sampleViewportAnchor(viewport: HTMLDivElement | null): ViewportAnchor |
   return null;
 }
 
-function sampleTailMessageMetrics(viewport: HTMLDivElement | null): TailMessageMetrics | null {
+function sampleTailItemMetrics(viewport: HTMLDivElement | null): TailItemMetrics | null {
   if (!viewport) {
     return null;
   }
-  const rows = viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]');
-  const tailRow = rows.length > 0 ? rows[rows.length - 1] : null;
-  const rowKey = tailRow?.dataset.chatRowKey;
-  if (!tailRow || !rowKey) {
+  const items = viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]');
+  const tailItem = items.length > 0 ? items[items.length - 1] : null;
+  const itemKey = tailItem?.dataset.chatItemKey;
+  if (!tailItem || !itemKey) {
     return null;
   }
   return {
-    rowKey,
-    height: tailRow.getBoundingClientRect().height,
+    itemKey,
+    height: tailItem.getBoundingClientRect().height,
   };
 }
 
 function hasTailResizeDelta(
-  previous: TailMessageMetrics | null,
-  next: TailMessageMetrics | null,
+  previous: TailItemMetrics | null,
+  next: TailItemMetrics | null,
 ): boolean {
   if (!previous || !next) {
     return previous !== next;
   }
-  return previous.rowKey !== next.rowKey || previous.height !== next.height;
+  return previous.itemKey !== next.itemKey || previous.height !== next.height;
 }
 
 function createInitialScopeState(): ScrollScopeState {
@@ -263,7 +263,7 @@ export function createChatScrollController(
       viewportHeight: viewport?.clientHeight ?? null,
       viewportWidth: viewport?.clientWidth ?? null,
       scrollHeight: viewport?.scrollHeight ?? null,
-      tailMetrics: sampleTailMessageMetrics(viewport),
+      tailMetrics: sampleTailItemMetrics(viewport),
     };
   };
 
@@ -324,16 +324,16 @@ export function createChatScrollController(
     if (!viewport) {
       return false;
     }
-    const messageRows = Array.from(
-      viewport.querySelectorAll<HTMLElement>('[data-chat-row-key]'),
+    const messageItems = Array.from(
+      viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'),
     );
     let target: HTMLElement | undefined;
-    if (anchor.messageId) {
-      target = messageRows.find((element) => element.dataset.chatMessageId === anchor.messageId);
+    if (anchor.itemKey) {
+      target = messageItems.find((element) => element.dataset.chatItemKey === anchor.itemKey);
     }
     if (!target && typeof anchor.timestamp === 'number') {
       let nearestDistance = Number.POSITIVE_INFINITY;
-      for (const element of messageRows) {
+      for (const element of messageItems) {
         const timestampText = element.dataset.chatMessageTimestamp;
         const timestamp = typeof timestampText === 'string' && timestampText.trim()
           ? Number(timestampText)
@@ -378,7 +378,7 @@ export function createChatScrollController(
   const applyBottomAlign = (force = false) => {
     const config = getConfig();
     const viewport = config.viewportRef.current;
-    if (!config.enabled || !viewport || !hasRenderableChatRows(config.contentRef.current, viewport)) {
+    if (!config.enabled || !viewport || !hasRenderableChatItems(config.contentRef.current, viewport)) {
       return false;
     }
     const metrics = readViewportMetrics(viewport);
@@ -442,7 +442,7 @@ export function createChatScrollController(
     clearScheduledAnchorRestore();
     const run = () => {
       const config = getConfig();
-      if (!config.enabled || !hasRenderableChatRows(config.contentRef.current, config.viewportRef.current)) {
+      if (!config.enabled || !hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
         return;
       }
       if (!restoreViewportAnchor(anchor)) {
@@ -508,6 +508,7 @@ export function createChatScrollController(
   const detachFromBottom = () => {
     const config = getConfig();
     cancelPendingTransitionForScope(config.scrollScopeKey);
+    clearScheduledBottomAlign();
     const scopeState = ensureScopeState(config.scrollScopeKey);
     const wasBottomLocked = scopeState.isBottomLocked;
     scopeState.isBottomLocked = false;
@@ -517,6 +518,8 @@ export function createChatScrollController(
       config.setScrollChromeBottomLocked(false);
     }
     if (wasBottomLocked) {
+      syncDetachedViewportAnchor();
+    } else {
       scheduleDetachedAnchorCapture();
     }
     syncScrollContainerState();
@@ -575,7 +578,7 @@ export function createChatScrollController(
       return;
     }
     const scopeState = ensureScopeState(config.scrollScopeKey);
-    if (!hasRenderableChatRows(config.contentRef.current, config.viewportRef.current)) {
+    if (!hasRenderableChatItems(config.contentRef.current, config.viewportRef.current)) {
       return;
     }
     if (!scopeState.hasLoaded) {
@@ -600,7 +603,7 @@ export function createChatScrollController(
       viewportHeight: viewportNode?.clientHeight ?? null,
       viewportWidth: viewportNode?.clientWidth ?? null,
       scrollHeight: viewportNode?.scrollHeight ?? null,
-      tailMetrics: sampleTailMessageMetrics(viewportNode),
+      tailMetrics: sampleTailItemMetrics(viewportNode),
     };
     const previousSnapshot = state.followSnapshot;
     state.followSnapshot = nextSnapshot;
@@ -622,7 +625,7 @@ export function createChatScrollController(
     );
     const tailMetricsChanged = hasTailResizeDelta(previousSnapshot.tailMetrics, nextSnapshot.tailMetrics);
 
-    if (!scopeState.hasLoaded && hasRenderableChatRows(contentNode, viewportNode)) {
+    if (!scopeState.hasLoaded && hasRenderableChatItems(contentNode, viewportNode)) {
       scheduleBottomAlign({ force: true, retry: true });
       syncScrollContainerState();
       return;

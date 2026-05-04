@@ -2,9 +2,10 @@ import { hostApiFetch } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
 import type { AttachedFileMeta, ChatSendAttachment } from './types';
 import type {
-  SessionMessageRow,
+  SessionAssistantTurnItem,
   SessionRenderAttachedFile,
-  SessionRenderRow,
+  SessionRenderItem,
+  SessionRenderUserMessageItem,
 } from '../../../runtime-host/shared/session-adapter-types';
 
 const IMAGE_CACHE_KEY = 'clawx:image-cache';
@@ -75,13 +76,17 @@ function buildAttachedFileFromRef(ref: { filePath: string; mimeType: string }): 
   };
 }
 
-function mergeRowAttachedFiles(row: SessionMessageRow): AttachedFileMeta[] {
-  const merged = normalizeAttachedFiles(row.attachedFiles);
-  if (row.role !== 'user') {
+function isAttachmentBearingItem(item: SessionRenderItem): item is SessionRenderUserMessageItem | SessionAssistantTurnItem {
+  return item.kind === 'user-message' || item.kind === 'assistant-turn';
+}
+
+function mergeItemAttachedFiles(item: SessionRenderUserMessageItem | SessionAssistantTurnItem): AttachedFileMeta[] {
+  const merged = normalizeAttachedFiles(item.attachedFiles);
+  if (item.kind !== 'user-message') {
     return merged;
   }
   const existingPaths = new Set(merged.map((file) => file.filePath).filter(Boolean));
-  for (const ref of extractMediaRefs(row.text)) {
+  for (const ref of extractMediaRefs(item.text)) {
     if (existingPaths.has(ref.filePath)) {
       continue;
     }
@@ -91,9 +96,11 @@ function mergeRowAttachedFiles(row: SessionMessageRow): AttachedFileMeta[] {
   return merged;
 }
 
-function hydrateMessageRowFromCache(row: SessionMessageRow): SessionMessageRow {
-  const attachedFiles = mergeRowAttachedFiles(row);
-  let changed = attachedFiles.length !== row.attachedFiles.length;
+function hydrateAttachmentItemFromCache(
+  item: SessionRenderUserMessageItem | SessionAssistantTurnItem,
+): SessionRenderUserMessageItem | SessionAssistantTurnItem {
+  const attachedFiles = mergeItemAttachedFiles(item);
+  let changed = attachedFiles.length !== item.attachedFiles.length;
   const nextFiles = attachedFiles.map((file) => {
     const filePath = file.filePath;
     if (!filePath) {
@@ -121,35 +128,35 @@ function hydrateMessageRowFromCache(row: SessionMessageRow): SessionMessageRow {
     return nextFile;
   });
   if (!changed) {
-    return row;
+    return item;
   }
   return {
-    ...row,
+    ...item,
     attachedFiles: nextFiles,
   };
 }
 
-export function hydrateAttachedFilesFromRows(rows: SessionRenderRow[]): SessionRenderRow[] {
+export function hydrateAttachedFilesFromItems(items: SessionRenderItem[]): SessionRenderItem[] {
   let changed = false;
-  const nextRows = rows.map((row) => {
-    if (row.kind !== 'message') {
-      return row;
+  const nextItems = items.map((item) => {
+    if (!isAttachmentBearingItem(item)) {
+      return item;
     }
-    const nextRow = hydrateMessageRowFromCache(row);
-    if (nextRow !== row) {
+    const nextItem = hydrateAttachmentItemFromCache(item);
+    if (nextItem !== item) {
       changed = true;
     }
-    return nextRow;
+    return nextItem;
   });
-  return changed ? nextRows : rows;
+  return changed ? nextItems : items;
 }
 
-export function hasPendingRowPreviewLoads(rows: SessionRenderRow[]): boolean {
-  return rows.some((row) => {
-    if (row.kind !== 'message') {
+export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean {
+  return items.some((item) => {
+    if (!isAttachmentBearingItem(item)) {
       return false;
     }
-    return mergeRowAttachedFiles(row).some((file) => {
+    return mergeItemAttachedFiles(item).some((file) => {
       if (!file.filePath) {
         return false;
       }
@@ -160,22 +167,22 @@ export function hasPendingRowPreviewLoads(rows: SessionRenderRow[]): boolean {
   });
 }
 
-export async function loadMissingRowPreviews(
-  rows: SessionRenderRow[],
+export async function loadMissingItemPreviews(
+  items: SessionRenderItem[],
   abortSignal?: AbortSignal,
-): Promise<SessionRenderRow[] | null> {
+): Promise<SessionRenderItem[] | null> {
   if (abortSignal) {
     throwIfHistoryLoadAborted(abortSignal);
   }
-  const normalizedRows = hydrateAttachedFilesFromRows(rows);
+  const normalizedItems = hydrateAttachedFilesFromItems(items);
   const needPreview: Array<{ filePath: string; mimeType: string }> = [];
   const seenPaths = new Set<string>();
 
-  for (const row of normalizedRows) {
-    if (row.kind !== 'message') {
+  for (const item of normalizedItems) {
+    if (!isAttachmentBearingItem(item)) {
       continue;
     }
-    for (const file of mergeRowAttachedFiles(row)) {
+    for (const file of mergeItemAttachedFiles(item)) {
       const filePath = file.filePath;
       if (!filePath || seenPaths.has(filePath)) {
         continue;
@@ -192,7 +199,7 @@ export async function loadMissingRowPreviews(
   }
 
   if (needPreview.length === 0) {
-    return normalizedRows === rows ? null : normalizedRows;
+    return normalizedItems === items ? null : normalizedItems;
   }
 
   try {
@@ -204,13 +211,13 @@ export async function loadMissingRowPreviews(
       },
     );
 
-    let changed = normalizedRows !== rows;
-    const nextRows = normalizedRows.map((row) => {
-      if (row.kind !== 'message') {
-        return row;
+    let changed = normalizedItems !== items;
+    const nextItems = normalizedItems.map((item) => {
+      if (!isAttachmentBearingItem(item)) {
+        return item;
       }
-      const attachedFiles = mergeRowAttachedFiles(row);
-      let rowChanged = attachedFiles.length !== row.attachedFiles.length;
+      const attachedFiles = mergeItemAttachedFiles(item);
+      let itemChanged = attachedFiles.length !== item.attachedFiles.length;
       const nextFiles = attachedFiles.map((file) => {
         const filePath = file.filePath;
         if (!filePath) {
@@ -226,28 +233,28 @@ export async function loadMissingRowPreviews(
           fileSize: thumb.fileSize || file.fileSize,
         } satisfies AttachedFileMeta;
         if (nextFile.preview !== file.preview || nextFile.fileSize !== file.fileSize) {
-          rowChanged = true;
+          itemChanged = true;
           imageCache.set(filePath, { ...nextFile });
         }
         return nextFile;
       });
-      if (!rowChanged) {
-        return row;
+      if (!itemChanged) {
+        return item;
       }
       changed = true;
       return {
-        ...row,
+        ...item,
         attachedFiles: nextFiles,
       };
     });
 
     if (changed) {
       saveImageCache(imageCache);
-      return nextRows;
+      return nextItems;
     }
     return null;
   } catch {
-    return normalizedRows === rows ? null : normalizedRows;
+    return normalizedItems === items ? null : normalizedItems;
   }
 }
 

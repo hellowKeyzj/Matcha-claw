@@ -5,7 +5,7 @@ describe('chat view state', () => {
   it('derives blocking loading directly from session status and rows without delay retention', () => {
     const loading = useChatView({
       currentSessionStatus: 'loading',
-      rowCount: 0,
+      itemCount: 0,
       sending: false,
       refreshing: false,
       mutating: false,
@@ -16,7 +16,7 @@ describe('chat view state', () => {
 
     const ready = useChatView({
       currentSessionStatus: 'ready',
-      rowCount: 2,
+      itemCount: 2,
       sending: false,
       refreshing: false,
       mutating: false,
@@ -27,7 +27,7 @@ describe('chat view state', () => {
   it('shows empty state only for ready empty sessions and keeps background status for non-blocking refresh', () => {
     const empty = useChatView({
       currentSessionStatus: 'ready',
-      rowCount: 0,
+      itemCount: 0,
       sending: false,
       refreshing: false,
       mutating: false,
@@ -37,7 +37,7 @@ describe('chat view state', () => {
 
     const refreshing = useChatView({
       currentSessionStatus: 'ready',
-      rowCount: 4,
+      itemCount: 4,
       sending: false,
       refreshing: true,
       mutating: false,
@@ -49,7 +49,7 @@ describe('chat view state', () => {
   it('shows blocking error only for empty error sessions', () => {
     const failed = useChatView({
       currentSessionStatus: 'error',
-      rowCount: 0,
+      itemCount: 0,
       sending: false,
       refreshing: false,
       mutating: false,

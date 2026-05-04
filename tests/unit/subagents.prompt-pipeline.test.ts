@@ -7,7 +7,7 @@ import {
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
 import { useSubagentsStore } from '@/stores/subagents';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function buildDraftOutput(
   files: Array<{ name: string; content: string; reason: string; confidence: number }>,
@@ -21,7 +21,7 @@ function buildHistoryWindow(output: string) {
   return {
     snapshot: {
       sessionKey: 'agent:writer:subagent-draft',
-      rows: buildRenderRowsFromMessages('agent:writer:subagent-draft', [{
+      items: buildRenderItemsFromMessages('agent:writer:subagent-draft', [{
         id: 'entry-1',
         role: 'assistant',
         content: [
@@ -36,13 +36,13 @@ function buildHistoryWindow(output: string) {
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
-        streamingMessageId: null,
+        streamingAnchorKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
       window: {
-        totalRowCount: 1,
+        totalItemCount: 1,
         windowStartOffset: 0,
         windowEndOffset: 1,
         hasMore: false,
@@ -204,19 +204,19 @@ describe('subagents prompt pipeline', () => {
       .mockResolvedValueOnce({
         snapshot: {
           sessionKey: 'agent:writer:subagent-draft',
-          rows: [],
+          items: [],
           replayComplete: true,
           runtime: {
             sending: false,
             activeRunId: null,
             runPhase: 'done' as const,
-            streamingMessageId: null,
+            streamingAnchorKey: null,
             pendingFinal: false,
             lastUserMessageAt: null,
             updatedAt: 1,
           },
           window: {
-            totalRowCount: 0,
+            totalItemCount: 0,
             windowStartOffset: 0,
             windowEndOffset: 0,
             hasMore: false,

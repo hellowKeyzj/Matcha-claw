@@ -9,9 +9,9 @@ interface ExecutionGraphCardProps {
   sessionLabel: string;
   steps: SessionExecutionGraphStep[];
   active: boolean;
-  triggerRowKey?: string;
-  replyRowKey?: string;
-  onJumpToRowKey?: (rowKey?: string) => void;
+  triggerItemKey?: string;
+  replyItemKey?: string;
+  onJumpToItemKey?: (itemKey?: string) => void;
 }
 
 function GraphStatusIcon({ status }: { status: SessionExecutionGraphStep['status'] }) {
@@ -73,17 +73,17 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   sessionLabel,
   steps,
   active,
-  triggerRowKey,
-  replyRowKey,
-  onJumpToRowKey,
+  triggerItemKey,
+  replyItemKey,
+  onJumpToItemKey,
 }: ExecutionGraphCardProps) {
   const { t } = useTranslation('chat');
   const handleJumpToTrigger = useCallback(() => {
-    onJumpToRowKey?.(triggerRowKey);
-  }, [onJumpToRowKey, triggerRowKey]);
+    onJumpToItemKey?.(triggerItemKey);
+  }, [onJumpToItemKey, triggerItemKey]);
   const handleJumpToReply = useCallback(() => {
-    onJumpToRowKey?.(replyRowKey);
-  }, [onJumpToRowKey, replyRowKey]);
+    onJumpToItemKey?.(replyItemKey);
+  }, [onJumpToItemKey, replyItemKey]);
 
   return (
     <div
