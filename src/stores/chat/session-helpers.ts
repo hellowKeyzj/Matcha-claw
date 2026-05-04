@@ -1,10 +1,10 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
 import {
   getSessionMeta,
-  getSessionRowCount,
+  getSessionItemCount,
   getSessionRecord,
   getSessionRuntime,
-  getSessionRows,
+  getSessionItems,
   toMs,
 } from './store-state-helpers';
 
@@ -54,11 +54,11 @@ export function resolveSessionListLabel(
   if (explicit) {
     return explicit;
   }
-  const rows = getSessionRows(state, sessionKey);
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row?.role === 'user' && normalizeSessionLabel(row.text)) {
-      return normalizeSessionLabel(row.text);
+  const items = getSessionItems(state, sessionKey);
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === 'user-message' && normalizeSessionLabel(item.text)) {
+      return normalizeSessionLabel(item.text);
     }
   }
   return null;
@@ -154,13 +154,13 @@ export function shouldRetainLocalSessionRecord(
   const record = getSessionRecord(state, sessionKey);
   const runtime = record.runtime;
   return (
-    getSessionRowCount(record) > 0
+    getSessionItemCount(record) > 0
     || Boolean(record.meta.label)
     || Boolean(record.meta.lastActivityAt)
     || runtime.sending
     || runtime.pendingFinal
     || runtime.activeRunId != null
-    || runtime.streamingMessageId != null
+    || runtime.streamingAnchorKey != null
     || (state.pendingApprovalsBySession[sessionKey]?.length ?? 0) > 0
   );
 }
@@ -278,16 +278,16 @@ export function shouldKeepMissingCurrentSession(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
-  const hasRows = getSessionRowCount(record) > 0;
+  const hasItems = getSessionItemCount(record) > 0;
   const hasLabel = Boolean(record.meta.label);
   const hasActivity = Boolean(record.meta.lastActivityAt);
   const hasRuntime = Object.prototype.hasOwnProperty.call(state.loadedSessions, sessionKey);
   const isPrimary = record.meta.preferred || record.meta.kind === 'main' || sessionKey.endsWith(':main');
   if (!isPrimary) {
     // Keep only local draft sessions (created but still truly empty).
-    return !hasRows && !hasLabel && !hasActivity && hasRuntime;
+    return !hasItems && !hasLabel && !hasActivity && hasRuntime;
   }
-  return hasRows || hasLabel || hasActivity;
+  return hasItems || hasLabel || hasActivity;
 }
 
 export function parseSessionUpdatedAtMs(value: unknown): number | undefined {
@@ -311,7 +311,7 @@ export function isTrulyEmptyNonMainSession(
   return !record.meta.preferred
     && record.meta.kind !== 'main'
     && !currentSessionKey.endsWith(':main')
-    && getSessionRowCount(record) === 0
+    && getSessionItemCount(record) === 0
     && !record.meta.lastActivityAt
     && !record.meta.label;
 }

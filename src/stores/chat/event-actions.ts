@@ -17,8 +17,8 @@ import {
 } from './store-state-helpers';
 import type { ChatStoreState } from './types';
 import type {
-  SessionRowChunkUpdateEvent,
-  SessionRowUpdateEvent,
+  SessionItemChunkUpdateEvent,
+  SessionItemUpdateEvent,
   SessionUpdateEvent,
 } from '../../../runtime-host/shared/session-adapter-types';
 
@@ -129,7 +129,7 @@ function applySessionLifecycleEvent(
 function applySessionMessageEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     currentSessionKey: string;
-    event: SessionRowChunkUpdateEvent | SessionRowUpdateEvent;
+    event: SessionItemChunkUpdateEvent | SessionItemUpdateEvent;
   },
 ): void {
   const {
@@ -139,13 +139,12 @@ function applySessionMessageEvent(
   } = input;
 
   if (
-    event.row?.role === 'assistant'
-    && event.row.kind === 'message'
-    && event.row.text.trim()
+    event.item?.kind === 'assistant-turn'
+    && event.item.text.trim()
   ) {
     maybeTrackSendToFirstToken(
       currentSessionKey,
-      event.sessionUpdate === 'session_row_chunk' ? 'delta' : 'final',
+      event.sessionUpdate === 'session_item_chunk' ? 'delta' : 'final',
     );
   }
 
@@ -181,8 +180,8 @@ export function handleStoreSessionUpdateEvent(
   }
 
   if (
-    sessionUpdate.sessionUpdate !== 'session_row_chunk'
-    && sessionUpdate.sessionUpdate !== 'session_row'
+    sessionUpdate.sessionUpdate !== 'session_item_chunk'
+    && sessionUpdate.sessionUpdate !== 'session_item'
   ) {
     return;
   }
@@ -206,9 +205,8 @@ export function handleStoreSessionUpdateEvent(
     event: sessionUpdate,
   });
 
-  if (sessionUpdate.sessionUpdate === 'session_row') {
-    const role = normalizeIdentifier(sessionUpdate.row?.role);
-    if (role === 'assistant') {
+  if (sessionUpdate.sessionUpdate === 'session_item') {
+    if (sessionUpdate.item?.kind === 'assistant-turn') {
       finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_message_final' });
       clearHistoryPoll();
     }

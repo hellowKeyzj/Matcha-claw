@@ -143,9 +143,9 @@ function setupChatSessions() {
       }),
     },
     loadHistory: vi.fn().mockResolvedValue(undefined),
-    loadOlderMessages: vi.fn().mockResolvedValue(undefined),
+    loadOlderItems: vi.fn().mockResolvedValue(undefined),
     jumpToLatest: vi.fn().mockResolvedValue(undefined),
-    setViewportLastVisibleMessageId: vi.fn(),
+    setViewportLastVisibleItemKey: vi.fn(),
     loadSessions: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
   } as never);

@@ -1,6 +1,6 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
 import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
-import type { SessionRenderAttachedFile, SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
 
 /** Metadata for locally-attached files (not from Gateway) */
@@ -89,7 +89,7 @@ export interface ChatSessionRuntimeState {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  streamingMessageId: string | null;
+  streamingAnchorKey: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
 }
@@ -110,12 +110,12 @@ export interface ChatSessionMetaState {
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
-  rows: SessionRenderRow[];
+  items: SessionRenderItem[];
   window: ChatSessionViewportState;
 }
 
 export interface ChatSessionViewportState {
-  totalRowCount: number;
+  totalItemCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -123,7 +123,7 @@ export interface ChatSessionViewportState {
   isLoadingMore: boolean;
   isLoadingNewer: boolean;
   isAtLatest: boolean;
-  lastVisibleMessageId: string | null;
+  lastVisibleItemKey: string | null;
 }
 
 export interface ChatViewState {
@@ -174,9 +174,9 @@ export interface ChatStoreActions {
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
-  loadOlderMessages: (sessionKey?: string) => Promise<void>;
+  loadOlderItems: (sessionKey?: string) => Promise<void>;
   jumpToLatest: (sessionKey?: string) => Promise<void>;
-  setViewportLastVisibleMessageId: (messageId: string | null, sessionKey?: string) => void;
+  setViewportLastVisibleItemKey: (itemKey: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
   handleApprovalRequested: (payload: Record<string, unknown>) => void;

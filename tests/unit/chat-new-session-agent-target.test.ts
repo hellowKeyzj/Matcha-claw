@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/stores/chat';
-import { createEmptySessionRecord, getSessionRows } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const hostSessionNewMock = vi.fn();
 
@@ -23,27 +23,36 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    rows: overrides?.rows ?? base.rows,
+    items: overrides?.items ?? base.items,
     window: overrides?.window ?? base.window,
   };
 }
 
 function buildNewSessionSnapshot(sessionKey: string) {
+  const agentId = sessionKey.split(':')[1] ?? 'main';
   return {
     sessionKey,
-    rows: [],
+    catalog: {
+      key: sessionKey,
+      agentId,
+      kind: 'session' as const,
+      preferred: false,
+      displayName: sessionKey,
+      updatedAt: 1,
+    },
+    items: [],
     replayComplete: true,
     runtime: {
       sending: false,
       activeRunId: null,
       runPhase: 'idle' as const,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
       lastUserMessageAt: null,
       updatedAt: 1,
     },
     window: {
-      totalRowCount: 0,
+      totalItemCount: 0,
       windowStartOffset: 0,
       windowEndOffset: 0,
       hasMore: false,
@@ -143,9 +152,9 @@ describe('chat store newSession agent targeting', () => {
       loadedSessions: {
         ...useChatStore.getState().loadedSessions,
         'agent:test:main': buildSessionRecord({
-          rows: buildRenderRowsFromMessages('agent:test:main', [userMsg]),
+          items: buildRenderItemsFromMessages('agent:test:main', [userMsg]),
           window: createViewportWindowState({
-            totalRowCount: 1,
+            totalItemCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             isAtLatest: true,
@@ -165,8 +174,8 @@ describe('chat store newSession agent targeting', () => {
     const state = useChatStore.getState();
     const record = state.loadedSessions['agent:test:main'];
     expect(state.currentSessionKey).toBe('agent:test:main');
-    expect(getSessionRows(state, 'agent:test:main')).toHaveLength(1);
-    expect(record?.rows[0]?.rowId).toBe('msg-local-1');
+    expect(getSessionItems(state, 'agent:test:main')).toHaveLength(1);
+    expect(record?.items[0]?.key).toContain('msg-local-1');
     expect(record?.runtime.sending).toBe(true);
     expect(record?.runtime.pendingFinal).toBe(true);
   });

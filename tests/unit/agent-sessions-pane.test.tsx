@@ -7,7 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -48,9 +48,9 @@ function createSessionRecord(input?: {
     runtime: {
       ...base.runtime,
     },
-    rows: buildRenderRowsFromMessages(sessionKey, messages),
+    items: buildRenderItemsFromMessages(sessionKey, messages),
     window: createViewportWindowState({
-      totalRowCount: messages.length,
+      totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -444,7 +444,7 @@ describe('agent sessions pane', () => {
             ...useChatStore.getState().loadedSessions['agent:test:session-2']!.meta,
             label: '最新输入标题',
           },
-          rows: buildRenderRowsFromMessages('agent:test:session-2', [
+          items: buildRenderItemsFromMessages('agent:test:session-2', [
             {
               role: 'user',
               content: '最新输入标题',

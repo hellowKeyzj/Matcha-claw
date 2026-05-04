@@ -5,7 +5,7 @@ import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { useSubagentsStore } from '@/stores/subagents';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const idleResource = {
   status: 'idle' as const,
@@ -36,9 +36,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    rows: overrides?.messages
-      ? buildRenderRowsFromMessages(sessionKey, overrides.messages)
-      : (overrides?.rows ?? base.rows),
+    items: overrides?.messages
+      ? buildRenderItemsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.items ?? base.items),
     window: overrides?.window ?? base.window,
   };
 }
@@ -195,7 +195,7 @@ describe('useChatInit', () => {
           meta: { historyStatus: 'ready' },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            totalRowCount: 1,
+            totalItemCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             hasMore: false,

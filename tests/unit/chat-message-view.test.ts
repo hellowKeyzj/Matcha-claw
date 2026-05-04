@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { getOrBuildChatMessageView } from '@/pages/Chat/chat-message-view';
-import type { SessionMessageRow, SessionToolActivityRow } from '../../runtime-host/shared/session-adapter-types';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
-function buildMessageRow(content: unknown): SessionMessageRow | SessionToolActivityRow {
-  const row = buildRenderRowsFromMessages('agent:test:main', [{
+function buildItem(content: unknown): SessionRenderItem {
+  const item = buildRenderItemsFromMessages('agent:test:main', [{
     role: 'assistant',
     content,
     _attachedFiles: [{
@@ -15,22 +15,25 @@ function buildMessageRow(content: unknown): SessionMessageRow | SessionToolActiv
       filePath: 'C:/workspace/README.md',
     }],
   }])[0];
-  if (!row || (row.kind !== 'message' && row.kind !== 'tool-activity')) {
-    throw new Error('expected assistant content row');
+  if (!item) {
+    throw new Error('expected assistant item');
   }
-  return row;
+  return item;
 }
 
 describe('chat message view', () => {
-  it('exposes render fields from the row protocol object', () => {
-    const row = buildMessageRow([
+  it('exposes render fields from the assistant turn item', () => {
+    const item = buildItem([
       { type: 'text', text: 'hello' },
       { type: 'thinking', thinking: 'reviewing options' },
       { type: 'tool_use', id: 'tool-1', name: 'read_file', input: { path: 'README.md' } },
       { type: 'image', data: 'base64-image', mimeType: 'image/png' },
     ]);
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
 
-    const view = getOrBuildChatMessageView(row);
+    const view = getOrBuildChatMessageView(item);
 
     expect(view.thinking).toBe('reviewing options');
     expect(view.toolUses).toEqual([{
@@ -46,21 +49,27 @@ describe('chat message view', () => {
     expect(view.attachedFiles[0]?.fileName).toBe('README.md');
   });
 
-  it('returns the latest row fields on repeated reads', () => {
-    const row = buildMessageRow('hello');
+  it('returns the latest item fields on repeated reads', () => {
+    const item = buildItem('hello');
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
 
-    expect(getOrBuildChatMessageView(row)).toStrictEqual(getOrBuildChatMessageView(row));
+    expect(getOrBuildChatMessageView(item)).toStrictEqual(getOrBuildChatMessageView(item));
   });
 
-  it('extracts tool cards from live assistant tool blocks', () => {
-    const row = buildMessageRow([{
+  it('extracts tool cards from live assistant tool calls', () => {
+    const item = buildItem([{
       type: 'toolCall',
       id: 'tool-3',
       name: 'read',
       input: { filePath: 'README.md' },
-    }]) as SessionToolActivityRow;
+    }]);
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
 
-    expect(getOrBuildChatMessageView(row).toolUses).toEqual([{
+    expect(getOrBuildChatMessageView(item).toolUses).toEqual([{
       id: 'tool-3',
       name: 'read',
       input: { filePath: 'README.md' },

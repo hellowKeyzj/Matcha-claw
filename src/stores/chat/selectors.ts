@@ -3,7 +3,7 @@ import { readSessionCatalogStatusShell, readSessionsFromState, resolveSessionLis
 import {
   getSessionMeta,
   getSessionRuntime,
-  getSessionRows,
+  getSessionItems,
 } from './store-state-helpers';
 import type { ChatSessionHistoryStatus } from './types';
 
@@ -88,8 +88,8 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
   };
 }
 
-export function selectSessionRows(state: ChatStoreState, sessionKey: string) {
-  return getSessionRows(state, sessionKey);
+export function selectSessionItems(state: ChatStoreState, sessionKey: string) {
+  return getSessionItems(state, sessionKey);
 }
 
 export function selectSessionMeta(state: ChatStoreState, sessionKey: string) {

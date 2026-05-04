@@ -1,84 +1,60 @@
-import { describe, expect, it } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
+import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
-import { ChatToolActivityRowView } from '@/pages/Chat/ChatToolActivityRow';
-import { applyAssistantPresentationToRows } from '@/pages/Chat/chat-row-model';
+import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
-function buildRow(message: RawMessage) {
-  return applyAssistantPresentationToRows({
-    rows: buildRenderRowsFromMessages('agent:test:main', [message]),
-    agents: [],
+function buildRenderItem(message: RawMessage) {
+  return applyAssistantPresentationToItems({
+    items: buildRenderItemsFromMessages('agent:test:main', [message]),
+    agents: [{
+      id: 'writer',
+      agentName: 'Writer',
+      avatarSeed: 'agent:writer',
+      avatarStyle: 'bottts',
+    }],
     defaultAssistant: null,
   })[0]!;
 }
 
-function buildMessageRow(message: RawMessage) {
-  const row = buildRow(message);
-  if (row.kind !== 'message') {
-    throw new Error('expected message row');
-  }
-  if (row.role === 'assistant') {
-    return {
-      ...row,
-      assistantPresentation: {
-        agentId: 'writer',
-        agentName: 'Writer',
-        avatarSeed: 'agent:writer',
-        avatarStyle: 'bottts',
-      },
-    };
-  }
-  return row;
-}
-
-function buildToolActivityRow(message: RawMessage) {
-  const row = buildRow(message);
-  if (row.kind !== 'tool-activity') {
-    throw new Error('expected tool activity row');
-  }
-  return {
-    ...row,
-    assistantPresentation: {
-      agentId: 'writer',
-      agentName: 'Writer',
-      avatarSeed: 'agent:writer',
-      avatarStyle: 'bottts' as const,
-    },
-  };
-}
-
 describe('chat message avatar', () => {
-  it('assistant message renders generated agent avatar', () => {
-    const message: RawMessage = {
+  it('assistant turn renders generated agent avatar', () => {
+    const item = buildRenderItem({
       role: 'assistant',
       content: 'hello',
-    };
+    });
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
 
     render(
-      <ChatMessage
-        row={buildMessageRow(message)}
+      <ChatAssistantTurn
+        item={item}
         showThinking={false}
       />,
     );
 
     const img = screen.getByTestId('assistant-message-avatar').querySelector('img') as HTMLImageElement | null;
     expect(img).not.toBeNull();
-    expect(img?.getAttribute('alt')).toBe('Writer avatar');
+    expect(img?.getAttribute('alt')).toBe('Agent avatar');
     expect(img?.src.startsWith('data:image/svg+xml')).toBe(true);
   });
 
-  it('uses the OpenClaw-style message shrink model instead of a fixed 80% shell', () => {
-    const message: RawMessage = {
+  it('uses the OpenClaw-style assistant shrink layout instead of a fixed 80% shell', () => {
+    const item = buildRenderItem({
       role: 'assistant',
       content: 'layout-check',
-    };
+    });
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
 
     const { container } = render(
-      <ChatMessage
-        row={buildMessageRow(message)}
+      <ChatAssistantTurn
+        item={item}
         showThinking={false}
       />,
     );
@@ -97,8 +73,8 @@ describe('chat message avatar', () => {
     expect(body?.className).toContain(CHAT_LAYOUT_TOKENS.assistantSurface);
   });
 
-  it('tool-only activity row renders expandable tool cards without empty assistant body shell', () => {
-    const message: RawMessage = {
+  it('tool-only assistant turn renders expandable tool cards without empty assistant body shell', () => {
+    const item = buildRenderItem({
       role: 'assistant',
       content: [{
         type: 'toolCall',
@@ -113,16 +89,20 @@ describe('chat message avatar', () => {
         updatedAt: 1,
       }],
       streaming: true,
-    };
+    });
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant turn');
+    }
 
     const { container } = render(
-      <ChatToolActivityRowView
-        row={buildToolActivityRow(message)}
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
       />,
     );
 
-    expect(container.querySelector('[data-chat-body-mode="streaming"]')).toBeNull();
-    const toggle = screen.getByText('read').closest('button') as HTMLButtonElement | null;
+    expect(container.querySelector('[data-chat-body-mode="streaming"]')).not.toBeNull();
+    const toggle = screen.getAllByText('read')[1]?.closest('button') as HTMLButtonElement | null;
     expect(toggle).not.toBeNull();
     act(() => {
       toggle?.click();
@@ -132,16 +112,18 @@ describe('chat message avatar', () => {
   });
 
   it('user message renders custom avatar image when provided', () => {
-    const message: RawMessage = {
+    const item = buildRenderItem({
       role: 'user',
       content: 'hi',
-    };
+    });
+    if (item.kind !== 'user-message') {
+      throw new Error('expected user message');
+    }
     const avatarDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
 
     render(
       <ChatMessage
-        row={buildMessageRow(message)}
-        showThinking={false}
+        item={item}
         userAvatarImageUrl={avatarDataUrl}
       />,
     );
@@ -158,15 +140,17 @@ describe('chat message avatar', () => {
   });
 
   it('renders user content as a light asymmetric card instead of the old secondary bubble', () => {
-    const message: RawMessage = {
+    const item = buildRenderItem({
       role: 'user',
       content: 'bubble-check',
-    };
+    });
+    if (item.kind !== 'user-message') {
+      throw new Error('expected user message');
+    }
 
     render(
       <ChatMessage
-        row={buildMessageRow(message)}
-        showThinking={false}
+        item={item}
       />,
     );
 
@@ -176,4 +160,3 @@ describe('chat message avatar', () => {
     expect(CHAT_LAYOUT_TOKENS.userBubble).not.toContain('bg-secondary');
   });
 });
-

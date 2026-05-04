@@ -10,8 +10,8 @@ import { useGatewayStore } from '@/stores/gateway';
 import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
-import { findLatestAssistantTextFromRows } from '@/stores/chat/timeline-message';
-import type { SessionRenderRow } from '../../../../runtime-host/shared/session-adapter-types';
+import { findLatestAssistantTextFromItems } from '@/stores/chat/timeline-message';
+import type { SessionRenderItem } from '../../../../runtime-host/shared/session-adapter-types';
 
 const ORCHESTRATOR_TICK_ACTIVE_MS = 2_500;
 const ORCHESTRATOR_TICK_IDLE_MS = 8_000;
@@ -81,31 +81,31 @@ async function gatewayRpc<T>(method: string, params?: unknown, timeoutMs?: numbe
   return callGatewayRpc<T>(method, params, timeoutMs ?? 30_000);
 }
 
-function readAssistantProgress(rows?: SessionRenderRow[]): AssistantProgress {
-  if (!Array.isArray(rows) || rows.length === 0) {
+function readAssistantProgress(items?: SessionRenderItem[]): AssistantProgress {
+  if (!Array.isArray(items) || items.length === 0) {
     return {
       assistantCount: 0,
       latestSummary: '',
     };
   }
   let assistantCount = 0;
-  for (const row of rows) {
-    if (row.kind === 'message' && row.role === 'assistant') {
+  for (const item of items) {
+    if (item.kind === 'assistant-turn') {
       assistantCount += 1;
     }
   }
   return {
     assistantCount,
-    latestSummary: summarizeAssistantText(findLatestAssistantTextFromRows(rows)),
+    latestSummary: summarizeAssistantText(findLatestAssistantTextFromItems(items)),
   };
 }
 
 async function fetchAssistantProgress(sessionKey: string): Promise<AssistantProgress> {
-  const rows = await fetchChatTimeline({
+  const items = await fetchChatTimeline({
     sessionKey,
     limit: HISTORY_LIMIT,
   });
-  return readAssistantProgress(rows);
+  return readAssistantProgress(items);
 }
 
 async function waitForNextAssistantSummary(

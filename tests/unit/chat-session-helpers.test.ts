@@ -9,7 +9,7 @@ import {
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
@@ -46,12 +46,12 @@ function createSessionRecord(input?: {
       pendingFinal: input?.runtime?.pendingFinal ?? false,
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       lastUserMessageAt: null,
     },
-    rows: buildRenderRowsFromMessages(sessionKey, messages),
+    items: buildRenderItemsFromMessages(sessionKey, messages),
     window: createViewportWindowState({
-      totalRowCount: messages.length,
+      totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,

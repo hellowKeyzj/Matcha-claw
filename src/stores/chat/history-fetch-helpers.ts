@@ -6,7 +6,7 @@ import type { ChatSession } from './types';
 export interface HistoryWindowResult {
   snapshot: SessionStateSnapshot | null;
   thinkingLevel: string | null;
-  totalRowCount: number;
+  totalItemCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -37,7 +37,7 @@ export async function fetchHistoryWindow(
   return {
     snapshot: data.snapshot,
     thinkingLevel: resolveSessionThinkingLevelFromList(sessions, requestedSessionKey),
-    totalRowCount: data.snapshot.window.totalRowCount,
+    totalItemCount: data.snapshot.window.totalItemCount,
     windowStartOffset: data.snapshot.window.windowStartOffset,
     windowEndOffset: data.snapshot.window.windowEndOffset,
     hasMore: data.snapshot.window.hasMore,

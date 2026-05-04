@@ -4,11 +4,11 @@ import {
   hostSessionPrompt,
   hostSessionWindowFetch,
 } from '@/lib/host-api';
-import type { SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 import type { ChatSession } from '@/stores/chat/types';
 import {
-  findLatestAssistantSnapshotFromRows,
-  findLatestAssistantTextFromRows,
+  findLatestAssistantSnapshotFromItems,
+  findLatestAssistantTextFromItems,
 } from '@/stores/chat/timeline-message';
 
 export interface AssistantSnapshot {
@@ -44,42 +44,42 @@ export interface ListSessionsInput {
 
 const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 
-function resolveAuthoritativeRows(
+function resolveAuthoritativeItems(
   payload: Awaited<ReturnType<typeof hostSessionWindowFetch>>,
-): SessionRenderRow[] {
-  return Array.isArray(payload?.snapshot?.rows) ? payload.snapshot.rows : [];
+): SessionRenderItem[] {
+  return Array.isArray(payload?.snapshot?.items) ? payload.snapshot.items : [];
 }
 
 export async function fetchChatTimeline(
   input: FetchChatTimelineInput,
-): Promise<SessionRenderRow[]> {
+): Promise<SessionRenderItem[]> {
   const history = await hostSessionWindowFetch({
     sessionKey: input.sessionKey,
     mode: 'latest',
     limit: input.limit ?? DEFAULT_CHAT_HISTORY_LIMIT,
     includeCanonical: true,
   });
-  return resolveAuthoritativeRows(history);
+  return resolveAuthoritativeItems(history);
 }
 
 export async function fetchLatestAssistantText(
   input: FetchChatHistoryInput,
 ): Promise<string> {
-  const rows = await fetchChatTimeline({
+  const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     limit: input.limit,
   });
-  return findLatestAssistantTextFromRows(rows);
+  return findLatestAssistantTextFromItems(items);
 }
 
 export async function fetchLatestAssistantSnapshot(
   input: FetchChatHistoryInput,
 ): Promise<AssistantSnapshot> {
-  const rows = await fetchChatTimeline({
+  const items = await fetchChatTimeline({
     sessionKey: input.sessionKey,
     limit: input.limit,
   });
-  return findLatestAssistantSnapshotFromRows(rows);
+  return findLatestAssistantSnapshotFromItems(items);
 }
 
 export async function sendChatMessage(

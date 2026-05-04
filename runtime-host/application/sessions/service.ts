@@ -1,48 +1,51 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { normalizeOptionalString } from '../../shared/chat-message-normalization';
 import type {
-  SessionExecutionGraphRow,
+  SessionAssistantTurnItem,
   SessionCatalogItem,
   SessionCatalogKind,
+  SessionExecutionGraphItem,
   SessionLoadResult,
-  SessionMessageRow,
-  SessionPendingAssistantRow,
   SessionListResult,
   SessionNewResult,
   SessionPromptResult,
-  SessionRenderRow,
+  SessionRenderItem,
+  SessionRenderTaskCompletionItem,
+  SessionRenderUserMessageItem,
   SessionRuntimeStateSnapshot,
   SessionStateSnapshot,
-  SessionToolActivityRow,
+  SessionTimelineEntry,
+  SessionTimelineMessageEntry,
+  SessionTimelineTaskCompletionEntry,
+  SessionTimelineToolActivityEntry,
   SessionUpdateEvent,
   SessionWindowStateSnapshot,
   SessionWindowResult,
 } from '../../shared/session-adapter-types';
 import {
-  buildRowsFromTranscriptMessage,
-  materializeTranscriptRows,
+  buildTimelineEntriesFromTranscriptMessage,
+  materializeTranscriptTimelineEntries,
   parseTranscriptMessages,
-  resolveSessionLabelDetailsFromRows,
+  resolveSessionLabelDetailsFromTimelineEntries,
   type SessionTranscriptMessage,
 } from './transcript-utils';
 import {
   attachExecutionGraphReply,
-  createExecutionGraphRow,
+  createExecutionGraphItem,
   deriveExecutionGraphSteps,
-  isAssistantActivityRow as isExecutionGraphAssistantActivityRow,
-  isTaskCompletionRow,
+  isAssistantActivityEntry as isExecutionGraphAssistantActivityEntry,
+  isTaskCompletionEntry,
   updateExecutionGraphChildSteps,
   updateExecutionGraphMainSteps,
 } from './execution-graphs';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from './gateway-ingress';
 import {
-  findRowIndex,
-  mergeRows,
-  resolveLastActivityAt,
-  upsertRow,
-} from './row-state';
+  findTimelineEntryIndex,
+  mergeTimelineEntries,
+  resolveTimelineLastActivityAt,
+  upsertTimelineEntry,
+} from './timeline-state';
 import {
   normalizeSendWithMediaInput,
   sendWithMediaViaOpenClawBridge,
@@ -99,9 +102,9 @@ interface SessionPromptMediaPayload {
 }
 
 interface SessionRuntimeTimelineState {
-  rows: SessionRenderRow[];
-  executionGraphs: SessionExecutionGraphRow[];
-  pendingRows: SessionPendingAssistantRow[];
+  timelineEntries: SessionTimelineEntry[];
+  executionGraphItems: SessionExecutionGraphItem[];
+  renderItems: SessionRenderItem[];
   hydrated: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;
@@ -123,6 +126,36 @@ interface PersistedSessionRuntimeStoreFile {
     sessionKey: string;
     runtime: SessionRuntimeStateSnapshot;
   }>;
+}
+
+interface AssistantTurnAccumulator {
+  key: string;
+  turnKey: string;
+  laneKey: string;
+  sessionKey: string;
+  agentId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  runId?: string;
+  latestTimelineKey: string;
+  latestTimelineEntryId?: string;
+  latestTimelineMessageId?: string;
+  lastStatus?: SessionTimelineEntry['status'];
+  thinking: string | null;
+  toolCalls: SessionAssistantTurnItem['toolCalls'];
+  toolStatuses: SessionAssistantTurnItem['toolStatuses'];
+  text: string;
+  images: SessionAssistantTurnItem['images'];
+  attachedFiles: SessionAssistantTurnItem['attachedFiles'];
+  explicitIdentity: boolean;
+}
+
+function buildAssistantTurnItemKey(input: {
+  sessionKey: string;
+  turnKey: string;
+  laneKey: string;
+}): string {
+  return `session:${input.sessionKey}|assistant-turn:${input.turnKey}:${input.laneKey}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -179,7 +212,7 @@ function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingMessageId: null,
+    streamingAnchorKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
     updatedAt: null,
@@ -187,7 +220,7 @@ function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
 }
 
 function createWindowStateSnapshot(input: {
-  totalRowCount: number;
+  totalItemCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -195,7 +228,7 @@ function createWindowStateSnapshot(input: {
   isAtLatest: boolean;
 }): SessionWindowStateSnapshot {
   return {
-    totalRowCount: input.totalRowCount,
+    totalItemCount: input.totalItemCount,
     windowStartOffset: input.windowStartOffset,
     windowEndOffset: input.windowEndOffset,
     hasMore: input.hasMore,
@@ -204,11 +237,11 @@ function createWindowStateSnapshot(input: {
   };
 }
 
-function createLatestWindowState(totalRowCount: number): SessionWindowStateSnapshot {
+function createLatestWindowState(totalItemCount: number): SessionWindowStateSnapshot {
   return createWindowStateSnapshot({
-    totalRowCount,
+    totalItemCount,
     windowStartOffset: 0,
-    windowEndOffset: totalRowCount,
+    windowEndOffset: totalItemCount,
     hasMore: false,
     hasNewer: false,
     isAtLatest: true,
@@ -219,9 +252,9 @@ function createEmptyTimelineState(
   patch: Partial<SessionRuntimeTimelineState> = {},
 ): SessionRuntimeTimelineState {
   return {
-    rows: [],
-    executionGraphs: [],
-    pendingRows: [],
+    timelineEntries: [],
+    executionGraphItems: [],
+    renderItems: [],
     hydrated: false,
     runtime: createEmptySessionRuntimeState(),
     window: createLatestWindowState(0),
@@ -229,36 +262,22 @@ function createEmptyTimelineState(
   };
 }
 
-function cloneSessionRuntimeState(
-  runtime: SessionRuntimeStateSnapshot,
-): SessionRuntimeStateSnapshot {
+function cloneSessionRuntimeState(runtime: SessionRuntimeStateSnapshot): SessionRuntimeStateSnapshot {
   return { ...runtime };
 }
 
-function cloneSessionWindowState(
-  window: SessionWindowStateSnapshot,
-): SessionWindowStateSnapshot {
+function cloneSessionWindowState(window: SessionWindowStateSnapshot): SessionWindowStateSnapshot {
   return { ...window };
 }
 
-function cloneRenderRows(rows: SessionRenderRow[]): SessionRenderRow[] {
-  return structuredClone(rows);
+function cloneRenderItems(items: SessionRenderItem[]): SessionRenderItem[] {
+  return structuredClone(items);
 }
 
-function isAssistantContentRow(
-  row: SessionRenderRow,
-): row is SessionMessageRow | SessionToolActivityRow {
-  return row.role === 'assistant' && (row.kind === 'message' || row.kind === 'tool-activity');
-}
-
-function isProtocolDerivedRow(
-  row: SessionRenderRow,
-): row is SessionPendingAssistantRow | SessionExecutionGraphRow {
-  return row.kind === 'pending-assistant' || row.kind === 'execution-graph';
-}
-
-function filterCoreRows(rows: SessionRenderRow[]): SessionRenderRow[] {
-  return rows.filter((row) => !isProtocolDerivedRow(row));
+function isAssistantTimelineEntry(
+  entry: SessionTimelineEntry,
+): entry is SessionTimelineMessageEntry | SessionTimelineToolActivityEntry {
+  return entry.role === 'assistant' && (entry.kind === 'message' || entry.kind === 'tool-activity');
 }
 
 function isAbsolutePath(path: string): boolean {
@@ -295,14 +314,12 @@ function resolveSessionCatalogKind(sessionKey: string): SessionCatalogKind {
 
 function buildSessionCatalogItem(input: {
   sessionKey: string;
-  rows: SessionRenderRow[];
+  timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
 }): SessionCatalogItem {
   const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
-  const sourceRows = filterCoreRows(input.rows);
-  const rows = sourceRows.length > 0 ? sourceRows : input.rows;
-  const label = resolveSessionLabelDetailsFromRows(rows);
-  const updatedAt = resolveLastActivityAt(rows, input.runtime);
+  const label = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
+  const updatedAt = resolveTimelineLastActivityAt(input.timelineEntries, input.runtime);
   const kind = resolveSessionCatalogKind(input.sessionKey);
   return {
     key: input.sessionKey,
@@ -491,232 +508,19 @@ function pruneStorageIndex(
   );
 }
 
-interface AssistantTurnLaneState {
-  laneKey: string;
-  turnKey: string;
-  agentId: string | null;
-  row: SessionMessageRow | SessionToolActivityRow;
-}
-
-interface AssistantTurnSnapshot {
-  turnKey: string;
-  lanes: AssistantTurnLaneState[];
-  latestRow: SessionMessageRow | SessionToolActivityRow;
-}
-
-function collectAssistantTurns(rows: SessionRenderRow[]): AssistantTurnSnapshot[] {
-  interface MutableTurn {
-    turnKey: string;
-    latestRow: SessionMessageRow | SessionToolActivityRow;
-    lanesByKey: Map<string, AssistantTurnLaneState>;
-  }
-
-  const turns: MutableTurn[] = [];
-  const turnIndexByKey = new Map<string, number>();
-  for (const row of rows) {
-    if (!isAssistantContentRow(row)) {
-      continue;
-    }
-    const turnKey = normalizeString(row.turnKey);
-    const laneKey = normalizeString(row.laneKey);
-    if (!turnKey || !laneKey) {
-      continue;
-    }
-
-    let turn = (() => {
-      const existingIndex = turnIndexByKey.get(turnKey);
-      return existingIndex != null ? turns[existingIndex] : undefined;
-    })();
-    if (!turn) {
-      turn = {
-        turnKey,
-        latestRow: row,
-        lanesByKey: new Map<string, AssistantTurnLaneState>(),
-      };
-      turnIndexByKey.set(turnKey, turns.length);
-      turns.push(turn);
-    }
-
-    turn.latestRow = row;
-    turn.lanesByKey.set(laneKey, {
-      laneKey,
-      turnKey,
-      agentId: normalizeString(row.agentId) || null,
-      row,
-    });
-  }
-
-  return turns.map((turn) => ({
-    turnKey: turn.turnKey,
-    lanes: Array.from(turn.lanesByKey.values()),
-    latestRow: turn.latestRow,
-  }));
-}
-
-function findCurrentStreamingTurn(
-  rows: SessionRenderRow[],
-  streamingMessageId: string | null | undefined,
-): SessionMessageRow | SessionToolActivityRow | null {
-  const normalizedStreamingMessageId = normalizeString(streamingMessageId);
-  if (normalizedStreamingMessageId) {
-    const matched = rows.find((row) => row.rowId === normalizedStreamingMessageId);
-    if (matched && isAssistantContentRow(matched)) {
-      return matched;
-    }
-  }
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row && isAssistantContentRow(row) && row.status === 'streaming') {
-      return row;
-    }
-  }
-  return null;
-}
-
-function buildPendingAssistantProtocolRows(input: {
-  sessionKey: string;
-  rows: SessionRenderRow[];
-  runtime: SessionRuntimeStateSnapshot;
-}): SessionPendingAssistantRow[] {
-  if (!input.runtime.sending) {
-    return [];
-  }
-
-  const turns = collectAssistantTurns(input.rows);
-  const currentStreamingTurn = findCurrentStreamingTurn(
-    input.rows,
-    input.runtime.streamingMessageId,
-  );
-  const activeTurnKey = currentStreamingTurn
-    ? normalizeString(currentStreamingTurn.turnKey)
-    : (turns[turns.length - 1]?.turnKey ?? '');
-  const activeTurn = activeTurnKey
-    ? turns.find((turn) => turn.turnKey === activeTurnKey) ?? null
-    : null;
-  const activeLanes = activeTurn?.lanes ?? [];
-
-  const activityRows = activeLanes
-    .filter((lane) => lane.row.status !== 'streaming')
-    .filter((lane) => input.runtime.pendingFinal || lane.row.toolStatuses.length > 0)
-    .map((lane) => ({
-      key: `session:${input.sessionKey}|pending:${lane.turnKey}:${lane.laneKey}`,
-      kind: 'pending-assistant' as const,
-      sessionKey: input.sessionKey,
-      role: 'assistant' as const,
-      text: '',
-      createdAt: lane.row.createdAt,
-      status: 'pending' as const,
-      runId: lane.row.runId,
-      sequenceId: lane.row.sequenceId,
-      laneKey: lane.laneKey,
-      turnKey: lane.turnKey,
-      agentId: lane.agentId ?? undefined,
-      assistantTurnKey: lane.turnKey,
-      assistantLaneKey: lane.laneKey,
-      assistantLaneAgentId: lane.agentId,
-      pendingState: 'activity' as const,
-    } satisfies SessionPendingAssistantRow));
-  if (activityRows.length > 0) {
-    return activityRows;
-  }
-
-  if (activeTurn?.lanes.some((lane) => lane.row.status === 'streaming')) {
-    return [];
-  }
-
-  const fallbackRow = activeTurn?.latestRow
-    ?? [...input.rows].reverse().find((row) => isAssistantContentRow(row))
-    ?? null;
-  return [{
-    key: `session:${input.sessionKey}|pending:default`,
-    kind: 'pending-assistant',
-    sessionKey: input.sessionKey,
-    role: 'assistant',
-    text: '',
-    createdAt: fallbackRow?.createdAt,
-    status: 'pending',
-    runId: fallbackRow?.runId ?? input.runtime.activeRunId ?? undefined,
-    sequenceId: fallbackRow?.sequenceId,
-    laneKey: fallbackRow?.laneKey,
-    turnKey: fallbackRow?.turnKey,
-    agentId: fallbackRow?.agentId,
-    assistantTurnKey: fallbackRow?.turnKey ?? null,
-    assistantLaneKey: fallbackRow?.laneKey ?? null,
-    assistantLaneAgentId: fallbackRow?.agentId ?? null,
-    pendingState: input.runtime.pendingFinal ? 'activity' : 'typing',
-  } satisfies SessionPendingAssistantRow];
-}
-
-function sortPendingAssistantRows(rows: SessionPendingAssistantRow[]): SessionPendingAssistantRow[] {
-  return [...rows].sort((left, right) => {
-    const leftCreatedAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
-    const rightCreatedAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
-    if (leftCreatedAt !== rightCreatedAt) {
-      return leftCreatedAt - rightCreatedAt;
-    }
-    return left.key.localeCompare(right.key);
-  });
-}
-
-function anchorExecutionGraphRows(
-  baseRows: SessionRenderRow[],
-  executionGraphs: SessionExecutionGraphRow[],
-): SessionRenderRow[] {
-  const rows = cloneRenderRows(baseRows);
-  const insertionsByAnchorKey = new Map<string, SessionExecutionGraphRow[]>();
-  const tailGraphs: SessionExecutionGraphRow[] = [];
-  for (const graphRow of sortExecutionGraphs(executionGraphs)) {
-    const anchorKey = normalizeString(graphRow.anchorRowKey);
-    if (!anchorKey) {
-      tailGraphs.push(graphRow);
-      continue;
-    }
-    const current = insertionsByAnchorKey.get(anchorKey);
-    if (current) {
-      current.push(graphRow);
-    } else {
-      insertionsByAnchorKey.set(anchorKey, [graphRow]);
-    }
-  }
-
-  const visibleRows: SessionRenderRow[] = [];
-  for (const row of rows) {
-    visibleRows.push(row);
-    const anchored = insertionsByAnchorKey.get(row.key);
-    if (anchored?.length) {
-      visibleRows.push(...anchored);
-    }
-  }
-  if (tailGraphs.length > 0) {
-    visibleRows.push(...tailGraphs);
-  }
-  return visibleRows;
-}
-
-function sortExecutionGraphs(graphs: SessionExecutionGraphRow[]): SessionExecutionGraphRow[] {
-  return [...graphs].sort((left, right) => {
-    const leftCreatedAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
-    const rightCreatedAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
-    if (leftCreatedAt !== rightCreatedAt) {
-      return leftCreatedAt - rightCreatedAt;
-    }
-    return left.key.localeCompare(right.key);
-  });
-}
-
 function clampWindowState(
   window: SessionWindowStateSnapshot,
-  totalRowCount: number,
+  totalItemCount: number,
 ): SessionWindowStateSnapshot {
-  const start = Math.max(0, Math.min(window.windowStartOffset, totalRowCount));
-  const end = Math.max(start, Math.min(window.windowEndOffset, totalRowCount));
+  const start = Math.max(0, Math.min(window.windowStartOffset, totalItemCount));
+  const end = Math.max(start, Math.min(window.windowEndOffset, totalItemCount));
   return createWindowStateSnapshot({
-    totalRowCount,
+    totalItemCount,
     windowStartOffset: start,
     windowEndOffset: end,
     hasMore: start > 0,
-    hasNewer: end < totalRowCount,
-    isAtLatest: end >= totalRowCount,
+    hasNewer: end < totalItemCount,
+    isAtLatest: end >= totalItemCount,
   });
 }
 
@@ -725,7 +529,7 @@ function shouldPersistLiveRuntimeState(runtime: SessionRuntimeStateSnapshot): bo
     runtime.sending
     || runtime.pendingFinal
     || runtime.activeRunId != null
-    || runtime.streamingMessageId != null
+    || runtime.streamingAnchorKey != null
     || (runtime.runPhase !== 'idle' && runtime.runPhase !== 'done' && runtime.runPhase !== 'error' && runtime.runPhase !== 'aborted')
   );
 }
@@ -736,30 +540,382 @@ function shouldExposeRuntimeOnlySession(runtime: SessionRuntimeStateSnapshot): b
 }
 
 function buildWindowRange(input: {
-  totalRowCount: number;
+  totalItemCount: number;
   mode: SessionWindowMode;
   limit: number;
   offset: number | null;
 }): { start: number; end: number } {
-  const { totalRowCount, mode, limit, offset } = input;
+  const { totalItemCount, mode, limit, offset } = input;
   if (mode === 'older') {
-    const anchor = Math.min(Math.max(offset ?? totalRowCount, 0), totalRowCount);
+    const anchor = Math.min(Math.max(offset ?? totalItemCount, 0), totalItemCount);
     return {
       start: Math.max(0, anchor - limit),
-      end: Math.min(totalRowCount, anchor + limit),
+      end: Math.min(totalItemCount, anchor + limit),
     };
   }
   if (mode === 'newer') {
-    const start = Math.min(Math.max(offset ?? totalRowCount, 0), totalRowCount);
+    const start = Math.min(Math.max(offset ?? totalItemCount, 0), totalItemCount);
     return {
       start,
-      end: Math.min(totalRowCount, start + limit),
+      end: Math.min(totalItemCount, start + limit),
     };
   }
   return {
-    start: Math.max(0, totalRowCount - limit),
-    end: totalRowCount,
+    start: Math.max(0, totalItemCount - limit),
+    end: totalItemCount,
   };
+}
+
+function sortExecutionGraphItems(graphs: SessionExecutionGraphItem[]): SessionExecutionGraphItem[] {
+  return [...graphs].sort((left, right) => {
+    const leftCreatedAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
+    const rightCreatedAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
+    if (leftCreatedAt !== rightCreatedAt) {
+      return leftCreatedAt - rightCreatedAt;
+    }
+    return left.key.localeCompare(right.key);
+  });
+}
+
+function resolveAssistantTurnPendingState(input: {
+  runtime: SessionRuntimeStateSnapshot;
+  activeTurnKey: string | null;
+  accumulator: AssistantTurnAccumulator;
+}): SessionAssistantTurnItem['pendingState'] {
+  if (!input.runtime.sending) {
+    return null;
+  }
+  if (input.activeTurnKey !== input.accumulator.turnKey) {
+    return null;
+  }
+  if (input.runtime.pendingFinal || input.accumulator.toolStatuses.length > 0) {
+    return 'activity';
+  }
+  if (input.accumulator.lastStatus === 'streaming') {
+    return null;
+  }
+  return 'typing';
+}
+
+function resolveAssistantTurnStatus(input: {
+  runtime: SessionRuntimeStateSnapshot;
+  activeTurnKey: string | null;
+  accumulator: AssistantTurnAccumulator;
+}): SessionAssistantTurnItem['status'] {
+  if (input.accumulator.lastStatus === 'error') {
+    return 'error';
+  }
+  if (input.accumulator.lastStatus === 'aborted') {
+    return 'aborted';
+  }
+  if (input.accumulator.lastStatus === 'streaming') {
+    return 'streaming';
+  }
+  if (input.runtime.sending && input.activeTurnKey === input.accumulator.turnKey) {
+    return input.runtime.pendingFinal || input.accumulator.toolStatuses.length > 0
+      ? 'waiting_tool'
+      : 'streaming';
+  }
+  return 'final';
+}
+
+function mergeAssistantTurnAccumulator(
+  accumulator: AssistantTurnAccumulator,
+  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
+): AssistantTurnAccumulator {
+  const nextUpdatedAt = typeof row.createdAt === 'number'
+    ? row.createdAt
+    : accumulator.updatedAt;
+  return {
+    ...accumulator,
+    createdAt: accumulator.createdAt ?? row.createdAt,
+    updatedAt: nextUpdatedAt,
+    runId: row.runId ?? accumulator.runId,
+    latestTimelineKey: row.key,
+    latestTimelineEntryId: row.entryId ?? accumulator.latestTimelineEntryId,
+    latestTimelineMessageId: row.kind === 'message'
+      ? (row.messageId ?? accumulator.latestTimelineMessageId)
+      : accumulator.latestTimelineMessageId,
+    lastStatus: row.status ?? accumulator.lastStatus,
+    thinking: row.kind === 'message'
+      ? (row.thinking ?? accumulator.thinking)
+      : accumulator.thinking,
+    toolCalls: row.toolUses.length > 0 ? structuredClone(row.toolUses) : accumulator.toolCalls,
+    toolStatuses: row.toolStatuses.length > 0 ? structuredClone(row.toolStatuses) : accumulator.toolStatuses,
+    text: row.text || accumulator.text,
+    images: row.kind === 'message' && row.images.length > 0 ? structuredClone(row.images) : accumulator.images,
+    attachedFiles: row.attachedFiles.length > 0 ? structuredClone(row.attachedFiles) : accumulator.attachedFiles,
+    explicitIdentity: accumulator.explicitIdentity,
+  };
+}
+
+function hasExplicitAssistantTurnIdentity(
+  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
+): boolean {
+  if (normalizeString(row.runId)) {
+    return true;
+  }
+  if (row.kind !== 'message') {
+    return false;
+  }
+  return Boolean(
+    normalizeString(row.uniqueId)
+    || normalizeString(row.requestId)
+    || normalizeString(row.clientId)
+    || normalizeString(row.originMessageId),
+  );
+}
+
+function createAssistantTurnAccumulator(
+  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
+): AssistantTurnAccumulator | null {
+  const laneKey = normalizeString(row.laneKey);
+  const turnKey = normalizeString(row.turnKey);
+  if (!laneKey || !turnKey) {
+    return null;
+  }
+  return {
+    key: buildAssistantTurnItemKey({
+      sessionKey: row.sessionKey,
+      turnKey,
+      laneKey,
+    }),
+    turnKey,
+    laneKey,
+    sessionKey: row.sessionKey,
+    ...(row.agentId ? { agentId: row.agentId } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.createdAt,
+    ...(row.runId ? { runId: row.runId } : {}),
+    latestTimelineKey: row.key,
+    ...(row.entryId ? { latestTimelineEntryId: row.entryId } : {}),
+    ...(row.kind === 'message' && row.messageId ? { latestTimelineMessageId: row.messageId } : {}),
+    lastStatus: row.status,
+    thinking: row.kind === 'message' ? row.thinking : null,
+    toolCalls: structuredClone(row.toolUses),
+    toolStatuses: structuredClone(row.toolStatuses),
+    text: row.text,
+    images: row.kind === 'message' ? structuredClone(row.images) : [],
+    attachedFiles: structuredClone(row.attachedFiles),
+    explicitIdentity: hasExplicitAssistantTurnIdentity(row),
+  };
+}
+
+function resolveAssistantTurnItemKeyFromTimelineEntry(entry: SessionTimelineEntry): string | null {
+  if (!isAssistantTimelineEntry(entry)) {
+    return null;
+  }
+  const laneKey = normalizeString(entry.laneKey);
+  const turnKey = normalizeString(entry.turnKey);
+  if (!laneKey || !turnKey) {
+    return null;
+  }
+  return buildAssistantTurnItemKey({
+    sessionKey: entry.sessionKey,
+    turnKey,
+    laneKey,
+  });
+}
+
+function buildRenderItemsFromTimeline(input: {
+  timelineEntries: SessionTimelineEntry[];
+  executionGraphItems: SessionExecutionGraphItem[];
+  runtime: SessionRuntimeStateSnapshot;
+}): SessionRenderItem[] {
+  const graphByAnchorKey = new Map<string, SessionExecutionGraphItem[]>();
+  const tailGraphs: SessionExecutionGraphItem[] = [];
+  for (const graph of sortExecutionGraphItems(input.executionGraphItems)) {
+    const anchorKey = normalizeString(graph.anchorItemKey);
+    if (!anchorKey) {
+      tailGraphs.push(structuredClone(graph));
+      continue;
+    }
+    const current = graphByAnchorKey.get(anchorKey);
+    if (current) {
+      current.push(structuredClone(graph));
+    } else {
+      graphByAnchorKey.set(anchorKey, [structuredClone(graph)]);
+    }
+  }
+
+  const assistantAccumulatorsByMatchKey = new Map<string, AssistantTurnAccumulator>();
+  const assistantTurnOrder: string[] = [];
+  const assistantTurnMatchKeyByItemKey = new Map<string, string>();
+  const assistantTurnMatchKeyByTimelineKey = new Map<string, string>();
+  let previousImplicitAssistantMatchKey: string | null = null;
+  let previousImplicitAssistantLaneKey: string | null = null;
+
+  for (const entry of input.timelineEntries) {
+    if (!isAssistantTimelineEntry(entry)) {
+      previousImplicitAssistantMatchKey = null;
+      previousImplicitAssistantLaneKey = null;
+      continue;
+    }
+    const accumulatorSeed = createAssistantTurnAccumulator(entry);
+    if (!accumulatorSeed) {
+      previousImplicitAssistantMatchKey = null;
+      previousImplicitAssistantLaneKey = null;
+      continue;
+    }
+    const matchKey = !accumulatorSeed.explicitIdentity
+      && previousImplicitAssistantMatchKey
+      && previousImplicitAssistantLaneKey === accumulatorSeed.laneKey
+      ? previousImplicitAssistantMatchKey
+      : (accumulatorSeed.explicitIdentity
+          ? `${accumulatorSeed.turnKey}|${accumulatorSeed.laneKey}`
+          : `implicit:${accumulatorSeed.laneKey}:${accumulatorSeed.key}`);
+    const existing = assistantAccumulatorsByMatchKey.get(matchKey);
+    const next = existing
+      ? mergeAssistantTurnAccumulator(existing, entry)
+      : accumulatorSeed;
+    assistantAccumulatorsByMatchKey.set(matchKey, next);
+    if (!existing) {
+      assistantTurnOrder.push(matchKey);
+    }
+    assistantTurnMatchKeyByItemKey.set(next.key, matchKey);
+    assistantTurnMatchKeyByTimelineKey.set(entry.key, matchKey);
+    if (next.explicitIdentity) {
+      previousImplicitAssistantMatchKey = null;
+      previousImplicitAssistantLaneKey = null;
+    } else {
+      previousImplicitAssistantMatchKey = matchKey;
+      previousImplicitAssistantLaneKey = accumulatorSeed.laneKey;
+    }
+  }
+
+  const activeAssistantTurnMatchKey = (() => {
+    const streamingAnchorKey = normalizeString(input.runtime.streamingAnchorKey);
+    if (streamingAnchorKey) {
+      const byItemKey = assistantTurnMatchKeyByItemKey.get(streamingAnchorKey);
+      if (byItemKey) {
+        return byItemKey;
+      }
+    }
+    if (assistantTurnOrder.length === 0) {
+      return null;
+    }
+    return assistantTurnOrder[assistantTurnOrder.length - 1] ?? null;
+  })();
+
+  const renderItems: SessionRenderItem[] = [];
+  const emittedAssistantTurns = new Set<string>();
+
+  const flushAnchoredGraphs = (anchorKey: string) => {
+    const anchored = graphByAnchorKey.get(anchorKey);
+    if (!anchored?.length) {
+      return;
+    }
+    renderItems.push(...anchored.map((graph) => structuredClone(graph)));
+    graphByAnchorKey.delete(anchorKey);
+  };
+
+  for (const entry of input.timelineEntries) {
+    if (isAssistantTimelineEntry(entry)) {
+      const matchKey = assistantTurnMatchKeyByTimelineKey.get(entry.key) ?? null;
+      if (!matchKey) {
+        continue;
+      }
+      const accumulator = assistantAccumulatorsByMatchKey.get(matchKey);
+      if (!accumulator) {
+        continue;
+      }
+      if (accumulator.latestTimelineKey !== entry.key) {
+        continue;
+      }
+      if (emittedAssistantTurns.has(accumulator.key)) {
+        continue;
+      }
+      const activeTurnKey = activeAssistantTurnMatchKey
+        ? assistantAccumulatorsByMatchKey.get(activeAssistantTurnMatchKey)?.turnKey ?? null
+        : null;
+      const item: SessionAssistantTurnItem = {
+        key: accumulator.key,
+        kind: 'assistant-turn',
+        sessionKey: accumulator.sessionKey,
+        role: 'assistant',
+        ...(accumulator.createdAt != null ? { createdAt: accumulator.createdAt } : {}),
+        ...(accumulator.updatedAt != null ? { updatedAt: accumulator.updatedAt } : {}),
+        ...(accumulator.runId ? { runId: accumulator.runId } : {}),
+        laneKey: accumulator.laneKey,
+        turnKey: accumulator.turnKey,
+        ...(accumulator.agentId ? { agentId: accumulator.agentId } : {}),
+        status: resolveAssistantTurnStatus({
+          runtime: input.runtime,
+          activeTurnKey,
+          accumulator,
+        }),
+        thinking: accumulator.thinking,
+        toolCalls: structuredClone(accumulator.toolCalls),
+        toolStatuses: structuredClone(accumulator.toolStatuses),
+        text: accumulator.text,
+        images: structuredClone(accumulator.images),
+        attachedFiles: structuredClone(accumulator.attachedFiles),
+        pendingState: resolveAssistantTurnPendingState({
+          runtime: input.runtime,
+          activeTurnKey,
+          accumulator,
+        }),
+      };
+      renderItems.push(item);
+      emittedAssistantTurns.add(accumulator.key);
+      flushAnchoredGraphs(item.key);
+      continue;
+    }
+
+    if (entry.kind === 'message' && entry.role === 'user') {
+      const item: SessionRenderUserMessageItem = {
+        key: entry.key,
+        kind: 'user-message',
+        sessionKey: entry.sessionKey,
+        role: 'user',
+        text: entry.text,
+        images: structuredClone(entry.images),
+        attachedFiles: structuredClone(entry.attachedFiles),
+        ...(entry.createdAt != null ? { createdAt: entry.createdAt } : {}),
+        ...(entry.createdAt != null ? { updatedAt: entry.createdAt } : {}),
+        ...(entry.runId ? { runId: entry.runId } : {}),
+        ...(entry.messageId ? { messageId: entry.messageId } : {}),
+      };
+      renderItems.push(item);
+      flushAnchoredGraphs(item.key);
+      continue;
+    }
+
+    if (entry.kind === 'task-completion') {
+      const item: SessionRenderTaskCompletionItem = {
+        key: entry.key,
+        kind: 'task-completion',
+        sessionKey: entry.sessionKey,
+        role: 'system',
+        text: entry.text,
+        childSessionKey: entry.childSessionKey,
+        ...(entry.createdAt != null ? { createdAt: entry.createdAt } : {}),
+        ...(entry.createdAt != null ? { updatedAt: entry.createdAt } : {}),
+        ...(entry.runId ? { runId: entry.runId } : {}),
+        ...(entry.childSessionId ? { childSessionId: entry.childSessionId } : {}),
+        ...(entry.childAgentId ? { childAgentId: entry.childAgentId } : {}),
+        ...(entry.taskLabel ? { taskLabel: entry.taskLabel } : {}),
+        ...(entry.statusLabel ? { statusLabel: entry.statusLabel } : {}),
+        ...(entry.result ? { result: entry.result } : {}),
+        ...(entry.statsLine ? { statsLine: entry.statsLine } : {}),
+        ...(entry.replyInstruction ? { replyInstruction: entry.replyInstruction } : {}),
+        ...(entry.anchorItemKey ? { anchorItemKey: entry.anchorItemKey } : {}),
+        ...(entry.triggerItemKey ? { triggerItemKey: entry.triggerItemKey } : {}),
+        ...(entry.replyItemKey ? { replyItemKey: entry.replyItemKey } : {}),
+      };
+      renderItems.push(item);
+      flushAnchoredGraphs(item.key);
+      continue;
+    }
+
+    if (entry.kind === 'system') {
+      renderItems.push(structuredClone(entry));
+      flushAnchoredGraphs(entry.key);
+    }
+  }
+
+  renderItems.push(...tailGraphs);
+  return renderItems;
 }
 
 export class SessionRuntimeService {
@@ -882,7 +1038,7 @@ export class SessionRuntimeService {
     return null;
   }
 
-  private readTranscriptRows(sessionKey: string): SessionRenderRow[] {
+  private readTranscriptTimelineEntries(sessionKey: string): SessionTimelineEntry[] {
     const descriptor = this.findStorageDescriptor(sessionKey);
     if (!descriptor?.transcriptPath || !existsSync(descriptor.transcriptPath)) {
       return [];
@@ -895,31 +1051,20 @@ export class SessionRuntimeService {
       return [];
     }
 
-    return materializeTranscriptRows(sessionKey, parseTranscriptMessages(content));
+    return materializeTranscriptTimelineEntries(sessionKey, parseTranscriptMessages(content));
   }
 
-  private resolveStorageDescriptorForDeletion(sessionKey: string): SessionStorageDescriptor | null {
-    const descriptor = this.findStorageDescriptor(sessionKey);
-    if (!descriptor) {
-      return null;
-    }
-    if (!descriptor.sessionsJsonPath || !descriptor.sessionsJson) {
-      return descriptor;
-    }
-    return descriptor;
-  }
-
-  private resolveChildRowsForExecutionGraph(childSessionKey: string): SessionRenderRow[] {
+  private resolveChildTimelineEntriesForExecutionGraph(childSessionKey: string): SessionTimelineEntry[] {
     const childState = this.getSessionState(childSessionKey);
     if (!childState.hydrated) {
       this.ensureSessionHydrated(childSessionKey, childState);
     }
-    return filterCoreRows(childState.rows);
+    return childState.timelineEntries;
   }
 
   private updateExecutionGraphDependencyIndex(
     sessionKey: string,
-    graphs: SessionExecutionGraphRow[],
+    graphs: SessionExecutionGraphItem[],
   ): void {
     for (const parents of this.parentSessionsByChildSessionKey.values()) {
       parents.delete(sessionKey);
@@ -938,173 +1083,110 @@ export class SessionRuntimeService {
     }
   }
 
-  private findExecutionGraphRowIndex(
+  private findExecutionGraphItemIndex(
     state: SessionRuntimeTimelineState,
-    completionRowKey: string,
+    completionItemKey: string,
   ): number {
-    return state.executionGraphs.findIndex((graph) => graph.completionRowKey === completionRowKey);
+    return state.executionGraphItems.findIndex((graph) => graph.completionItemKey === completionItemKey);
   }
 
-  private findExecutionGraphReplyRow(
-    rows: SessionRenderRow[],
-    completionRowKey: string,
-  ): SessionMessageRow | SessionToolActivityRow | null {
-    const completionIndex = rows.findIndex((row) => row.key === completionRowKey);
+  private findExecutionGraphReplyItem(
+    renderItems: SessionRenderItem[],
+    completionItemKey: string,
+  ): SessionAssistantTurnItem | null {
+    const completionIndex = renderItems.findIndex((item) => item.key === completionItemKey);
     if (completionIndex < 0) {
       return null;
     }
-    for (let index = completionIndex + 1; index < rows.length; index += 1) {
-      const row = rows[index];
-      if (row && isExecutionGraphAssistantActivityRow(row)) {
-        return row;
+    for (let index = completionIndex + 1; index < renderItems.length; index += 1) {
+      const item = renderItems[index];
+      if (item?.kind === 'assistant-turn') {
+        return item;
       }
     }
     return null;
   }
 
-  private buildExecutionGraphMainRows(
-    rows: SessionRenderRow[],
-    graph: SessionExecutionGraphRow,
-  ): SessionRenderRow[] {
-    const triggerIndex = rows.findIndex((row) => row.key === graph.triggerRowKey);
+  private buildExecutionGraphMainTimelineEntries(
+    state: SessionRuntimeTimelineState,
+    graph: SessionExecutionGraphItem,
+  ): SessionTimelineEntry[] {
+    const triggerIndex = state.timelineEntries.findIndex((entry) => entry.key === graph.triggerItemKey);
     if (triggerIndex < 0) {
       return [];
     }
-    const replyIndex = graph.replyRowKey
-      ? rows.findIndex((row) => row.key === graph.replyRowKey)
+    const replyItemIndex = graph.replyItemKey
+      ? state.renderItems.findIndex((item) => item.key === graph.replyItemKey)
       : -1;
-    const endExclusive = replyIndex >= 0 ? replyIndex + 1 : rows.length;
-    return rows.slice(triggerIndex, Math.max(triggerIndex, endExclusive));
+    let replyTimelineIndex = -1;
+    if (replyItemIndex >= 0) {
+      const replyItem = state.renderItems[replyItemIndex];
+      if (replyItem?.kind === 'assistant-turn') {
+        replyTimelineIndex = state.timelineEntries.findIndex((entry) => (
+          entry.turnKey === replyItem.turnKey
+          && entry.laneKey === replyItem.laneKey
+        ));
+      }
+    }
+    const endExclusive = replyTimelineIndex >= 0 ? replyTimelineIndex + 1 : state.timelineEntries.length;
+    return state.timelineEntries.slice(triggerIndex, Math.max(triggerIndex, endExclusive));
   }
 
-  private refreshExecutionGraphRow(
+  private refreshExecutionGraphItem(
     state: SessionRuntimeTimelineState,
     graphIndex: number,
-    rows: SessionRenderRow[],
     options: {
       refreshChildSteps?: boolean;
     } = {},
   ): void {
-    const current = state.executionGraphs[graphIndex];
+    const current = state.executionGraphItems[graphIndex];
     if (!current) {
       return;
     }
     const next = attachExecutionGraphReply(
       current,
-      this.findExecutionGraphReplyRow(rows, current.completionRowKey),
+      this.findExecutionGraphReplyItem(state.renderItems, current.completionItemKey),
     );
     const withMainSteps = updateExecutionGraphMainSteps(
       next,
-      deriveExecutionGraphSteps(this.buildExecutionGraphMainRows(rows, next)),
+      deriveExecutionGraphSteps(this.buildExecutionGraphMainTimelineEntries(state, next)),
     );
-    state.executionGraphs[graphIndex] = options.refreshChildSteps
+    state.executionGraphItems[graphIndex] = options.refreshChildSteps
       ? updateExecutionGraphChildSteps(
           withMainSteps,
-          deriveExecutionGraphSteps(this.resolveChildRowsForExecutionGraph(withMainSteps.childSessionKey)),
+          deriveExecutionGraphSteps(this.resolveChildTimelineEntriesForExecutionGraph(withMainSteps.childSessionKey)),
         )
       : withMainSteps;
   }
 
-  private rebuildExecutionGraphsFromRows(
+  private refreshRenderItems(state: SessionRuntimeTimelineState): void {
+    state.renderItems = buildRenderItemsFromTimeline({
+      timelineEntries: state.timelineEntries,
+      executionGraphItems: state.executionGraphItems,
+      runtime: state.runtime,
+    });
+  }
+
+  private rebuildExecutionGraphsFromTimeline(
     sessionKey: string,
     state: SessionRuntimeTimelineState,
   ): void {
-    const rows = filterCoreRows(state.rows);
-    state.executionGraphs = [];
-    for (const row of rows) {
-      if (!isTaskCompletionRow(row)) {
+    state.executionGraphItems = [];
+    for (const entry of state.timelineEntries) {
+      if (!isTaskCompletionEntry(entry)) {
         continue;
       }
-      const triggerRow = row.triggerRowKey
-        ? rows.find((candidate) => candidate.key === row.triggerRowKey) ?? row
-        : row;
-      state.executionGraphs.push(createExecutionGraphRow(row, triggerRow));
+      const triggerEntry = entry.triggerItemKey
+        ? state.timelineEntries.find((candidate) => candidate.key === entry.triggerItemKey) ?? entry
+        : entry;
+      state.executionGraphItems.push(createExecutionGraphItem(entry, triggerEntry));
     }
-    for (let index = 0; index < state.executionGraphs.length; index += 1) {
-      this.refreshExecutionGraphRow(state, index, rows, { refreshChildSteps: true });
+    this.refreshRenderItems(state);
+    for (let index = 0; index < state.executionGraphItems.length; index += 1) {
+      this.refreshExecutionGraphItem(state, index, { refreshChildSteps: true });
     }
-    this.updateExecutionGraphDependencyIndex(sessionKey, state.executionGraphs);
-  }
-
-  private markExecutionGraphsAffectedByRow(
-    state: SessionRuntimeTimelineState,
-    rows: SessionRenderRow[],
-    rowKey: string,
-    affectedCompletionRowKeys: Set<string>,
-  ): void {
-    const rowIndex = rows.findIndex((row) => row.key === rowKey);
-    if (rowIndex < 0) {
-      return;
-    }
-    for (const graph of state.executionGraphs) {
-      const triggerIndex = rows.findIndex((row) => row.key === graph.triggerRowKey);
-      if (triggerIndex < 0 || rowIndex < triggerIndex) {
-        continue;
-      }
-      const replyIndex = graph.replyRowKey
-        ? rows.findIndex((row) => row.key === graph.replyRowKey)
-        : -1;
-      const rangeEnd = replyIndex >= 0 ? replyIndex : rows.length - 1;
-      if (rowIndex <= rangeEnd) {
-        affectedCompletionRowKeys.add(graph.completionRowKey);
-      }
-    }
-  }
-
-  private reduceExecutionGraphsForRowUpsert(
-    sessionKey: string,
-    state: SessionRuntimeTimelineState,
-    row: SessionRenderRow,
-    rows: SessionRenderRow[],
-    affectedCompletionRowKeys: Set<string>,
-  ): void {
-    if (isTaskCompletionRow(row)) {
-      const triggerRow = row.triggerRowKey
-        ? rows.find((candidate) => candidate.key === row.triggerRowKey) ?? row
-        : row;
-      const nextGraph = createExecutionGraphRow(row, triggerRow);
-      const existingIndex = this.findExecutionGraphRowIndex(state, row.key);
-      if (existingIndex >= 0) {
-        state.executionGraphs[existingIndex] = nextGraph;
-      } else {
-        state.executionGraphs.push(nextGraph);
-      }
-      affectedCompletionRowKeys.add(row.key);
-      this.updateExecutionGraphDependencyIndex(sessionKey, state.executionGraphs);
-    }
-
-    if (isExecutionGraphAssistantActivityRow(row)) {
-      const replyIndex = rows.findIndex((candidate) => candidate.key === row.key);
-      for (let index = 0; index < state.executionGraphs.length; index += 1) {
-        const graph = state.executionGraphs[index];
-        if (!graph || graph.replyRowKey) {
-          continue;
-        }
-        const completionIndex = rows.findIndex((candidate) => candidate.key === graph.completionRowKey);
-        if (completionIndex >= 0 && completionIndex < replyIndex) {
-          state.executionGraphs[index] = attachExecutionGraphReply(graph, row);
-          affectedCompletionRowKeys.add(graph.completionRowKey);
-        }
-      }
-    }
-
-    this.markExecutionGraphsAffectedByRow(state, rows, row.key, affectedCompletionRowKeys);
-  }
-
-  private refreshExecutionGraphs(
-    state: SessionRuntimeTimelineState,
-    rows: SessionRenderRow[],
-    affectedCompletionRowKeys: Set<string>,
-    options: {
-      refreshChildSteps?: boolean;
-    } = {},
-  ): void {
-    for (const completionRowKey of affectedCompletionRowKeys) {
-      const graphIndex = this.findExecutionGraphRowIndex(state, completionRowKey);
-      if (graphIndex >= 0) {
-        this.refreshExecutionGraphRow(state, graphIndex, rows, options);
-      }
-    }
+    this.refreshRenderItems(state);
+    this.updateExecutionGraphDependencyIndex(sessionKey, state.executionGraphItems);
   }
 
   private refreshParentExecutionGraphs(childSessionKey: string): void {
@@ -1117,49 +1199,15 @@ export class SessionRuntimeService {
       if (!parentState?.hydrated) {
         continue;
       }
-      const rows = filterCoreRows(parentState.rows);
-      const affectedCompletionRowKeys = new Set<string>();
-      for (const graph of parentState.executionGraphs) {
-        if (graph.childSessionKey === childSessionKey) {
-          affectedCompletionRowKeys.add(graph.completionRowKey);
+      for (let index = 0; index < parentState.executionGraphItems.length; index += 1) {
+        const graph = parentState.executionGraphItems[index];
+        if (graph?.childSessionKey === childSessionKey) {
+          this.refreshExecutionGraphItem(parentState, index, { refreshChildSteps: true });
         }
       }
-      if (affectedCompletionRowKeys.size === 0) {
-        continue;
-      }
-      this.refreshExecutionGraphs(parentState, rows, affectedCompletionRowKeys, {
-        refreshChildSteps: true,
-      });
-      parentState.rows = this.materializeProtocolRows(parentSessionKey, parentState);
-      parentState.window = clampWindowState(parentState.window, parentState.rows.length);
+      this.refreshRenderItems(parentState);
+      parentState.window = clampWindowState(parentState.window, parentState.renderItems.length);
     }
-  }
-
-  private syncPendingAssistantRows(
-    sessionKey: string,
-    state: SessionRuntimeTimelineState,
-  ): void {
-    state.pendingRows = sortPendingAssistantRows(buildPendingAssistantProtocolRows({
-      sessionKey,
-      rows: filterCoreRows(state.rows),
-      runtime: state.runtime,
-    }));
-  }
-
-  private materializeProtocolRows(
-    sessionKey: string,
-    state: SessionRuntimeTimelineState,
-  ): SessionRenderRow[] {
-    const coreRows = filterCoreRows(state.rows);
-    const baseRows = [...coreRows, ...state.pendingRows];
-    return anchorExecutionGraphRows(baseRows, state.executionGraphs);
-  }
-
-  private recomposeSessionRows(
-    sessionKey: string,
-    state: SessionRuntimeTimelineState,
-  ): void {
-    state.rows = this.materializeProtocolRows(sessionKey, state);
   }
 
   private ensureSessionHydrated(
@@ -1170,15 +1218,13 @@ export class SessionRuntimeService {
       return;
     }
 
-    state.rows = mergeRows(
-      this.readTranscriptRows(sessionKey),
-      filterCoreRows(state.rows),
+    state.timelineEntries = mergeTimelineEntries(
+      this.readTranscriptTimelineEntries(sessionKey),
+      state.timelineEntries,
     );
     state.hydrated = true;
-    this.rebuildExecutionGraphsFromRows(sessionKey, state);
-    this.syncPendingAssistantRows(sessionKey, state);
-    this.recomposeSessionRows(sessionKey, state);
-    state.window = createLatestWindowState(state.rows.length);
+    this.rebuildExecutionGraphsFromTimeline(sessionKey, state);
+    state.window = createLatestWindowState(state.renderItems.length);
     this.refreshParentExecutionGraphs(sessionKey);
   }
 
@@ -1194,79 +1240,79 @@ export class SessionRuntimeService {
     if (options.hydrate) {
       this.ensureSessionHydrated(sessionKey, state);
     }
-    this.syncPendingAssistantRows(sessionKey, state);
-    this.recomposeSessionRows(sessionKey, state);
+    this.refreshRenderItems(state);
     if (options.resetWindowToLatest) {
-      state.window = createLatestWindowState(state.rows.length);
+      state.window = createLatestWindowState(state.renderItems.length);
     }
     this.persistStore();
     return state;
   }
 
-  private upsertSessionRows(sessionKey: string, rows: SessionRenderRow[]): SessionRenderRow[] {
+  private upsertTimelineEntries(sessionKey: string, entries: SessionTimelineEntry[]): SessionTimelineEntry[] {
     const state = this.getSessionState(sessionKey);
     if (!state.hydrated) {
       this.ensureSessionHydrated(sessionKey, state);
     }
-    state.rows = filterCoreRows(state.rows);
-    const mergedRows: SessionRenderRow[] = [];
-    const affectedCompletionRowKeys = new Set<string>();
-    for (const row of rows) {
-      state.rows = upsertRow(state.rows, row);
-      const mergedIndex = findRowIndex(state.rows, row);
+    const mergedEntries: SessionTimelineEntry[] = [];
+    let touchedExecutionGraphs = false;
+    for (const entry of entries) {
+      state.timelineEntries = upsertTimelineEntry(state.timelineEntries, entry);
+      const mergedIndex = findTimelineEntryIndex(state.timelineEntries, entry);
       if (mergedIndex >= 0) {
-        const mergedRow = structuredClone(state.rows[mergedIndex]!);
-        mergedRows.push(mergedRow);
-        this.reduceExecutionGraphsForRowUpsert(
-          sessionKey,
-          state,
-          mergedRow,
-          state.rows,
-          affectedCompletionRowKeys,
-        );
+        const mergedEntry = structuredClone(state.timelineEntries[mergedIndex]!);
+        mergedEntries.push(mergedEntry);
+        if (mergedEntry.kind === 'task-completion') {
+          touchedExecutionGraphs = true;
+        }
       }
     }
-    this.refreshExecutionGraphs(state, state.rows, affectedCompletionRowKeys);
-    this.syncPendingAssistantRows(sessionKey, state);
-    this.recomposeSessionRows(sessionKey, state);
-    state.window = createLatestWindowState(state.rows.length);
+    if (touchedExecutionGraphs) {
+      this.rebuildExecutionGraphsFromTimeline(sessionKey, state);
+    } else {
+      this.refreshRenderItems(state);
+      for (let index = 0; index < state.executionGraphItems.length; index += 1) {
+        this.refreshExecutionGraphItem(state, index);
+      }
+      this.refreshRenderItems(state);
+    }
+    state.window = createLatestWindowState(state.renderItems.length);
     this.refreshParentExecutionGraphs(sessionKey);
     this.persistStore();
-    return mergedRows;
+    return mergedEntries;
   }
 
   private buildSnapshot(
     sessionKey: string,
     state: SessionRuntimeTimelineState,
     options: {
-      rows?: SessionRenderRow[];
+      items?: SessionRenderItem[];
       window?: SessionWindowStateSnapshot;
       replayComplete?: boolean;
     } = {},
   ): SessionStateSnapshot {
-    const allRows = options.rows ?? state.rows;
+    const allItems = options.items ?? state.renderItems;
     const baseWindow = cloneSessionWindowState(
       options.window
-      ?? (state.window.isAtLatest ? createLatestWindowState(allRows.length) : state.window),
+      ?? (state.window.isAtLatest ? createLatestWindowState(allItems.length) : state.window),
     );
-    const start = Math.max(0, Math.min(baseWindow.windowStartOffset, allRows.length));
-    const end = Math.max(start, Math.min(baseWindow.windowEndOffset, allRows.length));
+    const start = Math.max(0, Math.min(baseWindow.windowStartOffset, allItems.length));
+    const end = Math.max(start, Math.min(baseWindow.windowEndOffset, allItems.length));
     const window = createWindowStateSnapshot({
-      totalRowCount: allRows.length,
+      totalItemCount: allItems.length,
       windowStartOffset: start,
       windowEndOffset: end,
       hasMore: start > 0,
-      hasNewer: end < allRows.length,
-      isAtLatest: end >= allRows.length,
+      hasNewer: end < allItems.length,
+      isAtLatest: end >= allItems.length,
     });
     return {
       sessionKey,
       catalog: buildSessionCatalogItem({
         sessionKey,
-        rows: allRows,
+        timelineEntries: state.timelineEntries,
         runtime: state.runtime,
       }),
-      rows: cloneRenderRows(allRows.slice(start, end)),
+      items: cloneRenderItems(allItems.slice(start, end)),
       replayComplete: options.replayComplete ?? true,
       runtime: cloneSessionRuntimeState(state.runtime),
       window,
@@ -1277,10 +1323,9 @@ export class SessionRuntimeService {
     sessionKey: string,
     state: SessionRuntimeTimelineState,
   ): SessionStateSnapshot {
-    const rows = state.rows;
     return this.buildSnapshot(sessionKey, state, {
-      rows,
-      window: createLatestWindowState(rows.length),
+      items: state.renderItems,
+      window: createLatestWindowState(state.renderItems.length),
       replayComplete: true,
     });
   }
@@ -1294,26 +1339,26 @@ export class SessionRuntimeService {
       offset: number | null;
     },
   ): SessionStateSnapshot {
-    const allRows = state.rows;
-    const totalRowCount = allRows.length;
+    const allItems = state.renderItems;
+    const totalItemCount = allItems.length;
     const { start, end } = buildWindowRange({
-      totalRowCount,
+      totalItemCount,
       mode: input.mode,
       limit: input.limit,
       offset: input.offset,
     });
     const window = createWindowStateSnapshot({
-      totalRowCount,
+      totalItemCount,
       windowStartOffset: start,
       windowEndOffset: end,
       hasMore: start > 0,
-      hasNewer: end < totalRowCount,
-      isAtLatest: end >= totalRowCount,
+      hasNewer: end < totalItemCount,
+      isAtLatest: end >= totalItemCount,
     });
     state.window = window;
     this.persistStore();
     return this.buildSnapshot(sessionKey, state, {
-      rows: allRows,
+      items: allItems,
       window,
       replayComplete: true,
     });
@@ -1329,23 +1374,32 @@ export class SessionRuntimeService {
       ...patch,
       updatedAt: Date.now(),
     };
-    this.syncPendingAssistantRows(sessionKey, state);
-    this.recomposeSessionRows(sessionKey, state);
+    this.refreshRenderItems(state);
+    for (let index = 0; index < state.executionGraphItems.length; index += 1) {
+      this.refreshExecutionGraphItem(state, index);
+    }
+    this.refreshRenderItems(state);
     this.persistStore();
     return cloneSessionRuntimeState(state.runtime);
   }
 
-  private resolvePrimaryRowFromSnapshot(
+  private resolvePrimaryItemFromSnapshot(
     snapshot: SessionStateSnapshot,
-    candidate: SessionRenderRow | null,
-    fallbackRows: SessionRenderRow[],
-  ): SessionRenderRow | null {
-    const primaryRowId = candidate?.rowId ?? fallbackRows[0]?.rowId ?? null;
-    const primaryKey = candidate?.key ?? fallbackRows[0]?.key ?? null;
-    return snapshot.rows.find((row) => (
-      (primaryRowId && row.rowId === primaryRowId)
-      || (primaryKey && row.key === primaryKey)
-    )) ?? null;
+    candidate: SessionTimelineEntry | null,
+    fallbackEntries: SessionTimelineEntry[],
+  ): SessionRenderItem | null {
+    const source = candidate ?? fallbackEntries[fallbackEntries.length - 1] ?? null;
+    if (!source) {
+      return null;
+    }
+    if (isAssistantTimelineEntry(source)) {
+      return snapshot.items.find((item) => (
+        item.kind === 'assistant-turn'
+        && item.turnKey === source.turnKey
+        && item.laneKey === source.laneKey
+      )) ?? null;
+    }
+    return snapshot.items.find((item) => item.key === source.key) ?? null;
   }
 
   private resolveLifecycleRuntime(
@@ -1367,7 +1421,7 @@ export class SessionRuntimeService {
           sending: false,
           activeRunId: null,
           runPhase: 'done',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
         });
       case 'error':
@@ -1375,7 +1429,7 @@ export class SessionRuntimeService {
           sending: false,
           activeRunId: null,
           runPhase: 'error',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
         });
       case 'aborted':
@@ -1383,7 +1437,7 @@ export class SessionRuntimeService {
           sending: false,
           activeRunId: null,
           runPhase: 'aborted',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
         });
       default:
@@ -1395,26 +1449,27 @@ export class SessionRuntimeService {
     sessionKey: string,
     input: {
       runId: string | null;
-      row: SessionRenderRow;
+      entry: SessionTimelineEntry;
       sessionUpdate: 'agent_message_chunk' | 'agent_message';
     },
   ): SessionRuntimeStateSnapshot {
     const currentState = this.getSessionState(sessionKey);
-    const messageTimestamp = input.row.createdAt != null ? input.row.createdAt : null;
+    const messageTimestamp = input.entry.createdAt != null ? input.entry.createdAt : null;
     if (input.sessionUpdate === 'agent_message_chunk') {
       return this.setSessionRuntime(sessionKey, {
         sending: true,
         activeRunId: input.runId,
         runPhase: 'streaming',
-        streamingMessageId: input.row.rowId ?? currentState.runtime.streamingMessageId,
+        streamingAnchorKey: resolveAssistantTurnItemKeyFromTimelineEntry(input.entry)
+          ?? currentState.runtime.streamingAnchorKey,
         pendingFinal: false,
-        lastUserMessageAt: input.row.role === 'user' && typeof messageTimestamp === 'number'
+        lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
           ? messageTimestamp
           : currentState.runtime.lastUserMessageAt,
       });
     }
 
-    if (input.row.role === 'user') {
+    if (input.entry.role === 'user') {
       return this.setSessionRuntime(sessionKey, {
         sending: Boolean(input.runId),
         activeRunId: input.runId,
@@ -1425,12 +1480,12 @@ export class SessionRuntimeService {
       });
     }
 
-    if (input.row.kind === 'tool-activity' && input.row.status !== 'streaming') {
+    if (input.entry.kind === 'tool-activity' && input.entry.status !== 'streaming') {
       return this.setSessionRuntime(sessionKey, {
         sending: true,
         activeRunId: input.runId,
         runPhase: 'waiting_tool',
-        streamingMessageId: null,
+        streamingAnchorKey: null,
         pendingFinal: true,
       });
     }
@@ -1439,27 +1494,27 @@ export class SessionRuntimeService {
       sending: false,
       activeRunId: null,
       runPhase: 'done',
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
     });
   }
 
-  private buildPromptUserRow(input: {
+  private buildPromptUserEntry(input: {
     sessionKey: string;
     promptId: string;
     message: string;
     media?: SessionPromptMediaPayload[];
-  }): SessionRenderRow {
+  }): SessionTimelineEntry {
     const state = this.getSessionState(input.sessionKey);
     if (!state.hydrated) {
       this.ensureSessionHydrated(input.sessionKey, state);
     }
     const timestamp = Date.now();
     const message: SessionTranscriptMessage = {
-      role: 'user' as const,
+      role: 'user',
       content: input.message || (input.media && input.media.length > 0 ? '(file attached)' : ''),
       id: input.promptId,
-      status: 'sending' as const,
+      status: 'sending',
       timestamp,
       ...(input.media && input.media.length > 0
         ? {
@@ -1473,10 +1528,10 @@ export class SessionRuntimeService {
           }
         : {}),
     };
-    return buildRowsFromTranscriptMessage(input.sessionKey, message, {
-      index: filterCoreRows(state.rows).length,
+    return buildTimelineEntriesFromTranscriptMessage(input.sessionKey, message, {
+      index: state.timelineEntries.length,
       status: 'pending',
-      existingRows: filterCoreRows(state.rows),
+      existingRows: state.timelineEntries,
     })[0]!;
   }
 
@@ -1486,7 +1541,7 @@ export class SessionRuntimeService {
       : '';
     const currentState = currentSessionKey ? this.getSessionState(currentSessionKey) : null;
     const translated = buildSessionUpdateEventsFromGatewayConversationEvent(payload, {
-      existingRows: currentState ? filterCoreRows(currentState.rows) : undefined,
+      existingEntries: currentState?.timelineEntries,
     });
     return translated.map((event) => {
       const sessionKey = normalizeString(event.sessionKey);
@@ -1495,10 +1550,10 @@ export class SessionRuntimeService {
           sessionKey: '',
           catalog: buildSessionCatalogItem({
             sessionKey: '',
-            rows: [],
+            timelineEntries: [],
             runtime: createEmptySessionRuntimeState(),
           }),
-          rows: [],
+          items: [],
           replayComplete: true,
           runtime: createEmptySessionRuntimeState(),
           window: createLatestWindowState(0),
@@ -1514,10 +1569,10 @@ export class SessionRuntimeService {
           };
         }
         return {
-          sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
+          sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
           sessionKey: event.sessionKey,
           runId: event.runId,
-          row: null,
+          item: null,
           snapshot: emptySnapshot,
           ...(event._meta ? { _meta: event._meta } : {}),
         };
@@ -1530,9 +1585,9 @@ export class SessionRuntimeService {
         });
         const state = this.getSessionState(sessionKey);
         const snapshot = this.buildSnapshot(sessionKey, state, {
-          window: state.window.totalRowCount > 0
+          window: state.window.totalItemCount > 0
             ? state.window
-            : createLatestWindowState(state.rows.length),
+            : createLatestWindowState(state.renderItems.length),
           replayComplete: true,
         });
         return {
@@ -1546,28 +1601,28 @@ export class SessionRuntimeService {
       }
 
       const state = this.getSessionState(sessionKey);
-      const mergedRows = this.upsertSessionRows(sessionKey, event.rows);
-      const runtimeSourceRow = mergedRows[mergedRows.length - 1] ?? event.rows[event.rows.length - 1] ?? null;
-      if (runtimeSourceRow) {
+      const mergedEntries = this.upsertTimelineEntries(sessionKey, event.entries);
+      const runtimeSourceEntry = mergedEntries[mergedEntries.length - 1] ?? event.entries[event.entries.length - 1] ?? null;
+      if (runtimeSourceEntry) {
         this.resolveMessageRuntime(sessionKey, {
           runId: event.runId,
-          row: runtimeSourceRow,
+          entry: runtimeSourceEntry,
           sessionUpdate: event.sessionUpdate,
         });
       }
-      state.window = createLatestWindowState(state.rows.length);
+      state.window = createLatestWindowState(state.renderItems.length);
       const snapshot = this.buildSnapshot(sessionKey, state, {
-        window: state.window.totalRowCount > 0
+        window: state.window.totalItemCount > 0
           ? state.window
-          : createLatestWindowState(state.rows.length),
+          : createLatestWindowState(state.renderItems.length),
         replayComplete: true,
       });
-      const row = this.resolvePrimaryRowFromSnapshot(snapshot, runtimeSourceRow, event.rows);
+      const item = this.resolvePrimaryItemFromSnapshot(snapshot, runtimeSourceEntry, event.entries);
       return {
-        sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
+        sessionUpdate: event.sessionUpdate === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
         sessionKey: event.sessionKey,
         runId: event.runId,
-        row,
+        item,
         snapshot,
         ...(event._meta ? { _meta: event._meta } : {}),
       };
@@ -1647,13 +1702,13 @@ export class SessionRuntimeService {
       if (!descriptor.transcriptPath || !existsSync(descriptor.transcriptPath)) {
         continue;
       }
-      const rows = this.readTranscriptRows(descriptor.sessionKey);
-      if (rows.length === 0) {
+      const timelineEntries = this.readTranscriptTimelineEntries(descriptor.sessionKey);
+      if (timelineEntries.length === 0) {
         continue;
       }
       sessionsByKey.set(descriptor.sessionKey, buildSessionCatalogItem({
         sessionKey: descriptor.sessionKey,
-        rows,
+        timelineEntries,
         runtime: createEmptySessionRuntimeState(),
       }));
     }
@@ -1667,7 +1722,7 @@ export class SessionRuntimeService {
       }
       sessionsByKey.set(sessionKey, buildSessionCatalogItem({
         sessionKey,
-        rows: state.rows,
+        timelineEntries: state.timelineEntries,
         runtime: state.runtime,
       }));
     }
@@ -1728,9 +1783,9 @@ export class SessionRuntimeService {
     });
     const result: SessionLoadResult = {
       snapshot: this.buildSnapshot(sessionKey, state, {
-        window: state.window.totalRowCount > 0
+        window: state.window.totalItemCount > 0
           ? state.window
-          : createLatestWindowState(state.rows.length),
+          : createLatestWindowState(state.renderItems.length),
         replayComplete: true,
       }),
     };
@@ -1777,9 +1832,9 @@ export class SessionRuntimeService {
       status: 200,
       data: {
         snapshot: this.buildSnapshot(sessionKey, state, {
-          window: state.window.totalRowCount > 0
+          window: state.window.totalItemCount > 0
             ? state.window
-            : createLatestWindowState(state.rows.length),
+            : createLatestWindowState(state.renderItems.length),
           replayComplete: true,
         }),
       } satisfies SessionLoadResult,
@@ -1882,7 +1937,7 @@ export class SessionRuntimeService {
       hydrate: true,
       resetWindowToLatest: true,
     });
-    const [row] = this.upsertSessionRows(sessionKey, [this.buildPromptUserRow({
+    const [entry] = this.upsertTimelineEntries(sessionKey, [this.buildPromptUserEntry({
       sessionKey,
       promptId,
       message,
@@ -1892,11 +1947,11 @@ export class SessionRuntimeService {
       sending: true,
       activeRunId: runId || null,
       runPhase: 'submitted',
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       pendingFinal: false,
-      lastUserMessageAt: row?.createdAt ?? Date.now(),
+      lastUserMessageAt: entry?.createdAt ?? Date.now(),
     });
-    state.window = createLatestWindowState(state.rows.length);
+    state.window = createLatestWindowState(state.renderItems.length);
     const snapshot = {
       ...this.buildLatestSnapshot(sessionKey, state),
       runtime,
@@ -1906,10 +1961,7 @@ export class SessionRuntimeService {
       sessionKey,
       runId: runId || null,
       promptId,
-      row: snapshot.rows.find((candidate) => (
-        (row?.rowId && candidate.rowId === row.rowId)
-        || (row?.key && candidate.key === row.key)
-      )) ?? null,
+      item: snapshot.items.find((candidate) => candidate.key === entry?.key) ?? null,
       snapshot,
     };
     return {

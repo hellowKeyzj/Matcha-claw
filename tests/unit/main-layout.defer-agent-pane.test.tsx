@@ -110,7 +110,7 @@ describe('main layout chat workspace host', () => {
             sending: false,
             activeRunId: null,
             runPhase: 'idle',
-            streamingMessageId: null,
+            streamingAnchorKey: null,
             streamingTools: [],
             pendingFinal: false,
             lastUserMessageAt: null,

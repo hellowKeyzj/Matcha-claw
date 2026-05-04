@@ -3,7 +3,11 @@ import {
   sanitizeCanonicalUserContent as sanitizeCanonicalUserContentShared,
   sanitizeCanonicalUserText as sanitizeCanonicalUserTextShared,
 } from '../../../runtime-host/shared/chat-message-normalization';
-import type { SessionMessageRow, SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
+import type {
+  SessionAssistantTurnItem,
+  SessionRenderItem,
+  SessionRenderUserMessageItem,
+} from '../../../runtime-host/shared/session-adapter-types';
 
 const SESSION_LABEL_MAX_LENGTH = 50;
 const ASSISTANT_SESSION_LABEL_TEMPLATE_PATTERNS: RegExp[] = [
@@ -37,31 +41,31 @@ function shouldIgnoreAssistantSessionLabel(text: string): boolean {
 export const sanitizeCanonicalUserText = sanitizeCanonicalUserTextShared;
 export const sanitizeCanonicalUserContent = sanitizeCanonicalUserContentShared;
 
-function resolveSessionLabelCandidateFromUserRow(row: SessionMessageRow): string {
-  return normalizeSessionLabelText(sanitizeCanonicalUserTextShared(row.text));
+function resolveSessionLabelCandidateFromUserItem(item: SessionRenderUserMessageItem): string {
+  return normalizeSessionLabelText(sanitizeCanonicalUserTextShared(item.text));
 }
 
-function resolveSessionLabelCandidateFromAssistantRow(row: SessionMessageRow): string {
-  return normalizeSessionLabelText(normalizeAssistantFinalText(row.text));
+function resolveSessionLabelCandidateFromAssistantTurn(item: SessionAssistantTurnItem): string {
+  return normalizeSessionLabelText(normalizeAssistantFinalText(item.text));
 }
 
-export function resolveSessionLabelFromRows(rows: SessionRenderRow[]): string | null {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row.kind !== 'message' || row.role !== 'user') {
+export function resolveSessionLabelFromItems(items: SessionRenderItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind !== 'user-message') {
       continue;
     }
-    const candidate = resolveSessionLabelCandidateFromUserRow(row);
+    const candidate = resolveSessionLabelCandidateFromUserItem(item);
     if (candidate) {
       return candidate;
     }
   }
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row.kind !== 'message' || row.role !== 'assistant') {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind !== 'assistant-turn') {
       continue;
     }
-    const candidate = resolveSessionLabelCandidateFromAssistantRow(row);
+    const candidate = resolveSessionLabelCandidateFromAssistantTurn(item);
     if (candidate && !shouldIgnoreAssistantSessionLabel(candidate)) {
       return candidate;
     }

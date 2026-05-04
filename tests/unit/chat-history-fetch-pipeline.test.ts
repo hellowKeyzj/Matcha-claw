@@ -3,7 +3,10 @@ import {
   CHAT_HISTORY_FULL_LIMIT,
   fetchHistoryWindow,
 } from '@/stores/chat/history-fetch-helpers';
-import type { RawMessage } from './helpers/timeline-fixtures';
+import {
+  buildRenderItemsFromMessages,
+  type RawMessage,
+} from './helpers/timeline-fixtures';
 
 const hostSessionLoadMock = vi.fn();
 
@@ -13,7 +16,7 @@ vi.mock('@/lib/host-api', () => ({
 }));
 
 describe('chat history fetch pipeline helpers', () => {
-  it('returns host session load result directly when adapter already provides rows', async () => {
+  it('returns host session load result directly when adapter already provides render items', async () => {
     const requestedSessionKey = 'agent:main:main';
     const sourceMessages: RawMessage[] = [
       { role: 'assistant', content: 'a', timestamp: 1 },
@@ -23,35 +26,19 @@ describe('chat history fetch pipeline helpers', () => {
     hostSessionLoadMock.mockResolvedValueOnce({
       snapshot: {
         sessionKey: requestedSessionKey,
-        rows: sourceMessages.map((message, index) => ({
-          key: `session:${requestedSessionKey}|row:row-${index + 1}`,
-          kind: 'message',
-          sessionKey: requestedSessionKey,
-          laneKey: 'main',
-          turnKey: `main:row-${index + 1}`,
-          role: 'assistant',
-          status: 'final',
-          text: typeof message.content === 'string' ? message.content : '',
-          thinking: null,
-          images: [],
-          toolUses: [],
-          attachedFiles: [],
-          toolStatuses: [],
-          isStreaming: false,
-          rowId: `row-${index + 1}`,
-        })),
+        items: buildRenderItemsFromMessages(requestedSessionKey, sourceMessages),
         replayComplete: true,
         runtime: {
           sending: false,
           activeRunId: null,
           runPhase: 'idle',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
           lastUserMessageAt: null,
           updatedAt: null,
         },
         window: {
-          totalRowCount: sourceMessages.length,
+          totalItemCount: sourceMessages.length,
           windowStartOffset: 0,
           windowEndOffset: sourceMessages.length,
           hasMore: false,
@@ -69,24 +56,22 @@ describe('chat history fetch pipeline helpers', () => {
 
     expect(result).toEqual(expect.objectContaining({
       thinkingLevel: 'medium',
-      totalRowCount: sourceMessages.length,
+      totalItemCount: sourceMessages.length,
       windowStartOffset: 0,
       windowEndOffset: sourceMessages.length,
     }));
-    expect(result.snapshot?.rows).toMatchObject([
+    expect(result.snapshot?.items).toMatchObject([
       {
-        rowId: 'row-1',
         role: 'assistant',
         text: 'a',
         laneKey: 'main',
-        turnKey: 'main:row-1',
+        turnKey: expect.any(String),
       },
       {
-        rowId: 'row-2',
         role: 'assistant',
         text: 'b',
         laneKey: 'main',
-        turnKey: 'main:row-2',
+        turnKey: expect.any(String),
       },
     ]);
   });
@@ -97,19 +82,19 @@ describe('chat history fetch pipeline helpers', () => {
     hostSessionLoadMock.mockResolvedValueOnce({
       snapshot: {
         sessionKey: requestedSessionKey,
-        rows: [],
+        items: [],
         replayComplete: true,
         runtime: {
           sending: false,
           activeRunId: null,
           runPhase: 'idle',
-          streamingMessageId: null,
+          streamingAnchorKey: null,
           pendingFinal: false,
           lastUserMessageAt: null,
           updatedAt: null,
         },
         window: {
-          totalRowCount: 0,
+          totalItemCount: 0,
           windowStartOffset: 0,
           windowEndOffset: 0,
           hasMore: false,
@@ -128,8 +113,8 @@ describe('chat history fetch pipeline helpers', () => {
     expect(hostSessionLoadMock).toHaveBeenCalledWith({
       sessionKey: requestedSessionKey,
     });
-    expect(result.snapshot?.rows).toEqual([]);
-    expect(result.totalRowCount).toBe(0);
+    expect(result.snapshot?.items).toEqual([]);
+    expect(result.totalItemCount).toBe(0);
     expect(result.isAtLatest).toBe(true);
   });
 });

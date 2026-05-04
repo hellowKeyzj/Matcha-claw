@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { getSessionRows } from '@/stores/chat/store-state-helpers';
+import { getSessionItems } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
@@ -24,25 +25,7 @@ function createSessionRecord(input?: {
   }>;
 }) {
   const messages = input?.messages ?? [];
-  const rows: SessionRenderRow[] = messages.map((message, index) => ({
-    key: `session:agent:main:main|row:${message.id ?? `entry-${index + 1}`}`,
-    kind: 'message',
-    sessionKey: 'agent:main:main',
-    role: message.role === 'user' || message.role === 'system' ? message.role : 'assistant',
-    text: typeof message.content === 'string' ? message.content : '',
-    createdAt: message.timestamp,
-    status: message.status === 'sending' ? 'pending' : 'final',
-    rowId: String(message.id ?? `entry-${index + 1}`),
-    laneKey: 'main',
-    turnKey: `main:${message.id ?? `entry-${index + 1}`}`,
-    thinking: null,
-    images: [],
-    toolUses: [],
-    attachedFiles: [],
-    toolStatuses: [],
-    isStreaming: false,
-    messageId: String(message.messageId ?? message.id ?? `entry-${index + 1}`),
-  }));
+  const items = buildRenderItemsFromMessages('agent:main:main', messages);
   return {
     meta: {
       label: null,
@@ -55,14 +38,14 @@ function createSessionRecord(input?: {
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
       pendingFinal: input?.runtime?.pendingFinal ?? false,
-      streamingMessageId: null,
+      streamingAnchorKey: null,
       lastUserMessageAt: null,
     },
-    rows,
+    items,
     window: createViewportWindowState({
-      totalRowCount: messages.length,
+      totalItemCount: items.length,
       windowStartOffset: 0,
-      windowEndOffset: messages.length,
+      windowEndOffset: items.length,
       isAtLatest: true,
     }),
   };
@@ -73,14 +56,22 @@ function createSessionInfoUpdate(payload: {
   runId?: string | null;
   sessionKey?: string | null;
 }) {
+  const sessionKey = payload.sessionKey ?? 'agent:main:main';
   return {
     sessionUpdate: 'session_info_update' as const,
     phase: payload.phase,
     runId: payload.runId ?? null,
     sessionKey: payload.sessionKey ?? null,
     snapshot: {
-      sessionKey: payload.sessionKey ?? '',
-      rows: [],
+      sessionKey,
+      catalog: {
+        key: sessionKey,
+        agentId: 'main',
+        kind: 'main' as const,
+        preferred: true,
+        displayName: sessionKey,
+      },
+      items: [],
       replayComplete: true,
       runtime: {
         sending: payload.phase === 'started',
@@ -92,13 +83,13 @@ function createSessionInfoUpdate(payload: {
             )
           )
         ),
-        streamingMessageId: null,
+        streamingAnchorKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
       window: {
-        totalRowCount: 0,
+        totalItemCount: 0,
         windowStartOffset: 0,
         windowEndOffset: 0,
         hasMore: false,
@@ -116,7 +107,8 @@ function createSessionMessageUpdate(payload: {
   sequenceId?: number;
   message: Record<string, unknown>;
 }) {
-  const rowId = String(
+  const sessionKey = payload.sessionKey ?? 'agent:main:main';
+  const entryId = String(
     payload.message.id
     ?? payload.message.messageId
     ?? (
@@ -131,92 +123,78 @@ function createSessionMessageUpdate(payload: {
     ?? payload.runId
     ?? 'turn',
   );
-  return {
-    sessionUpdate: payload.kind === 'agent_message_chunk' ? 'session_row_chunk' : 'session_row',
-    runId: payload.runId ?? null,
-    sessionKey: payload.sessionKey ?? null,
-    row: {
-      key: `session:${payload.sessionKey ?? ''}|row:${rowId}`,
-      kind: Array.isArray(payload.message.content) && payload.message.content.some((item) => (
-        item && typeof item === 'object' && (item as { type?: unknown }).type === 'toolCall'
-      )) ? 'tool-activity' : 'message',
-      rowId,
-      sessionKey: payload.sessionKey ?? '',
-      laneKey: 'main',
-      turnKey: `main:${turnIdentity}`,
-      role: payload.message.role,
-      status: payload.kind === 'agent_message_chunk' ? 'streaming' : 'final',
-      ...(payload.sequenceId != null ? { sequenceId: payload.sequenceId } : {}),
-      text: typeof payload.message.content === 'string' ? payload.message.content : '',
-      createdAt: 1,
-      ...(Array.isArray(payload.message.content)
-        ? {
-            toolUses: payload.message.content.map((item) => ({
-              id: (item as { id?: string }).id ?? 'tool',
-              name: (item as { name?: string }).name ?? 'tool',
-              input: (item as { input?: unknown }).input,
-            })),
-            toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses : [],
-            isStreaming: payload.kind === 'agent_message_chunk',
-          }
-        : {
-            thinking: null,
-            images: [],
-            toolUses: [],
-            attachedFiles: [],
-            toolStatuses: [],
-            isStreaming: payload.kind === 'agent_message_chunk',
-            messageId: rowId,
-          }),
-    },
-    snapshot: {
-      sessionKey: payload.sessionKey ?? '',
-      rows: [{
-        key: `session:${payload.sessionKey ?? ''}|row:${rowId}`,
-        kind: Array.isArray(payload.message.content) && payload.message.content.some((item) => (
-          item && typeof item === 'object' && (item as { type?: unknown }).type === 'toolCall'
-        )) ? 'tool-activity' : 'message',
-        rowId,
+  const assistantToolCalls = Array.isArray(payload.message.content)
+    ? payload.message.content
+        .filter((item): item is { id?: string; name?: string; input?: unknown; type?: unknown } => Boolean(item) && typeof item === 'object')
+        .flatMap((item) => item.type === 'toolCall'
+          ? [{
+              id: item.id ?? 'tool',
+              name: item.name ?? 'tool',
+              input: item.input,
+            }]
+          : [])
+    : [];
+  const isAssistant = payload.message.role === 'assistant';
+  const assistantItemKey = `session:${payload.sessionKey ?? ''}|assistant-turn:main:${turnIdentity}:main`;
+  const item: SessionRenderItem = isAssistant
+    ? {
+        key: assistantItemKey,
+        kind: 'assistant-turn',
         sessionKey: payload.sessionKey ?? '',
+        role: 'assistant',
         laneKey: 'main',
         turnKey: `main:${turnIdentity}`,
-        role: payload.message.role,
-        status: payload.kind === 'agent_message_chunk' ? 'streaming' : 'final',
-        ...(payload.sequenceId != null ? { sequenceId: payload.sequenceId } : {}),
+        status: payload.kind === 'agent_message_chunk'
+          ? 'streaming'
+          : 'final',
         text: typeof payload.message.content === 'string' ? payload.message.content : '',
+        thinking: null,
+        toolCalls: assistantToolCalls,
+        toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses as never[] : [],
+        images: [],
+        attachedFiles: [],
         createdAt: 1,
-        ...(Array.isArray(payload.message.content)
-          ? {
-              toolUses: payload.message.content.map((item) => ({
-                id: (item as { id?: string }).id ?? 'tool',
-                name: (item as { name?: string }).name ?? 'tool',
-                input: (item as { input?: unknown }).input,
-              })),
-              toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses : [],
-              isStreaming: payload.kind === 'agent_message_chunk',
-            }
-          : {
-              thinking: null,
-              images: [],
-              toolUses: [],
-              attachedFiles: [],
-              toolStatuses: [],
-              isStreaming: payload.kind === 'agent_message_chunk',
-              messageId: rowId,
-            }),
-      }],
+        updatedAt: 1,
+      }
+    : {
+        key: `session:${payload.sessionKey ?? ''}|entry:${entryId}`,
+        kind: 'user-message',
+        sessionKey: payload.sessionKey ?? '',
+        role: 'user',
+        text: typeof payload.message.content === 'string' ? payload.message.content : '',
+        images: [],
+        attachedFiles: [],
+        messageId: entryId,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+  return {
+    sessionUpdate: payload.kind === 'agent_message_chunk' ? 'session_item_chunk' : 'session_item',
+    runId: payload.runId ?? null,
+    sessionKey: payload.sessionKey ?? null,
+    item,
+    snapshot: {
+      sessionKey,
+      catalog: {
+        key: sessionKey,
+        agentId: 'main',
+        kind: 'main' as const,
+        preferred: true,
+        displayName: sessionKey,
+      },
+      items: [item],
       replayComplete: true,
       runtime: {
         sending: payload.kind === 'agent_message_chunk',
         activeRunId: payload.runId ?? null,
         runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
-        streamingMessageId: payload.kind === 'agent_message_chunk' ? rowId : null,
+        streamingAnchorKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
       },
       window: {
-        totalRowCount: 1,
+        totalItemCount: 1,
         windowStartOffset: 0,
         windowEndOffset: 1,
         hasMore: false,
@@ -442,7 +420,7 @@ describe('gateway store event wiring', () => {
     expect(state.error).toBeNull();
   });
 
-  it('structured session:update delta 会直接驱动 chat store 写入 timeline-backed streaming message', async () => {
+  it('structured session:update delta 会直接驱动 chat store 写入 streaming assistant turn', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -484,9 +462,8 @@ describe('gateway store event wiring', () => {
     }));
 
     const state = useChatStore.getState();
-    expect(getSessionRows(state, 'agent:main:main')).toMatchObject([{
-      rowId: 'run:run-delta-direct-1:seq:1',
-      role: 'assistant',
+    expect(getSessionItems(state, 'agent:main:main')).toMatchObject([{
+      kind: 'assistant-turn',
       text: 'hello timeline',
       status: 'streaming',
       laneKey: 'main',
@@ -494,7 +471,7 @@ describe('gateway store event wiring', () => {
     }]);
   });
 
-  it('structured session:update tool delta 即使 sequenceId 不是从 1 开始，也会立即写入 timeline 供工具卡片渲染', async () => {
+  it('structured session:update tool delta 即使 sequenceId 不是从 1 开始，也会立即写入 assistant turn 供工具卡片渲染', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -547,11 +524,10 @@ describe('gateway store event wiring', () => {
     }));
 
     const state = useChatStore.getState();
-    const [row] = getSessionRows(state, 'agent:main:main');
-    expect(row).toMatchObject({
-      kind: 'tool-activity',
-      rowId: 'run:run-tool-direct-1:tool:tool-1',
-      sequenceId: 8,
+    const [item] = getSessionItems(state, 'agent:main:main');
+    expect(item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run:run-tool-direct-1:tool:tool-1',
       toolStatuses: [{
         toolCallId: 'tool-1',
         name: 'memory_store',

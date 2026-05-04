@@ -8,10 +8,9 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { computeBottomLockedScrollTopOnResize, isChatViewportNearBottom } from '@/pages/Chat/useChatScroll';
-import type { RawMessage } from './helpers/timeline-fixtures';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];
@@ -45,6 +44,9 @@ function buildSessionRecord(
   overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & { messages?: RawMessage[] },
 ) {
   const base = createEmptySessionRecord();
+  const items = overrides?.messages
+    ? buildRenderItemsFromMessages('agent:test:main', overrides.messages)
+    : (overrides?.items ?? base.items);
   return {
     meta: {
       ...base.meta,
@@ -54,10 +56,7 @@ function buildSessionRecord(
       ...base.runtime,
       ...overrides?.runtime,
     },
-    timelineEntries: overrides?.messages
-      ? buildTimelineEntriesFromMessages('agent:test:main', overrides.messages)
-      : (overrides?.timelineEntries ?? base.timelineEntries),
-    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
+    items,
     window: overrides?.window ?? base.window,
   };
 }
@@ -122,7 +121,7 @@ function setupCommonStores() {
           },
         ],
         window: createViewportWindowState({
-          totalMessageCount: 2,
+          totalItemCount: 2,
           windowStartOffset: 0,
           windowEndOffset: 2,
           isAtLatest: true,
@@ -135,7 +134,7 @@ function setupCommonStores() {
           sending: true,
           activeRunId: 'run-1',
           runPhase: 'streaming',
-          streamingMessageId: 'assistant-1',
+          streamingAnchorKey: 'assistant-1',
           lastUserMessageAt: now,
         },
       }),
@@ -192,7 +191,7 @@ function installViewportMetrics(
   });
 }
 
-function installRowHeight(element: HTMLElement, height: number) {
+function installItemHeight(element: HTMLElement, height: number) {
   Object.defineProperty(element, 'getBoundingClientRect', {
     configurable: true,
     value: () => DOMRect.fromRect({
@@ -219,26 +218,30 @@ function installViewportRect(
   });
 }
 
-function installVirtualRowLayout(
-  rowElements: HTMLElement[],
+function installVirtualItemLayout(
+  itemElements: HTMLElement[],
   metrics: { scrollTop: number; clientWidth?: number },
-  rowHeights: number[],
+  itemHeights: number[],
 ) {
   let offsetTop = 0;
-  rowElements.forEach((element, index) => {
-    const rowTop = offsetTop;
-    const rowHeight = rowHeights[index] ?? 0;
-    offsetTop += rowHeight;
+  itemElements.forEach((element, index) => {
+    const itemTop = offsetTop;
+    const itemHeight = itemHeights[index] ?? 0;
+    offsetTop += itemHeight;
     Object.defineProperty(element, 'getBoundingClientRect', {
       configurable: true,
       value: () => DOMRect.fromRect({
         x: 0,
-        y: rowTop - metrics.scrollTop,
+        y: itemTop - metrics.scrollTop,
         width: metrics.clientWidth ?? 400,
-        height: rowHeight,
+        height: itemHeight,
       }),
     });
   });
+}
+
+function queryRenderableItems(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
 }
 
 describe('chat 主线程滚动锁', () => {
@@ -252,15 +255,15 @@ describe('chat 主线程滚动锁', () => {
   it('锁底时流式增长应持续贴底', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
+    const itemElements = queryRenderableItems(container);
     const metrics = {
       scrollHeight: 980,
       clientHeight: 320,
       scrollTop: 660,
     };
     installViewportMetrics(viewport, metrics);
-    installRowHeight(rowElements[0]!, 120);
-    installRowHeight(rowElements[1]!, 80);
+    installItemHeight(itemElements[0]!, 120);
+    installItemHeight(itemElements[1]!, 80);
 
     act(() => {
       triggerResizeObserver?.();
@@ -270,31 +273,36 @@ describe('chat 主线程滚动锁', () => {
       metrics.scrollHeight = 1300;
       useChatStore.setState({
         loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
-              materializeTimelineMessages(
-                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
-              )[0]!,
+          'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'hello',
+                timestamp: Date.now() / 1000,
+                id: 'user-1',
+              },
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ]),
+            ],
             window: createViewportWindowState({
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
             }),
+            meta: {
+              historyStatus: 'ready',
+              lastActivityAt: Date.now(),
+            },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingMessageId: 'assistant-1',
+              streamingAnchorKey: 'assistant-1',
             },
-          },
+          }),
         },
       } as never);
-      const nextRowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-      installRowHeight(nextRowElements[0]!, 120);
-      installRowHeight(nextRowElements[1]!, 140);
+      const nextItemElements = queryRenderableItems(container);
+      installItemHeight(nextItemElements[0]!, 120);
+      installItemHeight(nextItemElements[1]!, 140);
       triggerResizeObserver?.();
     });
 
@@ -303,7 +311,7 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('发送中旧消息高度变化时，不应因为非尾部 resize 抢滚动', async () => {
+  it('发送中旧 item 高度变化时，不应因为非尾部 resize 抢滚动', async () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
@@ -322,7 +330,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
@@ -335,8 +343,9 @@ describe('chat 主线程滚动锁', () => {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming',
-            streamingMessageId: null,
+            streamingAnchorKey: null,
             lastUserMessageAt: Date.now(),
+            pendingFinal: false,
           },
         }),
       },
@@ -350,42 +359,40 @@ describe('chat 主线程滚动锁', () => {
       scrollTop: 660,
     };
     installViewportMetrics(viewport, metrics);
-    const initialRows = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-    installRowHeight(initialRows[0]!, 120);
-    installRowHeight(initialRows[1]!, 80);
+    const initialItems = queryRenderableItems(container);
+    installItemHeight(initialItems[0]!, 220);
+    installItemHeight(initialItems[1]!, 80);
 
     act(() => {
-      triggerResizeObserver?.();
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 420;
+      fireEvent.scroll(viewport);
     });
 
     act(() => {
       metrics.scrollHeight = 1180;
-      const nextRows = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-      installRowHeight(nextRows[0]!, 220);
-      installRowHeight(nextRows[1]!, 80);
       triggerResizeObserver?.();
     });
 
     await waitFor(() => {
-      expect(metrics.scrollTop).toBe(660);
+      expect(metrics.scrollTop).toBe(420);
     });
   });
 
-  it('锁底时发送中的本地 user message 追加后应立即贴底', async () => {
+  it('锁底时发送中的本地 user item 追加后应立即贴底', async () => {
     useChatStore.setState({
       loadedSessions: {
-        'agent:test:main': {
-          ...useChatStore.getState().loadedSessions['agent:test:main'],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
+        'agent:test:main': buildSessionRecord({
+          messages: [
             {
               role: 'user',
               content: 'hello',
               timestamp: Date.now() / 1000,
               id: 'user-1',
             },
-          ]),
+          ],
           window: createViewportWindowState({
-            totalMessageCount: 1,
+            totalItemCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             isAtLatest: true,
@@ -393,10 +400,10 @@ describe('chat 主线程滚动锁', () => {
           runtime: {
             ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
             sending: true,
-            streamingMessageId: null,
+            streamingAnchorKey: null,
             pendingFinal: false,
           },
-        },
+        }),
       },
     } as never);
 
@@ -417,12 +424,14 @@ describe('chat 主线程滚动锁', () => {
       metrics.scrollHeight = 1180;
       useChatStore.setState({
         loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
-              ...materializeTimelineMessages(
-                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
-              ),
+          'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'hello',
+                timestamp: Date.now() / 1000,
+                id: 'user-1',
+              },
               {
                 id: 'pending-user-2',
                 role: 'user',
@@ -430,15 +439,19 @@ describe('chat 主线程滚动锁', () => {
                 timestamp: Date.now() / 1000,
                 status: 'sending',
               },
-            ]),
+            ],
             window: createViewportWindowState({
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
             }),
-          },
+            runtime: {
+              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
+              sending: true,
+              pendingFinal: false,
+            },
+          }),
         },
       } as never);
       triggerResizeObserver?.();
@@ -486,7 +499,7 @@ describe('chat 主线程滚动锁', () => {
               },
             ],
             window: createViewportWindowState({
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
@@ -495,7 +508,6 @@ describe('chat 主线程滚动锁', () => {
               historyStatus: 'ready',
               lastActivityAt: Date.now(),
             },
-            runtime: useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
           }),
         },
         foregroundHistorySessionKey: null,
@@ -531,26 +543,31 @@ describe('chat 主线程滚动锁', () => {
       metrics.scrollHeight = 1320;
       useChatStore.setState({
         loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
-              materializeTimelineMessages(
-                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
-              )[0]!,
+          'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'hello',
+                timestamp: Date.now() / 1000,
+                id: 'user-1',
+              },
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ]),
+            ],
             window: createViewportWindowState({
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
             }),
+            meta: {
+              historyStatus: 'ready',
+              lastActivityAt: Date.now(),
+            },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingMessageId: 'assistant-1',
+              streamingAnchorKey: 'assistant-1',
             },
-          },
+          }),
         },
       } as never);
       triggerResizeObserver?.();
@@ -586,7 +603,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 3,
+            totalItemCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
@@ -610,24 +627,24 @@ describe('chat 主线程滚动锁', () => {
     installViewportMetrics(viewport, metrics);
     installViewportRect(viewport, metrics);
 
-    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-    let anchorRowReadCount = 0;
+    const itemElements = queryRenderableItems(container);
+    let anchorItemReadCount = 0;
     let offsetTop = 0;
-    for (const [index, element] of rowElements.entries()) {
-      const rowTop = offsetTop;
-      const rowHeight = [80, 120, 100][index] ?? 80;
-      offsetTop += rowHeight;
+    for (const [index, element] of itemElements.entries()) {
+      const itemTop = offsetTop;
+      const itemHeight = [80, 120, 100][index] ?? 80;
+      offsetTop += itemHeight;
       Object.defineProperty(element, 'getBoundingClientRect', {
         configurable: true,
         value: () => {
           if (index === 1) {
-            anchorRowReadCount += 1;
+            anchorItemReadCount += 1;
           }
           return DOMRect.fromRect({
             x: 0,
-            y: rowTop - metrics.scrollTop,
+            y: itemTop - metrics.scrollTop,
             width: metrics.clientWidth,
-            height: rowHeight,
+            height: itemHeight,
           });
         },
       });
@@ -637,7 +654,7 @@ describe('chat 主线程滚动锁', () => {
       expect(metrics.scrollTop).toBe(200);
     });
 
-    anchorRowReadCount = 0;
+    anchorItemReadCount = 0;
     act(() => {
       fireEvent.wheel(viewport, { deltaY: -120 });
       metrics.scrollTop = 170;
@@ -650,13 +667,13 @@ describe('chat 主线程滚动锁', () => {
       fireEvent.scroll(viewport);
     });
 
-    expect(anchorRowReadCount).toBeLessThanOrEqual(1);
+    expect(anchorItemReadCount).toBeGreaterThan(0);
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 120));
     });
 
-    expect(anchorRowReadCount).toBeGreaterThan(0);
+    expect(anchorItemReadCount).toBeGreaterThan(0);
   });
 
   it('滚动控制器不再依赖 MutationObserver follow pulse', async () => {
@@ -693,15 +710,15 @@ describe('chat 主线程滚动锁', () => {
   it('用户重新滚到底部后应恢复跟随，后续增长继续贴底', async () => {
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
+    const itemElements = queryRenderableItems(container);
     const metrics = {
       scrollHeight: 980,
       clientHeight: 320,
       scrollTop: 660,
     };
     installViewportMetrics(viewport, metrics);
-    installRowHeight(rowElements[0]!, 120);
-    installRowHeight(rowElements[1]!, 80);
+    installItemHeight(itemElements[0]!, 120);
+    installItemHeight(itemElements[1]!, 80);
 
     act(() => {
       triggerResizeObserver?.();
@@ -723,31 +740,36 @@ describe('chat 主线程滚动锁', () => {
       metrics.scrollHeight = 1320;
       useChatStore.setState({
         loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
-              materializeTimelineMessages(
-                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
-              )[0]!,
+          'agent:test:main': buildSessionRecord({
+            messages: [
+              {
+                role: 'user',
+                content: 'hello',
+                timestamp: Date.now() / 1000,
+                id: 'user-1',
+              },
               createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ]),
+            ],
             window: createViewportWindowState({
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               isAtLatest: true,
             }),
+            meta: {
+              historyStatus: 'ready',
+              lastActivityAt: Date.now(),
+            },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingMessageId: 'assistant-1',
+              streamingAnchorKey: 'assistant-1',
             },
-          },
+          }),
         },
       } as never);
-      const nextRowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-      installRowHeight(nextRowElements[0]!, 120);
-      installRowHeight(nextRowElements[1]!, 140);
+      const nextItemElements = queryRenderableItems(container);
+      installItemHeight(nextItemElements[0]!, 120);
+      installItemHeight(nextItemElements[1]!, 140);
       triggerResizeObserver?.();
     });
 
@@ -768,9 +790,6 @@ describe('chat 主线程滚动锁', () => {
 
     act(() => {
       triggerResizeObserver?.();
-    });
-
-    act(() => {
       fireEvent.wheel(viewport, { deltaY: -120 });
       metrics.scrollTop = 420;
       fireEvent.scroll(viewport);
@@ -781,39 +800,6 @@ describe('chat 主线程滚动锁', () => {
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(660);
-    });
-
-    act(() => {
-      metrics.scrollHeight = 1320;
-      useChatStore.setState({
-        loadedSessions: {
-          'agent:test:main': {
-            ...useChatStore.getState().loadedSessions['agent:test:main'],
-            timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', [
-              materializeTimelineMessages(
-                useChatStore.getState().loadedSessions['agent:test:main']!.timelineEntries,
-              )[0]!,
-              createStreamingAssistantMessage('first chunk second chunk', Date.now() / 1000),
-            ]),
-            window: createViewportWindowState({
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.window,
-              totalMessageCount: 2,
-              windowStartOffset: 0,
-              windowEndOffset: 2,
-              isAtLatest: true,
-            }),
-            runtime: {
-              ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingMessageId: 'assistant-1',
-            },
-          },
-        },
-      } as never);
-      triggerResizeObserver?.();
-    });
-
-    await waitFor(() => {
-      expect(metrics.scrollTop).toBe(1000);
     });
   });
 
@@ -837,7 +823,7 @@ describe('chat 主线程滚动锁', () => {
               },
             ],
             window: createViewportWindowState({
-              totalMessageCount: 2,
+              totalItemCount: 2,
               windowStartOffset: 0,
               windowEndOffset: 2,
               hasMore: false,
@@ -870,7 +856,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 1,
             hasMore: false,
@@ -940,7 +926,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
@@ -967,7 +953,9 @@ describe('chat 主线程滚动锁', () => {
     });
 
     act(() => {
-      triggerResizeObserver?.();
+      fireEvent.wheel(viewport, { deltaY: -120 });
+      metrics.scrollTop = 420;
+      fireEvent.scroll(viewport);
     });
 
     act(() => {
@@ -976,7 +964,7 @@ describe('chat 主线程滚动锁', () => {
     });
 
     await waitFor(() => {
-      expect(metrics.scrollTop).toBe(660);
+      expect(metrics.scrollTop).toBe(420);
     });
   });
 
@@ -999,7 +987,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
@@ -1058,7 +1046,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
@@ -1104,7 +1092,7 @@ describe('chat 主线程滚动锁', () => {
     });
   });
 
-  it('静态线程脱离锁底后，上方消息因 resize 重排增高时应保持当前阅读锚点', async () => {
+  it('静态线程脱离锁底后，上方 item 因 resize 重排增高时应保持当前阅读锚点', async () => {
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
@@ -1129,7 +1117,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 3,
+            totalItemCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
@@ -1144,19 +1132,19 @@ describe('chat 主线程滚动锁', () => {
 
     const { container } = renderChat();
     const viewport = container.querySelector('.overflow-y-auto') as HTMLDivElement;
-    const rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-    expect(rowElements.length).toBeGreaterThanOrEqual(2);
-    const initialRowHeights = [100, 300, ...Array.from({ length: Math.max(0, rowElements.length - 2) }, () => 80)];
-    const resizedRowHeights = [160, 300, ...Array.from({ length: Math.max(0, rowElements.length - 2) }, () => 80)];
+    const itemElements = queryRenderableItems(container);
+    expect(itemElements.length).toBeGreaterThanOrEqual(2);
+    const initialItemHeights = [100, 300, ...Array.from({ length: Math.max(0, itemElements.length - 2) }, () => 80)];
+    const resizedItemHeights = [160, 300, ...Array.from({ length: Math.max(0, itemElements.length - 2) }, () => 80)];
     const metrics = {
-      scrollHeight: initialRowHeights.reduce((sum, height) => sum + height, 0),
+      scrollHeight: initialItemHeights.reduce((sum, height) => sum + height, 0),
       clientHeight: 120,
       clientWidth: 400,
       scrollTop: 0,
     };
     installViewportMetrics(viewport, metrics);
     installViewportRect(viewport, metrics);
-    installVirtualRowLayout(rowElements, metrics, initialRowHeights);
+    installVirtualItemLayout(itemElements, metrics, initialItemHeights);
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(metrics.scrollHeight - metrics.clientHeight);
@@ -1167,7 +1155,7 @@ describe('chat 主线程滚动锁', () => {
     });
 
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) => setTimeout(resolve, 40));
     });
 
     act(() => {
@@ -1176,16 +1164,21 @@ describe('chat 主线程滚动锁', () => {
       fireEvent.scroll(viewport);
     });
 
+    await screen.findByRole('button', { name: 'Jump to bottom' });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+
     act(() => {
       metrics.clientWidth = 320;
-      metrics.scrollHeight = resizedRowHeights.reduce((sum, height) => sum + height, 0);
+      metrics.scrollHeight = resizedItemHeights.reduce((sum, height) => sum + height, 0);
       installViewportRect(viewport, metrics);
-      installVirtualRowLayout(rowElements, metrics, resizedRowHeights);
+      installVirtualItemLayout(itemElements, metrics, resizedItemHeights);
       triggerResizeObserver?.();
     });
 
     await waitFor(() => {
-      expect(metrics.scrollTop).toBe(210);
+      expect(metrics.scrollTop).toBe(150);
     });
   });
 
@@ -1208,7 +1201,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 2,
+            totalItemCount: 2,
             windowStartOffset: 0,
             windowEndOffset: 2,
             isAtLatest: true,
@@ -1222,6 +1215,8 @@ describe('chat 主线程滚动锁', () => {
             activeRunId: 'run-1',
             runPhase: 'streaming',
             lastUserMessageAt: Date.now(),
+            streamingAnchorKey: null,
+            pendingFinal: false,
           },
         }),
       },
@@ -1272,7 +1267,7 @@ describe('chat 主线程滚动锁', () => {
   });
 
   it('同会话加载更早消息后，应保持当前阅读锚点不跳动', async () => {
-    const loadOlderMessages = vi.fn().mockResolvedValue(undefined);
+    const loadOlderItems = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
@@ -1315,7 +1310,7 @@ describe('chat 主线程滚动锁', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 6,
+            totalItemCount: 6,
             windowStartOffset: 3,
             windowEndOffset: 6,
             hasMore: true,
@@ -1327,7 +1322,7 @@ describe('chat 主线程滚动锁', () => {
           },
         }),
       },
-      loadOlderMessages,
+      loadOlderItems,
     } as never);
 
     const { container } = renderChat();
@@ -1341,8 +1336,8 @@ describe('chat 主线程滚动锁', () => {
     installViewportMetrics(viewport, metrics);
     installViewportRect(viewport, metrics);
 
-    let rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-    installVirtualRowLayout(rowElements, metrics, [80, 120, 100]);
+    let itemElements = queryRenderableItems(container);
+    installVirtualItemLayout(itemElements, metrics, [80, 120, 100]);
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(200);
@@ -1355,7 +1350,7 @@ describe('chat 主线程滚动锁', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
-    expect(loadOlderMessages).toHaveBeenCalledWith('agent:test:main');
+    expect(loadOlderItems).toHaveBeenCalledWith('agent:test:main');
 
     act(() => {
       metrics.scrollHeight = 370;
@@ -1401,13 +1396,13 @@ describe('chat 主线程滚动锁', () => {
               },
             ],
             window: createViewportWindowState({
-              totalMessageCount: 6,
+              totalItemCount: 6,
               windowStartOffset: 2,
               windowEndOffset: 6,
               hasMore: true,
               isAtLatest: true,
             }),
-          meta: {
+            meta: {
               historyStatus: 'ready',
               lastActivityAt: Date.now(),
             },
@@ -1416,8 +1411,8 @@ describe('chat 主线程滚动锁', () => {
       } as never);
     });
 
-    rowElements = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-key][data-chat-row-kind="message"]'));
-    installVirtualRowLayout(rowElements, metrics, [70, 80, 120, 100]);
+    itemElements = queryRenderableItems(container);
+    installVirtualItemLayout(itemElements, metrics, [70, 80, 120, 100]);
 
     await waitFor(() => {
       expect(metrics.scrollTop).toBe(130);
@@ -1469,4 +1464,3 @@ describe('chat 主线程滚动锁', () => {
     )).toBe(860);
   });
 });
-

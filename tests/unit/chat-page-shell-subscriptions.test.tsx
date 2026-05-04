@@ -8,7 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const chatViewportPaneRenderSpy = vi.fn();
 
@@ -108,7 +108,7 @@ vi.mock('@/pages/Chat/components/ChatList', () => ({
     }), []);
     return (
       <div data-testid="chat-viewport-pane">
-        {props.currentSession.rows.length}
+        {props.currentSession.items.length}
       </div>
     );
   }),
@@ -129,9 +129,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    rows: overrides?.messages
-      ? buildRenderRowsFromMessages(sessionKey, overrides.messages)
-      : (overrides?.rows ?? base.rows),
+    items: overrides?.messages
+      ? buildRenderItemsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.items ?? base.items),
     window: overrides?.window ?? base.window,
   };
 }
@@ -177,7 +177,7 @@ describe('chat 顶层订阅收口', () => {
             sending: true,
           },
           window: createViewportWindowState({
-            totalRowCount: 1,
+            totalItemCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             isAtLatest: true,
@@ -200,7 +200,7 @@ describe('chat 顶层订阅收口', () => {
       loadHistory: vi.fn().mockResolvedValue(undefined),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       cleanupEmptySession: vi.fn(),
-      loadOlderMessages: vi.fn().mockResolvedValue(undefined),
+      loadOlderItems: vi.fn().mockResolvedValue(undefined),
       jumpToLatest: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       abortRun: vi.fn().mockResolvedValue(undefined),
@@ -244,7 +244,7 @@ describe('chat 顶层订阅收口', () => {
               sending: true,
             },
             window: createViewportWindowState({
-              totalRowCount: 1,
+              totalItemCount: 1,
               windowStartOffset: 0,
               windowEndOffset: 1,
               isAtLatest: true,

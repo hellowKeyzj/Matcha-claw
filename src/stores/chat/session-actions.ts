@@ -22,7 +22,7 @@ import {
 } from './timers';
 import {
   createEmptySessionRecord,
-  getSessionRowCount,
+  getSessionItemCount,
   getSessionMeta,
   getSessionViewportState,
   patchSessionMeta,
@@ -127,7 +127,7 @@ function shouldMarkSessionLoadingOnSwitch(
   if (sessionRecord.runtime.sending) {
     return false;
   }
-  return sessionRecord.meta.historyStatus !== 'ready' && getSessionRowCount(sessionRecord) === 0;
+  return sessionRecord.meta.historyStatus !== 'ready' && getSessionItemCount(sessionRecord) === 0;
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
@@ -309,7 +309,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     });
     targetRecord = resolveSessionRecord(nextloadedSessions[key]);
   }
-  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionRowCount(targetRecord) > 0;
+  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionItemCount(targetRecord) > 0;
 
   set((stateValue) => ({
     sessionCatalogStatus: stateValue.sessionCatalogStatus,
@@ -347,7 +347,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   })();
 }
 
-export async function executeLoadOlderMessages(
+export async function executeLoadOlderItems(
   input: CreateStoreSessionActionsInput,
   sessionKeyHint?: string,
 ): Promise<void> {
@@ -369,9 +369,9 @@ export async function executeJumpToLatest(
   });
 }
 
-export function executeSetViewportLastVisibleMessageId(
+export function executeSetViewportLastVisibleItemKey(
   input: CreateStoreSessionActionsInput,
-  messageId: string | null,
+  itemKey: string | null,
   sessionKeyHint?: string,
 ): void {
   const { set, get } = input;
@@ -379,7 +379,7 @@ export function executeSetViewportLastVisibleMessageId(
   set((state) => ({
     loadedSessions: patchSessionViewportState(state, sessionKey, {
       ...getSessionViewportState(state, sessionKey),
-      lastVisibleMessageId: messageId,
+      lastVisibleItemKey: itemKey,
     }),
   }));
 }

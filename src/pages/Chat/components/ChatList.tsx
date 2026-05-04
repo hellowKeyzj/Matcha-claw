@@ -20,20 +20,17 @@ import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { buildChatAutoFollowSignal } from '../chat-auto-follow';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
 import {
-  applyAssistantPresentationToRows,
+  applyAssistantPresentationToItems,
   type ChatAssistantCatalogAgent,
   type ChatAssistantPresentation,
-  type ChatExecutionGraphRow,
-  type ChatMessageRow,
-  type ChatPendingAssistantRow,
-  type ChatRow,
-  type ChatTaskCompletionRow,
-  type ChatToolActivityRow,
-} from '../chat-row-model';
+  type ChatExecutionGraphItem,
+  type ChatRenderItem,
+  type ChatTaskCompletionItem,
+  type ChatUserMessageItem,
+} from '../chat-render-item-model';
 import { ChatMessage } from '../ChatMessage';
-import { ChatToolActivityRowView } from '../ChatToolActivityRow';
+import { ChatAssistantTurn } from '../ChatAssistantTurn';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
-import { PendingAssistantShell } from '../pending-assistant-shell';
 import { useChatScroll } from '../useChatScroll';
 import { useChatView } from '../useChatView';
 import { FailureScreen } from './ChatStates';
@@ -41,7 +38,7 @@ import type {
   ApprovalStatus,
   ChatSessionRecord,
 } from '@/stores/chat';
-import { selectViewportRows } from '@/stores/chat/store-state-helpers';
+import { selectViewportItems } from '@/stores/chat/store-state-helpers';
 
 const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
 
@@ -84,7 +81,7 @@ interface ChatListSurfaceProps {
   onScroll: () => void;
   onTouchMove: TouchEventHandler<HTMLDivElement>;
   onWheel: WheelEventHandler<HTMLDivElement>;
-  rows: ChatRow[];
+  items: ChatRenderItem[];
   showLoadOlder: boolean;
   isLoadingOlder: boolean;
   onLoadOlder: () => void;
@@ -92,7 +89,7 @@ interface ChatListSurfaceProps {
   scrollChromeStore: ChatScrollChromeStore;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
-  onJumpToRowKey: (rowKey?: string) => void;
+  onJumpToItemKey: (itemKey?: string) => void;
 }
 
 type ChatListContentProps = Omit<
@@ -100,22 +97,21 @@ type ChatListContentProps = Omit<
   'messagesViewportRef' | 'messageContentRef' | 'onPointerDown' | 'onScroll' | 'onTouchMove' | 'onWheel' | 'scrollChromeStore'
 >;
 
-function getMessageDataAttributes(row: ChatRow) {
+function getMessageDataAttributes(item: ChatRenderItem) {
   return {
-    'data-chat-row-key': row.key,
-    'data-chat-row-kind': row.kind,
-    'data-chat-message-id': row.kind === 'message' ? (row.messageId ?? undefined) : undefined,
-    'data-chat-message-timestamp': typeof row.createdAt === 'number' ? String(row.createdAt) : undefined,
-    'data-chat-assistant-turn-key': row.role === 'assistant' ? (row.assistantTurnKey ?? undefined) : undefined,
-    'data-chat-assistant-lane-key': row.role === 'assistant' ? (row.assistantLaneKey ?? undefined) : undefined,
-    'data-chat-assistant-agent-id': row.role === 'assistant' ? (row.assistantLaneAgentId ?? undefined) : undefined,
+    'data-chat-item-key': item.key,
+    'data-chat-item-kind': item.kind,
+    'data-chat-message-timestamp': typeof item.createdAt === 'number' ? String(item.createdAt) : undefined,
+    'data-chat-assistant-turn-key': item.kind === 'assistant-turn' ? (item.turnKey ?? undefined) : undefined,
+    'data-chat-assistant-lane-key': item.kind === 'assistant-turn' ? (item.laneKey ?? undefined) : undefined,
+    'data-chat-assistant-agent-id': item.kind === 'assistant-turn' ? (item.agentId ?? undefined) : undefined,
   };
 }
 
-function SystemInfoRow({ row }: { row: ChatTaskCompletionRow | ChatRow }) {
-  const text = row.text.trim()
-    || (row.kind === 'task-completion'
-      ? [row.taskLabel, row.statusLabel, row.result].filter(Boolean).join(' · ')
+function SystemInfoRow({ item }: { item: ChatTaskCompletionItem | ChatRenderItem }) {
+  const text = item.text.trim()
+    || (item.kind === 'task-completion'
+      ? [item.taskLabel, item.statusLabel, item.result].filter(Boolean).join(' · ')
       : '');
   if (!text) {
     return null;
@@ -129,22 +125,23 @@ function SystemInfoRow({ row }: { row: ChatTaskCompletionRow | ChatRow }) {
   );
 }
 
-function renderChatRow(input: {
-  row: ChatRow;
+function renderChatItem(input: {
+  item: ChatRenderItem;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
-  onJumpToRowKey: (rowKey?: string) => void;
+  onJumpToItemKey: (itemKey?: string) => void;
 }) {
-  if (input.row.kind === 'tool-activity') {
+  if (input.item.kind === 'assistant-turn') {
     return (
-      <ChatToolActivityRowView
-        row={input.row as ChatToolActivityRow}
+      <ChatAssistantTurn
+        item={input.item}
+        showThinking={input.showThinking}
         userAvatarImageUrl={input.userAvatarImageUrl}
       />
     );
   }
-  if (input.row.kind === 'execution-graph') {
-    const row = input.row as ChatExecutionGraphRow;
+  if (input.item.kind === 'execution-graph') {
+    const item = input.item as ChatExecutionGraphItem;
     return (
       <div
         data-testid="chat-execution-graph-rail"
@@ -168,38 +165,24 @@ function renderChatRow(input: {
           )}
         >
           <ExecutionGraphCard
-            agentLabel={row.agentLabel}
-            sessionLabel={row.sessionLabel}
-            steps={[...row.steps]}
-            active={row.active}
-            triggerRowKey={row.triggerRowKey}
-            replyRowKey={row.replyRowKey}
-            onJumpToRowKey={input.onJumpToRowKey}
+            agentLabel={item.agentLabel}
+            sessionLabel={item.sessionLabel}
+            steps={[...item.steps]}
+            active={item.active}
+            triggerItemKey={item.triggerItemKey}
+            replyItemKey={item.replyItemKey}
+            onJumpToItemKey={input.onJumpToItemKey}
           />
         </div>
       </div>
     );
   }
-  if (input.row.kind === 'pending-assistant') {
-    const row = input.row as ChatPendingAssistantRow;
-    return (
-      <PendingAssistantShell
-        state={row.pendingState}
-        assistantAgentId={row.assistantPresentation?.agentId}
-        assistantAgentName={row.assistantPresentation?.agentName}
-        assistantAvatarSeed={row.assistantPresentation?.avatarSeed}
-        assistantAvatarStyle={row.assistantPresentation?.avatarStyle}
-        userAvatarImageUrl={input.userAvatarImageUrl}
-      />
-    );
-  }
-  if (input.row.kind === 'task-completion' || input.row.kind === 'system') {
-    return <SystemInfoRow row={input.row} />;
+  if (input.item.kind === 'task-completion' || input.item.kind === 'system') {
+    return <SystemInfoRow item={input.item} />;
   }
   return (
     <ChatMessage
-      row={input.row as ChatMessageRow}
-      showThinking={input.showThinking}
+      item={input.item as ChatUserMessageItem}
       userAvatarImageUrl={input.userAvatarImageUrl}
     />
   );
@@ -210,14 +193,14 @@ const ChatListContent = memo(function ChatListContent({
   showBlockingLoading,
   showBlockingError,
   errorMessage,
-  rows,
+  items,
   showLoadOlder,
   isLoadingOlder,
   onLoadOlder,
   loadOlderLabel,
   showThinking,
   userAvatarImageUrl,
-  onJumpToRowKey,
+  onJumpToItemKey,
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -256,21 +239,21 @@ const ChatListContent = memo(function ChatListContent({
 
       {!isEmptyState ? (
         <>
-          {rows.map((row, index) => (
-            <div key={row.key}>
+          {items.map((item, index) => (
+            <div key={item.key}>
               <div
                 data-index={index}
                 className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}
               >
                 <div
-                  {...getMessageDataAttributes(row)}
+                  {...getMessageDataAttributes(item)}
                   className="w-full"
                 >
-                  {renderChatRow({
-                    row,
+                  {renderChatItem({
+                    item,
                     showThinking,
                     userAvatarImageUrl,
-                    onJumpToRowKey,
+                    onJumpToItemKey,
                   })}
                 </div>
               </div>
@@ -336,7 +319,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   onScroll,
   onTouchMove,
   onWheel,
-  rows,
+  items,
   showLoadOlder,
   isLoadingOlder,
   onLoadOlder,
@@ -344,7 +327,7 @@ export const ChatListSurface = memo(function ChatListSurface({
   scrollChromeStore,
   showThinking,
   userAvatarImageUrl,
-  onJumpToRowKey,
+  onJumpToItemKey,
 }: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -380,14 +363,14 @@ export const ChatListSurface = memo(function ChatListSurface({
               showBlockingLoading={showBlockingLoading}
               showBlockingError={showBlockingError}
               errorMessage={errorMessage}
-              rows={rows}
+              items={items}
               showLoadOlder={showLoadOlder}
               isLoadingOlder={isLoadingOlder}
               onLoadOlder={onLoadOlder}
               loadOlderLabel={loadOlderLabel}
               showThinking={showThinking}
               userAvatarImageUrl={userAvatarImageUrl}
-              onJumpToRowKey={onJumpToRowKey}
+              onJumpToItemKey={onJumpToItemKey}
             />
           </div>
         </div>
@@ -442,28 +425,28 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     })),
     [agents],
   );
-  const viewportRows = useMemo(
-    () => selectViewportRows(currentSession),
+  const viewportItems = useMemo(
+    () => selectViewportItems(currentSession),
     [currentSession],
   );
-  const rows = useMemo(
-    () => applyAssistantPresentationToRows({
-      rows: viewportRows,
+  const items = useMemo(
+    () => applyAssistantPresentationToItems({
+      items: viewportItems,
       agents: assistantCatalogAgents,
       defaultAssistant,
     }),
-    [assistantCatalogAgents, defaultAssistant, viewportRows],
+    [assistantCatalogAgents, defaultAssistant, viewportItems],
   );
 
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
-    rowCount: rows.length,
+    itemCount: items.length,
     sending: runtime.sending,
     refreshing: false,
     mutating: false,
   });
-  const autoFollowSignal = buildChatAutoFollowSignal(rows);
-  const tailActivityOpen = runtime.sending || runtime.pendingFinal || rows.some((row) => row.kind === 'pending-assistant');
+  const autoFollowSignal = buildChatAutoFollowSignal(items);
+  const tailActivityOpen = runtime.sending || runtime.pendingFinal || items.some((item) => item.kind === 'assistant-turn' && item.status !== 'final');
 
   const {
     handleViewportPointerDown,
@@ -492,16 +475,16 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     onLoadOlder();
   }, [currentSessionKey, onLoadOlder, prepareScopeAnchorRestore]);
 
-  const handleJumpToRowKey = useCallback((rowKey?: string) => {
-    if (!rowKey) {
+  const handleJumpToItemKey = useCallback((itemKey?: string) => {
+    if (!itemKey) {
       return;
     }
     const viewportNode = messagesViewportRef.current;
     if (!viewportNode) {
       return;
     }
-    const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-row-key]'))
-      .find((element) => element.dataset.chatRowKey === rowKey);
+    const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-item-key]'))
+      .find((element) => element.dataset.chatItemKey === itemKey);
     if (!target) {
       return;
     }
@@ -564,7 +547,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onScroll={handleViewportScroll}
       onTouchMove={handleViewportTouchMove}
       onWheel={handleViewportWheel}
-      rows={rows}
+      items={items}
       showLoadOlder={viewport.hasMore || viewport.isLoadingMore}
       isLoadingOlder={viewport.isLoadingMore}
       onLoadOlder={handleLoadOlder}
@@ -572,7 +555,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       scrollChromeStore={scrollChromeStore}
       showThinking={showThinking}
       userAvatarImageUrl={userAvatarDataUrl}
-      onJumpToRowKey={handleJumpToRowKey}
+      onJumpToItemKey={handleJumpToItemKey}
     />
   );
 });

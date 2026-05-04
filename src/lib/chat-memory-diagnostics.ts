@@ -5,9 +5,9 @@ import {
   type ChatStoreState,
 } from '@/stores/chat';
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
-import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
-import { getStaticRowsCacheStats } from '@/pages/Chat/chat-rows-cache';
+import { getStaticRenderItemsCacheStats } from '@/pages/Chat/chat-render-items-cache';
 import { hostApiFetch } from './host-api';
 import { getChatViewportCacheStats } from '@/stores/chat/viewport-state';
 
@@ -19,7 +19,7 @@ interface RendererHeapMemoryStats {
 
 interface ChatSessionMemorySummary {
   sessionKey: string;
-  rowCount: number;
+  itemCount: number;
   attachedFileCount: number;
   previewCharCount: number;
   contentCharCount: number;
@@ -32,7 +32,7 @@ interface ChatSessionMemorySummary {
 export interface ChatStoreMemorySummary {
   sessionCount: number;
   readySessionCount: number;
-  totalRowCount: number;
+  totalItemCount: number;
   totalAttachedFileCount: number;
   totalPreviewCharCount: number;
   totalDataUrlPreviewCharCount: number;
@@ -45,7 +45,7 @@ export interface ChatStoreMemorySummary {
 export interface ChatRendererCacheSummary {
   markdownRender: ReturnType<typeof getMarkdownRenderCacheStats>;
   viewportWindow: ReturnType<typeof getChatViewportCacheStats>;
-  staticRows: ReturnType<typeof getStaticRowsCacheStats>;
+  staticItems: ReturnType<typeof getStaticRenderItemsCacheStats>;
   attachmentImage: ReturnType<typeof getAttachmentImageCacheStats>;
 }
 
@@ -152,7 +152,7 @@ function estimateAttachedFiles(input: AttachedFileMeta[] | undefined): {
   };
 }
 
-function estimateRenderRowChars(row: SessionRenderRow): {
+function estimateRenderRowChars(row: SessionRenderItem): {
   contentChars: number;
   attachedFileCount: number;
   previewCharCount: number;
@@ -160,10 +160,10 @@ function estimateRenderRowChars(row: SessionRenderRow): {
   approxChars: number;
 } {
   const attachedFiles = estimateAttachedFiles(
-    row.kind === 'message' ? row.attachedFiles as AttachedFileMeta[] : undefined,
+    ('attachedFiles' in row) ? row.attachedFiles as AttachedFileMeta[] : undefined,
   );
   const contentChars = estimateUnknownChars(row);
-  const idChars = [row.rowId, row.laneKey, row.turnKey, row.runId, row.agentId]
+  const idChars = [row.key, row.laneKey, row.turnKey, row.runId, row.agentId]
     .filter((value): value is string => typeof value === 'string')
     .reduce((total, value) => total + value.length, 0);
   const approxChars = contentChars + attachedFiles.approxChars + idChars + 64;
@@ -184,8 +184,8 @@ function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): n
   }
 
   let total = 0;
-  if (runtime?.streamingMessageId) {
-    total += runtime.streamingMessageId.length;
+  if (runtime?.streamingAnchorKey) {
+    total += runtime.streamingAnchorKey.length;
   }
   return total;
 }
@@ -194,7 +194,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   const sessions = Object.entries(state.loadedSessions);
   const sessionSummaries: ChatSessionMemorySummary[] = [];
   let readySessionCount = 0;
-  let totalRowCount = 0;
+  let totalItemCount = 0;
   let totalAttachedFileCount = 0;
   let totalPreviewCharCount = 0;
   let totalDataUrlPreviewCharCount = 0;
@@ -203,15 +203,15 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   let approxRetainedBytes = 0;
 
   for (const [sessionKey, record] of sessions) {
-    const rows = Array.isArray(record.rows) ? record.rows : [];
+    const items = Array.isArray(record.items) ? record.items : [];
     let sessionContentChars = 0;
     let sessionAttachedFileCount = 0;
     let sessionPreviewCharCount = 0;
     let sessionDataUrlPreviewCharCount = 0;
     let sessionApproxChars = 0;
 
-    for (const row of rows) {
-      const stats = estimateRenderRowChars(row);
+    for (const item of items) {
+      const stats = estimateRenderRowChars(item);
       sessionContentChars += stats.contentChars;
       sessionAttachedFileCount += stats.attachedFileCount;
       sessionPreviewCharCount += stats.previewCharCount;
@@ -223,7 +223,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     const sessionApproxBytes = (sessionApproxChars + runtimeStateCharCount) * 2;
     sessionSummaries.push({
       sessionKey,
-      rowCount: rows.length,
+      itemCount: items.length,
       attachedFileCount: sessionAttachedFileCount,
       previewCharCount: sessionPreviewCharCount,
       contentCharCount: sessionContentChars,
@@ -236,7 +236,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     if (isSessionHistoryReady(record.meta.historyStatus)) {
       readySessionCount += 1;
     }
-    totalRowCount += rows.length;
+    totalItemCount += items.length;
     totalAttachedFileCount += sessionAttachedFileCount;
     totalPreviewCharCount += sessionPreviewCharCount;
     totalDataUrlPreviewCharCount += sessionDataUrlPreviewCharCount;
@@ -250,7 +250,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   return {
     sessionCount: sessions.length,
     readySessionCount,
-    totalRowCount,
+    totalItemCount,
     totalAttachedFileCount,
     totalPreviewCharCount,
     totalDataUrlPreviewCharCount,
@@ -296,7 +296,7 @@ export function collectRendererChatMemoryDiagnostics(): {
     caches: {
       markdownRender: getMarkdownRenderCacheStats(),
       viewportWindow: getChatViewportCacheStats(),
-      staticRows: getStaticRowsCacheStats(),
+      staticItems: getStaticRenderItemsCacheStats(),
       attachmentImage: getAttachmentImageCacheStats(),
     },
   };

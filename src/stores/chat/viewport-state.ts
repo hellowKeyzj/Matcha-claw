@@ -4,31 +4,31 @@ export type ChatViewportWindow = ChatSessionViewportState;
 
 export interface ChatViewportCacheStats {
   cachedSessionCount: number;
-  cachedRowCount: number;
+  cachedItemCount: number;
 }
 
 export function createViewportWindowState(
   partial: Partial<ChatSessionViewportState> = {},
 ): ChatViewportWindow {
-  const totalRowCount = typeof partial.totalRowCount === 'number'
-    ? partial.totalRowCount
+  const totalItemCount = typeof partial.totalItemCount === 'number'
+    ? partial.totalItemCount
     : (typeof partial.windowEndOffset === 'number' ? partial.windowEndOffset : 0);
   const windowStartOffset = typeof partial.windowStartOffset === 'number'
     ? partial.windowStartOffset
     : 0;
   const windowEndOffset = typeof partial.windowEndOffset === 'number'
     ? partial.windowEndOffset
-    : totalRowCount;
+    : totalItemCount;
   return {
-    totalRowCount,
+    totalItemCount,
     windowStartOffset,
     windowEndOffset,
     hasMore: Boolean(partial.hasMore),
     hasNewer: Boolean(partial.hasNewer),
     isLoadingMore: Boolean(partial.isLoadingMore),
     isLoadingNewer: Boolean(partial.isLoadingNewer),
-    isAtLatest: partial.isAtLatest ?? (windowEndOffset >= totalRowCount),
-    lastVisibleMessageId: partial.lastVisibleMessageId ?? null,
+    isAtLatest: partial.isAtLatest ?? (windowEndOffset >= totalItemCount),
+    lastVisibleItemKey: partial.lastVisibleItemKey ?? null,
   };
 }
 
@@ -45,6 +45,6 @@ export function syncViewportState(
 export function getChatViewportCacheStats(): ChatViewportCacheStats {
   return {
     cachedSessionCount: 0,
-    cachedRowCount: 0,
+    cachedItemCount: 0,
   };
 }

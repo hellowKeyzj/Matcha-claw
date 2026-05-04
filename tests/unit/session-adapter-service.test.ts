@@ -4,14 +4,14 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
 import { buildSessionUpdateEventsFromGatewayConversationEvent } from '../../runtime-host/application/sessions/gateway-ingress';
-import { materializeTranscriptRows, parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-utils';
+import { materializeTranscriptTimelineEntries, parseTranscriptMessages } from '../../runtime-host/application/sessions/transcript-utils';
 
 async function createRuntimeConfigDir() {
   return await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
 }
 
 describe('session runtime service', () => {
-  it('createSession 会把全新空会话作为已完成初始快照返回，避免前端误判为历史加载中', async () => {
+  it('createSession returns an empty authoritative render-item snapshot', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -30,7 +30,7 @@ describe('session runtime service', () => {
       sessionKey: expect.stringMatching(/^agent:worker-a:session-/),
       snapshot: {
         replayComplete: true,
-        rows: [],
+        items: [],
         runtime: {
           sending: false,
           activeRunId: null,
@@ -38,7 +38,7 @@ describe('session runtime service', () => {
           pendingFinal: false,
         },
         window: {
-          totalRowCount: 0,
+          totalItemCount: 0,
           windowStartOffset: 0,
           windowEndOffset: 0,
           hasMore: false,
@@ -49,7 +49,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('live row chunk 在缺少 message id 时，仍会生成稳定的 run/sequence row identity', () => {
+  it('live ingress still builds stable assistant timeline identities', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -69,9 +69,9 @@ describe('session runtime service', () => {
       runId: 'run-live-1',
       sessionKey: 'agent:main:main',
       laneKey: 'main',
-      rows: [{
+      entries: [{
         kind: 'message',
-        rowId: 'run:run-live-1:assistant:0',
+        entryId: 'run:run-live-1:assistant:0',
         sequenceId: 2,
         laneKey: 'main',
         turnKey: 'main:run-live-1',
@@ -81,7 +81,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('history transcript hydrate 会把 memory recall、metadata envelope 和 assistant reply directive 清洗为 display row text', () => {
+  it('history transcript hydrate sanitizes user and assistant display text', () => {
     const sessionKey = 'agent:main:main';
     const transcript = [
       JSON.stringify({
@@ -118,7 +118,7 @@ describe('session runtime service', () => {
       }),
     ].join('\n');
 
-    const rows = materializeTranscriptRows(sessionKey, parseTranscriptMessages(transcript));
+    const rows = materializeTranscriptTimelineEntries(sessionKey, parseTranscriptMessages(transcript));
 
     expect(rows).toMatchObject([
       expect.objectContaining({
@@ -132,7 +132,7 @@ describe('session runtime service', () => {
     ]);
   });
 
-  it('同一 run 的 chat delta 会持续合并到同一条 assistant row', () => {
+  it('same-run assistant deltas merge into one assistant-turn item', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -168,13 +168,25 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(firstEvent.row?.rowId).toBe('run:run-stream-merge:assistant:0');
-    expect(secondEvent.row?.rowId).toBe('run:run-stream-merge:assistant:0');
-    expect(secondEvent.row?.text).toBe('主人，我拿不到你当前定位');
-    expect(secondEvent.snapshot.window.totalRowCount).toBe(1);
+    expect(firstEvent.sessionUpdate).toBe('session_item_chunk');
+    expect(firstEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      laneKey: 'main',
+      turnKey: 'main:run-stream-merge',
+      text: '主人，我',
+      status: 'streaming',
+    });
+    expect(secondEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      laneKey: 'main',
+      turnKey: 'main:run-stream-merge',
+      text: '主人，我拿不到你当前定位',
+      status: 'streaming',
+    });
+    expect(secondEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('team lane live 事件会带上 member laneKey，并把 runId 作为 turn fallback', () => {
+  it('team lane live ingress carries member lane metadata', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -194,8 +206,8 @@ describe('session runtime service', () => {
     expect(event).toMatchObject({
       sessionUpdate: 'agent_message',
       laneKey: 'member:worker-a',
-      rows: [{
-        rowId: 'run:run-team-1:agent:worker-a:assistant:0',
+      entries: [{
+        entryId: 'run:run-team-1:agent:worker-a:assistant:0',
         laneKey: 'member:worker-a',
         turnKey: 'member:worker-a:run-team-1',
         agentId: 'worker-a',
@@ -207,7 +219,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('live gateway assistant message 会在 ingress 阶段直接产出清洗后的 display row text', () => {
+  it('live gateway assistant message is sanitized during ingress', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
       event: {
@@ -246,14 +258,14 @@ describe('session runtime service', () => {
 
     expect(event).toMatchObject({
       sessionUpdate: 'agent_message',
-      rows: [expect.objectContaining({
+      entries: [expect.objectContaining({
         kind: 'message',
         text: '你喜欢温柔甜美类型的小姐姐。',
       })],
     });
   });
 
-  it('OpenClaw tool lifecycle 会物化为可渲染的 assistant tool activity row', () => {
+  it('tool lifecycle ingress still materializes assistant tool activity timeline entries', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'tool.lifecycle',
       event: {
@@ -270,9 +282,9 @@ describe('session runtime service', () => {
 
     expect(event).toMatchObject({
       sessionUpdate: 'agent_message_chunk',
-      rows: [{
+      entries: [{
         kind: 'tool-activity',
-        rowId: 'run:run-tools-1:tool:tool-1',
+        entryId: 'run:run-tools-1:tool:tool-1',
         text: '',
         toolUses: [{
           id: 'tool-1',
@@ -288,7 +300,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('同一个 toolCallId 的 live tool stream 会合并到同一条 row', () => {
+  it('same toolCallId live stream stays inside the same assistant-turn item', () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -323,25 +335,36 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(startEvent.row?.rowId).toBe('run:run-tool-live:tool:tool-1');
-    expect(resultEvent.row?.rowId).toBe('run:run-tool-live:tool:tool-1');
-    expect(resultEvent.row).toMatchObject({
-      kind: 'tool-activity',
-      toolUses: [{
+    expect(startEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      laneKey: 'main',
+      turnKey: 'main:run-tool-live',
+      toolCalls: [{
         id: 'tool-1',
         name: 'memory_store',
-        input: { text: '记住偏好' },
       }],
       toolStatuses: [{
         toolCallId: 'tool-1',
+        status: 'running',
+      }],
+    });
+    expect(resultEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      laneKey: 'main',
+      turnKey: 'main:run-tool-live',
+      toolCalls: [{
+        id: 'tool-1',
         name: 'memory_store',
+      }],
+      toolStatuses: [{
+        toolCallId: 'tool-1',
         status: 'completed',
       }],
     });
-    expect(resultEvent.snapshot.window.totalRowCount).toBe(2);
+    expect(resultEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
-  it('同一 run 内 final assistant 会按 OpenClaw sequence 排在 tool activity 后面', async () => {
+  it('tool activity and final answer render as one assistant-turn with fixed internal order', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -390,19 +413,29 @@ describe('session runtime service', () => {
       },
     });
 
-    expect(finalEvent.snapshot.window.totalRowCount).toBe(2);
+    expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
     await expect(service.getSessionStateSnapshot({ sessionKey: 'agent:main:main' })).resolves.toMatchObject({
       data: {
         snapshot: {
-          rows: [
+          items: [
             {
-              kind: 'tool-activity',
-              rowId: 'run:run-order-1:tool:tool-read',
-            },
-            {
-              kind: 'message',
-              rowId: 'run:run-order-1:assistant:0',
+              kind: 'assistant-turn',
+              laneKey: 'main',
+              turnKey: 'main:run-order-1',
               text: '读完了，结论如下',
+              toolCalls: [
+                {
+                  id: 'tool-read',
+                  name: 'read',
+                },
+              ],
+              toolStatuses: [
+                {
+                  toolCallId: 'tool-read',
+                  name: 'read',
+                  status: 'running',
+                },
+              ],
             },
           ],
         },
@@ -410,7 +443,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('session snapshot 会直接产出 authoritative execution graph row，前端不再自己拉 child history 拼 graph', async () => {
+  it('session snapshot directly exposes execution graph render items', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
     const mainDir = join(rootDir, 'agents', 'main', 'sessions');
     const coderDir = join(rootDir, 'agents', 'coder', 'sessions');
@@ -512,14 +545,19 @@ describe('session runtime service', () => {
     const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
 
     expect(loadResponse.status).toBe(200);
-    expect(loadResponse.data.snapshot.rows).toEqual(expect.arrayContaining([
+    expect(loadResponse.data.snapshot.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'task-completion',
+        childSessionKey: 'agent:coder:child-1',
+        triggerItemKey: 'session:agent:main:main|entry:user-1',
+      }),
       expect.objectContaining({
         kind: 'execution-graph',
         childSessionKey: 'agent:coder:child-1',
         childSessionId: 'child-1',
         childAgentId: 'coder',
-        triggerRowKey: 'session:agent:main:main|row:user-1',
-        replyRowKey: 'session:agent:main:main|row:assistant-1',
+        triggerItemKey: 'session:agent:main:main|entry:user-1',
+        replyItemKey: 'session:agent:main:main|assistant-turn:member:coder:assistant-1:member:coder',
         steps: expect.arrayContaining([
           expect.objectContaining({
             label: 'read_file',
@@ -527,15 +565,10 @@ describe('session runtime service', () => {
           }),
         ]),
       }),
-      expect.objectContaining({
-        kind: 'task-completion',
-        childSessionKey: 'agent:coder:child-1',
-        triggerRowKey: 'session:agent:main:main|row:user-1',
-      }),
     ]));
   });
 
-  it('promptSession 会返回并缓存 authoritative user row，后续 load/window 直接读同一份 row timeline', async () => {
+  it('promptSession returns and caches authoritative user-message items', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -563,12 +596,10 @@ describe('session runtime service', () => {
       sessionKey: 'agent:main:main',
       runId: 'run-prompt-1',
       promptId: 'user-local-1',
-      row: {
-        kind: 'message',
-        rowId: 'user-local-1',
+      item: {
+        kind: 'user-message',
+        key: 'session:agent:main:main|entry:user-local-1',
         sessionKey: 'agent:main:main',
-        laneKey: 'main',
-        turnKey: 'main:user-local-1',
         role: 'user',
         text: 'hello authoritative',
         messageId: 'user-local-1',
@@ -584,16 +615,14 @@ describe('session runtime service', () => {
     expect(loadResponse.data).toMatchObject({
       snapshot: {
         sessionKey: 'agent:main:main',
-        rows: expect.arrayContaining([
+        items: [
           expect.objectContaining({
-            rowId: 'user-local-1',
+            kind: 'user-message',
+            key: 'session:agent:main:main|entry:user-local-1',
           }),
-          expect.objectContaining({
-            kind: 'pending-assistant',
-          }),
-        ]),
+        ],
         window: {
-          totalRowCount: 2,
+          totalItemCount: 1,
         },
       },
     });
@@ -607,9 +636,9 @@ describe('session runtime service', () => {
     expect(windowResponse.status).toBe(200);
     expect(windowResponse.data).toMatchObject({
       snapshot: {
-        rows: expect.arrayContaining([
+        items: [
           expect.objectContaining({
-            rowId: 'user-local-1',
+            key: 'session:agent:main:main|entry:user-local-1',
             attachedFiles: expect.arrayContaining([
               expect.objectContaining({
                 fileName: 'a.png',
@@ -617,15 +646,15 @@ describe('session runtime service', () => {
               }),
             ]),
           }),
-        ]),
+        ],
         window: {
-          totalRowCount: 2,
+          totalItemCount: 1,
         },
       },
     });
   });
 
-  it('canonical transcript 还没追平时，loadSession 仍会保留 live assistant final row', async () => {
+  it('canonical transcript catch-up keeps live assistant final item', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -649,9 +678,9 @@ describe('session runtime service', () => {
     });
 
     expect(sessionUpdate).toMatchObject({
-      sessionUpdate: 'session_row',
-      row: {
-        role: 'assistant',
+      sessionUpdate: 'session_item',
+      item: {
+        kind: 'assistant-turn',
         text: 'authoritative final',
       },
     });
@@ -660,16 +689,16 @@ describe('session runtime service', () => {
     expect(loadResponse.status).toBe(200);
     expect(loadResponse.data).toMatchObject({
       snapshot: {
-        rows: [{
-          role: 'assistant',
+        items: [{
+          kind: 'assistant-turn',
           text: 'authoritative final',
         }],
       },
     });
-    expect(loadResponse.data.snapshot.rows).toHaveLength(1);
+    expect(loadResponse.data.snapshot.items).toHaveLength(1);
   });
 
-  it('同一 run 内 assistant tool activity row 与最终文本 row 不应因 fallback merge 被压成一条', async () => {
+  it('tool-only assistant activity and final text stay inside one assistant-turn on transcript hydrate', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
     const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
     await mkdir(transcriptDir, { recursive: true });
@@ -733,21 +762,16 @@ describe('session runtime service', () => {
     const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
 
     expect(loadResponse.status).toBe(200);
-    expect(loadResponse.data.snapshot.rows).toHaveLength(3);
-    expect(loadResponse.data.snapshot.rows[1]).toMatchObject({
-      kind: 'tool-activity',
-      toolUses: [{
-        id: 'tool-1',
-        name: 'memory_store',
-      }],
-    });
-    expect(loadResponse.data.snapshot.rows[2]).toMatchObject({
-      kind: 'message',
+    // The historical transcript lacks explicit turn identity on the toolCall stub,
+    // so the tool-only fragment remains a separate earlier assistant-turn item.
+    expect(loadResponse.data.snapshot.items).toHaveLength(3);
+    expect(loadResponse.data.snapshot.items[2]).toMatchObject({
+      kind: 'assistant-turn',
       text: '记住了，主人。你是男的。',
     });
   });
 
-  it('promptSession 进入 runtime 后，后续 loadSession 不再用 canonical user 文本语义回写覆盖本地 authoritative row', async () => {
+  it('local prompt user item is not overwritten by canonical user text semantics on reload', async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
     const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
     await mkdir(transcriptDir, { recursive: true });
@@ -789,14 +813,15 @@ describe('session runtime service', () => {
 
     const loadResponse = await service.loadSession({ sessionKey: 'agent:main:main' });
     expect(loadResponse.status).toBe(200);
-    expect(loadResponse.data.snapshot.rows[0]).toMatchObject({
-      rowId: 'user-local-1',
+    expect(loadResponse.data.snapshot.items[0]).toMatchObject({
+      kind: 'user-message',
+      key: 'session:agent:main:main|entry:user-local-1',
       messageId: 'user-local-1',
       text: 'hello authoritative',
     });
   });
 
-  it('runtime store v2 only persists minimal live runtime metadata, not historical rows/window snapshots', async () => {
+  it('runtime store v2 persists only minimal live runtime metadata', async () => {
     const configDir = await createRuntimeConfigDir();
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -833,7 +858,7 @@ describe('session runtime service', () => {
         },
       ],
     });
-    expect(persisted.liveSessions[0]).not.toHaveProperty('rows');
+    expect(persisted.liveSessions[0]).not.toHaveProperty('items');
     expect(persisted.liveSessions[0]).not.toHaveProperty('window');
   });
 });
