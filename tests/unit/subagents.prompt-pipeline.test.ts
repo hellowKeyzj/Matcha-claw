@@ -6,8 +6,8 @@ import {
   hostSessionWindowFetchMock,
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
-
 import { useSubagentsStore } from '@/stores/subagents';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 function buildDraftOutput(
   files: Array<{ name: string; content: string; reason: string; confidence: number }>,
@@ -21,26 +21,16 @@ function buildHistoryWindow(output: string) {
   return {
     snapshot: {
       sessionKey: 'agent:writer:subagent-draft',
-      entries: [
-        {
-          entryId: 'entry-1',
-          sessionKey: 'agent:writer:subagent-draft',
-          laneKey: 'main',
-          turnKey: 'main:entry-1',
-          role: 'assistant' as const,
-          status: 'final' as const,
-          text: output,
-          message: {
-            role: 'assistant' as const,
-            content: [
-              {
-                type: 'text',
-                text: output,
-              },
-            ],
+      rows: buildRenderRowsFromMessages('agent:writer:subagent-draft', [{
+        id: 'entry-1',
+        role: 'assistant',
+        content: [
+          {
+            type: 'text',
+            text: output,
           },
-        },
-      ],
+        ],
+      }]),
       replayComplete: true,
       runtime: {
         sending: false,
@@ -52,7 +42,7 @@ function buildHistoryWindow(output: string) {
         updatedAt: 1,
       },
       window: {
-        totalEntryCount: 1,
+        totalRowCount: 1,
         windowStartOffset: 0,
         windowEndOffset: 1,
         hasMore: false,
@@ -214,7 +204,7 @@ describe('subagents prompt pipeline', () => {
       .mockResolvedValueOnce({
         snapshot: {
           sessionKey: 'agent:writer:subagent-draft',
-          entries: [],
+          rows: [],
           replayComplete: true,
           runtime: {
             sending: false,
@@ -226,7 +216,7 @@ describe('subagents prompt pipeline', () => {
             updatedAt: 1,
           },
           window: {
-            totalEntryCount: 0,
+            totalRowCount: 0,
             windowStartOffset: 0,
             windowEndOffset: 0,
             hasMore: false,

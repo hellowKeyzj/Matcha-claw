@@ -1,9 +1,4 @@
 import type { ToolStatus } from './types';
-import type { SessionTimelineEntry } from '../../../runtime-host/shared/session-adapter-types';
-
-function normalizeToolStatuses(input: ToolStatus[] | undefined): ToolStatus[] {
-  return Array.isArray(input) ? input.filter((item) => item && typeof item.name === 'string' && item.name.trim().length > 0) : [];
-}
 
 export function isToolResultRole(role: unknown): boolean {
   if (!role) return false;
@@ -39,8 +34,4 @@ export function upsertToolStatuses(current: ToolStatus[], updates: ToolStatus[])
     };
   }
   return next;
-}
-
-export function readTimelineEntryToolStatuses(entry: SessionTimelineEntry | null | undefined): ToolStatus[] {
-  return normalizeToolStatuses(entry?.message.toolStatuses as ToolStatus[] | undefined);
 }

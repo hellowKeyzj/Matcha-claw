@@ -1,6 +1,7 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
 import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionRenderAttachedFile, SessionRenderRow } from '../../../runtime-host/shared/session-adapter-types';
+import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -32,7 +33,11 @@ export interface ContentBlock {
 /** Session from session catalog */
 export interface ChatSession {
   key: string;
+  agentId?: string;
+  kind?: SessionCatalogKind;
+  preferred?: boolean;
   label?: string;
+  titleSource?: SessionCatalogTitleSource;
   displayName?: string;
   thinkingLevel?: string;
   model?: string;
@@ -90,7 +95,11 @@ export interface ChatSessionRuntimeState {
 }
 
 export interface ChatSessionMetaState {
+  agentId: string | null;
+  kind: SessionCatalogKind | null;
+  preferred: boolean;
   label: string | null;
+  titleSource: SessionCatalogTitleSource;
   displayName?: string | null;
   model?: string | null;
   lastActivityAt: number | null;
@@ -106,7 +115,7 @@ export interface ChatSessionRecord {
 }
 
 export interface ChatSessionViewportState {
-  totalMessageCount: number;
+  totalRowCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;

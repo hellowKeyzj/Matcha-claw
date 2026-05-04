@@ -26,7 +26,7 @@ export function getMessageRowAttachedFiles(row: SessionMessageRow): AttachedFile
 
 export function buildAssistantMarkdownCacheKey(row: SessionMessageRow): string {
   return buildMarkdownCacheKey({
-    messageId: row.messageId ?? row.entryId ?? row.key,
+    messageId: row.messageId ?? row.rowId ?? row.key,
     role: row.role,
     timestamp: row.createdAt,
     text: row.text,

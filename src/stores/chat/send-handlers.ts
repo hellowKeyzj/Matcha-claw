@@ -17,6 +17,7 @@ import {
 import {
   patchSessionRecord,
   patchSessionSnapshot,
+  getSessionMeta,
   getSessionRuntime,
   patchSessionMeta,
   hasTimeoutSignal,
@@ -43,7 +44,8 @@ interface ApplyStoreSendStartParams {
 export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
   const { set, sessionKey, text, nowMs } = params;
   set((state) => {
-    const nextSessionLabel = sessionKey.endsWith(':main')
+    const sessionMeta = getSessionMeta(state, sessionKey);
+    const nextSessionLabel = sessionMeta.kind === 'main' || sessionMeta.preferred
       ? null
       : text;
     const runtime = getSessionRuntime(state, sessionKey);

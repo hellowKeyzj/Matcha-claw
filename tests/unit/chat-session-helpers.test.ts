@@ -9,7 +9,7 @@ import {
   shouldKeepMissingCurrentSession,
 } from '@/stores/chat/session-helpers';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 function createSessionRecord(input?: {
@@ -28,7 +28,13 @@ function createSessionRecord(input?: {
   const messages = input?.messages ?? [];
   return {
     meta: {
-      label: input?.label ?? null,
+      agentId: sessionKey.split(':')[1] ?? null,
+      kind: sessionKey.endsWith(':main') ? 'main' : 'session',
+      preferred: sessionKey.endsWith(':main'),
+      label: input?.label ?? (messages.length > 0 && typeof messages[messages.length - 1]?.content === 'string'
+        ? String(messages[messages.length - 1]?.content)
+        : null),
+      titleSource: input?.label ? 'user' as const : 'none' as const,
       displayName: null,
       model: null,
       lastActivityAt: input?.lastActivityAt ?? null,
@@ -43,9 +49,9 @@ function createSessionRecord(input?: {
       streamingMessageId: null,
       lastUserMessageAt: null,
     },
-    timelineEntries: buildTimelineEntriesFromMessages(sessionKey, messages),
+    rows: buildRenderRowsFromMessages(sessionKey, messages),
     window: createViewportWindowState({
-      totalMessageCount: messages.length,
+      totalRowCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -86,13 +92,13 @@ describe('chat session helpers', () => {
     expect(sessions[1]?.thinkingLevel).toBe('low');
   });
 
-  it('prefers loaded viewport transcript title over stale stored label', () => {
+  it('reads authoritative store label instead of recomputing from rows', () => {
     const sessions = readSessionsFromState({
       loadedSessions: {
         'agent:test:session-1': createSessionRecord({
-          label: '本地旧标题',
+          label: '真正正文标题',
           messages: [
-            { role: 'user', content: '真正正文标题', timestamp: 1_800_000_001 },
+            { role: 'user', content: '旧正文内容', timestamp: 1_800_000_001 },
           ],
         }),
       },
@@ -108,18 +114,18 @@ describe('chat session helpers', () => {
     expect(parseSessionUpdatedAtMs('')).toBeUndefined();
   });
 
-  it('chooses preferred agent session key by canonical fallback then recency', () => {
+  it('chooses preferred agent session key from authoritative catalog preference then recency', () => {
     const sessions = [
-      { key: 'agent:foo:session-1700000000000' },
-      { key: 'agent:foo:main' },
-      { key: 'agent:bar:main' },
+      { key: 'agent:foo:session-1700000000000', agentId: 'foo' },
+      { key: 'agent:foo:main', agentId: 'foo', preferred: true },
+      { key: 'agent:bar:main', agentId: 'bar', preferred: true },
     ];
     const preferredWithCanonical = resolvePreferredSessionKeyForAgent('foo', sessions, {});
     expect(preferredWithCanonical).toBe('agent:foo:main');
 
     const sessionsNoCanonical = [
-      { key: 'agent:foo:session-1700000000000' },
-      { key: 'agent:foo:session-1700000000100' },
+      { key: 'agent:foo:session-1700000000000', agentId: 'foo', updatedAt: 1_700_000_000_000 },
+      { key: 'agent:foo:session-1700000000100', agentId: 'foo', updatedAt: 1_700_000_000_100 },
     ];
     const preferredByRecency = resolvePreferredSessionKeyForAgent('foo', sessionsNoCanonical, {});
     expect(preferredByRecency).toBe('agent:foo:session-1700000000100');
@@ -131,6 +137,7 @@ describe('chat session helpers', () => {
       {
         loadedSessions: {
           'agent:main:main': createSessionRecord({
+            sessionKey: 'agent:main:main',
             messages: [{ role: 'user', content: 'hi' }],
           }),
         },

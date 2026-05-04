@@ -11,9 +11,6 @@ import {
   fetchHistoryWindow,
   type HistoryWindowResult,
 } from './history-fetch-helpers';
-import {
-  resolveSessionLabelFromRows,
-} from './message-helpers';
 import { finishChatRunTelemetry } from './telemetry';
 import { clearHistoryPoll } from './timers';
 import {
@@ -25,7 +22,6 @@ import {
   patchSessionRecord,
   patchSessionSnapshot,
   patchSessionViewportState,
-  toMs,
 } from './store-state-helpers';
 import { readSessionsFromState } from './session-helpers';
 import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
@@ -62,8 +58,8 @@ interface CreateApplyLoadedMessagesInput {
   shouldAbortHistoryProcessing: () => boolean;
 }
 
-function resolveViewportFetchLimit(messageCount: number): number {
-  return Math.min(Math.max(messageCount || 80, 40), 200);
+function resolveViewportFetchLimit(rowCount: number): number {
+  return Math.min(Math.max(rowCount || 80, 40), 200);
 }
 
 function resolveViewportWindowRequestState(input: {
@@ -184,7 +180,6 @@ export function createApplyLoadedMessagesPipeline(
 ): (window: HistoryWindowResult) => Promise<void> {
   const {
     set,
-    get,
     historyRuntime,
     requestedSessionKey,
     scope,
@@ -206,14 +201,6 @@ export function createApplyLoadedMessagesPipeline(
     const hydratedRows = hydrateAttachedFilesFromRows(snapshot.rows);
     const renderFingerprint = buildRowRenderFingerprint(hydratedRows);
     const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
-    const currentState = get();
-    const currentMeta = currentState.loadedSessions[requestedSessionKey]?.meta;
-    const isMainSession = requestedSessionKey.endsWith(':main');
-    const resolvedLabel = !isMainSession
-      ? resolveSessionLabelFromRows(hydratedRows)
-      : '';
-    const lastRow = hydratedRows[hydratedRows.length - 1];
-    const lastAt = lastRow?.createdAt ? toMs(lastRow.createdAt) : null;
     const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
 
     set((state) => ({
@@ -228,8 +215,6 @@ export function createApplyLoadedMessagesPipeline(
         {
           historyStatus: 'ready',
           thinkingLevel: window.thinkingLevel,
-          label: resolvedLabel || currentMeta?.label || null,
-          lastActivityAt: lastAt ?? currentMeta?.lastActivityAt ?? null,
         },
       ),
     }));

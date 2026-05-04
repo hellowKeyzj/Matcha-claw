@@ -98,14 +98,8 @@ function dedupeTaskCompletionEvents(
   return deduped;
 }
 
-export function normalizeTaskCompletionEvents(input: {
-  taskCompletionEvents?: unknown;
-  internalEvents?: unknown;
-}): SessionTaskCompletionEvent[] | undefined {
-  const explicitEvents = [
-    ...(Array.isArray(input.taskCompletionEvents) ? input.taskCompletionEvents : []),
-    ...(Array.isArray(input.internalEvents) ? input.internalEvents : []),
-  ]
+export function normalizeTaskCompletionEvents(events: unknown): SessionTaskCompletionEvent[] | undefined {
+  const explicitEvents = (Array.isArray(events) ? events : [])
     .map((item) => normalizeTaskCompletionEventRecord(item))
     .filter((item): item is SessionTaskCompletionEvent => Boolean(item));
   return explicitEvents.length > 0 ? dedupeTaskCompletionEvents(explicitEvents) : undefined;

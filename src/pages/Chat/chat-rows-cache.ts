@@ -34,7 +34,7 @@ export function getOrBuildStaticRowsCacheEntry(
   return nextEntry;
 }
 
-export function prewarmStaticRowsForTimeline(
+export function prewarmStaticRows(
   sessionKey: string,
   rows: SessionRenderRow[],
 ): SessionStaticRowsCacheEntry {

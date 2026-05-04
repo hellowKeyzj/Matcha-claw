@@ -17,7 +17,7 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
-  getSessionMessageCount,
+  getSessionRowCount,
 } from '@/stores/chat/store-state-helpers';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
@@ -176,7 +176,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
-    rowCount: getSessionMessageCount(currentSession),
+    rowCount: getSessionRowCount(currentSession),
     sending: currentSession.runtime.sending,
     refreshing,
     mutating,

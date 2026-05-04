@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   getOrBuildStaticRowsCacheEntry,
-  prewarmStaticRowsForTimeline,
+  prewarmStaticRows,
 } from '@/pages/Chat/chat-rows-cache';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -18,10 +18,10 @@ function buildMessages(count: number): RawMessage[] {
 describe('chat rows cache', () => {
   it('returns the same static rows cache entry for the same message reference', () => {
     const messages = buildMessages(40);
-    const timelineEntries = buildTimelineEntriesFromMessages('agent:cache:main', messages);
+    const rows = buildRenderRowsFromMessages('agent:cache:main', messages);
 
-    const firstEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', timelineEntries);
-    const secondEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', timelineEntries);
+    const firstEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', rows);
+    const secondEntry = getOrBuildStaticRowsCacheEntry('agent:cache:main', rows);
 
     expect(secondEntry).toBe(firstEntry);
     expect(secondEntry.rows).toBe(firstEntry.rows);
@@ -29,10 +29,10 @@ describe('chat rows cache', () => {
 
   it('reuses prewarmed static rows on later reads', () => {
     const sessionKey = 'agent:cache:main';
-    const transcript = buildTimelineEntriesFromMessages(sessionKey, buildMessages(12));
+    const rows = buildRenderRowsFromMessages(sessionKey, buildMessages(12));
 
-    const prewarmed = prewarmStaticRowsForTimeline(sessionKey, transcript);
-    const reused = getOrBuildStaticRowsCacheEntry(sessionKey, transcript);
+    const prewarmed = prewarmStaticRows(sessionKey, rows);
+    const reused = getOrBuildStaticRowsCacheEntry(sessionKey, rows);
 
     expect(reused).toBe(prewarmed);
     expect(reused.rows).toBe(prewarmed.rows);
@@ -56,8 +56,8 @@ describe('chat rows cache', () => {
       },
     ];
 
-    const initialTimelineEntries = buildTimelineEntriesFromMessages(sessionKey, initialMessages);
-    const firstEntry = getOrBuildStaticRowsCacheEntry(sessionKey, initialTimelineEntries);
+    const initialRows = buildRenderRowsFromMessages(sessionKey, initialMessages);
+    const firstEntry = getOrBuildStaticRowsCacheEntry(sessionKey, initialRows);
     const nextMessages: RawMessage[] = [
       initialMessages[0]!,
       {
@@ -67,13 +67,13 @@ describe('chat rows cache', () => {
       },
     ];
 
-    const nextAssistantEntry = buildTimelineEntriesFromMessages(sessionKey, [nextMessages[1]!])[0]!;
+    const nextAssistantRow = buildRenderRowsFromMessages(sessionKey, [nextMessages[1]!])[0]!;
     const secondEntry = getOrBuildStaticRowsCacheEntry(sessionKey, [
-      initialTimelineEntries[0]!,
-      nextAssistantEntry,
+      initialRows[0]!,
+      nextAssistantRow,
     ]);
 
-    expect(secondEntry.rows[0]).toBe(firstEntry.rows[0]);
+    expect(secondEntry.rows[0]).toStrictEqual(firstEntry.rows[0]);
     expect(secondEntry.rows[1]).not.toBe(firstEntry.rows[1]);
     expect(secondEntry.rows[1]?.key).toBe(firstEntry.rows[1]?.key);
   });

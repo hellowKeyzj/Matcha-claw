@@ -6,7 +6,6 @@ import {
 } from '@/stores/chat';
 import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
 import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
-import { getExecutionGraphCacheStats } from '@/pages/Chat/execution-graph-diagnostics';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRowsCacheStats } from '@/pages/Chat/chat-rows-cache';
 import { hostApiFetch } from './host-api';
@@ -20,7 +19,7 @@ interface RendererHeapMemoryStats {
 
 interface ChatSessionMemorySummary {
   sessionKey: string;
-  messageCount: number;
+  rowCount: number;
   attachedFileCount: number;
   previewCharCount: number;
   contentCharCount: number;
@@ -33,7 +32,7 @@ interface ChatSessionMemorySummary {
 export interface ChatStoreMemorySummary {
   sessionCount: number;
   readySessionCount: number;
-  totalMessageCount: number;
+  totalRowCount: number;
   totalAttachedFileCount: number;
   totalPreviewCharCount: number;
   totalDataUrlPreviewCharCount: number;
@@ -47,7 +46,6 @@ export interface ChatRendererCacheSummary {
   markdownRender: ReturnType<typeof getMarkdownRenderCacheStats>;
   viewportWindow: ReturnType<typeof getChatViewportCacheStats>;
   staticRows: ReturnType<typeof getStaticRowsCacheStats>;
-  executionGraphs: ReturnType<typeof getExecutionGraphCacheStats>;
   attachmentImage: ReturnType<typeof getAttachmentImageCacheStats>;
 }
 
@@ -165,7 +163,7 @@ function estimateRenderRowChars(row: SessionRenderRow): {
     row.kind === 'message' ? row.attachedFiles as AttachedFileMeta[] : undefined,
   );
   const contentChars = estimateUnknownChars(row);
-  const idChars = [row.entryId, row.laneKey, row.turnKey, row.runId, row.agentId]
+  const idChars = [row.rowId, row.laneKey, row.turnKey, row.runId, row.agentId]
     .filter((value): value is string => typeof value === 'string')
     .reduce((total, value) => total + value.length, 0);
   const approxChars = contentChars + attachedFiles.approxChars + idChars + 64;
@@ -196,7 +194,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   const sessions = Object.entries(state.loadedSessions);
   const sessionSummaries: ChatSessionMemorySummary[] = [];
   let readySessionCount = 0;
-  let totalMessageCount = 0;
+  let totalRowCount = 0;
   let totalAttachedFileCount = 0;
   let totalPreviewCharCount = 0;
   let totalDataUrlPreviewCharCount = 0;
@@ -225,7 +223,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     const sessionApproxBytes = (sessionApproxChars + runtimeStateCharCount) * 2;
     sessionSummaries.push({
       sessionKey,
-      messageCount: rows.length,
+      rowCount: rows.length,
       attachedFileCount: sessionAttachedFileCount,
       previewCharCount: sessionPreviewCharCount,
       contentCharCount: sessionContentChars,
@@ -238,7 +236,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
     if (isSessionHistoryReady(record.meta.historyStatus)) {
       readySessionCount += 1;
     }
-    totalMessageCount += rows.length;
+    totalRowCount += rows.length;
     totalAttachedFileCount += sessionAttachedFileCount;
     totalPreviewCharCount += sessionPreviewCharCount;
     totalDataUrlPreviewCharCount += sessionDataUrlPreviewCharCount;
@@ -252,7 +250,7 @@ export function summarizeChatStoreMemory(state: ChatStoreState): ChatStoreMemory
   return {
     sessionCount: sessions.length,
     readySessionCount,
-    totalMessageCount,
+    totalRowCount,
     totalAttachedFileCount,
     totalPreviewCharCount,
     totalDataUrlPreviewCharCount,
@@ -299,7 +297,6 @@ export function collectRendererChatMemoryDiagnostics(): {
       markdownRender: getMarkdownRenderCacheStats(),
       viewportWindow: getChatViewportCacheStats(),
       staticRows: getStaticRowsCacheStats(),
-      executionGraphs: getExecutionGraphCacheStats(),
       attachmentImage: getAttachmentImageCacheStats(),
     },
   };

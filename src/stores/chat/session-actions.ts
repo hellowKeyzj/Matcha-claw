@@ -22,7 +22,7 @@ import {
 } from './timers';
 import {
   createEmptySessionRecord,
-  getSessionMessageCount,
+  getSessionRowCount,
   getSessionMeta,
   getSessionViewportState,
   patchSessionMeta,
@@ -127,7 +127,7 @@ function shouldMarkSessionLoadingOnSwitch(
   if (sessionRecord.runtime.sending) {
     return false;
   }
-  return sessionRecord.meta.historyStatus !== 'ready' && getSessionMessageCount(sessionRecord) === 0;
+  return sessionRecord.meta.historyStatus !== 'ready' && getSessionRowCount(sessionRecord) === 0;
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
@@ -147,58 +147,41 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
       const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
       const sessions: ChatSession[] = rawSessions.map((session) => ({
         key: session.key || '',
+        agentId: typeof session.agentId === 'string' ? session.agentId : undefined,
+        kind: session.kind === 'main' || session.kind === 'subsession' || session.kind === 'session' || session.kind === 'named'
+          ? session.kind
+          : undefined,
+        preferred: session.preferred === true,
         label: typeof session.label === 'string' ? session.label : undefined,
+        titleSource: session.titleSource === 'user' || session.titleSource === 'assistant' || session.titleSource === 'none'
+          ? session.titleSource
+          : undefined,
         displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
         updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
       })).filter((session: ChatSession) => session.key);
 
-      const canonicalBySuffix = new Map<string, string>();
-      for (const session of sessions) {
-        if (!session.key.startsWith('agent:')) continue;
-        const parts = session.key.split(':');
-        if (parts.length < 3) continue;
-        const suffix = parts.slice(2).join(':');
-        if (suffix && !canonicalBySuffix.has(suffix)) {
-          canonicalBySuffix.set(suffix, session.key);
-        }
-      }
-
-      const seen = new Set<string>();
-      const dedupedSessions = sessions.filter((session) => {
-        if (!session.key.startsWith('agent:') && canonicalBySuffix.has(session.key)) return false;
-        if (seen.has(session.key)) return false;
-        seen.add(session.key);
-        return true;
-      });
-
       const stateSnapshot = get();
       const { currentSessionKey } = stateSnapshot;
       let nextSessionKey = currentSessionKey || defaultSessionKey;
-      if (!nextSessionKey.startsWith('agent:')) {
-        const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
-        if (canonicalMatch) {
-          nextSessionKey = canonicalMatch;
-        }
-      }
-      const hasSessionInBackend = (sessionKey: string): boolean => dedupedSessions.some((session) => session.key === sessionKey);
+      const hasSessionInBackend = (sessionKey: string): boolean => sessions.some((session) => session.key === sessionKey);
       let shouldKeepMissingCurrent = false;
       if (!hasSessionInBackend(nextSessionKey)) {
         shouldKeepMissingCurrent = shouldKeepMissingCurrentSession(
           nextSessionKey,
           stateSnapshot,
-          dedupedSessions.length,
+          sessions.length,
         );
-        if (!shouldKeepMissingCurrent && dedupedSessions.length > 0) {
-          nextSessionKey = dedupedSessions[0].key;
+        if (!shouldKeepMissingCurrent && sessions.length > 0) {
+          nextSessionKey = sessions[0].key;
         }
       }
       const currentExistsInBackend = hasSessionInBackend(nextSessionKey);
-      const backendSessions = dedupedSessions;
+      const backendSessions = sessions;
 
       const shouldMarkCurrentAsReadyEmpty = (
         !currentExistsInBackend
         && shouldKeepMissingCurrent
-        && dedupedSessions.length === 0
+        && sessions.length === 0
         && nextSessionKey.length > 0
       );
       const loadedAt = Date.now();
@@ -220,7 +203,11 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
           const currentMeta = getSessionMeta({ loadedSessions }, session.key);
           const explicitLabel = normalizeCatalogString(session.label);
           loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
+            agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
+            kind: session.kind ?? currentMeta.kind,
+            preferred: session.preferred ?? currentMeta.preferred,
             label: explicitLabel && explicitLabel !== session.key ? explicitLabel : currentMeta.label,
+            titleSource: session.titleSource ?? currentMeta.titleSource,
             displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
             thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
             model: normalizeCatalogString(session.model) ?? currentMeta.model ?? null,
@@ -322,7 +309,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     });
     targetRecord = resolveSessionRecord(nextloadedSessions[key]);
   }
-  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionMessageCount(targetRecord) > 0;
+  const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionRowCount(targetRecord) > 0;
 
   set((stateValue) => ({
     sessionCatalogStatus: stateValue.sessionCatalogStatus,

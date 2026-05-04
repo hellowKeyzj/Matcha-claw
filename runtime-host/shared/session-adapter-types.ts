@@ -1,11 +1,11 @@
-export type SessionTimelineEntryRole =
+export type SessionMessageRole =
   | 'user'
   | 'assistant'
   | 'system'
   | 'toolresult'
   | 'tool_result';
 
-export type SessionTimelineEntryStatus =
+export type SessionRowStatus =
   | 'pending'
   | 'streaming'
   | 'final'
@@ -28,6 +28,8 @@ export interface SessionTaskCompletionEvent {
 
 export type SessionExecutionGraphStepStatus = 'running' | 'completed' | 'error';
 export type SessionExecutionGraphStepKind = 'thinking' | 'tool' | 'system';
+export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'named';
+export type SessionCatalogTitleSource = 'user' | 'assistant' | 'none';
 
 export interface SessionExecutionGraphStep {
   id: string;
@@ -37,63 +39,6 @@ export interface SessionExecutionGraphStep {
   detail?: string;
   depth: number;
   parentId?: string;
-}
-
-export interface SessionExecutionGraph {
-  id: string;
-  anchorEntryId: string;
-  anchorTurnKey?: string;
-  anchorLaneKey?: string;
-  triggerEntryId: string;
-  replyEntryId?: string;
-  childSessionKey: string;
-  childSessionId?: string;
-  childAgentId?: string;
-  agentLabel: string;
-  sessionLabel: string;
-  steps: SessionExecutionGraphStep[];
-  active: boolean;
-}
-
-export interface SessionTimelineEntryMessage {
-  role: SessionTimelineEntryRole;
-  content: unknown;
-  timestamp?: number;
-  id?: string;
-  messageId?: string;
-  originMessageId?: string;
-  clientId?: string;
-  uniqueId?: string;
-  requestId?: string;
-  status?: 'sending' | 'sent' | 'timeout' | 'error';
-  streaming?: boolean;
-  agentId?: string;
-  toolCallId?: string;
-  tool_calls?: Array<Record<string, unknown>>;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolName?: string;
-  metadata?: Record<string, unknown>;
-  name?: string;
-  details?: unknown;
-  toolStatuses?: Array<Record<string, unknown>>;
-  taskCompletionEvents?: SessionTaskCompletionEvent[];
-  isError?: boolean;
-  _attachedFiles?: Array<Record<string, unknown>>;
-}
-
-export interface SessionTimelineEntry {
-  entryId: string;
-  sessionKey: string;
-  laneKey: string;
-  turnKey: string;
-  role: SessionTimelineEntryRole;
-  status: SessionTimelineEntryStatus;
-  timestamp?: number;
-  runId?: string;
-  agentId?: string;
-  sequenceId?: number;
-  text: string;
-  message: SessionTimelineEntryMessage;
 }
 
 export interface SessionRuntimeStateSnapshot {
@@ -107,7 +52,7 @@ export interface SessionRuntimeStateSnapshot {
 }
 
 export interface SessionWindowStateSnapshot {
-  totalEntryCount: number;
+  totalRowCount: number;
   windowStartOffset: number;
   windowEndOffset: number;
   hasMore: boolean;
@@ -161,12 +106,14 @@ export interface SessionRenderRowBase {
   role: 'user' | 'assistant' | 'system';
   text: string;
   createdAt?: number;
-  status?: SessionTimelineEntryStatus;
+  status?: SessionRowStatus;
   runId?: string;
-  entryId?: string;
+  rowId?: string;
+  sequenceId?: number;
   laneKey?: string;
   turnKey?: string;
   agentId?: string;
+  sourceRole?: SessionMessageRole;
   assistantTurnKey?: string | null;
   assistantLaneKey?: string | null;
   assistantLaneAgentId?: string | null;
@@ -182,6 +129,10 @@ export interface SessionMessageRow extends SessionRenderRowBase {
   toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
   isStreaming: boolean;
   messageId?: string;
+  originMessageId?: string;
+  clientId?: string;
+  uniqueId?: string;
+  requestId?: string;
 }
 
 export interface SessionToolActivityRow extends SessionRenderRowBase {
@@ -189,6 +140,7 @@ export interface SessionToolActivityRow extends SessionRenderRowBase {
   role: 'assistant';
   toolUses: ReadonlyArray<SessionRenderToolUse>;
   toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   isStreaming: boolean;
 }
 
@@ -203,6 +155,9 @@ export interface SessionTaskCompletionRow extends SessionRenderRowBase {
   result?: string;
   statsLine?: string;
   replyInstruction?: string;
+  anchorRowKey?: string;
+  triggerRowKey?: string;
+  replyRowKey?: string;
 }
 
 export interface SessionPendingAssistantRow extends SessionRenderRowBase {
@@ -215,6 +170,8 @@ export interface SessionExecutionGraphRow extends SessionRenderRowBase {
   kind: 'execution-graph';
   role: 'assistant';
   graphId: string;
+  completionRowKey: string;
+  anchorRowKey?: string;
   childSessionKey: string;
   childSessionId?: string;
   childAgentId?: string;
@@ -242,6 +199,7 @@ export type SessionRenderRow =
 
 export interface SessionStateSnapshot {
   sessionKey: string;
+  catalog: SessionCatalogItem;
   rows: SessionRenderRow[];
   replayComplete: boolean;
   runtime: SessionRuntimeStateSnapshot;
@@ -254,7 +212,11 @@ export interface SessionLoadResult {
 
 export interface SessionCatalogItem {
   key: string;
+  agentId: string;
+  kind: SessionCatalogKind;
+  preferred: boolean;
   label?: string;
+  titleSource?: SessionCatalogTitleSource;
   displayName?: string;
   updatedAt?: number;
 }

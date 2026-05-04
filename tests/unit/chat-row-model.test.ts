@@ -1,58 +1,44 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyAssistantPresentationToRows,
-  buildStaticChatRows,
-  patchTimelineRows,
-  type ChatRow,
+  buildAssistantLaneTurnMatchKey,
+  resolveRowAssistantLaneTurnMatchKey,
   type ChatMessageRow,
 } from '@/pages/Chat/chat-row-model';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionRenderRow } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
-function buildAssistantEntry(input: {
-  entryId: string;
-  laneKey: string;
-  turnKey: string;
-  agentId?: string;
-  text: string;
-}): SessionTimelineEntry {
-  return {
-    entryId: input.entryId,
-    sessionKey: 'agent:main:main',
-    laneKey: input.laneKey,
-    turnKey: input.turnKey,
-    role: 'assistant',
-    status: 'final',
-    ...(input.agentId ? { agentId: input.agentId } : {}),
-    text: input.text,
-    message: {
-      id: input.entryId,
-      role: 'assistant',
-      content: input.text,
-      ...(input.agentId ? { agentId: input.agentId } : {}),
+function decorateRows(rows: SessionRenderRow[]) {
+  return applyAssistantPresentationToRows({
+    rows,
+    agents: [{
+      id: 'agent-a',
+      agentName: 'Agent A',
+      avatarSeed: 'seed-a',
+    }],
+    defaultAssistant: {
+      agentId: 'main',
+      agentName: 'Main Assistant',
     },
-  };
+  });
 }
 
 describe('chat row model lane identity', () => {
-  it('builds explicit assistant turn/lane identity onto rows from the same normalized message model', () => {
-    const rows = buildStaticChatRows({
-      sessionKey: 'agent:main:main',
-      entries: [
-        buildAssistantEntry({
-          entryId: 'assistant-a-1',
-          laneKey: 'member:agent-a',
-          turnKey: 'team-turn-1',
-          agentId: 'agent-a',
-          text: 'Alpha',
-        }),
-        buildAssistantEntry({
-          entryId: 'assistant-direct-1',
-          laneKey: 'main',
-          turnKey: 'direct-turn-1',
-          text: 'Direct',
-        }),
-      ],
-    });
+  it('builds explicit assistant turn/lane identity onto protocol rows', () => {
+    const rows = decorateRows(buildRenderRowsFromMessages('agent:main:main', [
+      {
+        role: 'assistant',
+        content: 'Alpha',
+        id: 'assistant-a-1',
+        uniqueId: 'team-turn-1',
+        agentId: 'agent-a',
+      },
+      {
+        role: 'assistant',
+        content: 'Direct',
+        id: 'assistant-direct-1',
+      },
+    ]));
 
     expect(rows.map((row) => ({
       key: row.key,
@@ -61,68 +47,43 @@ describe('chat row model lane identity', () => {
       assistantLaneAgentId: row.assistantLaneAgentId ?? null,
     }))).toEqual([
       {
-        key: 'session:agent:main:main|entry:assistant-a-1',
+        key: 'session:agent:main:main|row:assistant-a-1',
         assistantTurnKey: 'team-turn-1',
         assistantLaneKey: 'member:agent-a',
         assistantLaneAgentId: 'agent-a',
       },
       {
-        key: 'session:agent:main:main|entry:assistant-direct-1',
-        assistantTurnKey: 'direct-turn-1',
+        key: 'session:agent:main:main|row:assistant-direct-1',
+        assistantTurnKey: 'assistant-direct-1',
         assistantLaneKey: 'main',
         assistantLaneAgentId: null,
       },
     ]);
   });
 
-  it('resolves assistant presentation from row lane identity instead of falling back to the page default assistant', () => {
-    const row: ChatMessageRow = {
-      key: 'assistant-a-1',
-      kind: 'message',
+  it('resolves row assistant lane-turn match key from protocol rows', () => {
+    const row = decorateRows(buildRenderRowsFromMessages('agent:main:main', [{
       role: 'assistant',
-      text: 'Alpha',
-      renderSignature: 'assistant|final|Alpha',
-      assistantTurnKey: 'team-turn-1',
-      assistantLaneKey: 'team:agent-a',
-      assistantLaneAgentId: 'agent-a',
-      assistantPresentation: null,
-      assistantMarkdownHtml: null,
-      messageView: {
-        thinking: null,
-        toolUses: [],
-        images: [],
-        attachedFiles: [],
-      },
-      entry: {
-        entryId: 'assistant-a-1',
-        sessionKey: 'agent:main:main',
-        laneKey: 'team:agent-a',
-        turnKey: 'team-turn-1',
-        role: 'assistant',
-        status: 'final',
-        text: 'Alpha',
-        message: {
-          id: 'assistant-a-1',
-          role: 'assistant',
-          content: 'Alpha',
-        },
-      },
-    };
+      content: 'Alpha',
+      id: 'assistant-a-1',
+      uniqueId: 'team-turn-1',
+      agentId: 'agent-a',
+    }]))[0]!;
 
-    const rows = applyAssistantPresentationToRows({
-      rows: [row],
-      agents: [{
-        id: 'agent-a',
-        agentName: 'Agent A',
-        avatarSeed: 'seed-a',
-      }],
-      defaultAssistant: {
-        agentId: 'main',
-        agentName: 'Main Assistant',
-      },
-    });
+    expect(buildAssistantLaneTurnMatchKey('team-turn-1', 'member:agent-a')).toBe('team-turn-1|member:agent-a');
+    expect(resolveRowAssistantLaneTurnMatchKey(row)).toBe('team-turn-1|member:agent-a');
+  });
 
-    expect(rows[0]?.assistantPresentation).toEqual({
+  it('resolves assistant presentation from assistant lane agent id', () => {
+    const row = decorateRows(buildRenderRowsFromMessages('agent:main:main', [{
+      role: 'assistant',
+      content: 'Alpha',
+      id: 'assistant-a-1',
+      uniqueId: 'team-turn-1',
+      agentId: 'agent-a',
+    }]))[0];
+
+    expect(row?.assistantPresentation).toEqual({
       agentId: 'agent-a',
       agentName: 'Agent A',
       avatarSeed: 'seed-a',
@@ -130,112 +91,29 @@ describe('chat row model lane identity', () => {
     });
   });
 
-  it('rebuilds assistant markdown html when a timeline entry with the same id receives final markdown text', () => {
-    const sessionKey = 'agent:main:main';
-    const previousEntry = buildAssistantEntry({
-      entryId: 'assistant-markdown-1',
-      laneKey: 'main',
-      turnKey: 'main:assistant-markdown-1',
-      text: '',
-    });
-    const nextEntry = buildAssistantEntry({
-      entryId: 'assistant-markdown-1',
-      laneKey: 'main',
-      turnKey: 'main:assistant-markdown-1',
-      text: '### Title\n\n```json\n{\"ok\":true}\n```',
-    });
-    const previousRows = buildStaticChatRows({
-      sessionKey,
-      entries: [previousEntry],
-    });
-
-    const patched = patchTimelineRows(
-      sessionKey,
-      previousRows,
-      [previousEntry],
-      [nextEntry],
-    );
-
-    expect(patched?.rows[0]?.text).toBe('### Title\n\n```json\n{"ok":true}\n```');
-    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<h3>');
-    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<pre>');
-  });
-
-  it('rebuilds assistant markdown html even when an upstream path mutates the same timeline entry object', () => {
-    const sessionKey = 'agent:main:main';
-    const entry = buildAssistantEntry({
-      entryId: 'assistant-mutated-markdown-1',
-      laneKey: 'main',
-      turnKey: 'main:assistant-mutated-markdown-1',
-      text: '',
-    });
-    const previousRows = buildStaticChatRows({
-      sessionKey,
-      entries: [entry],
-    });
-
-    entry.text = '### Title\n\n```json\n{"ok":true}\n```';
-    entry.message = {
-      ...entry.message,
-      content: entry.text,
-    };
-    const patched = patchTimelineRows(
-      sessionKey,
-      previousRows,
-      [entry],
-      [entry],
-    );
-
-    expect(patched?.rows[0]).not.toBe(previousRows[0]);
-    expect(patched?.rows[0]?.text).toBe('### Title\n\n```json\n{"ok":true}\n```');
-    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<h3>');
-    expect(patched?.rows[0]?.assistantMarkdownHtml).toContain('<pre>');
-  });
-
-  it('rebuilds the row kind when an assistant entry changes from tool activity to text message', () => {
-    const sessionKey = 'agent:main:main';
-    const previousEntry: SessionTimelineEntry = {
-      entryId: 'assistant-tool-1',
-      sessionKey,
-      laneKey: 'main',
-      turnKey: 'main:assistant-tool-1',
+  it('builds assistant markdown html from protocol message rows', () => {
+    const row = decorateRows(buildRenderRowsFromMessages('agent:main:main', [{
       role: 'assistant',
-      status: 'final',
-      text: '',
-      message: {
-        id: 'assistant-tool-1',
-        role: 'assistant',
-        content: [{
-          type: 'toolCall',
-          id: 'tool-1',
-          name: 'read_file',
-          input: { filePath: 'README.md' },
-        }],
-      },
-    };
-    const nextEntry: SessionTimelineEntry = {
-      ...previousEntry,
-      text: 'Done',
-      message: {
-        ...previousEntry.message,
-        content: 'Done',
-      },
-    };
+      content: '### Title\n\n```json\n{"ok":true}\n```',
+      id: 'assistant-markdown-1',
+    }]))[0] as ChatMessageRow;
 
-    const previousRows = buildStaticChatRows({
-      sessionKey,
-      entries: [previousEntry],
-    });
-    expect(previousRows[0]?.kind).toBe('tool-activity');
+    expect(row.assistantMarkdownHtml).toContain('<h3>');
+    expect(row.assistantMarkdownHtml).toContain('<pre>');
+  });
 
-    const patched = patchTimelineRows(
-      sessionKey,
-      previousRows,
-      [previousEntry],
-      [nextEntry],
-    );
+  it('keeps tool-only assistant rows as tool-activity rows', () => {
+    const row = decorateRows(buildRenderRowsFromMessages('agent:main:main', [{
+      role: 'assistant',
+      id: 'assistant-tool-1',
+      content: [{
+        type: 'toolCall',
+        id: 'tool-1',
+        name: 'read_file',
+        input: { filePath: 'README.md' },
+      }],
+    }]))[0];
 
-    expect((patched?.rows[0] as ChatRow | undefined)?.kind).toBe('message');
-    expect((patched?.rows[0] as ChatMessageRow | undefined)?.text).toBe('Done');
+    expect(row?.kind).toBe('tool-activity');
   });
 });

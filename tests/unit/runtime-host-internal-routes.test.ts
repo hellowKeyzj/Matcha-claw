@@ -213,19 +213,41 @@ describe('runtime-host internal routes', () => {
       version: 1,
       eventName: 'session:update',
       payload: {
-        sessionUpdate: 'agent_message',
+        sessionUpdate: 'session_row',
         runId: 'run-2',
         sessionKey: 'agent:main:main',
-        laneKey: 'main',
-        entry: {
-          entryId: 'assistant-1',
+        row: {
+          key: 'session:agent:main:main|row:assistant-1',
+          kind: 'message',
+          rowId: 'assistant-1',
           sessionKey: 'agent:main:main',
           laneKey: 'main',
           turnKey: 'main:assistant-1',
           role: 'assistant',
           status: 'final',
           text: 'hi',
-          message: { role: 'assistant', content: 'hi' },
+        },
+        snapshot: {
+          sessionKey: 'agent:main:main',
+          rows: [],
+          replayComplete: true,
+          runtime: {
+            sending: false,
+            activeRunId: null,
+            runPhase: 'done',
+            streamingMessageId: null,
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            updatedAt: 1,
+          },
+          window: {
+            totalRowCount: 0,
+            windowStartOffset: 0,
+            windowEndOffset: 0,
+            hasMore: false,
+            hasNewer: false,
+            isAtLatest: true,
+          },
         },
       },
     });
@@ -251,19 +273,41 @@ describe('runtime-host internal routes', () => {
 
     expect(handled).toBe(true);
     expect(emitGatewayEvent).toHaveBeenCalledWith('session:update', {
-      sessionUpdate: 'agent_message',
+      sessionUpdate: 'session_row',
       runId: 'run-2',
       sessionKey: 'agent:main:main',
-      laneKey: 'main',
-      entry: {
-        entryId: 'assistant-1',
+      row: {
+        key: 'session:agent:main:main|row:assistant-1',
+        kind: 'message',
+        rowId: 'assistant-1',
         sessionKey: 'agent:main:main',
         laneKey: 'main',
         turnKey: 'main:assistant-1',
         role: 'assistant',
         status: 'final',
         text: 'hi',
-        message: { role: 'assistant', content: 'hi' },
+      },
+      snapshot: {
+        sessionKey: 'agent:main:main',
+        rows: [],
+        replayComplete: true,
+        runtime: {
+          sending: false,
+          activeRunId: null,
+          runPhase: 'done',
+          streamingMessageId: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          updatedAt: 1,
+        },
+        window: {
+          totalRowCount: 0,
+          windowStartOffset: 0,
+          windowEndOffset: 0,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        },
       },
     });
   });

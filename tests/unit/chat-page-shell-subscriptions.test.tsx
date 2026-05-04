@@ -8,6 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 const chatViewportPaneRenderSpy = vi.fn();
 
@@ -107,14 +108,18 @@ vi.mock('@/pages/Chat/components/ChatList', () => ({
     }), []);
     return (
       <div data-testid="chat-viewport-pane">
-        {props.currentSession.messages.length}
+        {props.currentSession.rows.length}
       </div>
     );
   }),
 }));
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
+  sessionKey?: string;
+  messages?: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: unknown; timestamp?: number; streaming?: boolean }>;
+}) {
   const base = createEmptySessionRecord();
+  const sessionKey = overrides?.sessionKey ?? 'agent:main:main';
   return {
     meta: {
       ...base.meta,
@@ -124,7 +129,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    messages: overrides?.messages ?? base.messages,
+    rows: overrides?.messages
+      ? buildRenderRowsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.rows ?? base.rows),
     window: overrides?.window ?? base.window,
   };
 }
@@ -156,6 +163,7 @@ describe('chat 顶层订阅收口', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
           messages: [
             {
               id: 'assistant-1',
@@ -169,7 +177,7 @@ describe('chat 顶层订阅收口', () => {
             sending: true,
           },
           window: createViewportWindowState({
-            totalMessageCount: 1,
+            totalRowCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             isAtLatest: true,
@@ -221,6 +229,7 @@ describe('chat 顶层订阅收口', () => {
         loadedSessions: {
           ...state.loadedSessions,
           'agent:main:main': buildSessionRecord({
+            sessionKey: 'agent:main:main',
             messages: [
               {
                 id: 'assistant-1',
@@ -235,7 +244,7 @@ describe('chat 顶层订阅收口', () => {
               sending: true,
             },
             window: createViewportWindowState({
-              totalMessageCount: 1,
+              totalRowCount: 1,
               windowStartOffset: 0,
               windowEndOffset: 1,
               isAtLatest: true,

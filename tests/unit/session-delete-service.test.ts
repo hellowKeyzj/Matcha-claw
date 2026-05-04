@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { SessionRuntimeService } from '../../runtime-host/application/session-runtime/service';
+import { SessionRuntimeService } from '../../runtime-host/application/sessions/service';
 
 describe('session adapter service delete', () => {
   const tempDirs: string[] = [];

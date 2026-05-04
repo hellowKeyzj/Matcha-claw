@@ -2,7 +2,7 @@ interface LocalDispatchResponse {
   status: number;
   data: unknown;
 }
-import { SessionRuntimeService } from '../../application/session-runtime/service';
+import { SessionRuntimeService } from '../../application/sessions/service';
 import type { OpenClawBridge } from '../../openclaw-bridge';
 
 interface SessionRouteDeps {

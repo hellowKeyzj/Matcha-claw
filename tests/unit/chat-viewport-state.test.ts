@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { selectViewportTimelineEntries } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages, materializeTimelineMessages } from './helpers/timeline-fixtures';
+import { selectViewportRows } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState, syncViewportState } from '@/stores/chat/viewport-state';
-import type { RawMessage } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -14,10 +13,10 @@ function buildMessages(count: number): RawMessage[] {
 }
 
 describe('viewport window state', () => {
-  it('preserves only viewport metadata and derives the visible slice from messages + offsets', () => {
-    const messages = buildMessages(40);
+  it('preserves only viewport metadata and derives the visible slice from rows + offsets', () => {
+    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(40));
     const window = createViewportWindowState({
-      totalMessageCount: 40,
+      totalRowCount: 40,
       windowStartOffset: 10,
       windowEndOffset: 40,
       hasMore: true,
@@ -27,28 +26,25 @@ describe('viewport window state', () => {
 
     expect(window.windowStartOffset).toBe(10);
     expect(window.windowEndOffset).toBe(40);
-    expect(window.totalMessageCount).toBe(40);
+    expect(window.totalRowCount).toBe(40);
     expect(window.hasMore).toBe(true);
     expect(window.isAtLatest).toBe(true);
-    expect(materializeTimelineMessages(selectViewportTimelineEntries({
-      timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
-      window,
-    })).map((message) => message.id)).toEqual(
-      messages.slice(10).map((message) => message.id),
+    expect(selectViewportRows({ rows, window }).map((row) => row.rowId)).toEqual(
+      rows.slice(10).map((row) => row.rowId),
     );
   });
 
-  it('syncViewportState updates paging metadata without owning message instances', () => {
-    const messages = buildMessages(6);
+  it('syncViewportState updates paging metadata without owning row instances', () => {
+    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(6));
     const baseWindow = createViewportWindowState({
-      totalMessageCount: 6,
+      totalRowCount: 6,
       windowStartOffset: 0,
       windowEndOffset: 6,
       isAtLatest: true,
     });
 
     const trimmedWindow = syncViewportState(baseWindow, createViewportWindowState({
-      totalMessageCount: 6,
+      totalRowCount: 6,
       windowStartOffset: 2,
       windowEndOffset: 6,
       hasMore: true,
@@ -58,10 +54,7 @@ describe('viewport window state', () => {
     expect(trimmedWindow.windowStartOffset).toBe(2);
     expect(trimmedWindow.windowEndOffset).toBe(6);
     expect(trimmedWindow.hasMore).toBe(true);
-    expect(materializeTimelineMessages(selectViewportTimelineEntries({
-      timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
-      window: trimmedWindow,
-    })).map((message) => message.id)).toEqual([
+    expect(selectViewportRows({ rows, window: trimmedWindow }).map((row) => row.rowId)).toEqual([
       'message-3',
       'message-4',
       'message-5',
@@ -69,11 +62,10 @@ describe('viewport window state', () => {
     ]);
   });
 
-  it('can materialize the viewport slice directly from authoritative timeline entries', () => {
-    const messages = buildMessages(5);
-    const timelineEntries = buildTimelineEntriesFromMessages('agent:test:main', messages);
+  it('can select the viewport slice directly from authoritative rows', () => {
+    const rows = buildRenderRowsFromMessages('agent:test:main', buildMessages(5));
     const window = createViewportWindowState({
-      totalMessageCount: 5,
+      totalRowCount: 5,
       windowStartOffset: 1,
       windowEndOffset: 4,
       hasMore: true,
@@ -81,17 +73,16 @@ describe('viewport window state', () => {
       isAtLatest: false,
     });
 
-    const viewportMessages = materializeTimelineMessages(selectViewportTimelineEntries({
-      timelineEntries,
+    const viewportRows = selectViewportRows({
+      rows,
       window,
-    }));
+    });
 
-    expect(viewportMessages.map((message) => message.id)).toEqual([
+    expect(viewportRows.map((row) => row.rowId)).toEqual([
       'message-2',
       'message-3',
       'message-4',
     ]);
-    expect(viewportMessages.every((message) => Boolean(message._timeline?.entryId))).toBe(true);
+    expect(viewportRows.every((row) => Boolean(row.rowId))).toBe(true);
   });
 });
-

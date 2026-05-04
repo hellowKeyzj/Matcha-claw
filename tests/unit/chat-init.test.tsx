@@ -5,6 +5,7 @@ import { useChatStore } from '@/stores/chat';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { useSubagentsStore } from '@/stores/subagents';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 
 const idleResource = {
   status: 'idle' as const,
@@ -20,8 +21,12 @@ const readyResource = {
   lastLoadedAt: 1,
 };
 
-function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>>) {
+function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySessionRecord>> & {
+  sessionKey?: string;
+  messages?: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: unknown; timestamp?: number }>;
+}) {
   const base = createEmptySessionRecord();
+  const sessionKey = overrides?.sessionKey ?? 'agent:main:main';
   return {
     meta: {
       ...base.meta,
@@ -31,7 +36,9 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
       ...base.runtime,
       ...overrides?.runtime,
     },
-    messages: overrides?.messages ?? base.messages,
+    rows: overrides?.messages
+      ? buildRenderRowsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.rows ?? base.rows),
     window: overrides?.window ?? base.window,
   };
 }
@@ -183,11 +190,12 @@ describe('useChatInit', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
           messages: [{ id: 'm1', role: 'assistant', content: 'hello', timestamp: 1 }],
-          meta: { ready: true },
+          meta: { historyStatus: 'ready' },
           window: createViewportWindowState({
             ...createEmptySessionViewportState(),
-            totalMessageCount: 1,
+            totalRowCount: 1,
             windowStartOffset: 0,
             windowEndOffset: 1,
             hasMore: false,
@@ -230,4 +238,3 @@ describe('useChatInit', () => {
     });
   });
 });
-

@@ -126,7 +126,7 @@ function findCurrentStreamingTurn(
 ): SessionRenderRow | null {
   const normalizedStreamingMessageId = normalizeIdentifier(streamingMessageId);
   if (normalizedStreamingMessageId) {
-    const matched = rows.find((row) => row.entryId === normalizedStreamingMessageId);
+    const matched = rows.find((row) => row.rowId === normalizedStreamingMessageId);
     if (matched) {
       return matched;
     }

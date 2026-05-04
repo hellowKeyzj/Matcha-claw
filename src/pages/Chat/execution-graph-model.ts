@@ -1,7 +1,7 @@
 import type {
-  SessionExecutionGraph,
+  SessionExecutionGraphRow,
   SessionExecutionGraphStep,
 } from '../../../runtime-host/shared/session-adapter-types';
 
 export type ExecutionGraphStepData = SessionExecutionGraphStep;
-export type ExecutionGraphData = SessionExecutionGraph;
+export type ExecutionGraphData = SessionExecutionGraphRow;

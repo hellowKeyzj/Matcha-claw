@@ -92,30 +92,27 @@ describe('chat content rail layout', () => {
     return {
       kind: 'message',
       key: input.key,
-      entry: {
-        entryId: input.key,
-        sessionKey: 'agent:test:main',
-        laneKey: input.assistantLaneKey ?? 'main',
-        turnKey: input.assistantTurnKey ?? input.key,
-        role: typeof input.message.role === 'string' ? input.message.role as never : 'assistant',
-        status: input.message.streaming ? 'streaming' : 'final',
-        text: input.text ?? (typeof input.message.content === 'string' ? input.message.content : ''),
-        message: input.message as never,
-      },
+      sessionKey: 'agent:test:main',
       role,
       text: input.text ?? (typeof input.message.content === 'string' ? input.message.content : ''),
+      status: input.message.streaming ? 'streaming' : 'final',
+      rowId: typeof input.message.id === 'string' ? input.message.id : input.key,
+      laneKey: input.assistantLaneKey ?? 'main',
+      turnKey: input.assistantTurnKey ?? input.key,
+      agentId: typeof input.message.agentId === 'string' ? input.message.agentId : undefined,
       renderSignature: input.key,
       assistantTurnKey: input.assistantTurnKey ?? null,
       assistantLaneKey: input.assistantLaneKey ?? null,
       assistantLaneAgentId: input.assistantLaneAgentId ?? null,
       assistantPresentation: input.assistantPresentation ?? null,
       assistantMarkdownHtml: null,
-      messageView: {
-        thinking: null,
-        toolUses: [],
-        images: [],
-        attachedFiles: [],
-      },
+      thinking: null,
+      images: [],
+      toolUses: [],
+      attachedFiles: [],
+      toolStatuses: Array.isArray(input.message.toolStatuses) ? input.message.toolStatuses as ChatMessageRow['toolStatuses'] : [],
+      isStreaming: Boolean(input.message.streaming),
+      messageId: typeof input.message.id === 'string' ? input.message.id : undefined,
     };
   }
 
@@ -130,18 +127,14 @@ describe('chat content rail layout', () => {
     return {
       kind: 'tool-activity',
       key: input.key,
-      entry: {
-        entryId: input.key,
-        sessionKey: 'agent:test:main',
-        laneKey: input.assistantLaneKey ?? 'main',
-        turnKey: input.assistantTurnKey ?? input.key,
-        role: 'assistant',
-        status: input.message.streaming ? 'streaming' : 'final',
-        text: '',
-        message: input.message as never,
-      },
+      sessionKey: 'agent:test:main',
       role: 'assistant',
       text: '',
+      status: input.message.streaming ? 'streaming' : 'final',
+      rowId: typeof input.message.id === 'string' ? input.message.id : input.key,
+      laneKey: input.assistantLaneKey ?? 'main',
+      turnKey: input.assistantTurnKey ?? input.key,
+      agentId: typeof input.message.agentId === 'string' ? input.message.agentId : undefined,
       renderSignature: input.key,
       assistantTurnKey: input.assistantTurnKey ?? null,
       assistantLaneKey: input.assistantLaneKey ?? null,
@@ -157,6 +150,7 @@ describe('chat content rail layout', () => {
         name: 'read_file',
         status: 'completed',
       }],
+      attachedFiles: [],
       isStreaming: false,
     };
   }
@@ -189,10 +183,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -254,10 +244,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -296,10 +282,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -344,10 +326,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={scrollChromeStore}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -382,7 +360,26 @@ describe('chat content rail layout', () => {
             role: 'assistant',
             content: 'hello',
           },
-        })]}
+        }), {
+          kind: 'execution-graph',
+          key: 'graph-1',
+          sessionKey: 'agent:test:main',
+          role: 'assistant',
+          text: '',
+          status: 'final',
+          renderSignature: 'graph-1',
+          assistantPresentation: null,
+          graphId: 'graph-1',
+          anchorRowKey: 'assistant-1',
+          childSessionKey: 'child-1',
+          agentLabel: 'main',
+          sessionLabel: 'session',
+          steps: [],
+          active: false,
+          assistantTurnKey: null,
+          assistantLaneKey: null,
+          assistantLaneAgentId: null,
+        } satisfies ChatRow]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -390,19 +387,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map([['assistant-1', [{
-            id: 'graph-1',
-            anchorEntryId: 'assistant-1',
-            triggerEntryId: 'assistant-1',
-            childSessionKey: 'child-1',
-            agentLabel: 'main',
-            sessionLabel: 'session',
-            steps: [],
-            active: false,
-          }]]]),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -422,9 +406,6 @@ describe('chat content rail layout', () => {
         streaming: false,
       },
     })];
-    const executionGraphSlots = {
-      anchoredGraphsByRowKey: new Map(),
-    };
     const commonProps = {
       messagesViewportRef: { current: null },
       messageContentRef: { current: null },
@@ -444,8 +425,6 @@ describe('chat content rail layout', () => {
       scrollChromeStore: buildScrollChromeStore(),
       showThinking: false,
       userAvatarImageUrl: null,
-      executionGraphSlots,
-      pendingAssistantShells: [],
       onJumpToRowKey: vi.fn(),
     };
 
@@ -498,10 +477,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -566,10 +541,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -577,31 +548,23 @@ describe('chat content rail layout', () => {
     expect(chatMessagePropsSpy).toHaveBeenCalledTimes(2);
     expect(chatMessagePropsSpy.mock.calls[0]?.[0]).toMatchObject({
       row: {
-        entry: {
-          message: {
-            id: 'assistant-a',
-          },
-        },
+        messageId: 'assistant-a',
+        toolStatuses: [{
+          id: 'tool-a',
+          name: 'read_file',
+          status: 'running',
+        }],
       },
-      streamingTools: [{
-        id: 'tool-a',
-        name: 'read_file',
-        status: 'running',
-      }],
     });
     expect(chatMessagePropsSpy.mock.calls[1]?.[0]).toMatchObject({
       row: {
-        entry: {
-          message: {
-            id: 'assistant-b',
-          },
-        },
+        messageId: 'assistant-b',
+        toolStatuses: [{
+          id: 'tool-b',
+          name: 'search',
+          status: 'running',
+        }],
       },
-      streamingTools: [{
-        id: 'tool-b',
-        name: 'search',
-        status: 'running',
-      }],
     });
   });
 
@@ -644,7 +607,39 @@ describe('chat content rail layout', () => {
             agentId: 'agent-b',
             content: 'Beta',
           },
-        })]}
+        }), {
+          kind: 'pending-assistant',
+          key: 'pending:agent-a',
+          sessionKey: 'agent:test:main',
+          role: 'assistant',
+          text: '',
+          status: 'pending',
+          renderSignature: 'pending:agent-a',
+          assistantPresentation: {
+            agentId: 'agent-a',
+            agentName: 'Agent A',
+          },
+          assistantTurnKey: null,
+          assistantLaneKey: null,
+          assistantLaneAgentId: 'agent-a',
+          pendingState: 'activity',
+        }, {
+          kind: 'pending-assistant',
+          key: 'pending:agent-b',
+          sessionKey: 'agent:test:main',
+          role: 'assistant',
+          text: '',
+          status: 'pending',
+          renderSignature: 'pending:agent-b',
+          assistantPresentation: {
+            agentId: 'agent-b',
+            agentName: 'Agent B',
+          },
+          assistantTurnKey: null,
+          assistantLaneKey: null,
+          assistantLaneAgentId: 'agent-b',
+          pendingState: 'typing',
+        }]}
         showLoadOlder={false}
         isLoadingOlder={false}
         onLoadOlder={vi.fn()}
@@ -652,24 +647,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[{
-          key: 'pending:agent-a',
-          state: 'activity',
-          assistantPresentation: {
-            agentId: 'agent-a',
-            agentName: 'Agent A',
-          },
-        }, {
-          key: 'pending:agent-b',
-          state: 'typing',
-          assistantPresentation: {
-            agentId: 'agent-b',
-            agentName: 'Agent B',
-          },
-        }]}
         onJumpToRowKey={vi.fn()}
       />,
     );
@@ -740,10 +717,6 @@ describe('chat content rail layout', () => {
         scrollChromeStore={buildScrollChromeStore()}
         showThinking={false}
         userAvatarImageUrl={null}
-        executionGraphSlots={{
-          anchoredGraphsByRowKey: new Map(),
-        }}
-        pendingAssistantShells={[]}
         onJumpToRowKey={vi.fn()}
       />,
     );

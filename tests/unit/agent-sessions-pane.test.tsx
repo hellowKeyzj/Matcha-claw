@@ -7,7 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderRowsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -25,27 +25,32 @@ function buildReadySessionCatalogStatus(_sessions: Array<{ key: string; displayN
 }
 
 function createSessionRecord(input?: {
+  sessionKey?: string;
   messages?: RawMessage[];
   label?: string | null;
   lastActivityAt?: number | null;
   ready?: boolean;
 }) {
+  const sessionKey = input?.sessionKey ?? 'agent:test:session-1';
   const messages = input?.messages ?? [];
   const base = createEmptySessionRecord();
   return {
     meta: {
       ...base.meta,
+      agentId: sessionKey.split(':')[1] ?? null,
+      kind: sessionKey.endsWith(':main') ? 'main' : 'session',
+      preferred: sessionKey.endsWith(':main'),
       label: input?.label ?? null,
+      titleSource: input?.label ? 'user' : 'none',
       lastActivityAt: input?.lastActivityAt ?? null,
       historyStatus: input?.ready ? 'ready' : 'idle',
     },
     runtime: {
       ...base.runtime,
     },
-    timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
-    executionGraphs: base.executionGraphs,
+    rows: buildRenderRowsFromMessages(sessionKey, messages),
     window: createViewportWindowState({
-      totalMessageCount: messages.length,
+      totalRowCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -99,10 +104,10 @@ describe('agent sessions pane', () => {
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:main:session-1': createSessionRecord({ ready: true, label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
-        'agent:test:main': createSessionRecord({ ready: true }),
-        'agent:test:session-2': createSessionRecord({ ready: true, label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
+        'agent:main:session-1': createSessionRecord({ sessionKey: 'agent:main:session-1', ready: true, label: '主Agent会话', lastActivityAt: now - 1 * 24 * 60 * 60 * 1000 }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
+        'agent:test:session-2': createSessionRecord({ sessionKey: 'agent:test:session-2', ready: true, label: '测试Agent会话', lastActivityAt: now - 2 * 24 * 60 * 60 * 1000 }),
       },
       switchSession: vi.fn(),
       newSession: vi.fn(),
@@ -130,8 +135,8 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
       },
       switchSession: vi.fn(),
       newSession,
@@ -166,8 +171,8 @@ describe('agent sessions pane', () => {
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
       },
       switchSession: vi.fn(),
       newSession,
@@ -193,9 +198,10 @@ describe('agent sessions pane', () => {
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
           ready: true,
           label: '测试Agent会话',
           lastActivityAt: now,
@@ -230,7 +236,7 @@ describe('agent sessions pane', () => {
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
       },
       switchSession,
       newSession: vi.fn(),
@@ -258,8 +264,9 @@ describe('agent sessions pane', () => {
       currentSessionKey: 'agent:main:main',
       sessionCatalogStatus: buildReadySessionCatalogStatus(sessions),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
         'agent:main:session-1': createSessionRecord({
+          sessionKey: 'agent:main:session-1',
           ready: true,
           label: '需要删除的会话',
           lastActivityAt: now - 1 * 24 * 60 * 60 * 1000,
@@ -307,6 +314,7 @@ describe('agent sessions pane', () => {
           return [
             key,
             createSessionRecord({
+              sessionKey: key,
               ready: true,
               label: index === 0 ? null : `会话 ${index}`,
               lastActivityAt: index === 0 ? now : now - index * 60_000,
@@ -351,8 +359,8 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:main', displayName: 'agent:test:main' },
       ]),
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ sessionKey: 'agent:main:main', ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
       },
       switchSession: vi.fn(),
       newSession: vi.fn(),
@@ -385,8 +393,9 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
           ready: true,
           label: '测试Agent会话',
           lastActivityAt: Date.now(),
@@ -404,7 +413,7 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('测试Agent会话')).toBeInTheDocument();
   });
 
-  it('会话标题优先显示发送中的本地用户预览，而不是旧 label', () => {
+  it('会话标题消费本地 authoritative label，而不是回退旧值', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-2',
@@ -413,10 +422,11 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
           ready: true,
-          label: '旧标题',
+          label: '最新输入标题',
           lastActivityAt: now,
         }),
       },
@@ -430,7 +440,11 @@ describe('agent sessions pane', () => {
         ...useChatStore.getState().loadedSessions,
         'agent:test:session-2': {
           ...useChatStore.getState().loadedSessions['agent:test:session-2'],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:test:session-2', [
+          meta: {
+            ...useChatStore.getState().loadedSessions['agent:test:session-2']!.meta,
+            label: '最新输入标题',
+          },
+          rows: buildRenderRowsFromMessages('agent:test:session-2', [
             {
               role: 'user',
               content: '最新输入标题',
@@ -448,7 +462,7 @@ describe('agent sessions pane', () => {
     expect(screen.queryByText('旧标题')).not.toBeInTheDocument();
   });
 
-  it('会话标题在窗口正文已加载时，应优先跟正文最新标题走，而不是停留在旧 label', () => {
+  it('会话标题在窗口正文已加载后，应消费同步后的 authoritative label', () => {
     const now = Date.now();
     useChatStore.setState({
       currentSessionKey: 'agent:test:session-2',
@@ -457,10 +471,11 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:session-2', displayName: 'agent:test:session-2' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
           ready: true,
-          label: '旧标题',
+          label: '正文里的新标题',
           lastActivityAt: now,
           messages: [
             {
@@ -493,8 +508,9 @@ describe('agent sessions pane', () => {
         { key: 'agent:test:session-1710000000000', displayName: 'MatchaClaw Runtime Host' },
       ]),
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-1710000000000': createSessionRecord({
+          sessionKey: 'agent:test:session-1710000000000',
           ready: true,
           label: null,
           lastActivityAt: now,
@@ -569,8 +585,9 @@ describe('agent sessions pane', () => {
         lastLoadedAt: null,
       },
       loadedSessions: {
-        'agent:test:main': createSessionRecord({ ready: true }),
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', ready: true }),
         'agent:test:session-2': createSessionRecord({
+          sessionKey: 'agent:test:session-2',
           ready: true,
           label: '正文来源会话',
           lastActivityAt: now,

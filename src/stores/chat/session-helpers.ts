@@ -1,8 +1,7 @@
 import type { ChatSession, ChatStoreState, TaskInboxChatBridgeState } from './types';
-import { resolveSessionLabelFromRows } from './message-helpers';
 import {
   getSessionMeta,
-  getSessionMessageCount,
+  getSessionRowCount,
   getSessionRecord,
   getSessionRuntime,
   getSessionRows,
@@ -50,15 +49,19 @@ export function resolveSessionListLabel(
   sessionKey: string,
   fallbackLabel?: string | null,
 ): string | null {
+  const meta = getSessionMeta(state, sessionKey);
+  const explicit = normalizeSessionLabel(meta.label ?? fallbackLabel);
+  if (explicit) {
+    return explicit;
+  }
   const rows = getSessionRows(state, sessionKey);
-  if (rows.length > 0) {
-    const viewportLabel = resolveSessionLabelFromRows(rows);
-    if (viewportLabel) {
-      return viewportLabel;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.role === 'user' && normalizeSessionLabel(row.text)) {
+      return normalizeSessionLabel(row.text);
     }
   }
-
-  return normalizeSessionLabel(getSessionMeta(state, sessionKey).label ?? fallbackLabel);
+  return null;
 }
 
 function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession): boolean {
@@ -67,7 +70,11 @@ function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession)
   }
   return (
     left.key === right.key
+    && (left.agentId ?? null) === (right.agentId ?? null)
+    && (left.kind ?? null) === (right.kind ?? null)
+    && (left.preferred ?? false) === (right.preferred ?? false)
     && (left.label ?? null) === (right.label ?? null)
+    && (left.titleSource ?? null) === (right.titleSource ?? null)
     && (left.displayName ?? null) === (right.displayName ?? null)
     && (left.thinkingLevel ?? null) === (right.thinkingLevel ?? null)
     && (left.model ?? null) === (right.model ?? null)
@@ -96,10 +103,13 @@ export function readSessionsFromState(
       continue;
     }
     const meta = getSessionMeta(state, sessionKey);
-    const label = resolveSessionListLabel(state, sessionKey, null);
     const nextSession = {
       key: sessionKey,
-      label: label ?? undefined,
+      agentId: meta.agentId ?? undefined,
+      kind: meta.kind ?? undefined,
+      preferred: meta.preferred,
+      label: normalizeSessionLabel(meta.label) ?? undefined,
+      titleSource: meta.titleSource,
       displayName: normalizeSessionLabel(meta.displayName) ?? sessionKey,
       thinkingLevel: meta.thinkingLevel ?? undefined,
       model: normalizeSessionLabel(meta.model) ?? undefined,
@@ -144,7 +154,7 @@ export function shouldRetainLocalSessionRecord(
   const record = getSessionRecord(state, sessionKey);
   const runtime = record.runtime;
   return (
-    getSessionMessageCount(record) > 0
+    getSessionRowCount(record) > 0
     || Boolean(record.meta.label)
     || Boolean(record.meta.lastActivityAt)
     || runtime.sending
@@ -216,15 +226,6 @@ export function buildTaskInboxBridgeState(
   };
 }
 
-export function parseSessionTimestampMs(sessionKey: string): number | null {
-  const suffix = sessionKey.split(':').slice(2).join(':') || sessionKey;
-  const matched = suffix.match(/session-(\d{8,16})/i);
-  if (!matched) return null;
-  const raw = Number(matched[1]);
-  if (!Number.isFinite(raw)) return null;
-  return matched[1].length <= 10 ? raw * 1000 : raw;
-}
-
 export function resolveSessionActivityMs(
   session: ChatSession,
   loadedSessions: ChatStoreState['loadedSessions'],
@@ -236,7 +237,7 @@ export function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return parseSessionTimestampMs(session.key) ?? 0;
+  return 0;
 }
 
 export function resolvePreferredSessionKeyForAgent(
@@ -244,13 +245,15 @@ export function resolvePreferredSessionKeyForAgent(
   sessions: ChatSession[],
   loadedSessions: ChatStoreState['loadedSessions'],
 ): string | null {
-  const canonicalKey = `agent:${agentId}:main`;
-  const owned = sessions.filter((session) => parseAgentIdFromSessionKey(session.key) === agentId);
+  const owned = sessions.filter((session) => (
+    (session.agentId ?? parseAgentIdFromSessionKey(session.key)) === agentId
+  ));
   if (owned.length === 0) {
     return null;
   }
-  if (owned.some((session) => session.key === canonicalKey)) {
-    return canonicalKey;
+  const preferred = owned.find((session) => session.preferred);
+  if (preferred) {
+    return preferred.key;
   }
   const sorted = [...owned].sort((left, right) => {
     const leftActivity = resolveSessionActivityMs(left, loadedSessions);
@@ -275,15 +278,16 @@ export function shouldKeepMissingCurrentSession(
     return true;
   }
   const record = getSessionRecord(state, sessionKey);
-  const hasMessages = getSessionMessageCount(record) > 0;
+  const hasRows = getSessionRowCount(record) > 0;
   const hasLabel = Boolean(record.meta.label);
   const hasActivity = Boolean(record.meta.lastActivityAt);
   const hasRuntime = Object.prototype.hasOwnProperty.call(state.loadedSessions, sessionKey);
-  if (!sessionKey.endsWith(':main')) {
+  const isPrimary = record.meta.preferred || record.meta.kind === 'main' || sessionKey.endsWith(':main');
+  if (!isPrimary) {
     // Keep only local draft sessions (created but still truly empty).
-    return !hasMessages && !hasLabel && !hasActivity && hasRuntime;
+    return !hasRows && !hasLabel && !hasActivity && hasRuntime;
   }
-  return hasMessages || hasLabel || hasActivity;
+  return hasRows || hasLabel || hasActivity;
 }
 
 export function parseSessionUpdatedAtMs(value: unknown): number | undefined {
@@ -304,8 +308,10 @@ export function isTrulyEmptyNonMainSession(
   state: Pick<ChatStoreState, 'loadedSessions'>,
 ): boolean {
   const record = getSessionRecord(state, currentSessionKey);
-  return !currentSessionKey.endsWith(':main')
-    && getSessionMessageCount(record) === 0
+  return !record.meta.preferred
+    && record.meta.kind !== 'main'
+    && !currentSessionKey.endsWith(':main')
+    && getSessionRowCount(record) === 0
     && !record.meta.lastActivityAt
     && !record.meta.label;
 }
