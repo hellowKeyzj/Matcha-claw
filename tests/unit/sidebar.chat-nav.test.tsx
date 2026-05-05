@@ -12,7 +12,7 @@ import { useTaskCenterStore } from '@/stores/task-center-store';
 import { usePluginsStore } from '@/stores/plugins-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
@@ -42,7 +42,7 @@ function mountSidebar(initialPath: string) {
 function createSessionRecord(input?: {
   messages?: RawMessage[];
   label?: string | null;
-  ready?: boolean;
+  historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
 }) {
   const messages = input?.messages ?? [];
   const base = createEmptySessionRecord();
@@ -50,15 +50,14 @@ function createSessionRecord(input?: {
     meta: {
       ...base.meta,
       label: input?.label ?? null,
-      historyStatus: input?.ready ? 'ready' : 'idle',
+      historyStatus: input?.historyStatus ?? 'idle',
     },
     runtime: {
       ...base.runtime,
     },
-    timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', messages),
-    executionGraphs: base.executionGraphs,
+    items: buildRenderItemsFromMessages('agent:main:main', messages),
     window: createViewportWindowState({
-      totalMessageCount: messages.length,
+      totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -193,7 +192,7 @@ describe('sidebar chat nav', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           messages: [{ role: 'user', content: 'existing' }],
-          ready: true,
+          historyStatus: 'ready',
         }),
       },
       newSession,
@@ -225,7 +224,7 @@ describe('sidebar chat nav', () => {
       loadedSessions: {
         'agent:main:main': createSessionRecord({
           messages: [{ role: 'user', content: 'existing' }],
-          ready: true,
+          historyStatus: 'ready',
         }),
       },
       newSession,
@@ -332,8 +331,8 @@ describe('sidebar chat nav', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true }),
-        'agent:analytics:main': createSessionRecord({ ready: true }),
+        'agent:main:main': createSessionRecord({ historyStatus: 'ready' }),
+        'agent:analytics:main': createSessionRecord({ historyStatus: 'ready' }),
       },
       pendingApprovalsBySession: {
         'agent:analytics:main': [
@@ -368,7 +367,7 @@ describe('sidebar chat nav', () => {
         lastLoadedAt: 1,
       },
       loadedSessions: {
-        'agent:main:main': createSessionRecord({ ready: true, label: null }),
+        'agent:main:main': createSessionRecord({ historyStatus: 'ready', label: null }),
       },
       pendingApprovalsBySession: {
         'agent:main:main': [

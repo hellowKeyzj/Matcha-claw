@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  executeJumpToLatest,
-  executeLoadOlderItems,
-  executeSetViewportLastVisibleItemKey,
+  executeJumpViewportToLatest,
+  executeLoadOlderViewportItems,
+  executeSetViewportAnchorItemKey,
   executeSwitchSession,
 } from '@/stores/chat/session-actions';
 import {
@@ -75,7 +75,9 @@ function buildWindowSnapshotResult(input: {
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -113,7 +115,9 @@ function buildSessionSnapshotResult(input: {
         sending: false,
         activeRunId: null,
         runPhase: 'done' as const,
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -193,10 +197,10 @@ function createSessionHarness(input: {
     historyRuntime: input.historyRuntime,
   };
   return {
-    loadOlderItems: (sessionKey?: string) => executeLoadOlderItems(shared, sessionKey),
-    jumpToLatest: (sessionKey?: string) => executeJumpToLatest(shared, sessionKey),
+    loadOlderViewportItems: (sessionKey?: string) => executeLoadOlderViewportItems(shared, sessionKey),
+    jumpViewportToLatest: (sessionKey?: string) => executeJumpViewportToLatest(shared, sessionKey),
     switchSession: (key: string) => executeSwitchSession(shared, key),
-    setViewportLastVisibleItemKey: (itemKey: string | null, sessionKey?: string) => executeSetViewportLastVisibleItemKey(shared, itemKey, sessionKey),
+    setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => executeSetViewportAnchorItemKey(shared, itemKey, sessionKey),
   };
 }
 
@@ -206,7 +210,7 @@ describe('chat session window ops', () => {
     hostApiFetchMock.mockReset();
   });
 
-  it('loadOlderItems expands the current session window upward without dropping the visible range', async () => {
+  it('loadOlderViewportItems expands the current session window upward without dropping the visible range', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
@@ -242,7 +246,7 @@ describe('chat session window ops', () => {
       isAtLatest: true,
     }));
 
-    await actions.loadOlderItems(sessionKey);
+    await actions.loadOlderViewportItems(sessionKey);
 
     expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
       buildRenderItemsFromMessages(sessionKey, olderWindowMessages).map((item) => item.key),
@@ -254,7 +258,7 @@ describe('chat session window ops', () => {
     expect(get().loadedSessions[sessionKey]?.window.windowEndOffset).toBe(220);
   });
 
-  it('jumpToLatest refreshes the session window to the latest slice', async () => {
+  it('jumpViewportToLatest refreshes the session window to the latest slice', async () => {
     const sessionKey = 'agent:test:main';
     const allMessages = buildMessages(220);
     const viewport = createViewportWindowState({
@@ -290,7 +294,7 @@ describe('chat session window ops', () => {
       isAtLatest: true,
     }));
 
-    await actions.jumpToLatest(sessionKey);
+    await actions.jumpViewportToLatest(sessionKey);
 
     expect(getSessionItems(get(), sessionKey).map((item) => item.key)).toEqual(
       buildRenderItemsFromMessages(sessionKey, latestWindowMessages).map((item) => item.key),
@@ -301,7 +305,7 @@ describe('chat session window ops', () => {
     expect(get().loadedSessions[sessionKey]?.window.isAtLatest).toBe(true);
   });
 
-  it('jumpToLatest replaces a stale local streaming assistant with the authoritative final row', async () => {
+  it('jumpViewportToLatest replaces a stale local streaming assistant with the authoritative final row', async () => {
     const sessionKey = 'agent:test:main';
     const viewport = createViewportWindowState({
       ...createEmptySessionViewportState(),
@@ -329,7 +333,7 @@ describe('chat session window ops', () => {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming' as const,
-            streamingAnchorKey: 'session:agent:test:main|assistant-turn:main:assistant-local-stream:main',
+            activeTurnItemKey: 'session:agent:test:main|assistant-turn:main:assistant-local-stream:main',
           },
           window: viewport,
         },
@@ -374,7 +378,7 @@ describe('chat session window ops', () => {
       isAtLatest: true,
     }));
 
-    await actions.jumpToLatest(sessionKey);
+    await actions.jumpViewportToLatest(sessionKey);
 
     expect(getSessionItems(state, sessionKey).map((item) => item.key)).toEqual(
       buildRenderItemsFromMessages(sessionKey, [{

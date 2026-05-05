@@ -10,7 +10,7 @@ import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import i18n from '@/i18n';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
 
@@ -28,10 +28,9 @@ function buildSessionRecord(
       ...base.runtime,
       ...overrides?.runtime,
     },
-    timelineEntries: overrides?.messages
-      ? buildTimelineEntriesFromMessages(sessionKey, overrides.messages)
-      : (overrides?.timelineEntries ?? base.timelineEntries),
-    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
+    items: overrides?.messages
+      ? buildRenderItemsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.items ?? base.items),
     window: overrides?.window ?? base.window,
   };
 }
@@ -144,13 +143,13 @@ describe('chat 左侧点击链路回归', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 3,
+            totalItemCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
           },
         }),
         'agent:another:main': buildSessionRecord('agent:another:main', {
@@ -175,7 +174,7 @@ describe('chat 左侧点击链路回归', () => {
             },
           ],
           window: createViewportWindowState({
-            totalMessageCount: 3,
+            totalItemCount: 3,
             windowStartOffset: 0,
             windowEndOffset: 3,
             isAtLatest: true,
@@ -183,7 +182,7 @@ describe('chat 左侧点击链路回归', () => {
           meta: {
             label: 'another latest session',
             lastActivityAt: 3,
-            ready: true,
+            historyStatus: 'ready',
           },
         }),
       },

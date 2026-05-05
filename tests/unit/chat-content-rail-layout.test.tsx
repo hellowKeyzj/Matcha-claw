@@ -95,7 +95,7 @@ function buildUserAndAssistantItems(): ChatRenderItem[] {
       role: 'assistant',
       content: 'world',
       timestamp: 2,
-      uniqueId: 'turn-1',
+      messageId: 'turn-1',
       agentId: 'agent-a',
     },
   ]));
@@ -159,8 +159,7 @@ describe('chat content rail layout', () => {
         id: 'assistant-a',
         role: 'assistant',
         agentId: 'agent-a',
-        uniqueId: 'team-turn-1',
-        requestId: 'user-1',
+        messageId: 'team-turn-1',
         content: 'Alpha',
         timestamp: 1,
       },
@@ -266,7 +265,7 @@ describe('chat content rail layout', () => {
   it('chat list renders execution graphs as sibling render items below assistant turn items', () => {
     const baseItems = buildRenderItemsFromMessages('agent:test:main', [
       { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
-      { id: 'assistant-1', role: 'assistant', content: 'reply', timestamp: 2, uniqueId: 'turn-1' },
+      { id: 'assistant-1', role: 'assistant', content: 'reply', timestamp: 2, messageId: 'turn-1' },
     ]);
     const assistant = baseItems[1]!;
     const items = decorateItems([
@@ -367,7 +366,7 @@ describe('chat content rail layout', () => {
         id: 'assistant-a',
         role: 'assistant',
         agentId: 'agent-a',
-        uniqueId: 'turn-a',
+        messageId: 'turn-a',
         content: 'Alpha',
         streaming: true,
         toolStatuses: [{
@@ -381,7 +380,7 @@ describe('chat content rail layout', () => {
         id: 'assistant-b',
         role: 'assistant',
         agentId: 'agent-b',
-        uniqueId: 'turn-b',
+        messageId: 'turn-b',
         content: [{
           type: 'toolCall',
           id: 'tool-b',
@@ -427,7 +426,7 @@ describe('chat content rail layout', () => {
       item: {
         kind: 'assistant-turn',
         agentId: 'agent-a',
-        toolStatuses: [{
+        tools: [{
           id: 'tool-a',
           name: 'read_file',
           status: 'running',
@@ -442,11 +441,7 @@ describe('chat content rail layout', () => {
       item: {
         kind: 'assistant-turn',
         agentId: 'agent-b',
-        toolCalls: [{
-          id: 'tool-b',
-          name: 'search',
-        }],
-        toolStatuses: [{
+        tools: [{
           id: 'tool-b',
           name: 'search',
           status: 'running',

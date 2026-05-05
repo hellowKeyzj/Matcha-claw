@@ -301,6 +301,17 @@ export async function hostSessionState(
   });
 }
 
+export async function hostSessionAbortRuntime(
+  payload: {
+    sessionKey: string;
+  },
+): Promise<SessionLoadResult & { success?: boolean }> {
+  return hostApiFetch('/api/session/abort-runtime', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function hostSessionPrompt(
   payload: {
     sessionKey: string;

@@ -54,7 +54,7 @@ describe('chat memory diagnostics', () => {
         },
         runtime: {
           ...useChatStore.getInitialState().loadedSessions['agent:main:main']!.runtime,
-          streamingAnchorKey: 'overlay-1',
+          activeTurnItemKey: 'overlay-1',
         },
       },
       'agent:other:main': {

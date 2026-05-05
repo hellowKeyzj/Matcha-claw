@@ -1,6 +1,8 @@
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { getAssistantTurnPlainText } from './chat-message-view';
 import type {
+  SessionAssistantMessageSegment,
   SessionAssistantTurnItem,
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
@@ -24,6 +26,7 @@ interface ChatRenderItemBase {
 export type ChatUserMessageItem = SessionRenderUserMessageItem & ChatRenderItemBase;
 export type ChatAssistantTurnItem = SessionAssistantTurnItem & ChatRenderItemBase & {
   assistantMarkdownHtml: string | null;
+  assistantSegmentMarkdownHtmlByKey: Record<string, string>;
 };
 export type ChatExecutionGraphItem = SessionRenderExecutionGraphItem & ChatRenderItemBase;
 export type ChatTaskCompletionItem = SessionRenderTaskCompletionItem & ChatRenderItemBase;
@@ -74,25 +77,60 @@ function decorateProtocolItem(item: SessionRenderItem): ChatRenderItem {
   } satisfies ChatRenderItemBase;
 
   if (item.kind === 'assistant-turn') {
+    const itemTools = Array.isArray(item.tools) ? item.tools : [];
+    const plainText = getAssistantTurnPlainText(item);
+    const assistantSegmentMarkdownHtmlByKey = Object.fromEntries(
+      item.segments
+        .filter((segment): segment is SessionAssistantMessageSegment => segment.kind === 'message')
+        .map((segment) => {
+          const html = getOrBuildAssistantMarkdownBody({
+            key: `${item.key}:segment:${segment.key}`,
+            role: 'assistant',
+            sessionKey: item.sessionKey,
+            createdAt: item.createdAt,
+            text: segment.text,
+            attachedFiles: [],
+          } as never)?.fullHtml ?? null;
+          return [segment.key, html ?? ''];
+        }),
+    );
     return {
       ...item,
       ...base,
-      assistantMarkdownHtml: item.text.trim()
+      assistantMarkdownHtml: plainText
         ? (getOrBuildAssistantMarkdownBody({
             key: item.key,
             kind: 'message',
             sessionKey: item.sessionKey,
             role: 'assistant',
-            text: item.text,
+            text: plainText,
             createdAt: item.createdAt,
             thinking: item.thinking,
             images: item.images,
-            toolUses: item.toolCalls,
+            toolUses: itemTools.map((tool) => ({
+              id: tool.id,
+              name: tool.name,
+              input: tool.input,
+            })),
             attachedFiles: item.attachedFiles,
-            toolStatuses: item.toolStatuses,
+            toolStatuses: itemTools.map((tool) => ({
+              ...(tool.id ? { id: tool.id } : {}),
+              ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+              name: tool.name,
+              status: tool.status,
+              ...(tool.summary ? { summary: tool.summary } : {}),
+              ...(tool.durationMs != null ? { durationMs: tool.durationMs } : {}),
+              ...(tool.updatedAt != null ? { updatedAt: tool.updatedAt } : {}),
+              ...(tool.output !== undefined ? { output: tool.output } : {}),
+              ...(tool.result.kind === 'canvas' && tool.result.rawText ? { outputText: tool.result.rawText } : {}),
+              ...(tool.result.kind === 'text' || tool.result.kind === 'json'
+                ? { outputText: tool.result.bodyText }
+                : {}),
+            })),
             isStreaming: item.status === 'streaming',
           } as never)?.fullHtml ?? null)
         : null,
+      assistantSegmentMarkdownHtmlByKey,
     };
   }
 

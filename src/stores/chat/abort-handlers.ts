@@ -1,6 +1,7 @@
+import { hostSessionAbortRuntime } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { reduceSessionRuntime } from './runtime-state-reducer';
-import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
+import { getSessionRuntime, patchSessionRecord, patchSessionSnapshot } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
   ApprovalItem,
@@ -65,10 +66,13 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
       'chat.abort',
       { sessionKey },
     );
+    const abortRuntime = await hostSessionAbortRuntime({ sessionKey });
+    set((state) => ({
+      loadedSessions: patchSessionSnapshot(state, sessionKey, abortRuntime.snapshot),
+    }));
   } catch (err) {
     set({ error: String(err) });
   } finally {
     onFinishMutating();
   }
 }
-

@@ -132,7 +132,7 @@ const EMPTY_VIEWPORT_STATE: ChatSessionViewportState = {
   isLoadingMore: false,
   isLoadingNewer: false,
   isAtLatest: true,
-  lastVisibleItemKey: null,
+  anchorItemKey: null,
 };
 
 export function createEmptySessionRuntime(): ChatSessionRuntimeState {
@@ -140,7 +140,9 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingAnchorKey: null,
+    activeTurnItemKey: null,
+    pendingTurnKey: null,
+    pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
   };
@@ -413,7 +415,7 @@ export function patchSessionItemsAndViewport(
     isLoadingMore: viewportPatch?.isLoadingMore ?? current.window.isLoadingMore,
     isLoadingNewer: viewportPatch?.isLoadingNewer ?? current.window.isLoadingNewer,
     isAtLatest: viewportPatch?.isAtLatest ?? current.window.isAtLatest,
-    lastVisibleItemKey: viewportPatch?.lastVisibleItemKey ?? current.window.lastVisibleItemKey,
+    anchorItemKey: viewportPatch?.anchorItemKey ?? current.window.anchorItemKey,
   });
   return patchSessionRecord(state, sessionKey, {
     items,
@@ -445,7 +447,9 @@ export function patchSessionSnapshot(
       sending: snapshot.runtime.sending,
       activeRunId: snapshot.runtime.activeRunId,
       runPhase: snapshot.runtime.runPhase,
-      streamingAnchorKey: snapshot.runtime.streamingAnchorKey,
+      activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
+      pendingTurnKey: snapshot.runtime.pendingTurnKey,
+      pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
       pendingFinal: snapshot.runtime.pendingFinal,
       lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
     },
@@ -458,7 +462,7 @@ export function patchSessionSnapshot(
       isLoadingMore: false,
       isLoadingNewer: false,
       isAtLatest: snapshot.window.isAtLatest,
-      lastVisibleItemKey: current.window.lastVisibleItemKey,
+      anchorItemKey: current.window.anchorItemKey,
     }),
   });
 }

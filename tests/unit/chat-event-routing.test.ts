@@ -9,18 +9,14 @@ import {
 describe('chat runtime event routing helpers', () => {
   it('ignores events for another session or another active run', () => {
     expect(shouldIgnoreRuntimeEvent({
-      activeRunId: null,
-      currentSessionKey: 'agent:main:main',
-      runId: '',
       eventSessionKey: 'agent:other:main',
+      targetSessionKey: 'agent:main:main',
     })).toBe(true);
 
     expect(shouldIgnoreRuntimeEvent({
-      activeRunId: 'run-a',
-      currentSessionKey: 'agent:main:main',
-      runId: 'run-b',
       eventSessionKey: 'agent:main:main',
-    })).toBe(true);
+      targetSessionKey: 'agent:main:main',
+    })).toBe(false);
   });
 
   it('only delta/final/error/aborted are useful for poll switching', () => {

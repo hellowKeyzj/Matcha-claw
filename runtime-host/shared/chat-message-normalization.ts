@@ -16,8 +16,6 @@ export interface NormalizeRawChatMessageOptions {
   sanitizeCanonicalUser?: boolean;
   fallbackMessageIdToId?: boolean;
   fallbackOriginMessageIdToParentMessageId?: boolean;
-  fallbackUniqueIdToId?: boolean;
-  fallbackRequestIdToClientId?: boolean;
 }
 
 export interface NormalizedChatMessageIdentity {
@@ -25,8 +23,6 @@ export interface NormalizedChatMessageIdentity {
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
-  uniqueId?: string;
-  requestId?: string;
   agentId?: string;
   toolCallId?: string;
   toolName?: string;
@@ -35,7 +31,6 @@ export interface NormalizedChatMessageIdentity {
 const CANONICAL_CHAT_MESSAGE_NORMALIZE_OPTIONS: NormalizeRawChatMessageOptions = {
   fallbackMessageIdToId: true,
   fallbackOriginMessageIdToParentMessageId: true,
-  fallbackRequestIdToClientId: true,
 };
 
 function isRecord(value: unknown): value is ChatMessageRecord {
@@ -53,8 +48,12 @@ export function normalizeMessageRole(value: unknown): NormalizedChatMessageRole 
     || normalized === 'assistant'
     || normalized === 'system'
     || normalized === 'toolresult'
+    || normalized === 'toolresult'
     || normalized === 'tool_result'
   ) {
+    if (normalized === 'toolresult') {
+      return 'toolresult';
+    }
     return normalized;
   }
   return undefined;
@@ -202,10 +201,6 @@ export function resolveNormalizedMessageIdentity(
         ? normalizeOptionalString(message.parentMessageId ?? message.parent_message_id)
         : undefined
     );
-  const uniqueId = normalizeOptionalString(message.uniqueId ?? message.unique_id)
-    ?? (options.fallbackUniqueIdToId ? id : undefined);
-  const requestId = normalizeOptionalString(message.requestId ?? message.request_id)
-    ?? (options.fallbackRequestIdToClientId ? clientId : undefined);
   const agentId = normalizeOptionalString(message.agentId ?? message.agent_id);
   const toolCallId = normalizeOptionalString(message.toolCallId ?? message.tool_call_id);
   const toolName = normalizeOptionalString(message.toolName ?? message.tool_name ?? message.name);
@@ -215,8 +210,6 @@ export function resolveNormalizedMessageIdentity(
     ...(messageId ? { messageId } : {}),
     ...(originMessageId ? { originMessageId } : {}),
     ...(clientId ? { clientId } : {}),
-    ...(uniqueId ? { uniqueId } : {}),
-    ...(requestId ? { requestId } : {}),
     ...(agentId ? { agentId } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolName ? { toolName } : {}),

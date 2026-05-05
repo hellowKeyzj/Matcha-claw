@@ -4,6 +4,8 @@ import type {
   SessionTimelineMessageEntry,
   SessionTimelineToolActivityEntry,
 } from '../../shared/session-adapter-types';
+import { mergeToolCards } from '../../shared/tool-card-render';
+import { rebuildAssistantSegmentsFromMergedEntry } from './assistant-turn-segments';
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -160,24 +162,46 @@ function mergeTimelineEntry(
   if (isMessageEntry(existing) || isMessageEntry(incoming)) {
     const existingMessage = isMessageEntry(existing) ? existing : null;
     const incomingMessage = isMessageEntry(incoming) ? incoming : null;
+    const mergedToolUses = mergeToolUses(existing.toolUses ?? [], incoming.toolUses ?? []);
+    const mergedToolStatuses = mergeToolStatuses(existing.toolStatuses ?? [], incoming.toolStatuses ?? []);
+    const mergedAttachedFiles = mergeAttachedFiles(
+      existingMessage?.attachedFiles ?? [],
+      incomingMessage?.attachedFiles ?? [],
+    );
+    const mergedToolCards = mergeToolCards({
+      existingTools: existing.toolCards ?? [],
+      toolUses: mergedToolUses,
+      toolStatuses: mergedToolStatuses,
+    });
+    const mergedThinking = incomingMessage?.thinking ?? existingMessage?.thinking ?? null;
+    const mergedImages = incomingMessage?.images?.length ? incomingMessage.images : (existingMessage?.images ?? []);
     const mergedMessageEntry: SessionTimelineMessageEntry = {
       ...mergedBase,
       kind: 'message',
-      thinking: incomingMessage?.thinking ?? existingMessage?.thinking ?? null,
-      images: incomingMessage?.images?.length ? incomingMessage.images : (existingMessage?.images ?? []),
-      toolUses: mergeToolUses(existing.toolUses ?? [], incoming.toolUses ?? []),
-      attachedFiles: mergeAttachedFiles(
-        existingMessage?.attachedFiles ?? [],
-        incomingMessage?.attachedFiles ?? [],
-      ),
-      toolStatuses: mergeToolStatuses(existing.toolStatuses ?? [], incoming.toolStatuses ?? []),
+      thinking: mergedThinking,
+      assistantSegments: [],
+      images: mergedImages,
+      toolUses: mergedToolUses,
+      attachedFiles: mergedAttachedFiles,
+      toolStatuses: mergedToolStatuses,
+      toolCards: mergedToolCards,
       isStreaming: incoming.status === 'streaming' || (incomingMessage?.isStreaming ?? false),
       messageId: incomingMessage?.messageId ?? existingMessage?.messageId,
       originMessageId: incomingMessage?.originMessageId ?? existingMessage?.originMessageId,
       clientId: incomingMessage?.clientId ?? existingMessage?.clientId,
-      uniqueId: incomingMessage?.uniqueId ?? existingMessage?.uniqueId,
-      requestId: incomingMessage?.requestId ?? existingMessage?.requestId,
     };
+    mergedMessageEntry.assistantSegments = mergedMessageEntry.role === 'assistant'
+      ? rebuildAssistantSegmentsFromMergedEntry({
+          role: 'assistant',
+          existingSegments: existingMessage?.assistantSegments ?? [],
+          incomingSegments: incomingMessage?.assistantSegments ?? [],
+          thinking: mergedMessageEntry.thinking,
+          text: mergedMessageEntry.text,
+          images: mergedMessageEntry.images,
+          attachedFiles: mergedMessageEntry.attachedFiles,
+          toolCards: mergedMessageEntry.toolCards,
+        })
+      : [];
     const shouldRemainToolActivity = (
       mergedMessageEntry.role === 'assistant'
       && mergedMessageEntry.toolUses.length > 0
@@ -191,8 +215,10 @@ function mergeTimelineEntry(
         ...mergedBase,
         kind: 'tool-activity',
         role: 'assistant',
+        assistantSegments: mergedMessageEntry.assistantSegments,
         toolUses: mergedMessageEntry.toolUses,
         toolStatuses: mergedMessageEntry.toolStatuses,
+        toolCards: mergedMessageEntry.toolCards,
         attachedFiles: [],
         isStreaming: mergedMessageEntry.isStreaming,
       };
@@ -204,16 +230,35 @@ function mergeTimelineEntry(
     return structuredClone(incoming);
   }
 
+  const mergedToolUses = mergeToolUses(existing.toolUses ?? [], incoming.toolUses ?? []);
+  const mergedToolStatuses = mergeToolStatuses(existing.toolStatuses ?? [], incoming.toolStatuses ?? []);
+  const mergedToolCards = mergeToolCards({
+    existingTools: existing.toolCards ?? [],
+    toolUses: mergedToolUses,
+    toolStatuses: mergedToolStatuses,
+  });
+  const mergedAttachedFiles = mergeAttachedFiles(
+    isToolActivityEntry(existing) ? existing.attachedFiles : [],
+    isToolActivityEntry(incoming) ? incoming.attachedFiles : [],
+  );
   return {
-      ...mergedBase,
-      kind: 'tool-activity',
+    ...mergedBase,
+    kind: 'tool-activity',
+    role: 'assistant',
+    assistantSegments: rebuildAssistantSegmentsFromMergedEntry({
       role: 'assistant',
-    toolUses: mergeToolUses(existing.toolUses ?? [], incoming.toolUses ?? []),
-    toolStatuses: mergeToolStatuses(existing.toolStatuses ?? [], incoming.toolStatuses ?? []),
-    attachedFiles: mergeAttachedFiles(
-      isToolActivityEntry(existing) ? existing.attachedFiles : [],
-      isToolActivityEntry(incoming) ? incoming.attachedFiles : [],
-    ),
+      existingSegments: isToolActivityEntry(existing) ? existing.assistantSegments : [],
+      incomingSegments: isToolActivityEntry(incoming) ? incoming.assistantSegments : [],
+      thinking: null,
+      text: mergedBase.text,
+      images: [],
+      attachedFiles: mergedAttachedFiles,
+      toolCards: mergedToolCards,
+    }),
+    toolUses: mergedToolUses,
+    toolStatuses: mergedToolStatuses,
+    toolCards: mergedToolCards,
+    attachedFiles: mergedAttachedFiles,
     isStreaming: incoming.status === 'streaming' || (isToolActivityEntry(incoming) ? incoming.isStreaming : false),
   };
 }
@@ -299,9 +344,7 @@ export function upsertTimelineEntry(
 
   const mergedEntry = mergeTimelineEntry(entries[index]!, incoming);
   const nextEntries = cloneTimelineEntries(entries);
-  nextEntries.splice(index, 1);
-  const insertionIndex = resolveInsertionIndex(nextEntries, mergedEntry, Math.min(index, nextEntries.length));
-  nextEntries.splice(insertionIndex, 0, mergedEntry);
+  nextEntries[index] = mergedEntry;
   return nextEntries;
 }
 

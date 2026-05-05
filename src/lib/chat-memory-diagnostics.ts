@@ -184,8 +184,8 @@ function estimateRuntimeStateChars(state: ChatStoreState, sessionKey: string): n
   }
 
   let total = 0;
-  if (runtime?.streamingAnchorKey) {
-    total += runtime.streamingAnchorKey.length;
+  if (runtime?.activeTurnItemKey) {
+    total += runtime.activeTurnItemKey.length;
   }
   return total;
 }

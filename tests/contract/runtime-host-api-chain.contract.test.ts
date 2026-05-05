@@ -344,7 +344,7 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(latest.snapshot.window.isAtLatest).toBe(true);
     expect(latest.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-window|entry:m3',
-      'session:agent:main:session-window|assistant-turn:main:m4:main',
+      'session:agent:main:session-window|assistant-turn:main:entry:m4:main',
     ]);
 
     const older = await harness.dispatchOk<{
@@ -371,9 +371,9 @@ describe('runtime-host API 真实链路 contract', () => {
     expect(older.snapshot.window.isAtLatest).toBe(true);
     expect(older.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-window|entry:m1',
-      'session:agent:main:session-window|assistant-turn:main:m2:main',
+      'session:agent:main:session-window|assistant-turn:main:entry:m2:main',
       'session:agent:main:session-window|entry:m3',
-      'session:agent:main:session-window|assistant-turn:main:m4:main',
+      'session:agent:main:session-window|assistant-turn:main:entry:m4:main',
     ]);
   });
 });

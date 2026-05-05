@@ -8,6 +8,7 @@ import { useLayoutStore } from '@/stores/layout';
 import { useSettingsStore } from '@/stores/settings';
 import { useSubagentsStore } from '@/stores/subagents';
 import i18n from '@/i18n';
+import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
@@ -99,26 +100,18 @@ describe('main layout chat workspace host', () => {
       currentSessionKey: 'agent:main:main',
       loadedSessions: {
         'agent:main:main': {
-          messages: [],
+          ...createEmptySessionRecord(),
           meta: {
+            ...createEmptySessionRecord().meta,
             label: null,
             lastActivityAt: null,
             historyStatus: 'ready',
-            thinkingLevel: null,
           },
           runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
+            ...createEmptySessionRecord().runtime,
           },
           window: createViewportWindowState({
-            totalMessageCount: 0,
+            totalItemCount: 0,
             windowStartOffset: 0,
             windowEndOffset: 0,
             isAtLatest: true,

@@ -40,6 +40,7 @@ function normalizeIdentifier(value: unknown): string {
 
 function applySessionLifecycleEvent(
   input: CreateStoreRuntimeEventActionsInput & {
+    targetSessionKey: string;
     currentSessionKey: string;
     event: Extract<SessionUpdateEvent, { sessionUpdate: 'session_info_update' }>;
   },
@@ -47,6 +48,7 @@ function applySessionLifecycleEvent(
   const {
     set,
     get,
+    targetSessionKey,
     currentSessionKey,
     event,
   } = input;
@@ -87,17 +89,14 @@ function applySessionLifecycleEvent(
     });
   }
 
-  const activeRunId = getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId;
   if (shouldIgnoreRuntimeEvent({
-    activeRunId,
-    currentSessionKey,
-    runId: eventRunId,
     eventSessionKey,
+    targetSessionKey,
   })) {
     return;
   }
 
-  bindChatRunIdTelemetry(currentSessionKey, eventRunId);
+  bindChatRunIdTelemetry(targetSessionKey, eventRunId);
   setLastChatEventAt(Date.now());
 
   if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
@@ -116,41 +115,51 @@ function applySessionLifecycleEvent(
 
   set((state) => ({
     error: event.phase === 'started' || event.phase === 'final' ? null : state.error,
-    loadedSessions: patchSessionSnapshot(state, currentSessionKey, event.snapshot),
+    loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
   }));
 
   if (event.phase === 'final') {
-    finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_final' });
+    finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_final' });
   } else if (event.phase === 'aborted') {
-    finishChatRunTelemetry(currentSessionKey, 'aborted', { stage: 'session_update_aborted' });
+    finishChatRunTelemetry(targetSessionKey, 'aborted', { stage: 'session_update_aborted' });
   }
 }
 
 function applySessionMessageEvent(
   input: CreateStoreRuntimeEventActionsInput & {
-    currentSessionKey: string;
+    targetSessionKey: string;
     event: SessionItemChunkUpdateEvent | SessionItemUpdateEvent;
   },
 ): void {
   const {
     set,
-    currentSessionKey,
+    targetSessionKey,
     event,
   } = input;
+  const hasAssistantOutput = event.item?.kind === 'assistant-turn'
+    ? event.item.segments.some((segment) => {
+        if (segment.kind === 'tool') {
+          return true;
+        }
+        if (segment.kind === 'message' || segment.kind === 'thinking') {
+          return segment.text.trim().length > 0;
+        }
+        return segment.images.length > 0 || segment.attachedFiles.length > 0;
+      })
+    : false;
 
   if (
-    event.item?.kind === 'assistant-turn'
-    && event.item.text.trim()
+    hasAssistantOutput
   ) {
     maybeTrackSendToFirstToken(
-      currentSessionKey,
+      targetSessionKey,
       event.sessionUpdate === 'session_item_chunk' ? 'delta' : 'final',
     );
   }
 
   set((state) => ({
       error: null,
-      loadedSessions: patchSessionSnapshot(state, currentSessionKey, event.snapshot),
+      loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
   }));
 }
 
@@ -166,13 +175,14 @@ export function handleStoreSessionUpdateEvent(
   const stateBeforeHandle = get();
   const currentSessionKey = stateBeforeHandle.currentSessionKey;
   const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
+  const targetSessionKey = eventSessionKey || currentSessionKey;
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
-  const activeRunId = getSessionRuntime(stateBeforeHandle, currentSessionKey).activeRunId;
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
     applySessionLifecycleEvent({
       set,
       get,
+      targetSessionKey,
       currentSessionKey,
       event: sessionUpdate,
     });
@@ -187,27 +197,25 @@ export function handleStoreSessionUpdateEvent(
   }
 
   if (shouldIgnoreRuntimeEvent({
-    activeRunId,
-    currentSessionKey,
-    runId: eventRunId,
     eventSessionKey,
+    targetSessionKey,
   })) {
     return;
   }
 
-  bindChatRunIdTelemetry(currentSessionKey, eventRunId);
+  bindChatRunIdTelemetry(targetSessionKey, eventRunId);
   setLastChatEventAt(Date.now());
 
   applySessionMessageEvent({
     set,
     get,
-    currentSessionKey,
+    targetSessionKey,
     event: sessionUpdate,
   });
 
   if (sessionUpdate.sessionUpdate === 'session_item') {
     if (sessionUpdate.item?.kind === 'assistant-turn') {
-      finishChatRunTelemetry(currentSessionKey, 'completed', { stage: 'session_update_message_final' });
+      finishChatRunTelemetry(targetSessionKey, 'completed', { stage: 'session_update_message_final' });
       clearHistoryPoll();
     }
   }

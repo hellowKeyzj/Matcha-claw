@@ -1,4 +1,5 @@
 import type {
+  SessionAssistantTurnSegment,
   SessionAssistantTurnItem,
   SessionRenderItem,
 } from '../../../runtime-host/shared/session-adapter-types';
@@ -8,9 +9,19 @@ function isAssistantTurnItem(item: SessionRenderItem): item is SessionAssistantT
 }
 
 function readTurnToolNames(item: SessionAssistantTurnItem): string[] {
-  return Array.isArray(item.toolCalls)
-    ? item.toolCalls.map((tool) => tool.name).filter((name) => typeof name === 'string' && name.trim())
-    : [];
+  return item.segments
+    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'tool' }> => segment.kind === 'tool')
+    .map((segment) => segment.tool.name)
+    .filter((name) => typeof name === 'string' && name.trim());
+}
+
+function readTurnMessageText(item: SessionAssistantTurnItem): string {
+  return item.segments
+    .filter((segment): segment is Extract<SessionAssistantTurnSegment, { kind: 'message' }> => segment.kind === 'message')
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }
 
 export function findLatestAssistantTextFromItems(
@@ -25,7 +36,7 @@ export function findLatestAssistantTextFromItems(
     if (!isAssistantTurnItem(item)) {
       continue;
     }
-    const text = item.text.trim();
+    const text = readTurnMessageText(item);
     if (text) {
       latestAssistant = text;
     }
@@ -60,7 +71,7 @@ export function findLatestAssistantSnapshotFromItems(
     if (!isAssistantTurnItem(item)) {
       continue;
     }
-    const text = item.text.trim();
+    const text = readTurnMessageText(item);
     const toolNames = readTurnToolNames(item);
     if (text || toolNames.length > 0) {
       return { text, toolNames };

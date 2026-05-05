@@ -1,4 +1,5 @@
 import type {
+  SessionAssistantTurnSegment,
   SessionAssistantTurnItem,
   SessionMessageRole,
   SessionRenderItem,
@@ -7,18 +8,32 @@ import type {
   SessionTimelineToolActivityEntry,
   SessionRenderAttachedFile,
   SessionRenderImage,
+  SessionRenderToolCard,
   SessionTimelineEntryStatus,
   SessionRenderToolStatus,
   SessionRenderToolUse,
   SessionTaskCompletionEvent,
+  SessionTurnBindingConfidence,
+  SessionTurnBindingSource,
+  SessionTurnIdentityConfidence,
+  SessionTurnIdentityMode,
 } from '../../../runtime-host/shared/session-adapter-types';
 import { extractMessageText, normalizeOptionalString } from '../../../runtime-host/shared/chat-message-normalization';
+import { assembleAuthoritativeAssistantTurns } from '../../../runtime-host/application/sessions/assistant-turn-assembler';
+import {
+  buildToolCardsFromMessage,
+  mergeToolCards,
+} from '../../../runtime-host/shared/tool-card-render';
 
 export interface MessageTimelineMeta {
   entryId: string;
   sessionKey: string;
   laneKey: string;
   turnKey: string;
+  turnBindingSource: SessionTurnBindingSource;
+  turnBindingConfidence: SessionTurnBindingConfidence;
+  turnIdentityMode: SessionTurnIdentityMode;
+  turnIdentityConfidence: SessionTurnIdentityConfidence;
   status: SessionTimelineEntryStatus;
   timestamp?: number;
   runId?: string;
@@ -34,7 +49,6 @@ export interface RawMessage {
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
-  uniqueId?: string;
   status?: 'sending' | 'sent' | 'timeout' | 'error';
   streaming?: boolean;
   toolCallId?: string;
@@ -45,7 +59,6 @@ export interface RawMessage {
   parentMessageId?: string;
   metadata?: Record<string, unknown>;
   name?: string;
-  requestId?: string;
   details?: unknown;
   toolStatuses?: Array<Record<string, unknown>>;
   taskCompletionEvents?: SessionTaskCompletionEvent[];
@@ -62,8 +75,6 @@ interface TimelineFixtureEntryMessage {
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
-  uniqueId?: string;
-  requestId?: string;
   status?: 'sending' | 'sent' | 'timeout' | 'error';
   streaming?: boolean;
   agentId?: string;
@@ -85,6 +96,10 @@ export interface TimelineFixtureEntry {
   sessionKey: string;
   laneKey: string;
   turnKey: string;
+  turnBindingSource?: SessionTurnBindingSource;
+  turnBindingConfidence?: SessionTurnBindingConfidence;
+  turnIdentityMode?: SessionTurnIdentityMode;
+  turnIdentityConfidence?: SessionTurnIdentityConfidence;
   role: SessionMessageRole;
   status: SessionTimelineEntryStatus;
   timestamp?: number;
@@ -96,11 +111,19 @@ export interface TimelineFixtureEntry {
 }
 
 function buildTimelineMeta(entry: TimelineFixtureEntry): MessageTimelineMeta {
+  const binding = resolveTimelineTurnBinding({
+    ...entry.message,
+    _timeline: entry.runId ? { runId: entry.runId } as MessageTimelineMeta : undefined,
+  });
   return {
     entryId: entry.entryId,
     sessionKey: entry.sessionKey,
     laneKey: entry.laneKey,
     turnKey: entry.turnKey,
+    turnBindingSource: entry.turnBindingSource ?? binding.source,
+    turnBindingConfidence: entry.turnBindingConfidence ?? binding.confidence,
+    turnIdentityMode: entry.turnIdentityMode ?? binding.mode,
+    turnIdentityConfidence: entry.turnIdentityConfidence ?? binding.confidence,
     status: entry.status,
     ...(entry.timestamp != null ? { timestamp: entry.timestamp } : {}),
     ...(entry.runId ? { runId: entry.runId } : {}),
@@ -130,8 +153,6 @@ function resolveTimelineEntryId(message: RawMessage, index: number): string {
   return normalizeIdentifier(
     message.messageId
     ?? message.id
-    ?? message.uniqueId
-    ?? message.requestId
     ?? message.clientId,
   ) || `entry-${index}`;
 }
@@ -142,15 +163,58 @@ function resolveTimelineLaneKey(message: RawMessage): string {
 }
 
 function resolveTimelineTurnKey(message: RawMessage, entryId: string): string {
-  const turnIdentity = normalizeIdentifier(
-    message.uniqueId
-    ?? message.requestId
-    ?? message.clientId
-    ?? message.messageId
-    ?? message.id
-    ?? message.originMessageId,
-  );
+  const turnIdentity = resolveTimelineTurnBinding(message).key;
   return turnIdentity || `entry:${entryId}`;
+}
+
+function resolveTimelineTurnBinding(message: RawMessage): {
+  key: string;
+  source: SessionTurnBindingSource;
+  confidence: SessionTurnIdentityConfidence;
+  mode: SessionTurnIdentityMode;
+} {
+  const runId = normalizeIdentifier(message._timeline?.runId);
+  if (runId) {
+    return {
+      key: runId,
+      source: 'run',
+      mode: 'run',
+      confidence: 'strong',
+    };
+  }
+  const messageId = normalizeIdentifier(message.messageId);
+  if (messageId) {
+    return {
+      key: messageId,
+      source: 'message',
+      mode: 'message',
+      confidence: 'strong',
+    };
+  }
+  const originMessageId = normalizeIdentifier(message.originMessageId);
+  if (originMessageId) {
+    return {
+      key: originMessageId,
+      source: 'origin',
+      mode: 'origin',
+      confidence: 'fallback',
+    };
+  }
+  const clientId = normalizeIdentifier(message.clientId);
+  if (clientId) {
+    return {
+      key: clientId,
+      source: 'client',
+      mode: 'client',
+      confidence: 'fallback',
+    };
+  }
+  return {
+    key: '',
+    source: 'heuristic',
+    mode: 'heuristic',
+    confidence: 'fallback',
+  };
 }
 
 function toTimelineEntryMessage(message: RawMessage): TimelineFixtureEntryMessage {
@@ -162,8 +226,6 @@ function toTimelineEntryMessage(message: RawMessage): TimelineFixtureEntryMessag
     ...(message.messageId ? { messageId: message.messageId } : {}),
     ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
     ...(message.clientId ? { clientId: message.clientId } : {}),
-    ...(message.uniqueId ? { uniqueId: message.uniqueId } : {}),
-    ...(message.requestId ? { requestId: message.requestId } : {}),
     ...(message.status ? { status: message.status } : {}),
     ...(message.streaming != null ? { streaming: message.streaming } : {}),
     ...(message.agentId ? { agentId: message.agentId } : {}),
@@ -199,6 +261,10 @@ export function buildTimelineEntryFromMessage(
       sessionKey: timeline.sessionKey || sessionKey,
       laneKey: timeline.laneKey,
       turnKey: timeline.turnKey,
+      turnBindingSource: timeline.turnBindingSource,
+      turnBindingConfidence: timeline.turnBindingConfidence,
+      turnIdentityMode: timeline.turnIdentityMode,
+      turnIdentityConfidence: timeline.turnIdentityConfidence,
       role: message.role,
       status: timeline.status,
       ...(timeline.timestamp != null
@@ -219,6 +285,10 @@ export function buildTimelineEntryFromMessage(
     sessionKey,
     laneKey,
     turnKey: resolveTimelineTurnKey(message, entryId),
+    turnBindingSource: resolveTimelineTurnBinding(message).source,
+    turnBindingConfidence: resolveTimelineTurnBinding(message).confidence,
+    turnIdentityMode: resolveTimelineTurnBinding(message).mode,
+    turnIdentityConfidence: resolveTimelineTurnBinding(message).confidence,
     role: message.role,
     status: resolveTimelineEntryStatus(message),
     ...(message.timestamp != null ? { timestamp: message.timestamp } : {}),
@@ -327,8 +397,10 @@ function readToolUses(content: unknown): SessionRenderToolUse[] {
       arguments?: unknown;
     };
     if ((row.type === 'tool_use' || row.type === 'toolCall') && typeof row.name === 'string') {
+      const toolCallId = typeof row.id === 'string' ? row.id : undefined;
       tools.push({
-        id: typeof row.id === 'string' ? row.id : row.name,
+        id: toolCallId || row.name,
+        ...(toolCallId ? { toolCallId } : {}),
         name: row.name,
         input: row.input ?? row.arguments,
       });
@@ -355,9 +427,244 @@ function readToolStatuses(message: RawMessage): SessionRenderToolStatus[] {
             ...(typeof toolStatus.durationMs === 'number' ? { durationMs: toolStatus.durationMs } : {}),
             ...(typeof toolStatus.summary === 'string' ? { summary: toolStatus.summary } : {}),
             ...(typeof toolStatus.updatedAt === 'number' ? { updatedAt: toolStatus.updatedAt } : {}),
+            ...(Object.prototype.hasOwnProperty.call(toolStatus, 'result') ? { output: toolStatus.result } : {}),
+            ...(Object.prototype.hasOwnProperty.call(toolStatus, 'output') ? { output: toolStatus.output } : {}),
+            ...(typeof toolStatus.outputText === 'string' ? { outputText: toolStatus.outputText } : {}),
           }];
         })
     : [];
+}
+
+function mergeTools(
+  existingTools: ReadonlyArray<SessionRenderToolCard>,
+  message: RawMessage,
+  toolUses: ReadonlyArray<SessionRenderToolUse>,
+  toolStatuses: ReadonlyArray<SessionRenderToolStatus>,
+): SessionRenderToolCard[] {
+  const contentDerivedTools = buildToolCardsFromMessage({
+    content: message.content,
+    role: message.role,
+    toolName: message.toolName ?? message.name,
+    toolCallId: message.toolCallId,
+    toolStatuses,
+    toolCalls: message.tool_calls ?? message.toolCalls,
+  });
+  return mergeToolCards({
+    existingTools: existingTools.length > 0 ? existingTools : contentDerivedTools,
+    toolUses,
+    toolStatuses,
+  });
+}
+
+function buildEmbeddedToolResults(
+  tools: ReadonlyArray<SessionRenderToolCard>,
+): NonNullable<SessionAssistantTurnItem['embeddedToolResults']> {
+  return tools.flatMap((tool, index) => {
+    if (tool.result.kind !== 'canvas' || tool.result.surface !== 'assistant-bubble' || tool.result.preview.surface !== 'assistant_message') {
+      return [];
+    }
+    return [{
+      key: tool.toolCallId || tool.id || `${tool.name}:${index}`,
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+      toolName: tool.name,
+      preview: tool.result.preview,
+      ...(tool.result.rawText ? { rawText: tool.result.rawText } : {}),
+    }];
+  });
+}
+
+function buildThinkingSegment(key: string, text: string): SessionAssistantTurnSegment | null {
+  const cleaned = text.trim();
+  if (!cleaned) {
+    return null;
+  }
+  return {
+    kind: 'thinking',
+    key,
+    text: cleaned,
+  };
+}
+
+function buildMessageSegment(key: string, text: string): SessionAssistantTurnSegment | null {
+  const cleaned = typeof text === 'string' ? text.trim() : '';
+  if (!cleaned) {
+    return null;
+  }
+  return {
+    kind: 'message',
+    key,
+    text: cleaned,
+  };
+}
+
+function buildMediaSegment(input: {
+  key: string;
+  images: ReadonlyArray<SessionRenderImage>;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+}): SessionAssistantTurnSegment | null {
+  if (input.images.length === 0 && input.attachedFiles.length === 0) {
+    return null;
+  }
+  return {
+    kind: 'media',
+    key: input.key,
+    images: structuredClone(input.images),
+    attachedFiles: structuredClone(input.attachedFiles),
+  };
+}
+
+function buildToolSegment(tool: SessionRenderToolCard): SessionAssistantTurnSegment {
+  return {
+    kind: 'tool',
+    key: tool.toolCallId || tool.id || tool.name,
+    tool: structuredClone(tool),
+  };
+}
+
+function findToolCardIndexForBlock(input: {
+  toolCards: ReadonlyArray<SessionRenderToolCard>;
+  consumedIndices: Set<number>;
+  toolCallId?: string;
+  toolName?: string;
+}): number {
+  const toolCallId = normalizeOptionalString(input.toolCallId) ?? '';
+  if (toolCallId) {
+    for (let index = 0; index < input.toolCards.length; index += 1) {
+      if (input.consumedIndices.has(index)) {
+        continue;
+      }
+      const tool = input.toolCards[index];
+      if ((tool?.toolCallId ?? tool?.id) === toolCallId) {
+        return index;
+      }
+    }
+  }
+  const toolName = normalizeOptionalString(input.toolName) ?? '';
+  if (toolName) {
+    for (let index = 0; index < input.toolCards.length; index += 1) {
+      if (input.consumedIndices.has(index)) {
+        continue;
+      }
+      const tool = input.toolCards[index];
+      if (tool?.name === toolName) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
+function buildAssistantSegmentsFromMessage(input: {
+  entryKey: string;
+  message: RawMessage;
+  text: string;
+  images: ReadonlyArray<SessionRenderImage>;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+  toolCards: ReadonlyArray<SessionRenderToolCard>;
+}): ReadonlyArray<SessionAssistantTurnSegment> {
+  if (input.message.role !== 'assistant') {
+    return [];
+  }
+
+  const segments: SessionAssistantTurnSegment[] = [];
+  const consumedToolIndices = new Set<number>();
+  let emittedInlineMedia = false;
+
+  if (Array.isArray(input.message.content)) {
+    for (const [index, block] of input.message.content.entries()) {
+      if (!block || typeof block !== 'object') {
+        continue;
+      }
+      const row = block as {
+        type?: unknown;
+        text?: unknown;
+        thinking?: unknown;
+        id?: unknown;
+        toolCallId?: unknown;
+        name?: unknown;
+      };
+      const type = typeof row.type === 'string' ? row.type : '';
+      if (type === 'thinking' && typeof row.thinking === 'string') {
+        const thinkingSegment = buildThinkingSegment(`${input.entryKey}:thinking:${index}`, row.thinking);
+        if (thinkingSegment) {
+          segments.push(thinkingSegment);
+        }
+        continue;
+      }
+      if (type === 'text' && typeof row.text === 'string') {
+        const messageSegment = buildMessageSegment(`${input.entryKey}:message:${index}`, row.text);
+        if (messageSegment) {
+          segments.push(messageSegment);
+        }
+        continue;
+      }
+      if (type === 'image') {
+        const mediaSegment = buildMediaSegment({
+          key: `${input.entryKey}:media:${index}`,
+          images: readImages([row]),
+          attachedFiles: input.attachedFiles,
+        });
+        if (mediaSegment) {
+          emittedInlineMedia = true;
+          segments.push(mediaSegment);
+        }
+        continue;
+      }
+      if (type === 'tool_use' || type === 'toolCall' || type === 'tool_result' || type === 'toolResult') {
+        const toolIndex = findToolCardIndexForBlock({
+          toolCards: input.toolCards,
+          consumedIndices: consumedToolIndices,
+          toolCallId: typeof row.toolCallId === 'string'
+            ? row.toolCallId
+            : (typeof row.id === 'string' ? row.id : undefined),
+          toolName: typeof row.name === 'string' ? row.name : undefined,
+        });
+        if (toolIndex >= 0) {
+          consumedToolIndices.add(toolIndex);
+          const tool = input.toolCards[toolIndex];
+          if (tool) {
+            segments.push(buildToolSegment(tool));
+          }
+        }
+      }
+    }
+  }
+
+  if (segments.length === 0) {
+    const messageSegment = buildMessageSegment(`${input.entryKey}:message:full`, input.text);
+    if (messageSegment) {
+      segments.push(messageSegment);
+    }
+  }
+
+  for (let index = 0; index < input.toolCards.length; index += 1) {
+    if (consumedToolIndices.has(index)) {
+      continue;
+    }
+    const tool = input.toolCards[index];
+    if (tool) {
+      segments.push(buildToolSegment(tool));
+    }
+  }
+
+  if (!emittedInlineMedia) {
+    const mediaSegment = buildMediaSegment({
+      key: `${input.entryKey}:media:tail`,
+      images: input.images,
+      attachedFiles: input.attachedFiles,
+    });
+    if (mediaSegment) {
+      segments.push(mediaSegment);
+    }
+  }
+
+  return segments;
+}
+
+function buildAssistantSegmentsFromToolCards(
+  toolCards: ReadonlyArray<SessionRenderToolCard>,
+): ReadonlyArray<SessionAssistantTurnSegment> {
+  return toolCards.map((tool) => buildToolSegment(tool));
 }
 
 export function buildRenderableTimelineEntriesFromMessages(
@@ -382,6 +689,10 @@ export function buildRenderableTimelineEntriesFromMessages(
         ...(entry.sequenceId != null ? { sequenceId: entry.sequenceId } : {}),
         laneKey: entry.laneKey,
         turnKey: entry.turnKey,
+        turnBindingSource: entry.turnBindingSource,
+        turnBindingConfidence: entry.turnBindingConfidence,
+        turnIdentityMode: entry.turnIdentityMode,
+        turnIdentityConfidence: entry.turnIdentityConfidence,
         ...(entry.agentId ? { agentId: entry.agentId } : {}),
         ...(entry.role === 'assistant' ? {
           assistantTurnKey: entry.turnKey,
@@ -395,8 +706,10 @@ export function buildRenderableTimelineEntriesFromMessages(
           ...base,
           kind: 'tool-activity',
           role: 'assistant',
+          assistantSegments: buildAssistantSegmentsFromToolCards(mergeTools([], message, toolUses, toolStatuses)),
           toolUses,
           toolStatuses,
+          toolCards: mergeTools([], message, toolUses, toolStatuses),
           attachedFiles: cloneAttachedFiles(message._attachedFiles),
           isStreaming: entry.status === 'streaming',
         };
@@ -407,16 +720,23 @@ export function buildRenderableTimelineEntriesFromMessages(
         ...base,
         kind: 'message',
         thinking: readThinking(message.content),
+        assistantSegments: buildAssistantSegmentsFromMessage({
+          entryKey: base.key,
+          message,
+          text: entry.text,
+          images: readImages(message.content),
+          attachedFiles: cloneAttachedFiles(message._attachedFiles),
+          toolCards: mergeTools([], message, toolUses, toolStatuses),
+        }),
         images: readImages(message.content),
         toolUses,
         attachedFiles: cloneAttachedFiles(message._attachedFiles),
         toolStatuses,
+        toolCards: mergeTools([], message, toolUses, toolStatuses),
         isStreaming: entry.status === 'streaming',
         ...(message.messageId ? { messageId: message.messageId } : {}),
         ...(message.originMessageId ? { originMessageId: message.originMessageId } : {}),
         ...(message.clientId ? { clientId: message.clientId } : {}),
-        ...(message.uniqueId ? { uniqueId: message.uniqueId } : {}),
-        ...(message.requestId ? { requestId: message.requestId } : {}),
       };
       return row;
     });
@@ -427,20 +747,26 @@ export function buildRenderItemsFromMessages(
   messages: RawMessage[],
 ): SessionRenderItem[] {
   const entries = buildRenderableTimelineEntriesFromMessages(sessionKey, messages);
+  const assembledTurns = assembleAuthoritativeAssistantTurns({
+    sessionKey,
+    timelineEntries: entries,
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle',
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      updatedAt: null,
+    },
+  });
   const items: SessionRenderItem[] = [];
-  let activeAssistantTurn: SessionAssistantTurnItem | null = null;
-
-  const flushAssistantTurn = () => {
-    if (!activeAssistantTurn) {
-      return;
-    }
-    items.push(activeAssistantTurn);
-    activeAssistantTurn = null;
-  };
+  const emittedAssistantTurnKeys = new Set<string>();
 
   for (const entry of entries) {
     if (entry.kind === 'message' && entry.role === 'user') {
-      flushAssistantTurn();
       items.push({
         key: entry.key,
         kind: 'user-message',
@@ -457,121 +783,18 @@ export function buildRenderItemsFromMessages(
       continue;
     }
 
-    if (entry.kind === 'message' && entry.role === 'assistant') {
-      const turnKey = entry.turnKey ?? entry.messageId ?? entry.key;
-      const laneKey = entry.laneKey ?? 'main';
-      const turnItemKey = `session:${entry.sessionKey}|assistant-turn:${turnKey}:${laneKey}`;
-      if (
-        !activeAssistantTurn
-        || activeAssistantTurn.turnKey !== turnKey
-        || activeAssistantTurn.laneKey !== laneKey
-      ) {
-        flushAssistantTurn();
-        activeAssistantTurn = {
-          key: turnItemKey,
-          kind: 'assistant-turn',
-          sessionKey: entry.sessionKey,
-          role: 'assistant',
-          ...(entry.createdAt != null ? { createdAt: entry.createdAt } : {}),
-          ...(entry.createdAt != null ? { updatedAt: entry.createdAt } : {}),
-          ...(entry.runId ? { runId: entry.runId } : {}),
-          laneKey,
-          turnKey,
-          ...(entry.agentId ? { agentId: entry.agentId } : {}),
-          status: entry.status === 'error'
-            ? 'error'
-            : entry.status === 'aborted'
-              ? 'aborted'
-              : entry.status === 'streaming'
-                ? 'streaming'
-                : 'final',
-          thinking: entry.thinking,
-          toolCalls: entry.toolUses,
-          toolStatuses: entry.toolStatuses,
-          text: entry.text,
-          images: entry.images,
-          attachedFiles: entry.attachedFiles,
-          pendingState: null,
-        };
+    if ((entry.kind === 'message' || entry.kind === 'tool-activity') && entry.role === 'assistant') {
+      const assistantTurn = assembledTurns.turnsByLatestTimelineKey.get(entry.key);
+      if (!assistantTurn || emittedAssistantTurnKeys.has(assistantTurn.key)) {
         continue;
       }
-      activeAssistantTurn = {
-        ...activeAssistantTurn,
-        updatedAt: entry.createdAt ?? activeAssistantTurn.updatedAt,
-        status: entry.status === 'error'
-          ? 'error'
-          : entry.status === 'aborted'
-            ? 'aborted'
-            : entry.status === 'streaming'
-              ? 'streaming'
-              : activeAssistantTurn.status,
-        thinking: entry.thinking ?? activeAssistantTurn.thinking,
-        toolCalls: entry.toolUses.length > 0 ? entry.toolUses : activeAssistantTurn.toolCalls,
-        toolStatuses: entry.toolStatuses.length > 0 ? entry.toolStatuses : activeAssistantTurn.toolStatuses,
-        text: entry.text || activeAssistantTurn.text,
-        images: entry.images.length > 0 ? entry.images : activeAssistantTurn.images,
-        attachedFiles: entry.attachedFiles.length > 0 ? entry.attachedFiles : activeAssistantTurn.attachedFiles,
-      };
+      emittedAssistantTurnKeys.add(assistantTurn.key);
+      items.push({
+        ...assistantTurn,
+        embeddedToolResults: buildEmbeddedToolResults(assistantTurn.tools),
+      });
       continue;
     }
-
-    if (entry.kind === 'tool-activity') {
-      const turnKey = entry.turnKey ?? entry.key;
-      const laneKey = entry.laneKey ?? 'main';
-      const turnItemKey = `session:${entry.sessionKey}|assistant-turn:${turnKey}:${laneKey}`;
-      if (
-        !activeAssistantTurn
-        || activeAssistantTurn.turnKey !== turnKey
-        || activeAssistantTurn.laneKey !== laneKey
-      ) {
-        flushAssistantTurn();
-        activeAssistantTurn = {
-          key: turnItemKey,
-          kind: 'assistant-turn',
-          sessionKey: entry.sessionKey,
-          role: 'assistant',
-          ...(entry.createdAt != null ? { createdAt: entry.createdAt } : {}),
-          ...(entry.createdAt != null ? { updatedAt: entry.createdAt } : {}),
-          ...(entry.runId ? { runId: entry.runId } : {}),
-          laneKey,
-          turnKey,
-          ...(entry.agentId ? { agentId: entry.agentId } : {}),
-          status: entry.status === 'error'
-            ? 'error'
-            : entry.status === 'aborted'
-              ? 'aborted'
-              : entry.status === 'streaming'
-                ? 'streaming'
-                : 'waiting_tool',
-          thinking: null,
-          toolCalls: entry.toolUses,
-          toolStatuses: entry.toolStatuses,
-          text: '',
-          images: [],
-          attachedFiles: entry.attachedFiles,
-          pendingState: entry.isStreaming ? 'activity' : null,
-        };
-        continue;
-      }
-      activeAssistantTurn = {
-        ...activeAssistantTurn,
-        updatedAt: entry.createdAt ?? activeAssistantTurn.updatedAt,
-        status: entry.status === 'error'
-          ? 'error'
-          : entry.status === 'aborted'
-            ? 'aborted'
-            : entry.status === 'streaming'
-              ? 'streaming'
-              : 'waiting_tool',
-        toolCalls: entry.toolUses.length > 0 ? entry.toolUses : activeAssistantTurn.toolCalls,
-        toolStatuses: entry.toolStatuses.length > 0 ? entry.toolStatuses : activeAssistantTurn.toolStatuses,
-        attachedFiles: entry.attachedFiles.length > 0 ? entry.attachedFiles : activeAssistantTurn.attachedFiles,
-        pendingState: entry.isStreaming ? 'activity' : activeAssistantTurn.pendingState,
-      };
-      continue;
-    }
-
-    flushAssistantTurn();
 
     if (entry.kind === 'task-completion') {
       items.push({
@@ -603,6 +826,5 @@ export function buildRenderItemsFromMessages(
     }
   }
 
-  flushAssistantTurn();
   return items;
 }

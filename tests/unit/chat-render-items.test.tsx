@@ -18,7 +18,7 @@ describe('chat render item fixtures', () => {
       kind: 'assistant-turn',
       text: 'a1',
       thinking: null,
-      toolCalls: [],
+      tools: [],
       images: [],
       attachedFiles: [],
     });
@@ -38,11 +38,11 @@ describe('chat render item fixtures', () => {
 
     expect(itemsDuringStreaming[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:assistant-1:main',
+      key: 'session:agent:main:main|assistant-turn:entry:assistant-1:main',
     });
     expect(finalItems[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:assistant-1:main',
+      key: 'session:agent:main:main|assistant-turn:entry:assistant-1:main',
     });
   });
 
@@ -55,7 +55,7 @@ describe('chat render item fixtures', () => {
     expect(items).toHaveLength(2);
     expect(items[1]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:assistant-stream-1:main',
+      key: 'session:agent:main:main|assistant-turn:entry:assistant-stream-1:main',
       text: 'hello world',
       status: 'streaming',
     });
@@ -87,15 +87,11 @@ describe('chat render item fixtures', () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       kind: 'assistant-turn',
-      key: 'session:agent:main:main|assistant-turn:assistant-tool-1:main',
-      toolCalls: [{
+      key: 'session:agent:main:main|assistant-turn:entry:assistant-tool-1:main',
+      tools: [{
         id: 'tool-1',
         name: 'read_file',
         input: { filePath: 'README.md' },
-      }],
-      toolStatuses: [{
-        toolCallId: 'tool-1',
-        name: 'read_file',
         status: 'completed',
       }],
       text: '',

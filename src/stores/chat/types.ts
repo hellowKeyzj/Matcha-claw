@@ -89,7 +89,9 @@ export interface ChatSessionRuntimeState {
   sending: boolean;
   activeRunId: string | null;
   runPhase: ChatRunPhase;
-  streamingAnchorKey: string | null;
+  activeTurnItemKey: string | null;
+  pendingTurnKey: string | null;
+  pendingTurnLaneKey: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
 }
@@ -123,7 +125,7 @@ export interface ChatSessionViewportState {
   isLoadingMore: boolean;
   isLoadingNewer: boolean;
   isAtLatest: boolean;
-  lastVisibleItemKey: string | null;
+  anchorItemKey: string | null;
 }
 
 export interface ChatViewState {
@@ -174,9 +176,9 @@ export interface ChatStoreActions {
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
-  loadOlderItems: (sessionKey?: string) => Promise<void>;
-  jumpToLatest: (sessionKey?: string) => Promise<void>;
-  setViewportLastVisibleItemKey: (itemKey: string | null, sessionKey?: string) => void;
+  loadOlderViewportItems: (sessionKey?: string) => Promise<void>;
+  jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
+  setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[]) => Promise<void>;
   abortRun: () => Promise<void>;
   handleApprovalRequested: (payload: Record<string, unknown>) => void;

@@ -1,4 +1,5 @@
 import type { SessionTimelineEntry, SessionTimelineEntryStatus } from '../../shared/session-adapter-types';
+import { normalizeMessageRole } from '../../shared/chat-message-normalization';
 import {
   buildTimelineEntriesFromTranscriptMessage,
   resolveSessionLaneKey,
@@ -11,8 +12,6 @@ interface GatewayConversationMessagePayload {
   runId?: unknown;
   sessionKey?: unknown;
   sequenceId?: unknown;
-  requestId?: unknown;
-  uniqueId?: unknown;
   agentId?: unknown;
   message?: unknown;
 }
@@ -140,6 +139,40 @@ function buildMemberMeta(agentId: string): Record<string, unknown> | undefined {
   };
 }
 
+function resolveExistingToolName(
+  entries: ReadonlyArray<SessionTimelineEntry> | undefined,
+  toolCallId: string,
+): string {
+  if (!entries || !toolCallId) {
+    return '';
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (!entry || (entry.kind !== 'message' && entry.kind !== 'tool-activity')) {
+      continue;
+    }
+    const toolName = entry.toolCards.find((tool) => (
+      tool.toolCallId === toolCallId || tool.id === toolCallId
+    ))?.name;
+    if (toolName) {
+      return toolName;
+    }
+    const toolUseName = entry.toolUses.find((toolUse) => (
+      toolUse.toolCallId === toolCallId || toolUse.id === toolCallId
+    ))?.name;
+    if (toolUseName) {
+      return toolUseName;
+    }
+    const toolStatusName = entry.toolStatuses.find((toolStatus) => (
+      toolStatus.toolCallId === toolCallId || toolStatus.id === toolCallId
+    ))?.name;
+    if (toolStatusName) {
+      return toolStatusName;
+    }
+  }
+  return '';
+}
+
 function normalizeConversationMessagePayload(
   payload: GatewayConversationMessagePayload,
 ): { sessionKey: string | null; runId: string | null; sequenceId?: number; message: SessionTranscriptMessage | null; status: SessionTimelineEntryStatus } {
@@ -158,7 +191,16 @@ function normalizeConversationMessagePayload(
     };
   }
 
-  const role = normalizeString(rawMessage.role) as SessionTranscriptMessage['role'];
+  const role = normalizeMessageRole(rawMessage.role);
+  if (!role) {
+    return {
+      sessionKey,
+      runId,
+      ...(sequenceId != null ? { sequenceId } : {}),
+      message: null,
+      status: normalizeTimelineEntryStatus(state),
+    };
+  }
   const content = Object.prototype.hasOwnProperty.call(rawMessage, 'content')
     ? rawMessage.content
     : '';
@@ -171,8 +213,6 @@ function normalizeConversationMessagePayload(
     ...(normalizeString(rawMessage.messageId) ? { messageId: normalizeString(rawMessage.messageId) } : {}),
     ...(normalizeString(rawMessage.originMessageId) ? { originMessageId: normalizeString(rawMessage.originMessageId) } : {}),
     ...(normalizeString(rawMessage.clientId) ? { clientId: normalizeString(rawMessage.clientId) } : {}),
-    ...(normalizeString(rawMessage.uniqueId ?? payload.uniqueId) ? { uniqueId: normalizeString(rawMessage.uniqueId ?? payload.uniqueId) } : {}),
-    ...(normalizeString(rawMessage.requestId ?? payload.requestId) ? { requestId: normalizeString(rawMessage.requestId ?? payload.requestId) } : {}),
     ...(normalizeString(rawMessage.agentId ?? payload.agentId) ? { agentId: normalizeString(rawMessage.agentId ?? payload.agentId) } : {}),
     ...(normalizeString(rawMessage.toolCallId) ? { toolCallId: normalizeString(rawMessage.toolCallId) } : {}),
     ...(normalizeString(rawMessage.toolName ?? rawMessage.name) ? { toolName: normalizeString(rawMessage.toolName ?? rawMessage.name) } : {}),
@@ -242,6 +282,9 @@ function buildToolLifecycleMessage(input: {
 
 function normalizeToolLifecyclePayload(
   payload: GatewayConversationToolLifecyclePayload,
+  options: {
+    existingEntries?: ReadonlyArray<SessionTimelineEntry>;
+  } = {},
 ): { sessionKey: string; runId: string; sequenceId: number; phase: 'start' | 'update' | 'result'; message: SessionTranscriptMessage } | null {
   const phase = normalizeToolLifecyclePhase(payload.phase);
   const runId = normalizeString(payload.runId);
@@ -249,7 +292,8 @@ function normalizeToolLifecyclePayload(
   const sequenceId = normalizeFiniteNumber(payload.sequenceId);
   const timestamp = normalizeFiniteNumber(payload.timestamp);
   const toolCallId = normalizeString(payload.toolCallId);
-  const name = normalizeString(payload.name);
+  const name = normalizeString(payload.name)
+    || resolveExistingToolName(options.existingEntries, toolCallId);
   if (!phase || !runId || !sessionKey || sequenceId == null || timestamp == null || !toolCallId) {
     return null;
   }
@@ -304,7 +348,9 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
   }
 
   if (input.type === 'tool.lifecycle') {
-    const toolLifecycle = normalizeToolLifecyclePayload(input.event as GatewayConversationToolLifecyclePayload);
+    const toolLifecycle = normalizeToolLifecyclePayload(input.event as GatewayConversationToolLifecyclePayload, {
+      existingEntries: options.existingEntries,
+    });
     if (!toolLifecycle) {
       return [];
     }

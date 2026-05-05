@@ -12,10 +12,60 @@ export type SessionTimelineEntryStatus =
   | 'error'
   | 'aborted';
 
+export type SessionTurnBindingSource =
+  | 'tool_call'
+  | 'run'
+  | 'message'
+  | 'origin'
+  | 'client'
+  | 'heuristic';
+
+/**
+ * Assistant turn identity mode.
+ *
+ * Rules:
+ * - `tool_call` means the turn was anchored by authoritative `toolCallId`.
+ * - `run` means the turn was anchored by authoritative live `runId`.
+ * - `message` means the turn was anchored by authoritative assistant `messageId`.
+ * - `origin` / `client` are supplemental upstream identities only.
+ * - `heuristic` means no strong upstream turn identity existed; binding is controlled fallback only.
+ *
+ * Explicitly not supported as turn identity:
+ * - `uniqueId`
+ * - `requestId`
+ * - any legacy row-era synthetic pseudo turn id
+ */
+export type SessionTurnIdentityMode =
+  | 'tool_call'
+  | 'run'
+  | 'message'
+  | 'origin'
+  | 'client'
+  | 'heuristic';
+
+export type SessionTurnBindingConfidence = 'strong' | 'fallback';
+/**
+ * Binding confidence for the final assistant-turn render model.
+ *
+ * - `strong`: backed by authoritative upstream identity.
+ * - `fallback`: controlled heuristic grouping only, not guaranteed 100% exact.
+ */
+export type SessionTurnIdentityConfidence = 'strong' | 'fallback';
+
 export interface SessionTaskCompletionEvent {
   kind: 'task_completion';
   source: 'subagent' | 'cron' | 'unknown';
   childSessionKey: string;
+  sequenceId?: number;
+  laneKey?: string;
+  turnKey?: string;
+  turnBindingSource?: SessionTurnBindingSource;
+  turnBindingConfidence?: SessionTurnBindingConfidence;
+  turnIdentityMode?: SessionTurnIdentityMode;
+  turnIdentityConfidence?: SessionTurnIdentityConfidence;
+  agentId?: string;
+  sourceRole?: SessionMessageRole;
+  assistantTurnKey?: string | null;
   childSessionId?: string;
   childAgentId?: string;
   announceType?: string;
@@ -45,7 +95,9 @@ export interface SessionRuntimeStateSnapshot {
   sending: boolean;
   activeRunId: string | null;
   runPhase: 'idle' | 'submitted' | 'streaming' | 'waiting_tool' | 'finalizing' | 'done' | 'error' | 'aborted';
-  streamingAnchorKey: string | null;
+  activeTurnItemKey: string | null;
+  pendingTurnKey: string | null;
+  pendingTurnLaneKey: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
   updatedAt: number | null;
@@ -82,16 +134,119 @@ export interface SessionRenderToolStatus {
   durationMs?: number;
   summary?: string;
   updatedAt?: number;
+  output?: unknown;
+  outputText?: string;
 }
 
 export interface SessionRenderToolUse {
   id: string;
+  toolCallId?: string;
   name: string;
   input: unknown;
   status?: SessionRenderToolStatus['status'];
   summary?: string;
   durationMs?: number;
 }
+
+export interface SessionRenderToolPreviewCanvas {
+  kind: 'canvas';
+  surface: 'assistant_message';
+  render: 'url';
+  title?: string;
+  preferredHeight?: number;
+  url: string;
+  viewId: string;
+}
+
+export type SessionRenderToolPreview = SessionRenderToolPreviewCanvas;
+
+export interface SessionRenderToolResultNone {
+  kind: 'none';
+  surface: 'tool-card';
+}
+
+export interface SessionRenderToolResultText {
+  kind: 'text';
+  surface: 'tool-card';
+  collapsedPreview: string;
+  bodyText: string;
+}
+
+export interface SessionRenderToolResultJson {
+  kind: 'json';
+  surface: 'tool-card';
+  collapsedPreview: string;
+  bodyText: string;
+}
+
+export interface SessionRenderToolResultCanvas {
+  kind: 'canvas';
+  surface: 'assistant-bubble';
+  collapsedPreview: string;
+  preview: SessionRenderToolPreview;
+  rawText?: string;
+}
+
+export type SessionRenderToolResult =
+  | SessionRenderToolResultNone
+  | SessionRenderToolResultText
+  | SessionRenderToolResultJson
+  | SessionRenderToolResultCanvas;
+
+export interface SessionRenderAssistantBubbleToolResult {
+  key: string;
+  toolCallId?: string;
+  toolName: string;
+  preview: SessionRenderToolPreview;
+  rawText?: string;
+}
+
+export interface SessionRenderToolCard {
+  id: string;
+  toolCallId?: string;
+  name: string;
+  displayTitle: string;
+  displayDetail?: string;
+  input: unknown;
+  inputText?: string;
+  status: SessionRenderToolStatus['status'];
+  summary?: string;
+  durationMs?: number;
+  updatedAt?: number;
+  output?: unknown;
+  result: SessionRenderToolResult;
+}
+
+export interface SessionAssistantThinkingSegment {
+  kind: 'thinking';
+  key: string;
+  text: string;
+}
+
+export interface SessionAssistantToolSegment {
+  kind: 'tool';
+  key: string;
+  tool: SessionRenderToolCard;
+}
+
+export interface SessionAssistantMessageSegment {
+  kind: 'message';
+  key: string;
+  text: string;
+}
+
+export interface SessionAssistantMediaSegment {
+  kind: 'media';
+  key: string;
+  images: ReadonlyArray<SessionRenderImage>;
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
+}
+
+export type SessionAssistantTurnSegment =
+  | SessionAssistantThinkingSegment
+  | SessionAssistantToolSegment
+  | SessionAssistantMessageSegment
+  | SessionAssistantMediaSegment;
 
 export interface SessionTimelineEntryBase {
   key: string;
@@ -111,6 +266,10 @@ export interface SessionTimelineEntryBase {
   sequenceId?: number;
   laneKey?: string;
   turnKey?: string;
+  turnBindingSource?: SessionTurnBindingSource;
+  turnBindingConfidence?: SessionTurnBindingConfidence;
+  turnIdentityMode?: SessionTurnIdentityMode;
+  turnIdentityConfidence?: SessionTurnIdentityConfidence;
   agentId?: string;
   sourceRole?: SessionMessageRole;
   assistantTurnKey?: string | null;
@@ -122,23 +281,25 @@ export interface SessionTimelineMessageEntry extends SessionTimelineEntryBase {
   kind: 'message';
   text: string;
   thinking: string | null;
+  assistantSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   images: ReadonlyArray<SessionRenderImage>;
   toolUses: ReadonlyArray<SessionRenderToolUse>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
+  toolCards: ReadonlyArray<SessionRenderToolCard>;
   isStreaming: boolean;
   messageId?: string;
   originMessageId?: string;
   clientId?: string;
-  uniqueId?: string;
-  requestId?: string;
 }
 
 export interface SessionTimelineToolActivityEntry extends SessionTimelineEntryBase {
   kind: 'tool-activity';
   role: 'assistant';
+  assistantSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   toolUses: ReadonlyArray<SessionRenderToolUse>;
   toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
+  toolCards: ReadonlyArray<SessionRenderToolCard>;
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   isStreaming: boolean;
 }
@@ -214,12 +375,44 @@ export interface SessionRenderUserMessageItem extends SessionRenderItemBase {
 export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   kind: 'assistant-turn';
   role: 'assistant';
+  identitySource: SessionTurnBindingSource;
+  /**
+   * `messageId` is optional in upstream history and must not be assumed to exist.
+   * `toolCallId` is the strongest tool identity when present.
+   */
+  identityMode: SessionTurnIdentityMode;
+  identityConfidence: SessionTurnIdentityConfidence;
   status: 'streaming' | 'waiting_tool' | 'final' | 'error' | 'aborted';
+  /**
+   * Authoritative presentation order for one assistant turn.
+   *
+   * The UI must render assistant turns from `segments`, not by independently
+   * arranging `thinking`, `tools`, `text`, or media summary fields.
+   */
+  segments: ReadonlyArray<SessionAssistantTurnSegment>;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
   thinking: string | null;
-  toolCalls: ReadonlyArray<SessionRenderToolUse>;
-  toolStatuses: ReadonlyArray<SessionRenderToolStatus>;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
+  tools: ReadonlyArray<SessionRenderToolCard>;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
+  embeddedToolResults?: ReadonlyArray<SessionRenderAssistantBubbleToolResult>;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
   text: string;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
   images: ReadonlyArray<SessionRenderImage>;
+  /**
+   * Derived convenience summary built from `segments`.
+   */
   attachedFiles: ReadonlyArray<SessionRenderAttachedFile>;
   pendingState?: 'typing' | 'activity' | null;
 }
