@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, privateDecrypt, randomBytes } from 'n
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import type { BrowserCookieInput } from '../browser-action-contract.js'
+import { relayDebugInfo } from '../debug-logging.js'
 import { RELAY_PRIVATE_KEY_PEM } from './keypair.js'
 import {
   claimRelayPortOwnership,
@@ -562,7 +563,8 @@ export class BrowserRelayServer {
             return
           }
           this.actualPort = address.port
-          this.logger.info(
+          relayDebugInfo(
+            this.logger,
             `[browser-relay] listening on 127.0.0.1:${this.actualPort} (HTTP /json/*, WS /extension, WS /cdp)`,
           )
           resolve()
@@ -659,7 +661,7 @@ export class BrowserRelayServer {
   }
 
   async openTarget(url: string): Promise<{ targetId: string }> {
-    return await this.createTargetInClient(this.resolveClientForDefaultAction(), url)
+    return await this.createTargetInClient(await this.resolveClientForBrowserUse(), url)
   }
 
   async waitForAttachedTarget(targetId: string, timeoutMs = TARGET_ATTACH_TIMEOUT_MS): Promise<AttachedRelayTarget> {
@@ -752,7 +754,7 @@ export class BrowserRelayServer {
   }
 
   async closeAllAgentTabs(): Promise<unknown> {
-    const client = this.resolveClientForDefaultAction()
+    const client = await this.resolveClientForBrowserUse()
     return this.sendToExtension(client, 'Target.closeAllAgentTabs', {})
   }
 
@@ -1272,7 +1274,8 @@ export class BrowserRelayServer {
         if (targetId) {
           const target = this.findTargetByTargetId(targetId)
           if (!target) throw new Error('target not found')
-          this.logger.info?.(
+          relayDebugInfo(
+            this.logger,
             `[browser-relay] Target.getTargetInfo by targetId targetId=${targetId} resolvedSessionId=${target.sessionId} resolvedUrl="${target.targetInfo.url ?? ''}"`,
           )
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
@@ -1280,28 +1283,32 @@ export class BrowserRelayServer {
         if (input.sessionId) {
           if (browserSession) {
             const browserTarget = this.getBrowserTargetInfoForBrowser(browserSession.browserInstanceId)
-            this.logger.info?.(
+            relayDebugInfo(
+              this.logger,
               `[browser-relay] Target.getTargetInfo by browserSession sessionId=${input.sessionId} browserTargetId=${browserTarget.targetId}`,
             )
             return { targetInfo: browserTarget }
           }
           const target = attachedSession ? this.findTargetByTargetId(attachedSession.targetId) : null
           if (!target) throw new Error('target not found')
-          this.logger.info?.(
+          relayDebugInfo(
+            this.logger,
             `[browser-relay] Target.getTargetInfo by sessionId sessionId=${input.sessionId} resolvedTargetId=${target.targetId ?? 'null'} resolvedUrl="${target.targetInfo.url ?? ''}"`,
           )
           return { targetInfo: normalizeTargetInfo(target.targetInfo) }
         }
         const browserTarget = this.getBrowserTargetInfo()
-        this.logger.info?.(
+        relayDebugInfo(
+          this.logger,
           `[browser-relay] Target.getTargetInfo root browserTargetId=${browserTarget.targetId}`,
         )
         return { targetInfo: browserTarget }
       }
       case 'Target.attachToBrowserTarget': {
-        const client = this.resolveClientForDefaultAction()
+        const client = await this.resolveClientForBrowserUse()
         const sessionId = this.allocateBrowserSession(client.browserInstanceId, input.cdpClient)
-        this.logger.info?.(
+        relayDebugInfo(
+          this.logger,
           `[browser-relay] Target.attachToBrowserTarget browserInstanceId=${client.browserInstanceId} browserSessionId=${sessionId}`,
         )
         return { sessionId }
@@ -1318,7 +1325,8 @@ export class BrowserRelayServer {
           }
         }
         const attachSession = this.allocateAttachedClientSession(target, input.cdpClient, { autoAttached: false })
-        this.logger.info?.(
+        relayDebugInfo(
+          this.logger,
           `[browser-relay] Target.attachToTarget allocated attachSessionId=${attachSession.attachSessionId} targetId=${targetId} physicalSessionId=${target.sessionId} url="${target.targetInfo.url ?? ''}"`,
         )
         setTimeout(() => {
@@ -1329,20 +1337,22 @@ export class BrowserRelayServer {
       case 'Target.detachFromTarget': {
         const detachedSessionId = typeof input.params?.sessionId === 'string' ? input.params.sessionId : undefined
         if (detachedSessionId && this.browserSessions.delete(detachedSessionId)) {
-          this.logger.info?.(
+          relayDebugInfo(
+            this.logger,
             `[browser-relay] Target.detachFromTarget browserSessionId=${detachedSessionId}`,
           )
           return {}
         }
         if (detachedSessionId && this.releaseAttachedClientSession(detachedSessionId)) {
-          this.logger.info?.(
+          relayDebugInfo(
+            this.logger,
             `[browser-relay] Target.detachFromTarget released attachSessionId=${detachedSessionId}`,
           )
         }
         return {}
       }
       case 'Target.createTarget': {
-        const client = this.resolveClientForDefaultAction()
+        const client = await this.resolveClientForBrowserUse()
         const result = await this.sendToExtension(client, input.method, input.params ?? {})
         const rawTargetId = readTargetIdFromResult(result)
         const externalTargetId = rawTargetId
@@ -1360,7 +1370,7 @@ export class BrowserRelayServer {
         return this.sendToExtension(client, input.method, { ...(input.params ?? {}), targetId: localTargetId })
       }
       case 'Target.closeAllAgentTabs': {
-        const client = this.resolveClientForDefaultAction()
+        const client = await this.resolveClientForBrowserUse()
         return this.sendToExtension(client, input.method, input.params ?? {})
       }
       case 'Runtime.enable':
@@ -1595,7 +1605,8 @@ export class BrowserRelayServer {
     const localTargetInfo = eventParams.targetInfo as Partial<RelayTargetInfo> & Pick<RelayTargetInfo, 'targetId'>
     const sessionId = encodeExternalSessionId(client.browserInstanceId, attachedLocalSessionId)
     const normalized = this.normalizeExternalTargetInfo(client, localTargetInfo)
-    this.logger.info(
+    relayDebugInfo(
+      this.logger,
       `[browser-relay] Target.attachedToTarget browserInstanceId=${client.browserInstanceId} localSessionId=${attachedLocalSessionId} localTargetId=${localTargetInfo.targetId} externalSessionId=${sessionId} externalTargetId=${normalized.targetId} type=${normalized.type} url="${normalized.url ?? ''}"`,
     )
     if (normalized.type === 'page') {
@@ -1991,7 +2002,8 @@ export class BrowserRelayServer {
     if (!client) {
       return Promise.reject(new Error('Target browser instance is not connected.'))
     }
-    this.logger.info?.(
+    relayDebugInfo(
+      this.logger,
       `[browser-relay] route page-session command attachSessionId=${attachedSession.attachSessionId} -> physicalSessionId=${attachedSession.physicalSessionId} method=${method}`,
     )
     return this.sendToExtension(
@@ -2390,7 +2402,8 @@ export class BrowserRelayServer {
     const rawTargetId = readTargetIdFromResult(result)
     if (!rawTargetId) throw new Error('Target.createTarget returned no targetId')
     const targetId = ensureExternalTargetId(client.browserInstanceId, rawTargetId)
-    this.logger.info(
+    relayDebugInfo(
+      this.logger,
       `[browser-relay] Target.createTarget url="${url}" browserInstanceId=${client.browserInstanceId} rawTargetId=${rawTargetId} externalTargetId=${targetId}`,
     )
     this.pendingTargetUrls.set(targetId, url)
@@ -2433,6 +2446,32 @@ export class BrowserRelayServer {
 
     clients.sort((left, right) => right.connectedAt - left.connectedAt)
     return clients[0] ?? null
+  }
+
+  private async resolveClientForBrowserUse(): Promise<ExtensionClient> {
+    if (this.selectedBrowserInstanceId) {
+      const selectedClient = this.extensionClients.get(this.selectedBrowserInstanceId)
+      if (selectedClient) {
+        return selectedClient
+      }
+    }
+
+    if (this.extensionClients.size === 1) {
+      const [onlyClient] = this.extensionClients.values()
+      if (onlyClient) {
+        return onlyClient
+      }
+    }
+
+    await this.ensureExecutionWindowSelectionForBrowserUse()
+    if (this.selectedBrowserInstanceId) {
+      const selectedClient = this.extensionClients.get(this.selectedBrowserInstanceId)
+      if (selectedClient) {
+        return selectedClient
+      }
+    }
+
+    throw new Error('No browser instance selected. Select a browser before using browser control.')
   }
 
   private async reconcileSelection(broadcast = true): Promise<void> {
@@ -2532,35 +2571,6 @@ export class BrowserRelayServer {
       }
     }
     return null
-  }
-
-  private requireSelectedClient(): ExtensionClient {
-    if (!this.hasSelection || !this.selectedBrowserInstanceId) {
-      throw new Error('No browser instance selected. Select a browser before using browser control.')
-    }
-    const client = this.extensionClients.get(this.selectedBrowserInstanceId)
-    if (!client) {
-      throw new Error('Selected browser instance is not connected.')
-    }
-    return client
-  }
-
-  private resolveClientForDefaultAction(): ExtensionClient {
-    if (this.selectedBrowserInstanceId) {
-      const selectedClient = this.extensionClients.get(this.selectedBrowserInstanceId)
-      if (selectedClient) {
-        return selectedClient
-      }
-    }
-
-    if (this.extensionClients.size === 1) {
-      const [onlyClient] = this.extensionClients.values()
-      if (onlyClient) {
-        return onlyClient
-      }
-    }
-
-    throw new Error('No browser instance selected. Select a browser before using browser control.')
   }
 
   private requireSelectedCurrentTarget(): ConnectedTarget {

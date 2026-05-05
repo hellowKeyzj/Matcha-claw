@@ -2441,6 +2441,110 @@ describe('openclaw browser relay plugin', () => {
     extensionB.close()
   })
 
+  it('opens a page through a newly provisioned execution window when no browser is selected in a multi-browser setup', async () => {
+    await startRelayServer()
+
+    const port = server!.port
+    const sessionKeyA = randomBytes(32)
+    const sessionKeyB = randomBytes(32)
+    const extensionA = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-open-multi-a' },
+    })
+    const extensionB = new WebSocket(`ws://127.0.0.1:${port}/extension`, {
+      headers: { Origin: 'chrome-extension://unit-test-open-multi-b' },
+    })
+    await waitForOpen(extensionA)
+    await waitForOpen(extensionB)
+
+    const helloAckA = waitForMessage(extensionA)
+    extensionA.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-a',
+        encryptedSessionKey: encryptSessionKey(sessionKeyA),
+      },
+    }))
+    await helloAckA
+
+    const helloAckB = waitForMessage(extensionB)
+    extensionB.send(JSON.stringify({
+      method: 'Extension.hello',
+      params: {
+        protocolVersion: RELAY_PROTOCOL_VERSION,
+        browserInstanceId: 'browser-b',
+        encryptedSessionKey: encryptSessionKey(sessionKeyB),
+      },
+    }))
+    await helloAckB
+
+    expect(server!.status.selectedBrowserInstanceId).toBeNull()
+    expect(server!.status.selectedWindowId).toBeNull()
+
+    const provisionCommand = waitForEncryptedJsonMessageMatching(
+      extensionB,
+      sessionKeyB,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Target.createTarget'
+        && ((message.params as Record<string, unknown>).params as Record<string, unknown> | undefined)?.url === 'about:blank',
+    )
+    const openPromise = server!.openTarget('https://example.com/opened')
+    const provisionRequest = await provisionCommand
+
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      id: provisionRequest.id,
+      result: { targetId: 'target-provisioned' },
+    })))
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      method: 'forwardCDPEvent',
+      params: {
+        method: 'Target.attachedToTarget',
+        params: {
+          sessionId: 'page-provisioned',
+          tabId: 91,
+          windowId: 9,
+          active: true,
+          targetKey: 'vtab:browser-b:91',
+          targetInfo: {
+            targetId: 'target-provisioned',
+            type: 'page',
+            title: 'Provisioned Page',
+            url: 'about:blank',
+          },
+        },
+      },
+    })))
+
+    await waitForEncryptedJsonMessageMatching(
+      extensionB,
+      sessionKeyB,
+      (message) => message.method === 'Extension.selectionChanged'
+        && (message.params as Record<string, unknown> | undefined)?.selectedBrowserInstanceId === 'browser-b'
+        && (message.params as Record<string, unknown> | undefined)?.selectedWindowId === 9,
+    )
+
+    const openedCommand = await waitForEncryptedJsonMessageMatching(
+      extensionB,
+      sessionKeyB,
+      (message) => message.method === 'forwardCDPCommand'
+        && (message.params as Record<string, unknown> | undefined)?.method === 'Target.createTarget'
+        && ((message.params as Record<string, unknown>).params as Record<string, unknown> | undefined)?.url === 'https://example.com/opened',
+    )
+    extensionB.send(encryptWireMessage(sessionKeyB, JSON.stringify({
+      id: openedCommand.id,
+      result: { targetId: 'target-opened' },
+    })))
+
+    await expect(openPromise).resolves.toEqual({
+      targetId: 'browser-b|tid|target-opened',
+    })
+    expect(server!.status.selectedBrowserInstanceId).toBe('browser-b')
+    expect(server!.status.selectedWindowId).toBe(9)
+
+    extensionA.close()
+    extensionB.close()
+  })
+
   it('auto-selects the only known window when browser use is requested in a single-browser setup', async () => {
     await startRelayServer()
 
