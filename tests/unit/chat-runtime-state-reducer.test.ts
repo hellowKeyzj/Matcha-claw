@@ -9,7 +9,9 @@ function buildRuntimeState(
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingAnchorKey: null,
+    activeTurnItemKey: null,
+    pendingTurnKey: null,
+    pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
     ...partial,
@@ -51,14 +53,14 @@ describe('chat runtime state reducer', () => {
 
   it('commits tool-result runtime state via reducer patch', () => {
     const patch = reduceSessionRuntime(buildRuntimeState({
-      streamingAnchorKey: 'assistant-1',
+      activeTurnItemKey: 'assistant-1',
     }), {
       type: 'tool_result_committed',
     });
 
     expect(patch.runPhase).toBe('waiting_tool');
     expect(patch.pendingFinal).toBe(true);
-    expect(patch.streamingAnchorKey).toBeNull();
+    expect(patch.activeTurnItemKey).toBeNull();
   });
 
   it('queues stream delta into the active streaming anchor', () => {
@@ -67,7 +69,7 @@ describe('chat runtime state reducer', () => {
       activeRunId: 'run-1',
       runPhase: 'submitted',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingAnchorKey: 'assistant-1',
+      activeTurnItemKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -77,7 +79,7 @@ describe('chat runtime state reducer', () => {
     });
 
     expect(patch.runPhase).toBe('streaming');
-    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
+    expect(patch.activeTurnItemKey ?? state.activeTurnItemKey).toBe('assistant-1');
   });
 
   it('adopts a new stream anchor when delta first binds', () => {
@@ -94,7 +96,7 @@ describe('chat runtime state reducer', () => {
       anchorKey: 'assistant-1',
     });
 
-    expect(patch.streamingAnchorKey).toBe('assistant-1');
+    expect(patch.activeTurnItemKey).toBe('assistant-1');
   });
 
   it('keeps existing active anchor when a tool-only delta arrives', () => {
@@ -103,7 +105,7 @@ describe('chat runtime state reducer', () => {
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingAnchorKey: 'assistant-1',
+      activeTurnItemKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -112,7 +114,7 @@ describe('chat runtime state reducer', () => {
       anchorKey: 'assistant-1',
     });
 
-    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
+    expect(patch.activeTurnItemKey ?? state.activeTurnItemKey).toBe('assistant-1');
   });
 
   it('clears the active streaming anchor immediately when final assistant message is committed', () => {
@@ -121,7 +123,7 @@ describe('chat runtime state reducer', () => {
       activeRunId: 'run-1',
       runPhase: 'streaming',
       lastUserMessageAt: 1_700_000_000_000,
-      streamingAnchorKey: 'assistant-1',
+      activeTurnItemKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -130,7 +132,7 @@ describe('chat runtime state reducer', () => {
       toolOnly: false,
     });
 
-    expect(patch.streamingAnchorKey).toBeNull();
+    expect(patch.activeTurnItemKey).toBeNull();
     expect(patch.sending).toBe(false);
     expect(patch.activeRunId).toBeNull();
     expect(patch.pendingFinal).toBe(false);
@@ -163,7 +165,7 @@ describe('chat runtime state reducer', () => {
       activeRunId: 'run-1',
       pendingFinal: true,
       runPhase: 'finalizing',
-      streamingAnchorKey: 'assistant-1',
+      activeTurnItemKey: 'assistant-1',
     });
 
     const patch = reduceSessionRuntime(state, {
@@ -176,7 +178,7 @@ describe('chat runtime state reducer', () => {
     expect(patch.activeRunId).toBeNull();
     expect(patch.pendingFinal).toBe(false);
     expect(patch.runPhase).toBe('done');
-    expect(patch.streamingAnchorKey ?? state.streamingAnchorKey).toBe('assistant-1');
+    expect(patch.activeTurnItemKey ?? state.activeTurnItemKey).toBe('assistant-1');
   });
 
 });

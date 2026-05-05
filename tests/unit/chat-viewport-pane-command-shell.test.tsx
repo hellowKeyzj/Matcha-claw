@@ -61,7 +61,7 @@ function buildCurrentSession(hasMore = true) {
     },
     messages: [],
     window: createViewportWindowState({
-      totalMessageCount: 0,
+      totalItemCount: 0,
       windowStartOffset: hasMore ? 1 : 0,
       windowEndOffset: 0,
       hasMore,
@@ -181,7 +181,7 @@ describe('chat list command shell', () => {
   });
 
   it('jump action schedules bottom align before refreshing a detached non-latest window', () => {
-    const jumpToLatest = vi.fn();
+    const jumpViewportToLatest = vi.fn();
 
     render(
       <ChatList
@@ -190,7 +190,7 @@ describe('chat list command shell', () => {
         currentSession={{
           ...buildCurrentSession(false),
           window: createViewportWindowState({
-            totalMessageCount: 12,
+            totalItemCount: 12,
             windowStartOffset: 0,
             windowEndOffset: 6,
             hasMore: false,
@@ -206,7 +206,7 @@ describe('chat list command shell', () => {
         defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
-        onJumpToLatest={jumpToLatest}
+        onJumpToLatest={jumpViewportToLatest}
         jumpToBottomLabel="Jump bottom"
       />,
     );
@@ -214,7 +214,7 @@ describe('chat list command shell', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Jump bottom' }));
 
     expect(scrollHandlers.prepareScopeBottomAlign).toHaveBeenCalledWith('agent:test:main');
-    expect(jumpToLatest).toHaveBeenCalledTimes(1);
+    expect(jumpViewportToLatest).toHaveBeenCalledTimes(1);
     expect(scrollHandlers.jumpToBottom).not.toHaveBeenCalled();
   });
 });

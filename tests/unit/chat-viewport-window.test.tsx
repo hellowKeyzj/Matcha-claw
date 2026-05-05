@@ -8,7 +8,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
 
@@ -41,10 +41,9 @@ function buildSessionRecord(
       ...base.runtime,
       ...overrides?.runtime,
     },
-    timelineEntries: overrides?.messages
-      ? buildTimelineEntriesFromMessages(sessionKey, overrides.messages)
-      : (overrides?.timelineEntries ?? base.timelineEntries),
-    executionGraphs: overrides?.executionGraphs ?? base.executionGraphs,
+    items: overrides?.messages
+      ? buildRenderItemsFromMessages(sessionKey, overrides.messages)
+      : (overrides?.items ?? base.items),
     window: overrides?.window ?? base.window,
   };
 }
@@ -111,7 +110,7 @@ describe('chat viewport window', () => {
         [currentSessionKey]: buildSessionRecord(currentSessionKey, {
           messages: allMessages,
           window: createViewportWindowState({
-            totalMessageCount: allMessages.length,
+            totalItemCount: allMessages.length,
             windowStartOffset: 15,
             windowEndOffset: 35,
             hasMore: true,
@@ -119,15 +118,15 @@ describe('chat viewport window', () => {
             isAtLatest: true,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
       },
       loadHistory: vi.fn().mockResolvedValue(undefined),
-      loadOlderItems: vi.fn().mockResolvedValue(undefined),
-      jumpToLatest: vi.fn().mockResolvedValue(undefined),
-      setViewportLastVisibleItemKey: vi.fn(),
+      loadOlderViewportItems: vi.fn().mockResolvedValue(undefined),
+      jumpViewportToLatest: vi.fn().mockResolvedValue(undefined),
+      setViewportAnchorItemKey: vi.fn(),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
     } as never);
@@ -139,9 +138,9 @@ describe('chat viewport window', () => {
     expect(screen.getByRole('button', { name: 'Load older messages' })).toBeInTheDocument();
   });
 
-  it('detached viewport send does not require页面层先 jumpToLatest', async () => {
+  it('detached viewport send does not require页面层先 jumpViewportToLatest', async () => {
     const currentSessionKey = 'agent:test:main';
-    const jumpToLatest = vi.fn().mockResolvedValue(undefined);
+    const jumpViewportToLatest = vi.fn().mockResolvedValue(undefined);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const allMessages = buildSessionMessages(20);
 
@@ -189,7 +188,7 @@ describe('chat viewport window', () => {
         [currentSessionKey]: buildSessionRecord(currentSessionKey, {
           messages: allMessages,
           window: createViewportWindowState({
-            totalMessageCount: 20,
+            totalItemCount: 20,
             windowStartOffset: 0,
             windowEndOffset: 10,
             hasMore: false,
@@ -197,15 +196,15 @@ describe('chat viewport window', () => {
             isAtLatest: false,
           }),
           meta: {
-            ready: true,
+            historyStatus: 'ready',
             lastActivityAt: Date.now(),
           },
         }),
       },
       loadHistory: vi.fn().mockResolvedValue(undefined),
-      loadOlderItems: vi.fn().mockResolvedValue(undefined),
-      jumpToLatest,
-      setViewportLastVisibleItemKey: vi.fn(),
+      loadOlderViewportItems: vi.fn().mockResolvedValue(undefined),
+      jumpViewportToLatest,
+      setViewportAnchorItemKey: vi.fn(),
       loadSessions: vi.fn().mockResolvedValue(undefined),
       sendMessage,
     } as never);
@@ -220,7 +219,7 @@ describe('chat viewport window', () => {
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith('reply from detached viewport', undefined);
     });
-    expect(jumpToLatest).not.toHaveBeenCalled();
+    expect(jumpViewportToLatest).not.toHaveBeenCalled();
   });
 });
 

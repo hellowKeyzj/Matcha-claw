@@ -160,7 +160,7 @@ export function shouldRetainLocalSessionRecord(
     || runtime.sending
     || runtime.pendingFinal
     || runtime.activeRunId != null
-    || runtime.streamingAnchorKey != null
+    || runtime.activeTurnItemKey != null
     || (state.pendingApprovalsBySession[sessionKey]?.length ?? 0) > 0
   );
 }

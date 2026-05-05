@@ -28,7 +28,7 @@ export function createViewportWindowState(
     isLoadingMore: Boolean(partial.isLoadingMore),
     isLoadingNewer: Boolean(partial.isLoadingNewer),
     isAtLatest: partial.isAtLatest ?? (windowEndOffset >= totalItemCount),
-    lastVisibleItemKey: partial.lastVisibleItemKey ?? null,
+    anchorItemKey: partial.anchorItemKey ?? null,
   };
 }
 

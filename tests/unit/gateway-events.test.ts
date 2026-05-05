@@ -38,7 +38,9 @@ function createSessionRecord(input?: {
       activeRunId: input?.runtime?.activeRunId ?? null,
       runPhase: 'idle' as const,
       pendingFinal: input?.runtime?.pendingFinal ?? false,
-      streamingAnchorKey: null,
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
       lastUserMessageAt: null,
     },
     items,
@@ -83,7 +85,9 @@ function createSessionInfoUpdate(payload: {
             )
           )
         ),
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
+        pendingTurnKey: payload.phase === 'started' && payload.runId ? `main:${payload.runId}` : null,
+        pendingTurnLaneKey: payload.phase === 'started' ? 'main' : null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -188,7 +192,9 @@ function createSessionMessageUpdate(payload: {
         sending: payload.kind === 'agent_message_chunk',
         activeRunId: payload.runId ?? null,
         runPhase: payload.kind === 'agent_message_chunk' ? 'streaming' : 'done',
-        streamingAnchorKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
+        activeTurnItemKey: payload.kind === 'agent_message_chunk' ? assistantItemKey : null,
+        pendingTurnKey: isAssistant ? `main:${turnIdentity}` : null,
+        pendingTurnLaneKey: isAssistant ? 'main' : null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -468,6 +474,51 @@ describe('gateway store event wiring', () => {
       status: 'streaming',
       laneKey: 'main',
       turnKey: 'main:run-delta-direct-1',
+    }]);
+  });
+
+  it('structured session:update 会按 event.sessionKey 写入对应 session，而不是 currentSessionKey', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord(),
+        'agent:other:main': createSessionRecord(),
+      },
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionMessageUpdate({
+      kind: 'agent_message_chunk',
+      runId: 'run-other-1',
+      sessionKey: 'agent:other:main',
+      sequenceId: 1,
+      message: {
+        role: 'assistant',
+        content: 'hello other session',
+      },
+    }));
+
+    const state = useChatStore.getState();
+    expect(getSessionItems(state, 'agent:main:main')).toEqual([]);
+    expect(getSessionItems(state, 'agent:other:main')).toMatchObject([{
+      kind: 'assistant-turn',
+      text: 'hello other session',
     }]);
   });
 

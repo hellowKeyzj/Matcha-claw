@@ -6,38 +6,57 @@ import {
   selectSnapshotLayerState,
   selectViewLayerState,
 } from '@/stores/chat/selectors';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 
+function createSessionRecord(input?: {
+  sessionKey?: string;
+  label?: string | null;
+  historyStatus?: 'idle' | 'loading' | 'ready' | 'error';
+  lastActivityAt?: number | null;
+  items?: ReturnType<typeof buildRenderItemsFromMessages>;
+  sending?: boolean;
+}) {
+  const sessionKey = input?.sessionKey ?? 'agent:main:main';
+  const items = input?.items ?? buildRenderItemsFromMessages(sessionKey, [
+    { role: 'assistant', content: 'hello', id: 'm1' },
+  ]);
+  const label = input && Object.prototype.hasOwnProperty.call(input, 'label')
+    ? (input.label ?? null)
+    : 'Main';
+  return {
+    meta: {
+      label,
+      lastActivityAt: input?.lastActivityAt ?? 1_700_000_000_000,
+      historyStatus: input?.historyStatus ?? 'ready',
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: input?.sending ?? false,
+      activeRunId: null,
+      runPhase: 'idle' as const,
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+    },
+    items,
+    window: createViewportWindowState({
+      totalItemCount: items.length,
+      windowStartOffset: 0,
+      windowEndOffset: items.length,
+      hasMore: false,
+      hasNewer: false,
+      isAtLatest: true,
+    }),
+  };
+}
+
 function makeState(overrides: Record<string, unknown> = {}) {
-  const baseMessages = [{ role: 'assistant', content: 'hello', id: 'm1' }];
   return {
     loadedSessions: {
-      'agent:main:main': {
-        timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', baseMessages),
-        meta: {
-          label: 'Main',
-          lastActivityAt: 1_700_000_000_000,
-          historyStatus: 'ready',
-          thinkingLevel: null,
-        },
-        runtime: {
-          sending: false,
-          activeRunId: null,
-          runPhase: 'idle',
-          streamingAnchorKey: null,
-          pendingFinal: false,
-          lastUserMessageAt: null,
-        },
-        window: createViewportWindowState({
-          totalMessageCount: 1,
-          windowStartOffset: 0,
-          windowEndOffset: 1,
-          hasMore: false,
-          hasNewer: false,
-          isAtLatest: true,
-        }),
-      },
+      'agent:main:main': createSessionRecord(),
     },
     currentSessionKey: 'agent:main:main',
     pendingApprovalsBySession: {},
@@ -73,35 +92,7 @@ describe('chat selectors layering', () => {
   it('splits state into snapshot/runtime/view selectors', () => {
     const state = makeState({
       loadedSessions: {
-        'agent:main:main': {
-          meta: {
-            label: 'Main',
-            lastActivityAt: 1_700_000_000_000,
-            historyStatus: 'ready',
-            thinkingLevel: null,
-          },
-          messages: [{ role: 'assistant', content: 'hello', id: 'm1' }],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'assistant', content: 'hello', id: 'm1' }]),
-          runtime: {
-            sending: true,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState({
-            totalMessageCount: 1,
-            windowStartOffset: 0,
-            windowEndOffset: 1,
-            hasMore: false,
-            hasNewer: false,
-            isAtLatest: true,
-          }),
-        },
+        'agent:main:main': createSessionRecord({ sending: true }),
       },
       error: 'boom',
       foregroundHistorySessionKey: 'agent:main:main',
@@ -126,61 +117,14 @@ describe('chat selectors layering', () => {
         'agent:main:main': [{ id: 'ap-1', sessionKey: 'agent:main:main', createdAtMs: 1 }],
       },
       loadedSessions: {
-        'agent:main:main': {
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'assistant', content: 'hello', id: 'm1' }]),
-          meta: {
-            label: 'Main',
-            lastActivityAt: 1_700_000_000_000,
-            historyStatus: 'ready',
-            thinkingLevel: null,
-          },
-          runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState({
-            totalMessageCount: 1,
-            windowStartOffset: 0,
-            windowEndOffset: 1,
-            hasMore: false,
-            hasNewer: false,
-            isAtLatest: true,
-          }),
-        },
-        'agent:foo:main': {
-          timelineEntries: [],
-          meta: {
-            label: 'Foo',
-            lastActivityAt: 1_699_000_000_000,
-            historyStatus: 'idle',
-            thinkingLevel: null,
-          },
-          runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState(),
-        },
-      },
-      sessionCatalogStatus: {
-        status: 'ready',
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: 1,
+        'agent:main:main': createSessionRecord({ label: 'Main' }),
+        'agent:foo:main': createSessionRecord({
+          sessionKey: 'agent:foo:main',
+          label: 'Foo',
+          historyStatus: 'idle',
+          lastActivityAt: 1_699_000_000_000,
+          items: [],
+        }),
       },
     });
 
@@ -196,46 +140,21 @@ describe('chat selectors layering', () => {
     expect(pane.currentSessionKey).toBe('agent:main:main');
   });
 
-  it('session pane selector should keep stable session entry references when only transcript changes', () => {
+  it('session pane selector keeps stable session entry references when only assistant transcript changes', () => {
     const baseState = makeState({
-      sessionCatalogStatus: {
-        status: 'ready',
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: 1,
-      },
       loadedSessions: {
-        'agent:main:main': {
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello', id: 'm1' }]),
-          meta: {
-            label: 'Main',
-            lastActivityAt: 1_700_000_000_000,
-            historyStatus: 'ready',
-            thinkingLevel: null,
-          },
-          runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState({ totalMessageCount: 1, windowStartOffset: 0, windowEndOffset: 1, hasMore: false, hasNewer: false, isAtLatest: true }),
-        },
+        'agent:main:main': createSessionRecord({
+          items: buildRenderItemsFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello', id: 'm1' }]),
+        }),
       },
     });
     const nextState = makeState({
       ...baseState,
       sessionCatalogStatus: baseState.sessionCatalogStatus,
       loadedSessions: {
-        'agent:main:main': {
-          ...baseState.loadedSessions['agent:main:main'],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello again', id: 'm2' }]),
-        },
+        'agent:main:main': createSessionRecord({
+          items: buildRenderItemsFromMessages('agent:main:main', [{ role: 'tool_result', content: 'hello again', id: 'm2' }]),
+        }),
       },
     });
 
@@ -246,51 +165,28 @@ describe('chat selectors layering', () => {
     expect(secondPane).toBe(firstPane);
   });
 
-  it('session pane selector should refresh session entries when the latest local user turn changes', () => {
+  it('session pane selector refreshes session entries when the latest local user turn changes', () => {
     const baseState = makeState({
-      sessionCatalogStatus: {
-        status: 'ready',
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: 1,
-      },
       loadedSessions: {
-        'agent:main:main': {
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: 'old title', id: 'u1' }]),
-          meta: {
-            label: 'Main',
-            lastActivityAt: 1_700_000_000_000,
-            historyStatus: 'ready',
-            thinkingLevel: null,
-          },
-          runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState({ totalMessageCount: 1, windowStartOffset: 0, windowEndOffset: 1, hasMore: false, hasNewer: false, isAtLatest: true }),
-        },
+        'agent:main:main': createSessionRecord({
+          label: null,
+          items: buildRenderItemsFromMessages('agent:main:main', [{ role: 'user', content: 'old title', id: 'u1' }]),
+        }),
       },
     });
     const nextState = makeState({
       ...baseState,
       sessionCatalogStatus: baseState.sessionCatalogStatus,
       loadedSessions: {
-        'agent:main:main': {
-          ...baseState.loadedSessions['agent:main:main'],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{
+        'agent:main:main': createSessionRecord({
+          label: null,
+          items: buildRenderItemsFromMessages('agent:main:main', [{
             role: 'user',
             content: 'new title',
             id: 'optimistic-user-1',
             timestamp: 1_700_000_001,
           }]),
-        },
+        }),
       },
     });
 
@@ -301,46 +197,23 @@ describe('chat selectors layering', () => {
     expect(secondPane.sessionEntries[0]?.title).toBe('new title');
   });
 
-  it('session pane selector should refresh session title when loaded viewport title changes', () => {
+  it('session pane selector refreshes session title when loaded viewport title changes', () => {
     const baseState = makeState({
-      sessionCatalogStatus: {
-        status: 'ready',
-        error: null,
-        hasLoadedOnce: true,
-        lastLoadedAt: 1,
-      },
       loadedSessions: {
-        'agent:main:main': {
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: '旧正文标题', id: 'u1' }]),
-          meta: {
-            label: '旧标题',
-            lastActivityAt: 1_700_000_000_000,
-            historyStatus: 'ready',
-            thinkingLevel: null,
-          },
-          runtime: {
-            sending: false,
-            activeRunId: null,
-            runPhase: 'idle',
-            streamingAnchorKey: null,
-            streamingTools: [],
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            pendingToolImages: [],
-            approvalStatus: 'idle',
-          },
-          window: createViewportWindowState({ totalMessageCount: 1, windowStartOffset: 0, windowEndOffset: 1, hasMore: false, hasNewer: false, isAtLatest: true }),
-        },
+        'agent:main:main': createSessionRecord({
+          label: null,
+          items: buildRenderItemsFromMessages('agent:main:main', [{ role: 'user', content: '旧正文标题', id: 'u1' }]),
+        }),
       },
     });
     const nextState = makeState({
       ...baseState,
       sessionCatalogStatus: baseState.sessionCatalogStatus,
       loadedSessions: {
-        'agent:main:main': {
-          ...baseState.loadedSessions['agent:main:main'],
-          timelineEntries: buildTimelineEntriesFromMessages('agent:main:main', [{ role: 'user', content: '新正文标题', id: 'u2' }]),
-        },
+        'agent:main:main': createSessionRecord({
+          label: null,
+          items: buildRenderItemsFromMessages('agent:main:main', [{ role: 'user', content: '新正文标题', id: 'u2' }]),
+        }),
       },
     });
 
@@ -352,4 +225,3 @@ describe('chat selectors layering', () => {
     expect(secondPane.sessionEntries).not.toBe(firstPane.sessionEntries);
   });
 });
-

@@ -55,8 +55,8 @@ function selectChatPageState(state: ChatStoreState) {
     showThinking: state.showThinking,
     refresh: state.refresh,
     toggleThinking: state.toggleThinking,
-    loadOlderItems: state.loadOlderItems,
-    jumpToLatest: state.jumpToLatest,
+    loadOlderViewportItems: state.loadOlderViewportItems,
+    jumpViewportToLatest: state.jumpViewportToLatest,
     sendMessage: state.sendMessage,
     abortRun: state.abortRun,
     clearError: state.clearError,
@@ -92,8 +92,8 @@ export function Chat({ isActive = true }: ChatProps) {
     showThinking,
     refresh,
     toggleThinking,
-    loadOlderItems,
-    jumpToLatest,
+    loadOlderViewportItems,
+    jumpViewportToLatest,
     sendMessage,
     abortRun,
     clearError,
@@ -273,11 +273,11 @@ export function Chat({ isActive = true }: ChatProps) {
               avatarStyle: currentAgent?.avatarStyle,
             }}
             onLoadOlder={() => {
-              void loadOlderItems(currentSessionKey);
+              void loadOlderViewportItems(currentSessionKey);
             }}
             loadOlderLabel={t('liveThread.loadOlder')}
             onJumpToLatest={() => {
-              void jumpToLatest(currentSessionKey);
+              void jumpViewportToLatest(currentSessionKey);
             }}
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />

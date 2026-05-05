@@ -74,7 +74,7 @@ describe('session runtime service window', () => {
     });
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
       'session:agent:main:session-a|entry:message-5',
     ]);
   });
@@ -125,9 +125,9 @@ describe('session runtime service window', () => {
     });
     expect(older.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
       'session:agent:main:session-a|entry:message-5',
-      'session:agent:main:session-a|assistant-turn:main:message-6:main',
+      'session:agent:main:session-a|assistant-turn:main:entry:message-6:main',
     ]);
 
     const newer = await service.getSessionWindow({
@@ -150,7 +150,7 @@ describe('session runtime service window', () => {
     });
     expect(newer.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|entry:message-5',
-      'session:agent:main:session-a|assistant-turn:main:message-6:main',
+      'session:agent:main:session-a|assistant-turn:main:entry:message-6:main',
     ]);
   });
 
@@ -187,7 +187,7 @@ describe('session runtime service window', () => {
     expect(response.status).toBe(200);
     expect(response.data.snapshot.items.map((item) => item.key)).toEqual([
       'session:agent:main:session-a|entry:message-3',
-      'session:agent:main:session-a|assistant-turn:main:message-4:main',
+      'session:agent:main:session-a|assistant-turn:main:entry:message-4:main',
     ]);
   });
 
@@ -233,7 +233,6 @@ describe('session runtime service window', () => {
       {
         kind: 'user-message',
         key: 'session:agent:main:session-a|entry:transcript-user-1',
-        messageId: 'transcript-user-1',
         text: 'hello world',
       },
     ]);

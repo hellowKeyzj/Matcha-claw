@@ -14,8 +14,6 @@ export type SendWithMediaInput = {
   message: string;
   deliver?: boolean;
   idempotencyKey: string;
-  uniqueId?: string;
-  requestId?: string;
   media?: Array<{
     filePath: string;
     mimeType: string;
@@ -54,8 +52,6 @@ export function normalizeSendWithMediaInput(value: unknown): SendWithMediaInput 
     sessionKey: value.sessionKey,
     message: value.message,
     idempotencyKey: value.idempotencyKey,
-    ...(typeof value.uniqueId === 'string' ? { uniqueId: value.uniqueId } : {}),
-    ...(typeof value.requestId === 'string' ? { requestId: value.requestId } : {}),
     ...(typeof value.deliver === 'boolean' ? { deliver: value.deliver } : {}),
     ...(media ? { media } : {}),
   };

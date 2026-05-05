@@ -189,9 +189,6 @@ function handleChatDomainEvent(event: ChatDomainEvent): void {
       state.handleApprovalRequested(event.payload);
       return;
     }
-    if (event.kind === 'chat.message' || event.kind === 'chat.runtime.lifecycle') {
-      return;
-    }
     state.handleApprovalResolved(event.payload);
   } catch {
     // ignore

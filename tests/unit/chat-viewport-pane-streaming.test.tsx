@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatList } from '@/pages/Chat/components/ChatList';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildTimelineEntriesFromMessages } from './helpers/timeline-fixtures';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import type { RawMessage } from './helpers/timeline-fixtures';
 
@@ -20,9 +20,9 @@ function buildCurrentSession(messages: RawMessage[]) {
       activeRunId: 'run-1',
       runPhase: 'submitted' as const,
     },
-    timelineEntries: buildTimelineEntriesFromMessages('agent:test:main', messages),
+    items: buildRenderItemsFromMessages('agent:test:main', messages),
     window: createViewportWindowState({
-      totalMessageCount: messages.length,
+      totalItemCount: messages.length,
       windowStartOffset: 0,
       windowEndOffset: messages.length,
       isAtLatest: true,
@@ -116,7 +116,15 @@ describe('chat list streaming render', () => {
       <ChatList
         isActive={false}
         currentSessionKey="agent:test:main"
-        currentSession={buildCurrentSession([])}
+        currentSession={buildCurrentSession([
+          {
+            id: 'assistant-1',
+            role: 'assistant',
+            content: '',
+            timestamp: Date.now() / 1000,
+            streaming: true,
+          },
+        ])}
         agents={[]}
         isGatewayRunning={false}
         errorMessage={null}

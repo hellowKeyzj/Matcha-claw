@@ -134,7 +134,9 @@ function setupCommonStores() {
           sending: true,
           activeRunId: 'run-1',
           runPhase: 'streaming',
-          streamingAnchorKey: 'assistant-1',
+          activeTurnItemKey: 'assistant-1',
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
           lastUserMessageAt: now,
         },
       }),
@@ -295,7 +297,7 @@ describe('chat 主线程滚动锁', () => {
             },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingAnchorKey: 'assistant-1',
+              activeTurnItemKey: 'assistant-1',
             },
           }),
         },
@@ -343,7 +345,9 @@ describe('chat 主线程滚动锁', () => {
             sending: true,
             activeRunId: 'run-1',
             runPhase: 'streaming',
-            streamingAnchorKey: null,
+            activeTurnItemKey: null,
+            pendingTurnKey: null,
+            pendingTurnLaneKey: null,
             lastUserMessageAt: Date.now(),
             pendingFinal: false,
           },
@@ -400,7 +404,7 @@ describe('chat 主线程滚动锁', () => {
           runtime: {
             ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
             sending: true,
-            streamingAnchorKey: null,
+            activeTurnItemKey: null,
             pendingFinal: false,
           },
         }),
@@ -565,7 +569,7 @@ describe('chat 主线程滚动锁', () => {
             },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingAnchorKey: 'assistant-1',
+              activeTurnItemKey: 'assistant-1',
             },
           }),
         },
@@ -762,7 +766,7 @@ describe('chat 主线程滚动锁', () => {
             },
             runtime: {
               ...useChatStore.getState().loadedSessions['agent:test:main']!.runtime,
-              streamingAnchorKey: 'assistant-1',
+              activeTurnItemKey: 'assistant-1',
             },
           }),
         },
@@ -804,7 +808,7 @@ describe('chat 主线程滚动锁', () => {
   });
 
   it('非 latest 窗口首次点击回到底部时，不应先停在旧位置再等下一帧贴底', async () => {
-    const jumpToLatest = vi.fn().mockImplementation(async () => {
+    const jumpViewportToLatest = vi.fn().mockImplementation(async () => {
       useChatStore.setState({
         loadedSessions: {
           'agent:test:main': buildSessionRecord({
@@ -869,7 +873,7 @@ describe('chat 主线程滚动锁', () => {
           },
         }),
       },
-      jumpToLatest,
+      jumpViewportToLatest,
     } as never);
 
     const rafQueue: FrameRequestCallback[] = [];
@@ -899,7 +903,7 @@ describe('chat 主线程滚动锁', () => {
       const jumpButton = await screen.findByRole('button', { name: 'Jump to bottom' });
       fireEvent.click(jumpButton);
 
-      expect(jumpToLatest).toHaveBeenCalledWith('agent:test:main');
+      expect(jumpViewportToLatest).toHaveBeenCalledWith('agent:test:main');
       expect(metrics.scrollTop).toBe(660);
       expect(rafQueue.length).toBeGreaterThan(0);
     } finally {
@@ -1215,7 +1219,9 @@ describe('chat 主线程滚动锁', () => {
             activeRunId: 'run-1',
             runPhase: 'streaming',
             lastUserMessageAt: Date.now(),
-            streamingAnchorKey: null,
+            activeTurnItemKey: null,
+            pendingTurnKey: null,
+            pendingTurnLaneKey: null,
             pendingFinal: false,
           },
         }),
@@ -1267,7 +1273,7 @@ describe('chat 主线程滚动锁', () => {
   });
 
   it('同会话加载更早消息后，应保持当前阅读锚点不跳动', async () => {
-    const loadOlderItems = vi.fn().mockResolvedValue(undefined);
+    const loadOlderViewportItems = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       loadedSessions: {
         'agent:test:main': buildSessionRecord({
@@ -1322,7 +1328,7 @@ describe('chat 主线程滚动锁', () => {
           },
         }),
       },
-      loadOlderItems,
+      loadOlderViewportItems,
     } as never);
 
     const { container } = renderChat();
@@ -1350,7 +1356,7 @@ describe('chat 主线程滚动锁', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
-    expect(loadOlderItems).toHaveBeenCalledWith('agent:test:main');
+    expect(loadOlderViewportItems).toHaveBeenCalledWith('agent:test:main');
 
     act(() => {
       metrics.scrollHeight = 370;

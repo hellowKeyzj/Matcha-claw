@@ -1,7 +1,5 @@
 export interface GatewayChatSendIdentity {
   idempotencyKey?: string;
-  uniqueId?: string;
-  requestId?: string;
 }
 
 export interface GatewayChatSendParamsInput extends GatewayChatSendIdentity {

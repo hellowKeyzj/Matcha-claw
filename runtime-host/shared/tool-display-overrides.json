@@ -1,0 +1,108 @@
+{
+  "tools": {
+    "exec": {
+      "title": "执行",
+      "detailKeys": ["command"]
+    },
+    "tool_call": {
+      "title": "工具调用",
+      "detailKeys": []
+    },
+    "tool_call_update": {
+      "title": "工具调用",
+      "detailKeys": []
+    },
+    "session_status": {
+      "title": "会话状态",
+      "detailKeys": ["sessionKey", "model"]
+    },
+    "sessions_list": {
+      "title": "会话列表",
+      "detailKeys": ["kinds", "limit", "activeMinutes", "messageLimit"]
+    },
+    "sessions_send": {
+      "title": "会话发送",
+      "detailKeys": ["label", "sessionKey", "agentId", "timeoutSeconds"]
+    },
+    "sessions_history": {
+      "title": "会话历史",
+      "detailKeys": ["sessionKey", "limit", "includeTools"]
+    },
+    "sessions_spawn": {
+      "title": "子智能体",
+      "detailKeys": ["label", "task", "agentId", "model", "thinking", "runTimeoutSeconds", "cleanup"]
+    },
+    "subagents": {
+      "title": "智能体",
+      "actions": {
+        "list": { "label": "列表", "detailKeys": ["recentMinutes"] },
+        "kill": { "label": "结束", "detailKeys": ["target"] },
+        "steer": { "label": "转交", "detailKeys": ["target"] }
+      }
+    },
+    "agents_list": {
+      "title": "智能体列表",
+      "detailKeys": []
+    },
+    "memory_search": {
+      "title": "记忆搜索",
+      "detailKeys": ["query"]
+    },
+    "memory_get": {
+      "title": "记忆读取",
+      "detailKeys": ["path", "from", "lines"]
+    },
+    "web_search": {
+      "title": "搜索",
+      "detailKeys": ["query", "count"]
+    },
+    "web_fetch": {
+      "title": "抓取",
+      "detailKeys": ["url", "extractMode", "maxChars"]
+    },
+    "code_execution": {
+      "title": "代码执行",
+      "detailKeys": ["task"]
+    },
+    "message": {
+      "title": "消息",
+      "actions": {
+        "send": { "label": "发送", "detailKeys": ["provider", "to", "media", "replyTo", "threadId"] },
+        "poll": { "label": "投票", "detailKeys": ["provider", "to", "pollQuestion"] },
+        "react": { "label": "回应", "detailKeys": ["provider", "to", "messageId", "emoji", "remove"] },
+        "reactions": { "label": "回应列表", "detailKeys": ["provider", "to", "messageId", "limit"] },
+        "read": { "label": "读取", "detailKeys": ["provider", "to", "limit"] },
+        "edit": { "label": "编辑", "detailKeys": ["provider", "to", "messageId"] },
+        "delete": { "label": "删除", "detailKeys": ["provider", "to", "messageId"] },
+        "pin": { "label": "置顶", "detailKeys": ["provider", "to", "messageId"] },
+        "unpin": { "label": "取消置顶", "detailKeys": ["provider", "to", "messageId"] },
+        "list-pins": { "label": "置顶列表", "detailKeys": ["provider", "to"] },
+        "permissions": { "label": "权限", "detailKeys": ["provider", "channelId", "to"] },
+        "thread-create": { "label": "创建线程", "detailKeys": ["provider", "channelId", "threadName"] },
+        "thread-list": { "label": "线程列表", "detailKeys": ["provider", "guildId", "channelId"] },
+        "thread-reply": { "label": "线程回复", "detailKeys": ["provider", "channelId", "messageId"] },
+        "search": { "label": "搜索", "detailKeys": ["provider", "guildId", "query"] },
+        "sticker": { "label": "贴纸", "detailKeys": ["provider", "to", "stickerId"] },
+        "member-info": { "label": "成员", "detailKeys": ["provider", "guildId", "userId"] },
+        "role-info": { "label": "角色", "detailKeys": ["provider", "guildId"] },
+        "emoji-list": { "label": "表情列表", "detailKeys": ["provider", "guildId"] },
+        "emoji-upload": { "label": "上传表情", "detailKeys": ["provider", "guildId", "emojiName"] },
+        "sticker-upload": { "label": "上传贴纸", "detailKeys": ["provider", "guildId", "stickerName"] },
+        "role-add": { "label": "添加角色", "detailKeys": ["provider", "guildId", "userId", "roleId"] },
+        "role-remove": { "label": "移除角色", "detailKeys": ["provider", "guildId", "userId", "roleId"] },
+        "channel-info": { "label": "频道", "detailKeys": ["provider", "channelId"] },
+        "channel-list": { "label": "频道列表", "detailKeys": ["provider", "guildId"] },
+        "voice-status": { "label": "语音状态", "detailKeys": ["provider", "guildId", "userId"] },
+        "event-list": { "label": "事件列表", "detailKeys": ["provider", "guildId"] },
+        "event-create": { "label": "创建事件", "detailKeys": ["provider", "guildId", "eventName"] },
+        "timeout": { "label": "超时", "detailKeys": ["provider", "guildId", "userId"] },
+        "kick": { "label": "移出", "detailKeys": ["provider", "guildId", "userId"] },
+        "ban": { "label": "封禁", "detailKeys": ["provider", "guildId", "userId"] }
+      }
+    },
+    "apply_patch": {
+      "title": "补丁",
+      "detailKeys": []
+    }
+  }
+}

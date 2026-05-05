@@ -347,7 +347,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   })();
 }
 
-export async function executeLoadOlderItems(
+export async function executeLoadOlderViewportItems(
   input: CreateStoreSessionActionsInput,
   sessionKeyHint?: string,
 ): Promise<void> {
@@ -358,7 +358,7 @@ export async function executeLoadOlderItems(
   });
 }
 
-export async function executeJumpToLatest(
+export async function executeJumpViewportToLatest(
   input: CreateStoreSessionActionsInput,
   sessionKeyHint?: string,
 ): Promise<void> {
@@ -369,7 +369,7 @@ export async function executeJumpToLatest(
   });
 }
 
-export function executeSetViewportLastVisibleItemKey(
+export function executeSetViewportAnchorItemKey(
   input: CreateStoreSessionActionsInput,
   itemKey: string | null,
   sessionKeyHint?: string,
@@ -379,7 +379,7 @@ export function executeSetViewportLastVisibleItemKey(
   set((state) => ({
     loadedSessions: patchSessionViewportState(state, sessionKey, {
       ...getSessionViewportState(state, sessionKey),
-      lastVisibleItemKey: itemKey,
+      anchorItemKey: itemKey,
     }),
   }));
 }

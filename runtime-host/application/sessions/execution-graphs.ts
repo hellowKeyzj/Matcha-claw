@@ -47,6 +47,7 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
 
   const streamingEntry = [...entries].reverse().find((entry) => isAssistantActivityEntry(entry) && entry.status === 'streaming') ?? null;
   const streamingStatuses = streamingEntry?.toolStatuses ?? [];
+  const streamingToolCards = streamingEntry?.toolCards ?? [];
 
   if (streamingEntry?.kind === 'message') {
     const thinking = normalizeText(streamingEntry.thinking);
@@ -75,16 +76,16 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
   }
 
   if (streamingEntry) {
-    for (const [index, tool] of streamingEntry.toolUses.entries()) {
+    for (const [index, tool] of streamingToolCards.entries()) {
       if (activeToolNames.has(tool.name)) {
         continue;
       }
       pushStep({
-        id: tool.id || makeToolId('stream-tool', tool.name, index),
+        id: tool.toolCallId || tool.id || makeToolId('stream-tool', tool.name, index),
         label: tool.name,
-        status: 'running',
+        status: tool.status,
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: normalizeText(tool.inputText ?? JSON.stringify(tool.input, null, 2)),
         depth: 1,
       });
     }
@@ -113,18 +114,13 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
       }
     }
 
-    for (const [toolIndex, tool] of assistantEntry.toolUses.entries()) {
-      const status = assistantEntry.toolStatuses.find((candidate) => (
-        (candidate.toolCallId && candidate.toolCallId === tool.id)
-        || (candidate.id && candidate.id === tool.id)
-        || candidate.name === tool.name
-      ))?.status ?? 'completed';
+    for (const [toolIndex, tool] of assistantEntry.toolCards.entries()) {
       pushStep({
-        id: tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.key || entryIndex}`, tool.name, toolIndex),
+        id: tool.toolCallId || tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.key || entryIndex}`, tool.name, toolIndex),
         label: tool.name,
-        status,
+        status: tool.status,
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: normalizeText(tool.inputText ?? JSON.stringify(tool.input, null, 2)),
         depth: 1,
       });
     }

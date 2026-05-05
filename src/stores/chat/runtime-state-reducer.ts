@@ -153,7 +153,7 @@ export function reduceSessionRuntime(
       return {
         sending: true,
         runPhase: 'submitted',
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
         pendingFinal: false,
         lastUserMessageAt: action.nowMs,
       };
@@ -182,7 +182,7 @@ export function reduceSessionRuntime(
       return {
         sending: false,
         runPhase: 'error',
-        streamingAnchorKey: action.clearRun ? null : state.streamingAnchorKey,
+        activeTurnItemKey: action.clearRun ? null : state.activeTurnItemKey,
         ...(action.clearRun
           ? {
               activeRunId: null,
@@ -211,7 +211,7 @@ export function reduceSessionRuntime(
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
         activeRunId: action.runId
           ? (state.activeRunId ?? action.runId)
           : state.activeRunId,
@@ -275,7 +275,7 @@ export function reduceSessionRuntime(
       const waitingApproval = action.currentPendingApprovals > 0;
       return {
         sending: action.targetRuntime.sending,
-        streamingAnchorKey: action.targetRuntime.streamingAnchorKey,
+        activeTurnItemKey: action.targetRuntime.activeTurnItemKey,
         activeRunId: action.targetRuntime.activeRunId,
         runPhase: waitingApproval ? 'waiting_tool' : action.targetRuntime.runPhase,
         pendingFinal: action.targetRuntime.pendingFinal,
@@ -285,7 +285,7 @@ export function reduceSessionRuntime(
 
     case 'tool_result_committed': {
       return {
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
         pendingFinal: true,
         runPhase: 'waiting_tool',
       };
@@ -303,15 +303,15 @@ export function reduceSessionRuntime(
     case 'stream_delta_queued': {
       const deltaPatch = reduceSessionRuntime(state, { type: 'delta_received' });
       const normalizedRunId = normalizeRunId(action.runId);
-      const nextStreamingAnchorKey = action.anchorKey.trim() || state.streamingAnchorKey;
-      const changedAnchorKey = nextStreamingAnchorKey !== state.streamingAnchorKey;
+      const nextActiveTurnItemKey = action.anchorKey.trim() || state.activeTurnItemKey;
+      const changedAnchorKey = nextActiveTurnItemKey !== state.activeTurnItemKey;
       const changedRun = normalizedRunId && normalizedRunId !== state.activeRunId;
       if (deltaPatch === state && !changedAnchorKey && !changedRun) {
         return state;
       }
       return {
         ...(deltaPatch === state ? {} : deltaPatch),
-        ...(changedAnchorKey ? { streamingAnchorKey: nextStreamingAnchorKey } : {}),
+        ...(changedAnchorKey ? { activeTurnItemKey: nextActiveTurnItemKey } : {}),
         ...(changedRun ? { activeRunId: normalizedRunId } : {}),
       };
     }
@@ -325,7 +325,7 @@ export function reduceSessionRuntime(
         sending: false,
         activeRunId: null,
         runPhase: 'aborted',
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
       };
@@ -334,7 +334,7 @@ export function reduceSessionRuntime(
     case 'event_error': {
         return {
           runPhase: 'error',
-          streamingAnchorKey: null,
+          activeTurnItemKey: null,
           pendingFinal: false,
       };
     }
@@ -367,7 +367,7 @@ export function reduceSessionRuntime(
 
     case 'final_message_committed': {
       const patch: Partial<ChatSessionRuntimeState> = {
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
       };
 
       if (action.toolOnly) {

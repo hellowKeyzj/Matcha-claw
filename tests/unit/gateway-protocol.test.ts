@@ -131,7 +131,7 @@ describe('dispatchProtocolEvent', () => {
     });
   });
 
-  it('chat 事件会保留 sequenceId、requestId、uniqueId 与 agentId', () => {
+  it('chat 事件会保留 sequenceId 与 agentId', () => {
     const emitNotification = vi.fn();
     const emitConversationEvent = vi.fn();
     const emitChannelStatus = vi.fn();
@@ -143,8 +143,6 @@ describe('dispatchProtocolEvent', () => {
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
         sequenceId: 9,
-        requestId: 'user-local-1',
-        uniqueId: 'user-local-1',
         agentId: 'agent-main',
         message: {
           role: 'assistant',
@@ -160,8 +158,6 @@ describe('dispatchProtocolEvent', () => {
         runId: 'run-identity-1',
         sessionKey: 'agent:main:main',
         sequenceId: 9,
-        requestId: 'user-local-1',
-        uniqueId: 'user-local-1',
         agentId: 'agent-main',
       }),
     });

@@ -17,7 +17,6 @@ import type {
   SessionStateSnapshot,
   SessionTimelineEntry,
   SessionTimelineMessageEntry,
-  SessionTimelineTaskCompletionEntry,
   SessionTimelineToolActivityEntry,
   SessionUpdateEvent,
   SessionWindowStateSnapshot,
@@ -26,15 +25,19 @@ import type {
 import {
   buildTimelineEntriesFromTranscriptMessage,
   materializeTranscriptTimelineEntries,
+  materializeTranscriptToolResultPatchEntries,
   parseTranscriptMessages,
   resolveSessionLabelDetailsFromTimelineEntries,
   type SessionTranscriptMessage,
 } from './transcript-utils';
 import {
+  assembleAuthoritativeAssistantTurns,
+  resolveAssistantTurnItemKeyFromTimelineEntry,
+} from './assistant-turn-assembler';
+import {
   attachExecutionGraphReply,
   createExecutionGraphItem,
   deriveExecutionGraphSteps,
-  isAssistantActivityEntry as isExecutionGraphAssistantActivityEntry,
   isTaskCompletionEntry,
   updateExecutionGraphChildSteps,
   updateExecutionGraphMainSteps,
@@ -93,6 +96,10 @@ interface SessionPromptPayload {
   media?: unknown;
 }
 
+interface SessionAbortRuntimePayload {
+  sessionKey?: unknown;
+}
+
 interface SessionPromptMediaPayload {
   filePath: string;
   mimeType: string;
@@ -102,6 +109,7 @@ interface SessionPromptMediaPayload {
 }
 
 interface SessionRuntimeTimelineState {
+  sessionKey: string;
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];
   renderItems: SessionRenderItem[];
@@ -120,42 +128,8 @@ interface SessionStorageDescriptor {
 }
 
 interface PersistedSessionRuntimeStoreFile {
-  version: 2;
+  version: 3;
   activeSessionKey: string | null;
-  liveSessions: Array<{
-    sessionKey: string;
-    runtime: SessionRuntimeStateSnapshot;
-  }>;
-}
-
-interface AssistantTurnAccumulator {
-  key: string;
-  turnKey: string;
-  laneKey: string;
-  sessionKey: string;
-  agentId?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  runId?: string;
-  latestTimelineKey: string;
-  latestTimelineEntryId?: string;
-  latestTimelineMessageId?: string;
-  lastStatus?: SessionTimelineEntry['status'];
-  thinking: string | null;
-  toolCalls: SessionAssistantTurnItem['toolCalls'];
-  toolStatuses: SessionAssistantTurnItem['toolStatuses'];
-  text: string;
-  images: SessionAssistantTurnItem['images'];
-  attachedFiles: SessionAssistantTurnItem['attachedFiles'];
-  explicitIdentity: boolean;
-}
-
-function buildAssistantTurnItemKey(input: {
-  sessionKey: string;
-  turnKey: string;
-  laneKey: string;
-}): string {
-  return `session:${input.sessionKey}|assistant-turn:${input.turnKey}:${input.laneKey}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -212,7 +186,9 @@ function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
     sending: false,
     activeRunId: null,
     runPhase: 'idle',
-    streamingAnchorKey: null,
+    activeTurnItemKey: null,
+    pendingTurnKey: null,
+    pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
     updatedAt: null,
@@ -252,6 +228,7 @@ function createEmptyTimelineState(
   patch: Partial<SessionRuntimeTimelineState> = {},
 ): SessionRuntimeTimelineState {
   return {
+    sessionKey: '',
     timelineEntries: [],
     executionGraphItems: [],
     renderItems: [],
@@ -524,19 +501,8 @@ function clampWindowState(
   });
 }
 
-function shouldPersistLiveRuntimeState(runtime: SessionRuntimeStateSnapshot): boolean {
-  return (
-    runtime.sending
-    || runtime.pendingFinal
-    || runtime.activeRunId != null
-    || runtime.streamingAnchorKey != null
-    || (runtime.runPhase !== 'idle' && runtime.runPhase !== 'done' && runtime.runPhase !== 'error' && runtime.runPhase !== 'aborted')
-  );
-}
-
 function shouldExposeRuntimeOnlySession(runtime: SessionRuntimeStateSnapshot): boolean {
-  return shouldPersistLiveRuntimeState(runtime)
-    || typeof runtime.updatedAt === 'number';
+  return typeof runtime.updatedAt === 'number';
 }
 
 function buildWindowRange(input: {
@@ -577,151 +543,17 @@ function sortExecutionGraphItems(graphs: SessionExecutionGraphItem[]): SessionEx
   });
 }
 
-function resolveAssistantTurnPendingState(input: {
-  runtime: SessionRuntimeStateSnapshot;
-  activeTurnKey: string | null;
-  accumulator: AssistantTurnAccumulator;
-}): SessionAssistantTurnItem['pendingState'] {
-  if (!input.runtime.sending) {
-    return null;
-  }
-  if (input.activeTurnKey !== input.accumulator.turnKey) {
-    return null;
-  }
-  if (input.runtime.pendingFinal || input.accumulator.toolStatuses.length > 0) {
-    return 'activity';
-  }
-  if (input.accumulator.lastStatus === 'streaming') {
-    return null;
-  }
-  return 'typing';
-}
-
-function resolveAssistantTurnStatus(input: {
-  runtime: SessionRuntimeStateSnapshot;
-  activeTurnKey: string | null;
-  accumulator: AssistantTurnAccumulator;
-}): SessionAssistantTurnItem['status'] {
-  if (input.accumulator.lastStatus === 'error') {
-    return 'error';
-  }
-  if (input.accumulator.lastStatus === 'aborted') {
-    return 'aborted';
-  }
-  if (input.accumulator.lastStatus === 'streaming') {
-    return 'streaming';
-  }
-  if (input.runtime.sending && input.activeTurnKey === input.accumulator.turnKey) {
-    return input.runtime.pendingFinal || input.accumulator.toolStatuses.length > 0
-      ? 'waiting_tool'
-      : 'streaming';
-  }
-  return 'final';
-}
-
-function mergeAssistantTurnAccumulator(
-  accumulator: AssistantTurnAccumulator,
-  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
-): AssistantTurnAccumulator {
-  const nextUpdatedAt = typeof row.createdAt === 'number'
-    ? row.createdAt
-    : accumulator.updatedAt;
-  return {
-    ...accumulator,
-    createdAt: accumulator.createdAt ?? row.createdAt,
-    updatedAt: nextUpdatedAt,
-    runId: row.runId ?? accumulator.runId,
-    latestTimelineKey: row.key,
-    latestTimelineEntryId: row.entryId ?? accumulator.latestTimelineEntryId,
-    latestTimelineMessageId: row.kind === 'message'
-      ? (row.messageId ?? accumulator.latestTimelineMessageId)
-      : accumulator.latestTimelineMessageId,
-    lastStatus: row.status ?? accumulator.lastStatus,
-    thinking: row.kind === 'message'
-      ? (row.thinking ?? accumulator.thinking)
-      : accumulator.thinking,
-    toolCalls: row.toolUses.length > 0 ? structuredClone(row.toolUses) : accumulator.toolCalls,
-    toolStatuses: row.toolStatuses.length > 0 ? structuredClone(row.toolStatuses) : accumulator.toolStatuses,
-    text: row.text || accumulator.text,
-    images: row.kind === 'message' && row.images.length > 0 ? structuredClone(row.images) : accumulator.images,
-    attachedFiles: row.attachedFiles.length > 0 ? structuredClone(row.attachedFiles) : accumulator.attachedFiles,
-    explicitIdentity: accumulator.explicitIdentity,
-  };
-}
-
-function hasExplicitAssistantTurnIdentity(
-  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
-): boolean {
-  if (normalizeString(row.runId)) {
-    return true;
-  }
-  if (row.kind !== 'message') {
-    return false;
-  }
-  return Boolean(
-    normalizeString(row.uniqueId)
-    || normalizeString(row.requestId)
-    || normalizeString(row.clientId)
-    || normalizeString(row.originMessageId),
-  );
-}
-
-function createAssistantTurnAccumulator(
-  row: SessionTimelineMessageEntry | SessionTimelineToolActivityEntry,
-): AssistantTurnAccumulator | null {
-  const laneKey = normalizeString(row.laneKey);
-  const turnKey = normalizeString(row.turnKey);
-  if (!laneKey || !turnKey) {
-    return null;
-  }
-  return {
-    key: buildAssistantTurnItemKey({
-      sessionKey: row.sessionKey,
-      turnKey,
-      laneKey,
-    }),
-    turnKey,
-    laneKey,
-    sessionKey: row.sessionKey,
-    ...(row.agentId ? { agentId: row.agentId } : {}),
-    createdAt: row.createdAt,
-    updatedAt: row.createdAt,
-    ...(row.runId ? { runId: row.runId } : {}),
-    latestTimelineKey: row.key,
-    ...(row.entryId ? { latestTimelineEntryId: row.entryId } : {}),
-    ...(row.kind === 'message' && row.messageId ? { latestTimelineMessageId: row.messageId } : {}),
-    lastStatus: row.status,
-    thinking: row.kind === 'message' ? row.thinking : null,
-    toolCalls: structuredClone(row.toolUses),
-    toolStatuses: structuredClone(row.toolStatuses),
-    text: row.text,
-    images: row.kind === 'message' ? structuredClone(row.images) : [],
-    attachedFiles: structuredClone(row.attachedFiles),
-    explicitIdentity: hasExplicitAssistantTurnIdentity(row),
-  };
-}
-
-function resolveAssistantTurnItemKeyFromTimelineEntry(entry: SessionTimelineEntry): string | null {
-  if (!isAssistantTimelineEntry(entry)) {
-    return null;
-  }
-  const laneKey = normalizeString(entry.laneKey);
-  const turnKey = normalizeString(entry.turnKey);
-  if (!laneKey || !turnKey) {
-    return null;
-  }
-  return buildAssistantTurnItemKey({
-    sessionKey: entry.sessionKey,
-    turnKey,
-    laneKey,
-  });
-}
-
 function buildRenderItemsFromTimeline(input: {
+  sessionKey: string;
   timelineEntries: SessionTimelineEntry[];
   executionGraphItems: SessionExecutionGraphItem[];
   runtime: SessionRuntimeStateSnapshot;
 }): SessionRenderItem[] {
+  const assembledTurns = assembleAuthoritativeAssistantTurns({
+    sessionKey: input.sessionKey,
+    timelineEntries: input.timelineEntries,
+    runtime: input.runtime,
+  });
   const graphByAnchorKey = new Map<string, SessionExecutionGraphItem[]>();
   const tailGraphs: SessionExecutionGraphItem[] = [];
   for (const graph of sortExecutionGraphItems(input.executionGraphItems)) {
@@ -737,68 +569,8 @@ function buildRenderItemsFromTimeline(input: {
       graphByAnchorKey.set(anchorKey, [structuredClone(graph)]);
     }
   }
-
-  const assistantAccumulatorsByMatchKey = new Map<string, AssistantTurnAccumulator>();
-  const assistantTurnOrder: string[] = [];
-  const assistantTurnMatchKeyByItemKey = new Map<string, string>();
-  const assistantTurnMatchKeyByTimelineKey = new Map<string, string>();
-  let previousImplicitAssistantMatchKey: string | null = null;
-  let previousImplicitAssistantLaneKey: string | null = null;
-
-  for (const entry of input.timelineEntries) {
-    if (!isAssistantTimelineEntry(entry)) {
-      previousImplicitAssistantMatchKey = null;
-      previousImplicitAssistantLaneKey = null;
-      continue;
-    }
-    const accumulatorSeed = createAssistantTurnAccumulator(entry);
-    if (!accumulatorSeed) {
-      previousImplicitAssistantMatchKey = null;
-      previousImplicitAssistantLaneKey = null;
-      continue;
-    }
-    const matchKey = !accumulatorSeed.explicitIdentity
-      && previousImplicitAssistantMatchKey
-      && previousImplicitAssistantLaneKey === accumulatorSeed.laneKey
-      ? previousImplicitAssistantMatchKey
-      : (accumulatorSeed.explicitIdentity
-          ? `${accumulatorSeed.turnKey}|${accumulatorSeed.laneKey}`
-          : `implicit:${accumulatorSeed.laneKey}:${accumulatorSeed.key}`);
-    const existing = assistantAccumulatorsByMatchKey.get(matchKey);
-    const next = existing
-      ? mergeAssistantTurnAccumulator(existing, entry)
-      : accumulatorSeed;
-    assistantAccumulatorsByMatchKey.set(matchKey, next);
-    if (!existing) {
-      assistantTurnOrder.push(matchKey);
-    }
-    assistantTurnMatchKeyByItemKey.set(next.key, matchKey);
-    assistantTurnMatchKeyByTimelineKey.set(entry.key, matchKey);
-    if (next.explicitIdentity) {
-      previousImplicitAssistantMatchKey = null;
-      previousImplicitAssistantLaneKey = null;
-    } else {
-      previousImplicitAssistantMatchKey = matchKey;
-      previousImplicitAssistantLaneKey = accumulatorSeed.laneKey;
-    }
-  }
-
-  const activeAssistantTurnMatchKey = (() => {
-    const streamingAnchorKey = normalizeString(input.runtime.streamingAnchorKey);
-    if (streamingAnchorKey) {
-      const byItemKey = assistantTurnMatchKeyByItemKey.get(streamingAnchorKey);
-      if (byItemKey) {
-        return byItemKey;
-      }
-    }
-    if (assistantTurnOrder.length === 0) {
-      return null;
-    }
-    return assistantTurnOrder[assistantTurnOrder.length - 1] ?? null;
-  })();
-
   const renderItems: SessionRenderItem[] = [];
-  const emittedAssistantTurns = new Set<string>();
+  const emittedAssistantTurnKeys = new Set<string>();
 
   const flushAnchoredGraphs = (anchorKey: string) => {
     const anchored = graphByAnchorKey.get(anchorKey);
@@ -811,53 +583,15 @@ function buildRenderItemsFromTimeline(input: {
 
   for (const entry of input.timelineEntries) {
     if (isAssistantTimelineEntry(entry)) {
-      const matchKey = assistantTurnMatchKeyByTimelineKey.get(entry.key) ?? null;
-      if (!matchKey) {
+      const item = assembledTurns.turnsByLatestTimelineKey.get(entry.key);
+      if (!item) {
         continue;
       }
-      const accumulator = assistantAccumulatorsByMatchKey.get(matchKey);
-      if (!accumulator) {
+      if (emittedAssistantTurnKeys.has(item.key)) {
         continue;
       }
-      if (accumulator.latestTimelineKey !== entry.key) {
-        continue;
-      }
-      if (emittedAssistantTurns.has(accumulator.key)) {
-        continue;
-      }
-      const activeTurnKey = activeAssistantTurnMatchKey
-        ? assistantAccumulatorsByMatchKey.get(activeAssistantTurnMatchKey)?.turnKey ?? null
-        : null;
-      const item: SessionAssistantTurnItem = {
-        key: accumulator.key,
-        kind: 'assistant-turn',
-        sessionKey: accumulator.sessionKey,
-        role: 'assistant',
-        ...(accumulator.createdAt != null ? { createdAt: accumulator.createdAt } : {}),
-        ...(accumulator.updatedAt != null ? { updatedAt: accumulator.updatedAt } : {}),
-        ...(accumulator.runId ? { runId: accumulator.runId } : {}),
-        laneKey: accumulator.laneKey,
-        turnKey: accumulator.turnKey,
-        ...(accumulator.agentId ? { agentId: accumulator.agentId } : {}),
-        status: resolveAssistantTurnStatus({
-          runtime: input.runtime,
-          activeTurnKey,
-          accumulator,
-        }),
-        thinking: accumulator.thinking,
-        toolCalls: structuredClone(accumulator.toolCalls),
-        toolStatuses: structuredClone(accumulator.toolStatuses),
-        text: accumulator.text,
-        images: structuredClone(accumulator.images),
-        attachedFiles: structuredClone(accumulator.attachedFiles),
-        pendingState: resolveAssistantTurnPendingState({
-          runtime: input.runtime,
-          activeTurnKey,
-          accumulator,
-        }),
-      };
-      renderItems.push(item);
-      emittedAssistantTurns.add(accumulator.key);
+      emittedAssistantTurnKeys.add(item.key);
+      renderItems.push(structuredClone(item));
       flushAnchoredGraphs(item.key);
       continue;
     }
@@ -914,6 +648,15 @@ function buildRenderItemsFromTimeline(input: {
     }
   }
 
+  const pendingAssistantTurn = assembledTurns.pendingTurn;
+  if (
+    pendingAssistantTurn
+    && !renderItems.some((item) => item.kind === 'assistant-turn' && item.turnKey === pendingAssistantTurn.turnKey && item.laneKey === pendingAssistantTurn.laneKey)
+  ) {
+    renderItems.push(pendingAssistantTurn);
+    flushAnchoredGraphs(pendingAssistantTurn.key);
+  }
+
   renderItems.push(...tailGraphs);
   return renderItems;
 }
@@ -936,33 +679,12 @@ export class SessionRuntimeService {
     try {
       const raw = readFileSync(this.storeFilePath, 'utf8');
       const parsed = JSON.parse(raw) as PersistedSessionRuntimeStoreFile;
-      if (!parsed || typeof parsed !== 'object' || parsed.version !== 2 || !Array.isArray(parsed.liveSessions)) {
+      if (!parsed || typeof parsed !== 'object') {
         return;
       }
       this.activeSessionKey = typeof parsed.activeSessionKey === 'string' && parsed.activeSessionKey.trim()
         ? parsed.activeSessionKey.trim()
         : null;
-      for (const session of parsed.liveSessions) {
-        if (!session || typeof session !== 'object' || Array.isArray(session)) {
-          continue;
-        }
-        const sessionKey = normalizeString((session as { sessionKey?: unknown }).sessionKey);
-        if (!sessionKey) {
-          continue;
-        }
-        const runtime = isRecord((session as { runtime?: unknown }).runtime)
-          ? {
-              ...createEmptySessionRuntimeState(),
-              ...((session as { runtime: SessionRuntimeStateSnapshot }).runtime),
-            }
-          : createEmptySessionRuntimeState();
-        if (!shouldPersistLiveRuntimeState(runtime) && typeof runtime.updatedAt !== 'number') {
-          continue;
-        }
-        this.sessionStates.set(sessionKey, createEmptyTimelineState({
-          runtime,
-        }));
-      }
     } catch {
       // ignore invalid persisted store
     }
@@ -970,14 +692,8 @@ export class SessionRuntimeService {
 
   private persistStore(): void {
     const payload: PersistedSessionRuntimeStoreFile = {
-      version: 2,
+      version: 3,
       activeSessionKey: this.activeSessionKey,
-      liveSessions: Array.from(this.sessionStates.entries())
-        .filter(([, state]) => shouldPersistLiveRuntimeState(state.runtime))
-        .map(([sessionKey, state]) => ({
-          sessionKey,
-          runtime: cloneSessionRuntimeState(state.runtime),
-        })),
     };
     mkdirSync(dirname(this.storeFilePath), { recursive: true });
     writeFileSync(this.storeFilePath, JSON.stringify(payload, null, 2), 'utf8');
@@ -989,6 +705,7 @@ export class SessionRuntimeService {
       return existing;
     }
     const created = createEmptyTimelineState();
+    created.sessionKey = sessionKey;
     this.sessionStates.set(sessionKey, created);
     return created;
   }
@@ -1044,7 +761,7 @@ export class SessionRuntimeService {
       return [];
     }
 
-    let content = '';
+    let content: string;
     try {
       content = readFileSync(descriptor.transcriptPath, 'utf8');
     } catch {
@@ -1052,6 +769,39 @@ export class SessionRuntimeService {
     }
 
     return materializeTranscriptTimelineEntries(sessionKey, parseTranscriptMessages(content));
+  }
+
+  private reconcileTranscriptTimelineEntries(input: {
+    sessionKey: string;
+    existingEntries: SessionTimelineEntry[];
+    runId?: string | null;
+  }): SessionTimelineEntry[] {
+    const descriptor = this.findStorageDescriptor(input.sessionKey);
+    if (!descriptor?.transcriptPath || !existsSync(descriptor.transcriptPath)) {
+      return input.existingEntries;
+    }
+
+    let content: string;
+    try {
+      content = readFileSync(descriptor.transcriptPath, 'utf8');
+    } catch {
+      return input.existingEntries;
+    }
+
+    const transcriptMessages = parseTranscriptMessages(content);
+    const toolPatchEntries = materializeTranscriptToolResultPatchEntries(
+      input.sessionKey,
+      transcriptMessages,
+      input.existingEntries,
+    );
+    if (toolPatchEntries.length === 0) {
+      return input.existingEntries;
+    }
+    let nextEntries = input.existingEntries;
+    for (const entry of toolPatchEntries) {
+      nextEntries = upsertTimelineEntry(nextEntries, entry);
+    }
+    return nextEntries;
   }
 
   private resolveChildTimelineEntriesForExecutionGraph(childSessionKey: string): SessionTimelineEntry[] {
@@ -1161,6 +911,7 @@ export class SessionRuntimeService {
 
   private refreshRenderItems(state: SessionRuntimeTimelineState): void {
     state.renderItems = buildRenderItemsFromTimeline({
+      sessionKey: state.sessionKey,
       timelineEntries: state.timelineEntries,
       executionGraphItems: state.executionGraphItems,
       runtime: state.runtime,
@@ -1226,6 +977,28 @@ export class SessionRuntimeService {
     this.rebuildExecutionGraphsFromTimeline(sessionKey, state);
     state.window = createLatestWindowState(state.renderItems.length);
     this.refreshParentExecutionGraphs(sessionKey);
+  }
+
+  private reconcileSessionTranscript(
+    sessionKey: string,
+    options: {
+      runId?: string | null;
+    } = {},
+  ): void {
+    const state = this.getSessionState(sessionKey);
+    if (!state.hydrated) {
+      this.ensureSessionHydrated(sessionKey, state);
+      return;
+    }
+    state.timelineEntries = this.reconcileTranscriptTimelineEntries({
+      sessionKey,
+      existingEntries: state.timelineEntries,
+      runId: options.runId,
+    });
+    this.rebuildExecutionGraphsFromTimeline(sessionKey, state);
+    state.window = createLatestWindowState(state.renderItems.length);
+    this.refreshParentExecutionGraphs(sessionKey);
+    this.persistStore();
   }
 
   private activateSession(
@@ -1415,13 +1188,17 @@ export class SessionRuntimeService {
           sending: true,
           activeRunId: input.runId,
           runPhase: 'submitted',
+          pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
+          pendingTurnLaneKey: 'main',
         });
       case 'final':
         return this.setSessionRuntime(sessionKey, {
           sending: false,
           activeRunId: null,
           runPhase: 'done',
-          streamingAnchorKey: null,
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
           pendingFinal: false,
         });
       case 'error':
@@ -1429,7 +1206,9 @@ export class SessionRuntimeService {
           sending: false,
           activeRunId: null,
           runPhase: 'error',
-          streamingAnchorKey: null,
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
           pendingFinal: false,
         });
       case 'aborted':
@@ -1437,7 +1216,9 @@ export class SessionRuntimeService {
           sending: false,
           activeRunId: null,
           runPhase: 'aborted',
-          streamingAnchorKey: null,
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
           pendingFinal: false,
         });
       default:
@@ -1456,12 +1237,15 @@ export class SessionRuntimeService {
     const currentState = this.getSessionState(sessionKey);
     const messageTimestamp = input.entry.createdAt != null ? input.entry.createdAt : null;
     if (input.sessionUpdate === 'agent_message_chunk') {
+      const anchorItemKey = resolveAssistantTurnItemKeyFromTimelineEntry(input.entry);
       return this.setSessionRuntime(sessionKey, {
         sending: true,
         activeRunId: input.runId,
         runPhase: 'streaming',
-        streamingAnchorKey: resolveAssistantTurnItemKeyFromTimelineEntry(input.entry)
-          ?? currentState.runtime.streamingAnchorKey,
+        activeTurnItemKey: anchorItemKey
+          ?? currentState.runtime.activeTurnItemKey,
+        pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
+        pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
         pendingFinal: false,
         lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
           ? messageTimestamp
@@ -1474,6 +1258,8 @@ export class SessionRuntimeService {
         sending: Boolean(input.runId),
         activeRunId: input.runId,
         runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
+        pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
+        pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
         lastUserMessageAt: typeof messageTimestamp === 'number'
           ? messageTimestamp
           : currentState.runtime.lastUserMessageAt,
@@ -1485,7 +1271,9 @@ export class SessionRuntimeService {
         sending: true,
         activeRunId: input.runId,
         runPhase: 'waiting_tool',
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
+        pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
+        pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
         pendingFinal: true,
       });
     }
@@ -1494,7 +1282,9 @@ export class SessionRuntimeService {
       sending: false,
       activeRunId: null,
       runPhase: 'done',
-      streamingAnchorKey: null,
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
       pendingFinal: false,
     });
   }
@@ -1579,6 +1369,11 @@ export class SessionRuntimeService {
       }
       this.activateSession(sessionKey);
       if (event.sessionUpdate === 'session_info_update') {
+        if (event.phase === 'final' || event.phase === 'error' || event.phase === 'aborted') {
+          this.reconcileSessionTranscript(sessionKey, {
+            runId: event.runId,
+          });
+        }
         this.resolveLifecycleRuntime(sessionKey, {
           phase: event.phase,
           runId: event.runId,
@@ -1828,16 +1623,17 @@ export class SessionRuntimeService {
       };
     }
     const state = this.activateSession(sessionKey, { hydrate: true });
+    const data: SessionLoadResult = {
+      snapshot: this.buildSnapshot(sessionKey, state, {
+        window: state.window.totalItemCount > 0
+          ? state.window
+          : createLatestWindowState(state.renderItems.length),
+        replayComplete: true,
+      }),
+    };
     return {
       status: 200,
-      data: {
-        snapshot: this.buildSnapshot(sessionKey, state, {
-          window: state.window.totalItemCount > 0
-            ? state.window
-            : createLatestWindowState(state.renderItems.length),
-          replayComplete: true,
-        }),
-      } satisfies SessionLoadResult,
+      data,
     };
   }
 
@@ -1871,6 +1667,37 @@ export class SessionRuntimeService {
       }),
     };
 
+    return {
+      status: 200,
+      data: result,
+    };
+  }
+
+  async abortSessionRuntime(payload: unknown) {
+    const body = isRecord(payload) ? payload as SessionAbortRuntimePayload : {};
+    const sessionKey = normalizeString(body.sessionKey) || this.activeSessionKey || '';
+    if (!sessionKey) {
+      return {
+        status: 400,
+        data: { success: false, error: 'sessionKey is required' },
+      };
+    }
+
+    const runtime = this.resolveLifecycleRuntime(sessionKey, {
+      phase: 'aborted',
+      runId: null,
+    });
+    const state = this.activateSession(sessionKey, {
+      hydrate: true,
+      resetWindowToLatest: true,
+    });
+    const result: SessionLoadResult & { success: boolean } = {
+      success: true,
+      snapshot: {
+        ...this.buildLatestSnapshot(sessionKey, state),
+        runtime,
+      },
+    };
     return {
       status: 200,
       data: result,
@@ -1947,7 +1774,9 @@ export class SessionRuntimeService {
       sending: true,
       activeRunId: runId || null,
       runPhase: 'submitted',
-      streamingAnchorKey: null,
+      activeTurnItemKey: null,
+      pendingTurnKey: runId ? `main:${runId}` : `main:prompt:${promptId}`,
+      pendingTurnLaneKey: 'main',
       pendingFinal: false,
       lastUserMessageAt: entry?.createdAt ?? Date.now(),
     });

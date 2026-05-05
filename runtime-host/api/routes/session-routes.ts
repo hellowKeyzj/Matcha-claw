@@ -143,5 +143,16 @@ export async function handleSessionRoute(
     }
   }
 
+  if (method === 'POST' && routePath === '/api/session/abort-runtime') {
+    try {
+      return await sessionRuntimeService.abortSessionRuntime(payload);
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
+
   return null;
 }

@@ -85,7 +85,9 @@ function setupSessionLoad(messages: RawMessage[]): void {
         sending: false,
         activeRunId: null,
         runPhase: 'done',
-        streamingAnchorKey: null,
+        activeTurnItemKey: null,
+        pendingTurnKey: null,
+        pendingTurnLaneKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         updatedAt: 1,
@@ -463,7 +465,9 @@ describe('chat session labeling', () => {
             sending: boolean;
             activeRunId: string | null;
             runPhase: 'done';
-            streamingAnchorKey: null;
+            activeTurnItemKey: null;
+            pendingTurnKey: null;
+            pendingTurnLaneKey: null;
             pendingFinal: boolean;
             lastUserMessageAt: null;
             updatedAt: number;
@@ -508,7 +512,9 @@ describe('chat session labeling', () => {
             sending: false,
             activeRunId: null,
             runPhase: 'done',
-            streamingAnchorKey: null,
+            activeTurnItemKey: null,
+            pendingTurnKey: null,
+            pendingTurnLaneKey: null,
             pendingFinal: false,
             lastUserMessageAt: null,
             updatedAt: 1,

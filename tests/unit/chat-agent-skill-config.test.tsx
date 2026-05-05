@@ -77,7 +77,7 @@ describe('chat agent skill configuration', () => {
           ...createEmptySessionRecord(),
           meta: {
             ...createEmptySessionRecord().meta,
-            ready: true,
+            historyStatus: 'ready',
           },
         },
       },

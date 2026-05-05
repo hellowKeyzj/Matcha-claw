@@ -75,4 +75,42 @@ describe('chat message view', () => {
       input: { filePath: 'README.md' },
     }]);
   });
+
+  it('keeps assistant bubble tool previews on the turn item while exposing tool uses normally', () => {
+    const item = buildItem([
+      {
+        type: 'toolCall',
+        id: 'tool-canvas-1',
+        name: 'canvas_render',
+        input: { source: { type: 'handle', id: 'cv-inline' } },
+      },
+      {
+        type: 'tool_result',
+        id: 'tool-canvas-1',
+        name: 'canvas_render',
+        content: {
+          kind: 'canvas',
+          view: {
+            backend: 'canvas',
+            id: 'cv-inline',
+            url: '/__openclaw__/canvas/documents/cv_inline/index.html',
+          },
+          presentation: {
+            target: 'assistant_message',
+          },
+        },
+      },
+    ]);
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
+
+    const view = getOrBuildChatMessageView(item);
+    expect(view.toolUses).toEqual([{
+      id: 'tool-canvas-1',
+      name: 'canvas_render',
+      input: { source: { type: 'handle', id: 'cv-inline' } },
+    }]);
+    expect(item.embeddedToolResults).toHaveLength(1);
+  });
 });
