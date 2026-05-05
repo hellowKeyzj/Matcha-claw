@@ -27,6 +27,7 @@ import { BrowserTabState } from '../state/browser-tab-state.js'
 import { PlaywrightSession } from '../playwright/session.js'
 import { PlaywrightActions } from '../playwright/actions.js'
 import { InstalledProfileAutoLauncher } from '../browser-launch/installed-profile-auto-launcher.js'
+import { relayDebugWarn } from '../debug-logging.js'
 
 export type BrowserControlServiceOptions = {
   logger: PluginLogger
@@ -484,11 +485,13 @@ export class BrowserControlService {
     if (action === 'open') {
       const requestedUrl = this.resolveOpenUrl(params)
       const created = await this.options.relay.openTarget(requestedUrl)
-      this.options.logger.warn?.(
+      relayDebugWarn(
+        this.options.logger,
         `[browser-relay] open action created target requestedUrl="${requestedUrl}" targetId=${created.targetId}`,
       )
       const attachedTarget = await this.options.relay.resolveReadyTarget(String(created.targetId))
-      this.options.logger.warn?.(
+      relayDebugWarn(
+        this.options.logger,
         `[browser-relay] open action attached target requestedUrl="${requestedUrl}" targetId=${attachedTarget.targetId} sessionId=${attachedTarget.sessionId} windowId=${attachedTarget.windowId ?? 'null'} tabId=${attachedTarget.tabId ?? 'null'} url="${attachedTarget.url}" readyState="${attachedTarget.readyState}" mainFrameUrl="${attachedTarget.mainFrameUrl}"`,
       )
       const targetId = attachedTarget.targetId

@@ -32,7 +32,9 @@ import { RelayState } from './lib/constants.js'
 import { createLogger, setDebug } from './lib/logger.js'
 import { getBrowserInstanceId } from './lib/browser-instance.js'
 
-setDebug(true)
+const ENABLE_BROWSER_RELAY_EXTENSION_DEBUG_LOGS = false
+
+setDebug(ENABLE_BROWSER_RELAY_EXTENSION_DEBUG_LOGS)
 
 const log = createLogger('bg')
 
