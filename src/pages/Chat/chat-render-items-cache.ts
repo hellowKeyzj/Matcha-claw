@@ -28,6 +28,7 @@ export function getOrBuildStaticRenderItemsCacheEntry(
       items,
       agents: [],
       defaultAssistant: null,
+      previousItems: cached?.items,
     }),
   } satisfies SessionStaticRenderItemsCacheEntry;
   globalStaticRenderItemsCache.set(sessionKey, nextEntry);

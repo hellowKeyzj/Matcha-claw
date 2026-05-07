@@ -617,7 +617,11 @@ function resolveBrowserDetail(action: string | undefined, args: unknown): string
   if (!record || !action) {
     return undefined;
   }
-  const targetUrl = typeof record.targetUrl === 'string' ? record.targetUrl.trim() : undefined;
+  const targetUrl = (
+    typeof record.targetUrl === 'string' && record.targetUrl.trim()
+      ? record.targetUrl.trim()
+      : (typeof record.url === 'string' && record.url.trim() ? record.url.trim() : undefined)
+  );
   const targetId = typeof record.targetId === 'string' ? record.targetId.trim() : undefined;
   const format = typeof record.format === 'string' ? record.format.trim() : undefined;
   const level = typeof record.level === 'string' ? record.level.trim() : undefined;

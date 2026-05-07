@@ -89,6 +89,19 @@ describe('tool display summary', () => {
     expect(formatToolDetail(display)).toBe('打开网页 https://example.com');
   });
 
+    it('formats browser open detail from runtime url field', () => {
+    const display = resolveToolDisplay({
+      name: 'browser',
+      args: {
+        action: 'open',
+        url: 'https://example.com/opened',
+      },
+    });
+
+    expect(display.title).toBe('浏览器');
+    expect(formatToolDetail(display)).toBe('打开网页 https://example.com/opened');
+  });
+
   it('formats browser status detail as user-facing chinese summary', () => {
     const display = resolveToolDisplay({
       name: 'browser',

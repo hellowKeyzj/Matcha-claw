@@ -73,9 +73,8 @@ describe('chat render items cache', () => {
       nextAssistantItem,
     ]);
 
-    expect(secondEntry.items[0]).toStrictEqual(firstEntry.items[0]);
+    expect(secondEntry.items[0]).toBe(firstEntry.items[0]);
     expect(secondEntry.items[1]).not.toBe(firstEntry.items[1]);
     expect(secondEntry.items[1]?.key).toBe(firstEntry.items[1]?.key);
   });
 });
-

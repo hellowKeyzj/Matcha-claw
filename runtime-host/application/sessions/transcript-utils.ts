@@ -1011,7 +1011,8 @@ export function buildTimelineEntriesFromTranscriptMessage(
   const assistantSegments = role === 'assistant'
     ? buildAssistantSegmentsFromMessageContent({
         role: message.role,
-        entryKey: `session:${sessionKey}|entry:${entryId}`,
+        turnKey,
+        laneKey,
         content: readMessageContent(message),
         text,
         images,

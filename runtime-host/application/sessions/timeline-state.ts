@@ -193,6 +193,8 @@ function mergeTimelineEntry(
     mergedMessageEntry.assistantSegments = mergedMessageEntry.role === 'assistant'
       ? rebuildAssistantSegmentsFromMergedEntry({
           role: 'assistant',
+          turnKey: mergedMessageEntry.turnKey ?? '',
+          laneKey: mergedMessageEntry.laneKey ?? '',
           existingSegments: existingMessage?.assistantSegments ?? [],
           incomingSegments: incomingMessage?.assistantSegments ?? [],
           thinking: mergedMessageEntry.thinking,
@@ -247,6 +249,8 @@ function mergeTimelineEntry(
     role: 'assistant',
     assistantSegments: rebuildAssistantSegmentsFromMergedEntry({
       role: 'assistant',
+      turnKey: mergedBase.turnKey ?? '',
+      laneKey: mergedBase.laneKey ?? '',
       existingSegments: isToolActivityEntry(existing) ? existing.assistantSegments : [],
       incomingSegments: isToolActivityEntry(incoming) ? incoming.assistantSegments : [],
       thinking: null,

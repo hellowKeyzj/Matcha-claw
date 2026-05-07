@@ -252,4 +252,56 @@ describe('chat render item model', () => {
       },
     ]);
   });
+
+  it('reuses unchanged decorated assistant-turn items when a sibling turn settles', () => {
+    const sessionKey = 'agent:main:main';
+    const initialProtocolItems = buildRenderItemsFromMessages(sessionKey, [
+      {
+        id: 'assistant-stable-1',
+        role: 'assistant',
+        messageId: 'turn-stable-1',
+        content: '稳定消息',
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-live-1',
+        role: 'assistant',
+        messageId: 'turn-live-1',
+        content: '第一段',
+        streaming: true,
+        timestamp: 2,
+      },
+    ]);
+
+    const firstDecorated = applyAssistantPresentationToItems({
+      items: initialProtocolItems,
+      agents: [],
+      defaultAssistant: null,
+    });
+
+    const settledSibling = buildRenderItemsFromMessages(sessionKey, [
+      {
+        id: 'assistant-live-1',
+        role: 'assistant',
+        messageId: 'turn-live-1',
+        content: '第一段，最终版',
+        timestamp: 2,
+      },
+    ])[0]!;
+
+    const secondDecorated = applyAssistantPresentationToItems({
+      items: [
+        initialProtocolItems[0]!,
+        settledSibling,
+      ],
+      agents: [],
+      defaultAssistant: null,
+      previousItems: firstDecorated,
+    });
+
+    expect(secondDecorated[0]).toBe(firstDecorated[0]);
+    expect(secondDecorated[1]).not.toBe(firstDecorated[1]);
+    expect(secondDecorated[1]?.key).toBe(firstDecorated[1]?.key);
+    expect((secondDecorated[1] as ChatAssistantTurnItem).text).toBe('第一段，最终版');
+  });
 });

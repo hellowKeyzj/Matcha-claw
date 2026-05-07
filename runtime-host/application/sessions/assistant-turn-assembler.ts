@@ -1,6 +1,6 @@
 import type {
-  SessionAssistantTurnItem,
   SessionAssistantTurnSegment,
+  SessionAssistantTurnItem,
   SessionRenderAssistantBubbleToolResult,
   SessionRenderAttachedFile,
   SessionRenderImage,
@@ -13,6 +13,9 @@ import type {
   SessionTurnIdentityConfidence,
   SessionTurnIdentityMode,
 } from '../../shared/session-adapter-types';
+import {
+  mergeAssistantSegmentStream,
+} from './assistant-turn-segments';
 
 interface AssistantTurnAccumulator {
   key: string;
@@ -52,58 +55,18 @@ function cloneSegments(segments: ReadonlyArray<SessionAssistantTurnSegment>): Se
   return structuredClone(segments);
 }
 
-function normalizeToolSegmentKey(segment: SessionAssistantTurnSegment): string {
-  if (segment.kind !== 'tool') {
-    return '';
-  }
-  return normalizeString(segment.tool.toolCallId ?? segment.tool.id ?? segment.tool.name);
-}
-
-function isDeferredMessageSegment(segment: SessionAssistantTurnSegment): boolean {
-  return segment.kind === 'message' && segment.key.includes(':variant:');
-}
-
-function findDeferredMessageInsertIndex(
-  segments: ReadonlyArray<SessionAssistantTurnSegment>,
-): number {
-  return segments.findIndex((segment) => isDeferredMessageSegment(segment));
-}
-
 function mergeOrderedSegments(
+  turnKey: string,
+  laneKey: string,
   existingSegments: ReadonlyArray<SessionAssistantTurnSegment>,
   incomingSegments: ReadonlyArray<SessionAssistantTurnSegment>,
 ): SessionAssistantTurnSegment[] {
-  if (existingSegments.length === 0) {
-    return cloneSegments(incomingSegments);
-  }
-  if (incomingSegments.length === 0) {
-    return cloneSegments(existingSegments);
-  }
-
-  const merged = cloneSegments(existingSegments);
-  let deferredInsertIndex = findDeferredMessageInsertIndex(merged);
-  for (const incoming of incomingSegments) {
-    if (incoming.kind === 'tool') {
-      const incomingToolKey = normalizeToolSegmentKey(incoming);
-      if (incomingToolKey) {
-        const existingIndex = merged.findIndex((segment) => (
-          segment.kind === 'tool'
-          && normalizeToolSegmentKey(segment) === incomingToolKey
-        ));
-        if (existingIndex >= 0) {
-          merged[existingIndex] = structuredClone(incoming);
-          continue;
-        }
-      }
-      if (deferredInsertIndex >= 0) {
-        merged.splice(deferredInsertIndex, 0, structuredClone(incoming));
-        deferredInsertIndex += 1;
-        continue;
-      }
-    }
-    merged.push(structuredClone(incoming));
-  }
-  return merged;
+  return mergeAssistantSegmentStream({
+    turnKey,
+    laneKey,
+    existingSegments,
+    incomingSegments,
+  });
 }
 
 function buildEmbeddedToolResults(
@@ -346,7 +309,12 @@ function mergeAssistantTurnAccumulator(
     identityMode: row.turnIdentityMode ?? accumulator.identityMode,
     identityConfidence: row.turnIdentityConfidence ?? accumulator.identityConfidence,
     lastStatus: row.status ?? accumulator.lastStatus,
-    segments: mergeOrderedSegments(accumulator.segments, row.assistantSegments),
+    segments: mergeOrderedSegments(
+      accumulator.turnKey,
+      accumulator.laneKey,
+      accumulator.segments,
+      row.assistantSegments,
+    ),
   };
 }
 

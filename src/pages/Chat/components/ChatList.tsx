@@ -429,12 +429,18 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     () => selectViewportItems(currentSession),
     [currentSession],
   );
+  const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const items = useMemo(
-    () => applyAssistantPresentationToItems({
-      items: viewportItems,
-      agents: assistantCatalogAgents,
-      defaultAssistant,
-    }),
+    () => {
+      const nextItems = applyAssistantPresentationToItems({
+        items: viewportItems,
+        agents: assistantCatalogAgents,
+        defaultAssistant,
+        previousItems: previousRenderedItemsRef.current ?? undefined,
+      });
+      previousRenderedItemsRef.current = nextItems;
+      return nextItems;
+    },
     [assistantCatalogAgents, defaultAssistant, viewportItems],
   );
 

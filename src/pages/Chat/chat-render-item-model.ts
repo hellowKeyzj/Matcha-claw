@@ -43,6 +43,22 @@ export interface ChatAssistantCatalogAgent extends ChatAssistantPresentation {
   id: string;
 }
 
+function isSameAssistantPresentation(
+  left: ChatAssistantPresentation | null,
+  right: ChatAssistantPresentation | null,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return left.agentId === right.agentId
+    && left.agentName === right.agentName
+    && left.avatarSeed === right.avatarSeed
+    && left.avatarStyle === right.avatarStyle;
+}
+
 function safeStableStringify(value: unknown): string {
   try {
     return JSON.stringify(value) ?? '';
@@ -183,10 +199,14 @@ export function applyAssistantPresentationToItems(input: {
   items: SessionRenderItem[];
   agents: ChatAssistantCatalogAgent[];
   defaultAssistant: ChatAssistantPresentation | null;
+  previousItems?: ChatRenderItem[];
 }): ChatRenderItem[] {
+  const previousItemsByKey = new Map(
+    (input.previousItems ?? []).map((item) => [item.key, item] as const),
+  );
   return input.items.map((protocolItem) => {
     const item = decorateProtocolItem(protocolItem);
-    return {
+    const decoratedItem = {
       ...item,
       assistantPresentation: resolveItemAssistantPresentation({
         item,
@@ -194,5 +214,15 @@ export function applyAssistantPresentationToItems(input: {
         defaultAssistant: input.defaultAssistant,
       }),
     };
+    const previousItem = previousItemsByKey.get(decoratedItem.key);
+    if (
+      previousItem
+      && previousItem.kind === decoratedItem.kind
+      && previousItem.renderSignature === decoratedItem.renderSignature
+      && isSameAssistantPresentation(previousItem.assistantPresentation, decoratedItem.assistantPresentation)
+    ) {
+      return previousItem;
+    }
+    return decoratedItem;
   });
 }

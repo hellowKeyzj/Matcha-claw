@@ -1,5 +1,4 @@
 import {
-  extractMessageText,
   sanitizeAssistantDisplayText,
 } from '../../shared/chat-message-normalization';
 import type {
@@ -27,8 +26,26 @@ interface ContentBlockLike {
   content?: unknown;
 }
 
+type StableAssistantSegmentKind = 'thinking' | 'message' | 'media';
+
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export function buildTurnScopedAssistantSegmentKey(input: {
+  kind: StableAssistantSegmentKind;
+  turnKey: string;
+  laneKey: string;
+  slot: number;
+}): string {
+  return `${input.kind}:${input.turnKey}:${input.laneKey}:${input.slot}`;
+}
+
+function cloneSegmentWithKey<T extends SessionAssistantTurnSegment>(segment: T, key: string): T {
+  return {
+    ...structuredClone(segment),
+    key,
+  };
 }
 
 function buildThinkingSegment(key: string, text: string): SessionAssistantThinkingSegment | null {
@@ -179,6 +196,90 @@ function findAssistantToolCardIndexForBlock(input: {
   return -1;
 }
 
+function countSegmentsOfKind(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  kind: StableAssistantSegmentKind,
+): number {
+  return segments.filter((segment) => segment.kind === kind).length;
+}
+
+function findLastSegmentIndexByKind(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  kind: StableAssistantSegmentKind,
+): number {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index]?.kind === kind) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function hasLaterDifferentKindSegment(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  index: number,
+  kind: StableAssistantSegmentKind,
+): boolean {
+  for (let cursor = index + 1; cursor < segments.length; cursor += 1) {
+    if (segments[cursor]?.kind !== kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findToolSegmentIndex(
+  segments: ReadonlyArray<SessionAssistantTurnSegment>,
+  toolKey: string,
+): number {
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment?.kind !== 'tool') {
+      continue;
+    }
+    if (normalizeToolSegmentCardKey(segment.tool) === toolKey) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+export function mergeAssistantSegmentStream(input: {
+  turnKey: string;
+  laneKey: string;
+  existingSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+  incomingSegments: ReadonlyArray<SessionAssistantTurnSegment>;
+}): SessionAssistantTurnSegment[] {
+  const merged = structuredClone(input.existingSegments);
+  for (const incoming of input.incomingSegments) {
+    if (incoming.kind === 'tool') {
+      const toolKey = normalizeToolSegmentCardKey(incoming.tool);
+      const existingIndex = findToolSegmentIndex(merged, toolKey);
+      if (existingIndex >= 0) {
+        merged[existingIndex] = structuredClone(incoming);
+      } else {
+        merged.push(structuredClone(incoming));
+      }
+      continue;
+    }
+
+    const latestIndex = findLastSegmentIndexByKind(merged, incoming.kind);
+    if (latestIndex >= 0 && !hasLaterDifferentKindSegment(merged, latestIndex, incoming.kind)) {
+      merged[latestIndex] = cloneSegmentWithKey(incoming, merged[latestIndex]!.key);
+      continue;
+    }
+
+    const slot = countSegmentsOfKind(merged, incoming.kind);
+    merged.push(cloneSegmentWithKey(incoming, buildTurnScopedAssistantSegmentKey({
+      kind: incoming.kind,
+      turnKey: input.turnKey,
+      laneKey: input.laneKey,
+      slot,
+    })));
+  }
+  return merged;
+}
+
 export function buildAssistantSegmentsFromToolCards(input: {
   toolCards: ReadonlyArray<SessionRenderToolCard>;
   updatedToolKeys?: ReadonlyArray<string>;
@@ -199,7 +300,8 @@ export function buildAssistantSegmentsFromToolCards(input: {
 
 export function buildAssistantSegmentsFromMessageContent(input: {
   role: SessionMessageRole;
-  entryKey: string;
+  turnKey: string;
+  laneKey: string;
   content: unknown;
   text: string;
   images: ReadonlyArray<SessionRenderImage>;
@@ -212,24 +314,40 @@ export function buildAssistantSegmentsFromMessageContent(input: {
 
   const segments: SessionAssistantTurnSegment[] = [];
   const consumedToolIndices = new Set<number>();
+  const slots: Record<StableAssistantSegmentKind, number> = {
+    thinking: 0,
+    message: 0,
+    media: 0,
+  };
   let emittedInlineMedia = false;
 
+  const nextSegmentKey = (kind: StableAssistantSegmentKind): string => {
+    const slot = slots[kind];
+    slots[kind] += 1;
+    return buildTurnScopedAssistantSegmentKey({
+      kind,
+      turnKey: input.turnKey,
+      laneKey: input.laneKey,
+      slot,
+    });
+  };
+
   if (Array.isArray(input.content)) {
-    for (const [index, block] of input.content.entries()) {
+    for (const block of input.content) {
       if (!block || typeof block !== 'object') {
         continue;
       }
       const row = block as ContentBlockLike;
       const type = typeof row.type === 'string' ? row.type : '';
       if (type === 'thinking' && typeof row.thinking === 'string') {
-        const segment = buildThinkingSegment(`${input.entryKey}:thinking:${index}`, row.thinking);
+        const segment = buildThinkingSegment(nextSegmentKey('thinking'), row.thinking);
         if (segment) {
           segments.push(segment);
         }
         continue;
       }
       if (type === 'text' && typeof row.text === 'string') {
-        const segment = buildMessageSegment(`${input.entryKey}:message:${index}`, row.text);
+        const segment = buildMessageSegment(nextSegmentKey('message'), row.text);
         if (segment) {
           segments.push(segment);
         }
@@ -237,7 +355,7 @@ export function buildAssistantSegmentsFromMessageContent(input: {
       }
       if (type === 'image') {
         const segment = buildMediaSegment({
-          key: `${input.entryKey}:media:${index}`,
+          key: nextSegmentKey('media'),
           images: extractImagesFromSingleBlock(row),
           attachedFiles: extractImagesAsAttachedFiles([row]),
         });
@@ -268,7 +386,7 @@ export function buildAssistantSegmentsFromMessageContent(input: {
   }
 
   if (segments.length === 0 && input.text.trim()) {
-    const segment = buildMessageSegment(`${input.entryKey}:message:full`, input.text);
+    const segment = buildMessageSegment(nextSegmentKey('message'), input.text);
     if (segment) {
       segments.push(segment);
     }
@@ -286,7 +404,7 @@ export function buildAssistantSegmentsFromMessageContent(input: {
 
   if (!emittedInlineMedia) {
     const segment = buildMediaSegment({
-      key: `${input.entryKey}:media:tail`,
+      key: nextSegmentKey('media'),
       images: input.images,
       attachedFiles: input.attachedFiles,
     });
@@ -298,86 +416,10 @@ export function buildAssistantSegmentsFromMessageContent(input: {
   return segments;
 }
 
-function buildSegmentIdentity(segment: SessionAssistantTurnSegment): string {
-  if (segment.kind === 'tool') {
-    return `tool:${normalizeToolSegmentCardKey(segment.tool)}`;
-  }
-  return `${segment.kind}:${segment.key}`;
-}
-
-function hashSegmentText(input: string): string {
-  let hash = 5381;
-  for (let index = 0; index < input.length; index += 1) {
-    hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function isMonotonicMessageTextUpdate(existingText: string, incomingText: string): boolean {
-  if (!existingText || !incomingText) {
-    return true;
-  }
-  return incomingText === existingText
-    || incomingText.startsWith(existingText)
-    || existingText.startsWith(incomingText);
-}
-
-function cloneMessageSegmentWithVariantKey(
-  segment: SessionAssistantMessageSegment,
-): SessionAssistantMessageSegment {
-  const textKey = hashSegmentText(segment.text.trim());
-  return {
-    ...structuredClone(segment),
-    key: `${segment.key}:variant:${textKey}`,
-  };
-}
-
-function buildNormalizedMessageSegmentTextSet(
-  segments: ReadonlyArray<SessionAssistantTurnSegment>,
-): Set<string> {
-  return new Set(
-    segments
-      .filter((segment): segment is SessionAssistantMessageSegment => segment.kind === 'message')
-      .map((segment) => segment.text.trim())
-      .filter((text) => text.length > 0),
-  );
-}
-
-function mergeAssistantSegmentSkeleton(
-  existingSegments: ReadonlyArray<SessionAssistantTurnSegment>,
-  incomingSegments: ReadonlyArray<SessionAssistantTurnSegment>,
-): SessionAssistantTurnSegment[] {
-  const merged = structuredClone(existingSegments);
-  for (const incoming of incomingSegments) {
-    const identity = buildSegmentIdentity(incoming);
-    const existingIndex = merged.findIndex((segment) => buildSegmentIdentity(segment) === identity);
-    if (existingIndex >= 0) {
-      const existing = merged[existingIndex];
-      if (
-        existing?.kind === 'message'
-        && incoming.kind === 'message'
-        && !isMonotonicMessageTextUpdate(existing.text.trim(), incoming.text.trim())
-      ) {
-        const distinctIncoming = cloneMessageSegmentWithVariantKey(incoming);
-        const distinctIdentity = buildSegmentIdentity(distinctIncoming);
-        const distinctIndex = merged.findIndex((segment) => buildSegmentIdentity(segment) === distinctIdentity);
-        if (distinctIndex >= 0) {
-          merged[distinctIndex] = distinctIncoming;
-        } else {
-          merged.push(distinctIncoming);
-        }
-        continue;
-      }
-      merged[existingIndex] = structuredClone(incoming);
-      continue;
-    }
-    merged.push(structuredClone(incoming));
-  }
-  return merged;
-}
-
 export function rebuildAssistantSegmentsFromMergedEntry(input: {
   role: SessionMessageRole | 'assistant';
+  turnKey: string;
+  laneKey: string;
   existingSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   incomingSegments: ReadonlyArray<SessionAssistantTurnSegment>;
   thinking: string | null;
@@ -390,16 +432,20 @@ export function rebuildAssistantSegmentsFromMergedEntry(input: {
     return [];
   }
 
-  const orderedSegments = mergeAssistantSegmentSkeleton(input.existingSegments, input.incomingSegments);
+  const orderedSegments = mergeAssistantSegmentStream({
+    turnKey: input.turnKey,
+    laneKey: input.laneKey,
+    existingSegments: input.existingSegments,
+    incomingSegments: input.incomingSegments,
+  });
   const mergedToolByKey = new Map<string, SessionRenderToolCard>();
   for (const tool of input.toolCards) {
     mergedToolByKey.set(normalizeToolSegmentCardKey(tool), tool);
   }
 
-  const incomingMessageTexts = buildNormalizedMessageSegmentTextSet(input.incomingSegments);
-  const hasDistinctIncomingMessageSegments = incomingMessageTexts.size > 0;
-  const thinkingSegmentCount = orderedSegments.filter((segment) => segment.kind === 'thinking').length;
-  const mediaSegmentCount = orderedSegments.filter((segment) => segment.kind === 'media').length;
+  const messageSegmentCount = countSegmentsOfKind(orderedSegments, 'message');
+  const thinkingSegmentCount = countSegmentsOfKind(orderedSegments, 'thinking');
+  const mediaSegmentCount = countSegmentsOfKind(orderedSegments, 'media');
   const emittedToolKeys = new Set<string>();
   const rebuilt: SessionAssistantTurnSegment[] = [];
 
@@ -416,10 +462,10 @@ export function rebuildAssistantSegmentsFromMergedEntry(input: {
     }
 
     if (segment.kind === 'thinking') {
-      const nextText = thinkingSegmentCount === 1 && input.thinking
-        ? input.thinking
-        : segment.text;
-      const rebuiltSegment = buildThinkingSegment(segment.key, nextText);
+      const rebuiltSegment = buildThinkingSegment(
+        segment.key,
+        thinkingSegmentCount === 1 ? (input.thinking ?? segment.text) : segment.text,
+      );
       if (rebuiltSegment) {
         rebuilt.push(rebuiltSegment);
       }
@@ -427,54 +473,59 @@ export function rebuildAssistantSegmentsFromMergedEntry(input: {
     }
 
     if (segment.kind === 'message') {
-      const nextText = (
-        hasDistinctIncomingMessageSegments
-        && incomingMessageTexts.has(segment.text.trim())
-      )
-        ? segment.text
-        : segment.text;
-      const rebuiltSegment = buildMessageSegment(segment.key, nextText);
+      const rebuiltSegment = buildMessageSegment(
+        segment.key,
+        messageSegmentCount === 1 ? input.text : segment.text,
+      );
       if (rebuiltSegment) {
         rebuilt.push(rebuiltSegment);
       }
       continue;
     }
 
-    const rebuiltSegment = mediaSegmentCount === 1
-      ? buildMediaSegment({
-          key: segment.key,
-          images: input.images,
-          attachedFiles: input.attachedFiles,
-        })
-      : buildMediaSegment({
-          key: segment.key,
-          images: segment.images,
-          attachedFiles: segment.attachedFiles,
-        });
+    const rebuiltSegment = buildMediaSegment(
+      mediaSegmentCount === 1
+        ? {
+            key: segment.key,
+            images: input.images,
+            attachedFiles: input.attachedFiles,
+          }
+        : {
+            key: segment.key,
+            images: segment.images,
+            attachedFiles: segment.attachedFiles,
+          },
+    );
     if (rebuiltSegment) {
       rebuilt.push(rebuiltSegment);
     }
   }
 
-  const hasThinkingSegment = rebuilt.some((segment) => segment.kind === 'thinking');
-  if (!hasThinkingSegment && input.thinking?.trim()) {
-    const segment = buildThinkingSegment('merged:thinking', input.thinking);
+  if (!rebuilt.some((segment) => segment.kind === 'thinking') && input.thinking?.trim()) {
+    const segment = buildThinkingSegment(
+      buildTurnScopedAssistantSegmentKey({
+        kind: 'thinking',
+        turnKey: input.turnKey,
+        laneKey: input.laneKey,
+        slot: 0,
+      }),
+      input.thinking,
+    );
     if (segment) {
       rebuilt.push(segment);
     }
   }
 
-  const hasMessageSegment = rebuilt.some((segment) => segment.kind === 'message');
-  const hasIncomingFullTextSegment = input.text.trim().length > 0
-    && rebuilt.some((segment) => segment.kind === 'message' && segment.text.trim() === input.text.trim());
-  if (!hasMessageSegment && input.text.trim()) {
-    const segment = buildMessageSegment('merged:message:full', input.text);
-    if (segment) {
-      rebuilt.push(segment);
-    }
-  }
-  if (!hasIncomingFullTextSegment && input.text.trim() && !incomingMessageTexts.has(input.text.trim())) {
-    const segment = buildMessageSegment('merged:message:tail', input.text);
+  if (!rebuilt.some((segment) => segment.kind === 'message') && input.text.trim()) {
+    const segment = buildMessageSegment(
+      buildTurnScopedAssistantSegmentKey({
+        kind: 'message',
+        turnKey: input.turnKey,
+        laneKey: input.laneKey,
+        slot: 0,
+      }),
+      input.text,
+    );
     if (segment) {
       rebuilt.push(segment);
     }
@@ -489,10 +540,14 @@ export function rebuildAssistantSegmentsFromMergedEntry(input: {
     rebuilt.push(buildToolSegment(tool));
   }
 
-  const hasMediaSegment = rebuilt.some((segment) => segment.kind === 'media');
-  if (!hasMediaSegment) {
+  if (!rebuilt.some((segment) => segment.kind === 'media')) {
     const segment = buildMediaSegment({
-      key: 'merged:media:tail',
+      key: buildTurnScopedAssistantSegmentKey({
+        kind: 'media',
+        turnKey: input.turnKey,
+        laneKey: input.laneKey,
+        slot: 0,
+      }),
       images: input.images,
       attachedFiles: input.attachedFiles,
     });

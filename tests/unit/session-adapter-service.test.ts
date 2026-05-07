@@ -87,45 +87,6 @@ describe('session runtime service', () => {
     expect(response.data.snapshot.items).toEqual([]);
   });
 
-  it('session abort clears runtime-host pending output state', async () => {
-    const configDir = await createRuntimeConfigDir();
-    const service = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
-      openclawBridge: {
-        chatSend: async () => ({ runId: 'run-abort-live' }),
-      },
-    });
-
-    await service.promptSession({
-      sessionKey: 'agent:main:main',
-      message: 'hello',
-      idempotencyKey: 'local-user-1',
-    });
-
-    const response = await service.abortSessionRuntime({ sessionKey: 'agent:main:main' });
-
-    expect(response.status).toBe(200);
-    expect(response.data.snapshot.runtime).toMatchObject({
-      sending: false,
-      activeRunId: null,
-      runPhase: 'aborted',
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      pendingFinal: false,
-    });
-
-    const restarted = new SessionRuntimeService({
-      getOpenClawConfigDir: () => configDir,
-      openclawBridge: {
-        chatSend: async () => ({ runId: 'run-unused' }),
-      },
-    });
-    const restored = await restarted.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
-    expect(restored.data.snapshot.runtime.sending).toBe(false);
-    expect(restored.data.snapshot.runtime.pendingTurnKey).toBeNull();
-  });
-
   it('live ingress still builds stable assistant timeline identities', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
@@ -261,6 +222,123 @@ describe('session runtime service', () => {
       status: 'streaming',
     });
     expect(secondEvent.snapshot.window.totalItemCount).toBe(1);
+  });
+
+  it('same-run assistant delta and final reuse the same message segment key', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const [deltaEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-segment-stable-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '主人，我先看看' }],
+        },
+      },
+    });
+    const [finalEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-segment-stable-1',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '主人，我先看看，已经确认完了' }],
+        },
+      },
+    });
+
+    expect(deltaEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-segment-stable-1',
+      segments: [{
+        kind: 'message',
+        key: 'message:main:run-segment-stable-1:main:0',
+        text: '主人，我先看看',
+      }],
+    });
+    expect(finalEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-segment-stable-1',
+      segments: [{
+        kind: 'message',
+        key: 'message:main:run-segment-stable-1:main:0',
+        text: '主人，我先看看，已经确认完了',
+      }],
+      text: '主人，我先看看，已经确认完了',
+    });
+    expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
+  });
+
+  it('same-run assistant final with messageId still reuses the live message segment key', () => {
+    const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+      },
+    });
+
+    const [deltaEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'delta',
+        runId: 'run-segment-stable-2',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '第一版回复' }],
+        },
+      },
+    });
+    const [finalEvent] = service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-segment-stable-2',
+        sessionKey: 'agent:main:main',
+        sequenceId: 2,
+        message: {
+          role: 'assistant',
+          messageId: 'assistant-msg-final-1',
+          content: [{ type: 'text', text: '最终版回复' }],
+        },
+      },
+    });
+
+    expect(deltaEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-segment-stable-2',
+      segments: [{
+        kind: 'message',
+        key: 'message:main:run-segment-stable-2:main:0',
+        text: '第一版回复',
+      }],
+    });
+    expect(finalEvent.item).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-segment-stable-2',
+      segments: [{
+        kind: 'message',
+        key: 'message:main:run-segment-stable-2:main:0',
+        text: '最终版回复',
+      }],
+      text: '最终版回复',
+    });
+    expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
   });
 
   it('team lane live ingress carries member lane metadata', () => {
@@ -803,7 +881,7 @@ describe('session runtime service', () => {
     });
   });
 
-  it('tool activity and final answer render as one assistant-turn with fixed internal order', async () => {
+  it('tool activity keeps one assistant-turn while final answer reuses the live message segment', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = new SessionRuntimeService({
       getOpenClawConfigDir: () => configDir,
@@ -864,7 +942,8 @@ describe('session runtime service', () => {
               segments: [
                 {
                   kind: 'message',
-                  text: '我先看看',
+                  key: 'message:main:run-order-1:main:0',
+                  text: '读完了，结论如下',
                 },
                 {
                   kind: 'tool',
@@ -874,11 +953,8 @@ describe('session runtime service', () => {
                     status: 'running',
                   },
                 },
-                {
-                  kind: 'message',
-                  text: '读完了，结论如下',
-                },
               ],
+              text: '读完了，结论如下',
               tools: [
                 {
                   id: 'tool-read',

@@ -1,13 +1,14 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatInput } from '@/pages/Chat/ChatInput';
-import { ChatListSurface } from '@/pages/Chat/components/ChatList';
+import { ChatList, ChatListSurface } from '@/pages/Chat/components/ChatList';
 import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import {
   applyAssistantPresentationToItems,
   type ChatRenderItem,
 } from '@/pages/Chat/chat-render-item-model';
+import type { ApprovalStatus, ChatSessionRecord } from '@/stores/chat';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -99,6 +100,45 @@ function buildUserAndAssistantItems(): ChatRenderItem[] {
       agentId: 'agent-a',
     },
   ]));
+}
+
+function buildSessionRecord(items: SessionRenderItem[]): ChatSessionRecord {
+  return {
+    meta: {
+      agentId: 'main',
+      kind: 'main',
+      preferred: true,
+      label: null,
+      titleSource: 'none',
+      displayName: null,
+      model: null,
+      lastActivityAt: null,
+      historyStatus: 'ready',
+      thinkingLevel: null,
+    },
+    runtime: {
+      sending: false,
+      activeRunId: null,
+      runPhase: 'idle',
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+    },
+    items,
+    window: {
+      totalItemCount: items.length,
+      windowStartOffset: 0,
+      windowEndOffset: items.length,
+      hasMore: false,
+      hasNewer: false,
+      isLoadingMore: false,
+      isLoadingNewer: false,
+      isAtLatest: true,
+      anchorItemKey: null,
+    },
+  };
 }
 
 describe('chat content rail layout', () => {
@@ -452,6 +492,81 @@ describe('chat content rail layout', () => {
         },
       },
     });
+  });
+
+  it('chat list should reuse unchanged render-items when only one assistant turn settles', () => {
+    const sessionKey = 'agent:test:main';
+    const initialItems = buildRenderItemsFromMessages(sessionKey, [
+      {
+        id: 'assistant-stable-1',
+        role: 'assistant',
+        messageId: 'turn-stable-1',
+        content: '稳定消息',
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-live-1',
+        role: 'assistant',
+        messageId: 'turn-live-1',
+        content: '第一段',
+        streaming: true,
+        timestamp: 2,
+      },
+    ]);
+    const settledLiveItem = buildRenderItemsFromMessages(sessionKey, [
+      {
+        id: 'assistant-live-1',
+        role: 'assistant',
+        messageId: 'turn-live-1',
+        content: '第一段，最终版',
+        timestamp: 2,
+      },
+    ])[0]!;
+
+    const view = render(
+      <ChatList
+        isActive={false}
+        currentSessionKey={sessionKey}
+        currentSession={buildSessionRecord(initialItems)}
+        approvalStatus={'idle' as ApprovalStatus}
+        agents={[]}
+        isGatewayRunning
+        errorMessage={null}
+        showThinking={false}
+        userAvatarDataUrl={null}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        onJumpToLatest={vi.fn()}
+        jumpToBottomLabel="Jump to bottom"
+        defaultAssistant={null}
+      />,
+    );
+
+    expect(assistantTurnRenderSpy).toHaveBeenCalledTimes(2);
+
+    view.rerender(
+      <ChatList
+        isActive={false}
+        currentSessionKey={sessionKey}
+        currentSession={buildSessionRecord([
+          initialItems[0]!,
+          settledLiveItem,
+        ])}
+        approvalStatus={'idle' as ApprovalStatus}
+        agents={[]}
+        isGatewayRunning
+        errorMessage={null}
+        showThinking={false}
+        userAvatarDataUrl={null}
+        onLoadOlder={vi.fn()}
+        loadOlderLabel="Load older"
+        onJumpToLatest={vi.fn()}
+        jumpToBottomLabel="Jump to bottom"
+        defaultAssistant={null}
+      />,
+    );
+
+    expect(assistantTurnRenderSpy).toHaveBeenCalledTimes(3);
   });
 
   it('chat input uses a floating narrow composer rail instead of a full-width dock strip', () => {

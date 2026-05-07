@@ -202,6 +202,36 @@ describe('chat message links', () => {
     expect(screen.queryByText(content)).toBeNull();
   });
 
+  it('assistant streaming settle keeps the same body root node for long markdown', () => {
+    const content = Array.from(
+      { length: 60 },
+      (_, index) => `- line ${index}: [OpenAI Stable](https://openai.com/?stable=${index})`,
+    ).join('\n');
+    const message: RawMessage = {
+      role: 'assistant',
+      id: 'assistant-stream-stable-body-1',
+      messageId: 'turn-stream-stable-body-1',
+      content,
+    };
+
+    const view = render(
+      <ChatAssistantTurn
+        item={buildItem({ ...message, streaming: true })}
+        showThinking={false}
+      />,
+    );
+
+    const firstBody = view.container.querySelector('[data-chat-body-mode="streaming"]');
+    expect(firstBody).not.toBeNull();
+    expect(screen.getAllByRole('link', { name: 'OpenAI Stable' }).length).toBeGreaterThan(0);
+
+    view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+
+    const settledBody = view.container.querySelector('[data-chat-body-mode="settled"]');
+    expect(settledBody).toBe(firstBody);
+    expect(screen.getAllByRole('link', { name: 'OpenAI Stable' }).length).toBeGreaterThan(0);
+  });
+
   it('assistant streaming text keeps a single body skeleton when settling', () => {
     const message: RawMessage = {
       role: 'assistant',
@@ -284,4 +314,3 @@ describe('chat message links', () => {
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
   });
 });
-
