@@ -35,6 +35,7 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
@@ -818,7 +819,7 @@ export function Cron({ embedded = false }: CronProps) {
   const [editingJob, setEditingJob] = useState<CronJob | undefined>();
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
 
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const manualRefreshBusy = refreshing || mutating;
   const showInitialLoading = !snapshotReady && initialLoading;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);

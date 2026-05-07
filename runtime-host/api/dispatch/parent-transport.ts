@@ -23,8 +23,7 @@ export type ParentGatewayForwardEventName =
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
-  | 'gateway:error'
-  | 'gateway:connection';
+  | 'gateway:error';
 
 interface ParentTransportErrorPayload {
   code: string;

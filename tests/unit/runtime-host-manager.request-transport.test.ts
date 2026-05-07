@@ -284,7 +284,7 @@ describe('runtime-host manager request transport policy', () => {
 
   it('启动时 gateway 端口仅来自 gatewayManager，不再读取 settings.gatewayPort', async () => {
     const gatewayManager = {
-      getStatus: vi.fn(() => ({ state: 'running', port: 19876 })),
+      getStatus: vi.fn(() => ({ processState: 'running', port: 19876 })),
     } as never;
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
@@ -304,7 +304,7 @@ describe('runtime-host manager request transport policy', () => {
 
   it('gatewayManager 返回非法端口时 start 直接失败，不再回退默认端口', async () => {
     const gatewayManager = {
-      getStatus: vi.fn(() => ({ state: 'running', port: 0 })),
+      getStatus: vi.fn(() => ({ processState: 'running', port: 0 })),
     } as never;
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
@@ -374,7 +374,7 @@ describe('runtime-host manager request transport policy', () => {
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
       gatewayManager: {
-        getStatus: () => ({ state: 'running', port: 19876 }),
+        getStatus: () => ({ processState: 'running', port: 19876 }),
         debouncedRestart,
       } as never,
     });

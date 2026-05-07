@@ -12,8 +12,17 @@ const invokeIpcMock = vi.fn();
 
 const gatewayState = {
   status: {
-    state: 'running',
+    processState: 'running',
     port: 18789,
+    gatewayReady: true,
+    healthSummary: 'healthy',
+    transportState: 'connected',
+    portReachable: true,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt: 1,
   },
 };
 

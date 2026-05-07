@@ -41,9 +41,14 @@ export async function sendChatTransport(
       : {}),
   });
   if (!response.success) {
+    const failureMessage = typeof (response as { error?: unknown }).error === 'string'
+      ? (response as { error?: string }).error?.trim()
+      : '';
     return {
       ok: false,
-      error: CHAT_SEND_DEFAULT_ERROR,
+      error: failureMessage
+        ? failureMessage
+        : CHAT_SEND_DEFAULT_ERROR,
     };
   }
   const normalizedRunId = typeof response.runId === 'string'

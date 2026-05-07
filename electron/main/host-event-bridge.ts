@@ -4,9 +4,11 @@ import type { GatewayStatus } from '../gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
 import type {
   RuntimeHostManager,
+  RuntimeHostGatewayStatusSnapshot,
   RuntimeHostManagerHealth,
   RuntimeHostManagerState,
 } from './runtime-host-manager';
+import { buildPublicGatewayStatus } from '../gateway/public-status';
 import { browserOAuthManager } from '../services/providers/oauth/browser-oauth-manager';
 import { deviceOAuthManager } from '../services/providers/oauth/device-oauth-manager';
 import { whatsAppLoginManager } from '../services/channels/whatsapp-login-manager';
@@ -15,7 +17,6 @@ import { weixinLoginManager } from '../services/channels/weixin-login-manager';
 type HostEventName =
   | 'gateway:status'
   | 'gateway:error'
-  | 'gateway:connection'
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
@@ -110,11 +111,17 @@ export function registerHostEventBridge(deps: {
     emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
   };
 
-  let previousGatewayState: GatewayStatus['state'] = deps.gatewayManager.getStatus().state;
+  let previousGatewayProcessState: GatewayStatus['processState'] = deps.gatewayManager.getStatus().processState;
   let previousRuntimeHostStatus: RuntimeHostLifecycleStatus | null = null;
   let previousRuntimeHostPid: number | undefined;
   let previousRuntimeHostError: string | undefined;
   let runtimeHostPollingBusy = false;
+
+  const publishGatewaySnapshot = async () => {
+    const baseStatus = deps.gatewayManager.getStatus();
+    const runtimeGatewayStatus = await deps.runtimeHostManager.readGatewayStatus();
+    emit('gateway:status', buildPublicGatewayStatus(baseStatus, runtimeGatewayStatus));
+  };
 
   const publishRuntimeHostSnapshot = async () => {
     if (runtimeHostPollingBusy) {
@@ -170,9 +177,9 @@ export function registerHostEventBridge(deps: {
   };
 
   deps.gatewayManager.on('status', (status: GatewayStatus) => {
-    emit('gateway:status', status);
-    const transitionedToRunning = status.state === 'running' && previousGatewayState !== 'running';
-    previousGatewayState = status.state;
+    void publishGatewaySnapshot();
+    const transitionedToRunning = status.processState === 'running' && previousGatewayProcessState !== 'running';
+    previousGatewayProcessState = status.processState;
     if (transitionedToRunning) {
       void deps.runtimeHostManager.syncSecurityPolicyToGatewayIfRunning();
     }
@@ -193,10 +200,6 @@ export function registerHostEventBridge(deps: {
     }
     if (eventName === 'gateway:notification') {
       emit('gateway:notification', payload);
-      return;
-    }
-    if (eventName === 'gateway:connection') {
-      emit('gateway:connection', payload);
       return;
     }
     if (eventName === 'session:update') {
@@ -264,8 +267,10 @@ export function registerHostEventBridge(deps: {
     emit('channel:weixin-error', error);
   });
 
+  void publishGatewaySnapshot();
   void publishRuntimeHostSnapshot();
   const runtimeHostPollTimer = setInterval(() => {
+    void publishGatewaySnapshot();
     void publishRuntimeHostSnapshot();
   }, 1500);
   runtimeHostPollTimer.unref();

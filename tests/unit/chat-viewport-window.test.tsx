@@ -67,7 +67,19 @@ describe('chat viewport window', () => {
     const currentSessionKey = 'agent:test:main';
     const allMessages = buildSessionMessages(35);
     useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
     useSubagentsStore.setState({
@@ -145,7 +157,19 @@ describe('chat viewport window', () => {
     const allMessages = buildSessionMessages(20);
 
     useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
     useSubagentsStore.setState({
@@ -222,4 +246,3 @@ describe('chat viewport window', () => {
     expect(jumpViewportToLatest).not.toHaveBeenCalled();
   });
 });
-

@@ -284,5 +284,85 @@ describe('chat history apply pipeline', () => {
     expect(harness.get().loadedSessions[sessionKey]?.runtime.activeRunId).toBeNull();
     expect(harness.get().loadedSessions[sessionKey]?.runtime.runPhase).toBe('done');
   });
+
+  it('active run期间的history snapshot不能冲掉当前pending assistant turn', async () => {
+    const sessionKey = 'agent:main:main';
+    const historyRuntime = createHistoryRuntimeHarness();
+    const harness = createStateHarness({
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: {
+          ...createEmptySessionRecord(),
+          items: [{
+            key: `session:${sessionKey}|assistant-turn:main:run-1:main`,
+            kind: 'assistant-turn',
+            sessionKey,
+            role: 'assistant',
+            turnKey: 'main:run-1',
+            laneKey: 'main',
+            identitySource: 'run',
+            identityMode: 'run',
+            identityConfidence: 'strong',
+            status: 'streaming',
+            segments: [],
+            thinking: null,
+            tools: [],
+            embeddedToolResults: [],
+            text: '',
+            images: [],
+            attachedFiles: [],
+            pendingState: 'typing',
+            updatedAt: 1,
+          }],
+          runtime: {
+            ...createEmptySessionRecord().runtime,
+            sending: true,
+            activeRunId: 'run-1',
+            runPhase: 'submitted',
+            pendingTurnKey: 'main:run-1',
+            pendingTurnLaneKey: 'main',
+          },
+        },
+      },
+      pendingApprovalsBySession: {},
+      foregroundHistorySessionKey: sessionKey,
+    } as ChatStoreState);
+
+    const applyLoadedMessages = createApplyLoadedMessagesPipeline({
+      set: harness.set,
+      get: harness.get,
+      historyRuntime,
+      requestedSessionKey: sessionKey,
+      scope: 'foreground',
+      abortSignal: new AbortController().signal,
+      shouldAbortHistoryProcessing: () => false,
+    });
+
+    await applyLoadedMessages({
+      ...createHistoryWindow(sessionKey, []),
+      snapshot: createSnapshot(sessionKey, [], {
+        sending: true,
+        activeRunId: 'run-1',
+        runPhase: 'submitted',
+        pendingTurnKey: 'main:run-1',
+        pendingTurnLaneKey: 'main',
+      }),
+    });
+
+    expect(getSessionItems(harness.get(), sessionKey)).toEqual([
+      expect.objectContaining({
+        kind: 'assistant-turn',
+        turnKey: 'main:run-1',
+        laneKey: 'main',
+        status: 'streaming',
+      }),
+    ]);
+    expect(harness.get().loadedSessions[sessionKey]?.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-1',
+      pendingTurnKey: 'main:run-1',
+      runPhase: 'submitted',
+    });
+  });
 });
 

@@ -2,6 +2,7 @@ import type { ResourceStatusState } from '@/lib/resource-state';
 import type { SessionUpdateEvent } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
 import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
+import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -94,6 +95,8 @@ export interface ChatSessionRuntimeState {
   pendingTurnLaneKey: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
+  lastError: string | null;
+  lastIssue: GatewayTransportIssue | null;
 }
 
 export interface ChatSessionMetaState {

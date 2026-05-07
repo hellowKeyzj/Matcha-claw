@@ -28,6 +28,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   useProviderStore,
   type ProviderAccount,
@@ -151,7 +152,7 @@ function getAuthModeLabel(
 export function ProvidersSettings() {
   const { t } = useTranslation('settings');
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
-  const gatewayState = useGatewayStore((state) => state.status.state);
+  const gatewayStatus = useGatewayStore((state) => state.status);
   const {
     providerSnapshot,
     snapshotReady,
@@ -176,7 +177,8 @@ export function ProvidersSettings() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
-  const wasGatewayRunningRef = React.useRef(gatewayState === 'running');
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const wasGatewayRunningRef = React.useRef(gatewayOperational);
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
   const displayProviders = useMemo(
@@ -227,14 +229,14 @@ export function ProvidersSettings() {
   }, [refreshProviderSnapshot]);
 
   useEffect(() => {
-    if (!wasGatewayRunningRef.current && gatewayState === 'running') {
+    if (!wasGatewayRunningRef.current && gatewayOperational) {
       void refreshProviderSnapshot({
         trigger: 'background',
         reason: 'gateway_reconnected',
       });
     }
-    wasGatewayRunningRef.current = gatewayState === 'running';
-  }, [gatewayState, refreshProviderSnapshot]);
+    wasGatewayRunningRef.current = gatewayOperational;
+  }, [gatewayOperational, refreshProviderSnapshot]);
 
   const handleManualRefresh = () => {
     if (manualRefreshPending) {

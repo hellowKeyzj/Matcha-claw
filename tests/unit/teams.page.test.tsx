@@ -17,8 +17,17 @@ describe('teams page', () => {
 
     useGatewayStore.setState({
       status: {
-        state: 'stopped',
+        processState: 'stopped',
         port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
       },
       health: null,
       isInitialized: true,
@@ -76,8 +85,17 @@ describe('teams page', () => {
     act(() => {
       useGatewayStore.setState({
         status: {
-          state: 'running',
+          processState: 'running',
           port: 18789,
+          gatewayReady: true,
+          healthSummary: 'healthy',
+          transportState: 'connected',
+          portReachable: true,
+          diagnostics: {
+            consecutiveHeartbeatMisses: 0,
+            consecutiveRpcFailures: 0,
+          },
+          updatedAt: 2,
         },
       });
     });
@@ -90,8 +108,17 @@ describe('teams page', () => {
   it('启动阶段且无本地 agent 时显示等待提示', async () => {
     useGatewayStore.setState({
       status: {
-        state: 'starting',
+        processState: 'starting',
         port: 18789,
+        gatewayReady: false,
+        healthSummary: 'degraded',
+        transportState: 'reconnecting',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
       },
       health: null,
       isInitialized: false,

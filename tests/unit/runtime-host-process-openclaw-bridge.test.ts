@@ -9,6 +9,7 @@ function createGatewayClientStub() {
     readGatewayConnectionState: vi.fn(async () => ({
       state: 'connected',
       portReachable: true,
+      transportEpoch: 1,
       updatedAt: 1,
     })),
     buildSecurityAuditQueryParams: vi.fn(() => ({ page: '1', agentId: 'main' })),
@@ -130,6 +131,7 @@ describe('runtime-host openclaw bridge', () => {
     await expect(bridge.readGatewayConnectionState()).resolves.toEqual({
       state: 'connected',
       portReachable: true,
+      transportEpoch: 1,
       updatedAt: 1,
     });
     expect(client.readGatewayConnectionState).toHaveBeenCalledTimes(1);

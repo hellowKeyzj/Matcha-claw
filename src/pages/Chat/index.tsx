@@ -13,6 +13,8 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
+import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   createEmptySessionRecord,
   getPendingApprovals,
@@ -39,6 +41,128 @@ interface ChatProps {
 const EMPTY_AGENTS: never[] = [];
 const EMPTY_CHAT_PAGE_SESSION = createEmptySessionRecord();
 const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
+const ACTIVE_RUN_DISCONNECTED_ERROR = 'The active run disconnected before a terminal event was received.';
+const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
+const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
+
+function parseRpcFailedMessage(message: string): { method: string; reason: string } | null {
+  const matched = /^Gateway RPC failed \((.+?)\):\s*(.+)$/.exec(message.trim());
+  if (!matched) {
+    return null;
+  }
+  return {
+    method: matched[1],
+    reason: matched[2],
+  };
+}
+
+function resolveSocketCloseReason(issue: GatewayTransportIssue): string {
+  const details = issue.details;
+  if (details && typeof details === 'object' && typeof (details as { reason?: unknown }).reason === 'string') {
+    return (details as { reason: string }).reason;
+  }
+  return 'unknown';
+}
+
+function localizeGatewayIssueByCode(
+  issue: GatewayTransportIssue,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  switch (issue.code) {
+    case 'MODEL_UNAVAILABLE':
+      return t('errors.modelUnavailable');
+    case 'AUTH_REQUIRED':
+    case 'AUTH_TOKEN_NOT_CONFIGURED':
+    case 'AUTH_PASSWORD_MISSING':
+    case 'AUTH_PASSWORD_NOT_CONFIGURED':
+      return t('errors.gatewayAuthRequired');
+    case 'AUTH_TOKEN_MISSING':
+      return t('errors.gatewayTokenMissing');
+    case 'AUTH_TOKEN_MISMATCH':
+      return t('errors.gatewayTokenMismatch');
+    case 'AUTH_UNAUTHORIZED':
+    case 'AUTH_PASSWORD_MISMATCH':
+    case 'AUTH_BOOTSTRAP_TOKEN_INVALID':
+    case 'AUTH_DEVICE_TOKEN_MISMATCH':
+    case 'DEVICE_AUTH_INVALID':
+    case 'DEVICE_AUTH_DEVICE_ID_MISMATCH':
+    case 'DEVICE_AUTH_SIGNATURE_EXPIRED':
+    case 'DEVICE_AUTH_NONCE_REQUIRED':
+    case 'DEVICE_AUTH_NONCE_MISMATCH':
+    case 'DEVICE_AUTH_SIGNATURE_INVALID':
+    case 'DEVICE_AUTH_PUBLIC_KEY_INVALID':
+    case 'AUTH_TAILSCALE_IDENTITY_MISSING':
+    case 'AUTH_TAILSCALE_PROXY_MISSING':
+    case 'AUTH_TAILSCALE_WHOIS_FAILED':
+    case 'AUTH_TAILSCALE_IDENTITY_MISMATCH':
+      return t('errors.gatewayAuthFailed');
+    case 'AUTH_RATE_LIMITED':
+      return t('errors.gatewayAuthRateLimited');
+    case 'PAIRING_REQUIRED':
+      return t('errors.gatewayPairingRequired');
+    case 'CONTROL_UI_ORIGIN_NOT_ALLOWED':
+      return t('errors.gatewayOriginNotAllowed');
+    case 'CONTROL_UI_DEVICE_IDENTITY_REQUIRED':
+    case 'DEVICE_IDENTITY_REQUIRED':
+      return t('errors.gatewayDeviceIdentityRequired');
+    default:
+      return null;
+  }
+}
+
+function localizeGatewayIssue(
+  issue: GatewayTransportIssue | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (!issue) {
+    return null;
+  }
+
+  const codeLocalized = localizeGatewayIssueByCode(issue, t);
+  if (codeLocalized) {
+    return codeLocalized;
+  }
+
+  if (!issue.message) {
+    return null;
+  }
+
+  if (issue.source === 'socket-close') {
+    return t('errors.gatewaySocketClosed', {
+      code: issue.code || 'unknown',
+      reason: resolveSocketCloseReason(issue),
+    });
+  }
+
+  if (issue.source === 'heartbeat-timeout') {
+    return t('errors.gatewayHeartbeatTimeout');
+  }
+
+  if (issue.source === 'connect') {
+    if (issue.message === 'Gateway connect timeout') {
+      return t('errors.gatewayConnectTimeout');
+    }
+    if (issue.message.startsWith(GATEWAY_CONNECT_FAILED_PREFIX)) {
+      return t('errors.gatewayConnectFailed', {
+        reason: issue.message.slice(GATEWAY_CONNECT_FAILED_PREFIX.length).trim(),
+      });
+    }
+  }
+
+  if (issue.source === 'rpc') {
+    if (issue.message.startsWith(GATEWAY_RPC_TIMEOUT_PREFIX)) {
+      return t('errors.gatewayRpcTimeout', {
+        method: issue.message.slice(GATEWAY_RPC_TIMEOUT_PREFIX.length).trim(),
+      });
+    }
+    const rpcFailure = parseRpcFailedMessage(issue.message);
+    if (rpcFailure) {
+      return t('errors.gatewayRpcFailed', rpcFailure);
+    }
+  }
+
+  return issue.message;
+}
 
 function selectChatPageState(state: ChatStoreState) {
   const currentSessionKey = state.currentSessionKey;
@@ -51,7 +175,7 @@ function selectChatPageState(state: ChatStoreState) {
     foregroundHistorySessionKey: state.foregroundHistorySessionKey,
     sessionsLoading: state.sessionCatalogStatus.status === 'loading',
     mutating: state.mutating,
-    error: state.error,
+    runtimeError: currentSession.runtime.lastError,
     showThinking: state.showThinking,
     refresh: state.refresh,
     toggleThinking: state.toggleThinking,
@@ -79,7 +203,12 @@ export function Chat({ isActive = true }: ChatProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const localizedGatewayIssue = useMemo(() => {
+    return localizeGatewayIssue(gatewayStatus.lastIssue, t)
+      ?? gatewayStatus.lastError
+      ?? null;
+  }, [gatewayStatus.lastError, gatewayStatus.lastIssue, t]);
   const {
     currentSessionKey,
     currentSession,
@@ -88,7 +217,7 @@ export function Chat({ isActive = true }: ChatProps) {
     foregroundHistorySessionKey,
     sessionsLoading,
     mutating,
-    error,
+    runtimeError,
     showThinking,
     refresh,
     toggleThinking,
@@ -185,6 +314,30 @@ export function Chat({ isActive = true }: ChatProps) {
     const matchedAgent = agents.find((agent) => agent.id === currentAgentId);
     return Array.isArray(matchedAgent?.skills) ? matchedAgent.skills : null;
   }, [agents, currentAgentId]);
+  const localizedRuntimeError = useMemo(() => {
+    const localizedRuntimeIssue = localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t);
+    const fallbackGatewayRuntimeError = (
+      localizedGatewayIssue
+      && (
+        currentSession.runtime.sending
+        || currentSession.runtime.pendingFinal
+        || currentSession.runtime.runPhase === 'finalizing'
+        || currentSession.runtime.runPhase === 'error'
+      )
+        ? localizedGatewayIssue
+        : null
+    );
+    const effectiveRuntimeError = localizedRuntimeIssue
+      ?? runtimeError
+      ?? fallbackGatewayRuntimeError;
+    if (!effectiveRuntimeError) {
+      return null;
+    }
+    if (effectiveRuntimeError === ACTIVE_RUN_DISCONNECTED_ERROR) {
+      return t('errors.activeRunDisconnected');
+    }
+    return effectiveRuntimeError;
+  }, [currentSession.runtime.lastIssue, currentSession.runtime.pendingFinal, currentSession.runtime.runPhase, currentSession.runtime.sending, localizedGatewayIssue, runtimeError, t]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -207,7 +360,7 @@ export function Chat({ isActive = true }: ChatProps) {
     return (
       <ChatOffline
         title={t('gatewayNotRunning')}
-        description={t('gatewayRequired')}
+        description={localizedGatewayIssue || t('gatewayRequired')}
       />
     );
   }
@@ -263,7 +416,7 @@ export function Chat({ isActive = true }: ChatProps) {
             approvalStatus={approvalStatus}
             agents={agents}
             isGatewayRunning={isGatewayRunning}
-            errorMessage={error}
+            errorMessage={localizedRuntimeError}
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
             defaultAssistant={{
@@ -282,9 +435,9 @@ export function Chat({ isActive = true }: ChatProps) {
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />
         )}
-        errorBanner={error ? (
+        errorBanner={localizedRuntimeError ? (
           <ChatErrorBanner
-            error={error}
+            error={localizedRuntimeError}
             dismissLabel={t('common:actions.dismiss')}
             onDismiss={clearError}
           />

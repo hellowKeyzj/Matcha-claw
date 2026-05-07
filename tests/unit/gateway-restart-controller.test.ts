@@ -15,10 +15,10 @@ describe('gateway restart controller', () => {
     const controller = new GatewayRestartController();
     const executeRestart = vi.fn();
 
-    controller.markDeferredRestart('reload', { state: 'starting', startLock: true });
+    controller.markDeferredRestart('reload', { processState: 'starting', startLock: true });
     controller.flushDeferredRestart(
       'status:starting->running',
-      { state: 'running', startLock: false, shouldReconnect: true },
+      { processState: 'running', startLock: false, shouldReconnect: true },
       executeRestart,
     );
 
@@ -29,13 +29,13 @@ describe('gateway restart controller', () => {
     const controller = new GatewayRestartController();
     const executeRestart = vi.fn();
 
-    controller.markDeferredRestart('restart', { state: 'starting', startLock: true });
+    controller.markDeferredRestart('restart', { processState: 'starting', startLock: true });
     vi.setSystemTime(new Date('2026-04-09T12:00:05.000Z'));
     controller.recordRestartCompleted();
 
     controller.flushDeferredRestart(
       'start:finally',
-      { state: 'running', startLock: false, shouldReconnect: true },
+      { processState: 'running', startLock: false, shouldReconnect: true },
       executeRestart,
     );
 

@@ -36,6 +36,28 @@
         "refreshing": "正在刷新...",
         "mutating": "正在应用变更..."
     },
+    "pending": {
+        "typing": "正在思考",
+        "activity": "正在调用工具"
+    },
+    "errors": {
+        "activeRunDisconnected": "当前这轮回复在收到结束事件前就断开了连接。",
+        "modelUnavailable": "当前模型不可用，请稍后重试或切换模型。",
+        "gatewayAuthRequired": "OpenClaw 网关需要认证，请检查认证配置。",
+        "gatewayAuthFailed": "OpenClaw 网关认证失败，请检查凭据或认证配置。",
+        "gatewayTokenMissing": "OpenClaw 网关缺少访问令牌。",
+        "gatewayTokenMismatch": "OpenClaw 网关访问令牌不匹配。",
+        "gatewayAuthRateLimited": "OpenClaw 网关认证失败次数过多，请稍后再试。",
+        "gatewayPairingRequired": "当前设备需要先与 OpenClaw 网关配对授权。",
+        "gatewayOriginNotAllowed": "当前来源不被 OpenClaw 网关允许，请检查 control UI 来源配置。",
+        "gatewayDeviceIdentityRequired": "当前连接缺少设备身份校验，请检查 HTTPS/localhost 或设备身份配置。",
+        "gatewayConnectTimeout": "连接 OpenClaw 网关超时。",
+        "gatewayConnectFailed": "连接 OpenClaw 网关失败：{{reason}}",
+        "gatewayHeartbeatTimeout": "与 OpenClaw 网关的连接已超时，正在等待恢复。",
+        "gatewaySocketClosed": "与 OpenClaw 网关的连接已断开（代码 {{code}}，原因：{{reason}}）。",
+        "gatewayRpcTimeout": "调用 OpenClaw 网关超时：{{method}}",
+        "gatewayRpcFailed": "调用 OpenClaw 网关失败：{{method}}，原因：{{reason}}"
+    },
     "taskPanel": {
         "stepStatus": {
             "running": "进行中",

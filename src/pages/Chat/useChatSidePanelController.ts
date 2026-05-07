@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { resolveChatSidePanelLayout, type ChatSidePanelMode } from './chat-workspace-layout';
 
 export type ChatSidePanelTab = 'tasks' | 'skills';
@@ -48,7 +49,7 @@ export function useChatSidePanelController(
   const [containerWidth, setContainerWidth] = useState<number>(() => (
     typeof window === 'undefined' ? 0 : window.innerWidth
   ));
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const unfinishedTaskCount = tasks.length;
   const hasActiveTasks = useMemo(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),

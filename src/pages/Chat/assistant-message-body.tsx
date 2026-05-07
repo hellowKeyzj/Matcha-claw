@@ -71,22 +71,6 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
     handleBodyClick(event);
   }, [handleBodyClick, handleMarkdownClick]);
 
-  if (!text.trim() && isStreaming) {
-    return (
-      <div
-        data-chat-body-mode="streaming"
-        className={cn(
-          CHAT_LAYOUT_TOKENS.assistantSurface,
-          'relative',
-        )}
-      >
-        <div className="flex min-h-[34px] items-center px-0.5 py-1.5">
-          <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-foreground/50 align-text-bottom" />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div
       data-chat-body-mode={isStreaming ? 'streaming' : 'settled'}

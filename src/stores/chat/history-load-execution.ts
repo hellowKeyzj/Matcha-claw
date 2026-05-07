@@ -17,6 +17,7 @@ import {
   buildItemHistoryFingerprint,
   buildItemRenderFingerprint,
   getSessionItems,
+  getSessionRuntime,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
@@ -56,6 +57,29 @@ interface CreateApplyLoadedMessagesInput {
   scope: ChatHistoryLoadRequest['scope'];
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
+}
+
+function shouldPreserveActiveForegroundItems(input: {
+  state: ChatStoreState;
+  requestedSessionKey: string;
+  snapshot: HistoryWindowResult['snapshot'];
+}): boolean {
+  const { state, requestedSessionKey, snapshot } = input;
+  if (!snapshot || state.currentSessionKey !== requestedSessionKey) {
+    return false;
+  }
+  const currentRuntime = getSessionRuntime(state, requestedSessionKey);
+  const snapshotRuntime = snapshot.runtime;
+  if (!currentRuntime.sending || !snapshotRuntime.sending) {
+    return false;
+  }
+  if (!currentRuntime.activeRunId || currentRuntime.activeRunId !== snapshotRuntime.activeRunId) {
+    return false;
+  }
+  if (snapshot.items.length > 0) {
+    return false;
+  }
+  return true;
 }
 
 function resolveViewportFetchLimit(itemCount: number): number {
@@ -203,21 +227,34 @@ export function createApplyLoadedMessagesPipeline(
     const previousRenderFingerprint = historyRuntime.historyRenderFingerprintBySession.get(requestedSessionKey) ?? null;
     const didMessageListChange = previousRenderFingerprint !== renderFingerprint;
 
-    set((state) => ({
-      loadedSessions: patchSessionMeta(
-        {
-          loadedSessions: patchSessionSnapshot(state, requestedSessionKey, {
+    set((state) => {
+      const nextSnapshot = shouldPreserveActiveForegroundItems({
+        state,
+        requestedSessionKey,
+        snapshot,
+      })
+        ? {
+            ...snapshot,
+            items: getSessionItems(state, requestedSessionKey),
+          }
+        : {
             ...snapshot,
             items: hydratedItems,
-          }),
-        },
-        requestedSessionKey,
-        {
-          historyStatus: 'ready',
-          thinkingLevel: window.thinkingLevel,
-        },
-      ),
-    }));
+          };
+
+      return {
+        loadedSessions: patchSessionMeta(
+          {
+            loadedSessions: patchSessionSnapshot(state, requestedSessionKey, nextSnapshot),
+          },
+          requestedSessionKey,
+          {
+            historyStatus: 'ready',
+            thinkingLevel: window.thinkingLevel,
+          },
+        ),
+      };
+    });
     historyRuntime.historyRenderFingerprintBySession.set(requestedSessionKey, renderFingerprint);
 
     if (

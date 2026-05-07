@@ -240,9 +240,10 @@ function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void 
     const runtime = getSessionRuntime(state, state.currentSessionKey);
     const runtimePatch = reduceSessionRuntime(runtime, { type: 'send_failed', error });
     return {
-      error,
       loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-        runtime: runtimePatch === runtime ? runtime : { ...runtime, ...runtimePatch },
+        runtime: runtimePatch === runtime
+          ? runtime
+          : { ...runtime, ...runtimePatch, lastError: error },
       }),
     };
   });
@@ -308,12 +309,15 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
     });
 
-    if (!sendResult.ok) {
-      const errorMsg = sendResult.error;
-      if (isRecoverableChatSendTimeout(errorMsg)) {
-        set({ error: errorMsg });
-        return;
-      }
+      if (!sendResult.ok) {
+        const errorMsg = sendResult.error;
+        if (isRecoverableChatSendTimeout(errorMsg)) {
+          finalizeStoreSendFailure({
+            set,
+            error: errorMsg,
+          });
+          return;
+        }
       if (await maybeEnterStoreWaitingApproval({
         set,
         get,
@@ -354,7 +358,10 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } catch (error) {
     const errorMsg = String(error);
     if (isRecoverableChatSendTimeout(errorMsg)) {
-      set({ error: errorMsg });
+      finalizeStoreSendFailure({
+        set,
+        error: errorMsg,
+      });
       return;
     }
     const timeoutSignal = hasTimeoutSignal(error);

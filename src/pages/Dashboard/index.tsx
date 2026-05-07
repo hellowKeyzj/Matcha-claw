@@ -21,6 +21,7 @@ import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
@@ -33,7 +34,7 @@ export function Dashboard() {
   const { t } = useTranslation('dashboard');
   const gatewayStatus = useGatewayStore((state) => state.status);
 
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const usageFetchMaxAttempts = window.electron?.platform === 'win32'
     ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
     : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
@@ -235,9 +236,9 @@ export function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <StatusBadge status={gatewayStatus.state} />
+              <StatusBadge status={gatewayStatus.processState} />
             </div>
-            {gatewayStatus.state === 'running' && (
+            {isGatewayRunning && (
               <p className="mt-1 text-xs text-muted-foreground">
                 {t('port', { port: gatewayStatus.port })} | {t('pid', { pid: gatewayStatus.pid || 'N/A' })}
               </p>
@@ -256,7 +257,7 @@ export function Dashboard() {
               {uptime > 0 ? formatUptime(uptime) : '—'}
             </div>
             <p className="text-xs text-muted-foreground">
-              {gatewayStatus.state === 'running' ? t('sinceRestart') : t('gatewayNotRunning')}
+              {isGatewayRunning ? t('sinceRestart') : t('gatewayNotRunning')}
             </p>
           </CardContent>
         </Card>

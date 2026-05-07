@@ -58,7 +58,19 @@ describe('settings user avatar', () => {
 
     useGatewayStore.setState((state) => ({
       ...state,
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
     }));
 
     useUpdateStore.setState((state) => ({

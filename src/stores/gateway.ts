@@ -14,9 +14,12 @@ import {
 import { useChatStore } from './chat';
 import { useTaskCenterStore } from './task-center-store';
 import { useChannelsStore } from './channels';
+import { isGatewayOperational } from '@/lib/gateway-status';
+import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
+let gatewayReconcileTimer: ReturnType<typeof setInterval> | null = null;
 const TASK_NOTIFICATION_FLUSH_MS = 48;
 const TASK_NOTIFICATION_COALESCE_LIMIT = 200;
 let queuedTaskNotifications: Array<{ method?: string; params?: Record<string, unknown> }> = [];
@@ -34,6 +37,11 @@ interface GatewayHealth {
   uptime?: number;
 }
 
+interface GatewayErrorEventPayload {
+  message?: string;
+  issue?: GatewayTransportIssue;
+}
+
 type RuntimeHostObservedStatus =
   | 'unknown'
   | 'starting'
@@ -41,12 +49,6 @@ type RuntimeHostObservedStatus =
   | 'degraded'
   | 'error'
   | 'stopped';
-
-type GatewayConnectionObservedStatus =
-  | 'unknown'
-  | 'connected'
-  | 'reconnecting'
-  | 'disconnected';
 
 interface RuntimeHostObservedState {
   lifecycle: RuntimeHostObservedStatus;
@@ -56,9 +58,6 @@ interface RuntimeHostObservedState {
   activePluginCount?: number;
   enabledPluginIds?: string[];
   error?: string;
-  gatewayConnectionState?: GatewayConnectionObservedStatus;
-  gatewayConnectionReason?: string;
-  gatewayConnectionUpdatedAt?: number;
   restartCount: number;
   lastRestartAt?: number;
   updatedAt?: number;
@@ -221,13 +220,21 @@ function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconn
 
 export const useGatewayStore = create<GatewayState>((set, get) => ({
   status: {
-    state: 'stopped',
+    processState: 'stopped',
     port: 18789,
+    gatewayReady: false,
+    healthSummary: 'unresponsive',
+    transportState: 'disconnected',
+    portReachable: false,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt: Date.now(),
   },
   health: null,
   runtimeHost: {
     lifecycle: 'unknown',
-    gatewayConnectionState: 'unknown',
     restartCount: 0,
   },
   isInitialized: false,
@@ -248,43 +255,23 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
-            const prevState = get().status.state;
+            const prevOperational = isGatewayOperational(get().status);
             set({ status: payload });
-            if (payload.state === 'running' && prevState !== 'running') {
+            if (isGatewayOperational(payload) && !prevOperational) {
               syncPendingApprovalsFromChatStore();
             }
           }));
-          unsubscribers.push(subscribeHostEvent<{ message?: string }>('gateway:error', (payload) => {
-            set({ lastError: payload.message || 'Gateway error' });
-          }));
-          unsubscribers.push(subscribeHostEvent<{
-            state?: GatewayConnectionObservedStatus;
-            portReachable?: boolean;
-            lastError?: string;
-            updatedAt?: number;
-          }>('gateway:connection', (payload) => {
-            set((state) => {
-              const connectionState = payload.state ?? state.runtimeHost.gatewayConnectionState ?? 'unknown';
-              const lifecycle = (() => {
-                if (connectionState === 'disconnected' && state.runtimeHost.lifecycle === 'running') {
-                  return 'degraded';
-                }
-                if (connectionState === 'connected' && state.runtimeHost.lifecycle === 'degraded') {
-                  return 'running';
-                }
-                return state.runtimeHost.lifecycle;
-              })();
-              return {
-                runtimeHost: {
-                  ...state.runtimeHost,
-                  lifecycle,
-                  gatewayConnectionState: connectionState,
-                  gatewayConnectionReason: payload.lastError,
-                  gatewayConnectionUpdatedAt: payload.updatedAt ?? Date.now(),
-                  updatedAt: payload.updatedAt ?? Date.now(),
-                },
-              };
-            });
+          unsubscribers.push(subscribeHostEvent<GatewayErrorEventPayload>('gateway:error', (payload) => {
+            set((state) => ({
+              lastError: payload.issue?.message || payload.message || 'Gateway error',
+              status: {
+                ...state.status,
+                ...(payload.issue?.message
+                  ? { lastError: payload.issue.message }
+                  : (payload.message ? { lastError: payload.message } : {})),
+                ...(payload.issue ? { lastIssue: payload.issue } : {}),
+              },
+            }));
           }));
           unsubscribers.push(subscribeHostEvent<{ method?: string; params?: Record<string, unknown> }>(
             'gateway:notification',
@@ -359,9 +346,28 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               },
             }));
           }));
+          if (gatewayReconcileTimer !== null) {
+            clearInterval(gatewayReconcileTimer);
+          }
+          gatewayReconcileTimer = setInterval(() => {
+            void fetchGatewayStatusSnapshot()
+              .then((latest) => {
+                const current = get().status;
+                if (
+                  latest.processState !== current.processState
+                  || latest.transportState !== current.transportState
+                  || latest.healthSummary !== current.healthSummary
+                  || latest.gatewayReady !== current.gatewayReady
+                  || latest.updatedAt !== current.updatedAt
+                ) {
+                  set({ status: latest });
+                }
+              })
+              .catch(() => {});
+          }, 30_000);
           gatewayEventUnsubscribers = unsubscribers;
         }
-        if (status.state === 'running') {
+        if (isGatewayOperational(status)) {
           syncPendingApprovalsFromChatStore();
         }
       } catch (error) {

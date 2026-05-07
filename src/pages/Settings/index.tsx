@@ -1423,14 +1423,14 @@ export function Settings() {
             <div className="flex items-center gap-2">
               <Badge
                 variant={
-                  gatewayStatus.state === 'running'
+                  gatewayStatus.processState === 'running'
                     ? 'success'
-                    : gatewayStatus.state === 'error'
+                    : gatewayStatus.processState === 'error'
                       ? 'destructive'
                       : 'secondary'
                 }
               >
-                {gatewayStatus.state}
+                {gatewayStatus.processState}
               </Badge>
               <Button variant="outline" size="sm" onClick={restartGateway}>
                 <RefreshCw className="h-4 w-4 mr-2" />

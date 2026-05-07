@@ -22,6 +22,7 @@ import {
   signDevicePayload,
   type DeviceIdentity,
 } from '../shared/device-identity';
+import type { GatewayTransportIssue } from '../shared/gateway-error';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -31,11 +32,29 @@ type PendingRequest = {
 };
 
 export type GatewayConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+export type GatewayHealthSummary = 'healthy' | 'degraded' | 'unresponsive';
+
+export interface GatewayDiagnosticsSnapshot {
+  readonly lastAliveAt?: number;
+  readonly lastRpcSuccessAt?: number;
+  readonly lastRpcFailureAt?: number;
+  readonly lastRpcFailureMethod?: string;
+  readonly lastHeartbeatTimeoutAt?: number;
+  readonly consecutiveHeartbeatMisses: number;
+  readonly lastSocketCloseAt?: number;
+  readonly lastSocketCloseCode?: number;
+  readonly consecutiveRpcFailures: number;
+}
 
 export interface GatewayConnectionStatePayload {
   readonly state: GatewayConnectionState;
   readonly portReachable: boolean;
+  readonly gatewayReady: boolean;
+  readonly healthSummary: GatewayHealthSummary;
+  readonly transportEpoch: number;
   readonly lastError?: string;
+  readonly lastIssue?: GatewayTransportIssue;
+  readonly diagnostics: GatewayDiagnosticsSnapshot;
   readonly updatedAt: number;
 }
 
@@ -45,6 +64,7 @@ export interface GatewayClientOptions {
   readonly onGatewayChannelStatus?: (payload: { channelId: string; status: string }) => void;
   readonly onGatewayError?: (error: Error) => void;
   readonly onGatewayConnectionState?: (payload: GatewayConnectionStatePayload) => void;
+  readonly requestGatewayRestart?: (reason: string) => Promise<void>;
 }
 
 export const DEFAULT_GATEWAY_OPERATOR_SCOPES = [
@@ -61,6 +81,14 @@ const GATEWAY_CLIENT_DISPLAY_NAME = 'MatchaClaw Runtime Host';
 const GATEWAY_CLIENT_CAPS = ['tool-events'] as const;
 const GATEWAY_DEVICE_IDENTITY_PATH = join(getRuntimeHostDataDir(), 'identity', 'device.json');
 let gatewayDeviceIdentityCache: DeviceIdentity | null = null;
+const GATEWAY_HEARTBEAT_INTERVAL_MS = process.platform === 'win32' ? 45_000 : 30_000;
+const GATEWAY_HEARTBEAT_TIMEOUT_MS = process.platform === 'win32' ? 20_000 : 10_000;
+const GATEWAY_HEARTBEAT_MAX_MISSES = process.platform === 'win32' ? 4 : 3;
+const GATEWAY_READY_FALLBACK_MS = 30_000;
+const GATEWAY_INITIAL_READY_HEARTBEAT_GRACE_MS = 300_000;
+const GATEWAY_RECONNECT_MAX_ATTEMPTS = 10;
+const GATEWAY_RECONNECT_BASE_DELAY_MS = 1_000;
+const GATEWAY_RECONNECT_MAX_DELAY_MS = 30_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -95,6 +123,28 @@ function extractGatewayErrorMessageFromResponse(message: GatewayResponseFrame): 
     return extractGatewayErrorMessage({ error: message.error });
   }
   return 'Unknown Gateway error';
+}
+
+function extractGatewayErrorCode(payload: unknown): string {
+  if (!isRecord(payload)) {
+    return '';
+  }
+  const error = payload.error;
+  if (!isRecord(error)) {
+    return '';
+  }
+  return typeof error.code === 'string' ? error.code.trim() : '';
+}
+
+function extractGatewayErrorDetails(payload: unknown): unknown {
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const error = payload.error;
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  return error.details;
 }
 
 function getGatewayPort(): number {
@@ -144,6 +194,53 @@ function loadGatewayDeviceIdentity(): DeviceIdentity {
   }
   gatewayDeviceIdentityCache = loadOrCreateDeviceIdentity(GATEWAY_DEVICE_IDENTITY_PATH);
   return gatewayDeviceIdentityCache;
+}
+
+function buildInitialDiagnostics(): GatewayDiagnosticsSnapshot {
+  return {
+    consecutiveHeartbeatMisses: 0,
+    consecutiveRpcFailures: 0,
+  };
+}
+
+function sameDiagnosticsSnapshot(
+  left: GatewayDiagnosticsSnapshot,
+  right: GatewayDiagnosticsSnapshot,
+): boolean {
+  return left.lastAliveAt === right.lastAliveAt
+    && left.lastRpcSuccessAt === right.lastRpcSuccessAt
+    && left.lastRpcFailureAt === right.lastRpcFailureAt
+    && left.lastRpcFailureMethod === right.lastRpcFailureMethod
+    && left.lastHeartbeatTimeoutAt === right.lastHeartbeatTimeoutAt
+    && left.consecutiveHeartbeatMisses === right.consecutiveHeartbeatMisses
+    && left.lastSocketCloseAt === right.lastSocketCloseAt
+    && left.lastSocketCloseCode === right.lastSocketCloseCode
+    && left.consecutiveRpcFailures === right.consecutiveRpcFailures;
+}
+
+function nextReconnectDelayMs(attempt: number): number {
+  return Math.min(
+    GATEWAY_RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt)),
+    GATEWAY_RECONNECT_MAX_DELAY_MS,
+  );
+}
+
+function buildGatewayHealthSummary(params: {
+  state: GatewayConnectionState;
+  portReachable: boolean;
+  gatewayReady: boolean;
+  diagnostics: GatewayDiagnosticsSnapshot;
+}): GatewayHealthSummary {
+  if (!params.portReachable || params.state === 'disconnected') {
+    return 'unresponsive';
+  }
+  if (!params.gatewayReady) {
+    return 'degraded';
+  }
+  if (params.diagnostics.consecutiveHeartbeatMisses > 0 || params.diagnostics.consecutiveRpcFailures > 0) {
+    return 'degraded';
+  }
+  return 'healthy';
 }
 
 function buildGatewayConnectRequest(connectId: string, challengeNonce: string) {
@@ -199,13 +296,53 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
   let connectPromise: Promise<void> | null = null;
   let connectRequestId: string | null = null;
   let isConnected = false;
+  let gatewayReady = false;
   let isClosingSocket = false;
+  let connectedAt = 0;
+  let lifecycleEpoch = 0;
+  let transportEpoch = 0;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+  let reconnectAttempts = 0;
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let heartbeatTimeoutTimer: NodeJS.Timeout | null = null;
+  let gatewayReadyFallbackTimer: NodeJS.Timeout | null = null;
+  let initialReadyHeartbeatRecoveryTimer: NodeJS.Timeout | null = null;
+  let diagnostics: GatewayDiagnosticsSnapshot = buildInitialDiagnostics();
   let connectionSnapshot: GatewayConnectionStatePayload = {
     state: 'disconnected',
     portReachable: false,
+    gatewayReady: false,
+    healthSummary: 'unresponsive',
+    transportEpoch: 0,
+    diagnostics,
     updatedAt: Date.now(),
   };
   const pendingRequests = new Map<string, PendingRequest>();
+
+  function buildIssue(input: {
+    message: string;
+    source: GatewayTransportIssue['source'];
+    code?: string;
+    details?: unknown;
+  }): GatewayTransportIssue {
+    return {
+      message: input.message,
+      source: input.source,
+      at: Date.now(),
+      ...(input.code ? { code: input.code } : {}),
+      ...(input.details !== undefined ? { details: input.details } : {}),
+    };
+  }
+
+  function updateDiagnostics(
+    patch: Partial<GatewayDiagnosticsSnapshot>,
+  ): GatewayDiagnosticsSnapshot {
+    diagnostics = {
+      ...diagnostics,
+      ...patch,
+    };
+    return diagnostics;
+  }
 
   function updateConnectionSnapshot(
     patch: Partial<Omit<GatewayConnectionStatePayload, 'updatedAt'>>,
@@ -213,14 +350,33 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     const nextSnapshot: GatewayConnectionStatePayload = {
       state: patch.state ?? connectionSnapshot.state,
       portReachable: patch.portReachable ?? connectionSnapshot.portReachable,
+      gatewayReady: patch.gatewayReady ?? connectionSnapshot.gatewayReady,
+      transportEpoch: patch.transportEpoch ?? connectionSnapshot.transportEpoch,
+      diagnostics: patch.diagnostics ?? connectionSnapshot.diagnostics,
+      healthSummary: buildGatewayHealthSummary({
+        state: patch.state ?? connectionSnapshot.state,
+        portReachable: patch.portReachable ?? connectionSnapshot.portReachable,
+        gatewayReady: patch.gatewayReady ?? connectionSnapshot.gatewayReady,
+        diagnostics: patch.diagnostics ?? connectionSnapshot.diagnostics,
+      }),
       ...(patch.lastError !== undefined
         ? (patch.lastError ? { lastError: patch.lastError } : {})
         : (connectionSnapshot.lastError ? { lastError: connectionSnapshot.lastError } : {})),
+      ...(patch.lastIssue !== undefined
+        ? (patch.lastIssue ? { lastIssue: patch.lastIssue } : {})
+        : (connectionSnapshot.lastIssue ? { lastIssue: connectionSnapshot.lastIssue } : {})),
       updatedAt: Date.now(),
     };
     const unchanged = connectionSnapshot.state === nextSnapshot.state
       && connectionSnapshot.portReachable === nextSnapshot.portReachable
-      && connectionSnapshot.lastError === nextSnapshot.lastError;
+      && connectionSnapshot.gatewayReady === nextSnapshot.gatewayReady
+      && connectionSnapshot.transportEpoch === nextSnapshot.transportEpoch
+      && connectionSnapshot.healthSummary === nextSnapshot.healthSummary
+      && connectionSnapshot.lastError === nextSnapshot.lastError
+      && connectionSnapshot.lastIssue?.message === nextSnapshot.lastIssue?.message
+      && connectionSnapshot.lastIssue?.source === nextSnapshot.lastIssue?.source
+      && connectionSnapshot.lastIssue?.code === nextSnapshot.lastIssue?.code
+      && sameDiagnosticsSnapshot(connectionSnapshot.diagnostics, nextSnapshot.diagnostics);
     if (unchanged) {
       return connectionSnapshot;
     }
@@ -233,12 +389,15 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     connectPromise = null;
     connectRequestId = null;
     isConnected = false;
+    gatewayReady = false;
+    connectedAt = 0;
     socket = null;
   }
 
   function resetConnectionHandshakeState(): void {
     connectRequestId = null;
     isConnected = false;
+    gatewayReady = false;
   }
 
   function rejectAllPending(error: Error): void {
@@ -249,9 +408,220 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     }
   }
 
-  function reportGatewayError(error: unknown): void {
+  function reportGatewayError(error: unknown, issue?: GatewayTransportIssue): void {
     const normalized = ensureError(error);
+    if (issue) {
+      updateConnectionSnapshot({
+        diagnostics,
+        lastError: issue.message,
+        lastIssue: issue,
+      });
+    }
     options.onGatewayError?.(normalized);
+  }
+
+  function clearHeartbeatTimers(): void {
+    if (heartbeatTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (heartbeatTimeoutTimer) {
+      clearTimeout(heartbeatTimeoutTimer);
+      heartbeatTimeoutTimer = null;
+    }
+  }
+
+  function clearRecoveryTimers(): void {
+    if (gatewayReadyFallbackTimer) {
+      clearTimeout(gatewayReadyFallbackTimer);
+      gatewayReadyFallbackTimer = null;
+    }
+    if (initialReadyHeartbeatRecoveryTimer) {
+      clearTimeout(initialReadyHeartbeatRecoveryTimer);
+      initialReadyHeartbeatRecoveryTimer = null;
+    }
+  }
+
+  function bumpLifecycleEpoch(): number {
+    lifecycleEpoch += 1;
+    return lifecycleEpoch;
+  }
+
+  function markAlive(source: 'message' | 'pong' | 'rpc') {
+    const now = Date.now();
+    updateDiagnostics({
+      lastAliveAt: now,
+      consecutiveHeartbeatMisses: 0,
+    });
+    updateConnectionSnapshot({
+      lastError: '',
+      lastIssue: null,
+      diagnostics,
+    });
+    if (source === 'rpc' && !gatewayReady) {
+      gatewayReady = true;
+      updateConnectionSnapshot({
+        gatewayReady: true,
+        diagnostics,
+      });
+    }
+  }
+
+  function recordRpcSuccess() {
+    updateDiagnostics({
+      lastRpcSuccessAt: Date.now(),
+      consecutiveRpcFailures: 0,
+      lastRpcFailureAt: undefined,
+      lastRpcFailureMethod: undefined,
+    });
+    updateConnectionSnapshot({
+      lastError: '',
+      lastIssue: null,
+      diagnostics,
+    });
+  }
+
+  function recordRpcFailure(method: string, issue?: GatewayTransportIssue) {
+    updateDiagnostics({
+      lastRpcFailureAt: Date.now(),
+      lastRpcFailureMethod: method,
+      consecutiveRpcFailures: diagnostics.consecutiveRpcFailures + 1,
+    });
+    updateConnectionSnapshot({
+      ...(issue ? { lastIssue: issue, lastError: issue.message } : {}),
+      diagnostics,
+    });
+  }
+
+  function recordSocketClose(code: number) {
+    updateDiagnostics({
+      lastSocketCloseAt: Date.now(),
+      lastSocketCloseCode: code,
+      consecutiveHeartbeatMisses: 0,
+    });
+  }
+
+  async function requestGatewayRestart(): Promise<void> {
+    if (typeof options.requestGatewayRestart !== 'function') {
+      return;
+    }
+    try {
+      await options.requestGatewayRestart('transport-unresponsive');
+    } catch (error) {
+      reportGatewayError(error, buildIssue({
+        message: ensureError(error, 'Gateway restart request failed').message,
+        source: 'runtime',
+      }));
+    }
+  }
+
+  function scheduleReconnect(reason: string): void {
+    if (reconnectTimer || reconnectAttempts >= GATEWAY_RECONNECT_MAX_ATTEMPTS) {
+      return;
+    }
+    const scheduledEpoch = bumpLifecycleEpoch();
+    const delayMs = nextReconnectDelayMs(reconnectAttempts);
+    reconnectAttempts += 1;
+    updateConnectionSnapshot({
+      state: 'reconnecting',
+      diagnostics,
+    });
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (scheduledEpoch !== lifecycleEpoch) {
+        return;
+      }
+      void ensureConnected().catch((error) => {
+        const failure = ensureError(error, `Gateway reconnect failed: ${reason}`);
+        updateConnectionSnapshot({
+          state: 'disconnected',
+          lastError: failure.message,
+          lastIssue: buildIssue({
+            message: failure.message,
+            source: 'connect',
+          }),
+          diagnostics,
+        });
+        scheduleReconnect(reason);
+      });
+    }, delayMs);
+  }
+
+  function scheduleGatewayReadyFallback(expectedEpoch: number): void {
+    if (gatewayReadyFallbackTimer) {
+      clearTimeout(gatewayReadyFallbackTimer);
+    }
+    gatewayReadyFallbackTimer = setTimeout(() => {
+      gatewayReadyFallbackTimer = null;
+      if (expectedEpoch !== lifecycleEpoch || !isConnected || gatewayReady) {
+        return;
+      }
+      void gatewayRpc('system-presence', {}, 5_000).catch(() => {
+        if (expectedEpoch !== lifecycleEpoch || !isConnected || gatewayReady) {
+          return;
+        }
+        scheduleGatewayReadyFallback(expectedEpoch);
+      });
+    }, GATEWAY_READY_FALLBACK_MS);
+  }
+
+  function scheduleHeartbeat(expectedEpoch: number): void {
+    clearHeartbeatTimers();
+    const tick = () => {
+      if (expectedEpoch !== lifecycleEpoch || !socket || socket.readyState !== WebSocket.OPEN || !isConnected) {
+        return;
+      }
+      try {
+        socket.ping();
+      } catch (error) {
+        reportGatewayError(error, buildIssue({
+          message: ensureError(error, 'Gateway ping failed').message,
+          source: 'runtime',
+        }));
+      }
+      heartbeatTimeoutTimer = setTimeout(() => {
+        heartbeatTimeoutTimer = null;
+        if (expectedEpoch !== lifecycleEpoch || !isConnected) {
+          return;
+        }
+        const nextMisses = diagnostics.consecutiveHeartbeatMisses + 1;
+        updateDiagnostics({
+          consecutiveHeartbeatMisses: nextMisses,
+          lastHeartbeatTimeoutAt: Date.now(),
+        });
+        updateConnectionSnapshot({
+          diagnostics,
+          lastIssue: buildIssue({
+            message: 'Gateway heartbeat timeout',
+            source: 'heartbeat-timeout',
+          }),
+          lastError: 'Gateway heartbeat timeout',
+        });
+        if (nextMisses >= GATEWAY_HEARTBEAT_MAX_MISSES) {
+          const withinInitialReadyGrace = !gatewayReady
+            && connectedAt > 0
+            && (Date.now() - connectedAt) < GATEWAY_INITIAL_READY_HEARTBEAT_GRACE_MS;
+          if (withinInitialReadyGrace) {
+            if (!initialReadyHeartbeatRecoveryTimer) {
+              initialReadyHeartbeatRecoveryTimer = setTimeout(() => {
+                initialReadyHeartbeatRecoveryTimer = null;
+                void requestGatewayRestart();
+              }, Math.max(0, GATEWAY_INITIAL_READY_HEARTBEAT_GRACE_MS - (Date.now() - connectedAt)));
+            }
+            scheduleHeartbeat(expectedEpoch);
+            return;
+          }
+          void requestGatewayRestart();
+          scheduleReconnect('heartbeat-timeout');
+          return;
+        }
+        scheduleHeartbeat(expectedEpoch);
+      }, GATEWAY_HEARTBEAT_TIMEOUT_MS);
+      heartbeatTimer = setTimeout(tick, GATEWAY_HEARTBEAT_INTERVAL_MS);
+    };
+
+    heartbeatTimer = setTimeout(tick, GATEWAY_HEARTBEAT_INTERVAL_MS);
+    scheduleGatewayReadyFallback(expectedEpoch);
   }
 
   async function ensureConnected(timeoutMs = GATEWAY_CONNECT_TIMEOUT_MS): Promise<void> {
@@ -264,6 +634,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
 
     const gatewayPort = getGatewayPort();
     const wsUrl = `ws://127.0.0.1:${gatewayPort}/ws`;
+    const expectedEpoch = bumpLifecycleEpoch();
     resetConnectionHandshakeState();
 
     connectPromise = new Promise<void>((resolve, reject) => {
@@ -281,7 +652,19 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         } catch {
           // ignore
         }
-        reject(new Error('Gateway connect timeout'));
+        const timeoutError = new Error('Gateway connect timeout');
+        updateConnectionSnapshot({
+          state: 'disconnected',
+          gatewayReady: false,
+          transportEpoch,
+          lastError: timeoutError.message,
+          lastIssue: buildIssue({
+            message: timeoutError.message,
+            source: 'connect',
+          }),
+          diagnostics,
+        });
+        reject(timeoutError);
       }, Math.max(1000, timeoutMs));
 
       const settleConnectSuccess = () => {
@@ -293,15 +676,31 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         }
         connectSettled = true;
         clearTimeout(connectTimer);
+        reconnectAttempts = 0;
+        connectedAt = Date.now();
+        transportEpoch += 1;
+        gatewayReady = false;
+        updateDiagnostics({
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        });
         updateConnectionSnapshot({
           state: 'connected',
           portReachable: true,
+          gatewayReady: false,
+          transportEpoch,
+          diagnostics,
           lastError: '',
+          lastIssue: null,
         });
+        scheduleHeartbeat(expectedEpoch);
         resolve();
       };
 
-      const settleConnectFailure = (error: unknown) => {
+      const settleConnectFailure = (
+        error: unknown,
+        issuePatch?: Pick<GatewayTransportIssue, 'code' | 'details'>,
+      ) => {
         if (connectSettled) {
           return;
         }
@@ -318,7 +717,16 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         const failure = ensureError(error, 'Gateway connect failed');
         updateConnectionSnapshot({
           state: 'disconnected',
+          gatewayReady: false,
+          transportEpoch,
           lastError: failure.message,
+          lastIssue: buildIssue({
+            message: failure.message,
+            source: 'connect',
+            ...(issuePatch?.code ? { code: issuePatch.code } : {}),
+            ...(issuePatch?.details !== undefined ? { details: issuePatch.details } : {}),
+          }),
+          diagnostics,
         });
         reject(failure);
       };
@@ -330,7 +738,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         updateConnectionSnapshot({
           state: 'reconnecting',
           portReachable: true,
+          transportEpoch,
           lastError: '',
+          lastIssue: null,
         });
       });
 
@@ -365,6 +775,10 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           if (parsed.ok === false || parsed.error) {
             settleConnectFailure(
               new Error(`Gateway connect failed: ${extractGatewayErrorMessageFromResponse(parsed)}`),
+              {
+                code: extractGatewayErrorCode({ error: parsed.error }),
+                details: extractGatewayErrorDetails({ error: parsed.error }),
+              },
             );
             return;
           }
@@ -375,6 +789,7 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         }
 
         if (isGatewayResponseFrame(parsed)) {
+          markAlive('rpc');
           const pending = pendingRequests.get(parsed.id);
           if (!pending) {
             return;
@@ -382,6 +797,12 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           clearTimeout(pending.timer);
           pendingRequests.delete(parsed.id);
           if (parsed.ok === false || parsed.error) {
+            recordRpcFailure(pending.method, buildIssue({
+              message: `Gateway RPC failed (${pending.method}): ${extractGatewayErrorMessageFromResponse(parsed)}`,
+              source: 'rpc',
+              code: extractGatewayErrorCode({ error: parsed.error }),
+              details: extractGatewayErrorDetails({ error: parsed.error }),
+            }));
             pending.reject(
               new Error(
                 `Gateway RPC failed (${pending.method}): ${extractGatewayErrorMessageFromResponse(parsed)}`,
@@ -389,11 +810,22 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
             );
             return;
           }
+          recordRpcSuccess();
           pending.resolve(parsed.payload ?? {});
           return;
         }
 
         if (isGatewayEventFrame(parsed)) {
+          markAlive('message');
+          if (parsed.event === 'gateway.ready' || parsed.event === 'presence' || parsed.event === 'health') {
+            if (!gatewayReady) {
+              gatewayReady = true;
+              updateConnectionSnapshot({
+                gatewayReady: true,
+                diagnostics,
+              });
+            }
+          }
           dispatchGatewayProtocolEvent(
             {
               emitNotification: (notification) => {
@@ -412,6 +844,13 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         }
       });
 
+      ws.on('pong', () => {
+        if (socket !== ws || !isConnected) {
+          return;
+        }
+        markAlive('pong');
+      });
+
       ws.on('error', (error: unknown) => {
         if (socket !== ws) {
           return;
@@ -420,13 +859,19 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
           settleConnectFailure(error);
           return;
         }
-        reportGatewayError(error);
+        reportGatewayError(error, buildIssue({
+          message: ensureError(error, 'Gateway socket error').message,
+          source: 'runtime',
+        }));
       });
 
       ws.on('close', (code: number, reason: unknown) => {
         if (socket !== ws) {
           return;
         }
+        clearHeartbeatTimers();
+        clearRecoveryTimers();
+        recordSocketClose(code);
         const closeError = new Error(
           `Gateway socket closed: code=${String(code)} reason=${String(reason ?? '') || 'unknown'}`,
         );
@@ -437,21 +882,39 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         rejectAllPending(closeError);
         updateConnectionSnapshot({
           state: 'disconnected',
+          gatewayReady: false,
+          transportEpoch,
           lastError: closeError.message,
+          lastIssue: buildIssue({
+            message: closeError.message,
+            source: 'socket-close',
+            code: String(code),
+            details: { reason: String(reason ?? '') || 'unknown' },
+          }),
+          diagnostics,
         });
         if (closedDuringConnect) {
           settleConnectFailure(closeError);
           return;
         }
         if (!closedByClient) {
-          reportGatewayError(closeError);
+          reportGatewayError(closeError, buildIssue({
+            message: closeError.message,
+            source: 'socket-close',
+            code: String(code),
+            details: { reason: String(reason ?? '') || 'unknown' },
+          }));
+          scheduleReconnect('socket-close');
         }
       });
     });
 
     updateConnectionSnapshot({
       state: 'reconnecting',
+      transportEpoch,
       lastError: '',
+      lastIssue: null,
+      diagnostics,
     });
 
     try {
@@ -472,6 +935,10 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
         state: 'connected',
         portReachable: true,
         lastError: '',
+        lastIssue: null,
+        transportEpoch,
+        gatewayReady,
+        diagnostics,
       });
     }
     const gatewayPort = getGatewayPort();
@@ -479,6 +946,9 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     return updateConnectionSnapshot({
       state: portReachable ? connectionSnapshot.state : 'disconnected',
       portReachable,
+      gatewayReady: portReachable ? connectionSnapshot.gatewayReady : false,
+      transportEpoch,
+      diagnostics,
     });
   }
 
@@ -502,7 +972,12 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     return await new Promise((resolveRpc, rejectRpc) => {
       const timer = setTimeout(() => {
         pendingRequests.delete(requestId);
-        rejectRpc(new Error(`Gateway RPC timeout: ${method}`));
+        const timeoutError = new Error(`Gateway RPC timeout: ${method}`);
+        recordRpcFailure(method, buildIssue({
+          message: timeoutError.message,
+          source: 'rpc',
+        }));
+        rejectRpc(timeoutError);
       }, Math.max(1000, timeoutMs));
 
       pendingRequests.set(requestId, {
@@ -522,12 +997,24 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
       } catch (error) {
         clearTimeout(timer);
         pendingRequests.delete(requestId);
-        rejectRpc(ensureError(error, `Failed to send gateway RPC: ${method}`));
+        const sendError = ensureError(error, `Failed to send gateway RPC: ${method}`);
+        recordRpcFailure(method, buildIssue({
+          message: sendError.message,
+          source: 'rpc',
+        }));
+        rejectRpc(sendError);
       }
     });
   }
 
   function close() {
+    clearHeartbeatTimers();
+    clearRecoveryTimers();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    bumpLifecycleEpoch();
     if (socket) {
       const current = socket;
       clearConnectionState();
@@ -541,7 +1028,11 @@ export function createGatewayClient(options: GatewayClientOptions = {}) {
     }
     updateConnectionSnapshot({
       state: 'disconnected',
+      gatewayReady: false,
+      transportEpoch,
       lastError: '',
+      lastIssue: null,
+      diagnostics,
     });
   }
 

@@ -84,7 +84,7 @@ export function getReconnectScheduleDecision(
 export type GatewayLifecycleState = 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
 
 export interface RestartDeferralContext {
-  state: GatewayLifecycleState;
+  processState: GatewayLifecycleState;
   startLock: boolean;
 }
 
@@ -94,9 +94,9 @@ export interface RestartDeferralContext {
  */
 export function shouldDeferRestart(context: RestartDeferralContext): boolean {
   return context.startLock
-    || context.state === 'starting'
-    || context.state === 'control_connecting'
-    || context.state === 'reconnecting';
+    || context.processState === 'starting'
+    || context.processState === 'control_connecting'
+    || context.processState === 'reconnecting';
 }
 
 export interface DeferredRestartActionContext extends RestartDeferralContext {

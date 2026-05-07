@@ -65,10 +65,10 @@ describe('security support store', () => {
       items: [{ ts: 1, toolName: 'system.run', risk: 'high', action: 'block', decision: 'deny' }],
     });
     const { useSecuritySupportStore } = await import('@/stores/security-support-store');
-    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayState: 'running' });
+    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'running' });
 
     hostSecurityReadAuditMock.mockRejectedValueOnce(new Error('network down'));
-    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayState: 'running' });
+    await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'running' });
 
     const state = useSecuritySupportStore.getState();
     expect(state.auditItems).toHaveLength(1);

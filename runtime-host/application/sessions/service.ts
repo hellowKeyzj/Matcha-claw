@@ -22,6 +22,7 @@ import type {
   SessionWindowStateSnapshot,
   SessionWindowResult,
 } from '../../shared/session-adapter-types';
+import type { GatewayTransportIssue } from '../../shared/gateway-error';
 import {
   buildTimelineEntriesFromTranscriptMessage,
   materializeTranscriptTimelineEntries,
@@ -116,6 +117,14 @@ interface SessionRuntimeTimelineState {
   hydrated: boolean;
   runtime: SessionRuntimeStateSnapshot;
   window: SessionWindowStateSnapshot;
+  activeTransportEpoch: number | null;
+}
+
+interface PendingRunClosureSignal {
+  hasActiveAssistantStream: boolean;
+  hasBlockingToolActivity: boolean;
+  hasFinalAssistantTurn: boolean;
+  hasMatchingRunEvidence: boolean;
 }
 
 interface SessionStorageDescriptor {
@@ -181,6 +190,59 @@ function normalizeIncludeCanonical(value: unknown): boolean {
   return value === true;
 }
 
+function collectPendingRunClosureSignal(
+  renderItems: ReadonlyArray<SessionRenderItem>,
+  runtime: SessionRuntimeStateSnapshot,
+): PendingRunClosureSignal {
+  const activeRunId = normalizeString(runtime.activeRunId);
+  const pendingTurnKey = normalizeString(runtime.pendingTurnKey);
+  const pendingTurnLaneKey = normalizeString(runtime.pendingTurnLaneKey) || 'main';
+  const signal: PendingRunClosureSignal = {
+    hasActiveAssistantStream: false,
+    hasBlockingToolActivity: false,
+    hasFinalAssistantTurn: false,
+    hasMatchingRunEvidence: false,
+  };
+
+  for (const item of renderItems) {
+    if (item.kind !== 'assistant-turn') {
+      continue;
+    }
+    const hasAuthoritativeOutput = (
+      item.segments.length > 0
+      || item.text.trim().length > 0
+      || item.tools.length > 0
+      || item.images.length > 0
+      || item.attachedFiles.length > 0
+      || Boolean(item.thinking)
+    );
+    if (!hasAuthoritativeOutput) {
+      continue;
+    }
+    const samePendingTurn = pendingTurnKey
+      && item.turnKey === pendingTurnKey
+      && (!pendingTurnLaneKey || item.laneKey === pendingTurnLaneKey);
+    const sameRun = activeRunId && normalizeString(item.runId) === activeRunId;
+    if (!samePendingTurn && !sameRun) {
+      continue;
+    }
+    signal.hasMatchingRunEvidence = true;
+    if (item.status === 'streaming') {
+      signal.hasActiveAssistantStream = true;
+      continue;
+    }
+    if (item.status === 'waiting_tool') {
+      signal.hasBlockingToolActivity = true;
+      continue;
+    }
+    if (item.status === 'final' || item.status === 'error' || item.status === 'aborted') {
+      signal.hasFinalAssistantTurn = true;
+    }
+  }
+
+  return signal;
+}
+
 function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
   return {
     sending: false,
@@ -191,6 +253,8 @@ function createEmptySessionRuntimeState(): SessionRuntimeStateSnapshot {
     pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
+    lastError: null,
+    lastIssue: null,
     updatedAt: null,
   };
 }
@@ -235,6 +299,7 @@ function createEmptyTimelineState(
     hydrated: false,
     runtime: createEmptySessionRuntimeState(),
     window: createLatestWindowState(0),
+    activeTransportEpoch: null,
     ...patch,
   };
 }
@@ -666,6 +731,7 @@ export class SessionRuntimeService {
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
   private activeSessionKey: string | null = null;
   private readonly storeFilePath: string;
+  private latestConnectedTransportEpoch = 0;
 
   constructor(private readonly deps: SessionRuntimeServiceDeps) {
     this.storeFilePath = join(this.deps.getOpenClawConfigDir(), 'matchaclaw-session-runtime-store.json');
@@ -996,6 +1062,18 @@ export class SessionRuntimeService {
       runId: options.runId,
     });
     this.rebuildExecutionGraphsFromTimeline(sessionKey, state);
+    const closureSignal = collectPendingRunClosureSignal(state.renderItems, state.runtime);
+    if (
+      state.runtime.sending
+      && !closureSignal.hasActiveAssistantStream
+      && !closureSignal.hasBlockingToolActivity
+      && closureSignal.hasFinalAssistantTurn
+    ) {
+      this.resetPendingRunState(sessionKey, {
+        runPhase: 'done',
+        lastError: null,
+      });
+    }
     state.window = createLatestWindowState(state.renderItems.length);
     this.refreshParentExecutionGraphs(sessionKey);
     this.persistStore();
@@ -1012,6 +1090,15 @@ export class SessionRuntimeService {
     this.activeSessionKey = sessionKey;
     if (options.hydrate) {
       this.ensureSessionHydrated(sessionKey, state);
+      if (
+        state.runtime.sending
+        || normalizeString(state.runtime.activeRunId)
+        || normalizeString(state.runtime.pendingTurnKey)
+      ) {
+        this.reconcileSessionTranscript(sessionKey, {
+          runId: state.runtime.activeRunId,
+        });
+      }
     }
     this.refreshRenderItems(state);
     if (options.resetWindowToLatest) {
@@ -1156,6 +1243,48 @@ export class SessionRuntimeService {
     return cloneSessionRuntimeState(state.runtime);
   }
 
+  private resetPendingRunState(
+    sessionKey: string,
+    patch: Pick<SessionRuntimeStateSnapshot, 'runPhase' | 'lastError' | 'lastIssue'>,
+  ): SessionRuntimeStateSnapshot {
+    const state = this.getSessionState(sessionKey);
+    state.activeTransportEpoch = null;
+    return this.setSessionRuntime(sessionKey, {
+      sending: false,
+      activeRunId: null,
+      runPhase: patch.runPhase,
+      activeTurnItemKey: null,
+      pendingTurnKey: null,
+      pendingTurnLaneKey: null,
+      pendingFinal: false,
+      lastError: patch.lastError,
+      lastIssue: patch.lastIssue,
+    });
+  }
+
+  notifyTransportConnected(transportEpoch: number): void {
+    if (!Number.isFinite(transportEpoch) || transportEpoch <= 0) {
+      return;
+    }
+    if (transportEpoch <= this.latestConnectedTransportEpoch) {
+      return;
+    }
+    this.latestConnectedTransportEpoch = transportEpoch;
+    for (const [sessionKey, state] of this.sessionStates.entries()) {
+      if (!state.runtime.sending || !state.runtime.activeRunId) {
+        continue;
+      }
+      if (state.activeTransportEpoch == null || state.activeTransportEpoch >= transportEpoch) {
+        continue;
+      }
+      this.resetPendingRunState(sessionKey, {
+        runPhase: 'error',
+        lastError: 'The active run disconnected before a terminal event was received.',
+        lastIssue: null,
+      });
+    }
+  }
+
   private resolvePrimaryItemFromSnapshot(
     snapshot: SessionStateSnapshot,
     candidate: SessionTimelineEntry | null,
@@ -1180,46 +1309,39 @@ export class SessionRuntimeService {
     input: {
       phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
       runId: string | null;
+      error: string | null;
+      transportIssue?: GatewayTransportIssue | null;
     },
   ): SessionRuntimeStateSnapshot {
     switch (input.phase) {
       case 'started':
+        this.getSessionState(sessionKey).activeTransportEpoch = this.latestConnectedTransportEpoch || 1;
         return this.setSessionRuntime(sessionKey, {
           sending: true,
           activeRunId: input.runId,
           runPhase: 'submitted',
           pendingTurnKey: input.runId ? `main:${input.runId}` : this.getSessionState(sessionKey).runtime.pendingTurnKey,
           pendingTurnLaneKey: 'main',
+          lastError: null,
+          lastIssue: null,
         });
       case 'final':
-        return this.setSessionRuntime(sessionKey, {
-          sending: false,
-          activeRunId: null,
+        return this.resetPendingRunState(sessionKey, {
           runPhase: 'done',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          pendingFinal: false,
+          lastError: null,
+          lastIssue: null,
         });
       case 'error':
-        return this.setSessionRuntime(sessionKey, {
-          sending: false,
-          activeRunId: null,
+        return this.resetPendingRunState(sessionKey, {
           runPhase: 'error',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          pendingFinal: false,
+          lastError: input.error,
+          lastIssue: input.transportIssue ?? null,
         });
       case 'aborted':
-        return this.setSessionRuntime(sessionKey, {
-          sending: false,
-          activeRunId: null,
+        return this.resetPendingRunState(sessionKey, {
           runPhase: 'aborted',
-          activeTurnItemKey: null,
-          pendingTurnKey: null,
-          pendingTurnLaneKey: null,
-          pendingFinal: false,
+          lastError: input.error,
+          lastIssue: input.transportIssue ?? null,
         });
       default:
         return cloneSessionRuntimeState(this.getSessionState(sessionKey).runtime);
@@ -1247,6 +1369,8 @@ export class SessionRuntimeService {
         pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
         pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
         pendingFinal: false,
+        lastError: null,
+        lastIssue: null,
         lastUserMessageAt: input.entry.role === 'user' && typeof messageTimestamp === 'number'
           ? messageTimestamp
           : currentState.runtime.lastUserMessageAt,
@@ -1260,6 +1384,8 @@ export class SessionRuntimeService {
         runPhase: input.runId ? 'submitted' : currentState.runtime.runPhase,
         pendingTurnKey: input.runId ? `main:${input.runId}` : currentState.runtime.pendingTurnKey,
         pendingTurnLaneKey: input.runId ? 'main' : currentState.runtime.pendingTurnLaneKey,
+        lastError: null,
+        lastIssue: null,
         lastUserMessageAt: typeof messageTimestamp === 'number'
           ? messageTimestamp
           : currentState.runtime.lastUserMessageAt,
@@ -1275,17 +1401,19 @@ export class SessionRuntimeService {
         pendingTurnKey: normalizeString(input.entry.turnKey) || currentState.runtime.pendingTurnKey,
         pendingTurnLaneKey: normalizeString(input.entry.laneKey) || currentState.runtime.pendingTurnLaneKey,
         pendingFinal: true,
+        lastError: null,
+        lastIssue: null,
       });
     }
 
-    return this.setSessionRuntime(sessionKey, {
-      sending: false,
-      activeRunId: null,
-      runPhase: 'done',
-      activeTurnItemKey: null,
-      pendingTurnKey: null,
-      pendingTurnLaneKey: null,
-      pendingFinal: false,
+    return this.resetPendingRunState(sessionKey, {
+      runPhase: input.entry.status === 'error'
+        ? 'error'
+        : (input.entry.status === 'aborted' ? 'aborted' : 'done'),
+      lastError: input.entry.status === 'error'
+        ? (input.entry.text.trim() || currentState.runtime.lastError)
+        : null,
+      lastIssue: null,
     });
   }
 
@@ -1355,6 +1483,8 @@ export class SessionRuntimeService {
             runId: event.runId,
             phase: event.phase,
             snapshot: emptySnapshot,
+            error: event.error,
+            ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
             ...(event._meta ? { _meta: event._meta } : {}),
           };
         }
@@ -1377,6 +1507,8 @@ export class SessionRuntimeService {
         this.resolveLifecycleRuntime(sessionKey, {
           phase: event.phase,
           runId: event.runId,
+          error: event.error,
+          transportIssue: event.transportIssue,
         });
         const state = this.getSessionState(sessionKey);
         const snapshot = this.buildSnapshot(sessionKey, state, {
@@ -1391,6 +1523,8 @@ export class SessionRuntimeService {
           runId: event.runId,
           phase: event.phase,
           snapshot,
+          error: event.error,
+          ...(event.transportIssue !== undefined ? { transportIssue: event.transportIssue } : {}),
           ...(event._meta ? { _meta: event._meta } : {}),
         };
       }
@@ -1780,6 +1914,7 @@ export class SessionRuntimeService {
       pendingFinal: false,
       lastUserMessageAt: entry?.createdAt ?? Date.now(),
     });
+    state.activeTransportEpoch = this.latestConnectedTransportEpoch || 1;
     state.window = createLatestWindowState(state.renderItems.length);
     const snapshot = {
       ...this.buildLatestSnapshot(sessionKey, state),

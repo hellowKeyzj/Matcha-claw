@@ -82,6 +82,7 @@ const {
   mapParentTransportResponse,
 } = parentTransportClient;
 let sessionRuntimeService: ReturnType<typeof getSessionRuntimeService> | null = null;
+let latestObservedTransportEpoch = 0;
 const gatewayClient = createGatewayClient({
   onGatewayNotification: (notification) => {
     void emitParentGatewayEvent('gateway:notification', notification).catch(() => {
@@ -102,14 +103,35 @@ const gatewayClient = createGatewayClient({
     });
   },
   onGatewayError: (error) => {
-    void emitParentGatewayEvent('gateway:error', { message: error.message }).catch(() => {
+    void gatewayClient.readGatewayConnectionState().then((snapshot) => {
+      return emitParentGatewayEvent('gateway:error', {
+        message: error.message,
+        ...(snapshot.lastIssue ? { issue: snapshot.lastIssue } : {}),
+      });
+    }).catch(() => {
+      return emitParentGatewayEvent('gateway:error', { message: error.message });
+    }).catch(() => {
       // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
     });
   },
   onGatewayConnectionState: (payload) => {
-    void emitParentGatewayEvent('gateway:connection', payload).catch(() => {
-      // runtime-host 与主进程短暂断连时允许丢弃单次事件，由主链路重试恢复
-    });
+    if (payload.state !== 'connected') {
+      return;
+    }
+    if (payload.transportEpoch <= latestObservedTransportEpoch) {
+      return;
+    }
+    latestObservedTransportEpoch = payload.transportEpoch;
+    sessionRuntimeService?.notifyTransportConnected(payload.transportEpoch);
+  },
+  requestGatewayRestart: async (reason) => {
+    const result = await requestParentShellAction('gateway_restart', { reason });
+    if (!result.success) {
+      throw new Error(result.error.message);
+    }
+    if (result.status >= 400) {
+      throw new Error(`Gateway restart request failed: HTTP ${String(result.status)}`);
+    }
   },
 });
 const openclawBridge = createOpenClawBridge(gatewayClient);

@@ -42,6 +42,7 @@ import {
   hostChannelsValidateCredentials,
 } from '@/lib/channel-runtime';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
 import {
@@ -130,7 +131,7 @@ export function Channels() {
   const statusRefreshPendingRef = useRef(false);
   const statusRefreshRafRef = useRef<number | null>(null);
   const statusRefreshLastAtRef = useRef(0);
-  const lastGatewayStateRef = useRef(gatewayStatus.state);
+  const lastGatewayOperationalRef = useRef(isGatewayOperational(gatewayStatus));
 
   // Fetch channels on mount
   useEffect(() => {
@@ -189,12 +190,13 @@ export function Channels() {
   }, [scheduleStatusRefresh]);
 
   useEffect(() => {
-    const previousGatewayState = lastGatewayStateRef.current;
-    lastGatewayStateRef.current = gatewayStatus.state;
-    if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
+    const gatewayOperational = isGatewayOperational(gatewayStatus);
+    const previousGatewayOperational = lastGatewayOperationalRef.current;
+    lastGatewayOperationalRef.current = gatewayOperational;
+    if (!previousGatewayOperational && gatewayOperational) {
       scheduleStatusRefresh();
     }
-  }, [gatewayStatus.state, scheduleStatusRefresh]);
+  }, [gatewayStatus, scheduleStatusRefresh]);
 
   // Get channel types to display
   const displayedChannelTypes = getPrimaryChannels();
@@ -283,7 +285,7 @@ export function Channels() {
       )}
 
       {/* Gateway Warning */}
-      {gatewayStatus.state !== 'running' && (
+      {!isGatewayOperational(gatewayStatus) && (
         <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
           <CardContent className="py-4 flex items-center gap-3">
             <AlertCircle className="h-5 w-5 text-yellow-500" />

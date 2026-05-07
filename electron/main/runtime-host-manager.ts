@@ -29,6 +29,7 @@ import {
   readEnabledPluginIdsFromOpenClawConfig,
   syncEnabledPluginIdsToOpenClawConfig,
 } from '../../runtime-host/application/openclaw/openclaw-plugin-config-service';
+import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
 type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -51,8 +52,28 @@ export type RuntimeHostGatewayForwardEventName =
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
-  | 'gateway:error'
-  | 'gateway:connection';
+  | 'gateway:error';
+
+export interface RuntimeHostGatewayStatusSnapshot {
+  readonly state: 'connected' | 'reconnecting' | 'disconnected';
+  readonly portReachable: boolean;
+  readonly gatewayReady: boolean;
+  readonly healthSummary: 'healthy' | 'degraded' | 'unresponsive';
+  readonly diagnostics: {
+    readonly lastAliveAt?: number;
+    readonly lastRpcSuccessAt?: number;
+    readonly lastRpcFailureAt?: number;
+    readonly lastRpcFailureMethod?: string;
+    readonly lastHeartbeatTimeoutAt?: number;
+    readonly consecutiveHeartbeatMisses: number;
+    readonly lastSocketCloseAt?: number;
+    readonly lastSocketCloseCode?: number;
+    readonly consecutiveRpcFailures: number;
+  };
+  readonly lastError?: string;
+  readonly lastIssue?: GatewayTransportIssue;
+  readonly updatedAt: number;
+}
 
 export interface RuntimeHostManagerHealth {
   readonly ok: boolean;
@@ -77,6 +98,7 @@ export interface RuntimeHostManager {
   readonly restart: () => Promise<void>;
   readonly syncSecurityPolicyToGatewayIfRunning: () => Promise<boolean>;
   readonly checkHealth: () => Promise<RuntimeHostManagerHealth>;
+  readonly readGatewayStatus: () => Promise<RuntimeHostGatewayStatusSnapshot | null>;
   readonly getState: () => RuntimeHostManagerState;
   readonly getExecutionState: () => RuntimeHostExecutionState;
   readonly refreshExecutionState: () => Promise<RuntimeHostExecutionState>;
@@ -265,7 +287,7 @@ export function createRuntimeHostManager(
   const mainProcessCapabilities: RuntimeHostMainProcessCapabilities = {
     channel: createChannelRuntimeService({
       scheduleGatewayRestart: () => {
-        if (infrastructure.gatewayManager.getStatus().state === 'stopped') {
+        if (infrastructure.gatewayManager.getStatus().processState === 'stopped') {
           return;
         }
         infrastructure.gatewayManager.debouncedRestart();
@@ -372,7 +394,7 @@ export function createRuntimeHostManager(
       }
 
       if (action === 'gateway_restart') {
-        if (infrastructure.gatewayManager.getStatus().state !== 'stopped') {
+        if (infrastructure.gatewayManager.getStatus().processState !== 'stopped') {
           infrastructure.gatewayManager.debouncedRestart();
         }
         return { status: 200, data: { success: true } };
@@ -585,6 +607,21 @@ export function createRuntimeHostManager(
           degradedPlugins: [],
           error: `Runtime-host transport health failed: ${toErrorMessage(error)}`,
         };
+      }
+    },
+
+    async readGatewayStatus() {
+      try {
+        const result = await infrastructure.httpClient.request<{
+          success?: boolean;
+          status?: RuntimeHostGatewayStatusSnapshot;
+        }>('GET', '/api/gateway/status');
+        if (result.data?.success !== true || !result.data.status) {
+          return null;
+        }
+        return result.data.status;
+      } catch {
+        return null;
       }
     },
 

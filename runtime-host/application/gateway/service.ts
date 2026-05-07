@@ -9,11 +9,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface GatewayServiceDeps {
-  readonly openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady'>;
+  readonly openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady' | 'readGatewayConnectionState'>;
 }
 
 export class GatewayService {
   constructor(private readonly deps: GatewayServiceDeps) {}
+
+  async status() {
+    return {
+      status: 200,
+      data: {
+        success: true,
+        status: await this.deps.openclawBridge.readGatewayConnectionState(),
+      },
+    };
+  }
 
   async rpc(payload: unknown) {
     const body = isRecord(payload) ? payload : {};

@@ -72,7 +72,19 @@ describe('chat 左侧点击链路回归', () => {
     i18n.changeLanguage('en');
 
     useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
     } as never);
 
     useSubagentsStore.setState({
@@ -234,4 +246,3 @@ describe('chat 左侧点击链路回归', () => {
     });
   });
 });
-

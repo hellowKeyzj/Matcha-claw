@@ -37,8 +37,35 @@ describe('host-events', () => {
     expect(onMock).toHaveBeenCalledWith('host:event', expect.any(Function));
     expect(createHostEventSourceMock).not.toHaveBeenCalled();
 
-    captured[0]({ eventName: 'gateway:status', payload: { state: 'running' } });
-    expect(handler).toHaveBeenCalledWith({ state: 'running' });
+    captured[0]({
+      eventName: 'gateway:status',
+      payload: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
+    });
+    expect(handler).toHaveBeenCalledWith({
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    });
 
     unsubscribe();
     expect(returnedUnsubscribe).toHaveBeenCalledTimes(1);

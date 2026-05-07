@@ -119,6 +119,32 @@ describe('session runtime service', () => {
     });
   });
 
+  it('run.phase error 会保留上游 errorMessage，不再在 bridge 层丢失', () => {
+    const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'error',
+      runId: 'run-error-bridge-1',
+      sessionKey: 'agent:main:main',
+      errorMessage: 'model unavailable',
+      errorCode: 'MODEL_UNAVAILABLE',
+      errorDetails: { provider: 'anthropic' },
+    });
+
+    expect(event).toMatchObject({
+      sessionUpdate: 'session_info_update',
+      runId: 'run-error-bridge-1',
+      sessionKey: 'agent:main:main',
+      phase: 'error',
+      error: 'model unavailable',
+      transportIssue: {
+        message: 'model unavailable',
+        source: 'runtime',
+        code: 'MODEL_UNAVAILABLE',
+        details: { provider: 'anthropic' },
+      },
+    });
+  });
+
   it('history transcript hydrate sanitizes user and assistant display text', () => {
     const sessionKey = 'agent:main:main';
     const transcript = [
@@ -339,6 +365,55 @@ describe('session runtime service', () => {
       text: '最终版回复',
     });
     expect(finalEvent.snapshot.window.totalItemCount).toBe(1);
+  });
+
+  it('new prompt must not reactivate the previous assistant turn as a second streaming shell', async () => {
+    const configDir = await createRuntimeConfigDir();
+    let nextRunId = 'run-old-final';
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: nextRunId }),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'chat.message',
+      event: {
+        state: 'final',
+        runId: 'run-old-final',
+        sessionKey: 'agent:main:main',
+        sequenceId: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'old answer' }],
+        },
+      },
+    });
+
+    nextRunId = 'run-new-pending';
+    const promptResponse = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'new question',
+      idempotencyKey: 'user-local-new',
+    });
+
+    expect(promptResponse.status).toBe(200);
+    const assistantTurns = promptResponse.data.snapshot.items.filter((item) => item.kind === 'assistant-turn');
+    expect(assistantTurns).toHaveLength(2);
+    expect(assistantTurns[0]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-old-final',
+      status: 'final',
+      text: 'old answer',
+    });
+    expect(assistantTurns[1]).toMatchObject({
+      kind: 'assistant-turn',
+      turnKey: 'main:run-new-pending',
+      status: 'streaming',
+      pendingState: 'typing',
+      text: '',
+    });
   });
 
   it('team lane live ingress carries member lane metadata', () => {
@@ -819,6 +894,105 @@ describe('session runtime service', () => {
     });
   });
 
+  it('reconcile 时如果活跃 run 没有终态且已无权威活跃证据，应自动收口 pending turn', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const transcriptDir = join(rootDir, 'agents', 'main', 'sessions');
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, 'sessions.json'),
+      JSON.stringify({
+        sessions: [{
+          key: 'agent:main:main',
+          sessionKey: 'agent:main:main',
+          file: 'main.jsonl',
+        }],
+      }),
+      'utf8',
+    );
+    await writeFile(
+      join(transcriptDir, 'main.jsonl'),
+      `${JSON.stringify({
+        type: 'message',
+        id: 'user-orphan-run',
+        timestamp: 1_700_000_000_000,
+        message: {
+          role: 'user',
+          id: 'user-orphan-run',
+          content: 'hello',
+        },
+      })}\n`,
+      'utf8',
+    );
+
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => rootDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-orphan-1' }),
+      },
+    });
+
+    const promptResponse = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-orphan-run',
+    });
+    expect(promptResponse.status).toBe(200);
+    expect(promptResponse.data.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-orphan-1',
+      pendingTurnKey: 'main:run-orphan-1',
+    });
+
+    const resumed = await service.resumeSession({ sessionKey: 'agent:main:main' });
+    expect(resumed.status).toBe(200);
+    expect(resumed.data.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-orphan-1',
+      pendingTurnKey: 'main:run-orphan-1',
+      runPhase: 'submitted',
+      lastError: null,
+    });
+    expect(
+      resumed.data.snapshot.items.some((item) => item.kind === 'assistant-turn' && item.status === 'streaming'),
+    ).toBe(true);
+  });
+
+  it('新 transport epoch 连上后，会清理旧 epoch 上悬空的 active run', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'matcha-session-runtime-'));
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => rootDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-orphan-cleanup-1' }),
+      },
+    });
+
+    service.notifyTransportConnected(1);
+    const promptResponse = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-orphan-cleanup-1',
+    });
+
+    expect(promptResponse.status).toBe(200);
+    expect(promptResponse.data.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-orphan-cleanup-1',
+      pendingTurnKey: 'main:run-orphan-cleanup-1',
+    });
+
+    service.notifyTransportConnected(2);
+
+    const resumed = await service.resumeSession({ sessionKey: 'agent:main:main' });
+    expect(resumed.status).toBe(200);
+    expect(resumed.data.snapshot.runtime).toMatchObject({
+      sending: false,
+      activeRunId: null,
+      pendingTurnKey: null,
+      runPhase: 'error',
+      lastError: 'The active run disconnected before a terminal event was received.',
+    });
+  });
+
   it('multiple tool lifecycle updates in one run stay as three completed cards on one assistant-turn', async () => {
     const configDir = join(tmpdir(), `matcha-session-runtime-${Date.now()}`);
     const service = new SessionRuntimeService({
@@ -1159,7 +1333,7 @@ describe('session runtime service', () => {
     expect(loadResponse.data).toMatchObject({
       snapshot: {
         sessionKey: 'agent:main:main',
-        items: [
+        items: expect.arrayContaining([
           expect.objectContaining({
             kind: 'user-message',
             key: 'session:agent:main:main|entry:user-local-1',
@@ -1168,11 +1342,17 @@ describe('session runtime service', () => {
             kind: 'assistant-turn',
             turnKey: 'main:run-prompt-1',
             laneKey: 'main',
-            pendingState: 'typing',
+            status: 'streaming',
           }),
-        ],
+        ]),
         window: {
           totalItemCount: 2,
+        },
+        runtime: {
+          sending: true,
+          activeRunId: 'run-prompt-1',
+          pendingTurnKey: 'main:run-prompt-1',
+          runPhase: 'submitted',
         },
       },
     });
@@ -1186,7 +1366,7 @@ describe('session runtime service', () => {
     expect(windowResponse.status).toBe(200);
     expect(windowResponse.data).toMatchObject({
       snapshot: {
-        items: [
+        items: expect.arrayContaining([
           expect.objectContaining({
             key: 'session:agent:main:main|entry:user-local-1',
             attachedFiles: expect.arrayContaining([
@@ -1199,10 +1379,18 @@ describe('session runtime service', () => {
           expect.objectContaining({
             kind: 'assistant-turn',
             turnKey: 'main:run-prompt-1',
+            laneKey: 'main',
+            status: 'streaming',
           }),
-        ],
+        ]),
         window: {
           totalItemCount: 2,
+        },
+        runtime: {
+          sending: true,
+          activeRunId: 'run-prompt-1',
+          pendingTurnKey: 'main:run-prompt-1',
+          runPhase: 'submitted',
         },
       },
     });

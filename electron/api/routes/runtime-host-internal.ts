@@ -26,8 +26,7 @@ type RuntimeHostGatewayForwardEventName =
   | 'gateway:notification'
   | 'session:update'
   | 'gateway:channel-status'
-  | 'gateway:error'
-  | 'gateway:connection';
+  | 'gateway:error';
 
 function normalizeHeaderValue(headerValue: string | string[] | undefined): string | null {
   if (!headerValue) {
@@ -101,8 +100,7 @@ function isGatewayForwardEventName(value: unknown): value is RuntimeHostGatewayF
   return value === 'gateway:notification'
     || value === 'session:update'
     || value === 'gateway:channel-status'
-    || value === 'gateway:error'
-    || value === 'gateway:connection';
+    || value === 'gateway:error';
 }
 
 async function handleShellActionRoute(

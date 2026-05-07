@@ -131,7 +131,19 @@ describe('Gateway Store', () => {
   beforeEach(() => {
     // Reset store
     useGatewayStore.setState({
-      status: { state: 'stopped', port: 18789 },
+      status: {
+        processState: 'stopped',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 0,
+      },
       isInitialized: false,
       lastError: null,
       health: null,
@@ -145,16 +157,29 @@ describe('Gateway Store', () => {
   
   it('should have default status', () => {
     const state = useGatewayStore.getState();
-    expect(state.status.state).toBe('stopped');
+    expect(state.status.processState).toBe('stopped');
     expect(state.status.port).toBe(18789);
   });
   
   it('should update status', () => {
     const { setStatus } = useGatewayStore.getState();
-    setStatus({ state: 'running', port: 18789, pid: 12345 });
+    setStatus({
+      processState: 'running',
+      port: 18789,
+      pid: 12345,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    });
     
     const state = useGatewayStore.getState();
-    expect(state.status.state).toBe('running');
+    expect(state.status.processState).toBe('running');
     expect(state.status.pid).toBe(12345);
   });
 
@@ -170,7 +195,19 @@ describe('Gateway Store', () => {
   it('should refresh gateway status from host after start command succeeds', async () => {
     hostApiFetchMock
       .mockResolvedValueOnce({ success: true })
-      .mockResolvedValueOnce({ state: 'starting', port: 18789 });
+      .mockResolvedValueOnce({
+        processState: 'starting',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'degraded',
+        transportState: 'reconnecting',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      });
 
     await useGatewayStore.getState().start();
 
@@ -180,20 +217,32 @@ describe('Gateway Store', () => {
       expect.objectContaining({ method: 'POST' }),
     );
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/gateway/status', undefined);
-    expect(useGatewayStore.getState().status.state).toBe('starting');
+    expect(useGatewayStore.getState().status.processState).toBe('starting');
     expect(useGatewayStore.getState().lastError).toBeNull();
   });
 
   it('should keep observed lifecycle unchanged when restart command fails', async () => {
     useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
       lastError: null,
     });
     hostApiFetchMock.mockResolvedValueOnce({ success: false, error: 'restart denied' });
 
     await useGatewayStore.getState().restart();
 
-    expect(useGatewayStore.getState().status.state).toBe('running');
+    expect(useGatewayStore.getState().status.processState).toBe('running');
     expect(useGatewayStore.getState().lastError).toBe('restart denied');
   });
 });

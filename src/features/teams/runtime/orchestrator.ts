@@ -6,6 +6,7 @@ import {
 } from '@/services/openclaw/session-runtime';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
 import { deriveAutoBlockedDecision, deriveTaskTitleFromProposal, parseBlockedDecision } from '@/features/teams/domain/runner-automation';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { useGatewayStore } from '@/stores/gateway';
 import type { TeamMeta } from '@/stores/teams';
 import { useTeamsStore } from '@/stores/teams';
@@ -223,7 +224,7 @@ export class TeamsBackgroundOrchestrator {
   }
 
   private isGatewayRunning(): boolean {
-    return useGatewayStore.getState().status.state === 'running';
+    return isGatewayOperational(useGatewayStore.getState().status);
   }
 
   private hasActiveWorkForTeam(teamId: string): boolean {

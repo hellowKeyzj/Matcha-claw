@@ -60,7 +60,19 @@ function createSessionRecord(input?: {
 
 function setupBaseState() {
   useGatewayStore.setState({
-    status: { state: 'running', port: 18789 },
+    status: {
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
 
@@ -606,4 +618,3 @@ describe('agent sessions pane', () => {
     expect(screen.getByText('正文来源会话')).toBeInTheDocument();
   });
 });
-

@@ -27,10 +27,19 @@ const hostApiFetchMock = vi.fn(async (path: string) => {
 
 const gatewayState = {
   status: {
-    state: 'running',
+    processState: 'running',
     port: 18789,
     pid: 1234,
     connectedAt: Date.now(),
+    gatewayReady: true,
+    healthSummary: 'healthy',
+    transportState: 'connected',
+    portReachable: true,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt: Date.now(),
   },
 };
 

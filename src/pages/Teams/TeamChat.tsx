@@ -10,6 +10,7 @@ import { useTeamsStore } from '@/stores/teams';
 import { useTeamsRunnerStore } from '@/stores/teams-runner';
 import { useTranslation } from 'react-i18next';
 import type { TeamMailboxMessage, TeamTask } from '@/features/teams/api/runtime-client';
+import { isGatewayOperational } from '@/lib/gateway-status';
 
 const DEFAULT_LEASE_MS = 60_000;
 const EMPTY_TASKS: TeamTask[] = [];
@@ -26,7 +27,7 @@ function buildTaskId(): string {
 export function TeamChat({ teamId }: { teamId?: string }) {
   const { t } = useTranslation('teams');
   const navigate = useNavigate();
-  const gatewayState = useGatewayStore((state) => state.status.state);
+  const gatewayStatus = useGatewayStore((state) => state.status);
 
   const teams = useTeamsStore((state) => state.teams);
   const activeTeamId = useTeamsStore((state) => state.activeTeamId);
@@ -136,7 +137,8 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   }
 
   const leadSession = effectiveSelectedAgentId ? sessionKey(effectiveSelectedAgentId, team.id) : '';
-  const autoRunnerState = teamAutoRunnerEnabled && gatewayState === 'running'
+  const autoRunnerState = teamAutoRunnerEnabled
+    && isGatewayOperational(gatewayStatus)
     ? t('chat.autoRunnerOn')
     : t('chat.autoRunnerOff');
   const autoRunnerError = resolvedTeamId ? lastErrorByTeamId[resolvedTeamId] : undefined;

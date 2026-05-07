@@ -18,7 +18,7 @@ export type GatewayControlApiContext = Pick<HostApiContext, 'gatewayManager'>;
 
 export type DiagnosticsApiContext = Pick<HostApiContext, 'gatewayManager' | 'runtimeHost'>;
 
-export type AppApiContext = Pick<HostApiContext, 'eventBus' | 'gatewayManager'>;
+export type AppApiContext = Pick<HostApiContext, 'eventBus' | 'gatewayManager' | 'runtimeHost'>;
 
 export type LogApiContext = {};
 

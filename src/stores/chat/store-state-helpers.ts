@@ -145,6 +145,8 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
+    lastError: null,
+    lastIssue: null,
   };
 }
 
@@ -452,6 +454,8 @@ export function patchSessionSnapshot(
       pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
       pendingFinal: snapshot.runtime.pendingFinal,
       lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
+      lastError: snapshot.runtime.lastError,
+      lastIssue: snapshot.runtime.lastIssue,
     },
     window: syncViewportState(current.window, {
       totalItemCount: snapshot.window.totalItemCount,

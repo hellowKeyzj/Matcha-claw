@@ -18,11 +18,11 @@ vi.mock('../../electron/services/channels/weixin-login-manager', () => ({
 }));
 
 class FakeGatewayManager extends EventEmitter {
-  private status: { state: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting'; port: number };
+  private status: { processState: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting'; port: number };
 
   constructor() {
     super();
-    this.status = { state: 'stopped', port: 18789 };
+    this.status = { processState: 'stopped', port: 18789 };
   }
 
   getStatus() {
@@ -58,6 +58,17 @@ describe('host event bridge runtime-host lifecycle', () => {
     const runtimeHostManager = {
       getState: vi.fn(() => runtimeState),
       checkHealth: vi.fn(async () => runtimeHealth),
+      readGatewayStatus: vi.fn(async () => ({
+        state: 'connected',
+        portReachable: true,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 123,
+      })),
       syncSecurityPolicyToGatewayIfRunning,
       onGatewayEvent: vi.fn((handler: (eventName: string, payload: unknown) => void) => {
         gatewayEventHandler = handler;
@@ -132,10 +143,6 @@ describe('host event bridge runtime-host lifecycle', () => {
       method: 'agent',
       params: { runId: 'run-1' },
     });
-    gatewayEventHandler?.('gateway:connection', {
-      state: 'connected',
-      updatedAt: 123,
-    });
     gatewayEventHandler?.('session:update', {
       sessionUpdate: 'session_info_update',
       phase: 'started',
@@ -148,12 +155,6 @@ describe('host event bridge runtime-host lifecycle', () => {
       'gateway:notification',
       expect.objectContaining({
         method: 'agent',
-      }),
-    );
-    expect(eventBus.emit).toHaveBeenCalledWith(
-      'gateway:connection',
-      expect.objectContaining({
-        state: 'connected',
       }),
     );
     expect(eventBus.emit).toHaveBeenCalledWith(

@@ -17,7 +17,7 @@ vi.mock('../../electron/services/settings/settings-store', () => ({
 function createContext() {
   return {
     gatewayManager: {
-      getStatus: vi.fn(() => ({ state: 'running', port: 18789 })),
+      getStatus: vi.fn(() => ({ processState: 'running', port: 18789 })),
       checkHealth: vi.fn(async () => ({ ok: true })),
       start: vi.fn(async () => undefined),
       stop: vi.fn(async () => undefined),
@@ -28,6 +28,19 @@ function createContext() {
       request: vi.fn(async () => ({
         status: 200,
         data: { success: true, result: { id: 'run-1' } },
+      })),
+      readGatewayStatus: vi.fn(async () => ({
+        state: 'reconnecting',
+        portReachable: true,
+        gatewayReady: false,
+        healthSummary: 'degraded',
+        diagnostics: {
+          lastAliveAt: 1200,
+          consecutiveHeartbeatMisses: 1,
+          consecutiveRpcFailures: 0,
+        },
+        lastError: 'connect timeout',
+        updatedAt: 1234,
       })),
     },
   };
@@ -118,17 +131,6 @@ describe('main gateway routes', () => {
 
   it('/api/gateway/health 直接透传 runtime health 的端口态和连接态', async () => {
     const ctx = createContext();
-    ctx.runtimeHost.request.mockResolvedValueOnce({
-      status: 200,
-      data: {
-        status: 'running',
-        detail: 'gateway control channel reconnecting',
-        portReachable: true,
-        connectionState: 'reconnecting',
-        lastError: 'connect timeout',
-        updatedAt: 1234,
-      },
-    });
     const { handleGatewayRoutes } = await import('../../electron/api/routes/gateway');
 
     const handled = await handleGatewayRoutes(
@@ -144,8 +146,8 @@ describe('main gateway routes', () => {
       200,
       {
         ok: true,
-        status: 'running',
-        detail: 'gateway control channel reconnecting',
+        status: 'degraded',
+        detail: 'gateway control channel not ready',
         portReachable: true,
         connectionState: 'reconnecting',
         lastError: 'connect timeout',

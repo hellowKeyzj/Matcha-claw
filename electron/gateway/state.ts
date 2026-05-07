@@ -4,11 +4,11 @@ import type { GatewayStatus } from './manager';
 
 type GatewayStateHooks = {
   emitStatus: (status: GatewayStatus) => void;
-  onTransition?: (previousState: GatewayStatus['state'], nextState: GatewayStatus['state']) => void;
+  onTransition?: (previousProcessState: GatewayStatus['processState'], nextProcessState: GatewayStatus['processState']) => void;
 };
 
 export class GatewayStateController {
-  private status: GatewayStatus = { state: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
+  private status: GatewayStatus = { processState: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
 
   constructor(private readonly hooks: GatewayStateHooks) {}
 
@@ -17,22 +17,22 @@ export class GatewayStateController {
   }
 
   isConnected(isSocketOpen: boolean): boolean {
-    return this.status.state === 'running' && isSocketOpen;
+    return this.status.processState === 'running' && isSocketOpen;
   }
 
   setStatus(update: Partial<GatewayStatus>): void {
-    const previousState = this.status.state;
+    const previousProcessState = this.status.processState;
     this.status = { ...this.status, ...update };
 
-    if (this.status.state === 'running' && this.status.connectedAt) {
+    if (this.status.processState === 'running' && this.status.connectedAt) {
       this.status.uptime = Date.now() - this.status.connectedAt;
     }
 
     this.hooks.emitStatus(this.status);
 
-    if (previousState !== this.status.state) {
-      logger.debug(`Gateway state changed: ${previousState} -> ${this.status.state}`);
-      this.hooks.onTransition?.(previousState, this.status.state);
+    if (previousProcessState !== this.status.processState) {
+      logger.debug(`Gateway processState changed: ${previousProcessState} -> ${this.status.processState}`);
+      this.hooks.onTransition?.(previousProcessState, this.status.processState);
     }
   }
 }

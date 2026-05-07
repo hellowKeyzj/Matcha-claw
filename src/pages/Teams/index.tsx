@@ -9,6 +9,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
+import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
 
 export function TeamsPage() {
   const { t } = useTranslation('teams');
@@ -18,7 +19,8 @@ export function TeamsPage() {
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const gatewayState = useGatewayStore((state) => state.status.state);
+  const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
 
   const teams = useTeamsStore((state) => state.teams);
   const createTeam = useTeamsStore((state) => state.createTeam);
@@ -33,7 +35,7 @@ export function TeamsPage() {
   const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
 
   useEffect(() => {
-    if (gatewayState !== 'running') {
+    if (!gatewayOperational) {
       hasRequestedAgentsForCurrentGatewayRunRef.current = false;
       return;
     }
@@ -44,9 +46,9 @@ export function TeamsPage() {
     if (agentsResource.status !== 'loading') {
       void loadAgents();
     }
-  }, [agentsResource.status, gatewayState, loadAgents]);
+  }, [agentsResource.status, gatewayOperational, loadAgents]);
 
-  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'control_connecting' || gatewayState === 'reconnecting';
+  const gatewayPending = !gatewayInitialized || isGatewayRecovering(gatewayStatus);
   const showAgentsLoading = !agentsResource.hasLoadedOnce
     && (agentsResource.status === 'idle' || agentsResource.status === 'loading' || gatewayPending);
 

@@ -22,6 +22,7 @@ import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskCenterStore } from '@/stores/task-center-store';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { cn } from '@/lib/utils';
@@ -210,7 +211,7 @@ export function TasksPage() {
   );
 
   useEffect(() => {
-    if (!pluginInstalled || !pluginEnabled || gatewayStatus.state !== 'running') {
+    if (!pluginInstalled || !pluginEnabled || !isGatewayOperational(gatewayStatus)) {
       return;
     }
 
@@ -264,7 +265,7 @@ export function TasksPage() {
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [hasActiveTasks, pluginEnabled, pluginInstalled, gatewayStatus.state, refreshTasks]);
+  }, [hasActiveTasks, pluginEnabled, pluginInstalled, gatewayStatus, refreshTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
@@ -619,7 +620,7 @@ export function TasksPage() {
             </div>
           </div>
 
-          {gatewayStatus.state !== 'running' && (
+          {!isGatewayOperational(gatewayStatus) && (
             <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
               <CardContent className="flex items-center gap-3 py-4 text-yellow-700 dark:text-yellow-300">
                 <AlertCircle className="h-5 w-5" />

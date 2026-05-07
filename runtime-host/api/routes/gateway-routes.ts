@@ -7,7 +7,7 @@ interface LocalDispatchResponse {
 }
 
 interface GatewayRouteDeps {
-  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady'>;
+  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc' | 'ensureGatewayReady' | 'readGatewayConnectionState'>;
 }
 
 export async function handleGatewayRoute(
@@ -22,6 +22,10 @@ export async function handleGatewayRoute(
 
   if (method === 'POST' && routePath === '/api/gateway/rpc') {
     return await service.rpc(payload);
+  }
+
+  if (method === 'GET' && routePath === '/api/gateway/status') {
+    return await service.status();
   }
 
   if (method === 'POST' && routePath === '/api/gateway/ready') {

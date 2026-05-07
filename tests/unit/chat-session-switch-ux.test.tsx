@@ -61,7 +61,19 @@ function setupChatSessions() {
   const anotherItems = buildRenderItemsFromMessages(anotherSessionKey, anotherMessages);
 
   useGatewayStore.setState({
-    status: { state: 'running', port: 18789 },
+    status: {
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    },
     rpc: vi.fn().mockResolvedValue({}),
   } as never);
   useSubagentsStore.setState({
@@ -211,4 +223,3 @@ describe('chat 会话切换 UX', () => {
     expect(screen.getByText('current 11')).toBeInTheDocument();
   });
 });
-

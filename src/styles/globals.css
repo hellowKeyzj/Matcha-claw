@@ -229,12 +229,14 @@
   background: hsl(var(--muted));
 }
 
-/* Typing indicator animation */
-@keyframes bounce {
+/* Chat pending indicator animation */
+@keyframes chat-pending-dot {
   0%, 60%, 100% {
+    opacity: 0.32;
     transform: translateY(0);
   }
   30% {
-    transform: translateY(-4px);
+    opacity: 1;
+    transform: translateY(-2px);
   }
 }

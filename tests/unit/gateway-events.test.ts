@@ -16,6 +16,22 @@ vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
 }));
 
+function createRunningGatewayStatus(updatedAt = 1) {
+  return {
+    processState: 'running' as const,
+    port: 18789,
+    gatewayReady: true,
+    healthSummary: 'healthy' as const,
+    transportState: 'connected' as const,
+    portReachable: true,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt,
+  };
+}
+
 function createSessionRecord(input?: {
   messages?: RawMessage[];
   runtime?: Partial<{
@@ -57,6 +73,7 @@ function createSessionInfoUpdate(payload: {
   phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
   runId?: string | null;
   sessionKey?: string | null;
+  error?: string | null;
 }) {
   const sessionKey = payload.sessionKey ?? 'agent:main:main';
   return {
@@ -64,6 +81,7 @@ function createSessionInfoUpdate(payload: {
     phase: payload.phase,
     runId: payload.runId ?? null,
     sessionKey: payload.sessionKey ?? null,
+    error: payload.error ?? null,
     snapshot: {
       sessionKey,
       catalog: {
@@ -90,6 +108,7 @@ function createSessionInfoUpdate(payload: {
         pendingTurnLaneKey: payload.phase === 'started' ? 'main' : null,
         pendingFinal: false,
         lastUserMessageAt: null,
+        lastError: payload.error ?? null,
         updatedAt: 1,
       },
       window: {
@@ -148,15 +167,52 @@ function createSessionMessageUpdate(payload: {
         role: 'assistant',
         laneKey: 'main',
         turnKey: `main:${turnIdentity}`,
+        identitySource: 'run',
+        identityMode: 'run',
+        identityConfidence: 'strong',
         status: payload.kind === 'agent_message_chunk'
           ? 'streaming'
           : 'final',
-        text: typeof payload.message.content === 'string' ? payload.message.content : '',
+        segments: typeof payload.message.content === 'string'
+          ? [{
+              kind: 'message' as const,
+              key: `${assistantItemKey}:message`,
+              text: payload.message.content,
+            }]
+          : assistantToolCalls.map((tool) => ({
+              kind: 'tool' as const,
+              key: `${assistantItemKey}:tool:${tool.id}`,
+              tool: {
+                id: tool.id ?? 'tool',
+                toolCallId: tool.id ?? 'tool',
+                name: tool.name ?? 'tool',
+                displayTitle: tool.name ?? 'tool',
+                input: tool.input,
+                status: 'running' as const,
+                result: {
+                  kind: 'none' as const,
+                  surface: 'tool-card' as const,
+                },
+              },
+            })),
         thinking: null,
-        toolCalls: assistantToolCalls,
-        toolStatuses: Array.isArray(payload.message.toolStatuses) ? payload.message.toolStatuses as never[] : [],
+        tools: assistantToolCalls.map((tool) => ({
+          id: tool.id ?? 'tool',
+          toolCallId: tool.id ?? 'tool',
+          name: tool.name ?? 'tool',
+          displayTitle: tool.name ?? 'tool',
+          input: tool.input,
+          status: 'running' as const,
+          result: {
+            kind: 'none' as const,
+            surface: 'tool-card' as const,
+          },
+        })),
+        embeddedToolResults: [],
+        text: typeof payload.message.content === 'string' ? payload.message.content : '',
         images: [],
         attachedFiles: [],
+        pendingState: payload.kind === 'agent_message_chunk' ? 'typing' : null,
         createdAt: 1,
         updatedAt: 1,
       }
@@ -218,7 +274,16 @@ describe('gateway store event wiring', () => {
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce({
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 1,
+    });
 
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -231,7 +296,6 @@ describe('gateway store event wiring', () => {
 
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:status', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:error', expect.any(Function));
-    expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:connection', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:notification', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('session:update', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
@@ -239,12 +303,30 @@ describe('gateway store event wiring', () => {
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:error', expect.any(Function));
     expect(subscribeHostEventMock).toHaveBeenCalledWith('runtime-host:restart', expect.any(Function));
 
-    handlers.get('gateway:status')?.({ state: 'stopped', port: 18789 });
-    expect(useGatewayStore.getState().status.state).toBe('stopped');
+    handlers.get('gateway:status')?.({
+      processState: 'stopped',
+      port: 18789,
+      gatewayReady: false,
+      healthSummary: 'unresponsive',
+      transportState: 'disconnected',
+      portReachable: false,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 2,
+    });
+    expect(useGatewayStore.getState().status.processState).toBe('stopped');
   });
 
-  it('gateway:connection 事件会更新 runtimeHost 连接态并驱动 degraded/running 切换', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+  it('gateway:status 事件直接同步统一 gateway 快照', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 1,
+    });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -254,33 +336,81 @@ describe('gateway store event wiring', () => {
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
 
-    handlers.get('runtime-host:status')?.({
-      status: 'running',
-      updatedAt: 2001,
-    });
-    handlers.get('gateway:connection')?.({
-      state: 'disconnected',
+    handlers.get('gateway:status')?.({
+      processState: 'running',
+      port: 18789,
+      transportState: 'disconnected',
+      healthSummary: 'unresponsive',
       lastError: 'socket closed',
-      updatedAt: 2002,
+      gatewayReady: false,
+      portReachable: false,
+      diagnostics: { consecutiveHeartbeatMisses: 1, consecutiveRpcFailures: 0 },
+      updatedAt: 2,
     });
 
-    let state = useGatewayStore.getState().runtimeHost;
-    expect(state.lifecycle).toBe('degraded');
-    expect(state.gatewayConnectionState).toBe('disconnected');
-    expect(state.gatewayConnectionReason).toBe('socket closed');
+    let state = useGatewayStore.getState().status;
+    expect(state.transportState).toBe('disconnected');
+    expect(state.healthSummary).toBe('unresponsive');
+    expect(state.lastError).toBe('socket closed');
 
-    handlers.get('gateway:connection')?.({
-      state: 'connected',
-      updatedAt: 2003,
+    handlers.get('gateway:status')?.({
+      processState: 'running',
+      port: 18789,
+      transportState: 'connected',
+      healthSummary: 'healthy',
+      gatewayReady: true,
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 3,
     });
 
-    state = useGatewayStore.getState().runtimeHost;
-    expect(state.lifecycle).toBe('running');
-    expect(state.gatewayConnectionState).toBe('connected');
+    state = useGatewayStore.getState().status;
+    expect(state.transportState).toBe('connected');
+    expect(state.healthSummary).toBe('healthy');
+  });
+
+  it('gateway:error 事件会把结构化 transport issue 写回 gateway store', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:error')?.({
+      message: 'Gateway socket closed: code=1006 reason=network down',
+      issue: {
+        message: 'Gateway socket closed: code=1006 reason=network down',
+        source: 'socket-close',
+        at: 123,
+        code: '1006',
+        details: { reason: 'network down' },
+      },
+    });
+
+    const state = useGatewayStore.getState().status;
+    expect(state.lastError).toBe('Gateway socket closed: code=1006 reason=network down');
+    expect(state.lastIssue).toMatchObject({
+      source: 'socket-close',
+      code: '1006',
+      details: { reason: 'network down' },
+    });
   });
 
   it('runtime-host 事件会更新 renderer 侧运行时状态', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce({
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: { consecutiveHeartbeatMisses: 0, consecutiveRpcFailures: 0 },
+      updatedAt: 1,
+    });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -317,7 +447,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('forwards exec.approval.requested/resolved notifications into chat approval state', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -379,7 +509,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('run.phase completed 事件应清理 chat.send 超时残留错误', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -423,11 +553,57 @@ describe('gateway store event wiring', () => {
     expect(state.loadedSessions['agent:main:main']?.runtime.sending).toBe(false);
     expect(state.loadedSessions['agent:main:main']?.runtime.pendingFinal).toBe(false);
     expect(state.loadedSessions['agent:main:main']?.runtime.activeRunId).toBeNull();
-    expect(state.error).toBeNull();
+    expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBeNull();
+  });
+
+  it('run.phase error 事件应写入当前 session runtime.lastError', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-error-1',
+            pendingFinal: false,
+          },
+        }),
+      },
+      loadHistory: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'error',
+      runId: 'run-error-1',
+      sessionKey: 'agent:main:main',
+      error: 'model unavailable',
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const state = useChatStore.getState();
+    expect(state.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('error');
+    expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBe('model unavailable');
   });
 
   it('structured session:update delta 会直接驱动 chat store 写入 streaming assistant turn', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -478,7 +654,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('structured session:update 会按 event.sessionKey 写入对应 session，而不是 currentSessionKey', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -523,7 +699,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('structured session:update tool delta 即使 sequenceId 不是从 1 开始，也会立即写入 assistant turn 供工具卡片渲染', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -579,7 +755,7 @@ describe('gateway store event wiring', () => {
     expect(item).toMatchObject({
       kind: 'assistant-turn',
       turnKey: 'main:run:run-tool-direct-1:tool:tool-1',
-      toolStatuses: [{
+      tools: [{
         toolCallId: 'tool-1',
         name: 'memory_store',
         status: 'running',
@@ -588,7 +764,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('run.phase completed 只应进入单一 session update 入口', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -633,7 +809,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('agent 通知与 conversation chat.message 同时到达时，不应重复转发到 chat store', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -707,7 +883,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('非结构化 session:update 载荷应直接忽略（不再 renderer 侧兜底归一化）', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -753,7 +929,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('legacy chat 与结构化 final 同时到达时，应只消费结构化 final', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -818,7 +994,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('user legacy metadata 与结构化 final 同时到达时，应只消费结构化 final', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -883,7 +1059,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('assistant legacy 与结构化 final 同时到达时，应只消费结构化 final', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -948,7 +1124,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('task_manager.* 通知会进入 task center，并按 taskId 合并批量更新', async () => {
-    hostApiFetchMock.mockResolvedValueOnce({ state: 'running', port: 18789 });
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -982,4 +1158,3 @@ describe('gateway store event wiring', () => {
     });
   });
 });
-

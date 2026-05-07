@@ -142,6 +142,21 @@ function resolveAssistantTurnPendingState(input: {
   return 'typing';
 }
 
+function matchesCurrentRuntimeTurn(input: {
+  runtime: SessionRuntimeStateSnapshot;
+  accumulator: AssistantTurnAccumulator;
+}): boolean {
+  const pendingTurnKey = normalizeString(input.runtime.pendingTurnKey);
+  if (pendingTurnKey) {
+    return input.accumulator.turnKey === pendingTurnKey;
+  }
+  const activeRunId = normalizeString(input.runtime.activeRunId);
+  if (!activeRunId) {
+    return false;
+  }
+  return normalizeString(input.accumulator.runId) === activeRunId;
+}
+
 function resolveAssistantTurnStatus(input: {
   runtime: SessionRuntimeStateSnapshot;
   activeTurnKey: string | null;
@@ -153,13 +168,20 @@ function resolveAssistantTurnStatus(input: {
   if (input.accumulator.lastStatus === 'aborted') {
     return 'aborted';
   }
-  if (input.accumulator.lastStatus === 'streaming') {
-    return 'streaming';
-  }
-  if (input.runtime.sending && input.activeTurnKey === input.accumulator.turnKey) {
+  if (
+    input.runtime.sending
+    && input.activeTurnKey === input.accumulator.turnKey
+    && matchesCurrentRuntimeTurn({
+      runtime: input.runtime,
+      accumulator: input.accumulator,
+    })
+  ) {
     return input.runtime.pendingFinal || deriveToolsFromSegments(input.accumulator.segments).length > 0
       ? 'waiting_tool'
       : 'streaming';
+  }
+  if (input.accumulator.lastStatus === 'streaming') {
+    return 'final';
   }
   return 'final';
 }
@@ -413,10 +435,7 @@ export function assembleAuthoritativeAssistantTurns(input: {
         return byItemKey;
       }
     }
-    if (assistantTurnOrder.length === 0) {
-      return null;
-    }
-    return assistantTurnOrder[assistantTurnOrder.length - 1] ?? null;
+    return null;
   })();
 
   const turnsByLatestTimelineKey = new Map<string, SessionAssistantTurnItem>();

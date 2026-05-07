@@ -17,6 +17,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import type { SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
+import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
 import { SubagentCard } from './components/SubagentCard';
 import { SubagentDeleteDialog } from './components/SubagentDeleteDialog';
 import { SubagentFormDialog } from './components/SubagentFormDialog';
@@ -156,7 +157,8 @@ export function SubAgents() {
   );
   const [visibleTemplateCount, setVisibleTemplateCount] = useState(INITIAL_TEMPLATE_CARD_BATCH);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const gatewayState = useGatewayStore((state) => state.status.state);
+  const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const templateLoadRequestIdRef = useRef(0);
   const prefetchedTemplateIdsRef = useRef<Set<string>>(new Set());
   const templateCardScrollRef = useRef<HTMLDivElement | null>(null);
@@ -179,7 +181,7 @@ export function SubAgents() {
   }, [availableModels]);
   const showNoModelGuide = !modelsLoading && !hasAvailableModels;
   const hasAgentCards = agents.length > 0;
-  const gatewayPending = !gatewayInitialized || gatewayState === 'starting' || gatewayState === 'control_connecting' || gatewayState === 'reconnecting';
+  const gatewayPending = !gatewayInitialized || isGatewayRecovering(gatewayStatus);
   const showSubagentGridSkeleton = !hasAgentCards && !agentsResource.hasLoadedOnce && (
     agentsResource.status === 'loading'
     || agentsResource.status === 'idle'
@@ -196,7 +198,7 @@ export function SubAgents() {
   }, [loadAvailableModels]);
 
   useEffect(() => {
-    if (gatewayState !== 'running') {
+    if (!gatewayOperational) {
       hasRequestedAgentsForCurrentGatewayRunRef.current = false;
       return;
     }
@@ -207,7 +209,7 @@ export function SubAgents() {
     if (agentsResource.status !== 'loading') {
       void loadAgents({ silent: true });
     }
-  }, [agentsResource.status, gatewayState, loadAgents]);
+  }, [agentsResource.status, gatewayOperational, loadAgents]);
 
   useEffect(() => {
     if (!managedAgentId) {

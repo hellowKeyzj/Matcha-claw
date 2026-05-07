@@ -114,7 +114,6 @@ function applySessionLifecycleEvent(
   }
 
   set((state) => ({
-    error: event.phase === 'started' || event.phase === 'final' ? null : state.error,
     loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
   }));
 
@@ -158,7 +157,6 @@ function applySessionMessageEvent(
   }
 
   set((state) => ({
-      error: null,
       loadedSessions: patchSessionSnapshot(state, targetSessionKey, event.snapshot),
   }));
 }

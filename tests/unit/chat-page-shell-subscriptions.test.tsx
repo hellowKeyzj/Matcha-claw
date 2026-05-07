@@ -83,7 +83,9 @@ vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
 }));
 
 vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
-  ChatErrorBanner: () => <div data-testid="chat-error-banner" />,
+  ChatErrorBanner: ({ error }: { error: string }) => (
+    <div data-testid="chat-error-banner">{error}</div>
+  ),
   ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
 }));
 
@@ -92,7 +94,18 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
 }));
 
 vi.mock('@/pages/Chat/components/ChatOffline', () => ({
-  ChatOffline: () => <div data-testid="chat-offline" />,
+  ChatOffline: ({
+    title,
+    description,
+  }: {
+    title: string;
+    description: string;
+  }) => (
+    <div data-testid="chat-offline">
+      <div data-testid="chat-offline-title">{title}</div>
+      <div data-testid="chat-offline-description">{description}</div>
+    </div>
+  ),
 }));
 
 vi.mock('@/pages/Chat/components/ChatList', () => ({
@@ -137,11 +150,25 @@ function buildSessionRecord(overrides?: Partial<ReturnType<typeof createEmptySes
 }
 
 describe('chat 顶层订阅收口', () => {
+  const activeRunDisconnectedError = 'The active run disconnected before a terminal event was received.';
+
   beforeEach(() => {
     chatViewportPaneRenderSpy.mockClear();
 
     useGatewayStore.setState({
-      status: { state: 'running', port: 18789 },
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        transportState: 'connected',
+        portReachable: true,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      },
       rpc: vi.fn(),
     } as never);
 
@@ -257,5 +284,170 @@ describe('chat 顶层订阅收口', () => {
     expect(chatViewportPaneRenderSpy).toHaveBeenCalledTimes(viewportRenderCountAfterMount + 1);
     expect(screen.getByTestId('chat-shell')).toBeInTheDocument();
     expect(screen.getByTestId('chat-input')).toBeInTheDocument();
+  });
+
+  it('当前会话 runtime.lastError 存在时应展示错误 banner', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            lastError: 'model unavailable',
+          },
+        }),
+      },
+      error: null,
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-error-banner')).toBeInTheDocument();
+  });
+
+  it('已知运行时断连错误应映射为本地化文案 key', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            lastError: activeRunDisconnectedError,
+          },
+        }),
+      },
+      error: null,
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.activeRunDisconnected');
+  });
+
+  it('gateway transport 断开时，离线页应显示具体 transport 错误原因', () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        lastError: 'Gateway socket closed: code=1006 reason=network down',
+        lastIssue: {
+          message: 'Gateway socket closed: code=1006 reason=network down',
+          source: 'socket-close',
+          at: 1,
+          code: '1006',
+          details: { reason: 'network down' },
+        },
+        diagnostics: {
+          consecutiveHeartbeatMisses: 1,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 2,
+      },
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-offline')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-offline-description')).toHaveTextContent(
+      'errors.gatewaySocketClosed',
+    );
+  });
+
+  it('当前会话仍在发送时，应优先把 gateway transport issue 映射为本地化错误 banner', () => {
+    useGatewayStore.setState({
+      status: {
+        processState: 'running',
+        port: 18789,
+        gatewayReady: true,
+        healthSummary: 'degraded',
+        transportState: 'connected',
+        portReachable: true,
+        lastError: 'Gateway RPC timeout: chat.send',
+        lastIssue: {
+          message: 'Gateway RPC timeout: chat.send',
+          source: 'rpc',
+          at: 1,
+        },
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 1,
+        },
+        updatedAt: 2,
+      },
+    } as never);
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            sending: true,
+            pendingFinal: false,
+            runPhase: 'submitted',
+            lastError: null,
+          },
+        }),
+      },
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.gatewayRpcTimeout');
+  });
+
+  it('当前会话 runtime.lastIssue 的错误码应优先映射为本地化文案 key', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            sending: false,
+            runPhase: 'error',
+            lastError: null,
+            lastIssue: {
+              message: 'model unavailable',
+              source: 'runtime',
+              at: 1,
+              code: 'MODEL_UNAVAILABLE',
+              details: { provider: 'anthropic' },
+            },
+          },
+        }),
+      },
+      error: null,
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.modelUnavailable');
   });
 });

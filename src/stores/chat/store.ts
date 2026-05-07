@@ -41,7 +41,7 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord } from './store-state-helpers';
+import { createEmptySessionRecord, getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import { finishChatRunTelemetry } from './telemetry';
 
 function isStaleApprovalResolveError(message: string): boolean {
@@ -246,6 +246,21 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         loadSessions(),
       ]);
     },
-    clearError: () => set({ error: null }),
+    clearError: () => set((state) => {
+      const runtime = getSessionRuntime(state, state.currentSessionKey);
+      return {
+        error: null,
+        loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
+          runtime: {
+            ...runtime,
+            lastError: null,
+            lastIssue: null,
+            ...(runtime.runPhase === 'error' && !runtime.sending && !runtime.pendingFinal
+              ? { runPhase: 'idle' as const }
+              : {}),
+          },
+        }),
+      };
+    }),
   };
 });

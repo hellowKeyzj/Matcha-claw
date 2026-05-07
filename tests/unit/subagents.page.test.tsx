@@ -94,8 +94,17 @@ describe('subagents page', () => {
     i18n.changeLanguage('en');
     useGatewayStore.setState({
       status: {
-        state: 'stopped',
+        processState: 'stopped',
         port: 18789,
+        gatewayReady: false,
+        healthSummary: 'unresponsive',
+        transportState: 'disconnected',
+        portReachable: false,
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
       },
       health: null,
       isInitialized: true,
@@ -208,8 +217,17 @@ describe('subagents page', () => {
     act(() => {
       useGatewayStore.setState({
         status: {
-          state: 'running',
+          processState: 'running',
           port: 18789,
+          gatewayReady: true,
+          healthSummary: 'healthy',
+          transportState: 'connected',
+          portReachable: true,
+          diagnostics: {
+            consecutiveHeartbeatMisses: 0,
+            consecutiveRpcFailures: 0,
+          },
+          updatedAt: 2,
         },
       });
     });

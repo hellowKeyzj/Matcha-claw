@@ -34,6 +34,7 @@ import { prewarmPluginsData } from '@/stores/plugins-store';
 import { Button } from '@/components/ui/button';
 import { PaneEdgeToggle } from '@/components/layout/PaneEdgeToggle';
 import { hostApiFetch } from '@/lib/host-api';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import type { TeamMailboxMessage } from '@/features/teams/api/runtime-client';
@@ -431,7 +432,8 @@ export function Sidebar({
   const toggleSidebar = useLayoutStore((state) => state.toggleSidebar);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore(selectSidebarNewSessionAction);
-  const gatewayState = useGatewayStore((state) => state.status.state);
+  const gatewayStatus = useGatewayStore((state) => state.status);
+  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
@@ -485,7 +487,7 @@ export function Sidebar({
       return;
     }
 
-    if (gatewayState !== 'running') {
+    if (!gatewayOperational) {
       return;
     }
 
@@ -507,7 +509,7 @@ export function Sidebar({
     }
   }, [
     fetchSkills,
-    gatewayState,
+    gatewayOperational,
     initTaskCenter,
     prewarmPluginsData,
     refreshTaskCenter,
@@ -560,13 +562,17 @@ export function Sidebar({
     if (location.pathname === to) {
       return;
     }
-    if (to === '/skills' && gatewayState === 'running' && !skillsSnapshotReady) {
+    if (
+      to === '/skills'
+      && gatewayOperational
+      && !skillsSnapshotReady
+    ) {
       void fetchSkills({ silent: true });
     }
     startTransition(() => {
       navigate(to);
     });
-  }, [fetchSkills, gatewayState, location.pathname, navigate, skillsSnapshotReady]);
+  }, [fetchSkills, gatewayOperational, location.pathname, navigate, skillsSnapshotReady]);
 
   return (
     <aside

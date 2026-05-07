@@ -1,4 +1,5 @@
 import type { SessionTimelineEntry, SessionTimelineEntryStatus } from '../../shared/session-adapter-types';
+import type { GatewayTransportIssue } from '../../shared/gateway-error';
 import { normalizeMessageRole } from '../../shared/chat-message-normalization';
 import {
   buildTimelineEntriesFromTranscriptMessage,
@@ -20,6 +21,8 @@ interface GatewayConversationLifecyclePayload {
   phase?: unknown;
   runId?: unknown;
   sessionKey?: unknown;
+  error?: unknown;
+  errorMessage?: unknown;
 }
 
 interface GatewayConversationToolLifecyclePayload {
@@ -41,6 +44,8 @@ export interface SessionInfoIngressEvent {
   sessionKey: string | null;
   runId: string | null;
   phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
+  error: string | null;
+  transportIssue?: GatewayTransportIssue | null;
   _meta?: Record<string, unknown>;
 }
 
@@ -344,6 +349,22 @@ export function buildSessionUpdateEventsFromGatewayConversationEvent(
       sessionKey,
       runId,
       phase,
+      error: normalizeString(lifecyclePayload.errorMessage) || normalizeString(lifecyclePayload.error) || null,
+      ...(normalizeString(lifecyclePayload.errorMessage) || normalizeString(lifecyclePayload.error)
+        ? {
+            transportIssue: {
+              message: normalizeString(lifecyclePayload.errorMessage) || normalizeString(lifecyclePayload.error),
+              source: 'runtime',
+              at: Date.now(),
+              ...(normalizeString((lifecyclePayload as Record<string, unknown>).errorCode)
+                ? { code: normalizeString((lifecyclePayload as Record<string, unknown>).errorCode) }
+                : {}),
+              ...((lifecyclePayload as Record<string, unknown>).errorDetails !== undefined
+                ? { details: (lifecyclePayload as Record<string, unknown>).errorDetails }
+                : {}),
+            },
+          }
+        : {}),
     }];
   }
 

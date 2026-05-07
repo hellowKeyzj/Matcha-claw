@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { AppApiContext } from '../context';
 import { getResourcesDir } from '../../utils/paths';
 import { sendJson } from '../route-utils';
+import { buildPublicGatewayStatus } from '../../gateway/public-status';
 
 export async function handleAppRoutes(
   req: IncomingMessage,
@@ -39,9 +40,12 @@ export async function handleAppRoutes(
     });
     res.write(': connected\n\n');
     ctx.eventBus.addSseClient(res);
+    const gatewayStatus = await ctx.runtimeHost.readGatewayStatus()
+      .then((runtimeStatus) => buildPublicGatewayStatus(ctx.gatewayManager.getStatus(), runtimeStatus))
+      .catch(() => buildPublicGatewayStatus(ctx.gatewayManager.getStatus(), null));
     // Send a current-state snapshot immediately so renderer subscribers do not
     // miss lifecycle transitions that happened before the SSE connection opened.
-    res.write(`event: gateway:status\ndata: ${JSON.stringify(ctx.gatewayManager.getStatus())}\n\n`);
+    res.write(`event: gateway:status\ndata: ${JSON.stringify(gatewayStatus)}\n\n`);
     return true;
   }
 

@@ -247,6 +247,7 @@ describe('runtime-host process gateway rpc client', () => {
           snapshots.push({
             state: payload.state,
             portReachable: payload.portReachable,
+            transportEpoch: payload.transportEpoch,
             lastError: payload.lastError,
           });
         },
@@ -259,6 +260,7 @@ describe('runtime-host process gateway rpc client', () => {
       expect(snapshots.map((item) => item.state)).toContain('reconnecting');
       expect(snapshots.map((item) => item.state)).toContain('connected');
       expect(snapshots.some((item) => item.state === 'connected' && item.portReachable)).toBe(true);
+      expect(snapshots.some((item) => item.state === 'connected' && item.transportEpoch >= 1)).toBe(true);
       expect(snapshots.at(-1)).toEqual(expect.objectContaining({
         state: 'disconnected',
       }));
@@ -309,6 +311,80 @@ describe('runtime-host process gateway rpc client', () => {
       await expect(client.ensureGatewayReady(8000)).resolves.toBeUndefined();
       expect(methods).toEqual(['connect', 'status']);
       client.close();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        wss.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
+  it('诊断快照变化会继续透传，不会被状态相同误吞', async () => {
+    const port = 48400 + Math.floor(Math.random() * 300);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT = String(port);
+    process.env.MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN = 'gateway-diagnostics-token';
+
+    const snapshots: Array<{
+      state: string;
+      gatewayReady: boolean;
+      diagnostics: {
+        lastAliveAt?: number;
+        lastRpcSuccessAt?: number;
+        consecutiveRpcFailures: number;
+      };
+    }> = [];
+    const wss = new WebSocketServer({ host: '127.0.0.1', port });
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({
+        type: 'event',
+        event: 'connect.challenge',
+        payload: { nonce: `nonce-${Date.now()}` },
+      }));
+
+      socket.on('message', (rawData) => {
+        const message = JSON.parse(rawData.toString()) as Record<string, unknown>;
+        if (message.type !== 'req' || typeof message.id !== 'string') {
+          return;
+        }
+        socket.send(JSON.stringify({
+          type: 'res',
+          id: message.id,
+          ok: true,
+          payload: { ok: true, method: message.method },
+        }));
+      });
+    });
+
+    try {
+      const client = createGatewayClient({
+        onGatewayConnectionState: (payload) => {
+          snapshots.push({
+            state: payload.state,
+            gatewayReady: payload.gatewayReady,
+            diagnostics: {
+              lastAliveAt: payload.diagnostics.lastAliveAt,
+              lastRpcSuccessAt: payload.diagnostics.lastRpcSuccessAt,
+              consecutiveRpcFailures: payload.diagnostics.consecutiveRpcFailures,
+            },
+          });
+        },
+      });
+
+      await client.gatewayRpc('channels.status', { probe: true });
+      client.close();
+
+      expect(snapshots.some((item) => item.state === 'connected' && item.gatewayReady)).toBe(true);
+      expect(
+        snapshots.some((item) => item.diagnostics.lastAliveAt && item.diagnostics.lastRpcSuccessAt),
+      ).toBe(true);
+      expect(
+        snapshots.some((item) => item.diagnostics.consecutiveRpcFailures === 0),
+      ).toBe(true);
     } finally {
       await new Promise<void>((resolve, reject) => {
         wss.close((error) => {

@@ -54,22 +54,22 @@ describe('gateway process policy helpers', () => {
 
   describe('restart deferral policy', () => {
     it('defers restart while startup or reconnect is in progress', () => {
-      expect(shouldDeferRestart({ state: 'starting', startLock: false })).toBe(true);
-      expect(shouldDeferRestart({ state: 'reconnecting', startLock: false })).toBe(true);
-      expect(shouldDeferRestart({ state: 'running', startLock: true })).toBe(true);
+      expect(shouldDeferRestart({ processState: 'starting', startLock: false })).toBe(true);
+      expect(shouldDeferRestart({ processState: 'reconnecting', startLock: false })).toBe(true);
+      expect(shouldDeferRestart({ processState: 'running', startLock: true })).toBe(true);
     });
 
     it('does not defer restart for stable states when no start lock', () => {
-      expect(shouldDeferRestart({ state: 'running', startLock: false })).toBe(false);
-      expect(shouldDeferRestart({ state: 'stopped', startLock: false })).toBe(false);
-      expect(shouldDeferRestart({ state: 'error', startLock: false })).toBe(false);
+      expect(shouldDeferRestart({ processState: 'running', startLock: false })).toBe(false);
+      expect(shouldDeferRestart({ processState: 'stopped', startLock: false })).toBe(false);
+      expect(shouldDeferRestart({ processState: 'error', startLock: false })).toBe(false);
     });
 
     it('executes deferred restart even after lifecycle recovers to running', () => {
       expect(
         getDeferredRestartAction({
           hasPendingRestart: true,
-          state: 'running',
+          processState: 'running',
           startLock: false,
           shouldReconnect: true,
         })
@@ -80,7 +80,7 @@ describe('gateway process policy helpers', () => {
       expect(
         getDeferredRestartAction({
           hasPendingRestart: true,
-          state: 'starting',
+          processState: 'starting',
           startLock: false,
           shouldReconnect: true,
         })
@@ -91,7 +91,7 @@ describe('gateway process policy helpers', () => {
       expect(
         getDeferredRestartAction({
           hasPendingRestart: true,
-          state: 'error',
+          processState: 'error',
           startLock: false,
           shouldReconnect: true,
         })
@@ -102,7 +102,7 @@ describe('gateway process policy helpers', () => {
       expect(
         getDeferredRestartAction({
           hasPendingRestart: true,
-          state: 'stopped',
+          processState: 'stopped',
           startLock: false,
           shouldReconnect: false,
         })

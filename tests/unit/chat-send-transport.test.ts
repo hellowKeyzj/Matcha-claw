@@ -33,6 +33,7 @@ function buildPromptSnapshot(entryId: string, content: string) {
       pendingTurnLaneKey: null,
       pendingFinal: false,
       lastUserMessageAt: 1,
+      lastError: null,
       updatedAt: 1,
     },
     window: {
@@ -119,6 +120,25 @@ describe('chat send transport', () => {
         fileSize: 1,
         preview: 'data:image/png;base64,AA==',
       }],
+    });
+  });
+
+  it('发送失败时应保留后端原始错误文案', async () => {
+    hostSessionPromptMock.mockResolvedValueOnce({
+      success: false,
+      error: 'model unavailable: quota exceeded',
+    });
+
+    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const result = await sendChatTransport({
+      sessionKey: 'agent:main:main',
+      message: 'hello',
+      idempotencyKey: 'user-local-3',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'model unavailable: quota exceeded',
     });
   });
 });

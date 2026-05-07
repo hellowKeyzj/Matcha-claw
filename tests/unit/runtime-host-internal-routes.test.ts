@@ -170,44 +170,6 @@ describe('runtime-host internal routes', () => {
     });
   });
 
-  it('gateway-events 支持 gateway:connection 事件透传', async () => {
-    parseJsonBodyMock.mockResolvedValueOnce({
-      version: 1,
-      eventName: 'gateway:connection',
-      payload: {
-        state: 'reconnecting',
-        portReachable: true,
-        lastError: 'connect timeout',
-      },
-    });
-    const emitGatewayEvent = vi.fn();
-
-    const { handleRuntimeHostInternalRoutes } = await import('../../electron/api/routes/runtime-host-internal');
-    const handled = await handleRuntimeHostInternalRoutes(
-      {
-        method: 'POST',
-        headers: {
-          'x-runtime-host-dispatch-token': 'test-token',
-        },
-      } as unknown as IncomingMessage,
-      {} as ServerResponse,
-      new URL('http://127.0.0.1:3210/internal/runtime-host/gateway-events'),
-      {
-        runtimeHost: {
-          getInternalDispatchToken: () => 'test-token',
-          emitGatewayEvent,
-        },
-      } as never,
-    );
-
-    expect(handled).toBe(true);
-    expect(emitGatewayEvent).toHaveBeenCalledWith('gateway:connection', {
-      state: 'reconnecting',
-      portReachable: true,
-      lastError: 'connect timeout',
-    });
-  });
-
   it('gateway-events 支持 session:update 事件透传', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       version: 1,

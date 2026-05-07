@@ -16,6 +16,10 @@ export type GatewayConversationEvent =
     phase: GatewayRunPhase;
     runId?: string;
     sessionKey?: string;
+    error?: string;
+    errorMessage?: string;
+    errorCode?: string;
+    errorDetails?: unknown;
   };
 
 export type GatewayProtocolEventDispatcher = {
@@ -147,6 +151,10 @@ function normalizeGatewayRunPhase(payload: unknown): {
   phase: GatewayRunPhase;
   runId?: string;
   sessionKey?: string;
+  error?: string;
+  errorMessage?: string;
+  errorCode?: string;
+  errorDetails?: unknown;
 } | null {
   const input = asRecord(payload) ?? {};
   const stream = getTrimmedString(input.stream);
@@ -180,10 +188,23 @@ function normalizeGatewayRunPhase(payload: unknown): {
 
   const runId = getTrimmedString(input.runId ?? data.runId);
   const sessionKey = getTrimmedString(input.sessionKey ?? data.sessionKey);
+  const errorMessage = getTrimmedString(data.errorMessage ?? input.errorMessage);
+  const error = getTrimmedString(data.error ?? input.error);
+  const rawError = asRecord(data.error ?? input.error);
+  const errorCode = getTrimmedString(
+    data.errorCode
+    ?? input.errorCode
+    ?? rawError?.code,
+  );
+  const errorDetails = data.errorDetails ?? input.errorDetails ?? rawError?.details;
   return {
     phase,
     ...(runId ? { runId } : {}),
     ...(sessionKey ? { sessionKey } : {}),
+    ...(error ? { error } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(errorDetails !== undefined ? { errorDetails } : {}),
   };
 }
 

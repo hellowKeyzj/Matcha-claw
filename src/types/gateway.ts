@@ -1,3 +1,5 @@
+import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
+
 /**
  * Gateway Type Definitions
  * Types for Gateway communication and data structures
@@ -7,7 +9,7 @@
  * Gateway connection status
  */
 export interface GatewayStatus {
-  state: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
+  processState: 'stopped' | 'starting' | 'control_connecting' | 'running' | 'error' | 'reconnecting';
   port: number;
   pid?: number;
   uptime?: number;
@@ -15,6 +17,25 @@ export interface GatewayStatus {
   connectedAt?: number;
   version?: string;
   reconnectAttempts?: number;
+  gatewayReady: boolean;
+  healthSummary: 'healthy' | 'degraded' | 'unresponsive';
+  transportState: 'connected' | 'reconnecting' | 'disconnected';
+  portReachable: boolean;
+  lastAliveAt?: number;
+  lastError?: string;
+  lastIssue?: GatewayTransportIssue;
+  diagnostics: {
+    lastAliveAt?: number;
+    lastRpcSuccessAt?: number;
+    lastRpcFailureAt?: number;
+    lastRpcFailureMethod?: string;
+    lastHeartbeatTimeoutAt?: number;
+    consecutiveHeartbeatMisses: number;
+    lastSocketCloseAt?: number;
+    lastSocketCloseCode?: number;
+    consecutiveRpcFailures: number;
+  };
+  updatedAt: number;
 }
 
 /**

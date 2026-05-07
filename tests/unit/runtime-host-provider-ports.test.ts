@@ -89,7 +89,7 @@ describe('runtime-host manager provider oauth action', () => {
   it('按 provider 类型分流 browser/device OAuth', async () => {
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: { getStatus: () => ({ state: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
+      gatewayManager: { getStatus: () => ({ processState: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
     });
 
     await manager.executeShellAction('provider_oauth_start', {
@@ -117,7 +117,7 @@ describe('runtime-host manager provider oauth action', () => {
   it('cancel/manual-code 只走主进程 OAuth manager', async () => {
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({
-      gatewayManager: { getStatus: () => ({ state: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
+      gatewayManager: { getStatus: () => ({ processState: 'running', port: 18789 }), debouncedRestart: vi.fn() } as never,
     });
 
     await manager.executeShellAction('provider_oauth_cancel');

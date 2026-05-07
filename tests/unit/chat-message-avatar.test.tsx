@@ -6,6 +6,25 @@ import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item
 import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import { vi } from 'vitest';
+
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>();
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (key: string) => {
+        if (key === 'pending.typing') {
+          return '正在思考';
+        }
+        if (key === 'pending.activity') {
+          return '正在调用工具';
+        }
+        return key;
+      },
+    }),
+  };
+});
 
 function buildRenderItem(message: RawMessage) {
   return applyAssistantPresentationToItems({
@@ -160,6 +179,63 @@ describe('chat message avatar', () => {
     expect(screen.getByText('输入参数')).toBeInTheDocument();
     expect(screen.getByText(/读取，README\.md/)).toBeInTheDocument();
     expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('读取，README.md');
+  });
+
+  it('pending typing turn shows thinking indicator instead of gray streaming block', () => {
+    const item = {
+      ...buildRenderItem({
+        role: 'assistant',
+        content: '',
+      }),
+      kind: 'assistant-turn' as const,
+      status: 'streaming' as const,
+      segments: [],
+      text: '',
+      thinking: null,
+      tools: [],
+      images: [],
+      attachedFiles: [],
+      pendingState: 'typing' as const,
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
+      />,
+    );
+
+    expect(screen.getByText('正在思考')).toBeInTheDocument();
+    expect(document.querySelector('[data-chat-pending-mode="typing"]')).not.toBeNull();
+    expect(document.querySelector('[data-chat-body-mode="streaming"]')).toBeNull();
+  });
+
+  it('pending activity turn shows tool activity indicator', () => {
+    const item = {
+      ...buildRenderItem({
+        role: 'assistant',
+        content: '',
+      }),
+      kind: 'assistant-turn' as const,
+      status: 'waiting_tool' as const,
+      segments: [],
+      text: '',
+      thinking: null,
+      tools: [],
+      images: [],
+      attachedFiles: [],
+      pendingState: 'activity' as const,
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={item}
+        showThinking={false}
+      />,
+    );
+
+    expect(screen.getByText('正在调用工具')).toBeInTheDocument();
+    expect(document.querySelector('[data-chat-pending-mode="activity"]')).not.toBeNull();
   });
 
   it('tool card stays collapsed by default and expands to show tool output', () => {

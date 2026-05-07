@@ -30,6 +30,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 import { useSettingsStore } from '@/stores/settings';
 import { useTranslation } from 'react-i18next';
+import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { toast } from 'sonner';
 import { invokeIpc } from '@/lib/api-client';
@@ -636,12 +637,12 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
     // Check Gateway — read directly from store to avoid stale closure
     // Don't immediately report error; gateway may still be initializing
     const currentGateway = useGatewayStore.getState().status;
-    if (currentGateway.state === 'running') {
+    if (isGatewayOperational(currentGateway)) {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'success', message: `Running on port ${currentGateway.port}` },
       }));
-    } else if (currentGateway.state === 'error') {
+    } else if (currentGateway.processState === 'error') {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'error', message: currentGateway.error || t('runtime.status.error') },
@@ -653,7 +654,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         ...prev,
         gateway: {
           status: 'checking',
-          message: currentGateway.state === 'starting' || currentGateway.state === 'control_connecting'
+          message: currentGateway.processState === 'starting' || currentGateway.processState === 'control_connecting'
             ? t('runtime.status.checking')
             : 'Waiting for gateway...'
         },
@@ -669,27 +670,28 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   useEffect(() => {
     const allPassed = checks.nodejs.status === 'success'
       && checks.openclaw.status === 'success'
-      && (checks.gateway.status === 'success' || gatewayStatus.state === 'running');
+      && (checks.gateway.status === 'success' || isGatewayOperational(gatewayStatus));
     onStatusChange(allPassed);
   }, [checks, gatewayStatus, onStatusChange]);
 
   // Update gateway check when gateway status changes
   useEffect(() => {
-    if (gatewayStatus.state === 'running') {
+    if (isGatewayOperational(gatewayStatus)) {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'success', message: t('runtime.status.gatewayRunning', { port: gatewayStatus.port }) },
       }));
-    } else if (gatewayStatus.state === 'error') {
+    } else if (gatewayStatus.processState === 'error') {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'error', message: gatewayStatus.error || 'Failed to start' },
       }));
-    } else if (
-      gatewayStatus.state === 'starting'
-      || gatewayStatus.state === 'control_connecting'
-      || gatewayStatus.state === 'reconnecting'
-    ) {
+    } else if (isGatewayUnavailable(gatewayStatus)) {
+      setChecks((prev) => ({
+        ...prev,
+        gateway: { status: 'error', message: gatewayStatus.lastError || 'Gateway unavailable' },
+      }));
+    } else if (isGatewayRecovering(gatewayStatus)) {
       setChecks((prev) => ({
         ...prev,
         gateway: { status: 'checking', message: 'Starting...' },
@@ -706,7 +708,11 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
     }
 
     // If gateway is already in a terminal state, no timeout needed
-    if (gatewayStatus.state === 'running' || gatewayStatus.state === 'error') {
+    if (
+      isGatewayOperational(gatewayStatus)
+      || gatewayStatus.processState === 'error'
+      || isGatewayUnavailable(gatewayStatus)
+    ) {
       return;
     }
 
@@ -729,7 +735,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         gatewayTimeoutRef.current = null;
       }
     };
-  }, [gatewayStatus.state]);
+  }, [gatewayStatus.processState, gatewayStatus.healthSummary, gatewayStatus.gatewayReady, gatewayStatus.transportState]);
 
   const handleStartGateway = async () => {
     setChecks((prev) => ({
@@ -2050,8 +2056,8 @@ function CompleteContent({ selectedProvider, installedSkills }: CompleteContentP
         </div>
         <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
           <span>{t('complete.gateway')}</span>
-          <span className={gatewayStatus.state === 'running' ? 'text-green-400' : 'text-yellow-400'}>
-            {gatewayStatus.state === 'running' ? `✓ ${t('complete.running')}` : gatewayStatus.state}
+          <span className={isGatewayOperational(gatewayStatus) ? 'text-green-400' : 'text-yellow-400'}>
+            {isGatewayOperational(gatewayStatus) ? `✓ ${t('complete.running')}` : gatewayStatus.processState}
           </span>
         </div>
       </div>

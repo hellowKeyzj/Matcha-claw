@@ -156,6 +156,8 @@ export function reduceSessionRuntime(
         activeTurnItemKey: null,
         pendingFinal: false,
         lastUserMessageAt: action.nowMs,
+        lastError: null,
+        lastIssue: null,
       };
     }
 
@@ -175,6 +177,8 @@ export function reduceSessionRuntime(
         sending: true,
         pendingFinal: true,
         runPhase: 'waiting_tool',
+        lastError: null,
+        lastIssue: null,
       };
     }
 
@@ -182,6 +186,8 @@ export function reduceSessionRuntime(
       return {
         sending: false,
         runPhase: 'error',
+        lastError: action.error,
+        lastIssue: null,
         activeTurnItemKey: action.clearRun ? null : state.activeTurnItemKey,
         ...(action.clearRun
           ? {
@@ -267,7 +273,7 @@ export function reduceSessionRuntime(
 
     case 'clear_error': {
       return (state.runPhase === 'error' && !state.sending && !state.pendingFinal)
-        ? { runPhase: 'idle' }
+        ? { runPhase: 'idle', lastError: null, lastIssue: null }
         : state;
     }
 
@@ -280,6 +286,8 @@ export function reduceSessionRuntime(
         runPhase: waitingApproval ? 'waiting_tool' : action.targetRuntime.runPhase,
         pendingFinal: action.targetRuntime.pendingFinal,
         lastUserMessageAt: action.targetRuntime.lastUserMessageAt,
+        lastError: action.targetRuntime.lastError,
+        lastIssue: action.targetRuntime.lastIssue,
       };
     }
 
@@ -328,6 +336,8 @@ export function reduceSessionRuntime(
         activeTurnItemKey: null,
         pendingFinal: false,
         lastUserMessageAt: null,
+        lastError: null,
+        lastIssue: null,
       };
     }
 
@@ -336,6 +346,8 @@ export function reduceSessionRuntime(
           runPhase: 'error',
           activeTurnItemKey: null,
           pendingFinal: false,
+          lastError: action.error,
+          lastIssue: null,
       };
     }
 
@@ -345,6 +357,8 @@ export function reduceSessionRuntime(
         activeRunId: null,
         runPhase: 'error',
         lastUserMessageAt: null,
+        lastError: state.lastError,
+        lastIssue: state.lastIssue,
       };
     }
 
@@ -355,6 +369,8 @@ export function reduceSessionRuntime(
           activeRunId: null,
           runPhase: 'done',
           pendingFinal: false,
+          lastError: null,
+          lastIssue: null,
         };
       }
       return {
@@ -380,6 +396,8 @@ export function reduceSessionRuntime(
       patch.activeRunId = action.hasOutput ? null : state.activeRunId;
       patch.pendingFinal = action.hasOutput ? false : true;
       patch.runPhase = action.hasOutput ? 'done' : 'finalizing';
+      patch.lastError = action.hasOutput ? null : state.lastError;
+      patch.lastIssue = action.hasOutput ? null : state.lastIssue;
       return patch;
     }
 
@@ -388,4 +406,3 @@ export function reduceSessionRuntime(
     }
   }
 }
-

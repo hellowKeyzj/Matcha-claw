@@ -13,7 +13,19 @@ const subagentsState = {
 };
 
 const gatewayState = {
-  status: { state: 'running' as const },
+  status: {
+    processState: 'running' as const,
+    port: 18789,
+    gatewayReady: true,
+    healthSummary: 'healthy' as const,
+    transportState: 'connected' as const,
+    portReachable: true,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    updatedAt: 1,
+  },
   rpc: gatewayRpcMock,
 };
 

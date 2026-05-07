@@ -1,3 +1,5 @@
+import type { GatewayTransportIssue } from './gateway-error';
+
 export type SessionMessageRole =
   | 'user'
   | 'assistant'
@@ -100,6 +102,8 @@ export interface SessionRuntimeStateSnapshot {
   pendingTurnLaneKey: string | null;
   pendingFinal: boolean;
   lastUserMessageAt: number | null;
+  lastError: string | null;
+  lastIssue: GatewayTransportIssue | null;
   updatedAt: number | null;
 }
 
@@ -479,6 +483,8 @@ export interface SessionInfoUpdateEvent {
   runId: string | null;
   phase: 'started' | 'final' | 'error' | 'aborted' | 'unknown';
   snapshot: SessionStateSnapshot;
+  error: string | null;
+  transportIssue?: GatewayTransportIssue | null;
   _meta?: Record<string, unknown>;
 }
 

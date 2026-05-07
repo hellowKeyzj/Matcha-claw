@@ -3,6 +3,7 @@ import type { ChatAssistantTurnItem } from './chat-render-item-model';
 import { AssistantMessageBody } from './assistant-message-body';
 import { MessageShell } from './chat-message-shell';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
+import { AssistantPendingIndicator } from './components/AssistantPendingIndicator';
 import { getAssistantTurnPlainText } from './chat-message-view';
 import {
   AssistantMessageMedia,
@@ -40,9 +41,9 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     }
     return segment.images.length > 0 || segment.attachedFiles.length > 0;
   });
-  const hasPendingShell = isStreaming && !hasContentSegments;
+  const pendingMode = hasContentSegments ? null : item.pendingState ?? null;
   const plainText = getAssistantTurnPlainText(item);
-  if (!hasContentSegments && !hasPendingShell) {
+  if (!hasContentSegments && !pendingMode) {
     return null;
   }
 
@@ -112,14 +113,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           );
         })}
 
-        {hasPendingShell && (
-          <AssistantMessageBody
-            text=""
-            markdownHtml={null}
-            isStreaming={isStreaming}
-            onBodyClick={requestCollapse}
-          />
-        )}
+        {pendingMode ? <AssistantPendingIndicator mode={pendingMode} /> : null}
 
         {plainText && <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} />}
       </MessageShell>

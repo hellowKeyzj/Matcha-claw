@@ -37,6 +37,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import { hostOpenClawGetSkillsDir } from '@/lib/host-api';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
@@ -1003,7 +1004,7 @@ export function Skills() {
   );
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const [showGatewayWarning, setShowGatewayWarning] = useState(false);
 
   // Debounce the gateway warning to avoid flickering during brief restarts (like skill toggles)

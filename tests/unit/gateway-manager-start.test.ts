@@ -43,7 +43,7 @@ describe('gateway manager start', () => {
     const manager = new GatewayManager();
     const controlReadyProbeMock = vi.fn(async () => {
       expect(manager.getStatus()).toEqual(expect.objectContaining({
-        state: 'control_connecting',
+        processState: 'control_connecting',
         pid: 4242,
       }));
     });
@@ -54,7 +54,7 @@ describe('gateway manager start', () => {
     expect(waitForGatewayPortReadyMock).toHaveBeenCalledTimes(1);
     expect(controlReadyProbeMock).toHaveBeenCalledTimes(1);
     expect(manager.getStatus()).toEqual(expect.objectContaining({
-      state: 'running',
+      processState: 'running',
       pid: 4242,
     }));
   });

@@ -91,7 +91,19 @@ function setupSidebarState() {
     selectAgent: vi.fn(),
   } as never);
   useGatewayStore.setState({
-    status: { state: 'running', port: 18789 },
+    status: {
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
   useTeamsStore.setState({
@@ -388,4 +400,3 @@ describe('sidebar chat nav', () => {
     expect(screen.getByText(/Approval Blocker · browser.fetch/i)).toBeInTheDocument();
   });
 });
-

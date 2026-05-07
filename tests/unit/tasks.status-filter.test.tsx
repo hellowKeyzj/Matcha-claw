@@ -8,7 +8,19 @@ import i18n from '@/i18n';
 
 function setupStores() {
   useGatewayStore.setState({
-    status: { state: 'running', port: 18789 },
+    status: {
+      processState: 'running',
+      port: 18789,
+      gatewayReady: true,
+      healthSummary: 'healthy',
+      transportState: 'connected',
+      portReachable: true,
+      diagnostics: {
+        consecutiveHeartbeatMisses: 0,
+        consecutiveRpcFailures: 0,
+      },
+      updatedAt: 1,
+    },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
 

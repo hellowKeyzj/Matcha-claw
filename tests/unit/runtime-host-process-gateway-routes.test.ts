@@ -6,6 +6,17 @@ function createDeps() {
     openclawBridge: {
       gatewayRpc: vi.fn(async () => ({ ok: true })),
       ensureGatewayReady: vi.fn(async () => undefined),
+      readGatewayConnectionState: vi.fn(async () => ({
+        state: 'connected',
+        portReachable: true,
+        gatewayReady: true,
+        healthSummary: 'healthy',
+        diagnostics: {
+          consecutiveHeartbeatMisses: 0,
+          consecutiveRpcFailures: 0,
+        },
+        updatedAt: 1,
+      })),
       chatSend: vi.fn(async () => ({ id: 'msg-1' })),
     },
   };
@@ -95,6 +106,36 @@ describe('runtime-host process gateway routes', () => {
       status: 200,
       data: {
         success: true,
+      },
+    });
+  });
+
+  it('GET /api/gateway/status 返回 transport 真相快照', async () => {
+    const deps = createDeps();
+
+    const result = await handleGatewayRoute(
+      'GET',
+      '/api/gateway/status',
+      undefined,
+      deps,
+    );
+
+    expect(deps.openclawBridge.readGatewayConnectionState).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      status: 200,
+      data: {
+        success: true,
+        status: {
+          state: 'connected',
+          portReachable: true,
+          gatewayReady: true,
+          healthSummary: 'healthy',
+          diagnostics: {
+            consecutiveHeartbeatMisses: 0,
+            consecutiveRpcFailures: 0,
+          },
+          updatedAt: 1,
+        },
       },
     });
   });

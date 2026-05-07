@@ -2,39 +2,31 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { PORTS } from '../../utils/config';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../services/settings/settings-store';
+import { buildPublicGatewayStatus } from '../../gateway/public-status';
 import type { GatewayApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 async function readPlatformHealth(ctx: GatewayApiContext): Promise<{
-  status: string;
-  detail?: string;
-  portReachable?: boolean;
-  connectionState?: string;
+  state: 'connected' | 'reconnecting' | 'disconnected';
+  portReachable: boolean;
+  gatewayReady: boolean;
+  healthSummary: 'healthy' | 'degraded' | 'unresponsive';
+  diagnostics: {
+    lastAliveAt?: number;
+    lastRpcSuccessAt?: number;
+    lastRpcFailureAt?: number;
+    lastRpcFailureMethod?: string;
+    lastHeartbeatTimeoutAt?: number;
+    consecutiveHeartbeatMisses: number;
+    lastSocketCloseAt?: number;
+    lastSocketCloseCode?: number;
+    consecutiveRpcFailures: number;
+  };
   lastError?: string;
-  updatedAt?: number;
+  updatedAt: number;
 } | null> {
   try {
-    const result = await ctx.runtimeHost.request<{
-      success?: boolean;
-      status?: string;
-      detail?: string;
-      portReachable?: boolean;
-      connectionState?: string;
-      lastError?: string;
-      updatedAt?: number;
-    }>('GET', '/api/platform/runtime/health');
-    const status = typeof result.data?.status === 'string' ? result.data.status : null;
-    if (!status) {
-      return null;
-    }
-    return {
-      status,
-      ...(typeof result.data?.detail === 'string' ? { detail: result.data.detail } : {}),
-      ...(typeof result.data?.portReachable === 'boolean' ? { portReachable: result.data.portReachable } : {}),
-      ...(typeof result.data?.connectionState === 'string' ? { connectionState: result.data.connectionState } : {}),
-      ...(typeof result.data?.lastError === 'string' ? { lastError: result.data.lastError } : {}),
-      ...(typeof result.data?.updatedAt === 'number' ? { updatedAt: result.data.updatedAt } : {}),
-    };
+    return await ctx.runtimeHost.readGatewayStatus();
   } catch {
     return null;
   }
@@ -49,30 +41,24 @@ export async function handleGatewayRoutes(
   if (url.pathname === '/api/gateway/status' && req.method === 'GET') {
     const status = ctx.gatewayManager.getStatus();
     const platformHealth = await readPlatformHealth(ctx);
-    if (platformHealth) {
-      sendJson(res, 200, { ...status, platformHealth });
-      return true;
-    }
-    sendJson(res, 200, status);
+    sendJson(res, 200, buildPublicGatewayStatus(status, platformHealth));
     return true;
   }
 
   if (url.pathname === '/api/gateway/health' && req.method === 'GET') {
-    const health = await readPlatformHealth(ctx);
-    if (health) {
-      sendJson(res, 200, {
-        ok: health.portReachable ?? health.status === 'running',
-        status: health.status,
-        detail: health.detail,
-        portReachable: health.portReachable,
-        connectionState: health.connectionState,
-        lastError: health.lastError,
-        updatedAt: health.updatedAt,
-      });
-      return true;
-    }
-    const gatewayHealth = await ctx.gatewayManager.checkHealth();
-    sendJson(res, 200, gatewayHealth);
+    const health = buildPublicGatewayStatus(
+      ctx.gatewayManager.getStatus(),
+      await readPlatformHealth(ctx),
+    );
+    sendJson(res, 200, {
+      ok: health.healthSummary !== 'unresponsive',
+      status: health.healthSummary,
+      detail: health.gatewayReady ? undefined : 'gateway control channel not ready',
+      portReachable: health.portReachable,
+      connectionState: health.transportState,
+      lastError: health.lastError,
+      updatedAt: health.updatedAt,
+    });
     return true;
   }
 

@@ -36,6 +36,28 @@
         "refreshing": "更新中...",
         "mutating": "変更を反映中..."
     },
+    "pending": {
+        "typing": "思考中",
+        "activity": "ツールを実行中"
+    },
+    "errors": {
+        "activeRunDisconnected": "この実行は終了イベントを受け取る前に切断されました。",
+        "modelUnavailable": "現在のモデルは利用できません。しばらく待って再試行するか、モデルを切り替えてください。",
+        "gatewayAuthRequired": "OpenClaw ゲートウェイで認証が必要です。認証設定を確認してください。",
+        "gatewayAuthFailed": "OpenClaw ゲートウェイの認証に失敗しました。資格情報または認証設定を確認してください。",
+        "gatewayTokenMissing": "OpenClaw ゲートウェイのアクセストークンがありません。",
+        "gatewayTokenMismatch": "OpenClaw ゲートウェイのアクセストークンが一致しません。",
+        "gatewayAuthRateLimited": "OpenClaw ゲートウェイの認証失敗が多すぎます。しばらく待ってから再試行してください。",
+        "gatewayPairingRequired": "このデバイスは接続前に OpenClaw ゲートウェイとのペアリング承認が必要です。",
+        "gatewayOriginNotAllowed": "この origin は OpenClaw ゲートウェイで許可されていません。Control UI の allowed origins 設定を確認してください。",
+        "gatewayDeviceIdentityRequired": "この接続にはデバイス ID 検証がありません。HTTPS/localhost またはデバイス ID 設定を確認してください。",
+        "gatewayConnectTimeout": "OpenClaw ゲートウェイへの接続がタイムアウトしました。",
+        "gatewayConnectFailed": "OpenClaw ゲートウェイへの接続に失敗しました: {{reason}}",
+        "gatewayHeartbeatTimeout": "OpenClaw ゲートウェイとの接続がタイムアウトし、復旧待ちです。",
+        "gatewaySocketClosed": "OpenClaw ゲートウェイとの接続が切断されました（コード {{code}}、理由: {{reason}}）。",
+        "gatewayRpcTimeout": "OpenClaw ゲートウェイ呼び出しがタイムアウトしました: {{method}}",
+        "gatewayRpcFailed": "OpenClaw ゲートウェイ呼び出しに失敗しました: {{method}}、理由: {{reason}}"
+    },
     "taskPanel": {
         "stepStatus": {
             "running": "実行中",

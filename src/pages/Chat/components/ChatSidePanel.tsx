@@ -9,6 +9,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
+import { isGatewayOperational } from '@/lib/gateway-status';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
@@ -67,7 +68,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const isGatewayRunning = gatewayStatus.state === 'running';
+  const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const tasks = useTaskInboxStore((state) => state.tasks);
   const loading = useTaskInboxStore((state) => state.loading);
   const initialized = useTaskInboxStore((state) => state.initialized);

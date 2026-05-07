@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron';
 import { GatewayManager } from '../../gateway/manager';
+import { buildPublicGatewayStatus } from '../../gateway/public-status';
 import { getSetting } from '../../services/settings/settings-store';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
@@ -19,35 +20,10 @@ export function registerGatewayHandlers(
 
   ipcMain.handle('gateway:status', async () => {
     const gatewayStatus = gatewayManager.getStatus();
-    if (!runtimeHost) {
-      return gatewayStatus;
-    }
-    try {
-      const response = await runtimeHost.request<{
-        status?: string;
-        detail?: string;
-        portReachable?: boolean;
-        connectionState?: string;
-        lastError?: string;
-        updatedAt?: number;
-      }>('GET', '/api/platform/runtime/health');
-      if (typeof response.data?.status !== 'string') {
-        return gatewayStatus;
-      }
-      return {
-        ...gatewayStatus,
-        platformHealth: {
-          status: response.data.status,
-          ...(typeof response.data?.detail === 'string' ? { detail: response.data.detail } : {}),
-          ...(typeof response.data?.portReachable === 'boolean' ? { portReachable: response.data.portReachable } : {}),
-          ...(typeof response.data?.connectionState === 'string' ? { connectionState: response.data.connectionState } : {}),
-          ...(typeof response.data?.lastError === 'string' ? { lastError: response.data.lastError } : {}),
-          ...(typeof response.data?.updatedAt === 'number' ? { updatedAt: response.data.updatedAt } : {}),
-        },
-      };
-    } catch {
-      return gatewayStatus;
-    }
+    const runtimeStatus = runtimeHost
+      ? await runtimeHost.readGatewayStatus().catch(() => null)
+      : null;
+    return buildPublicGatewayStatus(gatewayStatus, runtimeStatus);
   });
 
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {

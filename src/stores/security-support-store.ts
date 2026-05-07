@@ -95,7 +95,7 @@ interface SecuritySupportState {
   setActiveSection: (section: SecuritySectionKey) => void;
   loadPlatformTools: (options?: { refresh?: boolean }) => Promise<void>;
   loadRuleCatalog: () => Promise<void>;
-  loadRecentAudits: (options?: { gatewayState?: string; page?: number; pageSize?: number }) => Promise<void>;
+  loadRecentAudits: (options?: { gatewayProcessState?: string; page?: number; pageSize?: number }) => Promise<void>;
 }
 
 export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
@@ -242,8 +242,8 @@ export const useSecuritySupportStore = create<SecuritySupportState>((set) => ({
   },
 
   loadRecentAudits: async (options) => {
-    const gatewayState = options?.gatewayState;
-    if (gatewayState && gatewayState !== 'running') {
+    const gatewayProcessState = options?.gatewayProcessState;
+    if (gatewayProcessState && gatewayProcessState !== 'running') {
       return;
     }
     const page = options?.page ?? 1;
