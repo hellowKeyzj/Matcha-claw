@@ -1,0 +1,70 @@
+{
+  "title": "Plugin Center",
+  "description": "Manage plugin states in one place; Runtime Host is always-on.",
+  "runtime": {
+    "title": "Runtime Status",
+    "description": "Inspect Runtime Host lifecycle and health.",
+    "refresh": "Refresh",
+    "restart": "Restart Host",
+    "busy": "Processing...",
+    "recoveredNotice": "Runtime Host auto-recovered {{count}} times",
+    "recoveredAt": "Last recovered at: {{time}}"
+  },
+  "catalog": {
+    "title": "Plugin Catalog",
+    "description": "Manage plugin enablement here; Settings does not include plugin management.",
+    "empty": "No plugins available.",
+    "emptyGroup": "No plugins in {{group}}.",
+    "companionSkills": "Enabling this plugin will also install and enable companion skills: {{skills}}",
+    "channelManaged": "Managed by channel configuration",
+    "columns": {
+      "plugin": "Plugin",
+      "platform": "Platform",
+      "kind": "Kind",
+      "version": "Version",
+      "enabled": "Enabled"
+    },
+    "groups": {
+      "channel": "Channels",
+      "model": "Models",
+      "general": "General"
+    },
+    "platform": {
+      "openclaw": "OpenClaw",
+      "matchaclaw": "MatchaClaw"
+    },
+    "kind": {
+      "builtin": "Builtin",
+      "third-party": "Third-party"
+    }
+  },
+  "state": {
+    "hostRunning": "Host running",
+    "hostStopped": "Host not running",
+    "hostStarting": "Host starting",
+    "hostDegraded": "Host degraded"
+  },
+  "lifecycle": {
+    "host": {
+      "idle": "Host idle",
+      "starting": "Host starting",
+      "running": "Host running",
+      "stopped": "Host stopped",
+      "error": "Host error"
+    },
+    "runtime": {
+      "idle": "Runtime idle",
+      "booting": "Runtime booting",
+      "ready": "Runtime ready",
+      "running": "Runtime running",
+      "degraded": "Runtime degraded",
+      "stopped": "Runtime stopped",
+      "error": "Runtime error"
+    }
+  },
+  "errors": {
+    "loadFailed": "Failed to load plugin center data",
+    "togglePluginFailed": "Failed to switch plugin enablement",
+    "restartFailed": "Failed to restart Runtime Host"
+  }
+}

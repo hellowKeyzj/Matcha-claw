@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { access, readdir, readFile } from 'node:fs/promises';
+import { access, readdir, readFile, rm } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import {
   getOpenClawConfigDir,
@@ -279,6 +279,24 @@ function listConfiguredExternalChannelPluginIdsFromConfig(config: Record<string,
   return configured.sort((left, right) => left.localeCompare(right, 'en'));
 }
 
+async function cleanupUnconfiguredExternalChannelPluginDirs(
+  config: Record<string, unknown>,
+): Promise<void> {
+  const configuredPluginIds = new Set(listConfiguredExternalChannelPluginIdsFromConfig(config));
+  const extensionsDir = join(getOpenClawConfigDir(), 'extensions');
+
+  for (const binding of EXTERNAL_CHANNEL_PLUGIN_BINDINGS) {
+    if (configuredPluginIds.has(binding.pluginId)) {
+      continue;
+    }
+    const pluginDir = join(extensionsDir, binding.pluginId);
+    if (!(await pathExists(pluginDir))) {
+      continue;
+    }
+    await rm(pluginDir, { recursive: true, force: true });
+  }
+}
+
 export function readManuallyManagedPluginIdsFromConfig(config: Record<string, unknown>): string[] {
   return readPluginAllowlist(config).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
 }
@@ -420,9 +438,9 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
   const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
   const nextEntries = cloneNormalizedPluginEntries(config);
 
-  if (enabledSet.has('openclaw-lark') && isRecord(nextEntries.feishu) && nextEntries.feishu.enabled !== false) {
+  if (enabledSet.has('openclaw-lark') && nextEntries.feishu?.enabled !== false) {
     nextEntries.feishu = {
-      ...nextEntries.feishu,
+      ...(nextEntries.feishu ?? {}),
       enabled: false,
     };
   }
@@ -491,6 +509,7 @@ export async function applyManuallyManagedPluginIdsToOpenClawConfig(
 export async function syncEnabledPluginIdsToOpenClawConfig(pluginIds: readonly string[]): Promise<string[]> {
   const normalizedManualPluginIds = normalizePluginIds(pluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
   let effectivePluginIds: string[] = [];
+  let finalConfig: Record<string, unknown> | null = null;
   await withOpenClawConfigLock(async () => {
     const nextConfig = await applyManuallyManagedPluginIdsToOpenClawConfig(
       readOpenClawConfigJson(),
@@ -498,6 +517,10 @@ export async function syncEnabledPluginIdsToOpenClawConfig(pluginIds: readonly s
     );
     effectivePluginIds = resolveEffectivePluginIdsForConfig(nextConfig, normalizedManualPluginIds);
     await writeOpenClawConfigJson(nextConfig);
+    finalConfig = nextConfig;
   });
+  if (finalConfig) {
+    await cleanupUnconfiguredExternalChannelPluginDirs(finalConfig);
+  }
   return effectivePluginIds;
 }

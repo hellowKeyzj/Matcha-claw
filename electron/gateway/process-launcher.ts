@@ -32,8 +32,10 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
       delete flat['HTTP-Referer'];
       delete flat['x-title'];
       delete flat['X-Title'];
+      delete flat['x-openrouter-title'];
+      delete flat['X-OpenRouter-Title'];
       flat['HTTP-Referer'] = 'https://matchaclaw-x.com';
-      flat['X-Title'] = 'MatchaClaw';
+      flat['X-OpenRouter-Title'] = 'MatchaClaw';
       init.headers = flat;
     }
     return _f.call(globalThis, input, init);
@@ -118,6 +120,9 @@ export async function launchGatewayProcess(options: {
   const lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${options.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
 
   const runtimeEnv = { ...forkEnv };
+  // ClawX does not provide LAN gateway discovery, so OpenClaw's Bonjour
+  // broadcaster only adds noisy cross-device collisions on shared networks.
+  runtimeEnv.OPENCLAW_DISABLE_BONJOUR = '1';
   if (!app.isPackaged) {
     try {
       const preloadPath = ensureGatewayFetchPreload();

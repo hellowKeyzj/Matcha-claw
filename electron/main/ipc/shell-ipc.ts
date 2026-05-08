@@ -213,6 +213,17 @@ export function registerShellHandlers(): void {
   });
 
   ipcMain.handle('shell:openPath', async (_, path: string) => {
-    return await shell.openPath(path);
+    const rawPath = typeof path === 'string' ? path.trim() : '';
+    if (!rawPath) {
+      return 'Path is empty';
+    }
+    const decodedPath = (() => {
+      try {
+        return decodeURIComponent(rawPath);
+      } catch {
+        return rawPath;
+      }
+    })();
+    return await shell.openPath(resolvePath(expandPath(decodedPath)));
   });
 }

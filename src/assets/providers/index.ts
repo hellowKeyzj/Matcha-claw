@@ -5,6 +5,7 @@ import openrouter from './openrouter.svg';
 import ark from './ark.svg';
 import moonshot from './moonshot.svg';
 import siliconflow from './siliconflow.svg';
+import deepseek from './deepseek.svg';
 import minimaxPortal from './minimax.svg';
 import qwenPortal from './qwen.svg';
 import ollama from './ollama.svg';
@@ -17,7 +18,9 @@ export const providerIcons: Record<string, string> = {
     openrouter,
     ark,
     moonshot,
+    'moonshot-global': moonshot,
     siliconflow,
+    deepseek,
     'minimax-portal': minimaxPortal,
     'minimax-portal-cn': minimaxPortal,
     'qwen-portal': qwenPortal,

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron';
 import { join } from 'path';
 import { logger } from '../utils/logger';
+import { registerZoomShortcuts } from './zoom-shortcuts';
 
 function getIconsDir(): string {
   if (app.isPackaged) {
@@ -44,6 +45,8 @@ export function createMainWindow(): BrowserWindow {
     frame: isMac || !useCustomTitleBar,
     show: false,
   });
+
+  registerZoomShortcuts(win);
 
   win.once('ready-to-show', () => {
     win.show();

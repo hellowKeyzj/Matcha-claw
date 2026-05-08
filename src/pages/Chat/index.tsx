@@ -4,7 +4,7 @@
  * via gateway:rpc IPC. Session selector, thinking toggle, and refresh
  * are in the toolbar; messages render with markdown + streaming.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -33,6 +33,17 @@ import { useChatInit } from './useChatInit';
 import { useChatSidePanelController } from './useChatSidePanelController';
 import { useSkillConfig } from './useSkillConfig';
 import { useChatView } from './useChatView';
+import { hostApiFetch } from '@/lib/host-api';
+import { toast } from 'sonner';
+
+type ChatSkillPreviewState = {
+  skillId: string;
+  skillName: string;
+  markdown: string | null;
+  loading: boolean;
+  error: string | null;
+  filePath?: string;
+};
 
 interface ChatProps {
   isActive?: boolean;
@@ -239,12 +250,18 @@ export function Chat({ isActive = true }: ChatProps) {
   ));
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
+  const availableModels = useSubagentsStore((state) => state.availableModels);
+  const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
+  const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const currentAgent = agents.find((agent) => agent.id === currentAgentId);
   const skills = useSkillsStore((state) => state.skills);
   const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
+  const [skillPreview, setSkillPreview] = useState<ChatSkillPreviewState | null>(null);
+  const [switchingModelId, setSwitchingModelId] = useState<string | null>(null);
+  const skillPreviewRequestSeqRef = useRef(0);
 
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
@@ -295,7 +312,14 @@ export function Chat({ isActive = true }: ChatProps) {
 
   useEffect(() => {
     resetSkillConfigSession();
+    skillPreviewRequestSeqRef.current += 1;
+    setSkillPreview(null);
+    setSwitchingModelId(null);
   }, [currentAgentId, resetSkillConfigSession]);
+
+  useEffect(() => {
+    void loadAvailableModels();
+  }, [loadAvailableModels]);
 
   useEffect(() => {
     if (sidePanelOpen && activeSidePanelTab === 'skills') {
@@ -338,6 +362,33 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     return effectiveRuntimeError;
   }, [currentSession.runtime.lastIssue, currentSession.runtime.pendingFinal, currentSession.runtime.runPhase, currentSession.runtime.sending, localizedGatewayIssue, runtimeError, t]);
+  const modelPicker = useMemo(() => {
+    const currentModelId = currentAgent?.model?.trim();
+    if (!currentAgent || !currentModelId) {
+      return null;
+    }
+    const labels = new Map<string, string>();
+    for (const model of availableModels) {
+      labels.set(model.id, model.displayLabel);
+    }
+    const options = availableModels.map((model) => ({
+      id: model.id,
+      label: model.displayLabel,
+    }));
+    if (!labels.has(currentModelId)) {
+      options.unshift({
+        id: currentModelId,
+        label: currentModelId,
+      });
+    }
+    return {
+      currentModelId,
+      currentLabel: labels.get(currentModelId) ?? currentModelId,
+      options,
+      loading: modelsLoading,
+      switching: switchingModelId === currentModelId,
+    };
+  }, [availableModels, currentAgent, modelsLoading, switchingModelId]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -345,10 +396,109 @@ export function Chat({ isActive = true }: ChatProps) {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
     await sendMessage(text, attachments);
   }, [sendMessage]);
+  const handleSelectModel = useCallback(async (nextModelId: string) => {
+    const agent = currentAgent;
+    if (!agent) {
+      return;
+    }
+    const normalizedNextModelId = nextModelId.trim();
+    const currentModelId = agent.model?.trim() ?? '';
+    if (!normalizedNextModelId || normalizedNextModelId === currentModelId) {
+      return;
+    }
+    setSwitchingModelId(normalizedNextModelId);
+    try {
+      await updateAgent({
+        agentId: agent.id,
+        name: agent.name || agent.id,
+        workspace: agent.workspace ?? '',
+        model: normalizedNextModelId,
+        skills: Array.isArray(agent.skills) ? agent.skills : undefined,
+        avatarSeed: agent.avatarSeed,
+        avatarStyle: agent.avatarStyle,
+      });
+      const latestAgent = useSubagentsStore.getState().agentsResource.data.find((item) => item.id === agent.id);
+      const appliedModelId = latestAgent?.model?.trim() ?? '';
+      if (appliedModelId !== normalizedNextModelId) {
+        throw new Error(appliedModelId || normalizedNextModelId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('input.modelSwitchFailed', { error: message }));
+    } finally {
+      setSwitchingModelId(null);
+    }
+  }, [currentAgent, t, updateAgent]);
+  const handlePreviewSkill = useCallback(async (skill: {
+    id: string;
+    name: string;
+    filePath?: string;
+    baseDir?: string;
+  }) => {
+    setActiveSidePanelTab('skills');
+    const requestSeq = skillPreviewRequestSeqRef.current + 1;
+    skillPreviewRequestSeqRef.current = requestSeq;
+    setSkillPreview({
+      skillId: skill.id,
+      skillName: skill.name,
+      markdown: null,
+      loading: true,
+      error: null,
+      filePath: skill.filePath,
+    });
+    try {
+      const result = await hostApiFetch<{
+        success: boolean;
+        content?: string;
+        error?: string;
+        filePath?: string;
+      }>('/api/skills/readme', {
+        method: 'POST',
+        body: JSON.stringify({
+          skillKey: skill.id,
+          filePath: skill.filePath,
+          baseDir: skill.baseDir,
+        }),
+      });
+      if (skillPreviewRequestSeqRef.current !== requestSeq) {
+        return;
+      }
+      if (!result.success || typeof result.content !== 'string') {
+        throw new Error(result.error || t('skillPreviewNotFound'));
+      }
+      setSkillPreview({
+        skillId: skill.id,
+        skillName: skill.name,
+        markdown: result.content,
+        loading: false,
+        error: null,
+        filePath: result.filePath || skill.filePath,
+      });
+    } catch (error) {
+      if (skillPreviewRequestSeqRef.current !== requestSeq) {
+        return;
+      }
+      setSkillPreview({
+        skillId: skill.id,
+        skillName: skill.name,
+        markdown: null,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+        filePath: skill.filePath,
+      });
+    }
+  }, [setActiveSidePanelTab, t]);
   const inputNode = (
     <ChatInput
       onSend={handleSendMessage}
       onStop={abortRun}
+      onPreviewSkill={handlePreviewSkill}
+      modelPicker={modelPicker ? {
+        ...modelPicker,
+        onSelect: (modelId) => {
+          void handleSelectModel(modelId);
+        },
+      } : null}
       disabled={false}
       sending={currentSession.runtime.sending}
       approvalWaiting={approvalStatus === 'awaiting_approval'}
@@ -388,6 +538,8 @@ export function Chat({ isActive = true }: ChatProps) {
             skillsLoading={skillConfigSkillsLoading}
             selectedSkillIds={selectedSkillIds}
             onToggleSkill={toggleSkillConfigSelection}
+            skillPreview={skillPreview}
+            onClearSkillPreview={() => setSkillPreview(null)}
           />
         )}
         header={(

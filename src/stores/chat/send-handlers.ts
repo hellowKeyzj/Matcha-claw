@@ -2,6 +2,10 @@ import { cacheSendAttachments } from './attachment-helpers';
 import { reduceSessionRuntime } from './runtime-state-reducer';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import {
+  UNKNOWN_ABORTED_RUN_MARKER,
+  type StoreSessionRunCache,
+} from './session-run-cache';
+import {
   CHAT_SEND_RPC_TIMEOUT_MS,
   sendChatTransport,
 } from './send-transport';
@@ -252,6 +256,7 @@ function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void 
 interface ExecuteStoreSendParams {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
+  sessionRunCache: StoreSessionRunCache;
   beginMutating: () => void;
   finishMutating: () => void;
   text: string;
@@ -262,6 +267,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   const {
     set,
     get,
+    sessionRunCache,
     beginMutating,
     finishMutating,
     text,
@@ -280,6 +286,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   }
   const nowMs = Date.now();
   const clientMessageId = crypto.randomUUID();
+  const sendGeneration = sessionRunCache.nextSendGeneration(currentSessionKey);
   applyStoreSendStart({
     set,
     sessionKey: currentSessionKey,
@@ -309,13 +316,30 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
     });
 
+    if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
+      if (
+        sendResult.ok
+        && sendResult.runId
+        && sessionRunCache.getAbortedRunMarker(currentSessionKey) === UNKNOWN_ABORTED_RUN_MARKER
+      ) {
+        const currentRuntime = getSessionRuntime(get(), currentSessionKey);
+        if (!currentRuntime.sending) {
+          sessionRunCache.setAbortedRunMarker(currentSessionKey, sendResult.runId);
+        }
+      }
+      return;
+    }
+
       if (!sendResult.ok) {
         const errorMsg = sendResult.error;
         if (isRecoverableChatSendTimeout(errorMsg)) {
-          finalizeStoreSendFailure({
+          if (await maybeEnterStoreWaitingApproval({
             set,
-            error: errorMsg,
-          });
+            get,
+            sessionKey: currentSessionKey,
+          })) {
+            return;
+          }
           return;
         }
       if (await maybeEnterStoreWaitingApproval({
@@ -348,6 +372,15 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
           ),
         };
       });
+      sessionRunCache.setAbortedRunMarker(currentSessionKey, null);
+      const blockedSessionUpdates = sessionRunCache.takeBlockedSessionUpdates(currentSessionKey, sendResult.runId);
+      if (blockedSessionUpdates.length > 0) {
+        queueMicrotask(() => {
+          for (const blockedSessionUpdate of blockedSessionUpdates) {
+            get().handleSessionUpdateEvent(blockedSessionUpdate);
+          }
+        });
+      }
     } else {
       set((state) => {
         return {
@@ -356,12 +389,18 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       });
     }
   } catch (error) {
+    if (sendGeneration !== sessionRunCache.getSendGeneration(currentSessionKey)) {
+      return;
+    }
     const errorMsg = String(error);
     if (isRecoverableChatSendTimeout(errorMsg)) {
-      finalizeStoreSendFailure({
+      if (await maybeEnterStoreWaitingApproval({
         set,
-        error: errorMsg,
-      });
+        get,
+        sessionKey: currentSessionKey,
+      })) {
+        return;
+      }
       return;
     }
     const timeoutSignal = hasTimeoutSignal(error);

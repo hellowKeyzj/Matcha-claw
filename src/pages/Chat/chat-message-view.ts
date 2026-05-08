@@ -59,9 +59,25 @@ function readAssistantImages(item: SessionAssistantTurnItem): ReadonlyArray<Chat
 }
 
 function readAssistantAttachedFiles(item: SessionAssistantTurnItem): ReadonlyArray<AttachedFileMeta> {
-  return item.segments
+  const attachedFiles = item.segments
     .filter((segment): segment is SessionAssistantMediaSegment => segment.kind === 'media')
     .flatMap((segment) => segment.attachedFiles) as unknown as AttachedFileMeta[];
+  const hasPrimaryContent = item.segments.some((segment) => {
+    if (segment.kind === 'thinking') {
+      return segment.text.trim().length > 0;
+    }
+    if (segment.kind === 'message') {
+      return segment.text.trim().length > 0;
+    }
+    if (segment.kind === 'tool') {
+      return true;
+    }
+    return segment.images.length > 0;
+  });
+  if (!hasPrimaryContent) {
+    return attachedFiles;
+  }
+  return attachedFiles.filter((file) => file.source !== 'tool-result' || file.mimeType.startsWith('image/'));
 }
 
 export function getAssistantTurnPlainText(item: SessionAssistantTurnItem): string {

@@ -1,4 +1,5 @@
 import { hostSessionWindowFetch } from '@/lib/host-api';
+import { normalizeAppError } from '@/lib/error-model';
 import {
   hasPendingItemPreviewLoads,
   hydrateAttachedFilesFromItems,
@@ -29,6 +30,7 @@ import { isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-ab
 import type { StoreHistoryCache } from './history-cache';
 import type { ChatHistoryLoadRequest, ChatStoreState } from './types';
 import type { SessionRenderItem } from '../../../runtime-host/shared/session-adapter-types';
+import type { GatewayStatus } from '@/types/gateway';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -42,6 +44,7 @@ export interface HistoryLoadExecutionDeps {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
+  getGatewayStatus?: () => GatewayStatus | undefined;
 }
 
 export interface ViewportWindowLoadRequest {
@@ -57,6 +60,166 @@ interface CreateApplyLoadedMessagesInput {
   scope: ChatHistoryLoadRequest['scope'];
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
+}
+
+const CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS = 35_000;
+const CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS = [800, 2_000, 4_000, 8_000] as const;
+const CHAT_HISTORY_STARTUP_CONNECTION_GRACE_MS = 30_000;
+const CHAT_HISTORY_STARTUP_RUNNING_WINDOW_MS =
+  CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS + CHAT_HISTORY_STARTUP_CONNECTION_GRACE_MS;
+const CHAT_HISTORY_STARTUP_LOADING_TIMEOUT_MS =
+  CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS * (CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length + 1)
+  + CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.reduce((sum, delay) => sum + delay, 0)
+  + 2_000;
+
+type StartupHistoryRetryErrorKind = 'timeout' | 'gateway_unavailable' | 'gateway_startup';
+
+function isStartupColdHistoryLoad(request: ChatHistoryLoadRequest): boolean {
+  return (
+    request.mode === 'active'
+    && request.scope === 'foreground'
+    && request.reason === 'chat_init_cold_start'
+  );
+}
+
+function resolveForegroundLoadingTimeoutMs(
+  request: ChatHistoryLoadRequest,
+  defaultTimeoutMs: number,
+): number {
+  return isStartupColdHistoryLoad(request)
+    ? CHAT_HISTORY_STARTUP_LOADING_TIMEOUT_MS
+    : defaultTimeoutMs;
+}
+
+function classifyStartupHistoryRetryError(error: unknown): StartupHistoryRetryErrorKind | null {
+  if (isHistoryLoadAbortError(error)) {
+    return null;
+  }
+
+  const normalized = normalizeAppError(error);
+  const message = normalized.message.toLowerCase();
+
+  if (
+    message.includes('unavailable during gateway startup')
+    || message.includes('unavailable during startup')
+    || message.includes('not yet ready')
+    || message.includes('service not initialized')
+  ) {
+    return 'gateway_startup';
+  }
+
+  if (
+    normalized.code === 'TIMEOUT'
+    || message.includes('timeout')
+    || message.includes('timed out')
+    || message.includes('abort')
+  ) {
+    return 'timeout';
+  }
+
+  if (
+    normalized.code === 'GATEWAY'
+    || normalized.code === 'NETWORK'
+    || message.includes('gateway')
+    || message.includes('socket')
+    || message.includes('handshake')
+    || message.includes('fetch failed')
+    || message.includes('econnrefused')
+    || message.includes('connection refused')
+    || message.includes('service unavailable')
+    || message.includes('unavailable')
+  ) {
+    return 'gateway_unavailable';
+  }
+
+  return null;
+}
+
+function shouldRetryStartupHistoryLoad(
+  gatewayStatus: GatewayStatus | undefined,
+  errorKind: StartupHistoryRetryErrorKind | null,
+): boolean {
+  if (!gatewayStatus || !errorKind) {
+    return false;
+  }
+
+  if (errorKind === 'gateway_startup') {
+    return true;
+  }
+
+  if (
+    gatewayStatus.processState === 'starting'
+    || gatewayStatus.processState === 'control_connecting'
+    || gatewayStatus.processState === 'reconnecting'
+  ) {
+    return true;
+  }
+
+  if (gatewayStatus.processState !== 'running') {
+    return false;
+  }
+
+  if (!gatewayStatus.gatewayReady || gatewayStatus.transportState !== 'connected') {
+    return true;
+  }
+
+  if (gatewayStatus.connectedAt == null) {
+    return true;
+  }
+
+  return Date.now() - gatewayStatus.connectedAt <= CHAT_HISTORY_STARTUP_RUNNING_WINDOW_MS;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchHistoryWindowWithStartupRetry(input: {
+  requestedSessionKey: string;
+  request: ChatHistoryLoadRequest;
+  get: ChatStoreGetFn;
+  abortSignal: AbortSignal;
+  shouldAbortHistoryProcessing: () => boolean;
+  getGatewayStatus?: () => GatewayStatus | undefined;
+}): Promise<HistoryWindowResult> {
+  const {
+    requestedSessionKey,
+    request,
+    get,
+    abortSignal,
+    shouldAbortHistoryProcessing,
+    getGatewayStatus,
+  } = input;
+  const startupColdLoad = isStartupColdHistoryLoad(request);
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length; attempt += 1) {
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+    try {
+      return await fetchHistoryWindow({
+        requestedSessionKey,
+        sessions: readSessionsFromState(get()),
+        limit: CHAT_HISTORY_FULL_LIMIT,
+        ...(startupColdLoad ? { timeoutMs: CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS } : {}),
+      });
+    } catch (error) {
+      if (isHistoryLoadAbortError(error)) {
+        throw error;
+      }
+      lastError = error;
+    }
+    throwIfHistoryLoadAborted(abortSignal, shouldAbortHistoryProcessing);
+    if (!startupColdLoad || attempt >= CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length) {
+      break;
+    }
+    const errorKind = classifyStartupHistoryRetryError(lastError);
+    if (!shouldRetryStartupHistoryLoad(getGatewayStatus?.(), errorKind)) {
+      break;
+    }
+    await sleep(CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS[attempt]!);
+  }
+
+  throw lastError ?? new Error('Failed to load chat history');
 }
 
 function shouldPreserveActiveForegroundItems(input: {
@@ -183,6 +346,16 @@ function shouldSkipForegroundApply(
   return scope === 'foreground' && get().currentSessionKey !== requestedSessionKey;
 }
 
+function shouldSuppressStartupForegroundError(input: {
+  request: ChatHistoryLoadRequest;
+  error: unknown;
+}): boolean {
+  return (
+    isStartupColdHistoryLoad(input.request)
+    && classifyStartupHistoryRetryError(input.error) === 'gateway_startup'
+  );
+}
+
 function buildHistoryPreviewHydrationPatch(
   state: ChatStoreState,
   requestedSessionKey: string,
@@ -290,6 +463,7 @@ export async function executeHistoryLoad(
     get,
     historyRuntime,
     loadingTimeoutMs,
+    getGatewayStatus,
   } = deps;
   const requestedSessionKey = request.sessionKey;
   const mode = request.mode;
@@ -329,7 +503,7 @@ export async function executeHistoryLoad(
         }
         return { foregroundHistorySessionKey: null };
       });
-    }, loadingTimeoutMs);
+    }, resolveForegroundLoadingTimeoutMs(request, loadingTimeoutMs));
   }
   const shouldAbortHistoryProcessing = () => (
     abortController.signal.aborted
@@ -348,10 +522,13 @@ export async function executeHistoryLoad(
 
   try {
     throwIfHistoryLoadAborted(abortController.signal, shouldAbortHistoryProcessing);
-    const window = await fetchHistoryWindow({
+    const window = await fetchHistoryWindowWithStartupRetry({
       requestedSessionKey,
-      sessions: readSessionsFromState(get()),
-      limit: CHAT_HISTORY_FULL_LIMIT,
+      request,
+      get,
+      abortSignal: abortController.signal,
+      shouldAbortHistoryProcessing,
+      getGatewayStatus,
     });
     throwIfHistoryLoadAborted(abortController.signal, shouldAbortHistoryProcessing);
     if (shouldSkipForegroundApply(get, scope, requestedSessionKey)) {
@@ -381,6 +558,16 @@ export async function executeHistoryLoad(
         buildItemRenderFingerprint([]),
       );
       if (scope === 'foreground') {
+        if (shouldSuppressStartupForegroundError({ request, error: err })) {
+          set({
+            loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
+              historyStatus: 'ready',
+            }),
+            error: null,
+          });
+          recovered = true;
+          return;
+        }
         set({
           loadedSessions: patchSessionMeta(get(), requestedSessionKey, {
             historyStatus: 'error',

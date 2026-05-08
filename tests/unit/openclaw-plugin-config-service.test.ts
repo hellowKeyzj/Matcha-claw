@@ -212,6 +212,99 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
   });
 
+  it('启用 openclaw-lark 时即使原配置没有 entries.feishu 也会显式禁用 built-in feishu', async () => {
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      channels: {
+        feishu: {
+          enabled: true,
+          accounts: {
+            default: {
+              appId: 'cli_xxx',
+              appSecret: 'secret',
+              enabled: true,
+            },
+          },
+        },
+      },
+      plugins: {
+        allow: ['openclaw-lark'],
+        entries: {
+          'openclaw-lark': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+
+    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        entries: Record<string, { enabled?: boolean }>;
+      };
+    };
+
+    expect(nextConfig.plugins.entries.feishu).toMatchObject({ enabled: false });
+    expect(nextConfig.plugins.entries['openclaw-lark']).toMatchObject({ enabled: true });
+  });
+
+  it('同步手动插件列表时会清理未配置渠道残留的外部插件目录', async () => {
+    const feishuPluginDir = join(configDir, 'extensions', 'openclaw-lark');
+    const taskManagerDir = join(configDir, 'extensions', 'task-manager');
+    mkdirSync(feishuPluginDir, { recursive: true });
+    mkdirSync(taskManagerDir, { recursive: true });
+    writeFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'openclaw-lark' }, null, 2));
+    writeFileSync(join(taskManagerDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'task-manager' }, null, 2));
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['task-manager'],
+        entries: {
+          'task-manager': { enabled: true },
+          'openclaw-lark': { enabled: false },
+        },
+      },
+    }, null, 2));
+
+    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+
+    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+
+    expect(() => readFileSync(join(taskManagerDir, 'openclaw.plugin.json'), 'utf8')).not.toThrow();
+    expect(() => readFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), 'utf8')).toThrow();
+  });
+
+  it('已配置渠道对应的外部插件目录不会被清理', async () => {
+    const feishuPluginDir = join(configDir, 'extensions', 'openclaw-lark');
+    mkdirSync(feishuPluginDir, { recursive: true });
+    writeFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'openclaw-lark' }, null, 2));
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      channels: {
+        feishu: {
+          enabled: true,
+          accounts: {
+            default: {
+              appId: 'cli_xxx',
+              appSecret: 'secret',
+              enabled: true,
+            },
+          },
+        },
+      },
+      plugins: {
+        allow: ['openclaw-lark'],
+        entries: {
+          'openclaw-lark': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+
+    await syncEnabledPluginIdsToOpenClawConfig(['task-manager']);
+
+    expect(readFileSync(join(feishuPluginDir, 'openclaw.plugin.json'), 'utf8')).toContain('"openclaw-lark"');
+  });
+
   it('同步 browserMode=relay 时会关闭 bundled browser 并启用 browser-relay', async () => {
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
     const relaySourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
@@ -256,7 +349,12 @@ describe('openclaw plugin config service', () => {
       };
     };
 
-    expect(nextConfig.browser).toEqual({ enabled: true });
+    expect(nextConfig.browser).toEqual({
+      enabled: true,
+      ssrfPolicy: {
+        dangerouslyAllowPrivateNetwork: true,
+      },
+    });
     expect(nextConfig.plugins.allow).toContain('browser-relay');
     expect(nextConfig.plugins.allow).not.toContain('browser');
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });

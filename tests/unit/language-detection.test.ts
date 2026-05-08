@@ -6,6 +6,7 @@ describe('resolveSupportedLanguage', () => {
     expect(resolveSupportedLanguage('zh-CN')).toBe('zh');
     expect(resolveSupportedLanguage('ja_JP')).toBe('ja');
     expect(resolveSupportedLanguage('en-US')).toBe('en');
+    expect(resolveSupportedLanguage('ru-RU')).toBe('ru');
   });
 
   it('不支持的语言会回退到英文', () => {

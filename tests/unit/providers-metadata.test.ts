@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PROVIDER_TYPE_INFO,
   getProviderDocsUrl,
+  normalizeProviderApiKeyInput,
   resolveProviderModelForSave,
   shouldShowProviderModelId,
 } from '@/lib/providers';
@@ -10,17 +11,26 @@ import { buildProviderListItems } from '@/lib/provider-accounts';
 describe('provider metadata', () => {
   it('exposes SiliconFlow model override without requiring dev mode', () => {
     const siliconflow = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'siliconflow');
+    const deepseek = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'deepseek');
     const openrouter = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'openrouter');
     const ark = PROVIDER_TYPE_INFO.find((provider) => provider.id === 'ark');
     expect(siliconflow).toBeDefined();
+    expect(deepseek).toMatchObject({
+      defaultBaseUrl: 'https://api.deepseek.com/v1',
+      defaultModelId: 'deepseek-v4-pro',
+      apiKeyUrl: 'https://platform.deepseek.com/api_keys',
+    });
     expect(openrouter?.defaultModelId).toBe('openai/gpt-5.4');
     expect(ark?.codePlanPresetBaseUrl).toBe('https://ark.cn-beijing.volces.com/api/coding/v3');
     expect(ark?.codePlanPresetModelId).toBe('ark-code-latest');
     expect(ark?.codePlanDocsUrl).toBe('https://www.volcengine.com/docs/82379/1928261?lang=zh');
     expect(shouldShowProviderModelId(siliconflow, false)).toBe(true);
+    expect(shouldShowProviderModelId(deepseek, false)).toBe(false);
+    expect(shouldShowProviderModelId(deepseek, true)).toBe(true);
     expect(
       resolveProviderModelForSave(siliconflow, 'Qwen/Qwen3-Coder-480B-A35B-Instruct', false),
     ).toBe('Qwen/Qwen3-Coder-480B-A35B-Instruct');
+    expect(resolveProviderModelForSave(deepseek, '   ', true)).toBe('deepseek-v4-pro');
     expect(resolveProviderModelForSave(openrouter, '   ', false)).toBe('openai/gpt-5.4');
   });
 
@@ -56,6 +66,10 @@ describe('provider metadata', () => {
     expect(minimaxGlobal?.defaultModelId).toBe('MiniMax-M2.7');
     expect(minimaxGlobal?.apiKeyUrl).toBe('https://platform.minimax.io');
     expect(minimaxCn?.defaultModelId).toBe('MiniMax-M2.7');
+  });
+
+  it('normalizes provider API key input before validation and save', () => {
+    expect(normalizeProviderApiKeyInput('  sk-test \n')).toBe('sk-test');
   });
 
   it('OAuth provider 仅在开发者模式显示模型覆盖并提供稳定默认值', () => {

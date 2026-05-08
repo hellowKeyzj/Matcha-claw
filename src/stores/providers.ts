@@ -7,6 +7,7 @@ import type {
   ProviderAccount,
   ProviderWithKeyInfo,
 } from '@/lib/providers';
+import { normalizeProviderApiKeyInput } from '@/lib/providers';
 import {
   fetchProviderSnapshot,
   normalizeProviderSnapshot,
@@ -733,10 +734,11 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
 
   validateAccountApiKey: async (accountOrVendorId, apiKey, options) => {
     try {
+      const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
       const account = get().providerSnapshot.accounts.find((candidate) => candidate.id === accountOrVendorId);
       const payload = account
-        ? { accountId: account.id, vendorId: account.vendorId, apiKey, options }
-        : { vendorId: accountOrVendorId, apiKey, options };
+        ? { accountId: account.id, vendorId: account.vendorId, apiKey: normalizedApiKey, options }
+        : { vendorId: accountOrVendorId, apiKey: normalizedApiKey, options };
       const result = await hostProviderValidate(payload);
       return result;
     } catch (error) {

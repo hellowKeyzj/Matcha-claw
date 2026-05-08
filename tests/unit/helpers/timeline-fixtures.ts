@@ -329,6 +329,9 @@ function cloneAttachedFiles(files: Array<Record<string, unknown>> | undefined): 
         mimeType: typeof file.mimeType === 'string' ? file.mimeType : 'application/octet-stream',
         fileSize: typeof file.fileSize === 'number' ? file.fileSize : 0,
         preview: typeof file.preview === 'string' ? file.preview : null,
+        ...(file.source === 'user-upload' || file.source === 'tool-result' || file.source === 'message-ref'
+          ? { source: file.source }
+          : {}),
         ...(typeof file.filePath === 'string' ? { filePath: file.filePath } : {}),
       }))
     : [];

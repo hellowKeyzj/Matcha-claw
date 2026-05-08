@@ -75,4 +75,9 @@ describe('subagent workspace path', () => {
   it('normalizes name to slug', () => {
     expect(normalizeSubagentNameToSlug('  Matcha Agent 2  ')).toBe('matcha-agent-2');
   });
+
+  it('falls back to agent when normalized slug would be numeric-only', () => {
+    expect(normalizeSubagentNameToSlug('测试2')).toBe('agent');
+    expect(normalizeSubagentNameToSlug('123')).toBe('agent');
+  });
 });

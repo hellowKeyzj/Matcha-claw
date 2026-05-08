@@ -1,6 +1,7 @@
 import { hostSessionAbortRuntime } from '@/lib/host-api';
 import { useGatewayStore } from '../gateway';
 import { reduceSessionRuntime } from './runtime-state-reducer';
+import { UNKNOWN_ABORTED_RUN_MARKER, type StoreSessionRunCache } from './session-run-cache';
 import { getSessionRuntime, patchSessionRecord, patchSessionSnapshot } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
 import type {
@@ -18,6 +19,7 @@ type ChatStoreGetFn = () => ChatStoreState;
 interface ExecuteStoreAbortRunParams {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
+  sessionRunCache: StoreSessionRunCache;
   onBeginMutating: () => void;
   onFinishMutating: () => void;
   onAbortedTelemetry: (sessionKey: string) => void;
@@ -32,11 +34,14 @@ function getPendingApprovalsForCurrentSession(
 }
 
 export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): Promise<void> {
-  const { set, get, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
+  const { set, get, sessionRunCache, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
   clearHistoryPoll();
   clearErrorRecoveryTimer();
 
   const { sessionKey, pendingApprovals } = getPendingApprovalsForCurrentSession(get());
+  const activeRunId = getSessionRuntime(get(), sessionKey).activeRunId;
+  sessionRunCache.nextSendGeneration(sessionKey);
+  sessionRunCache.setAbortedRunMarker(sessionKey, activeRunId ?? UNKNOWN_ABORTED_RUN_MARKER);
   onAbortedTelemetry(sessionKey);
   set((state) => {
     const runtime = getSessionRuntime(state, sessionKey);

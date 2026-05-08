@@ -1,0 +1,371 @@
+{
+  "title": "Настройки",
+  "subtitle": "Настройте ваш опыт работы с MatchaClaw",
+  "appearance": {
+    "title": "Общие",
+    "description": "Настройте внешний вид",
+    "theme": "Тема",
+    "light": "Светлая",
+    "dark": "Тёмная",
+    "system": "Системная",
+    "language": "Язык",
+    "launchAtStartup": "Запуск при старте системы",
+    "userAvatar": "User Avatar",
+    "userAvatarDesc": "Upload your photo to use as the chat user avatar",
+    "userAvatarPreviewAlt": "User avatar preview",
+    "uploadAvatarInputLabel": "Upload User Avatar",
+    "uploadAvatar": "Upload Avatar",
+    "clearAvatar": "Clear Avatar",
+    "avatarInvalidType": "Please choose an image file",
+    "avatarUpdated": "User avatar updated",
+    "avatarCleared": "User avatar cleared",
+    "avatarUpdateFailed": "Failed to update user avatar: {{error}}"
+  },
+  "aiProviders": {
+    "title": "AI-провайдеры",
+    "description": "Настройте провайдеров AI-моделей и API-ключи",
+    "overview": {
+      "title": "Учётные записи провайдеров",
+      "description": "Сводка об учётных записях провайдеров и моделях.",
+      "noModelSelected": "Модель не выбрана",
+      "multiAccountReady": "Готов к нескольким аккаунтам",
+      "singletonVendor": "Одноаккаунтный провайдер"
+    },
+    "authModes": {
+      "apiKey": "API-ключ",
+      "oauthDevice": "OAuth Устройство",
+      "oauthBrowser": "OAuth Браузер",
+      "local": "Локальный"
+    },
+    "sections": {
+      "model": "Настройки модели",
+      "fallback": "Настройки резервного переключения"
+    },
+    "add": "Добавить провайдера",
+    "status": {
+      "refresh": "Refresh",
+      "refreshing": "Refreshing providers...",
+      "retry": "Retry refresh"
+    },
+    "custom": "Свой",
+    "notRequired": "Не требуется",
+    "empty": {
+      "title": "Провайдеры не настроены",
+      "desc": "Добавьте AI-провайдера, чтобы начать использовать MatchaClaw",
+      "cta": "Добавить первого провайдера"
+    },
+    "dialog": {
+      "title": "Добавить AI-провайдера",
+      "desc": "Настройте нового провайдера AI-моделей",
+      "displayName": "Отображаемое имя",
+      "apiKey": "API-ключ",
+      "apiKeyConfigured": "API-ключ уже сохранён для этого провайдера.",
+      "apiKeyMissing": "API-ключ ещё не сохранён для этого провайдера.",
+      "apiKeyStored": "Ваш API-ключ хранится локально на вашем компьютере.",
+      "replaceApiKey": "Заменить API-ключ",
+      "replaceApiKeyHelp": "Оставьте это поле пустым, чтобы сохранить текущий API-ключ.",
+      "baseUrl": "Базовый URL",
+      "protocol": "Протокол",
+      "modelId": "ID модели",
+      "contextWindow": "Context Window",
+      "maxTokens": "Max Tokens",
+      "codePlanPreset": "Пресет Code Plan",
+      "codePlanMode": "Code Plan",
+      "useCodePlanPreset": "Использовать пресет Ark Code Plan",
+      "codePlanPresetDesc": "Code Plan использует https://ark.cn-beijing.volces.com/api/coding/v3 и модель ark-code-latest. Не используйте /api/v3 для трафика Code Plan.",
+      "codePlanDoc": "Документация Code Plan",
+      "fallbackModels": "Резервные модели",
+      "fallbackProviders": "Резервные провайдеры",
+      "expandFallback": "Expand Fallback Settings",
+      "collapseFallback": "Collapse Fallback Settings",
+      "fallbackSummaryEmpty": "No fallback configured",
+      "fallbackSummaryCount_one": "1 fallback configured",
+      "fallbackSummaryCount_other": "{{count}} fallbacks configured",
+      "fallbackModelIds": "ID резервных моделей",
+      "fallbackModelIdsPlaceholder": "gpt-4.1-mini\nanother-model-id",
+      "fallbackModelIdsHelp": "Один ID модели на строку. Эти модели используют текущую конфигурацию провайдера перед переходом к другим провайдерам.",
+      "noFallbackOptions": "Сначала добавьте другого провайдера, чтобы использовать его как резервный.",
+      "cancel": "Отмена",
+      "change": "Изменить провайдера",
+      "add": "Добавить провайдера",
+      "save": "Сохранить",
+      "customDoc": "Документация",
+      "validate": "Проверить"
+    },
+    "protocols": {
+      "openai": "Совместимый с OpenAI",
+      "openaiCompletions": "OpenAI Completions",
+      "openaiResponses": "OpenAI Responses",
+      "anthropic": "Совместимый с Anthropic"
+    },
+    "card": {
+      "default": "По умолчанию",
+      "configured": "Настроен",
+      "noKey": "API-ключ не задан",
+      "none": "Нет",
+      "fallbacks_one": "Резервный: {{names}}",
+      "fallbacks_other": "Резервные ({{count}}): {{names}}",
+      "setDefault": "Установить по умолчанию",
+      "editKey": "Редактировать API-ключ",
+      "delete": "Удалить провайдера"
+    },
+    "toast": {
+      "added": "Провайдер успешно добавлен",
+      "failedAdd": "Не удалось добавить провайдера",
+      "deleted": "Провайдер удалён",
+      "failedDelete": "Не удалось удалить провайдера",
+      "defaultUpdated": "Провайдер по умолчанию обновлён",
+      "failedDefault": "Не удалось установить провайдер по умолчанию",
+      "updated": "Провайдер обновлён",
+      "failedUpdate": "Не удалось обновить провайдера",
+      "invalidKey": "Неверный API-ключ",
+      "modelRequired": "Требуется ID модели",
+      "minimaxConflict": "Нельзя добавить оба провайдера MiniMax (Global) и MiniMax (CN)."
+    },
+    "oauth": {
+      "loginMode": "Вход через OAuth",
+      "apikeyMode": "API-ключ",
+      "loginPrompt": "Этот провайдер требует входа через браузер.",
+      "loginButton": "Войти через браузер",
+      "getApiKey": "Получить API-ключ",
+      "waiting": "Ожидание...",
+      "openLoginPage": "Открыть страницу входа",
+      "waitingApproval": "Ожидание подтверждения в браузере...",
+      "cancel": "Отмена",
+      "codeCopied": "Код скопирован в буфер обмена",
+      "authFailed": "Ошибка аутентификации",
+      "browserFlowUnavailable": "OAuth через браузер ещё не настроен для этого провайдера.",
+      "tryAgain": "Попробовать снова",
+      "approveLogin": "Подтвердить вход",
+      "step1": "Скопируйте код авторизации ниже.",
+      "step2": "Откройте страницу входа в браузере.",
+      "step3": "Вставьте код для подтверждения доступа.",
+      "requestingCode": "Запрос кода безопасного входа..."
+    }
+  },
+  "license": {
+    "title": "License",
+    "description": "Activate and manage your local license authorization",
+    "gateStatus": "Gate Status",
+    "gateState": {
+      "checking": "Checking",
+      "granted": "Granted",
+      "blocked": "Blocked"
+    },
+    "renewAlert": {
+      "near_expiry_renew_failed": "Renewal failed near expiry. Please revalidate as soon as possible"
+    },
+    "inputLabel": "License Key",
+    "placeholder": "Enter your license key (e.g. MATCHACLAW-ABCD-EFGH-IJKL-MNPQ)",
+    "showKey": "Show license key",
+    "hideKey": "Hide license key",
+    "validate": "Validate License",
+    "revalidate": "Revalidate",
+    "clear": "Clear",
+    "messages": {
+      "valid": "License validated",
+      "cache_grace_valid": "License validated by cached grace period",
+      "empty": "Please enter a license key",
+      "format_invalid": "Invalid license key format",
+      "service_unconfigured": "License service is not configured",
+      "network_error": "Cannot reach license service, please check network and retry",
+      "server_rejected": "License was rejected by license service",
+      "expired": "License has expired",
+      "device_mismatch": "License device does not match this machine",
+      "not_allowed": "License is not allowed",
+      "checksum_invalid": "License checksum is invalid",
+      "unknown": "License validation failed"
+    },
+    "toast": {
+      "cleared": "Local license cleared",
+      "clearFailed": "Failed to clear local license: {{error}}"
+    }
+  },
+  "diagnostics": {
+    "title": "Diagnostics",
+    "description": "Collect a local diagnostics bundle for troubleshooting",
+    "collect": "Collect Bundle",
+    "collecting": "Collecting",
+    "openFolder": "Open Folder",
+    "lastBundle": "Last Bundle",
+    "lastMeta": "Generated at {{generatedAt}}, files: {{count}}",
+    "toast": {
+      "success": "Diagnostics bundle generated, files: {{count}}",
+      "failed": "Failed to generate diagnostics bundle: {{error}}",
+      "openFailed": "Failed to open diagnostics folder: {{error}}"
+    }
+  },
+  "gateway": {
+    "title": "Шлюз",
+    "description": "Настройки шлюза OpenClaw",
+    "tabs": {
+      "general": "General",
+      "browser": "Browser"
+    },
+    "status": "Статус",
+    "port": "Порт",
+    "logs": "Журналы",
+    "appLogs": "Журналы приложения",
+    "openFolder": "Открыть папку",
+    "autoStart": "Автозапуск шлюза",
+    "autoStartDesc": "Запускать шлюз при старте MatchaClaw",
+    "proxyTitle": "Прокси",
+    "proxyDesc": "Направлять трафик Electron и шлюза через локальный прокси-клиент.",
+    "proxyServer": "Прокси-сервер",
+    "proxyServerHelp": "Прокси по умолчанию для всех запросов. Значения вида хост:порт по умолчанию используют HTTP.",
+    "proxyBypass": "Правила обхода",
+    "proxyBypassHelp": "Разделённые точкой с запятой, запятой или новой строкой хосты, которые должны подключаться напрямую.",
+    "proxyRestartNote": "Сохранение переприменяет сетевые настройки Electron и немедленно перезапускает шлюз. Обычные перезапуски шлюза сохраняют значения прокси Telegram-канала при отключённом прокси; сохраните при отключённом прокси, чтобы очистить их.",
+    "proxySaved": "Настройки прокси сохранены",
+    "proxySaveFailed": "Не удалось сохранить настройки прокси",
+    "browser": {
+      "title": "Browser",
+      "description": "Choose which browser runtime path MatchaClaw should use",
+      "modeLabel": "Browser Mode",
+      "modeDescription": "Choose the active browser runtime path.",
+      "currentMode": "Current",
+      "modeSaving": "Applying browser mode and restarting Gateway...",
+      "modeSaved": "Browser mode saved",
+      "modeSaveFailed": "Failed to save browser mode",
+      "modes": {
+        "relay": {
+          "title": "Browser Relay",
+          "description": "Use the MatchaClaw Browser Relay plugin and browser extension."
+        },
+        "native": {
+          "title": "Native Browser",
+          "description": "Use OpenClaw's built-in browser plugin without the extension."
+        },
+        "off": {
+          "title": "Off",
+          "description": "Disable all browser capability."
+        }
+      },
+      "nativeModeTitle": "Native Browser is active",
+      "nativeModeBody": "MatchaClaw uses OpenClaw's built-in browser plugin and does not rely on the Browser Relay extension path.",
+      "offModeTitle": "Browser capability is disabled",
+      "offModeBody": "Neither the native Browser plugin nor Browser Relay will be enabled.",
+      "copyChromeExtensions": "Copy chrome://extensions",
+      "openChromeExtensions": "Open chrome://extensions",
+      "revealExtensionDir": "Reveal extension directory",
+      "copyExtensionPath": "Copy extension path",
+      "absolutePathLabel": "Absolute path",
+      "steps": {
+        "enableDevModeTitle": "Open Chrome Extensions and enable Developer mode",
+        "enableDevModeBody": "Open the Chrome extensions management page, then turn on the Developer mode toggle in the top-right corner.",
+        "openFolderTitle": "Open the extension folder",
+        "openFolderBody": "Find the directory that contains the browser extension files. In development you can use the repository path below; in packaged builds you can use Reveal extension directory.",
+        "installTitle": "Drag the extension folder into Chrome",
+        "installBody": "Drag the browser-relay folder onto the chrome://extensions page and Chrome will install it immediately.",
+        "installHint": "If drag and drop is inconvenient, click Load unpacked and select this extension directory instead."
+      }
+    }
+  },
+  "updates": {
+    "title": "Обновления",
+    "description": "Поддерживайте MatchaClaw в актуальном состоянии",
+    "autoCheck": "Автопроверка обновлений",
+    "autoCheckDesc": "Проверять обновления при запуске",
+    "autoDownload": "Автообновление",
+    "autoDownloadDesc": "Автоматически загружать и устанавливать обновления",
+    "status": {
+      "checking": "Проверка обновлений...",
+      "downloading": "Загрузка обновления...",
+      "available": "Доступно обновление: v{{version}}",
+      "downloaded": "Готово к установке: v{{version}}",
+      "autoInstalling": "Перезапуск для установки обновления через {{seconds}}с...",
+      "failed": "Ошибка проверки обновлений",
+      "latest": "У вас последняя версия",
+      "check": "Проверить обновления"
+    },
+    "action": {
+      "checking": "Проверка...",
+      "downloading": "Загрузка...",
+      "download": "Скачать обновление",
+      "install": "Установить и перезапустить",
+      "cancelAutoInstall": "Отмена",
+      "retry": "Повторить",
+      "check": "Проверить обновления"
+    },
+    "currentVersion": "Текущая версия",
+    "whatsNew": "Что нового:",
+    "errorDetails": "Детали ошибки:",
+    "help": "Когда автообновление включено, обновления загружаются и устанавливаются автоматически."
+  },
+  "advanced": {
+    "title": "Дополнительные",
+    "description": "Опции для продвинутых пользователей",
+    "transport": {
+      "label": "Предпочтение транспорта шлюза",
+      "desc": "Выберите, как рендерер запрашивает RPC шлюза: WebSocket, HTTP-прокси или IPC-резерв.",
+      "saved": "Предпочтение транспорта шлюза сохранено",
+      "options": {
+        "wsFirst": "WS сначала",
+        "httpFirst": "HTTP сначала",
+        "wsOnly": "Только WS",
+        "httpOnly": "Только HTTP",
+        "ipcOnly": "Только IPC"
+      },
+      "descriptions": {
+        "wsFirst": "WS -> HTTP -> IPC",
+        "httpFirst": "HTTP -> WS -> IPC",
+        "wsOnly": "WS -> IPC",
+        "httpOnly": "HTTP -> IPC",
+        "ipcOnly": "Только IPC"
+      }
+    },
+    "devMode": "Режим разработчика",
+    "devModeDesc": "Показывать инструменты и ярлыки разработчика"
+  },
+  "developer": {
+    "title": "Разработчик",
+    "description": "Расширенные опции для разработчиков",
+    "console": "Консоль OpenClaw",
+    "consoleDesc": "Доступ к нативному интерфейсу управления OpenClaw",
+    "openConsole": "Открыть консоль разработчика",
+    "consoleNote": "Открывает Control UI с токеном шлюза",
+    "gatewayToken": "Токен шлюза",
+    "gatewayTokenDesc": "Вставьте это в настройки Control UI при запросе",
+    "tokenUnavailable": "Токен недоступен",
+    "tokenCopied": "Токен шлюза скопирован",
+    "cli": "CLI OpenClaw",
+    "cliDesc": "Скопируйте команду для запуска OpenClaw без изменения PATH.",
+    "cliPowershell": "Команда PowerShell.",
+    "cmdUnavailable": "Команда недоступна",
+    "cmdCopied": "CLI-команда скопирована",
+    "wsDiagnostic": "Диагностический режим WS",
+    "wsDiagnosticDesc": "Временно включить цепочку WS/HTTP-резервов для отладки RPC шлюза.",
+    "wsDiagnosticEnabled": "Диагностический режим WS включён",
+    "wsDiagnosticDisabled": "Диагностический режим WS отключён",
+    "historyStrategyMetrics": "History Strategy Metrics",
+    "telemetryViewer": "Просмотр телеметрии",
+    "telemetryViewerDesc": "Локальная телеметрия UX/производительности, последние 200 записей.",
+    "telemetryWindow": "Time Window",
+    "telemetryWindowAll": "All",
+    "telemetryWindowMinutes": "{{minutes}}m",
+    "telemetryHistoryOnly": "History Events Only",
+    "telemetryHistoryOnlyDesc": "Show only chat.history_* telemetry events.",
+    "telemetryFiltered": "Filtered",
+    "telemetrySortBy": "Sort by",
+    "telemetrySortCount": "count",
+    "telemetrySortAvg": "avg",
+    "telemetrySortP95": "p95",
+    "telemetrySortP99": "p99",
+    "telemetrySortAsc": "asc",
+    "telemetrySortDesc": "desc",
+    "telemetryMinSample": "Min sample",
+    "telemetryLowSample": "low sample (<{{min}})",
+    "telemetryAggregated": "Топ событий",
+    "telemetryTotal": "Всего",
+    "telemetryErrors": "Ошибки",
+    "telemetrySlow": "Медленные (>=800мс)",
+    "telemetryEmpty": "Телеметрия ещё не собрана",
+    "telemetryCopied": "Телеметрия скопирована",
+    "telemetryCleared": "Телеметрия очищена",
+    "installCmd": "Установить команду \"openclaw\"",
+    "installCmdDesc": "Устанавливает ~/.local/bin/openclaw (без прав администратора)",
+    "installTitle": "Установить команду OpenClaw",
+    "installMessage": "Установить команду \"openclaw\"?",
+    "installDetail": "Это создаст ~/.local/bin/openclaw. Убедитесь, что ~/.local/bin в PATH, если хотите запускать глобально."
+  }
+}

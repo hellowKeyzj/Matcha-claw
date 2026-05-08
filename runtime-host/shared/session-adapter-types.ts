@@ -122,6 +122,8 @@ export interface SessionRenderAttachedFile {
   fileSize: number;
   preview: string | null;
   filePath?: string;
+  gatewayUrl?: string;
+  source?: 'user-upload' | 'tool-result' | 'message-ref';
 }
 
 export interface SessionRenderImage {

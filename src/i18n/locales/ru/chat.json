@@ -1,0 +1,140 @@
+{
+  "gatewayNotRunning": "Шлюз не запущен",
+  "gatewayRequired": "Для использования чата требуется запущенный шлюз OpenClaw. Он запустится автоматически, или вы можете запустить его в Настройках.",
+  "welcome": {
+    "title": "Чат MatchaClaw",
+    "subtitle": "Чем могу помочь?",
+    "askQuestions": "Задачи",
+    "askQuestionsDesc": "Работа над задачами",
+    "creativeTasks": "Непрерывное выполнение",
+    "creativeTasksDesc": "Выполнение многошаговых задач"
+  },
+  "input": {
+    "gatewayDisconnectedPlaceholder": "Gateway not connected...",
+    "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
+    "approvalWaitingPlaceholder": "Waiting for approval...",
+    "pickModel": "Выбрать модель",
+    "modelPickerTitle": "Переключить модель",
+    "modelSwitchFailed": "Не удалось переключить модель: {{error}}",
+    "skillActive": "{{count}} skill active",
+    "skillsActive": "{{count}} skills active",
+    "attachmentReady": "{{count}} attachment ready",
+    "attachmentsReady": "{{count}} attachments ready"
+  },
+  "noLogs": "(Журналы ещё недоступны)",
+  "toolbar": {
+    "refresh": "Обновить чат",
+    "openSidePanel": "Open side panel",
+    "closeSidePanel": "Close side panel",
+    "skillConfig": "Skill Configuration",
+    "showThinking": "Показать размышления",
+    "hideThinking": "Скрыть размышления"
+  },
+  "liveThread": {
+    "loadOlder": "Load older messages",
+    "jumpToLatest": "Jump to latest",
+    "jumpToBottom": "Jump to bottom"
+  },
+  "status": {
+    "refreshing": "Refreshing...",
+    "mutating": "Applying changes..."
+  },
+  "pending": {
+    "typing": "Thinking",
+    "activity": "Working"
+  },
+  "errors": {
+    "activeRunDisconnected": "The active run disconnected before a terminal event was received.",
+    "modelUnavailable": "The current model is unavailable. Please try again later or switch models.",
+    "gatewayAuthRequired": "The OpenClaw Gateway requires authentication. Check your authentication configuration.",
+    "gatewayAuthFailed": "OpenClaw Gateway authentication failed. Check your credentials or authentication configuration.",
+    "gatewayTokenMissing": "The OpenClaw Gateway access token is missing.",
+    "gatewayTokenMismatch": "The OpenClaw Gateway access token does not match.",
+    "gatewayAuthRateLimited": "Too many OpenClaw Gateway authentication failures. Please try again later.",
+    "gatewayPairingRequired": "This device must be paired with the OpenClaw Gateway before it can connect.",
+    "gatewayOriginNotAllowed": "This origin is not allowed by the OpenClaw Gateway. Check the Control UI allowed origins configuration.",
+    "gatewayDeviceIdentityRequired": "This connection is missing device identity verification. Check your HTTPS/localhost or device identity configuration.",
+    "gatewayConnectTimeout": "Connection to the OpenClaw Gateway timed out.",
+    "gatewayConnectFailed": "Failed to connect to the OpenClaw Gateway: {{reason}}",
+    "gatewayHeartbeatTimeout": "The connection to the OpenClaw Gateway timed out and is waiting to recover.",
+    "gatewaySocketClosed": "The connection to the OpenClaw Gateway was closed (code {{code}}, reason: {{reason}}).",
+    "gatewayRpcTimeout": "OpenClaw Gateway call timed out: {{method}}",
+    "gatewayRpcFailed": "OpenClaw Gateway call failed: {{method}}, reason: {{reason}}"
+  },
+  "taskPanel": {
+    "stepStatus": {
+      "running": "Выполняется",
+      "completed": "Готово",
+      "error": "Ошибка"
+    }
+  },
+  "executionGraph": {
+    "eyebrow": "Выполнение в чате",
+    "title": "Граф выполнения",
+    "status": {
+      "active": "Активно",
+      "previous": "Предыдущее"
+    },
+    "branchLabel": "ветвь",
+    "userTriggerHint": "Запущен пользовательским сообщением выше",
+    "agentRun": "Выполнение {{agent}}",
+    "agentReplyHint": "Разрешено в ответе ассистента ниже"
+  },
+  "skillConfigDialog": {
+    "titleWithAgent": "Skill Configuration · {{agent}}",
+    "loading": "Loading skills...",
+    "empty": "No available skills."
+  },
+  "skillPreviewTooltip": "Предпросмотр SKILL.md",
+  "skillPreviewTitle": "Предпросмотр SKILL.md",
+  "skillPreviewLoading": "Загрузка предпросмотра навыка...",
+  "skillPreviewNotFound": "Не удалось найти этот навык. Откройте список навыков и обновите его.",
+  "approval": {
+    "panelTitle": "Approval required",
+    "waitingLabel": "Waiting for approval...",
+    "pendingTool": "Tool: {{tool}}",
+    "unknownTool": "Unknown tool",
+    "allowOnce": "Allow once",
+    "allowAlways": "Always allow",
+    "deny": "Deny"
+  },
+  "historyBuckets": {
+    "today": "Сегодня",
+    "yesterday": "Вчера",
+    "withinWeek": "В течение недели",
+    "withinTwoWeeks": "В течение 2 недель",
+    "withinMonth": "В течение месяца",
+    "older": "Старее месяца"
+  },
+  "taskInbox": {
+    "title": "Task Inbox",
+    "unfinishedCount": "{{count}} unfinished tasks",
+    "refresh": "Refresh tasks",
+    "workspaceScope": "Scope: {{scope}}",
+    "gatewayStopped": "Gateway is stopped; task list and resume actions are unavailable",
+    "empty": "No unfinished tasks in current workspace",
+    "unboundSession": "No bound session yet, resume task first",
+    "taskNotFound": "Task not found or updated, please refresh",
+    "untitledTask": "Untitled task",
+    "assignedSessionReady": "Session is bound",
+    "assignedSessionMissing": "Session is not bound",
+    "openSession": "Open session",
+    "inputPlaceholder": "Please provide additional information",
+    "submitInput": "Submit input",
+    "reject": "Reject",
+    "approve": "Approve",
+    "collapse": "Collapse task inbox",
+    "expand": "Expand task inbox",
+    "status": {
+      "pending": "Pending",
+      "running": "Running",
+      "waiting_for_input": "Waiting Input",
+      "waiting_approval": "Waiting Approval",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "toast": {
+      "resumed": "Task resumed"
+    }
+  }
+}

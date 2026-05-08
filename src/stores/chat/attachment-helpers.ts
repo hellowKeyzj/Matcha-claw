@@ -58,8 +58,20 @@ function normalizeAttachedFiles(files: ReadonlyArray<SessionRenderAttachedFile>)
     mimeType: file.mimeType,
     fileSize: file.fileSize,
     preview: file.preview,
+    ...(file.source ? { source: file.source } : {}),
     ...(file.filePath ? { filePath: file.filePath } : {}),
+    ...(file.gatewayUrl ? { gatewayUrl: file.gatewayUrl } : {}),
   }));
+}
+
+function getAttachmentRefKey(file: { filePath?: string; gatewayUrl?: string }): string | null {
+  if (typeof file.filePath === 'string' && file.filePath.trim()) {
+    return file.filePath;
+  }
+  if (typeof file.gatewayUrl === 'string' && file.gatewayUrl.trim()) {
+    return file.gatewayUrl;
+  }
+  return null;
 }
 
 function buildAttachedFileFromRef(ref: { filePath: string; mimeType: string }): AttachedFileMeta {
@@ -73,6 +85,7 @@ function buildAttachedFileFromRef(ref: { filePath: string; mimeType: string }): 
     fileSize: 0,
     preview: null,
     filePath: ref.filePath,
+    source: 'message-ref',
   };
 }
 
@@ -102,11 +115,11 @@ function hydrateAttachmentItemFromCache(
   const attachedFiles = mergeItemAttachedFiles(item);
   let changed = attachedFiles.length !== item.attachedFiles.length;
   const nextFiles = attachedFiles.map((file) => {
-    const filePath = file.filePath;
-    if (!filePath) {
+    const refKey = getAttachmentRefKey(file);
+    if (!refKey) {
       return file;
     }
-    const cached = imageCache.get(filePath);
+    const cached = imageCache.get(refKey);
     if (!cached) {
       return file;
     }
@@ -116,6 +129,7 @@ function hydrateAttachmentItemFromCache(
       fileSize: file.fileSize > 0 ? file.fileSize : (cached.fileSize ?? 0),
       fileName: file.fileName || cached.fileName,
       mimeType: file.mimeType || cached.mimeType,
+      source: file.source ?? cached.source,
     } satisfies AttachedFileMeta;
     if (
       nextFile.preview !== file.preview
@@ -157,7 +171,7 @@ export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean 
       return false;
     }
     return mergeItemAttachedFiles(item).some((file) => {
-      if (!file.filePath) {
+      if (!getAttachmentRefKey(file)) {
         return false;
       }
       return file.mimeType.startsWith('image/')
@@ -175,16 +189,16 @@ export async function loadMissingItemPreviews(
     throwIfHistoryLoadAborted(abortSignal);
   }
   const normalizedItems = hydrateAttachedFilesFromItems(items);
-  const needPreview: Array<{ filePath: string; mimeType: string }> = [];
-  const seenPaths = new Set<string>();
+  const needPreview: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }> = [];
+  const seenRefs = new Set<string>();
 
   for (const item of normalizedItems) {
     if (!isAttachmentBearingItem(item)) {
       continue;
     }
     for (const file of mergeItemAttachedFiles(item)) {
-      const filePath = file.filePath;
-      if (!filePath || seenPaths.has(filePath)) {
+      const refKey = getAttachmentRefKey(file);
+      if (!refKey || seenRefs.has(refKey)) {
         continue;
       }
       const needsLoad = file.mimeType.startsWith('image/')
@@ -193,8 +207,10 @@ export async function loadMissingItemPreviews(
       if (!needsLoad) {
         continue;
       }
-      seenPaths.add(filePath);
-      needPreview.push({ filePath, mimeType: file.mimeType });
+      seenRefs.add(refKey);
+      needPreview.push(file.filePath
+        ? { filePath: file.filePath, mimeType: file.mimeType }
+        : { gatewayUrl: file.gatewayUrl, mimeType: file.mimeType });
     }
   }
 
@@ -219,11 +235,11 @@ export async function loadMissingItemPreviews(
       const attachedFiles = mergeItemAttachedFiles(item);
       let itemChanged = attachedFiles.length !== item.attachedFiles.length;
       const nextFiles = attachedFiles.map((file) => {
-        const filePath = file.filePath;
-        if (!filePath) {
+        const refKey = getAttachmentRefKey(file);
+        if (!refKey) {
           return file;
         }
-        const thumb = thumbnails[filePath];
+        const thumb = thumbnails[refKey];
         if (!thumb || (!thumb.preview && !thumb.fileSize)) {
           return file;
         }
@@ -234,7 +250,7 @@ export async function loadMissingItemPreviews(
         } satisfies AttachedFileMeta;
         if (nextFile.preview !== file.preview || nextFile.fileSize !== file.fileSize) {
           itemChanged = true;
-          imageCache.set(filePath, { ...nextFile });
+          imageCache.set(refKey, { ...nextFile });
         }
         return nextFile;
       });
@@ -280,6 +296,7 @@ export function cacheSendAttachments(attachments: ChatSendAttachment[]): void {
       fileSize: attachment.fileSize,
       preview: attachment.preview,
       filePath: attachment.stagedPath,
+      source: 'user-upload',
     });
   }
   saveImageCache(imageCache);

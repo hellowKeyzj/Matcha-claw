@@ -19,6 +19,7 @@ describe('provider-runtime-rules', () => {
   it('内置 provider 不走多实例 key 截断规则', () => {
     expect(getOpenClawProviderKey('openai', 'openai-personal')).toBe('openai');
     expect(getOpenClawProviderKey('minimax-portal-cn', 'any')).toBe('minimax-portal');
+    expect(getOpenClawProviderKey('moonshot-global', 'moonshot-global-work')).toBe('moonshot-global');
   });
 
   it('Browser OAuth 默认模型 ref 与当前产品策略一致', () => {

@@ -5,6 +5,7 @@ export const OPENAI_BROWSER_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_BROWSER_OAUTH_RU
 export const OPENCLAW_PROVIDER_KEY_MINIMAX = 'minimax-portal';
 export const OPENCLAW_PROVIDER_KEY_QWEN = 'qwen-portal';
 export const OPENCLAW_PROVIDER_KEY_MOONSHOT = 'moonshot';
+export const OPENCLAW_PROVIDER_KEY_MOONSHOT_GLOBAL = 'moonshot-global';
 export const OAUTH_PROVIDER_TYPES = ['qwen-portal', 'minimax-portal', 'minimax-portal-cn'] as const;
 export const OPENCLAW_OAUTH_PLUGIN_PROVIDER_KEYS = [
   OPENCLAW_PROVIDER_KEY_MINIMAX,

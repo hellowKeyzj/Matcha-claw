@@ -3,6 +3,7 @@ import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { ResourceStateMeta } from '@/lib/resource-state';
 import type { ChatSession } from '@/stores/chat';
 import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
+import { parseSessionCreatedAtMs } from '@/stores/chat/session-helpers';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -161,7 +162,7 @@ function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return 0;
+  return parseSessionCreatedAtMs(session.key) ?? 0;
 }
 
 function compareSessionSortEntries(left: SessionSortEntry, right: SessionSortEntry): number {

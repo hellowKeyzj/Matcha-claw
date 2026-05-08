@@ -1,6 +1,7 @@
 import type { ParentShellAction, ParentTransportUpstreamPayload } from '../../api/dispatch/parent-transport';
 import { getOpenClawProviderKeyForType } from './provider-runtime-rules';
 import {
+  getProviderApiKeyFromOpenClaw,
   removeProviderKeyFromOpenClaw,
 } from '../openclaw/openclaw-auth-profile-store';
 import {
@@ -73,6 +74,11 @@ function resolveProviderCleanupKeys(accountId: string, account: Record<string, a
   return Array.from(new Set([runtimeProviderKey, accountId].filter((item) => item.trim().length > 0)));
 }
 
+function getStoredApiKey(store: ProviderStore, key: string): string | undefined {
+  const value = store.apiKeys[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
 export class ProviderAccountsService {
   constructor(private readonly deps: ProviderAccountsServiceDeps) {}
 
@@ -81,6 +87,29 @@ export class ProviderAccountsService {
     if (result.storeModified) {
       await this.deps.writeProviderStore(store);
     }
+  }
+
+  private async resolveAccountApiKey(
+    store: ProviderStore,
+    accountId: string,
+    account: Record<string, any> | null,
+  ): Promise<string | undefined> {
+    const providerType = typeof account?.vendorId === 'string' ? account.vendorId.trim() : '';
+    const runtimeProviderKey = providerType
+      ? getOpenClawProviderKeyForType(providerType, accountId)
+      : accountId;
+    const runtimeApiKey = await getProviderApiKeyFromOpenClaw(runtimeProviderKey);
+    if (runtimeApiKey) {
+      return runtimeApiKey;
+    }
+    const localApiKey = getStoredApiKey(store, accountId);
+    if (localApiKey) {
+      return localApiKey;
+    }
+    if (runtimeProviderKey !== accountId) {
+      return getStoredApiKey(store, runtimeProviderKey);
+    }
+    return undefined;
   }
 
   async list() {
@@ -94,7 +123,11 @@ export class ProviderAccountsService {
       normalizedAccounts.map((account) => account.account),
       store.defaultAccountId,
     );
-    const statuses = sortedAccounts.map((account) => this.deps.accountToStatus(account, store.apiKeys[account.id]));
+    const statuses = await Promise.all(
+      sortedAccounts.map(async (account) => (
+        this.deps.accountToStatus(account, await this.resolveAccountApiKey(store, account.id, account))
+      )),
+    );
     return {
       accounts: sortedAccounts,
       statuses,
@@ -286,7 +319,8 @@ export class ProviderAccountsService {
 
   async hasApiKey(accountId: string) {
     const store = await this.deps.readProviderStore();
-    return { hasKey: typeof store.apiKeys[accountId] === 'string' && store.apiKeys[accountId].trim().length > 0 };
+    const account = isRecord(store.accounts[accountId]) ? store.accounts[accountId] : null;
+    return { hasKey: Boolean(await this.resolveAccountApiKey(store, accountId, account)) };
   }
 
   async get(accountId: string) {

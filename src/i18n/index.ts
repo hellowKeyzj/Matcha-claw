@@ -54,10 +54,27 @@ import jaTasks from './locales/ja/tasks.json';
 import jaSecurity from './locales/ja/security.json';
 import jaPlugins from './locales/ja/plugins.json';
 
+// RU
+import ruCommon from './locales/ru/common.json';
+import ruSettings from './locales/ru/settings.json';
+import ruDashboard from './locales/ru/dashboard.json';
+import ruChat from './locales/ru/chat.json';
+import ruChannels from './locales/ru/channels.json';
+import ruSkills from './locales/ru/skills.json';
+import ruCron from './locales/ru/cron.json';
+import ruSetup from './locales/ru/setup.json';
+import ruSubagents from './locales/ru/subagents.json';
+import ruSubagentTemplates from './locales/ru/subagent-templates.json';
+import ruTeams from './locales/ru/teams.json';
+import ruTasks from './locales/ru/tasks.json';
+import ruSecurity from './locales/ru/security.json';
+import ruPlugins from './locales/ru/plugins.json';
+
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
     { code: 'zh', label: '中文' },
     { code: 'ja', label: '日本語' },
+    { code: 'ru', label: 'Русский' },
 ] as const satisfies ReadonlyArray<{ code: SupportedLanguageCode; label: string }>;
 
 export type LanguageCode = SupportedLanguageCode;
@@ -110,6 +127,22 @@ const resources = {
         tasks: jaTasks,
         security: jaSecurity,
         plugins: jaPlugins,
+    },
+    ru: {
+        common: ruCommon,
+        settings: ruSettings,
+        dashboard: ruDashboard,
+        chat: ruChat,
+        channels: ruChannels,
+        skills: ruSkills,
+        cron: ruCron,
+        setup: ruSetup,
+        subagents: ruSubagents,
+        subagentTemplates: ruSubagentTemplates,
+        teams: ruTeams,
+        tasks: ruTasks,
+        security: ruSecurity,
+        plugins: ruPlugins,
     },
 };
 

@@ -1,9 +1,15 @@
+import { open } from 'node:fs/promises';
+import { join } from 'node:path';
 import { app } from 'electron';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { buildPublicGatewayStatus } from '../../gateway/public-status';
 import { getLicenseGateSnapshot } from '../../services/license/license-gate-service';
 import { getOpenClawConfigDir } from '../../utils/paths';
+import { logger } from '../../utils/logger';
 import type { DiagnosticsApiContext } from '../context';
 import { sendJson } from '../route-utils';
+
+const DEFAULT_TAIL_LINES = 200;
 
 function readMainProcessMemoryUsage() {
   const usage = process.memoryUsage();
@@ -64,12 +70,92 @@ function readElectronProcessMetrics() {
   };
 }
 
+async function readTail(filePath: string, tailLines = DEFAULT_TAIL_LINES): Promise<string> {
+  const safeTailLines = Math.max(1, Math.floor(tailLines));
+  try {
+    const file = await open(filePath, 'r');
+    try {
+      const stat = await file.stat();
+      if (stat.size === 0) {
+        return '';
+      }
+
+      const chunkSize = 64 * 1024;
+      let position = stat.size;
+      let content = '';
+      let lineCount = 0;
+
+      while (position > 0 && lineCount <= safeTailLines) {
+        const bytesToRead = Math.min(chunkSize, position);
+        position -= bytesToRead;
+        const buffer = Buffer.allocUnsafe(bytesToRead);
+        const { bytesRead } = await file.read(buffer, 0, bytesToRead, position);
+        content = `${buffer.subarray(0, bytesRead).toString('utf8')}${content}`;
+        lineCount = content.split('\n').length - 1;
+      }
+
+      const lines = content.split('\n');
+      return lines.length <= safeTailLines ? content : lines.slice(-safeTailLines).join('\n');
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return '';
+  }
+}
+
+async function readChannelSnapshot(
+  ctx: DiagnosticsApiContext,
+): Promise<{ snapshot: unknown | null; error?: string }> {
+  try {
+    const result = await ctx.runtimeHost.request<{
+      success?: boolean;
+      snapshot?: unknown;
+      error?: string;
+    }>('GET', '/api/channels/snapshot');
+    if (result.data?.success === true) {
+      return {
+        snapshot: result.data.snapshot ?? null,
+      };
+    }
+    return {
+      snapshot: null,
+      error: result.data?.error || `channels snapshot request failed (${result.status})`,
+    };
+  } catch (error) {
+    return {
+      snapshot: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function handleDiagnosticsRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
   ctx: DiagnosticsApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/diagnostics/gateway-snapshot' && req.method === 'GET') {
+    const runtimeGatewayStatus = await ctx.runtimeHost.readGatewayStatus().catch(() => null);
+    const gateway = buildPublicGatewayStatus(
+      ctx.gatewayManager.getStatus(),
+      runtimeGatewayStatus,
+    );
+    const channelSnapshot = await readChannelSnapshot(ctx);
+    const openClawConfigDir = getOpenClawConfigDir();
+    sendJson(res, 200, {
+      capturedAt: Date.now(),
+      gateway,
+      channelSnapshot: channelSnapshot.snapshot,
+      ...(channelSnapshot.error ? { channelSnapshotError: channelSnapshot.error } : {}),
+      clawxLogTail: await logger.readLogFile(DEFAULT_TAIL_LINES),
+      gatewayLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.log')),
+      gatewayErrLogTail: await readTail(join(openClawConfigDir, 'logs', 'gateway.err.log')),
+    });
+    return true;
+  }
+
   if (url.pathname === '/api/diagnostics/memory' && req.method === 'GET') {
     sendJson(res, 200, {
       sampledAt: new Date().toISOString(),

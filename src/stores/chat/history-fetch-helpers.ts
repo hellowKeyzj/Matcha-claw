@@ -18,6 +18,7 @@ interface FetchHistoryWindowInput {
   requestedSessionKey: string;
   sessions: ChatSession[];
   limit: number;
+  timeoutMs?: number;
 }
 
 export async function fetchHistoryWindow(
@@ -27,12 +28,15 @@ export async function fetchHistoryWindow(
     requestedSessionKey,
     sessions,
     limit,
+    timeoutMs,
   } = input;
 
   void limit;
 
   const data = await hostSessionLoad({
     sessionKey: requestedSessionKey,
+  }, {
+    timeoutMs,
   });
   return {
     snapshot: data.snapshot,

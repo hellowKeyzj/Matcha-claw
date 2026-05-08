@@ -261,10 +261,14 @@ export async function hostSessionLoad(
   payload: {
     sessionKey: string;
   },
+  options?: {
+    timeoutMs?: number;
+  },
 ): Promise<SessionLoadResult> {
   return hostApiFetch('/api/session/load', {
     method: 'POST',
     body: JSON.stringify(payload),
+    timeoutMs: options?.timeoutMs,
   });
 }
 

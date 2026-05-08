@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { deflateSync } from 'zlib';
 import { getOpenClawDir, getOpenClawResolvedDir } from '../../utils/paths';
 import { fsPath } from '../../utils/fs-path';
+import { resolveOpenClawRuntimeModulePath } from '../../utils/runtime-package-resolution';
 import { cleanupWhatsAppAuthDir, resolveWhatsAppAuthDir } from './whatsapp-auth-cleanup';
 
 const require = createRequire(import.meta.url);
@@ -16,7 +17,7 @@ const openclawRequire = createRequire(join(openclawResolvedPath, 'package.json')
 function resolveOpenClawPackageJson(packageName: string): string {
   const specifier = `${packageName}/package.json`;
   try {
-    return openclawRequire.resolve(specifier);
+    return resolveOpenClawRuntimeModulePath(specifier);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -62,7 +63,10 @@ function loadWhatsAppRuntimeDeps(): WhatsAppRuntimeDeps {
   }
 
   const baileysPath = dirname(resolveOpenClawPackageJson('@whiskeysockets/baileys'));
-  const qrcodeTerminalPath = dirname(resolveOpenClawPackageJson('qrcode-terminal'));
+  const qrCodeModulePath = resolveOpenClawRuntimeModulePath('qrcode-terminal/vendor/QRCode/index.js');
+  const qrErrorCorrectLevelPath = resolveOpenClawRuntimeModulePath(
+    'qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js',
+  );
 
   const baileysModule = require(baileysPath) as {
     default?: WhatsAppRuntimeDeps['makeWASocket'];
@@ -70,13 +74,8 @@ function loadWhatsAppRuntimeDeps(): WhatsAppRuntimeDeps {
     DisconnectReason?: WhatsAppRuntimeDeps['DisconnectReason'];
     fetchLatestBaileysVersion?: WhatsAppRuntimeDeps['fetchLatestBaileysVersion'];
   };
-  const QRCodeModule = require(join(qrcodeTerminalPath, 'vendor', 'QRCode', 'index.js')) as WhatsAppRuntimeDeps['QRCode'];
-  const QRErrorCorrectLevelModule = require(join(
-    qrcodeTerminalPath,
-    'vendor',
-    'QRCode',
-    'QRErrorCorrectLevel.js',
-  )) as WhatsAppRuntimeDeps['QRErrorCorrectLevel'];
+  const QRCodeModule = require(qrCodeModulePath) as WhatsAppRuntimeDeps['QRCode'];
+  const QRErrorCorrectLevelModule = require(qrErrorCorrectLevelPath) as WhatsAppRuntimeDeps['QRErrorCorrectLevel'];
 
   if (
     typeof baileysModule.default !== 'function'

@@ -11,6 +11,7 @@ function buildJob(id: string): CronJob {
   return {
     id,
     name: `job-${id}`,
+    agentId: 'main',
     message: 'hello',
     schedule: '0 9 * * *',
     enabled: true,
@@ -112,5 +113,31 @@ describe('cron store', () => {
     expect(state.mutatingByJobId['job-4']).toBeUndefined();
     expect(state.jobs[0]?.name).toBe('updated-name');
   });
-});
 
+  it('createJob 会保留返回的 agentId', async () => {
+    const createdJob = { ...buildJob('job-5'), agentId: 'agent-alpha' };
+    hostApiFetchMock.mockResolvedValueOnce(createdJob);
+
+    const { useCronStore } = await import('@/stores/cron');
+    const result = await useCronStore.getState().createJob({
+      name: createdJob.name,
+      agentId: 'agent-alpha',
+      message: createdJob.message,
+      schedule: '0 9 * * *',
+      enabled: true,
+    });
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        name: createdJob.name,
+        agentId: 'agent-alpha',
+        message: createdJob.message,
+        schedule: '0 9 * * *',
+        enabled: true,
+      }),
+    }));
+    expect(result.agentId).toBe('agent-alpha');
+    expect(useCronStore.getState().jobs[0]?.agentId).toBe('agent-alpha');
+  });
+});

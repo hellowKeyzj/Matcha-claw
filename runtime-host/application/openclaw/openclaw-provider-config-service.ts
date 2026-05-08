@@ -9,6 +9,7 @@ import {
 } from '../providers/provider-registry';
 import {
   OPENCLAW_PROVIDER_KEY_MOONSHOT,
+  OPENCLAW_PROVIDER_KEY_MOONSHOT_GLOBAL,
   isOpenClawOAuthPluginProviderKey,
 } from '../providers/provider-runtime-rules';
 import {
@@ -34,6 +35,7 @@ import {
   readEnabledPluginIdsFromOpenClawConfig,
 } from './openclaw-plugin-config-service';
 import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
+import { STRICT_SCHEMA_CHANNEL_IDS } from '../channels/channel-plugin-bindings';
 
 const logger = createRuntimeLogger('openclaw-provider-config-service');
 const BUILTIN_CHANNEL_IDS = new Set([
@@ -62,14 +64,36 @@ const AUTH_PROFILE_PROVIDER_KEY_REVERSE_MAP: Record<string, string[]> = Object.e
   accumulator[normalizedKey].push(rawKey);
   return accumulator;
 }, {});
+const OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS = new Set([
+  'talk-voice',
+  'voyage',
+]);
+const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
+  'browser',
+  'acpx',
+  'memory-core',
+]);
 
 type BundledPluginDiscovery = {
   dir: string;
   all: Set<string>;
   enabledByDefault: string[];
+  manifests: BundledPluginManifest[];
 };
 
 let bundledPluginDiscoveryCache: BundledPluginDiscovery | null = null;
+
+type BundledPluginManifest = {
+  id: string;
+  enabledByDefault: boolean;
+  providers: string[];
+  legacyPluginIds: string[];
+};
+
+type OAuthPluginRegistration = {
+  canonicalPluginId: string;
+  stalePluginIds: string[];
+};
 
 export type BrowserMode = 'off' | 'relay' | 'native';
 
@@ -88,6 +112,7 @@ function discoverBundledPlugins(): BundledPluginDiscovery {
 
   const all = new Set<string>();
   const enabledByDefault: string[] = [];
+  const manifests: BundledPluginManifest[] = [];
 
   if (existsSync(extensionsDir)) {
     try {
@@ -105,10 +130,22 @@ function discoverBundledPlugins(): BundledPluginDiscovery {
           if (!pluginId) {
             continue;
           }
+          const providers = Array.isArray(manifest.providers)
+            ? manifest.providers.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            : [];
+          const legacyPluginIds = Array.isArray(manifest.legacyPluginIds)
+            ? manifest.legacyPluginIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+            : [];
           all.add(pluginId);
           if (manifest.enabledByDefault === true) {
             enabledByDefault.push(pluginId);
           }
+          manifests.push({
+            id: pluginId,
+            enabledByDefault: manifest.enabledByDefault === true,
+            providers,
+            legacyPluginIds,
+          });
         } catch {
           // Ignore malformed plugin manifest.
         }
@@ -122,6 +159,7 @@ function discoverBundledPlugins(): BundledPluginDiscovery {
     dir: extensionsDir,
     all,
     enabledByDefault,
+    manifests,
   };
   return bundledPluginDiscoveryCache;
 }
@@ -165,8 +203,155 @@ async function getProvidersFromAuthProfileStores(): Promise<Set<string>> {
   return providers;
 }
 
-function getOAuthPluginId(provider: string): string {
-  return `${provider}-auth`;
+function getOAuthPluginRegistration(provider: string): OAuthPluginRegistration {
+  const manifest = discoverBundledPlugins().manifests.find((entry) => entry.providers.includes(provider));
+  if (!manifest) {
+    return {
+      canonicalPluginId: `${provider}-auth`,
+      stalePluginIds: [],
+    };
+  }
+
+  const knownPluginIds = new Set<string>([
+    manifest.id,
+    `${provider}-auth`,
+    ...manifest.legacyPluginIds,
+  ]);
+
+  return {
+    canonicalPluginId: manifest.id,
+    stalePluginIds: [...knownPluginIds].filter((pluginId) => pluginId !== manifest.id),
+  };
+}
+
+function removePluginRegistrations(
+  config: Record<string, unknown>,
+  pluginIds: string[],
+): boolean {
+  const uniquePluginIds = Array.from(new Set(pluginIds.filter(Boolean)));
+  if (uniquePluginIds.length === 0) {
+    return false;
+  }
+
+  const plugins = (
+    config.plugins && typeof config.plugins === 'object' && !Array.isArray(config.plugins)
+      ? config.plugins as Record<string, unknown>
+      : null
+  );
+  if (!plugins) {
+    return false;
+  }
+
+  let modified = false;
+
+  if (Array.isArray(plugins.allow)) {
+    const allow = (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string');
+    const nextAllow = allow.filter((pluginId) => !uniquePluginIds.includes(pluginId));
+    if (nextAllow.length !== allow.length) {
+      modified = true;
+      if (nextAllow.length > 0) {
+        plugins.allow = nextAllow;
+      } else {
+        delete plugins.allow;
+      }
+    }
+  }
+
+  if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries)) {
+    const entries = plugins.entries as Record<string, unknown>;
+    for (const pluginId of uniquePluginIds) {
+      if (pluginId in entries) {
+        delete entries[pluginId];
+        modified = true;
+      }
+    }
+    if (Object.keys(entries).length === 0) {
+      delete plugins.entries;
+      modified = true;
+    }
+  }
+
+  const pluginKeysExcludingEnabled = Object.keys(plugins).filter((key) => key !== 'enabled');
+  if (plugins.enabled === true && pluginKeysExcludingEnabled.length === 0) {
+    delete plugins.enabled;
+    modified = true;
+  }
+  if (Object.keys(plugins).length === 0) {
+    delete config.plugins;
+    modified = true;
+  }
+
+  return modified;
+}
+
+function removeOAuthPluginRegistrations(
+  config: Record<string, unknown>,
+  provider: string,
+): boolean {
+  const registration = getOAuthPluginRegistration(provider);
+  return removePluginRegistrations(config, [
+    registration.canonicalPluginId,
+    ...registration.stalePluginIds,
+  ]);
+}
+
+function ensureOAuthPluginEnabled(
+  config: Record<string, unknown>,
+  provider: string,
+): boolean {
+  const plugins = (
+    config.plugins && typeof config.plugins === 'object' && !Array.isArray(config.plugins)
+      ? { ...(config.plugins as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const allow = Array.isArray(plugins.allow)
+    ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  const entries = (
+    plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries)
+      ? { ...(plugins.entries as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const { canonicalPluginId, stalePluginIds } = getOAuthPluginRegistration(provider);
+
+  let modified = false;
+  const nextAllow = allow.filter((pluginId) => !stalePluginIds.includes(pluginId));
+  if (nextAllow.length !== allow.length) {
+    modified = true;
+  }
+  if (!nextAllow.includes(canonicalPluginId)) {
+    nextAllow.push(canonicalPluginId);
+    modified = true;
+  }
+
+  for (const stalePluginId of stalePluginIds) {
+    if (stalePluginId in entries) {
+      delete entries[stalePluginId];
+      modified = true;
+    }
+  }
+
+  const currentCanonicalEntry = (
+    entries[canonicalPluginId] && typeof entries[canonicalPluginId] === 'object' && !Array.isArray(entries[canonicalPluginId])
+      ? entries[canonicalPluginId] as Record<string, unknown>
+      : {}
+  );
+  if (currentCanonicalEntry.enabled !== true) {
+    entries[canonicalPluginId] = {
+      ...currentCanonicalEntry,
+      enabled: true,
+    };
+    modified = true;
+  }
+
+  if (!modified) {
+    return false;
+  }
+
+  plugins.allow = nextAllow;
+  plugins.entries = entries;
+  config.plugins = plugins;
+  return true;
 }
 
 function isProviderModelRef(value: unknown, provider: string): boolean {
@@ -316,13 +501,9 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
       const config = await readOpenClawJson();
       let modified = false;
 
-      const plugins = config.plugins as Record<string, unknown> | undefined;
-      const entries = (plugins?.entries ?? {}) as Record<string, Record<string, unknown>>;
-      const pluginName = `${provider}-auth`;
-      if (entries[pluginName]) {
-        entries[pluginName].enabled = false;
+      if (removeOAuthPluginRegistrations(config, provider)) {
         modified = true;
-        logger.info(`Disabled OpenClaw plugin: ${pluginName}`);
+        logger.info(`Removed OpenClaw OAuth plugin registrations for provider "${provider}"`);
       }
 
       const models = config.models as Record<string, unknown> | undefined;
@@ -509,11 +690,10 @@ function upsertOpenClawProviderEntry(
   }
 }
 
-function ensureMoonshotKimiWebSearchCnBaseUrl(config: Record<string, unknown>, provider: string): void {
-  if (provider !== OPENCLAW_PROVIDER_KEY_MOONSHOT) {
-    return;
-  }
-
+function upsertMoonshotWebSearchBaseUrl(
+  config: Record<string, unknown>,
+  baseUrl: string,
+): void {
   const tools = (config.tools || {}) as Record<string, unknown>;
   const web = (tools.web || {}) as Record<string, unknown>;
   const search = (web.search || {}) as Record<string, unknown>;
@@ -522,11 +702,21 @@ function ensureMoonshotKimiWebSearchCnBaseUrl(config: Record<string, unknown>, p
     : {};
 
   delete kimi.apiKey;
-  kimi.baseUrl = 'https://api.moonshot.cn/v1';
+  kimi.baseUrl = baseUrl;
   search.kimi = kimi;
   web.search = search;
   tools.web = web;
   config.tools = tools;
+}
+
+function ensureMoonshotKimiWebSearchBaseUrl(config: Record<string, unknown>, provider: string): void {
+  if (provider === OPENCLAW_PROVIDER_KEY_MOONSHOT) {
+    upsertMoonshotWebSearchBaseUrl(config, 'https://api.moonshot.cn/v1');
+    return;
+  }
+  if (provider === OPENCLAW_PROVIDER_KEY_MOONSHOT_GLOBAL) {
+    upsertMoonshotWebSearchBaseUrl(config, 'https://api.moonshot.ai/v1');
+  }
 }
 
 export async function setOpenClawDefaultModel(
@@ -536,7 +726,7 @@ export async function setOpenClawDefaultModel(
 ): Promise<void> {
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
-    ensureMoonshotKimiWebSearchCnBaseUrl(config, provider);
+    ensureMoonshotKimiWebSearchBaseUrl(config, provider);
 
     const model = normalizeModelRef(provider, modelOverride);
     if (!model) {
@@ -594,7 +784,7 @@ export async function syncProviderConfigToOpenClaw(
 ): Promise<void> {
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
-    ensureMoonshotKimiWebSearchCnBaseUrl(config, provider);
+    ensureMoonshotKimiWebSearchBaseUrl(config, provider);
 
     if (override.baseUrl && override.api) {
       upsertOpenClawProviderEntry(config, provider, {
@@ -602,22 +792,13 @@ export async function syncProviderConfigToOpenClaw(
         api: override.api,
         apiKeyEnv: override.apiKeyEnv,
         headers: override.headers,
+        authHeader: override.authHeader,
         models: override.models,
       });
     }
 
-    if (isOpenClawOAuthPluginProviderKey(provider)) {
-      const plugins = (config.plugins || {}) as Record<string, unknown>;
-      const allow = Array.isArray(plugins.allow) ? [...plugins.allow as string[]] : [];
-      const entries = (plugins.entries || {}) as Record<string, unknown>;
-      const pluginId = getOAuthPluginId(provider);
-      if (!allow.includes(pluginId)) {
-        allow.push(pluginId);
-      }
-      entries[pluginId] = { enabled: true };
-      plugins.allow = allow;
-      plugins.entries = entries;
-      config.plugins = plugins;
+    if (isOpenClawOAuthPluginProviderKey(provider) && ensureOAuthPluginEnabled(config, provider)) {
+      logger.info(`Enabled OpenClaw OAuth plugin for provider "${provider}"`);
     }
 
     await writeOpenClawJson(config);
@@ -632,7 +813,7 @@ export async function setOpenClawDefaultModelWithOverride(
 ): Promise<void> {
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
-    ensureMoonshotKimiWebSearchCnBaseUrl(config, provider);
+    ensureMoonshotKimiWebSearchBaseUrl(config, provider);
 
     const model = normalizeModelRef(provider, modelOverride);
     if (!model) {
@@ -667,18 +848,8 @@ export async function setOpenClawDefaultModelWithOverride(
     if (!gateway.mode) gateway.mode = 'local';
     config.gateway = gateway;
 
-    if (isOpenClawOAuthPluginProviderKey(provider)) {
-      const plugins = (config.plugins || {}) as Record<string, unknown>;
-      const allow = Array.isArray(plugins.allow) ? [...plugins.allow as string[]] : [];
-      const entries = (plugins.entries || {}) as Record<string, unknown>;
-      const pluginId = getOAuthPluginId(provider);
-      if (!allow.includes(pluginId)) {
-        allow.push(pluginId);
-      }
-      entries[pluginId] = { enabled: true };
-      plugins.allow = allow;
-      plugins.entries = entries;
-      config.plugins = plugins;
+    if (isOpenClawOAuthPluginProviderKey(provider) && ensureOAuthPluginEnabled(config, provider)) {
+      logger.info(`Enabled OpenClaw OAuth plugin for provider "${provider}"`);
     }
 
     await writeOpenClawJson(config);
@@ -835,6 +1006,28 @@ async function sanitizePluginsLoadPaths(config: Record<string, unknown>): Promis
   return modified;
 }
 
+const PACKAGED_CONTROL_UI_ALLOWED_ORIGINS = ['file://', 'null'] as const;
+
+function ensurePackagedControlUiAllowedOrigins(
+  controlUi: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowedOrigins = Array.isArray(controlUi.allowedOrigins)
+    ? (controlUi.allowedOrigins as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  const nextAllowedOrigins = [...allowedOrigins];
+
+  for (const origin of PACKAGED_CONTROL_UI_ALLOWED_ORIGINS) {
+    if (!nextAllowedOrigins.includes(origin)) {
+      nextAllowedOrigins.push(origin);
+    }
+  }
+
+  return {
+    ...controlUi,
+    allowedOrigins: nextAllowedOrigins,
+  };
+}
+
 export async function syncGatewayTokenToConfig(token: string): Promise<void> {
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
@@ -860,13 +1053,7 @@ export async function syncGatewayTokenToConfig(token: string): Promise<void> {
         ? { ...(gateway.controlUi as Record<string, unknown>) }
         : {}
     ) as Record<string, unknown>;
-    const allowedOrigins = Array.isArray(controlUi.allowedOrigins)
-      ? (controlUi.allowedOrigins as unknown[]).filter((value): value is string => typeof value === 'string')
-      : [];
-    if (!allowedOrigins.includes('file://')) {
-      controlUi.allowedOrigins = [...allowedOrigins, 'file://'];
-    }
-    gateway.controlUi = controlUi;
+    gateway.controlUi = ensurePackagedControlUiAllowedOrigins(controlUi);
 
     if (!gateway.mode) gateway.mode = 'local';
     config.gateway = gateway;
@@ -895,6 +1082,10 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
 
     if (browser.defaultProfile === undefined) {
       browser.defaultProfile = 'openclaw';
+      changed = true;
+    }
+
+    if (applyDefaultBrowserSsrfPolicy(browser)) {
       changed = true;
     }
 
@@ -929,6 +1120,7 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
     } else {
       delete browser.defaultProfile;
     }
+    applyDefaultBrowserSsrfPolicy(browser);
 
     const currentEnabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
     const nextEnabledPluginIds = currentEnabledPluginIds.filter(
@@ -946,6 +1138,22 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
     await writeOpenClawConfigJson(nextConfig);
     logger.info(`Synced browser mode "${browserMode}" to openclaw.json`);
   });
+}
+
+function applyDefaultBrowserSsrfPolicy(browser: Record<string, unknown>): boolean {
+  if (browser.ssrfPolicy == null) {
+    browser.ssrfPolicy = { dangerouslyAllowPrivateNetwork: true };
+    return true;
+  }
+  if (
+    typeof browser.ssrfPolicy === 'object'
+    && !Array.isArray(browser.ssrfPolicy)
+    && (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork === undefined
+  ) {
+    (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork = true;
+    return true;
+  }
+  return false;
 }
 
 export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
@@ -1056,10 +1264,35 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       modified = true;
     }
 
+    const channelsObj = (
+      config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
+        ? config.channels as Record<string, Record<string, unknown>>
+        : {}
+    );
+    for (const [channelId, section] of Object.entries(channelsObj)) {
+      if (!STRICT_SCHEMA_CHANNEL_IDS.has(channelId) || !section || typeof section !== 'object' || Array.isArray(section)) {
+        continue;
+      }
+      if ('accounts' in section) {
+        delete section.accounts;
+        modified = true;
+        logger.info(`[sanitize] Removed incompatible channels.${channelId}.accounts for strict-schema plugin`);
+      }
+      if ('defaultAccount' in section) {
+        delete section.defaultAccount;
+        modified = true;
+        logger.info(`[sanitize] Removed incompatible channels.${channelId}.defaultAccount for strict-schema plugin`);
+      }
+    }
+
     const plugins = config.plugins;
     if (plugins && typeof plugins === 'object' && !Array.isArray(plugins)) {
       const pluginsObj = plugins as Record<string, unknown>;
-      const entries = pluginsObj.entries as Record<string, Record<string, unknown>> | undefined;
+      const entries = (
+        pluginsObj.entries && typeof pluginsObj.entries === 'object' && !Array.isArray(pluginsObj.entries)
+          ? pluginsObj.entries as Record<string, Record<string, unknown>>
+          : {}
+      );
       const LEGACY_FEISHU_ID = 'feishu-openclaw-plugin';
       const NEW_FEISHU_ID = 'openclaw-lark';
       const LEGACY_WECOM_ID = 'wecom-openclaw-plugin';
@@ -1140,9 +1373,9 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             logger.info('[sanitize] Removed bare "feishu" from plugins.allow because openclaw-lark is configured');
           }
         }
-        if (hasNewFeishu && entries.feishu && entries.feishu.enabled !== false) {
+        if (hasNewFeishu && (!entries.feishu || entries.feishu.enabled !== false)) {
           entries.feishu = {
-            ...entries.feishu,
+            ...(entries.feishu ?? {}),
             enabled: false,
           };
           modified = true;
@@ -1154,14 +1387,18 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           modified = true;
           logger.info('[sanitize] Removed legacy plugins.entries.whatsapp for built-in channel');
         }
+
+        const hasMiniMaxPluginResidue = allowList.includes('minimax')
+          || allowList.includes('minimax-portal-auth')
+          || Boolean(entries.minimax)
+          || Boolean(entries['minimax-portal-auth']);
+        if ((providers['minimax-portal'] || hasMiniMaxPluginResidue) && ensureOAuthPluginEnabled(config, 'minimax-portal')) {
+          modified = true;
+          logger.info('[sanitize] Normalized MiniMax OAuth plugin registration to bundled canonical plugin id');
+        }
       }
 
       const configuredBuiltIns = new Set<string>();
-      const channelsObj = (
-        config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
-          ? config.channels as Record<string, Record<string, unknown>>
-          : {}
-      );
       for (const [channelId, section] of Object.entries(channelsObj)) {
         if (!BUILTIN_CHANNEL_IDS.has(channelId)) {
           continue;
@@ -1175,17 +1412,88 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       }
 
       const bundledPlugins = discoverBundledPlugins();
+      const activeProviders = new Set<string>(Object.keys(providers));
+      const agentsConfig = (
+        config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+          ? config.agents as Record<string, unknown>
+          : {}
+      );
+      const agentDefaults = (
+        agentsConfig.defaults && typeof agentsConfig.defaults === 'object' && !Array.isArray(agentsConfig.defaults)
+          ? agentsConfig.defaults as Record<string, unknown>
+          : {}
+      );
+      const defaultModelConfig = (
+        agentDefaults.model && typeof agentDefaults.model === 'object' && !Array.isArray(agentDefaults.model)
+          ? agentDefaults.model as Record<string, unknown>
+          : {}
+      );
+      const defaultModel = typeof defaultModelConfig.primary === 'string'
+        ? defaultModelConfig.primary
+        : undefined;
+      if (typeof defaultModel === 'string' && defaultModel.includes('/')) {
+        activeProviders.add(defaultModel.split('/')[0]!);
+      }
+      for (const [pluginId, meta] of Object.entries(entries)) {
+        if (pluginId.endsWith('-auth') && meta?.enabled === true) {
+          activeProviders.add(pluginId.replace(/-auth$/, ''));
+        }
+      }
+      const auth = config.auth as Record<string, unknown> | undefined;
+      addProvidersFromProfileEntries(auth?.profiles as Record<string, unknown> | undefined, activeProviders);
+      const authProfileProviders = await getProvidersFromAuthProfileStores();
+      for (const provider of authProfileProviders) {
+        activeProviders.add(provider);
+      }
+      const hasCanonicalFeishuPlugin = allowList.includes(NEW_FEISHU_ID) || Boolean(entries?.[NEW_FEISHU_ID]);
+      const explicitlyEnabledBundledPluginIds = Object.keys(entries)
+        .filter((pluginId) => {
+          if (!bundledPlugins.all.has(pluginId)) {
+            return false;
+          }
+          const entry = entries[pluginId];
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            return false;
+          }
+          if ((entry as Record<string, unknown>).enabled !== true) {
+            return false;
+          }
+          if (pluginId === 'feishu' && hasCanonicalFeishuPlugin) {
+            return false;
+          }
+          return true;
+        });
+      const activeBundledProviderPluginIds = bundledPlugins.enabledByDefault.filter((pluginId) => {
+        if (pluginId === 'feishu' && hasCanonicalFeishuPlugin) {
+          return false;
+        }
+        const manifest = bundledPlugins.manifests.find((entry) => entry.id === pluginId);
+        const providerIds = manifest?.providers ?? [];
+        const isProviderPlugin = providerIds.length > 0
+          || OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS.has(pluginId);
+        if (!isProviderPlugin) {
+          return false;
+        }
+        return providerIds.some((providerId) => activeProviders.has(providerId))
+          || activeProviders.has(pluginId);
+      });
+      const requiredBundledPluginIds = Array.from(new Set([
+        ...BUNDLED_ALLOWLIST_PRESERVE_IDS,
+        ...activeBundledProviderPluginIds,
+        ...explicitlyEnabledBundledPluginIds,
+      ])).filter((pluginId) => bundledPlugins.all.has(pluginId));
       const externalPluginIds = allowList.filter(
         (pluginId) => !BUILTIN_CHANNEL_IDS.has(pluginId) && !bundledPlugins.all.has(pluginId),
       );
-      const nextAllow = [...externalPluginIds];
-      if (externalPluginIds.length > 0) {
+      const retainedBundledPluginIds = allowList.filter((pluginId) => requiredBundledPluginIds.includes(pluginId));
+      const nextAllow = [...new Set([...externalPluginIds, ...retainedBundledPluginIds])];
+      if (nextAllow.length > 0) {
         for (const channelId of configuredBuiltIns) {
           if (!nextAllow.includes(channelId)) {
             nextAllow.push(channelId);
           }
         }
-        for (const pluginId of bundledPlugins.enabledByDefault) {
+        for (const pluginId of requiredBundledPluginIds) {
           if (!nextAllow.includes(pluginId)) {
             nextAllow.push(pluginId);
           }

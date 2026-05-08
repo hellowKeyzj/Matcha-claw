@@ -1,5 +1,5 @@
-import { memo, type CSSProperties } from 'react';
-import { AlertCircle, ListTodo, RefreshCw, Settings2, X } from 'lucide-react';
+import { memo, useMemo, type CSSProperties } from 'react';
+import { AlertCircle, ArrowLeft, ListTodo, RefreshCw, Settings2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -13,6 +13,7 @@ import { isGatewayOperational } from '@/lib/gateway-status';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 import { AgentSkillConfigPanel, type AgentSkillOption } from './AgentSkillConfigPanel';
+import { getOrBuildMarkdownBody } from '../md-pipeline';
 
 interface ChatSidePanelProps {
   mode: Exclude<ChatSidePanelMode, 'hidden'>;
@@ -27,6 +28,15 @@ interface ChatSidePanelProps {
   skillsLoading: boolean;
   selectedSkillIds: string[];
   onToggleSkill: (skillId: string, checked: boolean) => void;
+  skillPreview: {
+    skillId: string;
+    skillName: string;
+    markdown: string | null;
+    loading: boolean;
+    error: string | null;
+    filePath?: string;
+  } | null;
+  onClearSkillPreview: () => void;
 }
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
@@ -65,6 +75,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   skillsLoading,
   selectedSkillIds,
   onToggleSkill,
+  skillPreview,
+  onClearSkillPreview,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((state) => state.status);
@@ -79,6 +91,15 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
+  const previewHtml = useMemo(() => {
+    if (!skillPreview?.markdown) {
+      return null;
+    }
+    return getOrBuildMarkdownBody(
+      `chat-skill-preview:${skillPreview.skillId}:${skillPreview.filePath ?? ''}:${skillPreview.markdown}`,
+      { markdown: skillPreview.markdown },
+    ).fullHtml;
+  }, [skillPreview]);
 
   const handleOpenSession = (taskId: string) => {
     const result = openTaskSession(taskId);
@@ -228,13 +249,53 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         </TabsContent>
 
         <TabsContent value="skills" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
-          <AgentSkillConfigPanel
-            title={skillConfigTitle}
-            skillOptions={skillOptions}
-            skillsLoading={skillsLoading}
-            selectedSkillIds={selectedSkillIds}
-            onToggleSkill={onToggleSkill}
-          />
+          {skillPreview ? (
+            <div data-testid="chat-skill-preview-panel" className="flex min-h-0 flex-1 flex-col">
+              <div className="border-b border-border/40 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 rounded-md"
+                    onClick={onClearSkillPreview}
+                    aria-label={t('common:actions.back')}
+                    title={t('common:actions.back')}
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </Button>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">{skillPreview.skillName}</p>
+                    <p className="text-xs text-muted-foreground">{t('skillPreviewTitle')}</p>
+                  </div>
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                {skillPreview.loading ? (
+                  <p className="text-sm text-muted-foreground">{t('skillPreviewLoading')}</p>
+                ) : null}
+                {!skillPreview.loading && skillPreview.error ? (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
+                    {skillPreview.error}
+                  </div>
+                ) : null}
+                {!skillPreview.loading && !skillPreview.error && previewHtml ? (
+                  <div
+                    className="prose prose-zinc max-w-none break-words dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:tracking-[-0.02em] prose-p:my-0 prose-p:leading-7 prose-pre:my-3 prose-pre:rounded-[18px] prose-pre:border prose-pre:border-border/45 prose-pre:bg-background/88 prose-pre:px-4 prose-pre:py-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-1 prose-blockquote:border-l-border/60 prose-blockquote:text-muted-foreground prose-blockquote:italic prose-code:rounded prose-code:bg-background/75 prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.92em]"
+                    dangerouslySetInnerHTML={{ __html: previewHtml }}
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <AgentSkillConfigPanel
+              title={skillConfigTitle}
+              skillOptions={skillOptions}
+              skillsLoading={skillsLoading}
+              selectedSkillIds={selectedSkillIds}
+              onToggleSkill={onToggleSkill}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </aside>

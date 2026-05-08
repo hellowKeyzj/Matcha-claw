@@ -1,0 +1,118 @@
+{
+  "title": "Subagent Workspace",
+  "subtitle": "Manage subagents and model settings.",
+  "newSubagent": "New Subagent",
+  "status": {
+    "refreshing": "Refreshing...",
+    "mutating": "Saving changes..."
+  },
+  "empty": "No subagents found.",
+  "modelGuide": {
+    "description": "Please go to Models to add a model first.",
+    "action": "Open Models"
+  },
+  "templates": {
+    "title": "Built-in Template Catalog",
+    "subtitle": "Preview and load directly. Only model selection is required. {{count}} templates available",
+    "expand": "Expand Template Library",
+    "collapse": "Collapse Template Library",
+    "loading": "Loading templates...",
+    "loadingButton": "Loading...",
+    "load": "Load Template",
+    "empty": "No templates found.",
+    "error": "Failed to load templates: {{message}}",
+    "badge": "Template",
+    "pagination": {
+      "showing": "Showing {{shown}} / {{total}}",
+      "loadMore": "Load More Templates"
+    },
+    "categories": {
+      "all": "All",
+      "design": "Design",
+      "engineering": "Engineering",
+      "game-development": "Game Dev",
+      "marketing": "Marketing",
+      "paid-media": "Paid Media",
+      "sales": "Sales",
+      "product": "Product",
+      "project-management": "Project Mgmt",
+      "testing": "Testing",
+      "support": "Support",
+      "spatial-computing": "Spatial",
+      "specialized": "Specialized"
+    },
+    "source": "Source: {{source}}",
+    "loadDialog": {
+      "title": "Load Template: {{name}}",
+      "model": "Model",
+      "files": "Files to copy: {{files}}",
+      "confirm": "Load",
+      "loading": "Loading..."
+    }
+  },
+  "createDialogTitle": "Create Subagent",
+  "editDialogTitle": "Edit Subagent",
+  "manageTitle": "Managing: {{agentId}}",
+  "manage": {
+    "promptLabel": "Prompt",
+    "promptPlaceholder": "Describe what this subagent should write for AGENTS.md / SOUL.md / TOOLS.md / IDENTITY.md / USER.md",
+    "generateDraft": "Generate Draft",
+    "generatingDraft": "Generating...",
+    "applyingDraft": "Applying...",
+    "generateDiffPreview": "Generate Diff Preview",
+    "diffPreviewTitle": "Diff Preview",
+    "currentFilesTitle": "Current Files",
+    "emptyFileContent": "(empty)",
+    "confirmApplyDraft": "Confirm Apply Draft",
+    "cancelDraft": "Cancel Draft",
+    "applyDraftSuccess": "Draft applied successfully.",
+    "rawOutputTitle": "Raw model output"
+  },
+  "deleteDialog": {
+    "title": "Delete {{agentId}}",
+    "description": "Deleting this subagent will remove workspace/agentDir/sessions. Continue?",
+    "cancel": "Cancel",
+    "confirm": "Delete",
+    "deleting": "Deleting..."
+  },
+  "close": "Close",
+  "form": {
+    "basicInfo": "Basic Information",
+    "aiConfig": "AI Configuration",
+    "skillConfig": "Skill Configuration",
+    "useAllSkills": "Use all skills",
+    "skillsLoading": "Loading skills...",
+    "noSkillOptions": "No available skills.",
+    "name": "Name",
+    "workspace": "Workspace",
+    "model": "Model",
+    "avatar": "Avatar",
+    "avatarStyles": {
+      "pixelArt": "Pixel Art",
+      "bottts": "Bottts",
+      "botttsNeutral": "Bottts Neutral"
+    },
+    "avatarRefresh": "Refresh",
+    "initialPrompt": "System Prompt",
+    "initialPromptPlaceholder": "Optional: set a system prompt for this subagent",
+    "create": "Create",
+    "save": "Save",
+    "nameDuplicate": "Agent name is duplicated.",
+    "modelsLoading": "Loading models...",
+    "selectModel": "Select a configured model",
+    "useDefaultModel": "Inherit global default model",
+    "modelUnavailable": "No configured models found."
+  },
+  "card": {
+    "default": "Default",
+    "modelFallback": "Model not configured",
+    "modelMissingHint": "Model is not configured. Chat and run are disabled.",
+    "lockedHint": "Main agent is read-only.",
+    "actions": {
+      "edit": "Edit",
+      "delete": "Delete",
+      "manage": "Manage",
+      "chat": "Chat"
+    }
+  }
+}

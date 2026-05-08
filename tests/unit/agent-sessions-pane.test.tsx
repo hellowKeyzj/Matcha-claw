@@ -617,4 +617,39 @@ describe('agent sessions pane', () => {
     expect(screen.queryByTestId('session-list-error')).not.toBeInTheDocument();
     expect(screen.getByText('正文来源会话')).toBeInTheDocument();
   });
+
+  it('新建空会话应使用 session key 时间戳参与分桶，而不是被误归到很久以前', () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_710_000_600_000);
+    useChatStore.setState({
+      currentSessionKey: 'agent:test:session-1710000000000',
+      sessionCatalogStatus: buildReadySessionCatalogStatus([
+        { key: 'agent:test:main', displayName: 'agent:test:main' },
+        { key: 'agent:test:session-1700000000000', displayName: 'agent:test:session-1700000000000' },
+        { key: 'agent:test:session-1710000000000', displayName: 'agent:test:session-1710000000000' },
+      ]),
+      loadedSessions: {
+        'agent:test:main': createSessionRecord({ sessionKey: 'agent:test:main', historyStatus: 'ready' }),
+        'agent:test:session-1700000000000': createSessionRecord({
+          sessionKey: 'agent:test:session-1700000000000',
+          historyStatus: 'ready',
+          label: '旧空会话',
+        }),
+        'agent:test:session-1710000000000': createSessionRecord({
+          sessionKey: 'agent:test:session-1710000000000',
+          historyStatus: 'ready',
+          label: '新空会话',
+        }),
+      },
+      switchSession: vi.fn(),
+      newSession: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    renderPane();
+
+    expect(screen.getByText('新空会话')).toBeInTheDocument();
+    expect(screen.queryByText('旧空会话')).not.toBeInTheDocument();
+    nowSpy.mockRestore();
+  });
 });

@@ -168,6 +168,8 @@ export function createCoreLocalBusinessHandlers(
         updateSkillConfigLocal,
         setSkillEnabledLocal,
         listEffectiveSkillsLocal,
+        getOpenClawConfigDir,
+        readOpenClawConfigJson,
         openclawBridge: context.openclawBridge,
       }),
     },

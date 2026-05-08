@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyStoreSendStart, executeStoreSend } from '@/stores/chat/send-handlers';
+import { createStoreSessionRunCache, UNKNOWN_ABORTED_RUN_MARKER } from '@/stores/chat/session-run-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { getSessionItems } from '@/stores/chat/store-state-helpers';
@@ -166,6 +167,7 @@ describe('chat send handlers', () => {
     await executeStoreSend({
       set,
       get,
+      sessionRunCache: createStoreSessionRunCache(),
       beginMutating: vi.fn(),
       finishMutating: vi.fn(),
       text: 'latest reply',
@@ -230,6 +232,7 @@ describe('chat send handlers', () => {
     await executeStoreSend({
       set,
       get,
+      sessionRunCache: createStoreSessionRunCache(),
       beginMutating,
       finishMutating,
       text: '你好',
@@ -239,5 +242,163 @@ describe('chat send handlers', () => {
     expect(beginMutating).not.toHaveBeenCalled();
     expect(finishMutating).not.toHaveBeenCalled();
     expect(getSessionItems(state, sessionKey).map((item) => item.messageId)).toEqual(['user-local-1']);
+  });
+
+  it('recoverable chat.send timeout keeps the run pending instead of failing the session', async () => {
+    const sessionKey = 'agent:main:session-1';
+    sendChatTransportMock.mockResolvedValueOnce({
+      ok: false,
+      error: 'Gateway RPC timeout: chat.send',
+    });
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createSessionRecord({ sessionKey }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    await executeStoreSend({
+      set,
+      get,
+      sessionRunCache: createStoreSessionRunCache(),
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'latest reply',
+    });
+
+    const runtime = state.loadedSessions[sessionKey]!.runtime;
+    expect(runtime.sending).toBe(true);
+    expect(runtime.runPhase).toBe('submitted');
+    expect(runtime.lastError).toBeNull();
+    expect(runtime.pendingFinal).toBe(false);
+  });
+
+  it('ignores a late send result after the user already aborted the session', async () => {
+    const sessionKey = 'agent:main:session-1';
+    const sessionRunCache = createStoreSessionRunCache();
+    let resolveSend: ((value: unknown) => void) | null = null;
+    sendChatTransportMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSend = resolve;
+    }));
+
+    let state = {
+      currentSessionKey: sessionKey,
+      loadedSessions: {
+        [sessionKey]: createSessionRecord({ sessionKey }),
+      },
+      pendingApprovalsBySession: {},
+      error: null,
+      mutating: false,
+      syncPendingApprovals: vi.fn().mockResolvedValue(undefined),
+      handleSessionUpdateEvent: vi.fn(),
+    } as unknown as ChatStoreState;
+
+    const set = (
+      partial: Partial<ChatStoreState> | ((current: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
+    ) => {
+      const patch = typeof partial === 'function' ? partial(state) : partial;
+      state = { ...state, ...patch } as ChatStoreState;
+    };
+    const get = () => state;
+
+    const sendPromise = executeStoreSend({
+      set,
+      get,
+      sessionRunCache,
+      beginMutating: vi.fn(),
+      finishMutating: vi.fn(),
+      text: 'late reply',
+    });
+
+    await Promise.resolve();
+
+    sessionRunCache.nextSendGeneration(sessionKey);
+    sessionRunCache.setAbortedRunMarker(sessionKey, UNKNOWN_ABORTED_RUN_MARKER);
+    set((current) => ({
+      loadedSessions: {
+        ...current.loadedSessions,
+        [sessionKey]: {
+          ...current.loadedSessions[sessionKey]!,
+          runtime: {
+            ...current.loadedSessions[sessionKey]!.runtime,
+            sending: false,
+            activeRunId: null,
+            runPhase: 'aborted',
+            pendingFinal: false,
+          },
+        },
+      },
+    }));
+
+    resolveSend?.({
+      ok: true,
+      runId: 'run-late-1',
+      snapshot: {
+        sessionKey,
+        catalog: {
+          key: sessionKey,
+          agentId: 'main',
+          kind: 'session' as const,
+          preferred: false,
+          label: 'late reply',
+          titleSource: 'user' as const,
+          displayName: sessionKey,
+          updatedAt: 1,
+        },
+        items: [{
+          key: `session:${sessionKey}|entry:user-late-1`,
+          kind: 'user-message',
+          sessionKey,
+          role: 'user',
+          text: 'late reply',
+          images: [],
+          attachedFiles: [],
+          createdAt: 1,
+          updatedAt: 1,
+          messageId: 'user-late-1',
+        }],
+        replayComplete: true,
+        runtime: {
+          sending: true,
+          activeRunId: 'run-late-1',
+          runPhase: 'submitted' as const,
+          activeTurnItemKey: null,
+          pendingTurnKey: 'main:run-late-1',
+          pendingTurnLaneKey: 'main',
+          pendingFinal: false,
+          lastUserMessageAt: 1,
+          updatedAt: 1,
+        },
+        window: {
+          totalItemCount: 1,
+          windowStartOffset: 0,
+          windowEndOffset: 1,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        },
+      },
+    });
+
+    await sendPromise;
+
+    const record = state.loadedSessions[sessionKey]!;
+    expect(record.runtime.runPhase).toBe('aborted');
+    expect(record.runtime.sending).toBe(false);
+    expect(record.runtime.activeRunId).toBeNull();
+    expect(getSessionItems(state, sessionKey)).toEqual([]);
   });
 });

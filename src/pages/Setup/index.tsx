@@ -7,35 +7,31 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Loader2,
   AlertCircle,
-  Eye,
-  EyeOff,
   RefreshCw,
   CheckCircle2,
   XCircle,
   ExternalLink,
-  Copy,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
+import matchaClawIcon from '@/assets/logo.svg';
 import { TitleBar } from '@/components/layout/TitleBar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { Label } from '@/components/ui/label';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { SUPPORTED_LANGUAGES } from '@/i18n';
+import { invokeIpc } from '@/lib/api-client';
+import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
+import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
-import { useProviderStore } from '@/stores/providers';
 import { useSettingsStore } from '@/stores/settings';
-import { useTranslation } from 'react-i18next';
-import { isGatewayOperational, isGatewayRecovering, isGatewayUnavailable } from '@/lib/gateway-status';
-import { SUPPORTED_LANGUAGES } from '@/i18n';
-import { toast } from 'sonner';
-import { invokeIpc } from '@/lib/api-client';
-import { hostApiFetch, hostOpenClawGetStatus, hostUvInstallAll } from '@/lib/host-api';
-import { subscribeHostEvent } from '@/lib/host-events';
+
 interface SetupStep {
   id: string;
   title: string;
@@ -70,9 +66,8 @@ interface LicenseGateSnapshot {
 const STEP = {
   WELCOME: 0,
   RUNTIME: 1,
-  PROVIDER: 2,
-  INSTALLING: 3,
-  COMPLETE: 4,
+  INSTALLING: 2,
+  COMPLETE: 3,
 } as const;
 
 const steps: SetupStep[] = [
@@ -87,11 +82,6 @@ const steps: SetupStep[] = [
     description: 'Verifying system requirements',
   },
   {
-    id: 'provider',
-    title: 'AI Provider',
-    description: 'Configure your AI service',
-  },
-  {
     id: 'installing',
     title: 'Setting Up',
     description: 'Installing essential components',
@@ -103,7 +93,6 @@ const steps: SetupStep[] = [
   },
 ];
 
-// Default skills to auto-install (no additional API keys required)
 interface DefaultSkill {
   id: string;
   name: string;
@@ -118,64 +107,18 @@ const defaultSkills: DefaultSkill[] = [
   { id: 'terminal', name: 'Terminal', description: 'Shell command execution' },
 ];
 
-import {
-  SETUP_PROVIDERS,
-  type ProviderAccount,
-  type ProviderType,
-  type ProviderTypeInfo,
-  getProviderDocsUrl,
-  getProviderIconUrl,
-  resolveProviderApiKeyForSave,
-  resolveProviderModelForSave,
-  shouldInvertInDark,
-  shouldShowProviderModelId,
-} from '@/lib/providers';
-import {
-  buildProviderAccountId,
-  hasConfiguredCredentials,
-  pickPreferredAccount,
-} from '@/lib/provider-accounts';
-import {
-  buildProviderAccountPayload,
-  hostProviderCancelOAuth,
-  hostProviderStartOAuth,
-  hostProviderSubmitOAuthCode,
-} from '@/lib/provider-runtime';
-import matchaClawIcon from '@/assets/logo.svg';
-
-// Use the shared provider registry for setup providers
-const providers = SETUP_PROVIDERS;
-
-function getProtocolBaseUrlPlaceholder(
-  apiProtocol: ProviderAccount['apiProtocol'],
-): string {
-  if (apiProtocol === 'anthropic-messages') {
-    return 'https://api.example.com/anthropic';
-  }
-  return 'https://api.example.com/v1';
-}
-
-// NOTE: Channel types moved to Settings > Channels page
-// NOTE: Skill bundles moved to Settings > Skills page - auto-install essential skills during setup
-
 export function Setup() {
-  const { t } = useTranslation(['setup', 'channels']);
+  const { t } = useTranslation('setup');
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState<number>(STEP.WELCOME);
-
-  // Setup state
-  const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
-  const [providerConfigured, setProviderConfigured] = useState(false);
-  const [apiKey, setApiKey] = useState('');
-  // Installation state for the Installing step
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
-  // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
   const [licenseKey, setLicenseKey] = useState('');
   const [licenseValidation, setLicenseValidation] = useState<LicenseValidationResponse | null>(null);
   const [licenseValidationCode, setLicenseValidationCode] = useState<LicenseValidationCode | 'unknown' | null>(null);
   const [licenseValidating, setLicenseValidating] = useState(false);
   const bootstrappedLicenseRef = useRef(false);
+  const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
 
   const safeStepIndex = Number.isInteger(currentStep)
     ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
@@ -185,39 +128,33 @@ export function Setup() {
   const isLastStep = safeStepIndex === steps.length - 1;
   const licenseValidated = licenseValidation?.valid === true;
 
-  const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
-
-  // Derive canProceed based on current step - computed directly to avoid useEffect
   const canProceed = useMemo(() => {
     switch (safeStepIndex) {
       case STEP.WELCOME:
         return licenseValidated;
       case STEP.RUNTIME:
         return runtimeChecksPassed;
-      case STEP.PROVIDER:
-        return providerConfigured;
       case STEP.INSTALLING:
-        return false; // Cannot manually proceed, auto-proceeds when done
+        return false;
       case STEP.COMPLETE:
         return true;
       default:
         return true;
     }
-  }, [licenseValidated, providerConfigured, runtimeChecksPassed, safeStepIndex]);
+  }, [licenseValidated, runtimeChecksPassed, safeStepIndex]);
 
   const handleNext = async () => {
     if (isLastStep) {
-      // Complete setup
       markSetupComplete();
       toast.success(t('complete.title'));
       navigate('/');
-    } else {
-      setCurrentStep((i) => i + 1);
+      return;
     }
+    setCurrentStep((index) => index + 1);
   };
 
   const handleBack = () => {
-    setCurrentStep((i) => Math.max(i - 1, 0));
+    setCurrentStep((index) => Math.max(index - 1, STEP.WELCOME));
   };
 
   const handleSkip = () => {
@@ -250,11 +187,11 @@ export function Setup() {
       }
 
       if (result.valid) {
-        if (result.code === 'cache_grace_valid') {
-          toast.success(t('license.messages.cache_grace_valid'));
-        } else {
-          toast.success(t('license.messages.valid'));
-        }
+        toast.success(
+          result.code === 'cache_grace_valid'
+            ? t('license.messages.cache_grace_valid')
+            : t('license.messages.valid')
+        );
       } else {
         const localized = t(`license.messages.${result.code}`, { defaultValue: '' });
         const fallback = t('license.messages.unknown');
@@ -314,53 +251,45 @@ export function Setup() {
 
         setCurrentStep((prev) => (prev === STEP.WELCOME ? STEP.RUNTIME : prev));
       } catch {
-        // ignore bootstrap errors
+        // Ignore bootstrap errors and keep user on manual flow.
       }
     };
 
     void bootstrapFromGate();
   }, []);
 
-  // Auto-proceed when installation is complete
   const handleInstallationComplete = useCallback((skills: string[]) => {
     setInstalledSkills(skills);
-    // Auto-proceed to next step after a short delay
     setTimeout(() => {
-      setCurrentStep((i) => i + 1);
+      setCurrentStep((index) => index + 1);
     }, 1000);
   }, []);
-
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <TitleBar />
       <div className="flex-1 overflow-auto">
-        {/* Progress Indicator */}
         <div className="flex justify-center pt-8">
           <div className="flex items-center gap-2">
-            {steps.map((s, i) => (
-              <div key={s.id} className="flex items-center">
+            {steps.map((item, index) => (
+              <div key={item.id} className="flex items-center">
                 <div
                   className={cn(
                     'flex h-8 w-8 items-center justify-center rounded-full border-2 transition-colors',
-                    i < safeStepIndex
+                    index < safeStepIndex
                       ? 'border-primary bg-primary text-primary-foreground'
-                      : i === safeStepIndex
+                      : index === safeStepIndex
                         ? 'border-primary text-primary'
                         : 'border-slate-600 text-slate-600'
                   )}
                 >
-                  {i < safeStepIndex ? (
-                    <Check className="h-4 w-4" />
-                  ) : (
-                    <span className="text-sm">{i + 1}</span>
-                  )}
+                  {index < safeStepIndex ? <Check className="h-4 w-4" /> : <span className="text-sm">{index + 1}</span>}
                 </div>
-                {i < steps.length - 1 && (
+                {index < steps.length - 1 && (
                   <div
                     className={cn(
                       'h-0.5 w-8 transition-colors',
-                      i < safeStepIndex ? 'bg-primary' : 'bg-slate-600'
+                      index < safeStepIndex ? 'bg-primary' : 'bg-slate-600'
                     )}
                   />
                 )}
@@ -369,7 +298,6 @@ export function Setup() {
           </div>
         </div>
 
-        {/* Step Content */}
         <AnimatePresence mode="wait">
           <motion.div
             key={step.id}
@@ -378,13 +306,12 @@ export function Setup() {
             exit={{ opacity: 0, x: -20 }}
             className="mx-auto max-w-2xl p-8"
           >
-            <div className="text-center mb-8">
-              <h1 className="text-3xl font-bold mb-2">{t(`steps.${step.id}.title`)}</h1>
+            <div className="mb-8 text-center">
+              <h1 className="mb-2 text-3xl font-bold">{t(`steps.${step.id}.title`)}</h1>
               <p className="text-slate-400">{t(`steps.${step.id}.description`)}</p>
             </div>
 
-            {/* Step-specific content */}
-            <div className="rounded-xl bg-card text-card-foreground border shadow-sm p-8 mb-8">
+            <div className="mb-8 rounded-xl border bg-card p-8 text-card-foreground shadow-sm">
               {safeStepIndex === STEP.WELCOME && (
                 <WelcomeContent
                   licenseKey={licenseKey}
@@ -395,38 +322,22 @@ export function Setup() {
                 />
               )}
               {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
-              {safeStepIndex === STEP.PROVIDER && (
-                <ProviderContent
-                  providers={providers}
-                  selectedProvider={selectedProvider}
-                  onSelectProvider={setSelectedProvider}
-                  apiKey={apiKey}
-                  onApiKeyChange={setApiKey}
-                  onConfiguredChange={setProviderConfigured}
-                />
-              )}
               {safeStepIndex === STEP.INSTALLING && (
                 <InstallingContent
                   skills={defaultSkills}
                   onComplete={handleInstallationComplete}
-                  onSkip={() => setCurrentStep((i) => i + 1)}
+                  onSkip={() => setCurrentStep((index) => index + 1)}
                 />
               )}
-              {safeStepIndex === STEP.COMPLETE && (
-                <CompleteContent
-                  selectedProvider={selectedProvider}
-                  installedSkills={installedSkills}
-                />
-              )}
+              {safeStepIndex === STEP.COMPLETE && <CompleteContent installedSkills={installedSkills} />}
             </div>
 
-            {/* Navigation - hidden during installation step */}
             {safeStepIndex !== STEP.INSTALLING && (
               <div className="flex justify-between">
                 <div>
                   {!isFirstStep && (
                     <Button variant="ghost" onClick={handleBack}>
-                      <ChevronLeft className="h-4 w-4 mr-2" />
+                      <ChevronLeft className="mr-2 h-4 w-4" />
                       {t('nav.back')}
                     </Button>
                   )}
@@ -443,7 +354,7 @@ export function Setup() {
                     ) : (
                       <>
                         {t('nav.next')}
-                        <ChevronRight className="h-4 w-4 ml-2" />
+                        <ChevronRight className="ml-2 h-4 w-4" />
                       </>
                     )}
                   </Button>
@@ -456,8 +367,6 @@ export function Setup() {
     </div>
   );
 }
-
-// ==================== Step Content Components ====================
 
 interface WelcomeContentProps {
   licenseKey: string;
@@ -478,16 +387,14 @@ function WelcomeContent({
   const { language, setLanguage } = useSettingsStore();
 
   return (
-    <div className="text-center space-y-4">
+    <div className="space-y-4 text-center">
       <div className="mb-4 flex justify-center">
         <img src={matchaClawIcon} alt="MatchaClaw" className="h-16 w-16" />
       </div>
       <h2 className="text-xl font-semibold">{t('welcome.title')}</h2>
-      <p className="text-muted-foreground">
-        {t('welcome.description')}
-      </p>
+      <p className="text-muted-foreground">{t('welcome.description')}</p>
 
-      <div className="mx-auto max-w-md rounded-lg border p-4 text-left space-y-3">
+      <div className="mx-auto max-w-md space-y-3 rounded-lg border p-4 text-left">
         <div className="space-y-1">
           <Label htmlFor="setup-license-key">{t('license.label')}</Label>
           <p className="text-xs text-muted-foreground">{t('license.hint')}</p>
@@ -525,7 +432,6 @@ function WelcomeContent({
         </p>
       </div>
 
-      {/* Language Selector */}
       <div className="flex justify-center gap-2 py-2">
         {SUPPORTED_LANGUAGES.map((lang) => (
           <Button
@@ -540,7 +446,7 @@ function WelcomeContent({
         ))}
       </div>
 
-      <ul className="text-left space-y-2 text-muted-foreground pt-2">
+      <ul className="space-y-2 pt-2 text-left text-muted-foreground">
         <li className="flex items-center gap-2">
           <CheckCircle2 className="h-5 w-5 text-green-400" />
           {t('welcome.features.noCommand')}
@@ -570,7 +476,6 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   const { t } = useTranslation('setup');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const startGateway = useGatewayStore((state) => state.start);
-
   const [checks, setChecks] = useState({
     nodejs: { status: 'checking' as 'checking' | 'success' | 'error', message: '' },
     openclaw: { status: 'checking' as 'checking' | 'success' | 'error', message: '' },
@@ -582,49 +487,36 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   const gatewayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const runChecks = useCallback(async () => {
-    // Reset checks
     setChecks({
       nodejs: { status: 'checking', message: '' },
       openclaw: { status: 'checking', message: '' },
       gateway: { status: 'checking', message: '' },
     });
 
-    // Check Node.js — always available in Electron
     setChecks((prev) => ({
       ...prev,
       nodejs: { status: 'success', message: t('runtime.status.success') },
     }));
 
-    // Check OpenClaw package status
     try {
       const openclawStatus = await hostOpenClawGetStatus();
-
       setOpenclawDir(openclawStatus.dir);
 
       if (!openclawStatus.packageExists) {
         setChecks((prev) => ({
           ...prev,
-          openclaw: {
-            status: 'error',
-            message: `OpenClaw package not found at: ${openclawStatus.dir}`
-          },
+          openclaw: { status: 'error', message: `OpenClaw package not found at: ${openclawStatus.dir}` },
         }));
       } else if (!openclawStatus.isBuilt) {
         setChecks((prev) => ({
           ...prev,
-          openclaw: {
-            status: 'error',
-            message: 'OpenClaw package found but dist is missing'
-          },
+          openclaw: { status: 'error', message: 'OpenClaw package found but dist is missing' },
         }));
       } else {
         const versionLabel = openclawStatus.version ? ` v${openclawStatus.version}` : '';
         setChecks((prev) => ({
           ...prev,
-          openclaw: {
-            status: 'success',
-            message: `OpenClaw package ready${versionLabel}`
-          },
+          openclaw: { status: 'success', message: `OpenClaw package ready${versionLabel}` },
         }));
       }
     } catch (error) {
@@ -634,8 +526,6 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
       }));
     }
 
-    // Check Gateway — read directly from store to avoid stale closure
-    // Don't immediately report error; gateway may still be initializing
     const currentGateway = useGatewayStore.getState().status;
     if (isGatewayOperational(currentGateway)) {
       setChecks((prev) => ({
@@ -648,25 +538,22 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         gateway: { status: 'error', message: currentGateway.error || t('runtime.status.error') },
       }));
     } else {
-      // Gateway is 'stopped', 'starting', 'control_connecting', or 'reconnecting'
-      // Keep as 'checking' — the dedicated useEffect will update when status changes
       setChecks((prev) => ({
         ...prev,
         gateway: {
           status: 'checking',
           message: currentGateway.processState === 'starting' || currentGateway.processState === 'control_connecting'
             ? t('runtime.status.checking')
-            : 'Waiting for gateway...'
+            : 'Waiting for gateway...',
         },
       }));
     }
   }, [t]);
 
   useEffect(() => {
-    runChecks();
+    void runChecks();
   }, [runChecks]);
 
-  // Update canProceed when gateway status changes
   useEffect(() => {
     const allPassed = checks.nodejs.status === 'success'
       && checks.openclaw.status === 'success'
@@ -674,7 +561,6 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
     onStatusChange(allPassed);
   }, [checks, gatewayStatus, onStatusChange]);
 
-  // Update gateway check when gateway status changes
   useEffect(() => {
     if (isGatewayOperational(gatewayStatus)) {
       setChecks((prev) => ({
@@ -697,17 +583,14 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         gateway: { status: 'checking', message: 'Starting...' },
       }));
     }
-    // 'stopped' state: keep current check status (likely 'checking') to allow startup time
   }, [gatewayStatus, t]);
 
-  // Gateway startup timeout — show error only after giving enough time to initialize
   useEffect(() => {
     if (gatewayTimeoutRef.current) {
       clearTimeout(gatewayTimeoutRef.current);
       gatewayTimeoutRef.current = null;
     }
 
-    // If gateway is already in a terminal state, no timeout needed
     if (
       isGatewayOperational(gatewayStatus)
       || gatewayStatus.processState === 'error'
@@ -716,7 +599,6 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
       return;
     }
 
-    // Set timeout for non-terminal states (stopped, starting, control_connecting, reconnecting)
     gatewayTimeoutRef.current = setTimeout(() => {
       setChecks((prev) => {
         if (prev.gateway.status === 'checking') {
@@ -727,7 +609,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         }
         return prev;
       });
-    }, 600 * 1000); // 600 seconds — enough for gateway to fully initialize
+    }, 600 * 1000);
 
     return () => {
       if (gatewayTimeoutRef.current) {
@@ -735,7 +617,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         gatewayTimeoutRef.current = null;
       }
     };
-  }, [gatewayStatus.processState, gatewayStatus.healthSummary, gatewayStatus.gatewayReady, gatewayStatus.transportState]);
+  }, [gatewayStatus]);
 
   const handleStartGateway = async () => {
     setChecks((prev) => ({
@@ -763,16 +645,14 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
         await invokeIpc('shell:showItemInFolder', logDir);
       }
     } catch {
-      // ignore
+      // Ignore log directory open failures.
     }
   };
-
-  const ERROR_TRUNCATE_LEN = 30;
 
   const renderStatus = (status: 'checking' | 'success' | 'error', message: string) => {
     if (status === 'checking') {
       return (
-        <span className="flex items-center gap-2 text-yellow-400 whitespace-nowrap">
+        <span className="flex items-center gap-2 whitespace-nowrap text-yellow-400">
           <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin" />
           {message || 'Checking...'}
         </span>
@@ -780,24 +660,24 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
     }
     if (status === 'success') {
       return (
-        <span className="flex items-center gap-2 text-green-400 whitespace-nowrap">
+        <span className="flex items-center gap-2 whitespace-nowrap text-green-400">
           <CheckCircle2 className="h-5 w-5 flex-shrink-0" />
           {message}
         </span>
       );
     }
 
-    const isLong = message.length > ERROR_TRUNCATE_LEN;
-    const displayMsg = isLong ? message.slice(0, ERROR_TRUNCATE_LEN) : message;
+    const isLong = message.length > 30;
+    const displayMessage = isLong ? message.slice(0, 30) : message;
 
     return (
-      <span className="flex items-center gap-2 text-red-400 whitespace-nowrap">
+      <span className="flex items-center gap-2 whitespace-nowrap text-red-400">
         <XCircle className="h-5 w-5 flex-shrink-0" />
-        <span>{displayMsg}</span>
+        <span>{displayMessage}</span>
         {isLong && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="cursor-pointer text-red-300 hover:text-red-200 font-medium">...</span>
+              <span className="cursor-pointer font-medium text-red-300 hover:text-red-200">...</span>
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-sm whitespace-normal break-words text-xs">
               {message}
@@ -810,39 +690,38 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between mb-4">
+      <div className="mb-4 flex items-center justify-between">
         <h2 className="text-xl font-semibold">{t('runtime.title')}</h2>
         <div className="flex gap-2">
           <Button variant="ghost" size="sm" onClick={handleShowLogs}>
             {t('runtime.viewLogs')}
           </Button>
-          <Button variant="ghost" size="sm" onClick={runChecks}>
-            <RefreshCw className="h-4 w-4 mr-2" />
+          <Button variant="ghost" size="sm" onClick={() => void runChecks()}>
+            <RefreshCw className="mr-2 h-4 w-4" />
             {t('runtime.recheck')}
           </Button>
         </div>
       </div>
+
       <div className="space-y-3">
-        <div className="grid grid-cols-[1fr_auto] items-center gap-4 p-3 rounded-lg bg-muted/50">
+        <div className="grid grid-cols-[1fr_auto] items-center gap-4 rounded-lg bg-muted/50 p-3">
           <span className="text-left">{t('runtime.nodejs')}</span>
-          <div className="flex justify-end">
-            {renderStatus(checks.nodejs.status, checks.nodejs.message)}
-          </div>
+          <div className="flex justify-end">{renderStatus(checks.nodejs.status, checks.nodejs.message)}</div>
         </div>
-        <div className="grid grid-cols-[1fr_auto] items-center gap-4 p-3 rounded-lg bg-muted/50">
-          <div className="text-left min-w-0">
+        <div className="grid grid-cols-[1fr_auto] items-center gap-4 rounded-lg bg-muted/50 p-3">
+          <div className="min-w-0 text-left">
             <span>{t('runtime.openclaw')}</span>
             {openclawDir && (
-              <p className="text-xs text-muted-foreground mt-0.5 font-mono break-all">
+              <p className="mt-0.5 break-all font-mono text-xs text-muted-foreground">
                 {openclawDir}
               </p>
             )}
           </div>
-          <div className="flex justify-end self-start mt-0.5">
+          <div className="mt-0.5 flex justify-end self-start">
             {renderStatus(checks.openclaw.status, checks.openclaw.message)}
           </div>
         </div>
-        <div className="grid grid-cols-[1fr_auto] items-center gap-4 p-3 rounded-lg bg-muted/50">
+        <div className="grid grid-cols-[1fr_auto] items-center gap-4 rounded-lg bg-muted/50 p-3">
           <div className="flex items-center gap-2 text-left">
             <span>Gateway Service</span>
             {checks.gateway.status === 'error' && (
@@ -851,34 +730,29 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
               </Button>
             )}
           </div>
-          <div className="flex justify-end">
-            {renderStatus(checks.gateway.status, checks.gateway.message)}
-          </div>
+          <div className="flex justify-end">{renderStatus(checks.gateway.status, checks.gateway.message)}</div>
         </div>
       </div>
 
       {(checks.nodejs.status === 'error' || checks.openclaw.status === 'error') && (
-        <div className="mt-4 p-4 rounded-lg bg-red-900/20 border border-red-500/20">
+        <div className="mt-4 rounded-lg border border-red-500/20 bg-red-900/20 p-4">
           <div className="flex items-start gap-2">
-            <AlertCircle className="h-5 w-5 text-red-400 mt-0.5" />
+            <AlertCircle className="mt-0.5 h-5 w-5 text-red-400" />
             <div>
               <p className="font-medium text-red-400">{t('runtime.issue.title')}</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                {t('runtime.issue.desc')}
-              </p>
+              <p className="mt-1 text-sm text-muted-foreground">{t('runtime.issue.desc')}</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Log viewer panel */}
       {showLogs && (
-        <div className="mt-4 p-4 rounded-lg bg-black/40 border border-border">
-          <div className="flex items-center justify-between mb-2">
-            <p className="font-medium text-foreground text-sm">Application Logs</p>
+        <div className="mt-4 rounded-lg border border-border bg-black/40 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-medium text-foreground">Application Logs</p>
             <div className="flex gap-2">
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleOpenLogDir}>
-                <ExternalLink className="h-3 w-3 mr-1" />
+                <ExternalLink className="mr-1 h-3 w-3" />
                 Open Log Folder
               </Button>
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowLogs(false)}>
@@ -886,7 +760,7 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
               </Button>
             </div>
           </div>
-          <pre className="text-xs text-slate-300 bg-black/50 p-3 rounded max-h-60 overflow-auto whitespace-pre-wrap font-mono">
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded bg-black/50 p-3 font-mono text-xs text-slate-300">
             {logContent || '(No logs available yet)'}
           </pre>
         </div>
@@ -895,948 +769,6 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   );
 }
 
-interface ProviderContentProps {
-  providers: ProviderTypeInfo[];
-  selectedProvider: string | null;
-  onSelectProvider: (id: string | null) => void;
-  apiKey: string;
-  onApiKeyChange: (key: string) => void;
-  onConfiguredChange: (configured: boolean) => void;
-}
-
-function ProviderContent({
-  providers,
-  selectedProvider,
-  onSelectProvider,
-  apiKey,
-  onApiKeyChange,
-  onConfiguredChange,
-}: ProviderContentProps) {
-  const { t, i18n } = useTranslation(['setup', 'settings']);
-  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
-  const providerSnapshot = useProviderStore((state) => state.providerSnapshot);
-  const providerSnapshotReady = useProviderStore((state) => state.snapshotReady);
-  const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
-  const createAccount = useProviderStore((state) => state.createAccount);
-  const updateAccount = useProviderStore((state) => state.updateAccount);
-  const setDefaultAccount = useProviderStore((state) => state.setDefaultAccount);
-  const validateAccountApiKey = useProviderStore((state) => state.validateAccountApiKey);
-  const getAccountApiKey = useProviderStore((state) => state.getAccountApiKey);
-  const snapshotAccounts = providerSnapshot.accounts;
-  const snapshotStatuses = providerSnapshot.statuses;
-  const snapshotDefaultAccountId = providerSnapshot.defaultAccountId;
-  const [showKey, setShowKey] = useState(false);
-  const [validating, setValidating] = useState(false);
-  const [keyValid, setKeyValid] = useState<boolean | null>(null);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
-  const [baseUrl, setBaseUrl] = useState('');
-  const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>('openai-completions');
-  const [modelId, setModelId] = useState('');
-  const [providerMenuOpen, setProviderMenuOpen] = useState(false);
-  const providerMenuRef = useRef<HTMLDivElement | null>(null);
-
-  const [authMode, setAuthMode] = useState<'oauth' | 'apikey'>('oauth');
-  const [arkMode, setArkMode] = useState<'apikey' | 'codeplan'>('apikey');
-
-  // OAuth Flow State
-  const [oauthFlowing, setOauthFlowing] = useState(false);
-  const [oauthData, setOauthData] = useState<{
-    mode: 'device';
-    verificationUri: string;
-    userCode: string;
-    expiresIn: number;
-  } | {
-    mode: 'manual';
-    authorizationUrl: string;
-    message?: string;
-  } | null>(null);
-  const [manualCodeInput, setManualCodeInput] = useState('');
-  const [oauthError, setOauthError] = useState<string | null>(null);
-  const pendingOAuthRef = useRef<{ accountId: string; label: string } | null>(null);
-  const providerBootstrapDoneRef = useRef(false);
-
-  useEffect(() => {
-    void refreshProviderSnapshot({
-      trigger: 'background',
-      reason: 'setup_provider_mount',
-    });
-  }, [refreshProviderSnapshot]);
-
-  // Manage OAuth events
-  useEffect(() => {
-    const handleCode = (data: unknown) => {
-      const payload = data as Record<string, unknown>;
-      if (payload?.mode === 'manual') {
-        setOauthData({
-          mode: 'manual',
-          authorizationUrl: String(payload.authorizationUrl || ''),
-          message: typeof payload.message === 'string' ? payload.message : undefined,
-        });
-      } else {
-        setOauthData({
-          mode: 'device',
-          verificationUri: String(payload.verificationUri || ''),
-          userCode: String(payload.userCode || ''),
-          expiresIn: Number(payload.expiresIn || 300),
-        });
-      }
-      setOauthError(null);
-    };
-
-    const handleSuccess = async (data: unknown) => {
-      setOauthFlowing(false);
-      setOauthData(null);
-      setManualCodeInput('');
-      setKeyValid(true);
-
-      const payload = (data as { accountId?: string } | undefined) || undefined;
-      const accountId = payload?.accountId || pendingOAuthRef.current?.accountId;
-
-      try {
-        const store = useProviderStore.getState();
-        await store.refreshProviderSnapshot({
-          trigger: 'reconcile',
-          reason: 'setup_oauth_success_reconcile',
-        });
-        if (accountId) {
-          await store.setDefaultAccount(accountId);
-          setSelectedAccountId(accountId);
-        }
-      } catch (error) {
-        console.error('Failed to reconcile provider snapshot after OAuth success:', error);
-      }
-
-      pendingOAuthRef.current = null;
-      onConfiguredChange(true);
-      toast.success(t('provider.valid'));
-    };
-
-    const handleError = (data: unknown) => {
-      setOauthError((data as { message: string }).message);
-      setOauthData(null);
-      pendingOAuthRef.current = null;
-    };
-
-    const offCode = subscribeHostEvent('oauth:code', handleCode);
-    const offSuccess = subscribeHostEvent('oauth:success', handleSuccess);
-    const offError = subscribeHostEvent('oauth:error', handleError);
-
-    return () => {
-      offCode();
-      offSuccess();
-      offError();
-    };
-  }, [onConfiguredChange, t]);
-
-  const handleStartOAuth = async () => {
-    if (!selectedProvider) return;
-
-    try {
-      await refreshProviderSnapshot({
-        trigger: 'background',
-        reason: 'setup_oauth_start_refresh',
-      });
-      const latestSnapshot = useProviderStore.getState().providerSnapshot;
-      const existingVendorIds = new Set(latestSnapshot.accounts.map((account) => account.vendorId));
-      const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
-      if ((selectedProvider === 'minimax-portal' || selectedProvider === 'minimax-portal-cn') && hasMinimax) {
-        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
-        return;
-      }
-    } catch {
-      // ignore check failure
-    }
-
-    setOauthFlowing(true);
-    setOauthData(null);
-    setManualCodeInput('');
-    setOauthError(null);
-
-    try {
-      const accountId = buildProviderAccountId(
-        selectedProvider as ProviderType,
-        selectedAccountId,
-        useProviderStore.getState().providerSnapshot.vendors,
-      );
-      const label = selectedProviderData?.name || selectedProvider;
-      pendingOAuthRef.current = { accountId, label };
-      await hostProviderStartOAuth({ provider: selectedProvider, accountId, label });
-    } catch (e) {
-      setOauthError(String(e));
-      setOauthFlowing(false);
-      pendingOAuthRef.current = null;
-    }
-  };
-
-  const handleCancelOAuth = async () => {
-    setOauthFlowing(false);
-    setOauthData(null);
-    setManualCodeInput('');
-    setOauthError(null);
-    pendingOAuthRef.current = null;
-    await hostProviderCancelOAuth();
-  };
-
-  const handleSubmitManualOAuthCode = async () => {
-    const value = manualCodeInput.trim();
-    if (!value) return;
-    try {
-      await hostProviderSubmitOAuthCode(value);
-      setOauthError(null);
-    } catch (error) {
-      setOauthError(String(error));
-    }
-  };
-
-  // On mount, try to restore previously configured provider
-  useEffect(() => {
-    if (!providerSnapshotReady || providerBootstrapDoneRef.current) {
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const statusMap = new Map(snapshotStatuses.map((status) => [status.id, status]));
-        const setupProviderTypes = new Set<string>(providers.map((p) => p.id));
-        const setupCandidates = snapshotAccounts.filter((account) => setupProviderTypes.has(account.vendorId));
-        const preferred =
-          (snapshotDefaultAccountId
-            && setupCandidates.find((account) => account.id === snapshotDefaultAccountId))
-          || setupCandidates.find((account) => hasConfiguredCredentials(account, statusMap.get(account.id)))
-          || setupCandidates[0];
-        if (preferred && !cancelled) {
-          onSelectProvider(preferred.vendorId);
-          setSelectedAccountId(preferred.id);
-          const typeInfo = providers.find((p) => p.id === preferred.vendorId);
-          const requiresKey = typeInfo?.requiresApiKey ?? false;
-          onConfiguredChange(!requiresKey || hasConfiguredCredentials(preferred, statusMap.get(preferred.id)));
-          const storedKey = await getAccountApiKey(preferred.id);
-          onApiKeyChange(storedKey || '');
-        } else if (!cancelled) {
-          onConfiguredChange(false);
-          onApiKeyChange('');
-        }
-        if (!cancelled) {
-          providerBootstrapDoneRef.current = true;
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error('Failed to load provider list:', error);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [
-    getAccountApiKey,
-    onApiKeyChange,
-    onConfiguredChange,
-    onSelectProvider,
-    providers,
-    snapshotAccounts,
-    snapshotDefaultAccountId,
-    snapshotStatuses,
-    providerSnapshotReady,
-  ]);
-
-  // When provider changes, load stored key + reset base URL
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!selectedProvider) return;
-      try {
-        setApiProtocol('openai-completions');
-        const statusMap = new Map(snapshotStatuses.map((status) => [status.id, status]));
-        const preferredAccount = pickPreferredAccount(
-          snapshotAccounts,
-          snapshotDefaultAccountId,
-          selectedProvider,
-          statusMap,
-        );
-        setSelectedAccountId(preferredAccount?.id || null);
-        const storedKey = preferredAccount
-          ? await getAccountApiKey(preferredAccount.id)
-          : null;
-        if (!cancelled) {
-          onApiKeyChange(storedKey || '');
-
-          const info = providers.find((p) => p.id === selectedProvider);
-          const nextBaseUrl = preferredAccount?.baseUrl || info?.defaultBaseUrl || '';
-          const nextModelId = preferredAccount?.model || info?.defaultModelId || '';
-          setBaseUrl(nextBaseUrl);
-          setApiProtocol(preferredAccount?.apiProtocol || 'openai-completions');
-          setModelId(nextModelId);
-          if (
-            selectedProvider === 'ark'
-            && info?.codePlanPresetBaseUrl
-            && info?.codePlanPresetModelId
-            && nextBaseUrl.trim() === info.codePlanPresetBaseUrl
-            && nextModelId.trim() === info.codePlanPresetModelId
-          ) {
-            setArkMode('codeplan');
-          } else {
-            setArkMode('apikey');
-          }
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error('Failed to load provider configuration from store:', error);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [
-    getAccountApiKey,
-    onApiKeyChange,
-    providers,
-    selectedProvider,
-    snapshotAccounts,
-    snapshotDefaultAccountId,
-    snapshotStatuses,
-  ]);
-
-  useEffect(() => {
-    if (!providerMenuOpen) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (providerMenuRef.current && !providerMenuRef.current.contains(event.target as Node)) {
-        setProviderMenuOpen(false);
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setProviderMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleEscape);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleEscape);
-    };
-  }, [providerMenuOpen]);
-
-  const selectedProviderData = providers.find((p) => p.id === selectedProvider);
-  const providerDocsUrl = getProviderDocsUrl(selectedProviderData, i18n.language);
-  const effectiveProviderDocsUrl = selectedProvider === 'ark' && arkMode === 'codeplan'
-    ? (selectedProviderData?.codePlanDocsUrl || providerDocsUrl)
-    : providerDocsUrl;
-  const selectedProviderIconUrl = selectedProviderData
-    ? getProviderIconUrl(selectedProviderData.id)
-    : undefined;
-  const showBaseUrlField = selectedProviderData?.showBaseUrl ?? false;
-  const showModelIdField = shouldShowProviderModelId(selectedProviderData, devModeUnlocked);
-  const codePlanPreset = selectedProviderData?.codePlanPresetBaseUrl && selectedProviderData?.codePlanPresetModelId
-    ? {
-      baseUrl: selectedProviderData.codePlanPresetBaseUrl,
-      modelId: selectedProviderData.codePlanPresetModelId,
-    }
-    : null;
-  const requiresKey = selectedProviderData?.requiresApiKey ?? false;
-  const isOAuth = selectedProviderData?.isOAuth ?? false;
-  const supportsApiKey = selectedProviderData?.supportsApiKey ?? false;
-  const useOAuthFlow = isOAuth && (!supportsApiKey || authMode === 'oauth');
-
-  const handleValidateAndSave = async () => {
-    if (!selectedProvider) return;
-
-    try {
-      await refreshProviderSnapshot({
-        trigger: 'background',
-        reason: 'setup_validate_save_refresh',
-      });
-      const latestSnapshot = useProviderStore.getState().providerSnapshot;
-      const existingVendorIds = new Set(latestSnapshot.accounts.map((account) => account.vendorId));
-      const hasMinimax = existingVendorIds.has('minimax-portal') || existingVendorIds.has('minimax-portal-cn');
-      if ((selectedProvider === 'minimax-portal' || selectedProvider === 'minimax-portal-cn') && hasMinimax) {
-        toast.error(t('settings:aiProviders.toast.minimaxConflict'));
-        return;
-      }
-    } catch {
-      // ignore check failure
-    }
-
-    setValidating(true);
-    setKeyValid(null);
-
-    try {
-      // Validate key if the provider requires one and a key was entered
-      const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
-      if (isApiKeyRequired && apiKey) {
-        const result = await validateAccountApiKey(
-          selectedAccountId || selectedProvider,
-          apiKey,
-          {
-            baseUrl: baseUrl.trim() || undefined,
-            apiProtocol: (selectedProvider === 'custom' || selectedProvider === 'ollama')
-              ? apiProtocol
-              : undefined,
-          },
-        );
-
-        setKeyValid(result.valid);
-
-        if (!result.valid) {
-          toast.error(result.error || t('provider.invalid'));
-          setValidating(false);
-          return;
-        }
-      } else {
-        setKeyValid(true);
-      }
-
-      const effectiveModelId = resolveProviderModelForSave(
-        selectedProviderData,
-        modelId,
-        devModeUnlocked
-      );
-      const snapshot = useProviderStore.getState().providerSnapshot;
-      const accountIdForSave = buildProviderAccountId(
-        selectedProvider as ProviderType,
-        selectedAccountId,
-        snapshot.vendors,
-      );
-
-      const effectiveApiKey = resolveProviderApiKeyForSave(selectedProvider, apiKey);
-      const accountPayload: ProviderAccount = buildProviderAccountPayload({
-        accountId: accountIdForSave,
-        providerType: selectedProvider as ProviderType,
-        label: selectedProvider === 'custom'
-          ? t('settings:aiProviders.custom')
-          : (selectedProviderData?.name || selectedProvider),
-        authMode: selectedProvider === 'ollama'
-          ? 'local'
-          : 'api_key',
-        baseUrl: baseUrl.trim() || undefined,
-        apiProtocol: (selectedProvider === 'custom' || selectedProvider === 'ollama')
-          ? apiProtocol
-          : undefined,
-        model: effectiveModelId,
-      });
-
-      if (selectedAccountId) {
-        await updateAccount(
-          accountIdForSave,
-          {
-            label: accountPayload.label,
-            authMode: accountPayload.authMode,
-            baseUrl: accountPayload.baseUrl,
-            apiProtocol: accountPayload.apiProtocol,
-            model: accountPayload.model,
-            enabled: accountPayload.enabled,
-          },
-          effectiveApiKey,
-        );
-      } else {
-        await createAccount(accountPayload, effectiveApiKey);
-      }
-      await setDefaultAccount(accountIdForSave);
-
-      setSelectedAccountId(accountIdForSave);
-      onConfiguredChange(true);
-      toast.success(t('provider.valid'));
-    } catch (error) {
-      setKeyValid(false);
-      onConfiguredChange(false);
-      toast.error('Configuration failed: ' + String(error));
-    } finally {
-      setValidating(false);
-    }
-  };
-
-  // Can the user submit?
-  const isApiKeyRequired = requiresKey || (supportsApiKey && authMode === 'apikey');
-  const canSubmit =
-    selectedProvider
-    && (isApiKeyRequired ? apiKey.length > 0 : true)
-    && (showModelIdField ? modelId.trim().length > 0 : true)
-    && !useOAuthFlow;
-
-  const handleSelectProvider = (providerId: string) => {
-    onSelectProvider(providerId);
-    setSelectedAccountId(null);
-    onConfiguredChange(false);
-    onApiKeyChange('');
-    setKeyValid(null);
-    setProviderMenuOpen(false);
-    setAuthMode('oauth');
-    setArkMode('apikey');
-    setApiProtocol('openai-completions');
-  };
-
-  return (
-    <div className="space-y-6">
-      {/* Provider selector — dropdown */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-3">
-          <Label>{t('provider.label')}</Label>
-          {selectedProvider && effectiveProviderDocsUrl && (
-            <a
-              href={effectiveProviderDocsUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
-            >
-              {t('settings:aiProviders.dialog.customDoc')}
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          )}
-        </div>
-        <div className="relative" ref={providerMenuRef}>
-          <button
-            type="button"
-            aria-haspopup="listbox"
-            aria-expanded={providerMenuOpen}
-            onClick={() => setProviderMenuOpen((open) => !open)}
-            className={cn(
-              'w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'flex items-center justify-between gap-2',
-              'focus:outline-none focus:ring-2 focus:ring-ring'
-            )}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              {selectedProvider && selectedProviderData ? (
-                selectedProviderIconUrl ? (
-                  <img
-                    src={selectedProviderIconUrl}
-                    alt={selectedProviderData.name}
-                    className={cn('h-4 w-4 shrink-0', shouldInvertInDark(selectedProviderData.id) && 'dark:invert')}
-                  />
-                ) : (
-                  <span className="text-sm leading-none shrink-0">{selectedProviderData.icon}</span>
-                )
-              ) : (
-                <span className="text-xs text-muted-foreground shrink-0">—</span>
-              )}
-              <span className={cn('truncate text-left', !selectedProvider && 'text-muted-foreground')}>
-                {selectedProviderData
-                  ? `${selectedProviderData.id === 'custom' ? t('settings:aiProviders.custom') : selectedProviderData.name}${selectedProviderData.model ? ` — ${selectedProviderData.model}` : ''}`
-                  : t('provider.selectPlaceholder')}
-              </span>
-            </div>
-            <ChevronDown className={cn('h-3.5 w-3.5 text-muted-foreground shrink-0 transition-transform', providerMenuOpen && 'rotate-180')} />
-          </button>
-
-          {providerMenuOpen && (
-            <div
-              role="listbox"
-              className="absolute z-20 mt-1 w-full rounded-md border border-border bg-popover shadow-md max-h-64 overflow-auto"
-            >
-              {providers.map((p) => {
-                const iconUrl = getProviderIconUrl(p.id);
-                const isSelected = selectedProvider === p.id;
-
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    role="option"
-                    aria-selected={isSelected}
-                    onClick={() => handleSelectProvider(p.id)}
-                    className={cn(
-                      'w-full px-3 py-2 text-left text-sm flex items-center justify-between gap-2',
-                      'hover:bg-accent transition-colors',
-                      isSelected && 'bg-accent/60'
-                    )}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      {iconUrl ? (
-                        <img
-                          src={iconUrl}
-                          alt={p.name}
-                          className={cn('h-4 w-4 shrink-0', shouldInvertInDark(p.id) && 'dark:invert')}
-                        />
-                      ) : (
-                        <span className="text-sm leading-none shrink-0">{p.icon}</span>
-                      )}
-                      <span className="truncate">{p.id === 'custom' ? t('settings:aiProviders.custom') : p.name}{p.model ? ` — ${p.model}` : ''}</span>
-                    </div>
-                    {isSelected && <Check className="h-4 w-4 text-primary shrink-0" />}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Dynamic config fields based on selected provider */}
-      {selectedProvider && (
-        <motion.div
-          key={selectedProvider}
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="space-y-4"
-        >
-          {codePlanPreset && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <Label>{t('provider.codePlanPreset')}</Label>
-                {selectedProviderData?.codePlanDocsUrl && (
-                  <a
-                    href={selectedProviderData.codePlanDocsUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
-                  >
-                    {t('provider.codePlanDoc')}
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
-                )}
-              </div>
-              <div className="flex gap-2 text-sm">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setArkMode('apikey');
-                    setBaseUrl(selectedProviderData?.defaultBaseUrl || '');
-                    if (modelId.trim() === codePlanPreset.modelId) {
-                      setModelId(selectedProviderData?.defaultModelId || '');
-                    }
-                    onConfiguredChange(false);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 px-3 rounded-lg border transition-colors',
-                    arkMode === 'apikey'
-                      ? 'bg-primary/10 border-primary/30 font-medium'
-                      : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'
-                  )}
-                >
-                  {t('settings:aiProviders.authModes.apiKey')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setArkMode('codeplan');
-                    setBaseUrl(codePlanPreset.baseUrl);
-                    setModelId(codePlanPreset.modelId);
-                    onConfiguredChange(false);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 px-3 rounded-lg border transition-colors',
-                    arkMode === 'codeplan'
-                      ? 'bg-primary/10 border-primary/30 font-medium'
-                      : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted'
-                  )}
-                >
-                  {t('provider.codePlanMode')}
-                </button>
-              </div>
-              {arkMode === 'codeplan' && (
-                <p className="text-xs text-muted-foreground">
-                  {t('provider.codePlanPresetDesc')}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Base URL field (for siliconflow, ollama, custom) */}
-          {showBaseUrlField && (
-            <div className="space-y-2">
-              <Label htmlFor="baseUrl">{t('provider.baseUrl')}</Label>
-              <Input
-                id="baseUrl"
-                type="text"
-                placeholder={getProtocolBaseUrlPlaceholder(apiProtocol)}
-                value={baseUrl}
-                onChange={(e) => {
-                  setBaseUrl(e.target.value);
-                  onConfiguredChange(false);
-                }}
-                autoComplete="off"
-                className="bg-background border-input"
-              />
-            </div>
-          )}
-
-          {/* Model ID field (for siliconflow etc.) */}
-          {showModelIdField && (
-            <div className="space-y-2">
-              <Label htmlFor="modelId">{t('provider.modelId')}</Label>
-              <Input
-                id="modelId"
-                type="text"
-                placeholder={selectedProviderData?.modelIdPlaceholder || 'e.g. deepseek-ai/DeepSeek-V3'}
-                value={modelId}
-                onChange={(e) => {
-                  setModelId(e.target.value);
-                  onConfiguredChange(false);
-                }}
-                autoComplete="off"
-                className="bg-background border-input"
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('provider.modelIdDesc')}
-              </p>
-            </div>
-          )}
-
-          {selectedProvider === 'custom' && (
-            <div className="space-y-2">
-              <Label>{t('provider.protocol')}</Label>
-              <div className="flex gap-2 text-sm">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiProtocol('openai-completions');
-                    onConfiguredChange(false);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 px-3 rounded-lg border transition-colors',
-                    apiProtocol === 'openai-completions'
-                      ? 'bg-primary/10 border-primary/30 font-medium'
-                      : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted',
-                  )}
-                >
-                  {t('provider.protocols.openaiCompletions')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiProtocol('openai-responses');
-                    onConfiguredChange(false);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 px-3 rounded-lg border transition-colors',
-                    apiProtocol === 'openai-responses'
-                      ? 'bg-primary/10 border-primary/30 font-medium'
-                      : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted',
-                  )}
-                >
-                  {t('provider.protocols.openaiResponses')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiProtocol('anthropic-messages');
-                    onConfiguredChange(false);
-                  }}
-                  className={cn(
-                    'flex-1 py-2 px-3 rounded-lg border transition-colors',
-                    apiProtocol === 'anthropic-messages'
-                      ? 'bg-primary/10 border-primary/30 font-medium'
-                      : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted',
-                  )}
-                >
-                  {t('provider.protocols.anthropic')}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Auth mode toggle for providers supporting both */}
-          {isOAuth && supportsApiKey && (
-            <div className="flex rounded-lg border overflow-hidden text-sm">
-              <button
-                onClick={() => setAuthMode('oauth')}
-                className={cn(
-                  'flex-1 py-2 px-3 transition-colors',
-                  authMode === 'oauth' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'
-                )}
-              >
-                {t('settings:aiProviders.oauth.loginMode')}
-              </button>
-              <button
-                onClick={() => setAuthMode('apikey')}
-                className={cn(
-                  'flex-1 py-2 px-3 transition-colors',
-                  authMode === 'apikey' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'
-                )}
-              >
-                {t('settings:aiProviders.oauth.apikeyMode')}
-              </button>
-            </div>
-          )}
-
-          {/* API Key field (hidden for ollama) */}
-          {(!isOAuth || (supportsApiKey && authMode === 'apikey')) && (
-            <div className="space-y-2">
-              <Label htmlFor="apiKey">{t('provider.apiKey')}</Label>
-              <div className="relative">
-                <Input
-                  id="apiKey"
-                  type={showKey ? 'text' : 'password'}
-                  placeholder={selectedProviderData?.placeholder}
-                  value={apiKey}
-                  onChange={(e) => {
-                    onApiKeyChange(e.target.value);
-                    onConfiguredChange(false);
-                    setKeyValid(null);
-                  }}
-                  autoComplete="off"
-                  className="pr-10 bg-background border-input"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey(!showKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Device OAuth Trigger */}
-          {useOAuthFlow && (
-            <div className="space-y-4 pt-2">
-              <div className="rounded-lg bg-blue-500/10 border border-blue-500/20 p-4 text-center">
-                <p className="text-sm text-blue-200 mb-3 block">
-                  This provider requires signing in via your browser.
-                </p>
-                <Button
-                  onClick={handleStartOAuth}
-                  disabled={oauthFlowing}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-                >
-                  {oauthFlowing ? (
-                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Waiting...</>
-                  ) : (
-                    'Login with Browser'
-                  )}
-                </Button>
-              </div>
-
-              {/* OAuth Active State Modal / Inline View */}
-              {oauthFlowing && (
-                <div className="mt-4 p-4 border rounded-xl bg-card relative overflow-hidden">
-                  {/* Background pulse effect */}
-                  <div className="absolute inset-0 bg-primary/5 animate-pulse" />
-
-                  <div className="relative z-10 flex flex-col items-center justify-center text-center space-y-4">
-                    {oauthError ? (
-                      <div className="text-red-400 space-y-2">
-                        <XCircle className="h-8 w-8 mx-auto" />
-                        <p className="font-medium">Authentication Failed</p>
-                        <p className="text-sm opacity-80">{oauthError}</p>
-                        <Button variant="outline" size="sm" onClick={handleCancelOAuth} className="mt-2">
-                          Try Again
-                        </Button>
-                      </div>
-                    ) : !oauthData ? (
-                      <div className="space-y-3 py-4">
-                        <Loader2 className="h-8 w-8 animate-spin text-primary mx-auto" />
-                        <p className="text-sm text-muted-foreground animate-pulse">Requesting secure login code...</p>
-                      </div>
-                    ) : oauthData.mode === 'manual' ? (
-                      <div className="space-y-4 w-full">
-                        <div className="space-y-1">
-                          <h3 className="font-medium text-lg">Complete OpenAI Login</h3>
-                          <p className="text-sm text-muted-foreground text-left mt-2">
-                            {oauthData.message || 'Open the authorization page, complete login, then paste the callback URL or code below.'}
-                          </p>
-                        </div>
-
-                        <Button
-                          variant="secondary"
-                          className="w-full"
-                          onClick={() => invokeIpc('shell:openExternal', oauthData.authorizationUrl)}
-                        >
-                          <ExternalLink className="h-4 w-4 mr-2" />
-                          Open Authorization Page
-                        </Button>
-
-                        <Input
-                          placeholder="Paste callback URL or code"
-                          value={manualCodeInput}
-                          onChange={(e) => setManualCodeInput(e.target.value)}
-                        />
-
-                        <Button
-                          className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-                          onClick={handleSubmitManualOAuthCode}
-                          disabled={!manualCodeInput.trim()}
-                        >
-                          Submit Code
-                        </Button>
-
-                        <Button variant="ghost" size="sm" className="w-full mt-2" onClick={handleCancelOAuth}>
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="space-y-4 w-full">
-                        <div className="space-y-1">
-                          <h3 className="font-medium text-lg">Approve Login</h3>
-                          <div className="text-sm text-muted-foreground text-left mt-2 space-y-1">
-                            <p>1. Copy the authorization code below.</p>
-                            <p>2. Open the login page in your browser.</p>
-                            <p>3. Paste the code to approve access.</p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-center gap-2 p-3 bg-background border rounded-lg">
-                          <code className="text-2xl font-mono tracking-widest font-bold text-primary">
-                            {oauthData.userCode}
-                          </code>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              navigator.clipboard.writeText(oauthData.userCode);
-                              toast.success('Code copied to clipboard');
-                            }}
-                          >
-                            <Copy className="h-4 w-4" />
-                          </Button>
-                        </div>
-
-                        <Button
-                          variant="secondary"
-                          className="w-full"
-                          onClick={() => invokeIpc('shell:openExternal', oauthData.verificationUri)}
-                        >
-                          <ExternalLink className="h-4 w-4 mr-2" />
-                          Open Login Page
-                        </Button>
-
-                        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground pt-2">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          <span>Waiting for approval in browser...</span>
-                        </div>
-
-                        <Button variant="ghost" size="sm" className="w-full mt-2" onClick={handleCancelOAuth}>
-                          Cancel
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Validate & Save */}
-          <Button
-            onClick={handleValidateAndSave}
-            disabled={!canSubmit || validating}
-            className={cn("w-full", useOAuthFlow && "hidden")}
-          >
-            {validating ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            ) : null}
-            {requiresKey ? t('provider.validateSave') : t('provider.save')}
-          </Button>
-
-          {keyValid !== null && (
-            <p className={cn('text-sm text-center', keyValid ? 'text-green-400' : 'text-red-400')}>
-              {keyValid ? `✓ ${t('provider.valid')}` : `✗ ${t('provider.invalid')}`}
-            </p>
-          )}
-
-          <p className="text-sm text-muted-foreground text-center">
-            {t('provider.storedLocally')}
-          </p>
-        </motion.div>
-      )}
-    </div>
-  );
-}
-
-// NOTE: SkillsContent component removed - auto-install essential skills
-
-// Installation status for each skill
 type InstallStatus = 'pending' | 'installing' | 'completed' | 'failed';
 
 interface SkillInstallState {
@@ -1855,56 +787,51 @@ interface InstallingContentProps {
 function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProps) {
   const { t } = useTranslation('setup');
   const [skillStates, setSkillStates] = useState<SkillInstallState[]>(
-    skills.map((s) => ({ ...s, status: 'pending' as InstallStatus }))
+    skills.map((skill) => ({ ...skill, status: 'pending' as InstallStatus }))
   );
   const [overallProgress, setOverallProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const installStarted = useRef(false);
 
-  // Real installation process
   useEffect(() => {
-    if (installStarted.current) return;
+    if (installStarted.current) {
+      return;
+    }
     installStarted.current = true;
 
     const runRealInstall = async () => {
       try {
-        // Step 1: Initialize all skills to 'installing' state for UI
-        setSkillStates(prev => prev.map(s => ({ ...s, status: 'installing' })));
+        setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'installing' })));
         setOverallProgress(10);
 
-        // Step 2: Call the backend to install uv and setup Python
-        const result = await hostUvInstallAll() as {
-          success: boolean;
-          error?: string
-        };
-
+        const result = await hostUvInstallAll() as { success: boolean; error?: string };
         if (result.success) {
-          setSkillStates(prev => prev.map(s => ({ ...s, status: 'completed' })));
+          setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'completed' })));
           setOverallProgress(100);
-
           await new Promise((resolve) => setTimeout(resolve, 800));
-          onComplete(skills.map(s => s.id));
-        } else {
-          setSkillStates(prev => prev.map(s => ({ ...s, status: 'failed' })));
-          setErrorMessage(result.error || 'Unknown error during installation');
-          toast.error('Environment setup failed');
+          onComplete(skills.map((skill) => skill.id));
+          return;
         }
-      } catch (err) {
-        setSkillStates(prev => prev.map(s => ({ ...s, status: 'failed' })));
-        setErrorMessage(String(err));
+
+        setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'failed' })));
+        setErrorMessage(result.error || 'Unknown error during installation');
+        toast.error('Environment setup failed');
+      } catch (error) {
+        setSkillStates((prev) => prev.map((skill) => ({ ...skill, status: 'failed' })));
+        setErrorMessage(String(error));
         toast.error('Installation error');
       }
     };
 
-    runRealInstall();
-  }, [skills, onComplete]);
+    void runRealInstall();
+  }, [onComplete, skills]);
 
   const getStatusIcon = (status: InstallStatus) => {
     switch (status) {
       case 'pending':
         return <div className="h-5 w-5 rounded-full border-2 border-slate-500" />;
       case 'installing':
-        return <Loader2 className="h-5 w-5 text-primary animate-spin" />;
+        return <Loader2 className="h-5 w-5 animate-spin text-primary" />;
       case 'completed':
         return <CheckCircle2 className="h-5 w-5 text-green-400" />;
       case 'failed':
@@ -1928,20 +855,17 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
   return (
     <div className="space-y-6">
       <div className="text-center">
-        <div className="text-4xl mb-4">⚙️</div>
-        <h2 className="text-xl font-semibold mb-2">{t('installing.title')}</h2>
-        <p className="text-muted-foreground">
-          {t('installing.subtitle')}
-        </p>
+        <div className="mb-4 text-4xl">⚙️</div>
+        <h2 className="mb-2 text-xl font-semibold">{t('installing.title')}</h2>
+        <p className="text-muted-foreground">{t('installing.subtitle')}</p>
       </div>
 
-      {/* Progress bar */}
       <div className="space-y-2">
         <div className="flex justify-between text-sm">
           <span className="text-muted-foreground">{t('installing.progress')}</span>
           <span className="text-primary">{overallProgress}%</span>
         </div>
-        <div className="h-2 bg-secondary rounded-full overflow-hidden">
+        <div className="h-2 overflow-hidden rounded-full bg-secondary">
           <motion.div
             className="h-full bg-primary"
             initial={{ width: 0 }}
@@ -1951,15 +875,14 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
         </div>
       </div>
 
-      {/* Skill list */}
-      <div className="space-y-2 max-h-48 overflow-y-auto">
+      <div className="max-h-48 space-y-2 overflow-y-auto">
         {skillStates.map((skill) => (
           <motion.div
             key={skill.id}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             className={cn(
-              'flex items-center justify-between p-3 rounded-lg',
+              'flex items-center justify-between rounded-lg p-3',
               skill.status === 'installing' ? 'bg-muted' : 'bg-muted/50'
             )}
           >
@@ -1975,23 +898,22 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
         ))}
       </div>
 
-      {/* Error Message Display */}
       {errorMessage && (
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
-          className="p-4 rounded-lg bg-red-900/30 border border-red-500/50 text-red-200 text-sm"
+          className="rounded-lg border border-red-500/50 bg-red-900/30 p-4 text-sm text-red-200"
         >
           <div className="flex items-start gap-2">
-            <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
             <div className="space-y-1">
               <p className="font-semibold">{t('installing.error')}</p>
-              <pre className="text-xs bg-black/30 p-2 rounded overflow-x-auto whitespace-pre-wrap font-monospace">
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-black/30 p-2 font-monospace text-xs">
                 {errorMessage}
               </pre>
               <Button
                 variant="link"
-                className="text-red-400 p-0 h-auto text-xs underline"
+                className="h-auto p-0 text-xs text-red-400 underline"
                 onClick={() => window.location.reload()}
               >
                 {t('installing.restart')}
@@ -2002,59 +924,44 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
       )}
 
       {!errorMessage && (
-        <p className="text-sm text-slate-400 text-center">
-          {t('installing.wait')}
-        </p>
+        <p className="text-center text-sm text-slate-400">{t('installing.wait')}</p>
       )}
+
       <div className="flex justify-end">
-        <Button
-          variant="ghost"
-          className="text-muted-foreground"
-          onClick={onSkip}
-        >
+        <Button variant="ghost" className="text-muted-foreground" onClick={onSkip}>
           {t('installing.skip')}
         </Button>
       </div>
     </div>
   );
 }
+
 interface CompleteContentProps {
-  selectedProvider: string | null;
   installedSkills: string[];
 }
 
-function CompleteContent({ selectedProvider, installedSkills }: CompleteContentProps) {
-  const { t } = useTranslation(['setup', 'settings']);
+function CompleteContent({ installedSkills }: CompleteContentProps) {
+  const { t } = useTranslation('setup');
   const gatewayStatus = useGatewayStore((state) => state.status);
-
-  const providerData = providers.find((p) => p.id === selectedProvider);
   const installedSkillNames = defaultSkills
-    .filter((s) => installedSkills.includes(s.id))
-    .map((s) => s.name)
+    .filter((skill) => installedSkills.includes(skill.id))
+    .map((skill) => skill.name)
     .join(', ');
 
   return (
-    <div className="text-center space-y-6">
-      <div className="text-6xl mb-4">🎉</div>
+    <div className="space-y-6 text-center">
+      <div className="mb-4 text-6xl">🎉</div>
       <h2 className="text-xl font-semibold">{t('complete.title')}</h2>
-      <p className="text-muted-foreground">
-        {t('complete.subtitle')}
-      </p>
+      <p className="text-muted-foreground">{t('complete.subtitle')}</p>
 
-      <div className="space-y-3 text-left max-w-md mx-auto">
-        <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
-          <span>{t('complete.provider')}</span>
-          <span className="text-green-400">
-            {providerData ? <span className="flex items-center gap-1.5">{getProviderIconUrl(providerData.id) ? <img src={getProviderIconUrl(providerData.id)} alt={providerData.name} className={`h-4 w-4 inline-block ${shouldInvertInDark(providerData.id) ? 'dark:invert' : ''}`} /> : providerData.icon} {providerData.id === 'custom' ? t('settings:aiProviders.custom') : providerData.name}</span> : '—'}
-          </span>
-        </div>
-        <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+      <div className="mx-auto max-w-md space-y-3 text-left">
+        <div className="flex items-center justify-between rounded-lg bg-muted/50 p-3">
           <span>{t('complete.components')}</span>
           <span className="text-green-400">
             {installedSkillNames || `${installedSkills.length} ${t('installing.status.installed')}`}
           </span>
         </div>
-        <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+        <div className="flex items-center justify-between rounded-lg bg-muted/50 p-3">
           <span>{t('complete.gateway')}</span>
           <span className={isGatewayOperational(gatewayStatus) ? 'text-green-400' : 'text-yellow-400'}>
             {isGatewayOperational(gatewayStatus) ? `✓ ${t('complete.running')}` : gatewayStatus.processState}
@@ -2062,9 +969,7 @@ function CompleteContent({ selectedProvider, installedSkills }: CompleteContentP
         </div>
       </div>
 
-      <p className="text-sm text-muted-foreground">
-        {t('complete.footer')}
-      </p>
+      <p className="text-sm text-muted-foreground">{t('complete.footer')}</p>
     </div>
   );
 }

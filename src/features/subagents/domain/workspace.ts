@@ -9,7 +9,10 @@ export function normalizeSubagentNameToSlug(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return slug || 'agent';
+  if (!slug || /^\d+$/.test(slug)) {
+    return 'agent';
+  }
+  return slug;
 }
 
 function detectSeparator(pathname: string): '/' | '\\' {

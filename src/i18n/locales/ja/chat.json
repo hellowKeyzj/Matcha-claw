@@ -13,6 +13,9 @@
         "gatewayDisconnectedPlaceholder": "ゲートウェイ未接続...",
         "messagePlaceholder": "メッセージ（/ でスキル候補、Enter 送信、Shift+Enter 改行）",
         "approvalWaitingPlaceholder": "承認待ちです...",
+        "pickModel": "モデルを選択",
+        "modelPickerTitle": "モデルを切り替え",
+        "modelSwitchFailed": "モデルの切り替えに失敗しました: {{error}}",
         "skillActive": "スキル {{count}} 件を使用中",
         "skillsActive": "スキル {{count}} 件を使用中",
         "attachmentReady": "添付 {{count}} 件を追加済み",
@@ -82,6 +85,10 @@
         "loading": "スキルを読み込み中...",
         "empty": "利用可能なスキルがありません。"
     },
+    "skillPreviewTooltip": "SKILL.md をプレビュー",
+    "skillPreviewTitle": "SKILL.md プレビュー",
+    "skillPreviewLoading": "スキルプレビューを読み込み中...",
+    "skillPreviewNotFound": "このスキルが見つかりません。スキル一覧を開いて更新してください。",
     "approval": {
         "panelTitle": "承認待ち",
         "waitingLabel": "承認待ちです...",

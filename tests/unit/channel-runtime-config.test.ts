@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   deleteChannelConfigLocal,
+  getChannelFormValuesLocal,
   listConfiguredChannelsLocal,
   saveChannelConfigLocal,
   setChannelEnabledLocal,
@@ -166,6 +167,27 @@ describe('channel-runtime config save', () => {
     expect(channels).not.toContain('qqbot');
   });
 
+  it('忽略数组形态的异常 accounts，并回退到默认账号 legacy 配置', async () => {
+    await writeFile(
+      join(tempDir, 'openclaw.json'),
+      `${JSON.stringify({
+        channels: {
+          feishu: {
+            enabled: true,
+            defaultAccount: 'default',
+            accounts: [null, null, { appId: 'ghost-account' }],
+            appId: 'cli_real_app',
+            appSecret: 'real_secret',
+          },
+        },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    const channels = await listConfiguredChannelsLocal();
+    expect(channels).not.toContain('feishu');
+  });
+
   it('内置频道保存配置时会在存在外部插件时补齐 built-in allowlist', async () => {
     await saveChannelConfigLocal({
       channelType: 'telegram',
@@ -257,5 +279,39 @@ describe('channel-runtime config save', () => {
     expect(config.channels?.qqbot).toBeUndefined();
     expect(config.plugins.entries['openclaw-qqbot'].enabled).toBe(false);
     expect(config.plugins.allow).not.toContain('openclaw-qqbot');
+  });
+
+  it('保存 dingtalk 配置时使用 strict-schema 顶层结构，不写 accounts/defaultAccount', async () => {
+    await saveChannelConfigLocal({
+      channelType: 'dingtalk',
+      accountId: 'team-1',
+      config: {
+        clientId: 'ding-client-id',
+        clientSecret: 'ding-secret',
+        robotCode: 'ding-robot',
+      },
+      enabled: true,
+    });
+
+    const config = JSON.parse(
+      await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
+    ) as Record<string, any>;
+
+    expect(config.channels.dingtalk.clientId).toBe('ding-client-id');
+    expect(config.channels.dingtalk.clientSecret).toBe('ding-secret');
+    expect(config.channels.dingtalk.robotCode).toBe('ding-robot');
+    expect(config.channels.dingtalk.enabled).toBe(true);
+    expect(config.channels.dingtalk.accounts).toBeUndefined();
+    expect(config.channels.dingtalk.defaultAccount).toBeUndefined();
+
+    const configuredChannels = await listConfiguredChannelsLocal();
+    expect(configuredChannels).toContain('dingtalk');
+
+    const values = await getChannelFormValuesLocal('dingtalk', 'team-1');
+    expect(values).toMatchObject({
+      clientId: 'ding-client-id',
+      clientSecret: 'ding-secret',
+      robotCode: 'ding-robot',
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoreHistoryCache } from '@/stores/chat/history-cache';
 import type { ChatStoreState } from '@/stores/chat/types';
+import type { GatewayStatus } from '@/types/gateway';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import {
   createEmptySessionRecord,
@@ -111,6 +112,24 @@ function createStateHarness(overrides: Partial<ChatStoreState>) {
   return {
     set,
     get: () => state,
+  };
+}
+
+function createGatewayStatus(overrides?: Partial<GatewayStatus>): GatewayStatus {
+  return {
+    processState: 'running',
+    port: 18789,
+    gatewayReady: true,
+    healthSummary: 'healthy',
+    transportState: 'connected',
+    portReachable: true,
+    diagnostics: {
+      consecutiveHeartbeatMisses: 0,
+      consecutiveRpcFailures: 0,
+    },
+    connectedAt: Date.now(),
+    updatedAt: Date.now(),
+    ...overrides,
   };
 }
 
@@ -243,6 +262,156 @@ describe('chat history load execution', () => {
 
     expect(fetchHistoryWindowMock).not.toHaveBeenCalled();
     expect(historyRuntime.historyFingerprintBySession.has(requestedSessionKey)).toBe(false);
+  });
+
+  it('chat_init_cold_start 首次前台加载遇到超时后会按启动期预算重试并恢复', async () => {
+    vi.useFakeTimers();
+    try {
+      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const requestedSessionKey = 'agent:main:main';
+      const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
+      fetchHistoryWindowMock
+        .mockRejectedValueOnce(new Error('request timed out'))
+        .mockResolvedValueOnce(createWindowResult(requestedSessionKey, [
+          { role: 'assistant', content: 'recovered after retry', timestamp: 1, id: 'assistant-1' },
+        ]));
+
+      const loadPromise = executeHistoryLoad({
+        set,
+        get,
+        historyRuntime: createHistoryRuntimeHarness(),
+        loadingTimeoutMs: 15_000,
+        getGatewayStatus: () => createGatewayStatus({
+          connectedAt: Date.now() - 5_000,
+        }),
+      }, {
+        sessionKey: requestedSessionKey,
+        mode: 'active',
+        scope: 'foreground',
+        reason: 'chat_init_cold_start',
+      });
+
+      await vi.runAllTimersAsync();
+      await loadPromise;
+
+      expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(2);
+      expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        requestedSessionKey,
+        timeoutMs: 35_000,
+      }));
+      expect(fetchHistoryWindowMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        requestedSessionKey,
+        timeoutMs: 35_000,
+      }));
+      expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
+      expect(getSessionItems(get(), requestedSessionKey)).toMatchObject([
+        expect.objectContaining({ text: 'recovered after retry' }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('chat_init_cold_start 首次前台加载失败耗尽预算后才进入 error', async () => {
+    vi.useFakeTimers();
+    try {
+      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const requestedSessionKey = 'agent:main:main';
+      const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
+      fetchHistoryWindowMock.mockRejectedValue(new Error('request timed out'));
+
+      const loadPromise = executeHistoryLoad({
+        set,
+        get,
+        historyRuntime: createHistoryRuntimeHarness(),
+        loadingTimeoutMs: 15_000,
+        getGatewayStatus: () => createGatewayStatus({
+          connectedAt: Date.now() - 2_000,
+        }),
+      }, {
+        sessionKey: requestedSessionKey,
+        mode: 'active',
+        scope: 'foreground',
+        reason: 'chat_init_cold_start',
+      });
+
+      await vi.runAllTimersAsync();
+      await loadPromise;
+
+      expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(5);
+      expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
+      expect(get().error).toBe('request timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('chat_init_cold_start 遇到 gateway startup 特殊错误时会扩大重试预算并在耗尽后保持非失败态', async () => {
+    vi.useFakeTimers();
+    try {
+      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const requestedSessionKey = 'agent:main:main';
+      const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
+      fetchHistoryWindowMock.mockRejectedValue(new Error('Service not initialized: unavailable during gateway startup'));
+
+      const loadPromise = executeHistoryLoad({
+        set,
+        get,
+        historyRuntime: createHistoryRuntimeHarness(),
+        loadingTimeoutMs: 15_000,
+        getGatewayStatus: () => createGatewayStatus({
+          processState: 'starting',
+          gatewayReady: false,
+          transportState: 'disconnected',
+          connectedAt: undefined,
+        }),
+      }, {
+        sessionKey: requestedSessionKey,
+        mode: 'active',
+        scope: 'foreground',
+        reason: 'chat_init_cold_start',
+      });
+
+      await vi.runAllTimersAsync();
+      await loadPromise;
+
+      expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(5);
+      expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('ready');
+      expect(get().foregroundHistorySessionKey).toBeNull();
+      expect(get().error).toBeNull();
+      expect(getSessionItems(get(), requestedSessionKey)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('非冷启动前台加载不会吃启动期重试预算', async () => {
+    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const requestedSessionKey = 'agent:main:main';
+    const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
+    fetchHistoryWindowMock.mockRejectedValueOnce(new Error('request timed out'));
+
+    await executeHistoryLoad({
+      set,
+      get,
+      historyRuntime: createHistoryRuntimeHarness(),
+      loadingTimeoutMs: 15_000,
+      getGatewayStatus: () => createGatewayStatus(),
+    }, {
+      sessionKey: requestedSessionKey,
+      mode: 'active',
+      scope: 'foreground',
+      reason: 'manual_refresh',
+    });
+
+    expect(fetchHistoryWindowMock).toHaveBeenCalledTimes(1);
+    const [firstCall] = fetchHistoryWindowMock.mock.calls[0] ?? [];
+    expect(firstCall).toMatchObject({
+      requestedSessionKey,
+      limit: 200,
+    });
+    expect(firstCall).not.toHaveProperty('timeoutMs');
+    expect(get().loadedSessions[requestedSessionKey]?.meta.historyStatus).toBe('error');
   });
 });
 

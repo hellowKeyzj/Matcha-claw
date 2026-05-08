@@ -190,6 +190,8 @@ export class GatewayManager extends EventEmitter {
           if (!isOwnProcess) {
             this.ownsProcess = false;
             this.setStatus({ pid: undefined });
+          } else {
+            this.restartController.recordRestartCompleted();
           }
         },
         waitForPortFree: async (port) => {
@@ -316,7 +318,14 @@ export class GatewayManager extends EventEmitter {
     logger.debug('Gateway restart requested');
     this.restartInFlight = (async () => {
       await this.stop();
-      await this.start();
+      try {
+        await this.start();
+      } catch (error) {
+        logger.warn('Gateway restart failed after stop; scheduling auto-reconnect recovery', error);
+        this.shouldReconnect = true;
+        this.scheduleReconnect();
+        throw error;
+      }
     })();
 
     try {

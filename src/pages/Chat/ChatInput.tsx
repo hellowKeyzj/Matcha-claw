@@ -9,6 +9,7 @@
 import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
@@ -41,6 +42,8 @@ interface SelectedSkill {
   id: string;
   name: string;
   icon: string;
+  filePath?: string;
+  baseDir?: string;
 }
 
 interface StagedFilePayload {
@@ -52,11 +55,28 @@ interface StagedFilePayload {
   preview: string | null;
 }
 
+interface ModelPickerOption {
+  id: string;
+  label: string;
+}
+
+interface ModelPickerState {
+  currentModelId: string;
+  currentLabel: string;
+  options: ModelPickerOption[];
+  loading: boolean;
+  switching: boolean;
+  disabled?: boolean;
+  onSelect: (modelId: string) => void;
+}
+
 const STAGE_BUFFER_CONCURRENCY = 3;
 
 interface ChatInputProps {
   onSend: (text: string, attachments?: FileAttachment[]) => void;
   onStop?: () => void;
+  onPreviewSkill?: (skill: SelectedSkill) => void;
+  modelPicker?: ModelPickerState | null;
   disabled?: boolean;
   sending?: boolean;
   approvalWaiting?: boolean;
@@ -248,6 +268,8 @@ function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
 export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
+  onPreviewSkill,
+  modelPicker = null,
   disabled = false,
   sending = false,
   approvalWaiting = false,
@@ -417,6 +439,8 @@ export const ChatInput = memo(function ChatInput({
         id: skill.id,
         name: skill.name,
         icon: skill.icon || '🧩',
+        filePath: skill.filePath,
+        baseDir: skill.baseDir,
       }));
     setSlashOpen(true);
     setSlashStart(range.start);
@@ -792,8 +816,27 @@ export const ChatInput = memo(function ChatInput({
                       key={skill.id}
                       className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/60 bg-background/80 px-2.5 py-1 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm"
                     >
-                      <span>{skill.icon}</span>
-                      <span className="truncate">{skill.name}</span>
+                      {onPreviewSkill ? (
+                        <button
+                          type="button"
+                          className="inline-flex min-w-0 items-center gap-1 rounded-full text-left transition-colors hover:text-primary"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                          }}
+                          onClick={() => onPreviewSkill(skill)}
+                          title={t('skillPreviewTooltip')}
+                          aria-label={t('skillPreviewTooltip')}
+                          data-testid="chat-selected-skill-preview"
+                        >
+                          <span>{skill.icon}</span>
+                          <span className="truncate">{skill.name}</span>
+                        </button>
+                      ) : (
+                        <>
+                          <span>{skill.icon}</span>
+                          <span className="truncate">{skill.name}</span>
+                        </>
+                      )}
                       <button
                         type="button"
                         className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-background/90 hover:text-foreground"
@@ -911,6 +954,27 @@ export const ChatInput = memo(function ChatInput({
               ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {modelPicker ? (
+                <div className="w-[180px] shrink-0">
+                  <Select
+                    value={modelPicker.currentModelId}
+                    disabled={modelPicker.disabled || modelPicker.loading || modelPicker.switching || modelPicker.options.length === 0}
+                    aria-label={t('input.pickModel')}
+                    title={t('input.modelPickerTitle')}
+                    data-testid="chat-model-picker"
+                    className="h-9 rounded-full border border-border/45 bg-background/74 px-3 py-1 text-xs shadow-sm"
+                    onChange={(event) => {
+                      modelPicker.onSelect(event.target.value);
+                    }}
+                  >
+                    {modelPicker.options.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              ) : null}
               <Button
                 variant="ghost"
                 size="icon"

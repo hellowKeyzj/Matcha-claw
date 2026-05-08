@@ -23,6 +23,7 @@ describe('cron service delivery', () => {
     bridge.addCronJob.mockResolvedValue({
       id: 'job-1',
       name: 'Daily Report',
+      agentId: 'agent-reporter',
       payload: { kind: 'agentTurn', message: 'summarize today' },
       schedule: { kind: 'cron', expr: '0 9 * * *' },
       delivery: { mode: 'announce', channel: 'feishu', accountId: 'feishu-main', to: 'user:ou_xxx' },
@@ -38,6 +39,7 @@ describe('cron service delivery', () => {
 
     const response = await service.createJob({
       name: 'Daily Report',
+      agentId: 'agent-reporter',
       message: 'summarize today',
       schedule: '0 9 * * *',
       delivery: {
@@ -49,6 +51,7 @@ describe('cron service delivery', () => {
     });
 
     expect(bridge.addCronJob).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'agent-reporter',
       delivery: {
         mode: 'announce',
         channel: 'feishu',
@@ -57,6 +60,7 @@ describe('cron service delivery', () => {
       },
     }));
     expect(response.status).toBe(200);
+    expect((response.data as { agentId?: string }).agentId).toBe('agent-reporter');
     expect((response.data as { delivery?: unknown }).delivery).toEqual({
       mode: 'announce',
       channel: 'feishu',
@@ -70,6 +74,7 @@ describe('cron service delivery', () => {
     bridge.addCronJob.mockResolvedValue({
       id: 'job-wx-1',
       name: 'WeChat Push',
+      agentId: 'wechat-agent',
       payload: { kind: 'agentTurn', message: 'ping' },
       schedule: { kind: 'cron', expr: '0 9 * * *' },
       delivery: { mode: 'announce', channel: 'openclaw-weixin', accountId: 'wechat-main', to: 'wxid_123@im.wechat' },
@@ -85,6 +90,7 @@ describe('cron service delivery', () => {
 
     const response = await service.createJob({
       name: 'WeChat Push',
+      agentId: 'wechat-agent',
       message: 'ping',
       schedule: '0 9 * * *',
       delivery: {
@@ -97,6 +103,7 @@ describe('cron service delivery', () => {
 
     expect(response.status).toBe(200);
     expect(bridge.addCronJob).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'wechat-agent',
       delivery: {
         mode: 'announce',
         channel: 'openclaw-weixin',
@@ -139,6 +146,7 @@ describe('cron service delivery', () => {
     });
 
     const response = await service.updateJob('job-2', {
+      agentId: 'agent-evening',
       message: 'next report',
       schedule: '0 18 * * *',
       delivery: {
@@ -151,6 +159,7 @@ describe('cron service delivery', () => {
 
     expect(response.status).toBe(200);
     expect(bridge.updateCronJob).toHaveBeenCalledWith('job-2', expect.objectContaining({
+      agentId: 'agent-evening',
       schedule: { kind: 'cron', expr: '0 18 * * *' },
       payload: { kind: 'agentTurn', message: 'next report' },
       delivery: {
@@ -160,6 +169,33 @@ describe('cron service delivery', () => {
         to: 'chat:oc_yyy',
       },
     }));
+  });
+
+  it('listJobs 会把缺失的 agentId 归一为 main', async () => {
+    const bridge = createBridgeMock();
+    bridge.listCronJobs.mockResolvedValue({
+      jobs: [
+        {
+          id: 'job-main',
+          name: 'Main Agent Job',
+          payload: { kind: 'agentTurn', message: 'hello' },
+          schedule: { kind: 'cron', expr: '0 9 * * *' },
+          enabled: true,
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          state: {},
+        },
+      ],
+    });
+    const service = new CronService({
+      openclawBridge: bridge,
+      getOpenClawConfigDir,
+    });
+
+    const jobs = await service.listJobs();
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.agentId).toBe('main');
   });
 
   it('updateJob 在 WeChat 定时投递缺少 accountId 时拒绝', async () => {

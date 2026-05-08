@@ -49,6 +49,7 @@ export type CronSchedule =
 export interface CronJob {
   id: string;
   name: string;
+  agentId: string;
   message: string;
   schedule: string | CronSchedule;
   delivery?: CronJobDelivery;
@@ -66,6 +67,7 @@ export interface CronJob {
  */
 export interface CronJobCreateInput {
   name: string;
+  agentId?: string;
   message: string;
   schedule: string;
   delivery?: CronJobDelivery;
@@ -77,6 +79,7 @@ export interface CronJobCreateInput {
  */
 export interface CronJobUpdateInput {
   name?: string;
+  agentId?: string;
   message?: string;
   schedule?: string;
   delivery?: CronJobDelivery;

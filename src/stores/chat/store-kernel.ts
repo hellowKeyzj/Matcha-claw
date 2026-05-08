@@ -1,4 +1,5 @@
 import type { StoreHistoryCache } from './history-cache';
+import { createStoreSessionRunCache, type StoreSessionRunCache } from './session-run-cache';
 import type { ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
@@ -10,6 +11,7 @@ export interface ChatStoreKernel {
   beginMutating: () => void;
   finishMutating: () => void;
   historyRuntime: StoreHistoryCache;
+  sessionRunCache: StoreSessionRunCache;
 }
 
 export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
@@ -19,6 +21,7 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
   const historyFingerprintBySession = new Map<string, string>();
   const historyRenderFingerprintBySession = new Map<string, string>();
   const historyLoadAbortControllerBySession = new Map<string, AbortController>();
+  const sessionRunCache = createStoreSessionRunCache();
 
   const beginMutating = (): void => {
     mutatingCounter += 1;
@@ -62,5 +65,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
     beginMutating,
     finishMutating,
     historyRuntime,
+    sessionRunCache,
   };
 }

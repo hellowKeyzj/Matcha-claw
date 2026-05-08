@@ -13,7 +13,9 @@ export const PROVIDER_TYPES = [
   'openrouter',
   'ark',
   'moonshot',
+  'moonshot-global',
   'siliconflow',
+  'deepseek',
   'minimax-portal',
   'minimax-portal-cn',
   'qwen-portal',
@@ -29,7 +31,9 @@ export const BUILTIN_PROVIDER_TYPES = [
   'openrouter',
   'ark',
   'moonshot',
+  'moonshot-global',
   'siliconflow',
+  'deepseek',
   'minimax-portal',
   'minimax-portal-cn',
   'qwen-portal',
@@ -188,8 +192,10 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     codePlanPresetModelId: 'ark-code-latest',
     codePlanDocsUrl: 'https://www.volcengine.com/docs/82379/1928261?lang=zh',
   },
-  { id: 'moonshot', name: 'Moonshot (CN)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.cn/v1', defaultModelId: 'kimi-k2.5', docsUrl: 'https://platform.moonshot.cn/' },
+  { id: 'moonshot', name: 'Moonshot (CN)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.cn/v1', defaultModelId: 'kimi-k2.6', docsUrl: 'https://platform.moonshot.cn/' },
+  { id: 'moonshot-global', name: 'Moonshot (Global)', icon: '🌙', placeholder: 'sk-...', model: 'Kimi', requiresApiKey: true, defaultBaseUrl: 'https://api.moonshot.ai/v1', defaultModelId: 'kimi-k2.6', docsUrl: 'https://platform.moonshot.ai/' },
   { id: 'siliconflow', name: 'SiliconFlow (CN)', icon: '🌊', placeholder: 'sk-...', model: 'Multi-Model', requiresApiKey: true, defaultBaseUrl: 'https://api.siliconflow.cn/v1', showModelId: true, modelIdPlaceholder: 'deepseek-ai/DeepSeek-V3', defaultModelId: 'deepseek-ai/DeepSeek-V3', docsUrl: 'https://docs.siliconflow.cn/cn/userguide/introduction' },
+  { id: 'deepseek', name: 'DeepSeek', icon: '🐋', placeholder: 'sk-...', model: 'DeepSeek', requiresApiKey: true, defaultBaseUrl: 'https://api.deepseek.com/v1', showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'deepseek-v4-pro', defaultModelId: 'deepseek-v4-pro', apiKeyUrl: 'https://platform.deepseek.com/api_keys', docsUrl: 'https://api-docs.deepseek.com/', docsUrlZh: 'https://api-docs.deepseek.com/zh-cn/' },
   { id: 'minimax-portal', name: 'MiniMax (Global)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'MiniMax-M2.7', defaultModelId: 'MiniMax-M2.7', apiKeyUrl: 'https://platform.minimax.io' },
   { id: 'minimax-portal-cn', name: 'MiniMax (CN)', icon: '☁️', placeholder: 'sk-...', model: 'MiniMax', requiresApiKey: false, isOAuth: true, supportsApiKey: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'MiniMax-M2.7', defaultModelId: 'MiniMax-M2.7', apiKeyUrl: 'https://platform.minimaxi.com/' },
   { id: 'qwen-portal', name: 'Qwen (Global)', icon: '☁️', placeholder: 'sk-...', model: 'Qwen', requiresApiKey: false, isOAuth: true, showModelId: true, showModelIdInDevModeOnly: true, modelIdPlaceholder: 'coder-model', defaultModelId: 'coder-model' },
@@ -261,9 +267,13 @@ export function resolveProviderModelForSave(
   return trimmedModelId || provider?.defaultModelId || undefined;
 }
 
+export function normalizeProviderApiKeyInput(apiKey: string): string {
+  return apiKey.trim();
+}
+
 /** Normalize provider API key before saving; Ollama uses a local placeholder when blank. */
 export function resolveProviderApiKeyForSave(type: ProviderType | string, apiKey: string): string | undefined {
-  const trimmed = apiKey.trim();
+  const trimmed = normalizeProviderApiKeyInput(apiKey);
   if (type === 'ollama') {
     return trimmed || OLLAMA_PLACEHOLDER_API_KEY;
   }

@@ -9,6 +9,7 @@ import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import {
   LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS,
   getExternalChannelPluginId,
+  STRICT_SCHEMA_CHANNEL_IDS,
 } from './channel-plugin-bindings';
 
 const CHANNEL_UNIQUE_CREDENTIAL_KEY: Record<string, string> = {
@@ -93,12 +94,45 @@ function cleanupLegacyBuiltInChannelPluginRegistrationLocal(config: Record<strin
   return removePluginRegistration(config, channelType);
 }
 
-function channelHasAnyAccount(channelSection: Record<string, any>): boolean {
-  const accounts = isRecord(channelSection.accounts) ? channelSection.accounts : null;
+function isStrictSchemaChannel(channelType: string): boolean {
+  return STRICT_SCHEMA_CHANNEL_IDS.has(channelType);
+}
+
+function getChannelAccountsMap(channelSection: Record<string, any>): Record<string, Record<string, any>> | null {
+  if (!isRecord(channelSection.accounts)) {
+    return null;
+  }
+  return channelSection.accounts as Record<string, Record<string, any>>;
+}
+
+function ensureChannelAccountsMap(channelSection: Record<string, any>): Record<string, Record<string, any>> {
+  const accounts = getChannelAccountsMap(channelSection);
+  if (accounts) {
+    return accounts;
+  }
+  channelSection.accounts = {};
+  return channelSection.accounts as Record<string, Record<string, any>>;
+}
+
+function channelHasAnyAccount(channelType: string, channelSection: Record<string, any>): boolean {
+  if (typeof channelSection.enabled === 'boolean' && channelSection.enabled === false) {
+    return false;
+  }
+  if (isStrictSchemaChannel(channelType) && !getChannelAccountsMap(channelSection)) {
+    return Object.entries(channelSection).some(([key, value]) => (
+      key !== 'enabled'
+      && key !== 'updatedAt'
+      && normalizeChannelConfigValueLocal(value).trim().length > 0
+    ));
+  }
+  const accounts = getChannelAccountsMap(channelSection);
   if (!accounts) {
     return false;
   }
-  return Object.values(accounts).some((item) => !isRecord(item) || item.enabled !== false);
+  return Object.entries(accounts).some(([accountId, item]) => (
+    accountId.trim().length > 0
+    && (!isRecord(item) || item.enabled !== false)
+  ));
 }
 
 async function reconcileChannelDerivedPluginStateLocal(config: Record<string, any>): Promise<Record<string, any>> {
@@ -119,7 +153,7 @@ export async function listConfiguredChannelsLocal() {
     if (sectionRaw.enabled === false) {
       continue;
     }
-    if (channelHasAnyAccount(sectionRaw)) {
+    if (channelHasAnyAccount(channelType, sectionRaw)) {
       channels.push(channelType);
     }
   }
@@ -150,7 +184,7 @@ function assertNoDuplicateCredential(
     return;
   }
 
-  const accounts = isRecord(channelSection.accounts) ? channelSection.accounts : {};
+  const accounts = getChannelAccountsMap(channelSection) ?? {};
   for (const [existingAccountId, accountConfig] of Object.entries(accounts)) {
     if (existingAccountId === resolvedAccountId || !isRecord(accountConfig)) {
       continue;
@@ -164,8 +198,11 @@ function assertNoDuplicateCredential(
   }
 }
 
-function getChannelAccountConfigLocal(channelSection: Record<string, any>, accountId: string) {
-  const accounts = isRecord(channelSection.accounts) ? channelSection.accounts : {};
+function getChannelAccountConfigLocal(channelType: string, channelSection: Record<string, any>, accountId: string) {
+  if (isStrictSchemaChannel(channelType) && !getChannelAccountsMap(channelSection)) {
+    return channelSection;
+  }
+  const accounts = getChannelAccountsMap(channelSection) ?? {};
   if (isRecord(accounts[accountId])) {
     return accounts[accountId];
   }
@@ -203,22 +240,39 @@ export async function saveChannelConfigLocal(input: unknown) {
     }
 
     const section = config.channels[channelType];
-    if (!isRecord(section.accounts)) {
-      section.accounts = {};
-    }
-    const previous = isRecord(section.accounts[accountId]) ? section.accounts[accountId] : {};
     const bodyConfig = isRecord(input.config) ? input.config : {};
-    const nextAccountConfig = {
-      ...previous,
-      ...bodyConfig,
-    };
-    assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
-    section.accounts[accountId] = {
-      ...nextAccountConfig,
-      enabled: input.enabled !== false,
-      updatedAt: new Date().toISOString(),
-    };
-    section.enabled = input.enabled !== false;
+    if (isStrictSchemaChannel(channelType)) {
+      const nextAccountConfig = {
+        ...section,
+        ...bodyConfig,
+      };
+      assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
+      delete section.accounts;
+      delete section.defaultAccount;
+      delete nextAccountConfig.accounts;
+      delete nextAccountConfig.defaultAccount;
+      Object.assign(section, nextAccountConfig, {
+        enabled: input.enabled !== false,
+        updatedAt: new Date().toISOString(),
+      });
+    } else {
+      const accounts = ensureChannelAccountsMap(section);
+      const previous = isRecord(accounts[accountId]) ? accounts[accountId] : {};
+      const nextAccountConfig = {
+        ...previous,
+        ...bodyConfig,
+      };
+      assertNoDuplicateCredential(channelType, section, accountId, nextAccountConfig);
+      accounts[accountId] = {
+        ...nextAccountConfig,
+        enabled: input.enabled !== false,
+        updatedAt: new Date().toISOString(),
+      };
+      section.defaultAccount = typeof section.defaultAccount === 'string' && section.defaultAccount.trim()
+        ? section.defaultAccount
+        : accountId;
+      section.enabled = input.enabled !== false;
+    }
     config = await reconcileChannelDerivedPluginStateLocal(config);
     await writeOpenClawConfigJson(config);
   });
@@ -242,8 +296,9 @@ export async function setChannelEnabledLocal(channelType: string, enabled: boole
     }
     const section = config.channels[channelType];
     section.enabled = enabled;
-    if (isRecord(section.accounts)) {
-      for (const account of Object.values(section.accounts)) {
+    const accounts = getChannelAccountsMap(section);
+    if (accounts) {
+      for (const account of Object.values(accounts)) {
         if (!isRecord(account)) {
           continue;
         }
@@ -263,7 +318,7 @@ export async function getChannelFormValuesLocal(channelType: string, accountId?:
   const config = readOpenClawConfigJson();
   const channels = isRecord(config.channels) ? config.channels : {};
   const section = isRecord(channels[channelType]) ? channels[channelType] : {};
-  const selected = getChannelAccountConfigLocal(section, accountId || DEFAULT_ACCOUNT_ID);
+  const selected = getChannelAccountConfigLocal(channelType, section, accountId || DEFAULT_ACCOUNT_ID);
   const values: Record<string, string> = {};
   for (const [key, value] of Object.entries(selected)) {
     if (key === 'enabled' || key === 'updatedAt') {

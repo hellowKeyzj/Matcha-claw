@@ -13,6 +13,9 @@
         "gatewayDisconnectedPlaceholder": "Gateway not connected...",
         "messagePlaceholder": "Message (Type / to see skills, Enter to send, Shift+Enter for new line)",
         "approvalWaitingPlaceholder": "Waiting for approval...",
+        "pickModel": "Choose model",
+        "modelPickerTitle": "Switch model for this chat",
+        "modelSwitchFailed": "Failed to switch model: {{error}}",
         "skillActive": "{{count}} skill active",
         "skillsActive": "{{count}} skills active",
         "attachmentReady": "{{count}} attachment ready",
@@ -82,6 +85,10 @@
         "loading": "Loading skills...",
         "empty": "No available skills."
     },
+    "skillPreviewTooltip": "Preview SKILL.md",
+    "skillPreviewTitle": "SKILL.md Preview",
+    "skillPreviewLoading": "Loading skill preview...",
+    "skillPreviewNotFound": "Could not find this skill. Open the skill list to refresh it.",
     "approval": {
         "panelTitle": "Approval required",
         "waitingLabel": "Waiting for approval...",

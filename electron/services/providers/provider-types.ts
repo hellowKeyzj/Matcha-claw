@@ -5,7 +5,9 @@ export const BUILTIN_PROVIDER_TYPES = [
   'openrouter',
   'ark',
   'moonshot',
+  'moonshot-global',
   'siliconflow',
+  'deepseek',
   'minimax-portal',
   'minimax-portal-cn',
   'qwen-portal',
@@ -48,4 +50,3 @@ export type ProviderSecret =
       accountId: string;
       apiKey?: string;
     };
-

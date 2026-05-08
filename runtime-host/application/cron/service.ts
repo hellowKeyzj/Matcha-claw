@@ -124,6 +124,14 @@ function normalizeCronDeliveryPatch(rawPatch: unknown): Record<string, unknown> 
   return patch;
 }
 
+function normalizeCronAgentId(value: unknown): string {
+  if (typeof value !== 'string') {
+    return 'main';
+  }
+  const normalized = value.trim();
+  return normalized || 'main';
+}
+
 function asCronCreateInput(value: unknown) {
   if (!isRecord(value)) return null;
   if (typeof value.name !== 'string' || typeof value.message !== 'string' || typeof value.schedule !== 'string') {
@@ -131,6 +139,7 @@ function asCronCreateInput(value: unknown) {
   }
   return {
     name: value.name,
+    agentId: normalizeCronAgentId(value.agentId),
     message: value.message,
     schedule: value.schedule,
     delivery: normalizeCronDelivery(value.delivery),
@@ -143,6 +152,7 @@ function normalizeCronJob(job: Record<string, any>) {
   const delivery = normalizeCronDelivery(job.delivery);
   const state = isRecord(job.state) ? job.state : {};
   const schedule = isRecord(job.schedule) ? job.schedule : {};
+  const agentId = normalizeCronAgentId(job.agentId);
   const message = payload.message || payload.text || '';
   const channelType = delivery.channel;
   const target = channelType
@@ -166,6 +176,7 @@ function normalizeCronJob(job: Record<string, any>) {
   return {
     id: job.id,
     name: job.name,
+    agentId,
     message,
     schedule,
     delivery,
@@ -358,6 +369,7 @@ export class CronService {
     }
     const created = await this.deps.openclawBridge.addCronJob({
       name: input.name,
+      agentId: input.agentId,
       schedule: { kind: 'cron', expr: input.schedule },
       payload: { kind: 'agentTurn', message: input.message },
       enabled: input.enabled ?? true,
@@ -386,6 +398,9 @@ export class CronService {
     if (typeof patch.message === 'string') {
       patch.payload = { kind: 'agentTurn', message: patch.message };
       delete patch.message;
+    }
+    if ('agentId' in patch) {
+      patch.agentId = normalizeCronAgentId(patch.agentId);
     }
     if ('delivery' in patch) {
       patch.delivery = normalizeCronDeliveryPatch(patch.delivery);

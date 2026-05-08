@@ -4,6 +4,7 @@
  * Communicates with OpenClaw Gateway via renderer WebSocket RPC.
  */
 import { create } from 'zustand';
+import type { GatewayStatus } from '@/types/gateway';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
 import { useGatewayStore } from '../gateway';
 import { executeStoreAbortRun } from './abort-handlers';
@@ -50,7 +51,7 @@ function isStaleApprovalResolveError(message: string): boolean {
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
-  const { beginMutating, finishMutating, historyRuntime } = runtimeKernel;
+  const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
   const sessionInput = {
     set,
     get,
@@ -96,6 +97,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         get,
         historyRuntime,
         loadingTimeoutMs: CHAT_HISTORY_LOADING_TIMEOUT_MS,
+        getGatewayStatus: (): GatewayStatus => useGatewayStore.getState().status,
       }, {
         ...request,
         sessionKey: normalizedSessionKey,
@@ -109,6 +111,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     sendMessage: (text, attachments) => executeStoreSend({
       set,
       get,
+      sessionRunCache,
       beginMutating,
       finishMutating,
       text,
@@ -118,6 +121,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       await executeStoreAbortRun({
         set,
         get,
+        sessionRunCache,
         onBeginMutating: beginMutating,
         onFinishMutating: finishMutating,
         onAbortedTelemetry: (sessionKey) => {
@@ -231,7 +235,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       return true;
     },
     handleSessionUpdateEvent: (event) => {
-      handleStoreSessionUpdateEvent({ set, get }, event);
+      handleStoreSessionUpdateEvent({ set, get, sessionRunCache }, event);
     },
     toggleThinking: () => set((state) => ({ showThinking: !state.showThinking })),
     refresh: async () => {

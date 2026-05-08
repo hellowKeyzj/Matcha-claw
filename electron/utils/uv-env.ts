@@ -1,11 +1,51 @@
 import { app } from 'electron';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { request } from 'https';
+import path from 'path';
 import { logger } from './logger';
+import { getOpenClawConfigDir } from './paths';
+
+const UV_PYTHON_INSTALL_MIRROR_URL = 'https://registry.npmmirror.com/-/binary/python-build-standalone/';
+const UV_INDEX_URL = 'https://pypi.tuna.tsinghua.edu.cn/simple/';
 
 const UV_MIRROR_ENV: Record<string, string> = {
-  UV_PYTHON_INSTALL_MIRROR: 'https://registry.npmmirror.com/-/binary/python-build-standalone/',
-  UV_INDEX_URL: 'https://pypi.tuna.tsinghua.edu.cn/simple/',
+  UV_PYTHON_INSTALL_MIRROR: UV_PYTHON_INSTALL_MIRROR_URL,
+  UV_INDEX_URL,
 };
+
+function quoteTomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildClawXUvConfigToml(): string {
+  return [
+    '# This file is managed by MatchaClaw.',
+    '# It keeps uv mirror settings available even when child process env filtering drops UV_INDEX_URL.',
+    `index-url = ${quoteTomlString(UV_INDEX_URL)}`,
+    `python-install-mirror = ${quoteTomlString(UV_PYTHON_INSTALL_MIRROR_URL)}`,
+    '',
+  ].join('\n');
+}
+
+export function getClawXUvConfigFilePath(): string {
+  return path.join(getOpenClawConfigDir(), 'clawx', 'uv.toml');
+}
+
+function ensureClawXUvConfigFile(): string | null {
+  const filePath = getClawXUvConfigFilePath();
+  const nextContent = buildClawXUvConfigToml();
+
+  try {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    if (!existsSync(filePath) || readFileSync(filePath, 'utf8') !== nextContent) {
+      writeFileSync(filePath, nextContent, { encoding: 'utf8', mode: 0o644 });
+    }
+    return filePath;
+  } catch (error) {
+    logger.warn('Failed to write MatchaClaw uv mirror config file:', error);
+    return null;
+  }
+}
 
 const GOOGLE_204_HOST = 'www.google.com';
 const GOOGLE_204_PATH = '/generate_204';
@@ -108,7 +148,14 @@ export async function shouldOptimizeNetwork(): Promise<boolean> {
 
 export async function getUvMirrorEnv(): Promise<Record<string, string>> {
   const isOptimized = await shouldOptimizeNetwork();
-  return isOptimized ? { ...UV_MIRROR_ENV } : {};
+  if (!isOptimized) {
+    return {};
+  }
+
+  const uvConfigFile = ensureClawXUvConfigFile();
+  return uvConfigFile
+    ? { ...UV_MIRROR_ENV, UV_CONFIG_FILE: uvConfigFile }
+    : { ...UV_MIRROR_ENV };
 }
 
 export async function warmupNetworkOptimization(): Promise<void> {

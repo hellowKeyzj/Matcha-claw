@@ -26,6 +26,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/skills/import-local',
   '/api/diagnostics/collect',
   '/api/diagnostics/memory',
+  '/api/diagnostics/gateway-snapshot',
   '/api/logs',
   '/api/logs/dir',
   '/api/logs/files',

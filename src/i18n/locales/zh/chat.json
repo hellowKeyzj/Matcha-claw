@@ -13,6 +13,9 @@
         "gatewayDisconnectedPlaceholder": "网关未连接...",
         "messagePlaceholder": "消息（输入 / 选skill，Enter 发送，Shift+Enter 换行）",
         "approvalWaitingPlaceholder": "等待审批中...",
+        "pickModel": "选择模型",
+        "modelPickerTitle": "切换当前 Agent 模型",
+        "modelSwitchFailed": "模型切换失败：{{error}}",
         "skillActive": "已启用 {{count}} 个技能",
         "skillsActive": "已启用 {{count}} 个技能",
         "attachmentReady": "已添加 {{count}} 个附件",
@@ -82,6 +85,10 @@
         "loading": "技能加载中...",
         "empty": "暂无可用技能。"
     },
+    "skillPreviewTooltip": "预览 SKILL.md",
+    "skillPreviewTitle": "SKILL.md 预览",
+    "skillPreviewLoading": "正在加载技能预览...",
+    "skillPreviewNotFound": "找不到该技能。请打开技能列表刷新后重试。",
     "approval": {
         "panelTitle": "审批待处理",
         "waitingLabel": "等待审批中...",

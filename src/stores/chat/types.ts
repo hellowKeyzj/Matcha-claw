@@ -4,13 +4,15 @@ import type { SessionRenderAttachedFile, SessionRenderItem } from '../../../runt
 import type { SessionCatalogKind, SessionCatalogTitleSource } from '../../../runtime-host/shared/session-adapter-types';
 import type { GatewayTransportIssue } from '../../../runtime-host/shared/gateway-error';
 
-/** Metadata for locally-attached files (not from Gateway) */
+/** Metadata for chat attachments backed by a local file or Gateway media record. */
 export interface AttachedFileMeta {
   fileName: string;
   mimeType: string;
   fileSize: number;
   preview: string | null;
   filePath?: string;
+  gatewayUrl?: string;
+  source?: 'user-upload' | 'tool-result' | 'message-ref';
 }
 
 export type ChatAttachedFile = SessionRenderAttachedFile;
@@ -24,6 +26,8 @@ export interface ContentBlock {
   /** Flat image format from Gateway tool results (no source wrapper) */
   data?: string;
   mimeType?: string;
+  url?: string;
+  alt?: string;
   id?: string;
   name?: string;
   input?: unknown;

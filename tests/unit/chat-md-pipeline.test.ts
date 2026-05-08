@@ -48,13 +48,30 @@ describe('chat markdown pipeline cache', () => {
   it('assistant markdown cache 命中时，peek 不应再做 markdown 预处理与重算', () => {
     const entry: SessionTimelineEntry = {
       entryId: 'assistant-cache-hit',
+      key: 'assistant-cache-hit',
       sessionKey: 'agent:main:test',
       laneKey: 'main',
       turnKey: 'main:assistant-cache-hit',
       role: 'assistant',
+      kind: 'message',
       status: 'final',
-      timestamp: 1_700_000_100,
+      createdAt: 1_700_000_100,
       text: '[TOOLS.md](TOOLS.md)',
+      thinking: null,
+      assistantSegments: [],
+      images: [],
+      toolUses: [],
+      attachedFiles: [{
+        fileName: 'TOOLS.md',
+        mimeType: 'text/markdown',
+        fileSize: 1024,
+        preview: null,
+        filePath: 'C:/workspace/TOOLS.md',
+      }],
+      toolStatuses: [],
+      toolCards: [],
+      isStreaming: false,
+      messageId: 'assistant-cache-hit',
       message: {
         id: 'assistant-cache-hit',
         role: 'assistant',
@@ -81,5 +98,42 @@ describe('chat markdown pipeline cache', () => {
     expect(
       getUiTelemetrySnapshot().filter((entry) => entry.event === 'chat.md_process_cost'),
     ).toHaveLength(0);
+  });
+});
+
+describe('chat markdown pipeline math rendering', () => {
+  it('renders inline and block LaTeX delimiters with KaTeX', () => {
+    const result = getOrBuildMarkdownBody('math:basic', {
+      markdown: [
+        'Mass-energy: $E=mc^2$',
+        '',
+        '\\(x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}\\)',
+        '',
+        '$$',
+        '\\int_0^1 x\\,dx = \\frac{1}{2}',
+        '$$',
+        '',
+        '\\[\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\\]',
+      ].join('\n'),
+    });
+
+    expect(result.fullHtml).toContain('class="katex"');
+    expect(result.fullHtml).toContain('class="katex-display"');
+  });
+
+  it('does not parse LaTeX delimiters inside code fences or inline code', () => {
+    const result = getOrBuildMarkdownBody('math:code', {
+      markdown: [
+        'Inline code: `\\(hello\\)`',
+        '',
+        '```ts',
+        'console.log("\\[still code\\]");',
+        '```',
+      ].join('\n'),
+    });
+
+    expect(result.fullHtml).toContain('\\(hello\\)');
+    expect(result.fullHtml).toContain('\\[still code\\]');
+    expect(result.fullHtml).not.toContain('class="katex"');
   });
 });

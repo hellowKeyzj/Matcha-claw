@@ -5,6 +5,7 @@ const {
   setOpenClawDefaultModelMock,
   setOpenClawDefaultModelWithOverrideMock,
   syncProviderConfigToOpenClawMock,
+  getProviderApiKeyFromOpenClawMock,
   removeProviderKeyFromOpenClawMock,
   saveProviderKeyToOpenClawMock,
 } = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ const {
   setOpenClawDefaultModelMock: vi.fn(),
   setOpenClawDefaultModelWithOverrideMock: vi.fn(),
   syncProviderConfigToOpenClawMock: vi.fn(),
+  getProviderApiKeyFromOpenClawMock: vi.fn(),
   removeProviderKeyFromOpenClawMock: vi.fn(),
   saveProviderKeyToOpenClawMock: vi.fn(),
 }));
@@ -24,6 +26,7 @@ vi.mock('../../runtime-host/application/openclaw/openclaw-provider-config-servic
 }));
 
 vi.mock('../../runtime-host/application/openclaw/openclaw-auth-profile-store', () => ({
+  getProviderApiKeyFromOpenClaw: getProviderApiKeyFromOpenClawMock,
   removeProviderKeyFromOpenClaw: removeProviderKeyFromOpenClawMock,
   saveProviderKeyToOpenClaw: saveProviderKeyToOpenClawMock,
 }));
@@ -70,8 +73,10 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     setOpenClawDefaultModelMock.mockReset();
     setOpenClawDefaultModelWithOverrideMock.mockReset();
     syncProviderConfigToOpenClawMock.mockReset();
+    getProviderApiKeyFromOpenClawMock.mockReset();
     removeProviderKeyFromOpenClawMock.mockReset();
     saveProviderKeyToOpenClawMock.mockReset();
+    getProviderApiKeyFromOpenClawMock.mockResolvedValue(null);
   });
 
   it('直接返回 provider-store 的账号列表，并保持 default 排序优先', async () => {
@@ -164,6 +169,50 @@ describe('ProviderAccountsService list（provider-store 单一显示源）', () 
     expect(store.apiKeys['minimax-portal']).toBeUndefined();
     expect(store.defaultAccountId).toBe('minimax-portal-cn-uuid');
     expect(writeProviderStore).toHaveBeenCalledTimes(1);
+  });
+
+  it('列表状态优先使用 OpenClaw auth-profiles 中的 runtime key', async () => {
+    const store = {
+      defaultAccountId: 'custom-12345678',
+      accounts: {
+        'custom-12345678': {
+          id: 'custom-12345678',
+          vendorId: 'custom',
+          updatedAt: '2026-04-08T00:00:00.000Z',
+        },
+      },
+      apiKeys: {},
+    };
+    getProviderApiKeyFromOpenClawMock.mockResolvedValueOnce('sk-openclaw');
+
+    const { service } = createServiceWithStore(store);
+    const result = await service.list();
+
+    expect(getProviderApiKeyFromOpenClawMock).toHaveBeenCalledWith('custom-12345678');
+    expect(result.statuses).toEqual([
+      expect.objectContaining({ id: 'custom-12345678', hasKey: true }),
+    ]);
+  });
+
+  it('hasApiKey 在本地 store 无 key 时仍应识别 OpenClaw runtime key', async () => {
+    const store = {
+      defaultAccountId: 'custom-12345678',
+      accounts: {
+        'custom-12345678': {
+          id: 'custom-12345678',
+          vendorId: 'custom',
+          updatedAt: '2026-04-08T00:00:00.000Z',
+        },
+      },
+      apiKeys: {},
+    };
+    getProviderApiKeyFromOpenClawMock.mockResolvedValueOnce('sk-openclaw');
+
+    const { service } = createServiceWithStore(store);
+    const result = await service.hasApiKey('custom-12345678');
+
+    expect(getProviderApiKeyFromOpenClawMock).toHaveBeenCalledWith('custom-12345678');
+    expect(result).toEqual({ hasKey: true });
   });
 });
 
@@ -331,7 +380,7 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
         'moonshot-main': {
           id: 'moonshot-main',
           vendorId: 'moonshot',
-          model: 'kimi-k2.5',
+          model: 'kimi-k2.6',
           updatedAt: '2026-04-10T00:00:00.000Z',
         },
       },
@@ -347,7 +396,34 @@ describe('ProviderAccountsService create/setDefault（写入后立即同步 open
     expect(result.status).toBe(200);
     expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
       'moonshot',
-      'kimi-k2.5',
+      'kimi-k2.6',
+      [],
+    );
+  });
+
+  it('切换到 Moonshot Global 默认账号后，会同步全局 provider key 而不是 CN key', async () => {
+    const store = {
+      defaultAccountId: 'moonshot-global-main',
+      accounts: {
+        'moonshot-global-main': {
+          id: 'moonshot-global-main',
+          vendorId: 'moonshot-global',
+          model: 'kimi-k2.6',
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        },
+      },
+      apiKeys: {
+        'moonshot-global-main': 'sk-moonshot-global',
+      },
+    };
+    const { service } = createServiceWithStore(store);
+
+    const result = await service.setDefault({ accountId: 'moonshot-global-main' });
+
+    expect(result.status).toBe(200);
+    expect(setOpenClawDefaultModelMock).toHaveBeenCalledWith(
+      'moonshot-global',
+      'kimi-k2.6',
       [],
     );
   });

@@ -1,96 +1,80 @@
 import { describe, expect, it } from 'vitest';
-import { hydrateAttachedFilesFromTimelineEntries } from '@/stores/chat/attachment-helpers';
-import type { SessionTimelineEntry } from '../../runtime-host/shared/session-adapter-types';
-
-function buildEntry(input: Partial<SessionTimelineEntry>): SessionTimelineEntry {
-  const role = input.role ?? 'assistant';
-  const entryId = input.entryId ?? 'entry-1';
-  return {
-    entryId,
-    sessionKey: 'agent:test:main',
-    laneKey: 'main',
-    turnKey: `main:${entryId}`,
-    role,
-    status: 'final',
-    text: '',
-    message: {
-      role,
-      content: '',
-      ...input.message,
-    },
-    ...input,
-  };
-}
+import { hydrateAttachedFilesFromItems } from '@/stores/chat/attachment-helpers';
+import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 describe('chat attachment helpers', () => {
   it('does not synthesize assistant attachments from raw absolute paths in assistant text', () => {
-    const entries = [buildEntry({
-      entryId: 'assistant-1',
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'assistant',
-      message: {
-        role: 'assistant',
-        content: ['path', 'E:\\code\\Matcha-claw\\browser.md'].join('\n'),
-      },
-    })];
+      content: ['path', 'E:\\code\\Matcha-claw\\browser.md'].join('\n'),
+      id: 'assistant-1',
+    }]);
 
-    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
+    const hydrated = hydrateAttachedFilesFromItems(items);
+    const assistant = hydrated[0];
 
-    expect(hydrated[0]?.message._attachedFiles).toBeUndefined();
+    expect(assistant).toMatchObject({
+      kind: 'assistant-turn',
+      attachedFiles: [],
+    });
   });
 
-  it('keeps explicit authoritative attached files on user entries', () => {
-    const entries = [buildEntry({
-      entryId: 'user-1',
+  it('keeps explicit authoritative attached files on user items and tags media refs as message-ref', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
       role: 'user',
-      message: {
-        role: 'user',
-        content: '[media attached: E:\\code\\Matcha-claw\\browser.md (text/markdown) | browser.md]',
-        _attachedFiles: [{
-          fileName: 'browser.md',
-          mimeType: 'text/markdown',
-          fileSize: 0,
-          preview: null,
-          filePath: 'E:\\code\\Matcha-claw\\browser.md',
-        }],
-      },
-    })];
+      content: '[media attached: E:\\code\\Matcha-claw\\browser.md (text/markdown) | browser.md]',
+      id: 'user-1',
+      _attachedFiles: [{
+        fileName: 'browser.md',
+        mimeType: 'text/markdown',
+        fileSize: 0,
+        preview: null,
+        filePath: 'E:\\code\\Matcha-claw\\browser.md',
+        source: 'message-ref',
+      }],
+    }]) as SessionRenderItem[];
 
-    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
+    const hydrated = hydrateAttachedFilesFromItems(items);
+    const userItem = hydrated[0];
 
-    expect(hydrated[0]?.message._attachedFiles).toEqual([{
-      fileName: 'browser.md',
-      mimeType: 'text/markdown',
-      fileSize: 0,
-      preview: null,
-      filePath: 'E:\\code\\Matcha-claw\\browser.md',
-    }]);
+    expect(userItem).toMatchObject({
+      kind: 'user-message',
+      attachedFiles: [{
+        fileName: 'browser.md',
+        mimeType: 'text/markdown',
+        fileSize: 0,
+        preview: null,
+        filePath: 'E:\\code\\Matcha-claw\\browser.md',
+        source: 'message-ref',
+      }],
+    });
   });
 
-  it('keeps structured tool-result images as assistant timeline attachments', () => {
-    const entries = [
-      buildEntry({
-        entryId: 'toolresult-1',
-        role: 'toolresult',
-        message: {
-          role: 'toolresult',
-          toolCallId: 'tool-call-1',
-          content: [{ type: 'image', mimeType: 'image/png', data: 'abc' }],
-        },
-      }),
-      buildEntry({
-        entryId: 'assistant-1',
-        role: 'assistant',
-        message: { role: 'assistant', content: '结果如下。' },
-      }),
-    ];
-
-    const hydrated = hydrateAttachedFilesFromTimelineEntries(entries);
-
-    expect(hydrated[1]?.message._attachedFiles).toEqual([{
-      fileName: 'image',
-      mimeType: 'image/png',
-      fileSize: 0,
-      preview: 'data:image/png;base64,abc',
+  it('preserves tool-result attachment source on assistant items', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', [{
+      role: 'assistant',
+      id: 'assistant-1',
+      content: '结果如下。',
+      _attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: 'data:image/png;base64,abc',
+        filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+        source: 'tool-result',
+      }],
     }]);
+
+    const hydrated = hydrateAttachedFilesFromItems(items);
+    const assistant = hydrated[0];
+
+    expect(assistant).toMatchObject({
+      kind: 'assistant-turn',
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        source: 'tool-result',
+      }],
+    });
   });
 });

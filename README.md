@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a>
+  English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a> | <a href="README.ru-RU.md">Русский</a>
 </p>
 
 ---
@@ -100,7 +100,7 @@ We are committed to maintaining strict alignment with the upstream OpenClaw proj
 Complete the entire setup—from installation to your first AI interaction—through an intuitive graphical interface. No terminal commands, no YAML files, no environment variable hunting.
 
 ### 💬 Intelligent Chat Interface
-Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, and rich content rendering with Markdown. The live thread keeps the latest 30 messages responsive, while full transcripts remain available in history mode.
+Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, and rich content rendering with Markdown, including GitHub-style tables and KaTeX-powered LaTeX math via `$inline$`, `$$block$$`, `\\(inline\\)`, and `\\[block\\]`. The live thread keeps the latest 30 messages responsive, while full transcripts remain available in history mode.
 
 ### 🧠 Subagent Workspace
 Create and manage specialized subagents in a visual workspace. Built-in draft generation, line-level diff preview, and controlled apply flow help you evolve `AGENTS.md` / `SOUL.md` / `TOOLS.md` / `IDENTITY.md` / `USER.md` safely.
@@ -118,10 +118,9 @@ WeChat (`openclaw-weixin`) cron proactive delivery is supported with constraints
 
 ### 🧩 Extensible Skill System
 Extend your AI agents with pre-built skills. Browse, install, upload local skill folders/ZIPs/Markdown files, and manage skills through the integrated skill panel—no package managers required.
-ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `brave-web-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
+ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to `~/.openclaw/skills` on startup, and enables them by default on first install. Additional bundled skills (`find-skills`, `tavily-search`, `multi-search-engine`, `web-extract`, `daily-news-briefing`) are also enabled by default; if required API keys are missing, OpenClaw will surface configuration errors in runtime.
 
 Environment variables for bundled search skills:
-- `BRAVE_SEARCH_API_KEY` for `brave-web-search`
 - `TAVILY_API_KEY` for `tavily-search` (OAuth may also be supported by upstream skill runtime)
 - `find-skills` does not require API keys
 
@@ -178,11 +177,11 @@ When you launch MatchaClaw for the first time, the **Setup Wizard** will guide y
 
 1. **License & Language** – Validate your license key and configure your preferred locale
 2. **Environment Check** – Verify local runtime requirements
-3. **AI Provider** – Add providers with API keys or OAuth (for providers that support browser/device login)
-4. **Skill Bundles** – Select pre-configured skills for common use cases
-5. **Verification** – Test your configuration before entering the main interface
+3. **Setting Up** – Install the essential runtime components bundled with MatchaClaw
+4. **Finish** – Confirm gateway readiness and enter the main interface
 
 If your system language is supported, the wizard will preselect it by default; otherwise it falls back to English.
+AI providers are configured after setup in **Settings → Models / Providers**, so first launch no longer blocks on provider credentials.
 
 > Note for Moonshot (Kimi): MatchaClaw keeps Kimi web search enabled by default.  
 > When Moonshot is configured, MatchaClaw also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.

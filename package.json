@@ -1,6 +1,6 @@
 {
   "name": "clawx",
-  "version": "1.0.0",
+  "version": "0.4.1",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@discordjs/opus",
@@ -35,8 +35,8 @@
   "scripts": {
     "init": "pnpm install && pnpm run uv:download",
     "dev": "pnpm run build:runtime-host-process && vite",
-    "build": "pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
-    "build:vite": "vite build",
+    "build": "pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
+    "build:vite": "node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build",
     "build:runtime-host-process": "node scripts/build-runtime-host-process.mjs",
     "build:openclaw-local-plugins": "node scripts/build-local-openclaw-plugins.mjs",
     "bundle:openclaw-plugins": "zx scripts/bundle-openclaw-plugins.mjs",
@@ -62,19 +62,19 @@
     "node:download:win": "zx scripts/download-bundled-node.mjs --platform=win",
     "prep:win-binaries": "pnpm run uv:download:win && pnpm run node:download:win",
     "icons": "zx scripts/generate-icons.mjs",
-    "package": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
-    "package:mac": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
-    "package:mac:local": "SKIP_PREINSTALLED_SKILLS=1 pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
-    "package:win": "pnpm run check:openclaw-plugin-inputs && pnpm run prep:win-binaries && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --win",
-    "package:linux": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --linux",
-    "release": "pnpm run uv:download && pnpm run build:runtime-host-process && vite build && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --publish always",
+    "package": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder",
+    "package:mac": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
+    "package:mac:local": "SKIP_PREINSTALLED_SKILLS=1 pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --mac",
+    "package:win": "pnpm run check:openclaw-plugin-inputs && pnpm run prep:win-binaries && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --win",
+    "package:linux": "pnpm run check:openclaw-plugin-inputs && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --linux",
+    "release": "pnpm run uv:download && pnpm run build:runtime-host-process && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && electron-builder --publish always",
     "version:patch": "pnpm version patch",
     "version:minor": "pnpm version minor",
     "version:major": "pnpm version major",
     "postversion": "git push && git push --tags"
   },
   "dependencies": {
-    "@buape/carbon": "0.0.0-beta-20260327000044",
+    "@buape/carbon": "0.16.0",
     "@dicebear/collection": "^9.4.2",
     "@dicebear/core": "^9.4.2",
     "@matchaclaw/plugins-sdk": "workspace:*",
@@ -84,14 +84,16 @@
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
     "grammy": "^1.42.0",
+    "katex": "^0.16.45",
     "ms": "^2.1.3",
     "qrcode": "1.5.4",
+    "tar": "^6.2.1",
     "ws": "^8.19.0"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock": "3.1020.0",
     "@eslint/js": "^10.0.1",
-    "@larksuite/openclaw-lark": "2026.3.29",
+    "@larksuite/openclaw-lark": "2026.4.8",
     "@playwright/test": "^1.58.2",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
@@ -107,9 +109,9 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@sinclair/typebox": "^0.34.48",
     "@slack/web-api": "^7.15.0",
-    "@soimy/dingtalk": "3.5.1",
+    "@soimy/dingtalk": "^3.5.3",
     "@tencent-connect/openclaw-qqbot": "1.6.6",
-    "@tencent-weixin/openclaw-weixin": "2.1.1",
+    "@tencent-weixin/openclaw-weixin": "^2.1.9",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/markdown-it": "^14.1.2",
@@ -120,7 +122,7 @@
     "@typescript-eslint/eslint-plugin": "^8.56.0",
     "@typescript-eslint/parser": "^8.56.0",
     "@vitejs/plugin-react": "^5.1.4",
-    "@wecom/wecom-openclaw-plugin": "2026.3.26",
+    "@wecom/wecom-openclaw-plugin": "^2026.4.23",
     "autoprefixer": "^10.4.24",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -136,7 +138,7 @@
     "lucide-react": "^0.563.0",
     "markdown-it": "^14.1.1",
     "memory-lancedb-pro": "workspace:*",
-    "openclaw": "2026.4.1",
+    "openclaw": "2026.4.23",
     "png2icons": "^2.0.1",
     "postcss": "^8.5.6",
     "react": "^19.2.4",
@@ -156,5 +158,5 @@
     "zustand": "^5.0.11",
     "zx": "^8.8.5"
   },
-  "packageManager": "pnpm@10.29.2+sha512.bef43fa759d91fd2da4b319a5a0d13ef7a45bb985a3d7342058470f9d2051a3ba8674e629672654686ef9443ad13a82da2beb9eeb3e0221c87b8154fff9d74b8"
+  "packageManager": "pnpm@10.31.0+sha512.e3927388bfaa8078ceb79b748ffc1e8274e84d75163e67bc22e06c0d3aed43dd153151cbf11d7f8301ff4acb98c68bdc5cadf6989532801ffafe3b3e4a63c268"
 }

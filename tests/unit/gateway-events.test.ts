@@ -6,10 +6,12 @@ import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 
 const hostApiFetchMock = vi.fn();
+const hostSessionAbortRuntimeMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostSessionAbortRuntime: (...args: unknown[]) => hostSessionAbortRuntimeMock(...args),
 }));
 
 vi.mock('@/lib/host-events', () => ({
@@ -271,6 +273,7 @@ describe('gateway store event wiring', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    hostSessionAbortRuntimeMock.mockReset();
   });
 
   it('subscribes to host events through subscribeHostEvent on init', async () => {
@@ -554,6 +557,65 @@ describe('gateway store event wiring', () => {
     expect(state.loadedSessions['agent:main:main']?.runtime.pendingFinal).toBe(false);
     expect(state.loadedSessions['agent:main:main']?.runtime.activeRunId).toBeNull();
     expect(state.loadedSessions['agent:main:main']?.runtime.lastError).toBeNull();
+  });
+
+  it('abortRun 之后旧 run 的 session:update 不应重新激活当前会话 runtime', async () => {
+    hostApiFetchMock.mockResolvedValueOnce(createRunningGatewayStatus());
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessionCatalogStatus: {
+        status: 'ready',
+        error: null,
+        hasLoadedOnce: true,
+        lastLoadedAt: 1,
+      },
+      loadedSessions: {
+        'agent:main:main': createSessionRecord({
+          runtime: {
+            sending: true,
+            activeRunId: 'run-abort-1',
+            pendingFinal: true,
+          },
+        }),
+      },
+      pendingApprovalsBySession: {},
+    } as never);
+
+    hostSessionAbortRuntimeMock.mockResolvedValue({
+      snapshot: createSessionInfoUpdate({
+        phase: 'aborted',
+        runId: 'run-abort-1',
+        sessionKey: 'agent:main:main',
+      }).snapshot,
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+    useGatewayStore.setState({
+      rpc: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await useChatStore.getState().abortRun();
+
+    handlers.get('session:update')?.(createSessionInfoUpdate({
+      phase: 'started',
+      runId: 'run-abort-1',
+      sessionKey: 'agent:main:main',
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const state = useChatStore.getState();
+    expect(state.loadedSessions['agent:main:main']?.runtime.runPhase).toBe('aborted');
+    expect(state.loadedSessions['agent:main:main']?.runtime.sending).toBe(false);
+    expect(state.loadedSessions['agent:main:main']?.runtime.activeRunId).toBeNull();
   });
 
   it('run.phase error 事件应写入当前 session runtime.lastError', async () => {

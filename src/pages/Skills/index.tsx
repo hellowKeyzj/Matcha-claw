@@ -37,7 +37,6 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
-import { isGatewayOperational } from '@/lib/gateway-status';
 import { hostOpenClawGetSkillsDir } from '@/lib/host-api';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
@@ -48,12 +47,45 @@ import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { toast } from 'sonner';
 import type { Skill, MarketplaceSkill, SkillMissingRequirements } from '@/types/skill';
+import type { GatewayStatus } from '@/types/gateway';
 import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'blocked' | 'missing' | 'disabled' | 'unknown';
 const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
 const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'line-clamp-2 text-sm leading-6 text-muted-foreground';
+const INSTALL_ERROR_CODES = new Set(['installTimeoutError', 'installRateLimitError']);
+const FETCH_ERROR_CODES = new Set(['fetchTimeoutError', 'fetchRateLimitError', 'timeoutError', 'rateLimitError']);
+const SEARCH_ERROR_CODES = new Set(['searchTimeoutError', 'searchRateLimitError', 'timeoutError', 'rateLimitError']);
+type SkillsGatewayBannerState = 'none' | 'starting' | 'stopped';
+
+function isSkillsGatewayReady(status: GatewayStatus, skillsFeatureReady: boolean): boolean {
+  return status.processState === 'running' && (status.gatewayReady === true || skillsFeatureReady);
+}
+
+function getSkillsGatewayBannerState(
+  status: GatewayStatus,
+  skillsFeatureReady: boolean,
+): SkillsGatewayBannerState {
+  if (
+    status.processState === 'starting'
+    || status.processState === 'control_connecting'
+    || status.processState === 'reconnecting'
+  ) {
+    return 'starting';
+  }
+  if (status.processState === 'running' && !isSkillsGatewayReady(status, skillsFeatureReady)) {
+    return 'starting';
+  }
+  if (status.processState === 'stopped' || status.processState === 'error') {
+    return 'stopped';
+  }
+  return 'none';
+}
+
+function normalizeSkillErrorCode(error: string): string {
+  return error.replace(/^Error:\s*/, '');
+}
 
 function buildMarketplaceSkillUrl(slug: string) {
   return `${CLAWHUB_MARKETPLACE_PRIMARY_URL}/s/${slug}`;
@@ -1004,35 +1036,75 @@ export function Skills() {
   );
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
-  const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const [showGatewayWarning, setShowGatewayWarning] = useState(false);
+  const gatewayProcessRunning = gatewayStatus.processState === 'running';
+  const gatewayReportedReady = gatewayStatus.gatewayReady === true;
+  const gatewayRuntimeKey = `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`;
+  const [skillsFeatureReady, setSkillsFeatureReady] = useState(
+    () => gatewayProcessRunning && gatewayReportedReady,
+  );
+  const gatewayBannerState = getSkillsGatewayBannerState(gatewayStatus, skillsFeatureReady);
+  const [showGatewayBanner, setShowGatewayBanner] = useState(false);
 
-  // Debounce the gateway warning to avoid flickering during brief restarts (like skill toggles)
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (!isGatewayRunning) {
-      // Wait 1.5s before showing the warning
+    if (gatewayBannerState === 'none') {
       timer = setTimeout(() => {
-        setShowGatewayWarning(true);
-      }, 1500);
+        setShowGatewayBanner(false);
+      }, 0);
     } else {
-      setShowGatewayWarning((prev) => (prev ? false : prev));
+      timer = setTimeout(() => {
+        setShowGatewayBanner(true);
+      }, 1500);
     }
     return () => {
       if (timer !== undefined) {
         clearTimeout(timer);
       }
     };
-  }, [isGatewayRunning]);
+  }, [gatewayBannerState]);
 
-  // Fetch skills on mount.
-  // 技能数据通常在 App 启动预热/其他页面交互后已存在，切页进入技能页时
-  // 仅在本地快照未就绪时自动拉取，避免重复触发 skills.status 带来日志噪音。
   useEffect(() => {
-    if (isGatewayRunning && !snapshotReady) {
-      void fetchSkills({ silent: true });
+    if (!gatewayProcessRunning) {
+      setSkillsFeatureReady(false);
+      return;
     }
-  }, [fetchSkills, isGatewayRunning, snapshotReady]);
+
+    setSkillsFeatureReady(gatewayReportedReady);
+
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setInterval> | null = null;
+
+    const attemptFetch = async (force: boolean) => {
+      await fetchSkills({ force, silent: true });
+      if (cancelled) {
+        return;
+      }
+      if (!useSkillsStore.getState().error) {
+        setSkillsFeatureReady(true);
+        if (retryTimer) {
+          clearInterval(retryTimer);
+          retryTimer = null;
+        }
+      }
+    };
+
+    if (!snapshotReady || !gatewayReportedReady) {
+      void attemptFetch(!snapshotReady || !skillsFeatureReady);
+    }
+
+    if (!gatewayReportedReady) {
+      retryTimer = setInterval(() => {
+        void attemptFetch(true);
+      }, 5000);
+    }
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) {
+        clearInterval(retryTimer);
+      }
+    };
+  }, [fetchSkills, gatewayProcessRunning, gatewayReportedReady, gatewayRuntimeKey, skillsFeatureReady, snapshotReady]);
 
   useEffect(() => {
     if (skillsHeavyContentReady) {
@@ -1369,11 +1441,11 @@ export function Skills() {
       await enableSkill(slug);
       toast.success(t('toast.installed'));
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      if (['installTimeoutError', 'installRateLimitError'].includes(errorMessage)) {
-        toast.error(t(`toast.${errorMessage}`, { path: skillsDirPath }), { duration: 10000 });
+      const errorCode = normalizeSkillErrorCode(err instanceof Error ? err.message : String(err));
+      if (INSTALL_ERROR_CODES.has(errorCode)) {
+        toast.error(t(`toast.${errorCode}`, { path: skillsDirPath }), { duration: 10000 });
       } else {
-        toast.error(t('toast.failedInstall') + ': ' + errorMessage);
+        toast.error(t('toast.failedInstall') + ': ' + errorCode);
       }
     }
   }, [installSkill, enableSkill, t, skillsDirPath]);
@@ -1432,7 +1504,7 @@ export function Skills() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!isGatewayRunning || manualRefreshBusy}>
+          <Button variant="outline" onClick={() => { void fetchSkills({ force: true }); }} disabled={!gatewayProcessRunning || manualRefreshBusy}>
             <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
             {t('refresh')}
           </Button>
@@ -1445,13 +1517,24 @@ export function Skills() {
         </div>
       </div>
 
-      {/* Gateway Warning */}
-      {showGatewayWarning && (
-        <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10">
+      {/* Gateway Status */}
+      {showGatewayBanner && gatewayBannerState !== 'none' && (
+        <Card className={cn(
+          gatewayBannerState === 'starting'
+            ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/10'
+            : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10',
+        )}>
           <CardContent className="py-4 flex items-center gap-3">
-            <AlertCircle className="h-5 w-5 text-yellow-600" />
-            <span className="text-yellow-700 dark:text-yellow-400">
-              {t('gatewayWarning')}
+            <AlertCircle className={cn(
+              'h-5 w-5',
+              gatewayBannerState === 'starting' ? 'text-blue-600' : 'text-yellow-600',
+            )} />
+            <span className={cn(
+              gatewayBannerState === 'starting'
+                ? 'text-blue-700 dark:text-blue-400'
+                : 'text-yellow-700 dark:text-yellow-400',
+            )}>
+              {gatewayBannerState === 'starting' ? t('gatewayStarting') : t('gatewayWarning')}
             </span>
           </CardContent>
         </Card>
@@ -1544,8 +1627,8 @@ export function Skills() {
               <CardContent className="py-4 text-destructive flex items-center gap-2">
                 <AlertCircle className="h-5 w-5 shrink-0" />
                 <span>
-                  {['fetchTimeoutError', 'fetchRateLimitError', 'timeoutError', 'rateLimitError'].includes(error)
-                    ? t(`toast.${error}`, { path: skillsDirPath })
+                  {FETCH_ERROR_CODES.has(normalizeSkillErrorCode(error))
+                    ? t(`toast.${normalizeSkillErrorCode(error)}`, { path: skillsDirPath })
                     : error}
                 </span>
               </CardContent>
@@ -1653,9 +1736,9 @@ export function Skills() {
                 <CardContent className="py-3 text-sm text-destructive flex items-start gap-2">
                   <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
                   <span>
-                    {['searchTimeoutError', 'searchRateLimitError', 'timeoutError', 'rateLimitError'].includes(searchError.replace('Error: ', ''))
-                      ? t(`toast.${searchError.replace('Error: ', '')}`, { path: skillsDirPath })
-                      : t('marketplace.searchError')}
+                    {SEARCH_ERROR_CODES.has(normalizeSkillErrorCode(searchError))
+                      ? t(`toast.${normalizeSkillErrorCode(searchError)}`, { path: skillsDirPath })
+                      : searchError}
                   </span>
                 </CardContent>
               </Card>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getOrBuildChatMessageView } from '@/pages/Chat/chat-message-view';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
+import type { SessionAssistantTurnItem } from '../../runtime-host/shared/session-adapter-types';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function buildItem(content: unknown): SessionRenderItem {
@@ -22,6 +23,30 @@ function buildItem(content: unknown): SessionRenderItem {
 }
 
 describe('chat message view', () => {
+  function buildAssistantTurnItem(
+    overrides: Partial<SessionAssistantTurnItem>,
+  ): SessionAssistantTurnItem {
+    return {
+      key: 'assistant-turn-1',
+      kind: 'assistant-turn',
+      sessionKey: 'agent:test:main',
+      role: 'assistant',
+      turnKey: 'main:turn:1',
+      laneKey: 'main',
+      identitySource: 'message',
+      identityMode: 'message',
+      identityConfidence: 'strong',
+      status: 'final',
+      segments: [],
+      thinking: null,
+      tools: [],
+      text: '',
+      images: [],
+      attachedFiles: [],
+      ...overrides,
+    };
+  }
+
   it('exposes render fields from the assistant turn item', () => {
     const item = buildItem([
       { type: 'text', text: 'hello' },
@@ -112,5 +137,102 @@ describe('chat message view', () => {
       input: { source: { type: 'handle', id: 'cv-inline' } },
     }]);
     expect(item.embeddedToolResults).toHaveLength(1);
+  });
+
+  it('hides tool-result-only attachments when the same turn already has text content', () => {
+    const item = buildItem([
+      { type: 'text', text: '分析完了，结论如下。' },
+    ]);
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
+
+    item.segments = [{
+      kind: 'message',
+      key: 'message:main:0',
+      text: '分析完了，结论如下。',
+    }, {
+      kind: 'media',
+      key: 'media:main:0',
+      images: [],
+      attachedFiles: [{
+        fileName: 'CHECKLIST.md',
+        mimeType: 'text/markdown',
+        fileSize: 433,
+        preview: null,
+        filePath: 'C:/workspace/CHECKLIST.md',
+        source: 'tool-result',
+      }],
+    }];
+
+    const view = getOrBuildChatMessageView(item);
+    expect(view.attachedFiles).toEqual([]);
+  });
+
+  it('keeps attachment-only assistant replies visible even for tool-result attachments', () => {
+    const item = buildItem([]);
+    if (item.kind !== 'assistant-turn') {
+      throw new Error('expected assistant-turn');
+    }
+
+    item.segments = [{
+      kind: 'media',
+      key: 'media:main:0',
+      images: [],
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: 'data:image/png;base64,abc',
+        filePath: 'C:/workspace/artifact.png',
+        source: 'tool-result',
+      }],
+    }];
+
+    const view = getOrBuildChatMessageView(item);
+    expect(view.attachedFiles).toEqual([
+      expect.objectContaining({
+        fileName: 'artifact.png',
+        source: 'tool-result',
+      }),
+    ]);
+  });
+
+  it('keeps gateway media attachments visible when the assistant turn also has text', () => {
+    const item = buildAssistantTurnItem({
+      segments: [{
+        kind: 'message',
+        key: 'message:main:0',
+        text: '这是生成的图片。',
+      }, {
+        kind: 'media',
+        key: 'media:main:0',
+        images: [],
+        attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: 'data:image/png;base64,abc',
+          gatewayUrl: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
+          source: 'tool-result',
+        }],
+      }],
+      text: '这是生成的图片。',
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        mimeType: 'image/png',
+        fileSize: 0,
+        preview: 'data:image/png;base64,abc',
+        gatewayUrl: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
+        source: 'tool-result',
+      }],
+    });
+
+    expect(getOrBuildChatMessageView(item).attachedFiles).toEqual([
+      expect.objectContaining({
+        fileName: 'artifact.png',
+        gatewayUrl: '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full',
+      }),
+    ]);
   });
 });

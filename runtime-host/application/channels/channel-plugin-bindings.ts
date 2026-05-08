@@ -45,6 +45,7 @@ export const BUILTIN_CHANNEL_IDS = new Set([
 ]);
 
 export const LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS = new Set(['whatsapp']);
+export const STRICT_SCHEMA_CHANNEL_IDS = new Set(['dingtalk']);
 
 const externalChannelPluginIdByType = new Map<string, string>();
 const externalChannelTypeByPluginId = new Map<string, string>();
@@ -74,4 +75,3 @@ export function isChannelDerivedPluginId(pluginId: string): boolean {
     || LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS.has(pluginId)
     || getExternalChannelTypeByPluginId(pluginId) !== undefined;
 }
-

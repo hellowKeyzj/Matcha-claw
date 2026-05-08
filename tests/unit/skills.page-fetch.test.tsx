@@ -61,9 +61,17 @@ const skillsState: {
   searchError: null,
   installing: {},
 };
+const hoisted = vi.hoisted(() => ({
+  useSkillsStoreMock: Object.assign(
+    (selector: (state: typeof skillsState) => unknown) => selector(skillsState),
+    {
+      getState: () => skillsState,
+    },
+  ),
+}));
 
 vi.mock('@/stores/skills', () => ({
-  useSkillsStore: (selector: (state: typeof skillsState) => unknown) => selector(skillsState),
+  useSkillsStore: hoisted.useSkillsStoreMock,
 }));
 
 vi.mock('@/stores/gateway', () => ({
@@ -86,6 +94,7 @@ vi.mock('react-i18next', () => ({
 
 describe('skills page fetch behavior', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     invokeIpcMock.mockClear();
     fetchSkillsMock.mockClear();
     enableSkillMock.mockClear();
@@ -136,6 +145,10 @@ describe('skills page fetch behavior', () => {
     skillsState.searching = false;
     skillsState.searchError = null;
     skillsState.installing = {};
+    gatewayState.status.processState = 'running';
+    gatewayState.status.gatewayReady = true;
+    gatewayState.status.transportState = 'connected';
+    gatewayState.status.healthSummary = 'healthy';
   });
 
   it('skills 已存在时不重复触发 fetchSkills', async () => {
@@ -231,6 +244,24 @@ describe('skills page fetch behavior', () => {
 
     expect(screen.queryByText('marketplace.manualInstallHint')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'marketplace.uploadSkill' })).toBeInTheDocument();
+  });
+
+  it('市场搜索未知错误时展示具体错误信息而不是通用兜底文案', async () => {
+    skillsState.snapshotReady = true;
+    skillsState.searchError = 'custom search failure';
+
+    render(
+      <MemoryRouter>
+        <Skills />
+      </MemoryRouter>,
+    );
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'tabs.marketplace' }));
+
+    await screen.findByPlaceholderText('searchMarketplace');
+
+    expect(screen.getByText('custom search failure')).toBeInTheDocument();
+    expect(screen.queryByText('marketplace.searchError')).not.toBeInTheDocument();
   });
 
   it('市场卡片描述使用与已安装列表一致的两行省略样式', async () => {

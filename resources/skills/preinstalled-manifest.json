@@ -49,14 +49,6 @@
       "autoEnable": true
     },
     {
-      "slug": "brave-web-search",
-      "repo": "brave/brave-search-skills",
-      "repoPath": "skills/web-search",
-      "ref": "main",
-      "version": "main",
-      "autoEnable": true
-    },
-    {
       "slug": "TuanziGuardianClaw",
       "sourceUrl": "https://claw.mytuanzi.com/SKILL.md",
       "version": "2026-03-15",
@@ -88,7 +80,6 @@
     }
   ]
 }
-
 
 
 

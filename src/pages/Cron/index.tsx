@@ -2,10 +2,11 @@
  * Cron Page
  * Manage scheduled tasks
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Plus,
   Clock,
+  Bot,
   Play,
   Pause,
   Trash2,
@@ -33,8 +34,10 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
 import { TaskCenterStatCard } from '@/components/task-center/stat-card';
 import { TASK_CENTER_SURFACE_CARD_CLASS } from '@/components/task-center/styles';
+import { useChatStore } from '@/stores/chat';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
+import { useSubagentsStore } from '@/stores/subagents';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
@@ -44,6 +47,7 @@ import type { CronJob, CronJobCreateInput, ScheduleType } from '@/types/cron';
 import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+import { parseAgentIdFromSessionKey } from '@/stores/chat/session-helpers';
 
 // Common cron schedule presets
 const schedulePresets: { key: string; value: string; type: ScheduleType }[] = [
@@ -260,15 +264,18 @@ function estimateNextRun(scheduleExpr: string): string | null {
 // Create/Edit Task Dialog
 interface TaskDialogProps {
   job?: CronJob;
+  agents: Array<{ id: string; name: string }>;
+  defaultAgentId: string;
   onClose: () => void;
   onSave: (input: CronJobCreateInput) => Promise<void>;
 }
 
-function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
+function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialogProps) {
   const { t } = useTranslation('cron');
   const [saving, setSaving] = useState(false);
 
   const [name, setName] = useState(job?.name || '');
+  const [agentId, setAgentId] = useState(job?.agentId || defaultAgentId);
   const [message, setMessage] = useState(job?.message || '');
   // Extract cron expression string from CronSchedule object or use as-is if string
   const initialSchedule = (() => {
@@ -306,6 +313,22 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
   const selectedDeliveryChannelGroup = deliveryChannelOptions.find((entry) => entry.channelType === deliveryChannel);
   const deliveryAccountOptions = selectedDeliveryChannelGroup?.accounts ?? [];
   const requiresExplicitDeliveryAccount = deliveryMode === 'announce' && isWeChatDeliveryChannel(deliveryChannel);
+  const agentOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const agent of agents) {
+      if (!agent.id) {
+        continue;
+      }
+      options.set(agent.id, agent.name || agent.id);
+    }
+    if (!options.has(defaultAgentId)) {
+      options.set(defaultAgentId, defaultAgentId);
+    }
+    if (job?.agentId && !options.has(job.agentId)) {
+      options.set(job.agentId, job.agentId);
+    }
+    return Array.from(options, ([id, name]) => ({ id, name }));
+  }, [agents, defaultAgentId, job?.agentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -342,6 +365,12 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
       setDeliveryChannel(firstSupported.channelType);
     }
   }, [deliveryChannels, deliveryChannel, deliveryMode]);
+
+  useEffect(() => {
+    if (!agentId) {
+      setAgentId(job?.agentId || defaultAgentId);
+    }
+  }, [agentId, defaultAgentId, job?.agentId]);
 
   useEffect(() => {
     if (deliveryMode !== 'announce') {
@@ -411,6 +440,7 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
     try {
       await onSave({
         name: name.trim(),
+        agentId: agentId.trim() || defaultAgentId,
         message: message.trim(),
         schedule: finalSchedule,
         delivery: finalDelivery,
@@ -459,6 +489,21 @@ function TaskDialog({ job, onClose, onSave }: TaskDialogProps) {
               onChange={(e) => setMessage(e.target.value)}
               rows={3}
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="agent">{t('dialog.agent')}</Label>
+            <Select
+              id="agent"
+              value={agentId}
+              onChange={(event) => setAgentId(event.target.value)}
+            >
+              {agentOptions.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </Select>
           </div>
 
           {/* Schedule */}
@@ -637,6 +682,10 @@ interface CronJobCardProps {
 function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
   const { t } = useTranslation('cron');
   const [triggering, setTriggering] = useState(false);
+  const agents = useSubagentsStore((state) => (
+    Array.isArray(state.agentsResource.data) ? state.agentsResource.data : []
+  ));
+  const agentName = agents.find((agent) => agent.id === job.agentId)?.name ?? job.agentId;
   const isRunning = Boolean(job.runningAt);
   const actionsDisabled = isMutating || triggering;
 
@@ -754,6 +803,11 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
               {t('card.next')}: {new Date(job.nextRun).toLocaleString()}
             </span>
           )}
+
+          <span className="flex items-center gap-1">
+            <Bot className="h-4 w-4" />
+            {agentName}
+          </span>
         </div>
 
         {/* Last Run Error */}
@@ -815,11 +869,18 @@ export function Cron({ embedded = false }: CronProps) {
     triggerJob,
   } = useCronStore();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const currentChatSessionKey = useChatStore((state) => state.currentSessionKey);
+  const agentsResource = useSubagentsStore((state) => state.agentsResource);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const [showDialog, setShowDialog] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | undefined>();
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
 
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const availableAgents = Array.isArray(agentsResource.data)
+    ? agentsResource.data.map((agent) => ({ id: agent.id, name: agent.name || agent.id }))
+    : [];
+  const defaultAgentId = parseAgentIdFromSessionKey(currentChatSessionKey) || 'main';
   const manualRefreshBusy = refreshing || mutating;
   const showInitialLoading = !snapshotReady && initialLoading;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
@@ -830,6 +891,15 @@ export function Cron({ embedded = false }: CronProps) {
       void fetchJobs({ silent: true });
     }
   }, [fetchJobs, isGatewayRunning]);
+
+  useEffect(() => {
+    if (!isGatewayRunning) {
+      return;
+    }
+    if (agentsResource.status !== 'loading') {
+      void loadAgents({ silent: true });
+    }
+  }, [agentsResource.status, isGatewayRunning, loadAgents]);
 
   // Statistics
   const runningJobs = jobs.filter((j) => Boolean(j.runningAt));
@@ -993,6 +1063,8 @@ export function Cron({ embedded = false }: CronProps) {
       {showDialog && (
         <TaskDialog
           job={editingJob}
+          agents={availableAgents}
+          defaultAgentId={defaultAgentId}
           onClose={() => {
             setShowDialog(false);
             setEditingJob(undefined);

@@ -122,7 +122,16 @@
   }
 }
 
-/* Custom scrollbar */
+/* Keep scrollbars visually quiet until users interact with a scroll area. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
 ::-webkit-scrollbar {
   width: var(--scrollbar-size);
   height: var(--scrollbar-size);
@@ -133,10 +142,14 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  @apply bg-border rounded-full;
+  @apply bg-transparent rounded-full;
 }
 
-::-webkit-scrollbar-thumb:hover {
+*:hover::-webkit-scrollbar-thumb {
+  @apply bg-border;
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
   @apply bg-muted-foreground/30;
 }
 
@@ -226,6 +239,11 @@
 }
 
 .prose th {
+  background: transparent;
+  font-weight: 700;
+}
+
+.dark .prose th {
   background: hsl(var(--muted));
 }
 

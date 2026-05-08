@@ -254,6 +254,39 @@ export function isInternalAssistantControlMessage(value: unknown): boolean {
   return /^(HEARTBEAT_OK|NO_REPLY)$/.test(text);
 }
 
+function isRuntimeSystemInjectionText(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (/^\s*System\s*\(untrusted\)\s*:/i.test(normalized)) {
+    return true;
+  }
+  if (
+    /An async command you ran earlier has completed/i.test(normalized)
+    && /Do not relay it to the user unless explicitly requested/i.test(normalized)
+  ) {
+    return true;
+  }
+  return (
+    /^\s*Current time\s*:/i.test(normalized)
+    && /^\s*Current time\s*:[^\n]*\/\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\s*$/i.test(normalized)
+  );
+}
+
+export function isInternalRuntimeDisplayMessage(value: unknown): boolean {
+  const message = isRecord(value) ? value : {};
+  const role = normalizeMessageRole(message.role);
+  if (role !== 'user' && role !== 'assistant') {
+    return false;
+  }
+  const text = extractMessageText(message.content ?? message.text);
+  if (role === 'assistant' && /^(HEARTBEAT_OK|NO_REPLY)\s*$/.test(text.trim())) {
+    return true;
+  }
+  return isRuntimeSystemInjectionText(text);
+}
+
 export function isCanonicalSystemNoticeMessage(value: unknown): boolean {
   const message = isRecord(value) ? value : {};
   if (normalizeMessageRole(message.role) !== 'system') {
@@ -274,5 +307,5 @@ export function shouldPreserveCanonicalTranscriptMessage(value: unknown): boolea
   if (role === 'toolresult' || role === 'tool_result') {
     return false;
   }
-  return !isInternalAssistantControlMessage(message);
+  return !isInternalRuntimeDisplayMessage(message);
 }

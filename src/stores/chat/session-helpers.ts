@@ -204,6 +204,15 @@ export function parseAgentIdFromSessionKey(sessionKey: string): string | null {
   return matched?.[1] ?? null;
 }
 
+export function parseSessionCreatedAtMs(sessionKey: string): number | null {
+  const matched = sessionKey.match(/(?:^|:)session-(\d{11,})(?=$|:)/);
+  if (!matched) {
+    return null;
+  }
+  const createdAtMs = Number(matched[1]);
+  return Number.isFinite(createdAtMs) && createdAtMs > 0 ? createdAtMs : null;
+}
+
 export function normalizeTaskInboxSessionKey(sessionKey: string | undefined, fallback: string): string {
   const normalized = typeof sessionKey === 'string' ? sessionKey.trim() : '';
   if (normalized.length > 0) {
@@ -237,7 +246,7 @@ export function resolveSessionActivityMs(
   if (typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)) {
     return session.updatedAt;
   }
-  return 0;
+  return parseSessionCreatedAtMs(session.key) ?? 0;
 }
 
 export function resolvePreferredSessionKeyForAgent(

@@ -15,6 +15,10 @@ import {
   getSessionRuntime,
   patchSessionSnapshot,
 } from './store-state-helpers';
+import {
+  UNKNOWN_ABORTED_RUN_MARKER,
+  type StoreSessionRunCache,
+} from './session-run-cache';
 import type { ChatStoreState } from './types';
 import type {
   SessionItemChunkUpdateEvent,
@@ -32,6 +36,7 @@ type ChatStoreGetFn = () => ChatStoreState;
 interface CreateStoreRuntimeEventActionsInput {
   set: ChatStoreSetFn;
   get: ChatStoreGetFn;
+  sessionRunCache: StoreSessionRunCache;
 }
 
 function normalizeIdentifier(value: unknown): string {
@@ -124,6 +129,49 @@ function applySessionLifecycleEvent(
   }
 }
 
+function shouldBlockAbortedRunEvent(input: {
+  event: SessionUpdateEvent;
+  eventRunId: string;
+  targetSessionKey: string;
+  targetRuntime: ReturnType<typeof getSessionRuntime>;
+  sessionRunCache: StoreSessionRunCache;
+}): boolean {
+  const {
+    event,
+    eventRunId,
+    targetSessionKey,
+    targetRuntime,
+    sessionRunCache,
+  } = input;
+  if (!eventRunId) {
+    return false;
+  }
+
+  const abortedRunMarker = sessionRunCache.getAbortedRunMarker(targetSessionKey);
+  if (!abortedRunMarker) {
+    return false;
+  }
+  if (abortedRunMarker !== UNKNOWN_ABORTED_RUN_MARKER && abortedRunMarker !== eventRunId) {
+    return false;
+  }
+
+  if (event.sessionUpdate === 'session_info_update' && event.phase === 'aborted') {
+    if (abortedRunMarker === UNKNOWN_ABORTED_RUN_MARKER) {
+      sessionRunCache.setAbortedRunMarker(targetSessionKey, eventRunId);
+    }
+    return false;
+  }
+
+  if (
+    abortedRunMarker === UNKNOWN_ABORTED_RUN_MARKER
+    && targetRuntime.sending
+    && !targetRuntime.activeRunId
+  ) {
+    sessionRunCache.queueBlockedSessionUpdate(targetSessionKey, eventRunId, event);
+  }
+  return true;
+}
+
 function applySessionMessageEvent(
   input: CreateStoreRuntimeEventActionsInput & {
     targetSessionKey: string;
@@ -175,11 +223,26 @@ export function handleStoreSessionUpdateEvent(
   const eventSessionKey = normalizeIdentifier(sessionUpdate.sessionKey);
   const targetSessionKey = eventSessionKey || currentSessionKey;
   const eventRunId = normalizeIdentifier(sessionUpdate.runId);
+  const targetRuntime = getSessionRuntime(stateBeforeHandle, targetSessionKey);
+
+  if (shouldBlockAbortedRunEvent({
+    event: sessionUpdate,
+    eventRunId,
+    targetSessionKey,
+    targetRuntime,
+    sessionRunCache: input.sessionRunCache,
+  })) {
+    return;
+  }
 
   if (sessionUpdate.sessionUpdate === 'session_info_update') {
+    if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
+      return;
+    }
     applySessionLifecycleEvent({
       set,
       get,
+      sessionRunCache: input.sessionRunCache,
       targetSessionKey,
       currentSessionKey,
       event: sessionUpdate,
@@ -191,6 +254,10 @@ export function handleStoreSessionUpdateEvent(
     sessionUpdate.sessionUpdate !== 'session_item_chunk'
     && sessionUpdate.sessionUpdate !== 'session_item'
   ) {
+    return;
+  }
+
+  if (eventRunId && targetRuntime.activeRunId && targetRuntime.activeRunId !== eventRunId) {
     return;
   }
 
@@ -207,6 +274,7 @@ export function handleStoreSessionUpdateEvent(
   applySessionMessageEvent({
     set,
     get,
+    sessionRunCache: input.sessionRunCache,
     targetSessionKey,
     event: sessionUpdate,
   });

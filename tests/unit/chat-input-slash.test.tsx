@@ -109,4 +109,30 @@ describe('chat input slash skills', () => {
 
     expect(scrollMock).toHaveBeenCalled();
   });
+
+  it('renders model picker and forwards selection', () => {
+    const onSelect = vi.fn();
+
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        modelPicker={{
+          currentModelId: 'openai/gpt-5.4',
+          currentLabel: 'OpenAI / gpt-5.4',
+          options: [
+            { id: 'openai/gpt-5.4', label: 'OpenAI / gpt-5.4' },
+            { id: 'anthropic/claude-opus-4-6', label: 'Anthropic / claude-opus-4-6' },
+          ],
+          loading: false,
+          switching: false,
+          onSelect,
+        }}
+      />,
+    );
+
+    const select = screen.getByTestId('chat-model-picker');
+    fireEvent.change(select, { target: { value: 'anthropic/claude-opus-4-6' } });
+
+    expect(onSelect).toHaveBeenCalledWith('anthropic/claude-opus-4-6');
+  });
 });

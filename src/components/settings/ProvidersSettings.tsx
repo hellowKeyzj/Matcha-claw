@@ -40,6 +40,7 @@ import {
   type ProviderConfig,
   type ProviderType,
   getProviderIconUrl,
+  normalizeProviderApiKeyInput,
   resolveProviderApiKeyForSave,
   resolveProviderModelForSave,
   shouldShowProviderModelId,
@@ -533,6 +534,7 @@ function ProviderCard({
   const sanitizedHeaders = stripUserAgentHeader(account.headers);
   const hasLegacyUserAgentHeader = Object.keys(account.headers ?? {}).length
     !== Object.keys(sanitizedHeaders ?? {}).length;
+  const normalizedNewKey = normalizeProviderApiKeyInput(newKey);
 
   const resolveAccountLabel = (candidate: ProviderAccount): string => {
     const rawLabel = (candidate.label ?? '').trim();
@@ -624,9 +626,9 @@ function ProviderCard({
       const nextContextWindow = parseOptionalPositiveInteger(contextWindow);
       const nextMaxTokens = parseOptionalPositiveInteger(maxTokens);
 
-      if (newKey.trim()) {
+      if (normalizedNewKey) {
         setValidating(true);
-        const result = await onValidateKey(newKey, {
+        const result = await onValidateKey(normalizedNewKey, {
           baseUrl: baseUrl.trim() || undefined,
           apiProtocol: (account.vendorId === 'custom' || account.vendorId === 'ollama')
             ? apiProtocol
@@ -639,7 +641,7 @@ function ProviderCard({
           setSaving(false);
           return;
         }
-        payload.newApiKey = newKey.trim();
+        payload.newApiKey = normalizedNewKey;
       }
 
       {
@@ -1047,7 +1049,7 @@ function ProviderCard({
                       validating
                       || saving
                       || (
-                        !newKey.trim()
+                        !normalizedNewKey
                         && (baseUrl.trim() || undefined) === (account.baseUrl || undefined)
                         && (apiProtocol || 'openai-completions') === (account.apiProtocol || 'openai-completions')
                         && !hasLegacyUserAgentHeader
@@ -1260,6 +1262,7 @@ function AddProviderDialog({
       : (selectedType === 'google' ? 'oauth_browser' : null));
   // Effective OAuth mode: pure OAuth providers, or dual-mode with oauth selected
   const useOAuthFlow = isOAuth && (!supportsApiKey || authMode === 'oauth');
+  const normalizedApiKey = normalizeProviderApiKeyInput(apiKey);
 
   useEffect(() => {
     if (!selectedVendor || !isOAuth || !supportsApiKey) {
@@ -1440,13 +1443,13 @@ function AddProviderDialog({
     try {
       // Validate key first if the provider requires one and a key was entered
       const requiresKey = typeInfo?.requiresApiKey ?? false;
-      if (requiresKey && !apiKey.trim()) {
+      if (requiresKey && !normalizedApiKey) {
         setValidationError(t('aiProviders.toast.invalidKey')); // reusing invalid key msg or should add 'required' msg? null checks
         setSaving(false);
         return;
       }
-      if (requiresKey && apiKey) {
-        const result = await onValidateKey(selectedType, apiKey, {
+      if (requiresKey && normalizedApiKey) {
+        const result = await onValidateKey(selectedType, normalizedApiKey, {
           baseUrl: baseUrl.trim() || undefined,
           apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')
             ? apiProtocol
@@ -1472,7 +1475,7 @@ function AddProviderDialog({
       await onAdd(
         selectedType,
         name || (typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name) || selectedType,
-        apiKey.trim(),
+        normalizedApiKey,
         {
           baseUrl: baseUrl.trim() || undefined,
           apiProtocol: (selectedType === 'custom' || selectedType === 'ollama')

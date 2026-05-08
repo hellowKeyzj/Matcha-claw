@@ -83,7 +83,7 @@ function normalizeMissingRequirements(missing?: GatewaySkillMissing): SkillMissi
 function mapErrorCodeToSkillErrorKey(
   code: AppError['code'],
   operation: 'fetch' | 'search' | 'install',
-): string {
+): string | null {
   if (code === 'TIMEOUT') {
     return operation === 'search'
       ? 'searchTimeoutError'
@@ -98,7 +98,7 @@ function mapErrorCodeToSkillErrorKey(
         ? 'installRateLimitError'
         : 'fetchRateLimitError';
   }
-  return 'rateLimitError';
+  return null;
 }
 
 function hasMutatingSkills(mutatingBySkillId: Record<string, number>): boolean {
@@ -295,10 +295,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       } catch (error) {
         console.error('Failed to fetch skills:', error);
         const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+        const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
         set({
           initialLoading: false,
           refreshing: false,
-          error: mapErrorCodeToSkillErrorKey(appError.code, 'fetch'),
+          error: errorKey ?? appError.message,
         });
       } finally {
         inflightSkillsFetch = null;
@@ -342,7 +343,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       }
     } catch (error) {
       const appError = normalizeAppError(error, { module: 'skills', operation: 'search' });
-      set({ searchError: mapErrorCodeToSkillErrorKey(appError.code, 'search') });
+      const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'search');
+      set({ searchError: errorKey ?? appError.message });
     } finally {
       if (inflightMarketplaceSearch.get(cacheKey) === pending) {
         inflightMarketplaceSearch.delete(cacheKey);
@@ -373,7 +375,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           module: 'skills',
           operation: 'install',
         });
-        throw new Error(mapErrorCodeToSkillErrorKey(appError.code, 'install'));
+        const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'install');
+        throw new Error(errorKey ?? appError.message);
       }
       // Refresh skills after install
       await get().fetchSkills({ force: true });

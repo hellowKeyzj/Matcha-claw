@@ -148,6 +148,29 @@ describe('host-api', () => {
     });
   });
 
+  it('hostSessionLoad 透传调用方指定的 timeoutMs', async () => {
+    invokeIpcMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        status: 200,
+        ok: true,
+        json: { snapshot: { sessionKey: 'agent:main:main' } },
+      },
+    });
+
+    const { hostSessionLoad } = await import('@/lib/host-api');
+    await hostSessionLoad({ sessionKey: 'agent:main:main' }, { timeoutMs: 35000 });
+
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/session/load',
+        method: 'POST',
+        timeoutMs: 35000,
+      }),
+    );
+  });
+
   it('createHostEventSource 会附带 token 且复用缓存 token', async () => {
     const eventSourceCtor = vi.fn(function EventSourceCtor(this: unknown) {});
     vi.stubGlobal('EventSource', eventSourceCtor as unknown as typeof EventSource);

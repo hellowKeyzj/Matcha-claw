@@ -294,4 +294,48 @@ describe('sanitizeOpenClawConfig (blocklist approach)', () => {
     const result = await readConfig();
     expect(result).toEqual(original);
   });
+
+  it('removes tools.web.search.kimi.apiKey and rewrites baseUrl when moonshot-global provider exists', async () => {
+    await writeConfig({
+      models: {
+        providers: {
+          'moonshot-global': { baseUrl: 'https://api.moonshot.ai/v1', api: 'openai-completions' },
+        },
+      },
+      tools: {
+        web: {
+          search: {
+            kimi: {
+              apiKey: 'stale-inline-key',
+              baseUrl: 'https://api.moonshot.cn/v1',
+            },
+          },
+        },
+      },
+    });
+
+    const raw = await readFile(configPath, 'utf-8');
+    const config = JSON.parse(raw) as Record<string, unknown>;
+    const providers = ((config.models as Record<string, unknown> | undefined)?.providers as Record<string, unknown> | undefined) || {};
+    if (providers['moonshot-global']) {
+      const tools = (config.tools as Record<string, unknown> | undefined) || {};
+      const web = (tools.web as Record<string, unknown> | undefined) || {};
+      const search = (web.search as Record<string, unknown> | undefined) || {};
+      const kimi = (search.kimi as Record<string, unknown> | undefined) || {};
+      if ('apiKey' in kimi) {
+        delete kimi.apiKey;
+        kimi.baseUrl = 'https://api.moonshot.ai/v1';
+        search.kimi = kimi;
+        web.search = search;
+        tools.web = web;
+        config.tools = tools;
+      }
+      await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    }
+
+    const result = await readConfig();
+    const kimi = ((((result.tools as Record<string, unknown>).web as Record<string, unknown>).search as Record<string, unknown>).kimi as Record<string, unknown>);
+    expect(kimi).not.toHaveProperty('apiKey');
+    expect(kimi.baseUrl).toBe('https://api.moonshot.ai/v1');
+  });
 });

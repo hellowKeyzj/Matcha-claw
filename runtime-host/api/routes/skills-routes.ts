@@ -11,6 +11,8 @@ interface SkillsRouteDeps {
   updateSkillConfigLocal: (skillKey: string, updates: Record<string, unknown>) => Promise<unknown>;
   setSkillEnabledLocal: (skillKey: string, enabled: boolean) => Promise<unknown>;
   listEffectiveSkillsLocal: () => Promise<unknown>;
+  getOpenClawConfigDir: () => string;
+  readOpenClawConfigJson: () => Record<string, unknown>;
   openclawBridge: Pick<OpenClawBridge, 'gatewayRpc' | 'isGatewayRunning'>;
 }
 
@@ -25,6 +27,8 @@ export async function handleSkillsRoute(
     updateSkillConfig: deps.updateSkillConfigLocal,
     setSkillEnabled: deps.setSkillEnabledLocal,
     listEffectiveSkills: deps.listEffectiveSkillsLocal,
+    getOpenClawConfigDir: deps.getOpenClawConfigDir,
+    readOpenClawConfigJson: deps.readOpenClawConfigJson,
     openclawBridge: deps.openclawBridge,
   });
 
@@ -63,6 +67,17 @@ export async function handleSkillsRoute(
         status: 200,
         data: await service.effective(),
       };
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
+
+  if (method === 'POST' && routePath === '/api/skills/readme') {
+    try {
+      return await service.readmePreview(payload);
     } catch (error) {
       return {
         status: 500,

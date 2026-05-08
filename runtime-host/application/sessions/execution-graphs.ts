@@ -34,62 +34,22 @@ function makeToolId(prefix: string, toolName: string, index: number): string {
 
 export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): SessionExecutionGraphStep[] {
   const steps: SessionExecutionGraphStep[] = [];
-  const seenIds = new Set<string>();
-  const activeToolNames = new Set<string>();
+  const stepIndexById = new Map<string, number>();
 
-  const pushStep = (step: SessionExecutionGraphStep): void => {
-    if (seenIds.has(step.id)) {
+  const upsertStep = (step: SessionExecutionGraphStep): void => {
+    const existingIndex = stepIndexById.get(step.id);
+    if (existingIndex == null) {
+      stepIndexById.set(step.id, steps.length);
+      steps.push(step);
       return;
     }
-    seenIds.add(step.id);
-    steps.push(step);
+    const existing = steps[existingIndex]!;
+    steps[existingIndex] = {
+      ...existing,
+      ...step,
+      detail: step.detail ?? existing.detail,
+    };
   };
-
-  const streamingEntry = [...entries].reverse().find((entry) => isAssistantActivityEntry(entry) && entry.status === 'streaming') ?? null;
-  const streamingStatuses = streamingEntry?.toolStatuses ?? [];
-  const streamingToolCards = streamingEntry?.toolCards ?? [];
-
-  if (streamingEntry?.kind === 'message') {
-    const thinking = normalizeText(streamingEntry.thinking);
-    if (thinking) {
-      pushStep({
-        id: 'stream-thinking',
-        label: 'Thinking',
-        status: 'running',
-        kind: 'thinking',
-        detail: thinking,
-        depth: 1,
-      });
-    }
-  }
-
-  for (const [index, tool] of streamingStatuses.entries()) {
-    activeToolNames.add(tool.name);
-    pushStep({
-      id: tool.toolCallId || tool.id || makeToolId('stream-status', tool.name, index),
-      label: tool.name,
-      status: tool.status,
-      kind: 'tool',
-      detail: normalizeText(tool.summary),
-      depth: 1,
-    });
-  }
-
-  if (streamingEntry) {
-    for (const [index, tool] of streamingToolCards.entries()) {
-      if (activeToolNames.has(tool.name)) {
-        continue;
-      }
-      pushStep({
-        id: tool.toolCallId || tool.id || makeToolId('stream-tool', tool.name, index),
-        label: tool.name,
-        status: tool.status,
-        kind: 'tool',
-        detail: normalizeText(tool.inputText ?? JSON.stringify(tool.input, null, 2)),
-        depth: 1,
-      });
-    }
-  }
 
   const relevantAssistantEntries = entries.filter((entry) => (
     isAssistantActivityEntry(entry)
@@ -103,7 +63,7 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     if (assistantEntry.kind === 'message') {
       const thinking = normalizeText(assistantEntry.thinking);
       if (thinking) {
-        pushStep({
+        upsertStep({
           id: `history-thinking-${assistantEntry.entryId || assistantEntry.messageId || entryIndex}`,
           label: 'Thinking',
           status: assistantEntry.status === 'error' ? 'error' : 'completed',
@@ -115,18 +75,74 @@ export function deriveExecutionGraphSteps(entries: SessionTimelineEntry[]): Sess
     }
 
     for (const [toolIndex, tool] of assistantEntry.toolCards.entries()) {
-      pushStep({
+      upsertStep({
         id: tool.toolCallId || tool.id || makeToolId(`history-tool-${assistantEntry.entryId || assistantEntry.key || entryIndex}`, tool.name, toolIndex),
         label: tool.name,
         status: tool.status,
         kind: 'tool',
-        detail: normalizeText(tool.inputText ?? JSON.stringify(tool.input, null, 2)),
+        detail: normalizeText(tool.summary ?? tool.inputText ?? JSON.stringify(tool.input, null, 2)),
         depth: 1,
       });
     }
   }
 
-  return steps.slice(0, MAX_GRAPH_STEPS);
+  const streamingEntry = [...entries].reverse().find((entry) => isAssistantActivityEntry(entry) && entry.status === 'streaming') ?? null;
+  const streamingStatuses = streamingEntry?.toolStatuses ?? [];
+  const streamingToolCards = streamingEntry?.toolCards ?? [];
+
+  if (streamingEntry?.kind === 'message') {
+    const thinking = normalizeText(streamingEntry.thinking);
+    if (thinking) {
+      upsertStep({
+        id: 'stream-thinking',
+        label: 'Thinking',
+        status: 'running',
+        kind: 'thinking',
+        detail: thinking,
+        depth: 1,
+      });
+    }
+  }
+
+  const activeToolIds = new Set<string>();
+  const activeToolNamesWithoutIds = new Set<string>();
+
+  for (const [index, tool] of streamingStatuses.entries()) {
+    const id = tool.toolCallId || tool.id || makeToolId('stream-status', tool.name, index);
+    activeToolIds.add(id);
+    if (!tool.toolCallId && !tool.id) {
+      activeToolNamesWithoutIds.add(tool.name);
+    }
+    upsertStep({
+      id,
+      label: tool.name,
+      status: tool.status,
+      kind: 'tool',
+      detail: normalizeText(tool.summary),
+      depth: 1,
+    });
+  }
+
+  if (streamingEntry) {
+    for (const [index, tool] of streamingToolCards.entries()) {
+      const id = tool.toolCallId || tool.id || makeToolId('stream-tool', tool.name, index);
+      if (activeToolIds.has(id) || activeToolNamesWithoutIds.has(tool.name)) {
+        continue;
+      }
+      upsertStep({
+        id,
+        label: tool.name,
+        status: tool.status,
+        kind: 'tool',
+        detail: normalizeText(tool.summary ?? tool.inputText ?? JSON.stringify(tool.input, null, 2)),
+        depth: 1,
+      });
+    }
+  }
+
+  return steps.length > MAX_GRAPH_STEPS
+    ? steps.slice(-MAX_GRAPH_STEPS)
+    : steps;
 }
 
 function resolveAnchorIdentity(

@@ -144,6 +144,52 @@ export async function getOAuthTokenFromOpenClaw(
   return null;
 }
 
+function getApiKeyFromAuthProfilesStore(
+  store: AuthProfilesStore,
+  provider: string,
+): string | null {
+  const profileIds = [
+    store.lastGood?.[provider],
+    ...(store.order?.[provider] ?? []),
+    `${provider}:default`,
+  ].filter((profileId): profileId is string => Boolean(profileId));
+
+  for (const profileId of profileIds) {
+    const profile = store.profiles[profileId];
+    if (profile?.type === 'api_key' && profile.provider === provider && profile.key) {
+      return profile.key;
+    }
+  }
+
+  for (const profile of Object.values(store.profiles)) {
+    if (profile.type === 'api_key' && profile.provider === provider && profile.key) {
+      return profile.key;
+    }
+  }
+
+  return null;
+}
+
+export async function getProviderApiKeyFromOpenClaw(
+  provider: string,
+  agentId?: string,
+): Promise<string | null> {
+  const agentIds = agentId ? [agentId] : await discoverAgentIds();
+  if (agentIds.length === 0) {
+    agentIds.push('main');
+  }
+
+  for (const id of agentIds) {
+    const store = await readAuthProfiles(id);
+    const apiKey = getApiKeyFromAuthProfilesStore(store, provider);
+    if (apiKey) {
+      return apiKey;
+    }
+  }
+
+  return null;
+}
+
 export async function saveProviderKeyToOpenClaw(
   provider: string,
   apiKey: string,

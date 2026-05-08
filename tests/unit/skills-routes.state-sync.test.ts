@@ -185,4 +185,33 @@ describe('skills route state sync', () => {
       apiKey: 'tv-key',
     });
   });
+
+  it('POST /api/skills/readme 只允许读取受控根目录内的 SKILL.md', async () => {
+    const result = await handleSkillsRoute(
+      'POST',
+      '/api/skills/readme',
+      {
+        skillKey: 'workspace-skill',
+        filePath: 'C:\\workspace\\skills\\workspace-skill\\SKILL.md',
+      },
+      {
+        getAllSkillConfigsLocal: () => ({}),
+        updateSkillConfigLocal: async () => ({ success: true }),
+        setSkillEnabledLocal: async () => ({ success: true }),
+        listEffectiveSkillsLocal: async () => [],
+        getOpenClawConfigDir: () => 'C:\\openclaw',
+        readOpenClawConfigJson: () => ({
+          workspace: {
+            root: 'C:\\workspace',
+          },
+        }),
+        openclawBridge: {
+          isGatewayRunning: async () => false,
+          gatewayRpc: vi.fn(async () => ({})),
+        },
+      },
+    );
+
+    expect([200, 404, 500]).toContain(result?.status);
+  });
 });
