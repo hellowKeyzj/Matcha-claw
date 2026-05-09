@@ -4,6 +4,7 @@ import {
   hasPendingItemPreviewLoads,
   hydrateAttachedFilesFromItems,
   loadMissingItemPreviews,
+  reconcileHydratedAttachmentItems,
 } from './attachment-helpers';
 import {
   CHAT_HISTORY_FULL_LIMIT,
@@ -362,12 +363,13 @@ function buildHistoryPreviewHydrationPatch(
   hydratedItems: SessionRenderItem[],
 ): Partial<ChatStoreState> | ChatStoreState {
   const currentItems = getSessionItems(state, requestedSessionKey);
-  if (currentItems === hydratedItems) {
+  const nextItems = reconcileHydratedAttachmentItems(currentItems, hydratedItems);
+  if (currentItems === nextItems) {
     return state;
   }
   return {
     loadedSessions: patchSessionRecord(state, requestedSessionKey, {
-      items: hydratedItems,
+      items: nextItems,
     }),
   };
 }

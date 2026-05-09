@@ -468,6 +468,7 @@ export interface SessionCatalogItem {
   label?: string;
   titleSource?: SessionCatalogTitleSource;
   displayName?: string;
+  model?: string;
   updatedAt?: number;
 }
 

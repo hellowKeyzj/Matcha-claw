@@ -26,28 +26,28 @@ export function AgentSkillConfigPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="shrink-0 border-b border-border/40 px-4 py-3">
+      <div className="shrink-0 border-b border-border/40 px-3 py-3">
         <p className="text-sm font-medium text-foreground">{title}</p>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <div className="space-y-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <div className="min-w-0">
           {skillsLoading ? (
             <p className="text-sm text-muted-foreground">{t('skillConfigDialog.loading')}</p>
           ) : skillOptions.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t('skillConfigDialog.empty')}</p>
           ) : (
-            <div className="grid gap-2">
+            <div className="min-w-0 divide-y divide-border/35">
               {skillOptions.map((skill) => {
                 const checked = selectedSkillIds.includes(skill.id);
                 return (
                   <div
                     key={skill.id}
                     className={cn(
-                      'flex items-start gap-3 rounded-xl border px-3 py-3 transition-colors',
+                      'flex min-w-0 w-full items-start gap-3 overflow-hidden px-2 py-3 transition-colors',
                       checked
-                        ? 'border-emerald-500/35 bg-emerald-500/5'
-                        : 'border-border/60 bg-background hover:bg-muted/30',
+                        ? 'bg-secondary/90'
+                        : 'hover:bg-secondary',
                     )}
                   >
                     <div className={cn(
@@ -70,7 +70,7 @@ export function AgentSkillConfigPanel({
                             </p>
                           ) : null}
                         </div>
-                        <div className="flex items-center">
+                        <div className="shrink-0 flex items-center">
                           <Switch
                             aria-label={skill.name}
                             checked={checked}

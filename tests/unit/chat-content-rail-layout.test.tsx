@@ -8,7 +8,6 @@ import {
   applyAssistantPresentationToItems,
   type ChatRenderItem,
 } from '@/pages/Chat/chat-render-item-model';
-import type { ApprovalStatus, ChatSessionRecord } from '@/stores/chat';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -102,20 +101,8 @@ function buildUserAndAssistantItems(): ChatRenderItem[] {
   ]));
 }
 
-function buildSessionRecord(items: SessionRenderItem[]): ChatSessionRecord {
+function buildChatListProps(items: ChatRenderItem[]) {
   return {
-    meta: {
-      agentId: 'main',
-      kind: 'main',
-      preferred: true,
-      label: null,
-      titleSource: 'none',
-      displayName: null,
-      model: null,
-      lastActivityAt: null,
-      historyStatus: 'ready',
-      thinkingLevel: null,
-    },
     runtime: {
       sending: false,
       activeRunId: null,
@@ -137,6 +124,12 @@ function buildSessionRecord(items: SessionRenderItem[]): ChatSessionRecord {
       isLoadingNewer: false,
       isAtLatest: true,
       anchorItemKey: null,
+    },
+    liveView: {
+      showBlockingLoading: false,
+      showBlockingError: false,
+      showBackgroundStatus: false,
+      isEmptyState: false,
     },
   };
 }
@@ -496,7 +489,9 @@ describe('chat content rail layout', () => {
 
   it('chat list should reuse unchanged render-items when only one assistant turn settles', () => {
     const sessionKey = 'agent:test:main';
-    const initialItems = buildRenderItemsFromMessages(sessionKey, [
+    const onOpenArtifactFile = vi.fn();
+    const onOpenAttachedArtifact = vi.fn();
+    const initialItems = decorateItems(buildRenderItemsFromMessages(sessionKey, [
       {
         id: 'assistant-stable-1',
         role: 'assistant',
@@ -512,8 +507,8 @@ describe('chat content rail layout', () => {
         streaming: true,
         timestamp: 2,
       },
-    ]);
-    const settledLiveItem = buildRenderItemsFromMessages(sessionKey, [
+    ]));
+    const settledLiveItem = decorateItems(buildRenderItemsFromMessages(sessionKey, [
       {
         id: 'assistant-live-1',
         role: 'assistant',
@@ -521,16 +516,16 @@ describe('chat content rail layout', () => {
         content: '第一段，最终版',
         timestamp: 2,
       },
-    ])[0]!;
+    ]))[0]!;
 
     const view = render(
       <ChatList
         isActive={false}
         currentSessionKey={sessionKey}
-        currentSession={buildSessionRecord(initialItems)}
-        approvalStatus={'idle' as ApprovalStatus}
-        agents={[]}
-        isGatewayRunning
+        runtime={buildChatListProps(initialItems).runtime}
+        viewport={buildChatListProps(initialItems).window}
+        items={buildChatListProps(initialItems).items}
+        liveView={buildChatListProps(initialItems).liveView}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
@@ -538,7 +533,9 @@ describe('chat content rail layout', () => {
         loadOlderLabel="Load older"
         onJumpToLatest={vi.fn()}
         jumpToBottomLabel="Jump to bottom"
-        defaultAssistant={null}
+        artifactGroups={[]}
+        onOpenArtifactFile={onOpenArtifactFile}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
 
@@ -548,13 +545,22 @@ describe('chat content rail layout', () => {
       <ChatList
         isActive={false}
         currentSessionKey={sessionKey}
-        currentSession={buildSessionRecord([
+        runtime={buildChatListProps([
           initialItems[0]!,
           settledLiveItem,
-        ])}
-        approvalStatus={'idle' as ApprovalStatus}
-        agents={[]}
-        isGatewayRunning
+        ]).runtime}
+        viewport={buildChatListProps([
+          initialItems[0]!,
+          settledLiveItem,
+        ]).window}
+        items={buildChatListProps([
+          initialItems[0]!,
+          settledLiveItem,
+        ]).items}
+        liveView={buildChatListProps([
+          initialItems[0]!,
+          settledLiveItem,
+        ]).liveView}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
@@ -562,7 +568,9 @@ describe('chat content rail layout', () => {
         loadOlderLabel="Load older"
         onJumpToLatest={vi.fn()}
         jumpToBottomLabel="Jump to bottom"
-        defaultAssistant={null}
+        artifactGroups={[]}
+        onOpenArtifactFile={onOpenArtifactFile}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
       />,
     );
 
@@ -570,7 +578,22 @@ describe('chat content rail layout', () => {
   });
 
   it('chat input uses a floating narrow composer rail instead of a full-width dock strip', () => {
-    const { container } = render(<ChatInput onSend={vi.fn()} />);
+    const { container } = render(
+      <ChatInput
+        onSend={vi.fn()}
+        modelPicker={{
+          currentModelId: 'openai/gpt-5.4',
+          currentLabel: 'OpenAI / gpt-5.4',
+          options: [
+            { id: 'openai/gpt-5.4', label: 'OpenAI / gpt-5.4' },
+            { id: 'anthropic/claude-opus-4-6', label: 'Anthropic / claude-opus-4-6' },
+          ],
+          loading: false,
+          switching: false,
+          onSelect: vi.fn(),
+        }}
+      />,
+    );
 
     const classNames = Array.from(container.querySelectorAll<HTMLElement>('div'))
       .map((node) => node.className)
@@ -583,6 +606,39 @@ describe('chat content rail layout', () => {
     expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('backdrop-blur');
     expect(CHAT_LAYOUT_TOKENS.inputCard).toContain('shadow-');
     expect(screen.getByRole('textbox')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-model-picker').tagName).toBe('BUTTON');
+  });
+
+  it('chat input keeps the action controls inside the card when the composer narrows', () => {
+    render(
+      <div className="w-[320px]">
+        <ChatInput
+          onSend={vi.fn()}
+          modelPicker={{
+            currentModelId: 'anthropic/claude-opus-4-6',
+            currentLabel: 'anthropic / claude-opus-4-6',
+            options: [
+              { id: 'anthropic/claude-opus-4-6', label: 'anthropic / claude-opus-4-6' },
+              { id: 'openai/gpt-5.4', label: 'openai / gpt-5.4' },
+            ],
+            loading: false,
+            switching: false,
+            onSelect: vi.fn(),
+          }}
+        />
+      </div>,
+    );
+
+    const picker = screen.getByTestId('chat-model-picker');
+    const controlsRow = picker.parentElement?.parentElement as HTMLElement | null;
+    const statusRow = controlsRow?.nextElementSibling as HTMLElement | null;
+
+    expect(controlsRow?.className).toContain('w-full');
+    expect(controlsRow?.className).toContain('min-w-0');
+    expect(controlsRow?.className).toContain('flex-wrap');
+    expect(statusRow?.className).toContain('min-h-[18px]');
+    expect(CHAT_LAYOUT_TOKENS.inputActionsRow).toContain('flex-col');
+    expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('w-full');
   });
 
   it('empty state no longer renders welcome content inside the message viewport rail', () => {

@@ -7,9 +7,8 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { memo, useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle } from 'lucide-react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
@@ -290,12 +289,14 @@ export const ChatInput = memo(function ChatInput({
   const [slashItems, setSlashItems] = useState<SelectedSkill[]>([]);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [lightboxAttachment, setLightboxAttachment] = useState<{
     src: string;
     fileName: string;
     filePath?: string;
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const isComposingRef = useRef(false);
   const skills = useSkillsStore((state) => state.skills);
@@ -353,6 +354,46 @@ export const ChatInput = memo(function ChatInput({
       return next.length === prev.length ? prev : next;
     });
   }, [allowedSkillIdSet]);
+
+  useEffect(() => {
+    if (!modelPicker) {
+      setModelPickerOpen(false);
+      return;
+    }
+    if (modelPicker.disabled || modelPicker.loading || modelPicker.switching || modelPicker.options.length === 0) {
+      setModelPickerOpen(false);
+    }
+  }, [modelPicker]);
+
+  useEffect(() => {
+    if (!modelPickerOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (modelPickerRef.current?.contains(target)) {
+        return;
+      }
+      setModelPickerOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setModelPickerOpen(false);
+      }
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [modelPickerOpen]);
 
   const closeMention = useCallback(() => {
     setMentionOpen(false);
@@ -621,6 +662,11 @@ export const ChatInput = memo(function ChatInput({
     && !sending
     && !approvalWaiting;
   const canStop = sending && !disabled && !!onStop;
+  const modelPickerDisabled = !modelPicker
+    || modelPicker.disabled
+    || modelPicker.loading
+    || modelPicker.switching
+    || modelPicker.options.length === 0;
 
   const handleSend = useCallback(() => {
     if (!canSend) return;
@@ -948,31 +994,80 @@ export const ChatInput = memo(function ChatInput({
           </div>
 
           <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-2')}>
-            <div className="min-h-[18px] min-w-0 flex-1 px-0.5 text-[11px] text-muted-foreground/78">
-              {statusText ? (
-                <span className="block truncate">{statusText}</span>
-              ) : null}
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-2">
               {modelPicker ? (
-                <div className="w-[180px] shrink-0">
-                  <Select
-                    value={modelPicker.currentModelId}
-                    disabled={modelPicker.disabled || modelPicker.loading || modelPicker.switching || modelPicker.options.length === 0}
+                <div ref={modelPickerRef} className="relative min-w-0 max-w-[220px] flex-[1_1_10rem]">
+                  <button
+                    type="button"
                     aria-label={t('input.pickModel')}
+                    aria-haspopup="listbox"
+                    aria-expanded={modelPickerOpen}
                     title={t('input.modelPickerTitle')}
                     data-testid="chat-model-picker"
-                    className="h-9 rounded-full border border-border/45 bg-background/74 px-3 py-1 text-xs shadow-sm"
-                    onChange={(event) => {
-                      modelPicker.onSelect(event.target.value);
+                    data-state={modelPickerOpen ? 'open' : 'closed'}
+                    disabled={modelPickerDisabled}
+                    className={cn(
+                      CHAT_LAYOUT_TOKENS.inputModelPickerTrigger,
+                      'min-w-0',
+                      modelPickerDisabled && 'cursor-not-allowed opacity-55',
+                    )}
+                    onClick={() => {
+                      if (modelPickerDisabled) {
+                        return;
+                      }
+                      setModelPickerOpen((open) => !open);
                     }}
                   >
-                    {modelPicker.options.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </Select>
+                    <span className="truncate text-[13px] leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
+                    {modelPicker.switching ? (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+                    ) : (
+                      <ChevronDown
+                        className={cn(
+                          'mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180',
+                          modelPickerOpen && 'rotate-180',
+                        )}
+                      />
+                    )}
+                  </button>
+                  {modelPickerOpen ? (
+                    <div
+                      role="listbox"
+                      aria-label={t('input.pickModel')}
+                      className={CHAT_LAYOUT_TOKENS.inputModelPickerMenu}
+                    >
+                      {modelPicker.options.map((option) => {
+                        const selected = option.id === modelPicker.currentModelId;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            className={cn(
+                              'flex w-full items-center gap-3 rounded-[1rem] px-3 py-2.5 text-left transition-colors',
+                              selected
+                                ? 'bg-slate-100 text-foreground dark:bg-white/10'
+                                : 'text-foreground/88 hover:bg-slate-50 dark:hover:bg-white/6',
+                            )}
+                            onClick={() => {
+                              setModelPickerOpen(false);
+                              if (!selected) {
+                                modelPicker.onSelect(option.id);
+                              }
+                            }}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[13px] font-medium leading-5">{option.label}</div>
+                            </div>
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                              {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               <Button
@@ -1008,6 +1103,11 @@ export const ChatInput = memo(function ChatInput({
                   <Send className="h-4 w-4" />
                 )}
               </Button>
+            </div>
+            <div className="min-h-[18px] min-w-0 px-0.5 text-[11px] text-muted-foreground/78">
+              {statusText ? (
+                <span className="block truncate">{statusText}</span>
+              ) : null}
             </div>
           </div>
         </div>

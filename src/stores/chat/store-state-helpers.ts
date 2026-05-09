@@ -11,7 +11,12 @@ import type {
 } from './types';
 import type {
   SessionAssistantTurnItem,
+  SessionExecutionGraphStep,
+  SessionRenderAttachedFile,
+  SessionRenderExecutionGraphItem,
+  SessionRenderImage,
   SessionRenderItem,
+  SessionRenderSystemItem,
   SessionStateSnapshot,
 } from '../../../runtime-host/shared/session-adapter-types';
 import { findLatestAssistantTextFromItems } from './timeline-message';
@@ -42,6 +47,248 @@ function hashStringDjb2(input: string): string {
     hash = ((hash << 5) + hash) ^ input.charCodeAt(index);
   }
   return (hash >>> 0).toString(36);
+}
+
+function hashText(value: string | null | undefined): string {
+  return hashStringDjb2(value ?? '');
+}
+
+function buildAttachedFilesSignature(
+  attachedFiles: ReadonlyArray<SessionRenderAttachedFile>,
+): string {
+  if (attachedFiles.length === 0) {
+    return '';
+  }
+  const parts = attachedFiles.map((file) => [
+    file.fileName,
+    file.filePath ?? '',
+    file.gatewayUrl ?? '',
+    file.mimeType,
+    String(file.fileSize),
+    file.preview ?? '',
+    file.source ?? '',
+  ].join(':'));
+  return hashStringDjb2(parts.join('|'));
+}
+
+function buildImageSignature(images: ReadonlyArray<SessionRenderImage>): string {
+  if (images.length === 0) {
+    return '';
+  }
+  const parts = images.map((image) => [
+    image.mimeType,
+    image.url ?? '',
+    String(image.data?.length ?? 0),
+  ].join(':'));
+  return hashStringDjb2(parts.join('|'));
+}
+
+function buildAssistantToolResultSignature(result: SessionAssistantTurnItem['tools'][number]['result']): string {
+  switch (result.kind) {
+    case 'text':
+      return `${result.kind}:${hashText(result.bodyText)}`;
+    case 'json':
+      return `${result.kind}:${hashText(result.bodyText)}`;
+    case 'canvas':
+      return [
+        result.kind,
+        result.surface,
+        result.preview.kind,
+        result.preview.surface,
+        result.preview.viewId,
+        hashText(result.rawText),
+      ].join(':');
+    default:
+      return result.kind;
+  }
+}
+
+function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
+  const segmentParts = item.segments.map((segment) => {
+    if (segment.kind === 'message' || segment.kind === 'thinking') {
+      return `${segment.kind}:${segment.key}:${hashText(segment.text)}`;
+    }
+    if (segment.kind === 'media') {
+      return [
+        segment.kind,
+        segment.key,
+        buildImageSignature(segment.images),
+        buildAttachedFilesSignature(segment.attachedFiles),
+      ].join(':');
+    }
+    return [
+      segment.kind,
+      segment.key,
+      segment.tool.id,
+      segment.tool.toolCallId ?? '',
+      segment.tool.name,
+      segment.tool.status,
+      String(segment.tool.updatedAt ?? ''),
+      String(segment.tool.durationMs ?? ''),
+      hashText(segment.tool.summary),
+      buildAssistantToolResultSignature(segment.tool.result),
+    ].join(':');
+  });
+
+  const toolParts = item.tools.map((tool) => [
+    tool.id,
+    tool.toolCallId ?? '',
+    tool.name,
+    tool.status,
+    String(tool.updatedAt ?? ''),
+    String(tool.durationMs ?? ''),
+    hashText(tool.summary),
+    buildAssistantToolResultSignature(tool.result),
+  ].join(':'));
+
+  const embeddedToolResultParts = (item.embeddedToolResults ?? []).map((result) => [
+    result.key,
+    result.toolCallId ?? '',
+    result.toolName,
+    result.preview.kind,
+    result.preview.viewId,
+    result.rawText ? hashText(result.rawText) : '',
+  ].join(':'));
+
+  return hashStringDjb2([
+    item.key,
+    item.kind,
+    item.role,
+    item.status,
+    item.createdAt ?? '',
+    item.updatedAt ?? '',
+    item.turnKey ?? '',
+    item.laneKey ?? '',
+    item.agentId ?? '',
+    item.pendingState ?? '',
+    hashText(item.text),
+    buildImageSignature(item.images),
+    buildAttachedFilesSignature(item.attachedFiles),
+    segmentParts.join('|'),
+    toolParts.join('|'),
+    embeddedToolResultParts.join('|'),
+  ].join('|'));
+}
+
+function buildExecutionGraphStepSignature(step: SessionExecutionGraphStep): string {
+  return [
+    step.id,
+    step.label,
+    step.status,
+    step.kind,
+    step.detail ?? '',
+    String(step.depth),
+    step.parentId ?? '',
+  ].join(':');
+}
+
+function buildExecutionGraphSignature(item: SessionRenderExecutionGraphItem): string {
+  return hashStringDjb2([
+    item.key,
+    item.kind,
+    item.role,
+    item.createdAt ?? '',
+    item.graphId,
+    item.completionItemKey,
+    item.anchorItemKey ?? '',
+    item.childSessionKey,
+    item.childSessionId ?? '',
+    item.childAgentId ?? '',
+    item.agentId ?? '',
+    item.agentLabel,
+    item.sessionLabel,
+    item.triggerItemKey ?? '',
+    item.replyItemKey ?? '',
+    item.active ? '1' : '0',
+    item.steps.map(buildExecutionGraphStepSignature).join('|'),
+  ].join('|'));
+}
+
+function buildProtocolItemSignature(item: SessionRenderItem): string {
+  if (item.kind === 'assistant-turn') {
+    return buildAssistantTurnSignature(item);
+  }
+  if (item.kind === 'execution-graph') {
+    return buildExecutionGraphSignature(item);
+  }
+  if (item.kind === 'user-message') {
+    return hashStringDjb2([
+      item.key,
+      item.kind,
+      item.role,
+      item.messageId ?? '',
+      item.createdAt ?? '',
+      item.updatedAt ?? '',
+      hashText(item.text),
+      buildImageSignature(item.images),
+      buildAttachedFilesSignature(item.attachedFiles),
+    ].join('|'));
+  }
+  if (item.kind === 'task-completion') {
+    return hashStringDjb2([
+      item.key,
+      item.kind,
+      item.role,
+      item.createdAt ?? '',
+      item.updatedAt ?? '',
+      hashText(item.text),
+      item.childSessionKey,
+      item.childSessionId ?? '',
+      item.childAgentId ?? '',
+      item.taskLabel ?? '',
+      item.statusLabel ?? '',
+      item.result ?? '',
+      item.statsLine ?? '',
+      item.replyInstruction ?? '',
+      item.anchorItemKey ?? '',
+      item.triggerItemKey ?? '',
+      item.replyItemKey ?? '',
+    ].join('|'));
+  }
+  const systemItem: SessionRenderSystemItem = item;
+  return hashStringDjb2([
+    systemItem.key,
+    systemItem.kind,
+    systemItem.role,
+    systemItem.createdAt ?? '',
+    systemItem.level,
+    hashText(systemItem.text),
+  ].join('|'));
+}
+
+export function reconcileSessionItems(
+  currentItems: SessionRenderItem[],
+  nextItems: SessionRenderItem[],
+): SessionRenderItem[] {
+  if (currentItems === nextItems) {
+    return currentItems;
+  }
+  if (nextItems.length === 0) {
+    return currentItems.length === 0 ? currentItems : nextItems;
+  }
+
+  const currentByKey = new Map(
+    currentItems.map((item) => [item.key, item] as const),
+  );
+  let changed = currentItems.length !== nextItems.length;
+
+  const reconciled = nextItems.map((nextItem, index) => {
+    const currentItem = currentByKey.get(nextItem.key);
+    if (!currentItem || currentItem.kind !== nextItem.kind) {
+      changed = true;
+      return nextItem;
+    }
+    if (buildProtocolItemSignature(currentItem) !== buildProtocolItemSignature(nextItem)) {
+      changed = true;
+      return nextItem;
+    }
+    if (currentItems[index] !== currentItem) {
+      changed = true;
+    }
+    return currentItem;
+  });
+
+  return changed ? reconciled : currentItems;
 }
 
 export function areSessionsEquivalent(left: ChatSession[], right: ChatSession[]): boolean {
@@ -373,28 +620,8 @@ export function removeSessionViewportState(
 export function selectViewportItems(
   record: Pick<ChatSessionRecord, 'items' | 'window'>,
 ): SessionRenderItem[] {
-  const items = resolveSessionItems(record as ChatSessionRecord);
-  if (items.length === 0) {
-    return EMPTY_ITEMS;
-  }
-  const totalCount = Math.max(record.window.totalItemCount, items.length);
-  const start = Math.max(0, Math.min(record.window.windowStartOffset, items.length));
-  const end = Math.max(start, Math.min(record.window.windowEndOffset, items.length));
-  const expectedWindowSize = Math.max(
-    0,
-    Math.min(record.window.windowEndOffset, totalCount) - Math.min(record.window.windowStartOffset, totalCount),
-  );
-  const isAuthoritativeWindowSlice = (
-    totalCount > items.length
-    && items.length === expectedWindowSize
-  );
-  if (isAuthoritativeWindowSlice) {
-    return items;
-  }
-  if (start === 0 && end === items.length) {
-    return items;
-  }
-  return items.slice(start, end);
+  void record.window;
+  return resolveSessionItems(record as ChatSessionRecord);
 }
 
 
@@ -432,6 +659,7 @@ export function patchSessionSnapshot(
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
+  const nextItems = reconcileSessionItems(current.items, snapshot.items);
   return patchSessionRecord(state, sessionKey, {
     meta: {
       ...current.meta,
@@ -441,9 +669,10 @@ export function patchSessionSnapshot(
       label: catalog.label ?? null,
       titleSource: catalog.titleSource ?? 'none',
       displayName: catalog.displayName ?? current.meta.displayName,
+      model: catalog.model ?? current.meta.model ?? null,
       lastActivityAt: typeof catalog.updatedAt === 'number' ? catalog.updatedAt : current.meta.lastActivityAt,
     },
-    items: snapshot.items,
+    items: nextItems,
     runtime: {
       ...current.runtime,
       sending: snapshot.runtime.sending,

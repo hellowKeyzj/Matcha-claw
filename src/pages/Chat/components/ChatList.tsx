@@ -19,35 +19,27 @@ import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { buildChatAutoFollowSignal } from '../chat-auto-follow';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
-import {
-  applyAssistantPresentationToItems,
-  type ChatAssistantCatalogAgent,
-  type ChatAssistantPresentation,
-  type ChatExecutionGraphItem,
-  type ChatRenderItem,
-  type ChatTaskCompletionItem,
-  type ChatUserMessageItem,
+import type {
+  ChatExecutionGraphItem,
+  ChatRenderItem,
+  ChatTaskCompletionItem,
+  ChatUserMessageItem,
 } from '../chat-render-item-model';
 import { ChatMessage } from '../ChatMessage';
 import { ChatAssistantTurn } from '../ChatAssistantTurn';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import { useChatScroll } from '../useChatScroll';
-import { useChatView } from '../useChatView';
+import type { UseChatViewResult } from '../useChatView';
 import { FailureScreen } from './ChatStates';
+import type { ChatArtifactGroup } from '../artifacts';
 import type {
-  ApprovalStatus,
-  ChatSessionRecord,
+  AttachedFileMeta,
+  ChatSessionRuntimeState,
+  ChatSessionViewportState,
 } from '@/stores/chat';
-import { selectViewportItems } from '@/stores/chat/store-state-helpers';
+import type { GeneratedFile } from '@/lib/generated-files';
 
 const CHAT_BOTTOM_FOLLOW_THRESHOLD_PX = 96;
-
-interface ThreadAgent {
-  id: string;
-  name?: string;
-  avatarSeed?: string;
-  avatarStyle?: ChatAssistantPresentation['avatarStyle'];
-}
 
 export interface ChatListHandle {
   prepareCurrentLatestBottomAlign: () => void;
@@ -56,10 +48,10 @@ export interface ChatListHandle {
 export interface ChatListProps {
   isActive: boolean;
   currentSessionKey: string;
-  currentSession: ChatSessionRecord;
-  approvalStatus: ApprovalStatus;
-  agents: ThreadAgent[];
-  isGatewayRunning: boolean;
+  runtime: ChatSessionRuntimeState;
+  viewport: ChatSessionViewportState;
+  items: ChatRenderItem[];
+  liveView: UseChatViewResult;
   errorMessage: string | null;
   showThinking: boolean;
   userAvatarDataUrl: string | null;
@@ -67,7 +59,9 @@ export interface ChatListProps {
   loadOlderLabel: string;
   onJumpToLatest: () => void;
   jumpToBottomLabel: string;
-  defaultAssistant: ChatAssistantPresentation | null;
+  artifactGroups: ChatArtifactGroup[];
+  onOpenArtifactFile: (file: GeneratedFile) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
 }
 
 interface ChatListSurfaceProps {
@@ -90,6 +84,9 @@ interface ChatListSurfaceProps {
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   onJumpToItemKey: (itemKey?: string) => void;
+  artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
+  onOpenArtifactFile: (file: GeneratedFile) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
 }
 
 type ChatListContentProps = Omit<
@@ -130,6 +127,9 @@ function renderChatItem(input: {
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   onJumpToItemKey: (itemKey?: string) => void;
+  artifactFilesByGraphKey: ReadonlyMap<string, GeneratedFile[]>;
+  onOpenArtifactFile: (file: GeneratedFile) => void;
+  onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
 }) {
   if (input.item.kind === 'assistant-turn') {
     return (
@@ -137,6 +137,7 @@ function renderChatItem(input: {
         item={input.item}
         showThinking={input.showThinking}
         userAvatarImageUrl={input.userAvatarImageUrl}
+        onOpenAttachedArtifact={input.onOpenAttachedArtifact}
       />
     );
   }
@@ -172,6 +173,8 @@ function renderChatItem(input: {
             triggerItemKey={item.triggerItemKey}
             replyItemKey={item.replyItemKey}
             onJumpToItemKey={input.onJumpToItemKey}
+            artifactFiles={input.artifactFilesByGraphKey.get(item.key) ?? []}
+            onOpenArtifactFile={input.onOpenArtifactFile}
           />
         </div>
       </div>
@@ -201,6 +204,9 @@ const ChatListContent = memo(function ChatListContent({
   showThinking,
   userAvatarImageUrl,
   onJumpToItemKey,
+  artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
+  onOpenArtifactFile = () => {},
+  onOpenAttachedArtifact = () => {},
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -254,6 +260,9 @@ const ChatListContent = memo(function ChatListContent({
                     showThinking,
                     userAvatarImageUrl,
                     onJumpToItemKey,
+                    artifactFilesByGraphKey,
+                    onOpenArtifactFile,
+                    onOpenAttachedArtifact,
                   })}
                 </div>
               </div>
@@ -328,6 +337,9 @@ export const ChatListSurface = memo(function ChatListSurface({
   showThinking,
   userAvatarImageUrl,
   onJumpToItemKey,
+  artifactFilesByGraphKey = new Map<string, GeneratedFile[]>(),
+  onOpenArtifactFile = () => {},
+  onOpenAttachedArtifact = () => {},
 }: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -371,6 +383,9 @@ export const ChatListSurface = memo(function ChatListSurface({
               showThinking={showThinking}
               userAvatarImageUrl={userAvatarImageUrl}
               onJumpToItemKey={onJumpToItemKey}
+              artifactFilesByGraphKey={artifactFilesByGraphKey}
+              onOpenArtifactFile={onOpenArtifactFile}
+              onOpenAttachedArtifact={onOpenAttachedArtifact}
             />
           </div>
         </div>
@@ -387,9 +402,10 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   {
     isActive,
     currentSessionKey,
-    currentSession,
-    approvalStatus,
-    agents,
+    runtime,
+    viewport,
+    items,
+    liveView,
     errorMessage,
     showThinking,
     userAvatarDataUrl,
@@ -397,16 +413,14 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     loadOlderLabel,
     onJumpToLatest,
     jumpToBottomLabel,
-    defaultAssistant,
+    artifactGroups,
+    onOpenArtifactFile,
+    onOpenAttachedArtifact,
   },
   ref,
 ) {
-  void approvalStatus;
-
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
-  const viewport = currentSession.window;
-  const runtime = currentSession.runtime;
   const [scrollChromeStore] = useState(() => (
     createChatScrollChromeStore({
       isBottomLocked: true,
@@ -416,41 +430,9 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     })
   ));
 
-  const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
-    () => agents.map((agent) => ({
-      id: agent.id,
-      agentName: agent.name,
-      avatarSeed: agent.avatarSeed,
-      avatarStyle: agent.avatarStyle,
-    })),
-    [agents],
-  );
-  const viewportItems = useMemo(
-    () => selectViewportItems(currentSession),
-    [currentSession],
-  );
-  const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
-  const items = useMemo(
-    () => {
-      const nextItems = applyAssistantPresentationToItems({
-        items: viewportItems,
-        agents: assistantCatalogAgents,
-        defaultAssistant,
-        previousItems: previousRenderedItemsRef.current ?? undefined,
-      });
-      previousRenderedItemsRef.current = nextItems;
-      return nextItems;
-    },
-    [assistantCatalogAgents, defaultAssistant, viewportItems],
-  );
-
-  const liveView = useChatView({
-    currentSessionStatus: currentSession.meta.historyStatus,
-    itemCount: items.length,
-    sending: runtime.sending,
-    refreshing: false,
-    mutating: false,
-  });
+  const artifactFilesByGraphKey = useMemo(() => (
+    new Map(artifactGroups.map((group) => [group.graphItemKey, group.files] as const))
+  ), [artifactGroups]);
   const autoFollowSignal = buildChatAutoFollowSignal(items);
   const tailActivityOpen = runtime.sending || runtime.pendingFinal || items.some((item) => item.kind === 'assistant-turn' && item.status !== 'final');
 
@@ -562,6 +544,9 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       showThinking={showThinking}
       userAvatarImageUrl={userAvatarDataUrl}
       onJumpToItemKey={handleJumpToItemKey}
+      artifactFilesByGraphKey={artifactFilesByGraphKey}
+      onOpenArtifactFile={onOpenArtifactFile}
+      onOpenAttachedArtifact={onOpenAttachedArtifact}
     />
   );
 });

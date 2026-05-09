@@ -60,6 +60,7 @@ interface SessionRuntimeServiceDeps {
   resolveDeletedPath?: (path: string) => string;
   openclawBridge: {
     chatSend: (params: Record<string, unknown>) => Promise<unknown>;
+    gatewayRpc?: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
   };
 }
 
@@ -101,6 +102,11 @@ interface SessionAbortRuntimePayload {
   sessionKey?: unknown;
 }
 
+interface SessionPatchPayload {
+  sessionKey?: unknown;
+  model?: unknown;
+}
+
 interface SessionPromptMediaPayload {
   filePath: string;
   mimeType: string;
@@ -133,6 +139,7 @@ interface SessionStorageDescriptor {
   sessionsDir: string;
   sessionsJsonPath: string | null;
   sessionsJson: Record<string, unknown> | null;
+  sessionStoreEntry: Record<string, unknown> | null;
   transcriptPath: string | null;
 }
 
@@ -358,11 +365,20 @@ function buildSessionCatalogItem(input: {
   sessionKey: string;
   timelineEntries: SessionTimelineEntry[];
   runtime: SessionRuntimeStateSnapshot;
+  configDir: string;
+  storageDescriptor?: SessionStorageDescriptor | null;
+  runtimeModel?: string | null;
 }): SessionCatalogItem {
   const agentId = parseSessionKeyAgent(input.sessionKey) ?? 'main';
   const label = resolveSessionLabelDetailsFromTimelineEntries(input.timelineEntries);
   const updatedAt = resolveTimelineLastActivityAt(input.timelineEntries, input.runtime);
   const kind = resolveSessionCatalogKind(input.sessionKey);
+  const resolvedModel = resolveSessionCatalogModel({
+    sessionKey: input.sessionKey,
+    storageDescriptor: input.storageDescriptor ?? null,
+    configDir: input.configDir,
+    runtimeModel: input.runtimeModel ?? null,
+  });
   return {
     key: input.sessionKey,
     agentId,
@@ -371,6 +387,7 @@ function buildSessionCatalogItem(input: {
     ...(label.label ? { label: label.label } : {}),
     ...(label.titleSource !== 'none' ? { titleSource: label.titleSource } : {}),
     displayName: input.sessionKey,
+    ...(resolvedModel ? { model: resolvedModel } : {}),
     ...(typeof updatedAt === 'number' ? { updatedAt } : {}),
   };
 }
@@ -434,6 +451,7 @@ function listAgentStorageDescriptors(input: {
         sessionsDir: input.sessionsDir,
         sessionsJsonPath: input.sessionsJsonPath,
         sessionsJson: input.sessionsJson,
+        sessionStoreEntry: candidate,
         transcriptPath: resolveIndexedTranscriptPath(candidate, input.sessionsDir),
       });
     }
@@ -452,6 +470,7 @@ function listAgentStorageDescriptors(input: {
         sessionsDir: input.sessionsDir,
         sessionsJsonPath: input.sessionsJsonPath,
         sessionsJson: input.sessionsJson,
+        sessionStoreEntry: null,
         transcriptPath: join(input.sessionsDir, normalizedFileName),
       });
       continue;
@@ -465,6 +484,7 @@ function listAgentStorageDescriptors(input: {
       sessionsDir: input.sessionsDir,
       sessionsJsonPath: input.sessionsJsonPath,
       sessionsJson: input.sessionsJson,
+      sessionStoreEntry: value,
       transcriptPath: resolveIndexedTranscriptPath(value, input.sessionsDir),
     });
   }
@@ -521,6 +541,7 @@ function listTranscriptStorageDescriptors(input: {
       sessionsDir: input.sessionsDir,
       sessionsJsonPath: input.sessionsJsonPath,
       sessionsJson: input.sessionsJson,
+      sessionStoreEntry: null,
       transcriptPath,
     });
   }
@@ -568,6 +589,99 @@ function clampWindowState(
 
 function shouldExposeRuntimeOnlySession(runtime: SessionRuntimeStateSnapshot): boolean {
   return typeof runtime.updatedAt === 'number';
+}
+
+function resolveAgentConfigDefaultModel(
+  configDir: string,
+  sessionKey: string,
+): string | null {
+  const config = readJsonRecord(join(configDir, 'openclaw.json'));
+  if (!config) {
+    return null;
+  }
+  const agents = isRecord(config.agents) ? config.agents : null;
+  const agentId = parseSessionKeyAgent(sessionKey);
+  const list = Array.isArray(agents?.list) ? agents.list : [];
+  if (agentId) {
+    const matchedAgent = list.find((candidate) => (
+      isRecord(candidate) && normalizeString(candidate.id) === agentId
+    ));
+    const agentModel = readAgentModelValue(matchedAgent);
+    if (agentModel) {
+      return agentModel;
+    }
+  }
+  return readAgentModelValue(agents?.defaults);
+}
+
+function readAgentModelValue(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const model = value.model;
+  if (typeof model === 'string') {
+    const normalized = normalizeString(model);
+    return normalized || null;
+  }
+  if (isRecord(model)) {
+    const primary = normalizeString(model.primary);
+    return primary || null;
+  }
+  return null;
+}
+
+function qualifySessionModel(provider: string, model: string): string | null {
+  if (!model) {
+    return null;
+  }
+  if (provider && model.toLowerCase().startsWith(`${provider.toLowerCase()}/`)) {
+    return model;
+  }
+  return provider ? `${provider}/${model}` : model;
+}
+
+function readSessionStoreResolvedModel(entry: Record<string, unknown> | null): string | null {
+  if (!entry) {
+    return null;
+  }
+  const providerOverride = normalizeString(entry.providerOverride);
+  const modelOverride = normalizeString(entry.modelOverride);
+  const overrideModel = qualifySessionModel(providerOverride, modelOverride);
+  if (overrideModel) {
+    return overrideModel;
+  }
+  const runtimeProvider = normalizeString(entry.modelProvider);
+  const runtimeModel = normalizeString(entry.model);
+  return qualifySessionModel(runtimeProvider, runtimeModel);
+}
+
+function readPatchedSessionResolvedModel(requestedModel: string, result: unknown): string {
+  if (!isRecord(result)) {
+    return requestedModel;
+  }
+  const resolved = isRecord(result.resolved) ? result.resolved : null;
+  if (!resolved) {
+    return requestedModel;
+  }
+  const provider = normalizeString(resolved.modelProvider);
+  const model = normalizeString(resolved.model);
+  return qualifySessionModel(provider, model) ?? requestedModel;
+}
+
+function resolveSessionCatalogModel(input: {
+  sessionKey: string;
+  storageDescriptor: SessionStorageDescriptor | null;
+  configDir: string;
+  runtimeModel?: string | null;
+}): string | null {
+  if (input.runtimeModel) {
+    return input.runtimeModel;
+  }
+  const entryModel = readSessionStoreResolvedModel(input.storageDescriptor?.sessionStoreEntry ?? null);
+  if (entryModel) {
+    return entryModel;
+  }
+  return resolveAgentConfigDefaultModel(input.configDir, input.sessionKey);
 }
 
 function buildWindowRange(input: {
@@ -729,6 +843,7 @@ function buildRenderItemsFromTimeline(input: {
 export class SessionRuntimeService {
   private readonly sessionStates = new Map<string, SessionRuntimeTimelineState>();
   private readonly parentSessionsByChildSessionKey = new Map<string, Set<string>>();
+  private readonly resolvedSessionModels = new Map<string, string>();
   private activeSessionKey: string | null = null;
   private readonly storeFilePath: string;
   private latestConnectedTransportEpoch = 0;
@@ -1171,6 +1286,9 @@ export class SessionRuntimeService {
         sessionKey,
         timelineEntries: state.timelineEntries,
         runtime: state.runtime,
+        configDir: this.deps.getOpenClawConfigDir(),
+        storageDescriptor: this.findStorageDescriptor(sessionKey),
+        runtimeModel: this.resolvedSessionModels.get(sessionKey) ?? null,
       }),
       items: cloneRenderItems(allItems.slice(start, end)),
       replayComplete: options.replayComplete ?? true,
@@ -1470,6 +1588,9 @@ export class SessionRuntimeService {
             sessionKey: '',
             timelineEntries: [],
             runtime: createEmptySessionRuntimeState(),
+            configDir: this.deps.getOpenClawConfigDir(),
+            storageDescriptor: null,
+            runtimeModel: null,
           }),
           items: [],
           replayComplete: true,
@@ -1626,6 +1747,7 @@ export class SessionRuntimeService {
 
   async listSessions() {
     const sessionsByKey = new Map<string, SessionCatalogItem>();
+    const configDir = this.deps.getOpenClawConfigDir();
 
     for (const descriptor of this.listStorageDescriptors()) {
       if (!descriptor.transcriptPath || !existsSync(descriptor.transcriptPath)) {
@@ -1639,6 +1761,9 @@ export class SessionRuntimeService {
         sessionKey: descriptor.sessionKey,
         timelineEntries,
         runtime: createEmptySessionRuntimeState(),
+        configDir,
+        storageDescriptor: descriptor,
+        runtimeModel: this.resolvedSessionModels.get(descriptor.sessionKey) ?? null,
       }));
     }
 
@@ -1653,6 +1778,9 @@ export class SessionRuntimeService {
         sessionKey,
         timelineEntries: state.timelineEntries,
         runtime: state.runtime,
+        configDir,
+        storageDescriptor: this.findStorageDescriptor(sessionKey),
+        runtimeModel: this.resolvedSessionModels.get(sessionKey) ?? null,
       }));
     }
 
@@ -1721,6 +1849,49 @@ export class SessionRuntimeService {
     return {
       status: 200,
       data: result,
+    };
+  }
+
+  async patchSession(payload: unknown) {
+    const body = isRecord(payload) ? payload as SessionPatchPayload : {};
+    const sessionKey = normalizeString(body.sessionKey);
+    const model = normalizeString(body.model);
+    if (!sessionKey) {
+      return {
+        status: 400,
+        data: { success: false, error: 'sessionKey is required' },
+      };
+    }
+    if (!model) {
+      return {
+        status: 400,
+        data: { success: false, error: 'model is required' },
+      };
+    }
+    if (!this.deps.openclawBridge.gatewayRpc) {
+      return {
+        status: 500,
+        data: { success: false, error: 'gatewayRpc is unavailable' },
+      };
+    }
+
+    const patchResult = await this.deps.openclawBridge.gatewayRpc('sessions.patch', {
+      key: sessionKey,
+      model,
+    }, 30000);
+    this.resolvedSessionModels.set(sessionKey, readPatchedSessionResolvedModel(model, patchResult));
+
+    const state = this.activateSession(sessionKey, {
+      hydrate: true,
+      resetWindowToLatest: false,
+    });
+
+    return {
+      status: 200,
+      data: {
+        success: true,
+        snapshot: this.buildLatestSnapshot(sessionKey, state),
+      },
     };
   }
 

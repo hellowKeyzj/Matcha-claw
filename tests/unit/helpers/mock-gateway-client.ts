@@ -22,6 +22,7 @@ export const hostSessionPromptMock = vi.fn();
 export const hostSessionWindowFetchMock = vi.fn();
 export const hostSessionDeleteMock = vi.fn();
 export const hostSessionListMock = vi.fn();
+export const hostSessionPatchMock = vi.fn();
 
 vi.spyOn(hostApiModule, 'hostGatewayRequest').mockImplementation(async <TResult = unknown>(
   method: string,
@@ -116,6 +117,13 @@ vi.spyOn(hostApiModule, 'hostSessionDelete').mockImplementation(async (
 
 vi.spyOn(hostApiModule, 'hostSessionList').mockImplementation(async () => await hostSessionListMock());
 
+vi.spyOn(hostApiModule, 'hostSessionPatch').mockImplementation(async (
+  payload: {
+    sessionKey: string;
+    model: string;
+  },
+) => await hostSessionPatchMock(payload));
+
 export function resetGatewayClientMocks(): void {
   gatewayClientRequestMock.mockReset();
   gatewayClientRpcMock.mockReset();
@@ -124,4 +132,5 @@ export function resetGatewayClientMocks(): void {
   hostSessionWindowFetchMock.mockReset();
   hostSessionDeleteMock.mockReset();
   hostSessionListMock.mockReset();
+  hostSessionPatchMock.mockReset();
 }

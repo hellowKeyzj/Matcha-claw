@@ -3,6 +3,7 @@ import {
   applyAssistantPresentationToItems,
   type ChatAssistantTurnItem,
 } from '@/pages/Chat/chat-render-item-model';
+import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function decorateItems() {
@@ -59,12 +60,19 @@ describe('chat render item model', () => {
     });
   });
 
-  it('builds assistant markdown html for assistant-turn text', () => {
+  it('builds assistant markdown html on demand for assistant-turn text', () => {
     const item = decorateItems()[1] as ChatAssistantTurnItem;
 
     expect(item.kind).toBe('assistant-turn');
-    expect(item.assistantMarkdownHtml).toContain('<h3>');
-    expect(item.assistantMarkdownHtml).toContain('<pre>');
+    const html = getOrBuildAssistantMarkdownBody({
+      key: `${item.key}:segment:${item.segments[0]?.key ?? 'missing'}`,
+      role: 'assistant',
+      createdAt: item.createdAt,
+      text: item.segments[0]?.kind === 'message' ? item.segments[0].text : '',
+      attachedFiles: [],
+    } as never)?.fullHtml ?? '';
+    expect(html).toContain('<h3>');
+    expect(html).toContain('<pre>');
   });
 
   it('keeps tool-only assistant activity inside the assistant-turn item', () => {

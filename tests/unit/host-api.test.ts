@@ -120,6 +120,79 @@ describe('host-api', () => {
     });
   });
 
+  it('hostFileReadText uses main-owned preview route', async () => {
+    invokeIpcMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        status: 200,
+        ok: true,
+        json: { ok: true, content: '# Hello' },
+      },
+    });
+
+    const { hostFileReadText } = await import('@/lib/host-api');
+    const result = await hostFileReadText({ path: '/tmp/demo.md' });
+
+    expect(result).toEqual({ ok: true, content: '# Hello' });
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/files/read-text',
+        method: 'POST',
+      }),
+    );
+  });
+
+  it('hostFileReadBinary uses main-owned preview route', async () => {
+    invokeIpcMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        status: 200,
+        ok: true,
+        json: { ok: true, data: 'UEsDBA==' },
+      },
+    });
+
+    const { hostFileReadBinary } = await import('@/lib/host-api');
+    const result = await hostFileReadBinary({ path: '/tmp/demo.pdf' });
+
+    expect(result).toEqual({ ok: true, data: 'UEsDBA==' });
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/files/read-binary',
+        method: 'POST',
+      }),
+    );
+  });
+
+  it('hostFileListDir uses main-owned preview route', async () => {
+    invokeIpcMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        status: 200,
+        ok: true,
+        json: { ok: true, entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }] },
+      },
+    });
+
+    const { hostFileListDir } = await import('@/lib/host-api');
+    const result = await hostFileListDir({ path: '/tmp/workspace' });
+
+    expect(result).toEqual({
+      ok: true,
+      entries: [{ name: 'src', path: '/tmp/workspace/src', isDir: true, size: 0, mtimeMs: 0, hasChildren: true }],
+    });
+    expect(invokeIpcMock).toHaveBeenCalledWith(
+      'hostapi:fetch',
+      expect.objectContaining({
+        path: '/api/files/list-dir',
+        method: 'POST',
+        timeoutMs: 60000,
+      }),
+    );
+  });
+
   it('hostGatewayRequest 透传调用方指定的 timeoutMs', async () => {
     invokeIpcMock.mockResolvedValueOnce({
       ok: true,

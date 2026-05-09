@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/pages/Chat';
@@ -10,6 +10,10 @@ import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
 import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
+import {
+  hostSessionPatchMock,
+  resetGatewayClientMocks,
+} from './helpers/mock-gateway-client';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -35,6 +39,7 @@ function renderChat() {
 
 describe('chat model picker', () => {
   beforeEach(() => {
+    resetGatewayClientMocks();
     (globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 
     const sessionKey = 'agent:test:main';
@@ -53,6 +58,44 @@ describe('chat model picker', () => {
       },
     ]);
 
+    hostSessionPatchMock.mockImplementation(async (payload: { sessionKey: string; model: string }) => ({
+      success: true,
+      snapshot: {
+        sessionKey: payload.sessionKey,
+        catalog: {
+          key: payload.sessionKey,
+          agentId: 'test',
+          kind: 'main',
+          preferred: true,
+          displayName: payload.sessionKey,
+          model: payload.model,
+          updatedAt: 10,
+        },
+        items: messages,
+        replayComplete: true,
+        runtime: {
+          sending: false,
+          activeRunId: null,
+          runPhase: 'idle',
+          activeTurnItemKey: null,
+          pendingTurnKey: null,
+          pendingTurnLaneKey: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          lastError: null,
+          lastIssue: null,
+        },
+        window: {
+          totalItemCount: messages.length,
+          windowStartOffset: 0,
+          windowEndOffset: messages.length,
+          hasMore: false,
+          hasNewer: false,
+          isAtLatest: true,
+        },
+      },
+    }));
+
     useGatewayStore.setState({
       status: {
         processState: 'running',
@@ -69,19 +112,6 @@ describe('chat model picker', () => {
       },
       rpc: vi.fn().mockResolvedValue({}),
     } as never);
-
-    const updateAgent = vi.fn().mockImplementation(async (payload: { model?: string }) => {
-      useSubagentsStore.setState((state) => ({
-        agentsResource: {
-          ...state.agentsResource,
-          data: state.agentsResource.data.map((agent) => (
-            agent.id === 'test'
-              ? { ...agent, model: payload.model }
-              : agent
-          )),
-        },
-      }));
-    });
 
     useSubagentsStore.setState({
       agents: [
@@ -100,22 +130,22 @@ describe('chat model picker', () => {
         {
           id: 'openai/gpt-5.4',
           provider: 'openai',
-          providerLabel: 'OpenAI',
+          providerLabel: 'openai',
           modelLabel: 'gpt-5.4',
-          displayLabel: 'OpenAI / gpt-5.4',
+          displayLabel: 'openai / gpt-5.4',
         },
         {
           id: 'anthropic/claude-opus-4-6',
           provider: 'anthropic',
-          providerLabel: 'Anthropic',
+          providerLabel: 'anthropic',
           modelLabel: 'claude-opus-4-6',
-          displayLabel: 'Anthropic / claude-opus-4-6',
+          displayLabel: 'anthropic / claude-opus-4-6',
         },
       ],
       modelsLoading: false,
       loadAvailableModels: vi.fn().mockResolvedValue(undefined),
       loadAgents: vi.fn().mockResolvedValue(undefined),
-      updateAgent,
+      updateAgent: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     useTaskInboxStore.setState({
@@ -180,28 +210,72 @@ describe('chat model picker', () => {
             ...createEmptySessionRecord().meta,
             historyStatus: 'ready',
             lastActivityAt: Date.now(),
+            model: 'openai/gpt-5.4',
           },
         },
       },
     } as never);
   });
 
-  it('switches the current agent model via subagents store', async () => {
+  it('switches the current session model via session patch', async () => {
     renderChat();
 
-    const select = await screen.findByTestId('chat-model-picker');
-    fireEvent.change(select, { target: { value: 'anthropic/claude-opus-4-6' } });
+    const picker = await screen.findByTestId('chat-model-picker');
+    expect(picker).toHaveTextContent('openai / gpt-5.4');
+
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
 
     await waitFor(() => {
-      const updateAgent = useSubagentsStore.getState().updateAgent as ReturnType<typeof vi.fn>;
-      expect(updateAgent).toHaveBeenCalledWith(expect.objectContaining({
-        agentId: 'test',
+      expect(hostSessionPatchMock).toHaveBeenCalledWith({
+        sessionKey: 'agent:test:main',
         model: 'anthropic/claude-opus-4-6',
-      }));
+      });
     });
 
     await waitFor(() => {
-      expect((screen.getByTestId('chat-model-picker') as HTMLSelectElement).value).toBe('anthropic/claude-opus-4-6');
+      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
     });
+
+    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
+  });
+
+  it('rolls back the optimistic session model when session patch fails', async () => {
+    hostSessionPatchMock.mockRejectedValueOnce(new Error('patch failed'));
+
+    renderChat();
+
+    const picker = await screen.findByTestId('chat-model-picker');
+    expect(picker).toHaveTextContent('openai / gpt-5.4');
+
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'anthropic / claude-opus-4-6' }));
+
+    expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('anthropic / claude-opus-4-6');
+    expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('anthropic/claude-opus-4-6');
+
+    await waitFor(() => {
+      expect(useChatStore.getState().loadedSessions['agent:test:main']?.meta.model).toBe('openai/gpt-5.4');
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-model-picker')).toHaveTextContent('openai / gpt-5.4');
+    });
+  });
+
+  it('loads chat model options from the shared subagent model catalog instead of models.list', async () => {
+    const loadAvailableModels = vi.fn().mockResolvedValue(undefined);
+    useSubagentsStore.setState({
+      loadAvailableModels,
+    } as never);
+
+    renderChat();
+
+    await screen.findByTestId('chat-model-picker');
+
+    expect(loadAvailableModels).toHaveBeenCalledTimes(1);
   });
 });

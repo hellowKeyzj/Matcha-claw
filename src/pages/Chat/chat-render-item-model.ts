@@ -1,9 +1,8 @@
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
-import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
-import { getAssistantTurnPlainText } from './chat-message-view';
 import type {
-  SessionAssistantMessageSegment,
+  SessionAssistantToolSegment,
   SessionAssistantTurnItem,
+  SessionRenderImage,
   SessionRenderExecutionGraphItem,
   SessionRenderItem,
   SessionRenderSystemItem,
@@ -24,10 +23,7 @@ interface ChatRenderItemBase {
 }
 
 export type ChatUserMessageItem = SessionRenderUserMessageItem & ChatRenderItemBase;
-export type ChatAssistantTurnItem = SessionAssistantTurnItem & ChatRenderItemBase & {
-  assistantMarkdownHtml: string | null;
-  assistantSegmentMarkdownHtmlByKey: Record<string, string>;
-};
+export type ChatAssistantTurnItem = SessionAssistantTurnItem & ChatRenderItemBase;
 export type ChatExecutionGraphItem = SessionRenderExecutionGraphItem & ChatRenderItemBase;
 export type ChatTaskCompletionItem = SessionRenderTaskCompletionItem & ChatRenderItemBase;
 export type ChatSystemItem = SessionRenderSystemItem & ChatRenderItemBase;
@@ -59,14 +55,6 @@ function isSameAssistantPresentation(
     && left.avatarStyle === right.avatarStyle;
 }
 
-function safeStableStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? '';
-  } catch {
-    return String(value);
-  }
-}
-
 function hashStringDjb2(input: string): string {
   let hash = 5381;
   for (let index = 0; index < input.length; index += 1) {
@@ -75,85 +63,211 @@ function hashStringDjb2(input: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function buildRenderSignature(item: SessionRenderItem): string {
-  return [
+function hashText(value: string | null | undefined): string {
+  return hashStringDjb2(value ?? '');
+}
+
+function buildAttachedFilesSignature(
+  attachedFiles: ReadonlyArray<{
+    fileName?: string;
+    filePath?: string | null;
+    mimeType?: string;
+    fileSize?: number;
+    source?: string;
+  }>,
+): string {
+  if (attachedFiles.length === 0) {
+    return '';
+  }
+  const parts = attachedFiles.map((file) => [
+    file.fileName ?? '',
+    file.filePath ?? '',
+    file.mimeType ?? '',
+    String(file.fileSize ?? ''),
+    file.source ?? '',
+  ].join(':'));
+  return hashStringDjb2(parts.join('|'));
+}
+
+function buildImageSignature(images: ReadonlyArray<SessionRenderImage>): string {
+  if (images.length === 0) {
+    return '';
+  }
+  const parts = images.map((image) => [
+    image.mimeType,
+    image.url ?? '',
+    String(image.data?.length ?? 0),
+  ].join(':'));
+  return hashStringDjb2(parts.join('|'));
+}
+
+function buildAssistantToolResultSignature(result: SessionAssistantToolSegment['tool']['result']): string {
+  switch (result.kind) {
+    case 'text':
+      return [
+        result.kind,
+        hashText(result.bodyText),
+      ].join(':');
+    case 'json':
+      return [
+        result.kind,
+        hashText(result.bodyText),
+      ].join(':');
+    case 'canvas':
+      return [
+        result.kind,
+        result.surface,
+        result.preview.kind,
+        result.preview.surface,
+        result.preview.viewId,
+        hashText(result.rawText),
+      ].join(':');
+    default:
+      return result.kind;
+  }
+}
+
+function buildAssistantTurnSignature(item: SessionAssistantTurnItem): string {
+  const segmentParts = item.segments.map((segment) => {
+    if (segment.kind === 'message') {
+      return [
+        segment.kind,
+        segment.key,
+        hashText(segment.text),
+      ].join(':');
+    }
+    if (segment.kind === 'thinking') {
+      return [
+        segment.kind,
+        segment.key,
+        hashText(segment.text),
+      ].join(':');
+    }
+    if (segment.kind === 'media') {
+      return [
+        segment.kind,
+        segment.key,
+        buildImageSignature(segment.images),
+        buildAttachedFilesSignature(segment.attachedFiles),
+      ].join(':');
+    }
+    return [
+      segment.kind,
+      segment.key,
+      segment.tool.id,
+      segment.tool.toolCallId ?? '',
+      segment.tool.name,
+      segment.tool.status,
+      String(segment.tool.updatedAt ?? ''),
+      String(segment.tool.durationMs ?? ''),
+      hashText(segment.tool.summary),
+      buildAssistantToolResultSignature(segment.tool.result),
+    ].join(':');
+  });
+
+  const toolParts = (item.tools ?? []).map((tool) => [
+    tool.id,
+    tool.toolCallId ?? '',
+    tool.name,
+    tool.status,
+    String(tool.updatedAt ?? ''),
+    String(tool.durationMs ?? ''),
+    hashText(tool.summary),
+    buildAssistantToolResultSignature(tool.result),
+  ].join(':'));
+
+  const embeddedToolResultParts = (item.embeddedToolResults ?? []).map((result) => [
+    result.key,
+    result.toolCallId ?? '',
+    result.toolName,
+    result.preview.kind,
+    result.preview.viewId,
+    result.rawText ? hashText(result.rawText) : '',
+  ].join(':'));
+
+  return hashStringDjb2([
     item.key,
     item.kind,
     item.role,
-    'status' in item ? (item.status ?? '') : '',
+    item.status,
     item.createdAt ?? '',
-    hashStringDjb2(safeStableStringify(item)),
-  ].join('|');
+    item.updatedAt ?? '',
+    item.turnKey ?? '',
+    item.laneKey ?? '',
+    item.agentId ?? '',
+    item.pendingState ?? '',
+    hashText(item.text),
+    buildAttachedFilesSignature(item.attachedFiles ?? []),
+    buildImageSignature(item.images ?? []),
+    segmentParts.join('|'),
+    toolParts.join('|'),
+    embeddedToolResultParts.join('|'),
+  ].join('|'));
 }
 
-function decorateProtocolItem(item: SessionRenderItem): ChatRenderItem {
-  const base = {
-    assistantPresentation: null,
-    renderSignature: buildRenderSignature(item),
-  } satisfies ChatRenderItemBase;
+function buildExecutionGraphSignature(item: SessionRenderExecutionGraphItem): string {
+  const stepParts = item.steps.map((step) => [
+    step.id,
+    step.label,
+    step.status,
+    step.kind,
+    step.detail ?? '',
+    String(step.depth),
+    step.parentId ?? '',
+  ].join(':'));
+  return hashStringDjb2([
+    item.key,
+    item.kind,
+    item.role,
+    item.createdAt ?? '',
+    item.graphId,
+    item.completionItemKey ?? '',
+    item.childSessionKey ?? '',
+    item.childSessionId ?? '',
+    item.childAgentId ?? '',
+    item.agentId ?? '',
+    item.agentLabel ?? '',
+    item.sessionLabel ?? '',
+    item.anchorItemKey ?? '',
+    item.triggerItemKey ?? '',
+    item.replyItemKey ?? '',
+    item.active ? '1' : '0',
+    stepParts.join('|'),
+  ].join('|'));
+}
 
+function buildRenderSignature(item: SessionRenderItem): string {
   if (item.kind === 'assistant-turn') {
-    const itemTools = Array.isArray(item.tools) ? item.tools : [];
-    const plainText = getAssistantTurnPlainText(item);
-    const assistantSegmentMarkdownHtmlByKey = Object.fromEntries(
-      item.segments
-        .filter((segment): segment is SessionAssistantMessageSegment => segment.kind === 'message')
-        .map((segment) => {
-          const html = getOrBuildAssistantMarkdownBody({
-            key: `${item.key}:segment:${segment.key}`,
-            role: 'assistant',
-            sessionKey: item.sessionKey,
-            createdAt: item.createdAt,
-            text: segment.text,
-            attachedFiles: [],
-          } as never)?.fullHtml ?? null;
-          return [segment.key, html ?? ''];
-        }),
-    );
-    return {
-      ...item,
-      ...base,
-      assistantMarkdownHtml: plainText
-        ? (getOrBuildAssistantMarkdownBody({
-            key: item.key,
-            kind: 'message',
-            sessionKey: item.sessionKey,
-            role: 'assistant',
-            text: plainText,
-            createdAt: item.createdAt,
-            thinking: item.thinking,
-            images: item.images,
-            toolUses: itemTools.map((tool) => ({
-              id: tool.id,
-              name: tool.name,
-              input: tool.input,
-            })),
-            attachedFiles: item.attachedFiles,
-            toolStatuses: itemTools.map((tool) => ({
-              ...(tool.id ? { id: tool.id } : {}),
-              ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-              name: tool.name,
-              status: tool.status,
-              ...(tool.summary ? { summary: tool.summary } : {}),
-              ...(tool.durationMs != null ? { durationMs: tool.durationMs } : {}),
-              ...(tool.updatedAt != null ? { updatedAt: tool.updatedAt } : {}),
-              ...(tool.output !== undefined ? { output: tool.output } : {}),
-              ...(tool.result.kind === 'canvas' && tool.result.rawText ? { outputText: tool.result.rawText } : {}),
-              ...(tool.result.kind === 'text' || tool.result.kind === 'json'
-                ? { outputText: tool.result.bodyText }
-                : {}),
-            })),
-            isStreaming: item.status === 'streaming',
-          } as never)?.fullHtml ?? null)
-        : null,
-      assistantSegmentMarkdownHtmlByKey,
-    };
+    return [
+      item.key,
+      item.kind,
+      item.role,
+      item.status,
+      item.createdAt ?? '',
+      buildAssistantTurnSignature(item),
+    ].join('|');
   }
 
-  return {
-    ...item,
-    ...base,
-  } as ChatRenderItem;
+  if (item.kind === 'execution-graph') {
+    return [
+      item.key,
+      item.kind,
+      item.role,
+      item.createdAt ?? '',
+      buildExecutionGraphSignature(item),
+    ].join('|');
+  }
+
+  return hashStringDjb2([
+    item.key,
+    item.kind,
+    item.role,
+    item.createdAt ?? '',
+    'updatedAt' in item ? (item.updatedAt ?? '') : '',
+    hashText(item.text),
+    'images' in item ? buildImageSignature(item.images ?? []) : '',
+    'attachedFiles' in item ? buildAttachedFilesSignature(item.attachedFiles ?? []) : '',
+  ].join('|'));
 }
 
 export function resolveAssistantPresentationForLaneAgentId(input: {
@@ -181,7 +295,7 @@ export function resolveAssistantPresentationForLaneAgentId(input: {
 }
 
 export function resolveItemAssistantPresentation(input: {
-  item: ChatRenderItem;
+  item: Pick<SessionRenderItem, 'kind'> & { agentId?: string | null };
   agents: ChatAssistantCatalogAgent[];
   defaultAssistant: ChatAssistantPresentation | null;
 }): ChatAssistantPresentation | null {
@@ -205,24 +319,25 @@ export function applyAssistantPresentationToItems(input: {
     (input.previousItems ?? []).map((item) => [item.key, item] as const),
   );
   return input.items.map((protocolItem) => {
-    const item = decorateProtocolItem(protocolItem);
-    const decoratedItem = {
-      ...item,
-      assistantPresentation: resolveItemAssistantPresentation({
-        item,
-        agents: input.agents,
-        defaultAssistant: input.defaultAssistant,
-      }),
-    };
-    const previousItem = previousItemsByKey.get(decoratedItem.key);
+    const renderSignature = buildRenderSignature(protocolItem);
+    const assistantPresentation = resolveItemAssistantPresentation({
+      item: protocolItem,
+      agents: input.agents,
+      defaultAssistant: input.defaultAssistant,
+    });
+    const previousItem = previousItemsByKey.get(protocolItem.key);
     if (
       previousItem
-      && previousItem.kind === decoratedItem.kind
-      && previousItem.renderSignature === decoratedItem.renderSignature
-      && isSameAssistantPresentation(previousItem.assistantPresentation, decoratedItem.assistantPresentation)
+      && previousItem.kind === protocolItem.kind
+      && previousItem.renderSignature === renderSignature
+      && isSameAssistantPresentation(previousItem.assistantPresentation, assistantPresentation)
     ) {
       return previousItem;
     }
-    return decoratedItem;
+    return {
+      ...protocolItem,
+      renderSignature,
+      assistantPresentation,
+    } as ChatRenderItem;
   });
 }

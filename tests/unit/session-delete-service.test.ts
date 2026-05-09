@@ -32,6 +32,7 @@ describe('session adapter service delete', () => {
       resolveDeletedPath: (path) => path.replace(/\.jsonl$/, '.deleted.jsonl'),
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -72,6 +73,7 @@ describe('session adapter service delete', () => {
       resolveDeletedPath: (path) => path.replace(/\.jsonl$/, '.deleted.jsonl'),
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 

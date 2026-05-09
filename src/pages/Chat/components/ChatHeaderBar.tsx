@@ -6,7 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 
-const HEADER_BUTTON_CLASSNAME = 'h-8 w-8 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground';
+const HEADER_BUTTON_CLASSNAME = 'h-8 w-8 rounded-md border-0 bg-transparent p-0 text-muted-foreground shadow-none transition-colors hover:bg-secondary hover:text-foreground focus-visible:ring-0 focus-visible:ring-offset-0';
 const HEADER_TOOLTIP_PROPS = {
   side: 'bottom' as const,
   align: 'end' as const,
@@ -46,7 +46,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
   return (
     <div className="flex items-start justify-end gap-2">
       {showBackgroundStatus && (
-        <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border/45 bg-background/74 px-3 text-[11px] text-muted-foreground shadow-[0_8px_22px_rgba(15,23,42,0.05)] backdrop-blur-xl">
+        <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border/45 bg-card/92 px-3 text-[11px] text-muted-foreground shadow-[0_8px_22px_rgba(15,23,42,0.05)] backdrop-blur-xl">
           <Loader2 className="h-3 w-3 animate-spin" />
           <span>{refreshing ? statusRefreshingLabel : statusMutatingLabel}</span>
         </div>
@@ -77,7 +77,7 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
               size="icon"
               className={cn(
                 HEADER_BUTTON_CLASSNAME,
-                showThinking && 'bg-secondary/62 text-foreground',
+                showThinking && 'bg-secondary text-foreground',
               )}
               onClick={onToggleThinking}
             >
@@ -94,14 +94,14 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
             <div className="relative">
               <Button
                 variant="ghost"
-                size="icon"
-                aria-label={sidePanelToggleLabel}
-                className={cn(
-                  HEADER_BUTTON_CLASSNAME,
-                  sidePanelOpen && 'bg-muted/70 text-foreground',
-                )}
-                onClick={onToggleSidePanel}
-              >
+              size="icon"
+              aria-label={sidePanelToggleLabel}
+              className={cn(
+                HEADER_BUTTON_CLASSNAME,
+                sidePanelOpen && 'bg-secondary text-foreground',
+              )}
+              onClick={onToggleSidePanel}
+            >
                 {sidePanelOpen ? (
                   <PanelRightClose className="h-4 w-4" />
                 ) : (

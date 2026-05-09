@@ -111,7 +111,7 @@ vi.mock('@/pages/Chat/components/ChatOffline', () => ({
 vi.mock('@/pages/Chat/components/ChatList', () => ({
   ChatList: forwardRef(function MockChatViewportPane(
     props: {
-      currentSession: ReturnType<typeof createEmptySessionRecord>;
+      items: ReturnType<typeof createEmptySessionRecord>['items'];
     },
     ref,
   ) {
@@ -121,7 +121,7 @@ vi.mock('@/pages/Chat/components/ChatList', () => ({
     }), []);
     return (
       <div data-testid="chat-viewport-pane">
-        {props.currentSession.items.length}
+        {props.items.length}
       </div>
     );
   }),

@@ -4,9 +4,12 @@ import { CHAT_WORKSPACE_LAYOUT, clampPaneWidth, getSidebarResizeMaxWidth } from 
 interface LayoutState {
   sidebarVisible: boolean;
   sidebarWidth: number;
+  chatTakeoverMode: 'none' | 'artifact-workbench';
   setSidebarVisible: (value: boolean) => void;
   toggleSidebar: () => void;
   setSidebarWidth: (value: number, containerWidth: number) => void;
+  setChatTakeoverMode: (value: LayoutState['chatTakeoverMode']) => void;
+  clearChatTakeoverMode: () => void;
 }
 
 const SIDEBAR_VISIBLE_STORAGE_KEY = 'layout:sidebar-visible';
@@ -67,6 +70,7 @@ function persistSidebarWidth(value: number) {
 export const useLayoutStore = create<LayoutState>((set) => ({
   sidebarVisible: readStoredSidebarVisible(),
   sidebarWidth: readStoredSidebarWidth(),
+  chatTakeoverMode: 'none',
   setSidebarVisible: (sidebarVisible) => {
     persistSidebarVisible(sidebarVisible);
     set({ sidebarVisible });
@@ -86,5 +90,11 @@ export const useLayoutStore = create<LayoutState>((set) => ({
     );
     persistSidebarWidth(sidebarWidth);
     set({ sidebarWidth });
+  },
+  setChatTakeoverMode: (chatTakeoverMode) => {
+    set({ chatTakeoverMode });
+  },
+  clearChatTakeoverMode: () => {
+    set({ chatTakeoverMode: 'none' });
   },
 }));

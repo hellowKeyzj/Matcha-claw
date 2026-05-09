@@ -8,7 +8,7 @@ import type { OpenClawBridge } from '../../openclaw-bridge';
 interface SessionRouteDeps {
   getOpenClawConfigDir: () => string;
   resolveDeletedPath: (path: string) => string;
-  openclawBridge: Pick<OpenClawBridge, 'chatSend'>;
+  openclawBridge: Pick<OpenClawBridge, 'chatSend' | 'gatewayRpc'>;
 }
 
 let cachedSessionRuntimeService: SessionRuntimeService | null = null;
@@ -91,6 +91,17 @@ export async function handleSessionRoute(
   if (method === 'POST' && routePath === '/api/session/prompt') {
     try {
       return await sessionRuntimeService.promptSession(payload);
+    } catch (error) {
+      return {
+        status: 500,
+        data: { success: false, error: String(error) },
+      };
+    }
+  }
+
+  if (method === 'POST' && routePath === '/api/session/patch') {
+    try {
+      return await sessionRuntimeService.patchSession(payload);
     } catch (error) {
       return {
         status: 500,

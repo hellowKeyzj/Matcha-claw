@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, memo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type MouseEvent, type PointerEvent } from 'react';
 import { Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { invokeIpc } from '@/lib/api-client';
 import type { AttachedFileMeta } from '@/stores/chat';
@@ -9,6 +9,8 @@ import type {
 import type { ChatMessageImage } from './chat-message-view';
 import { formatTimestamp } from './message-utils';
 import { buildMarkdownCacheKey, getOrBuildMarkdownBody } from './md-pipeline';
+import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
+import { shouldKeepAssistantAttachmentVisible } from './artifact-paths';
 
 export interface MessageLightboxState {
   src: string;
@@ -203,10 +205,12 @@ export function AssistantMessageMedia({
   images,
   attachedFiles,
   onPreview,
+  onOpenFile,
 }: {
   images: ReadonlyArray<ChatMessageImage>;
   attachedFiles: ReadonlyArray<AttachedFileMeta>;
   onPreview: (item: MessageLightboxState) => void;
+  onOpenFile?: (file: AttachedFileMeta) => void;
 }) {
   return (
     <>
@@ -232,7 +236,7 @@ export function AssistantMessageMedia({
             const isImage = file.mimeType.startsWith('image/');
             if (isImage && images.length > 0) return null;
             if (!isImage) {
-              return <FileCard key={`local-${index}`} file={file} />;
+              return <FileCard key={`local-${index}`} file={file} onOpen={onOpenFile} />;
             }
             if (!file.preview) {
               return <MissingImagePreview key={`local-${index}`} />;
@@ -597,6 +601,7 @@ function formatFileSize(bytes: number): string {
 }
 
 function FileIcon({ mimeType, className }: { mimeType: string; className?: string }) {
+  if (mimeType === DIRECTORY_MIME_TYPE) return <FileArchive className={className} />;
   if (mimeType.startsWith('video/')) return <Film className={className} />;
   if (mimeType.startsWith('audio/')) return <Music className={className} />;
   if (mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/xml') return <FileText className={className} />;
@@ -605,20 +610,68 @@ function FileIcon({ mimeType, className }: { mimeType: string; className?: strin
   return <File className={className} />;
 }
 
-function FileCard({ file }: { file: AttachedFileMeta }) {
+function FileCard({
+  file,
+  onOpen,
+}: {
+  file: AttachedFileMeta;
+  onOpen?: (file: AttachedFileMeta) => void;
+}) {
   const canOpen = typeof file.filePath === 'string' && file.filePath.trim().length > 0;
+  const lastOpenEventRef = useRef<{ kind: 'pointerdown' | 'mousedown' | 'click'; at: number } | null>(null);
   const handleOpen = useCallback(() => {
     if (!canOpen) {
       return;
     }
+    if (onOpen && shouldKeepAssistantAttachmentVisible(file)) {
+      onOpen(file);
+      return;
+    }
     void invokeIpc('shell:openPath', file.filePath!);
-  }, [canOpen, file.filePath]);
+  }, [canOpen, file, onOpen]);
+  const triggerOpen = useCallback((kind: 'pointerdown' | 'mousedown' | 'click') => {
+    const previous = lastOpenEventRef.current;
+    const now = Date.now();
+    if (previous && now - previous.at < 250) {
+      if (previous.kind === 'pointerdown' && (kind === 'mousedown' || kind === 'click')) {
+        return;
+      }
+      if (previous.kind === 'mousedown' && kind === 'click') {
+        return;
+      }
+    }
+    lastOpenEventRef.current = { kind, at: now };
+    handleOpen();
+  }, [handleOpen]);
+  const handlePointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    triggerOpen('pointerdown');
+  }, [triggerOpen]);
+  const handleMouseDown = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    triggerOpen('mousedown');
+  }, [triggerOpen]);
+  const handleClick = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    triggerOpen('click');
+  }, [triggerOpen]);
 
   if (canOpen) {
     return (
       <button
         type="button"
-        onClick={handleOpen}
+        data-testid="chat-attached-file-card"
+        data-chat-attached-file-path={file.filePath}
+        data-chat-attached-file-name={file.fileName}
+        onPointerDown={handlePointerDown}
+        onMouseDown={handleMouseDown}
+        onClick={handleClick}
         title="Open file"
         className="flex max-w-[220px] items-center gap-2 rounded-[16px] border border-border/42 bg-background/72 px-3 py-2 text-left shadow-sm backdrop-blur-sm transition-colors hover:bg-background/84"
       >
@@ -626,7 +679,7 @@ function FileCard({ file }: { file: AttachedFileMeta }) {
         <div className="min-w-0 overflow-hidden">
           <p className="text-xs font-medium truncate">{file.fileName}</p>
           <p className="text-[10px] text-muted-foreground">
-            {file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
+            {file.mimeType === DIRECTORY_MIME_TYPE ? '文件夹' : file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
           </p>
         </div>
       </button>

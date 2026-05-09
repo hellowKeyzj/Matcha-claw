@@ -13,8 +13,8 @@ function buildMessages(count: number): RawMessage[] {
 }
 
 describe('viewport window state', () => {
-  it('preserves only viewport metadata and derives the visible slice from items + offsets', () => {
-    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(40));
+  it('preserves viewport metadata separately from the authoritative viewport items', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(30, 11));
     const window = createViewportWindowState({
       totalItemCount: 40,
       windowStartOffset: 10,
@@ -30,7 +30,7 @@ describe('viewport window state', () => {
     expect(window.hasMore).toBe(true);
     expect(window.isAtLatest).toBe(true);
     expect(selectViewportItems({ items, window }).map((item) => item.key)).toEqual(
-      items.slice(10).map((item) => item.key),
+      items.map((item) => item.key),
     );
   });
 
@@ -54,23 +54,20 @@ describe('viewport window state', () => {
     expect(trimmedWindow.windowStartOffset).toBe(2);
     expect(trimmedWindow.windowEndOffset).toBe(6);
     expect(trimmedWindow.hasMore).toBe(true);
-    expect(selectViewportItems({ items, window: trimmedWindow }).map((item) => item.key)).toEqual([
-      items[2]!.key,
-      items[3]!.key,
-      items[4]!.key,
-      items[5]!.key,
-    ]);
+    expect(selectViewportItems({ items, window: trimmedWindow }).map((item) => item.key)).toEqual(
+      items.map((item) => item.key),
+    );
   });
 
-  it('can select the viewport slice directly from authoritative items', () => {
-    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(5));
+  it('does not re-slice authoritative viewport items when window metadata is stale', () => {
+    const items = buildRenderItemsFromMessages('agent:test:main', buildMessages(5, 21));
     const window = createViewportWindowState({
       totalItemCount: 5,
-      windowStartOffset: 1,
-      windowEndOffset: 4,
+      windowStartOffset: 10,
+      windowEndOffset: 15,
       hasMore: true,
-      hasNewer: true,
-      isAtLatest: false,
+      hasNewer: false,
+      isAtLatest: true,
     });
 
     const viewportItems = selectViewportItems({
@@ -78,11 +75,7 @@ describe('viewport window state', () => {
       window,
     });
 
-    expect(viewportItems.map((item) => item.key)).toEqual([
-      items[1]!.key,
-      items[2]!.key,
-      items[3]!.key,
-    ]);
+    expect(viewportItems.map((item) => item.key)).toEqual(items.map((item) => item.key));
     expect(viewportItems.every((item) => Boolean(item.key))).toBe(true);
   });
 });

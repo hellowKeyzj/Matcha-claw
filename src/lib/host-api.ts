@@ -37,6 +37,54 @@ export interface OpenClawStatusPayload {
   version?: string;
 }
 
+export type FilePreviewError =
+  | 'binary'
+  | 'notDirectory'
+  | 'notFound'
+  | 'tooLarge'
+  | string;
+
+export interface FilePreviewDirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  mtimeMs: number;
+  hasChildren?: boolean;
+}
+
+export interface ReadTextFileResult {
+  ok: boolean;
+  path?: string;
+  content?: string;
+  mimeType?: string;
+  size?: number;
+  readOnly?: boolean;
+  error?: FilePreviewError;
+}
+
+export interface ReadBinaryFileResult {
+  ok: boolean;
+  path?: string;
+  data?: string;
+  mimeType?: string;
+  size?: number;
+  readOnly?: boolean;
+  error?: FilePreviewError;
+}
+
+export interface FilePreviewStatResult {
+  ok: boolean;
+  entry?: FilePreviewDirEntry;
+  error?: FilePreviewError;
+}
+
+export interface FilePreviewListDirResult {
+  ok: boolean;
+  entries?: FilePreviewDirEntry[];
+  error?: FilePreviewError;
+}
+
 export interface OpenClawCliCommandPayload {
   success: boolean;
   command?: string;
@@ -214,6 +262,57 @@ export async function hostUvInstallAll(): Promise<{ success: boolean; error?: st
   });
 }
 
+export async function hostFileReadText(
+  payload: {
+    path: string;
+    maxBytes?: number;
+  },
+): Promise<ReadTextFileResult> {
+  return hostApiFetch('/api/files/read-text', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostFileReadBinary(
+  payload: {
+    path: string;
+    maxBytes?: number;
+  },
+): Promise<ReadBinaryFileResult> {
+  return hostApiFetch('/api/files/read-binary', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostFileStat(
+  payload: {
+    path: string;
+  },
+): Promise<FilePreviewStatResult> {
+  return hostApiFetch('/api/files/stat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostFileListDir(
+  payload: {
+    path: string;
+    includeHidden?: boolean;
+  },
+  options?: {
+    timeoutMs?: number;
+  },
+): Promise<FilePreviewListDirResult> {
+  return hostApiFetch('/api/files/list-dir', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: options?.timeoutMs ?? 60000,
+  });
+}
+
 export async function hostSessionList(): Promise<SessionListResult> {
   return hostApiFetch('/api/sessions/list');
 }
@@ -311,6 +410,18 @@ export async function hostSessionAbortRuntime(
   },
 ): Promise<SessionLoadResult & { success?: boolean }> {
   return hostApiFetch('/api/session/abort-runtime', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function hostSessionPatch(
+  payload: {
+    sessionKey: string;
+    model: string;
+  },
+): Promise<SessionLoadResult & { success?: boolean; error?: string }> {
+  return hostApiFetch('/api/session/patch', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

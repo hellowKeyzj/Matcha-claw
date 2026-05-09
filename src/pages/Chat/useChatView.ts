@@ -8,7 +8,7 @@ interface UseChatViewInput {
   mutating: boolean;
 }
 
-interface UseChatViewResult {
+export interface UseChatViewResult {
   showBlockingLoading: boolean;
   showBlockingError: boolean;
   showBackgroundStatus: boolean;

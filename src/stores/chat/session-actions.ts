@@ -157,6 +157,7 @@ export async function executeLoadSessions(input: CreateStoreSessionActionsInput)
           ? session.titleSource
           : undefined,
         displayName: typeof session.displayName === 'string' ? session.displayName : undefined,
+        model: normalizeCatalogString(session.model) ?? undefined,
         updatedAt: parseSessionUpdatedAtMs(session.updatedAt),
       })).filter((session: ChatSession) => session.key);
 

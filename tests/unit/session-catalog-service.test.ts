@@ -33,6 +33,14 @@ describe('session adapter service catalog', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
     tempDirs.push(configDir);
 
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      agents: {
+        defaults: {
+          model: 'openai/gpt-5.4',
+        },
+      },
+    }, null, 2));
+
     const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
     mkdirSync(sessionsDir, { recursive: true });
     writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
@@ -71,6 +79,7 @@ describe('session adapter service catalog', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -87,6 +96,7 @@ describe('session adapter service catalog', () => {
           preferred: false,
           titleSource: 'assistant',
           displayName: 'agent:alpha:session-2',
+          model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-11T08:00:00.000Z'),
         },
         {
@@ -97,6 +107,7 @@ describe('session adapter service catalog', () => {
           preferred: false,
           titleSource: 'user',
           displayName: 'agent:alpha:session-1',
+          model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-10T10:10:00.000Z'),
         },
       ],
@@ -114,11 +125,15 @@ describe('session adapter service catalog', () => {
         sessionId: 'session-main',
         sessionFile: join(sessionsDir, 'session-main.jsonl'),
         updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
+        modelProvider: 'openai',
+        model: 'gpt-5.4',
       },
       'agent:alpha:session-2': {
         sessionId: 'session-2',
         sessionFile: join(sessionsDir, 'session-2.jsonl'),
         updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
+        providerOverride: 'anthropic',
+        modelOverride: 'claude-opus-4-6',
       },
     }, null, 2));
 
@@ -144,6 +159,7 @@ describe('session adapter service catalog', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -160,6 +176,7 @@ describe('session adapter service catalog', () => {
           preferred: false,
           titleSource: 'assistant',
           displayName: 'agent:alpha:session-2',
+          model: 'anthropic/claude-opus-4-6',
           updatedAt: Date.parse('2026-04-13T10:00:00.000Z'),
         },
         {
@@ -170,9 +187,61 @@ describe('session adapter service catalog', () => {
           preferred: true,
           titleSource: 'user',
           displayName: 'agent:alpha:main',
+          model: 'openai/gpt-5.4',
           updatedAt: Date.parse('2026-04-12T10:00:00.000Z'),
         },
       ],
+    });
+  });
+
+  it('falls back to configured agent default model when session store has no override', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'matchaclaw-session-catalog-'));
+    tempDirs.push(configDir);
+
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      agents: {
+        defaults: {
+          model: 'openai/gpt-5.4',
+        },
+        list: [
+          {
+            id: 'alpha',
+            model: 'anthropic/claude-sonnet-4-5',
+          },
+        ],
+      },
+    }, null, 2));
+
+    const sessionsDir = join(configDir, 'agents', 'alpha', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:alpha:main', id: 'main' },
+      ],
+    }, null, 2));
+    writeFileSync(join(sessionsDir, 'main.jsonl'), [
+      buildTranscriptLine({
+        timestamp: '2026-04-13T10:00:00.000Z',
+        role: 'user',
+        content: 'alpha main title',
+        id: 'message-main',
+      }),
+    ].join('\n'));
+
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    const response = await service.listSessions();
+
+    expect(response.status).toBe(200);
+    expect(response.data.sessions[0]).toMatchObject({
+      key: 'agent:alpha:main',
+      model: 'anthropic/claude-sonnet-4-5',
     });
   });
 
@@ -195,6 +264,7 @@ describe('session adapter service catalog', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 

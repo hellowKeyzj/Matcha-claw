@@ -1,12 +1,14 @@
-import { useCallback, memo } from 'react';
+import { useCallback, memo, useMemo } from 'react';
 import { invokeIpc } from '@/lib/api-client';
+import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
 import { decodeFileHintHref } from './md-pipeline';
 
 interface AssistantMessageBodyProps {
+  itemKey: string;
+  createdAt?: number;
   text: string;
-  markdownHtml: string | null;
   isStreaming: boolean;
   onBodyClick?: () => void;
 }
@@ -22,11 +24,24 @@ function getEventElement(target: EventTarget | null): Element | null {
 }
 
 export const AssistantMessageBody = memo(function AssistantMessageBody({
+  itemKey,
+  createdAt,
   text,
-  markdownHtml,
   isStreaming,
   onBodyClick,
 }: AssistantMessageBodyProps) {
+  const markdownHtml = useMemo(() => {
+    if (!text.trim()) {
+      return null;
+    }
+    return getOrBuildAssistantMarkdownBody({
+      key: itemKey,
+      role: 'assistant',
+      createdAt,
+      text,
+      attachedFiles: [],
+    } as never)?.fullHtml ?? null;
+  }, [createdAt, itemKey, text]);
   const handleOpenFileHint = useCallback(async (hintPath: string) => {
     if (!hintPath) {
       return;

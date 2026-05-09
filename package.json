@@ -74,6 +74,7 @@
     "postversion": "git push && git push --tags"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@buape/carbon": "0.16.0",
     "@dicebear/collection": "^9.4.2",
     "@dicebear/core": "^9.4.2",
@@ -85,10 +86,13 @@
     "electron-updater": "^6.8.3",
     "grammy": "^1.42.0",
     "katex": "^0.16.45",
+    "monaco-editor": "^0.55.1",
     "ms": "^2.1.3",
+    "pdfjs-dist": "^5.7.284",
     "qrcode": "1.5.4",
     "tar": "^6.2.1",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock": "3.1020.0",

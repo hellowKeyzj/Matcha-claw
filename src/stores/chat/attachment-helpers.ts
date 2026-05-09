@@ -1,5 +1,6 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { throwIfHistoryLoadAborted } from './history-abort';
+import { reconcileSessionItems } from './store-state-helpers';
 import type { AttachedFileMeta, ChatSendAttachment } from './types';
 import type {
   SessionAssistantTurnItem,
@@ -163,6 +164,34 @@ export function hydrateAttachedFilesFromItems(items: SessionRenderItem[]): Sessi
     return nextItem;
   });
   return changed ? nextItems : items;
+}
+
+export function reconcileHydratedAttachmentItems(
+  currentItems: SessionRenderItem[],
+  hydratedItems: SessionRenderItem[],
+): SessionRenderItem[] {
+  if (currentItems === hydratedItems) {
+    return currentItems;
+  }
+
+  const hydratedByKey = new Map(
+    hydratedItems.map((item) => [item.key, item] as const),
+  );
+  let changed = currentItems.length !== hydratedItems.length;
+
+  const nextItems = currentItems.map((currentItem) => {
+    const hydratedItem = hydratedByKey.get(currentItem.key);
+    if (!hydratedItem || hydratedItem.kind !== currentItem.kind) {
+      return currentItem;
+    }
+    if (hydratedItem === currentItem) {
+      return currentItem;
+    }
+    changed = true;
+    return hydratedItem;
+  });
+
+  return changed ? reconcileSessionItems(currentItems, nextItems) : currentItems;
 }
 
 export function hasPendingItemPreviewLoads(items: SessionRenderItem[]): boolean {

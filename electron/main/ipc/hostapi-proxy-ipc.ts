@@ -12,6 +12,9 @@ type HostApiFetchRequest = {
   timeoutMs?: number;
 };
 
+const DEFAULT_HOST_API_TIMEOUT_MS = 15000;
+const FILE_DIRECTORY_TIMEOUT_MS = 60000;
+
 export function registerHostApiProxyHandlers(): void {
   ipcMain.handle('hostapi:token', () => getHostApiToken());
 
@@ -29,7 +32,9 @@ export function registerHostApiProxyHandlers(): void {
       const timeoutMs =
         typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
           ? request.timeoutMs
-          : 15000;
+          : normalizedPath === '/api/files/list-dir'
+            ? FILE_DIRECTORY_TIMEOUT_MS
+            : DEFAULT_HOST_API_TIMEOUT_MS;
 
       const headers: Record<string, string> = { ...(request?.headers ?? {}) };
       headers.Authorization = `Bearer ${getHostApiToken()}`;

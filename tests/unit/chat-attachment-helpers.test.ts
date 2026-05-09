@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { hydrateAttachedFilesFromItems } from '@/stores/chat/attachment-helpers';
+import {
+  hydrateAttachedFilesFromItems,
+  reconcileHydratedAttachmentItems,
+} from '@/stores/chat/attachment-helpers';
+import { reconcileSessionItems } from '@/stores/chat/store-state-helpers';
 import type { SessionRenderItem } from '../../runtime-host/shared/session-adapter-types';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -75,6 +79,103 @@ describe('chat attachment helpers', () => {
         fileName: 'artifact.png',
         source: 'tool-result',
       }],
+    });
+  });
+
+  it('reuses unchanged items by key and replaces only semantic changes', () => {
+    const currentItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'user',
+        content: 'hello',
+        id: 'user-1',
+        timestamp: 1,
+      },
+      {
+        role: 'assistant',
+        content: 'world',
+        id: 'assistant-1',
+        timestamp: 2,
+      },
+    ]) as SessionRenderItem[];
+    const nextItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'assistant',
+        content: 'world updated',
+        id: 'assistant-1',
+        timestamp: 2,
+      },
+      {
+        role: 'user',
+        content: 'hello',
+        id: 'user-1',
+        timestamp: 1,
+      },
+    ]) as SessionRenderItem[];
+
+    const reconciled = reconcileSessionItems(currentItems, nextItems);
+
+    expect(reconciled).toHaveLength(2);
+    expect(reconciled[0]).toBe(nextItems[0]);
+    expect(reconciled[1]).toBe(currentItems[0]);
+    expect(reconciled.map((item) => item.key)).toEqual(nextItems.map((item) => item.key));
+  });
+
+  it('keeps newer snapshot items when old hydrated previews resolve later', () => {
+    const currentItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'assistant',
+        content: 'old assistant',
+        id: 'assistant-1',
+        timestamp: 1,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 0,
+          preview: null,
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+      {
+        role: 'user',
+        content: 'new user',
+        id: 'user-2',
+        timestamp: 2,
+      },
+    ]) as SessionRenderItem[];
+    const hydratedOldItems = buildRenderItemsFromMessages('agent:test:main', [
+      {
+        role: 'assistant',
+        content: 'old assistant',
+        id: 'assistant-1',
+        timestamp: 1,
+        _attachedFiles: [{
+          fileName: 'artifact.png',
+          mimeType: 'image/png',
+          fileSize: 123,
+          preview: 'data:image/png;base64,abc',
+          filePath: 'E:\\code\\Matcha-claw\\artifact.png',
+          source: 'tool-result',
+        }],
+      },
+    ]) as SessionRenderItem[];
+
+    const reconciled = reconcileHydratedAttachmentItems(currentItems, hydratedOldItems);
+
+    expect(reconciled).toHaveLength(2);
+    expect(reconciled[0]).not.toBe(currentItems[0]);
+    expect(reconciled[0]).toMatchObject({
+      kind: 'assistant-turn',
+      attachedFiles: [{
+        fileName: 'artifact.png',
+        fileSize: 123,
+        preview: 'data:image/png;base64,abc',
+      }],
+    });
+    expect(reconciled[1]).toBe(currentItems[1]);
+    expect(reconciled[1]).toMatchObject({
+      kind: 'user-message',
+      text: 'new user',
     });
   });
 });

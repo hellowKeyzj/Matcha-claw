@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog, nativeImage } from 'electron';
 import crypto from 'node:crypto';
-import { extname, join } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { FileApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -54,6 +54,176 @@ function mimeToExt(mimeType: string): string {
 }
 
 const OUTBOUND_DIR = join(homedir(), '.openclaw', 'media', 'outbound');
+const FILE_PREVIEW_MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const FILE_PREVIEW_MAX_BINARY_BYTES = 50 * 1024 * 1024;
+const FILE_PREVIEW_DIR_BLACKLIST = new Set([
+  'node_modules',
+  '.venv',
+  '__pycache__',
+  '.git',
+  'dist',
+  'build',
+  '.next',
+  '.turbo',
+  '.cache',
+]);
+
+interface FilePreviewDirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  mtimeMs: number;
+  hasChildren?: boolean;
+}
+
+function expandPreviewPath(input: string): string {
+  if (input === '~') {
+    return homedir();
+  }
+  if (input.startsWith('~/') || input.startsWith('~\\')) {
+    return join(homedir(), input.slice(2));
+  }
+  return input;
+}
+
+async function resolvePreviewPath(input: string): Promise<string> {
+  if (typeof input !== 'string' || !input.trim()) {
+    throw new Error('notFound');
+  }
+  const expanded = expandPreviewPath(input.trim());
+  const fsP = await import('node:fs/promises');
+  try {
+    return await fsP.realpath(expanded);
+  } catch {
+    return resolve(expanded);
+  }
+}
+
+function looksLikeBinary(buffer: Buffer): boolean {
+  const limit = Math.min(buffer.length, 8192);
+  for (let index = 0; index < limit; index += 1) {
+    if (buffer[index] === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function statPreviewTarget(inputPath: string) {
+  const realPath = await resolvePreviewPath(inputPath);
+  const fsP = await import('node:fs/promises');
+  const stat = await fsP.stat(realPath);
+  return { realPath, stat };
+}
+
+function mapPreviewError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === 'binary') {
+    return 'binary';
+  }
+  if (message === 'tooLarge') {
+    return 'tooLarge';
+  }
+  if (message === 'notDirectory') {
+    return 'notDirectory';
+  }
+  if (message.includes('ENOENT')) {
+    return 'notFound';
+  }
+  return message || 'unknown';
+}
+
+function toDirEntry(path: string, stat: { isDirectory(): boolean; size: number; mtimeMs: number }): FilePreviewDirEntry {
+  return {
+    name: basename(path),
+    path,
+    isDir: stat.isDirectory(),
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+}
+
+async function readPreviewTextFile(inputPath: string, maxBytes?: number) {
+  const { realPath, stat } = await statPreviewTarget(inputPath);
+  if (!stat.isFile()) {
+    throw new Error('notFound');
+  }
+  const cap = Math.max(1, Math.min(maxBytes ?? FILE_PREVIEW_MAX_TEXT_BYTES, FILE_PREVIEW_MAX_TEXT_BYTES));
+  if (stat.size > cap) {
+    throw new Error('tooLarge');
+  }
+  const fsP = await import('node:fs/promises');
+  const buffer = await fsP.readFile(realPath);
+  if (looksLikeBinary(buffer)) {
+    throw new Error('binary');
+  }
+  return {
+    path: realPath,
+    content: buffer.toString('utf8'),
+    mimeType: getMimeType(extname(realPath)),
+    size: stat.size,
+    readOnly: true,
+  };
+}
+
+async function readPreviewBinaryFile(inputPath: string, maxBytes?: number) {
+  const { realPath, stat } = await statPreviewTarget(inputPath);
+  if (!stat.isFile()) {
+    throw new Error('notFound');
+  }
+  const cap = Math.max(1, Math.min(maxBytes ?? FILE_PREVIEW_MAX_BINARY_BYTES, FILE_PREVIEW_MAX_BINARY_BYTES));
+  if (stat.size > cap) {
+    throw new Error('tooLarge');
+  }
+  const fsP = await import('node:fs/promises');
+  const buffer = await fsP.readFile(realPath);
+  return {
+    path: realPath,
+    data: buffer.toString('base64'),
+    mimeType: getMimeType(extname(realPath)),
+    size: stat.size,
+    readOnly: true,
+  };
+}
+
+async function listPreviewDir(inputPath: string, includeHidden = false): Promise<FilePreviewDirEntry[]> {
+  const { realPath, stat } = await statPreviewTarget(inputPath);
+  if (!stat.isDirectory()) {
+    throw new Error('notDirectory');
+  }
+  const fsP = await import('node:fs/promises');
+  const entries = await fsP.readdir(realPath, { withFileTypes: true });
+  const results: FilePreviewDirEntry[] = [];
+
+  for (const entry of entries) {
+    if (!includeHidden && entry.name.startsWith('.')) {
+      continue;
+    }
+    if (entry.isDirectory() && FILE_PREVIEW_DIR_BLACKLIST.has(entry.name)) {
+      continue;
+    }
+    if (!entry.isDirectory() && !entry.isFile()) {
+      continue;
+    }
+    const childPath = join(realPath, entry.name);
+    results.push({
+      name: entry.name,
+      path: childPath,
+      isDir: entry.isDirectory(),
+      size: 0,
+      mtimeMs: 0,
+      hasChildren: entry.isDirectory() ? true : false,
+    });
+  }
+
+  return results.sort((left, right) => {
+    if (left.isDir !== right.isDir) {
+      return left.isDir ? -1 : 1;
+    }
+    return left.name.localeCompare(right.name);
+  });
+}
 
 async function generateImagePreview(filePath: string, mimeType: string): Promise<string | null> {
   try {
@@ -117,6 +287,50 @@ export async function handleFileRoutes(
   url: URL,
   _ctx: FileApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/files/read-text' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ path: string; maxBytes?: number }>(req);
+      const result = await readPreviewTextFile(body.path, body.maxBytes);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, 200, { ok: false, error: mapPreviewError(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/files/read-binary' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ path: string; maxBytes?: number }>(req);
+      const result = await readPreviewBinaryFile(body.path, body.maxBytes);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, 200, { ok: false, error: mapPreviewError(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/files/stat' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ path: string }>(req);
+      const { realPath, stat } = await statPreviewTarget(body.path);
+      sendJson(res, 200, { ok: true, entry: toDirEntry(realPath, stat) });
+    } catch (error) {
+      sendJson(res, 200, { ok: false, error: mapPreviewError(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/files/list-dir' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ path: string; includeHidden?: boolean }>(req);
+      const entries = await listPreviewDir(body.path, body.includeHidden === true);
+      sendJson(res, 200, { ok: true, entries });
+    } catch (error) {
+      sendJson(res, 200, { ok: false, error: mapPreviewError(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/files/stage-paths' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ filePaths: string[] }>(req);

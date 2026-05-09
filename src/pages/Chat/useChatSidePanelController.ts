@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useGatewayStore } from '@/stores/gateway';
+import { useLayoutStore } from '@/stores/layout';
 import { useTaskInboxStore } from '@/stores/task-inbox-store';
 import { isGatewayOperational } from '@/lib/gateway-status';
-import { resolveChatSidePanelLayout, type ChatSidePanelMode } from './chat-workspace-layout';
+import {
+  clampChatSidePanelWidth,
+  getDefaultChatSidePanelWidth,
+  resolveChatSidePanelLayout,
+  type ChatSidePanelWidthPolicy,
+  type ChatSidePanelMode,
+} from './chat-workspace-layout';
 
-export type ChatSidePanelTab = 'tasks' | 'skills';
+export type ChatSidePanelTab = 'tasks' | 'skills' | 'artifacts';
 
 const TASK_INBOX_POLL_FAST_MS = 5_000;
 const TASK_INBOX_POLL_NORMAL_MS = 15_000;
@@ -13,20 +20,36 @@ const TASK_INBOX_POLL_BACKGROUND_MS = 60_000;
 interface ChatSidePanelState {
   open: boolean;
   activeTab: ChatSidePanelTab;
+  lightWidth: number;
+  artifactWidth: number;
+}
+
+function resolveSidePanelWidthPolicy(tab: ChatSidePanelTab): ChatSidePanelWidthPolicy {
+  return tab === 'artifacts' ? 'artifacts' : 'light';
 }
 
 function readStoredPanelState(): ChatSidePanelState {
   try {
     const open = window.localStorage.getItem('chat:side-panel-open') === '1';
     const storedTab = window.localStorage.getItem('chat:side-panel-tab');
+    const storedLightWidth = Number(window.localStorage.getItem('chat:side-panel-light-width'));
+    const storedArtifactWidth = Number(window.localStorage.getItem('chat:side-panel-artifact-width'));
     return {
       open,
-      activeTab: storedTab === 'skills' ? 'skills' : 'tasks',
+      activeTab: storedTab === 'skills' || storedTab === 'artifacts' ? storedTab : 'tasks',
+      lightWidth: Number.isFinite(storedLightWidth) && storedLightWidth > 0
+        ? storedLightWidth
+        : getDefaultChatSidePanelWidth('light'),
+      artifactWidth: Number.isFinite(storedArtifactWidth) && storedArtifactWidth > 0
+        ? storedArtifactWidth
+        : getDefaultChatSidePanelWidth('artifacts'),
     };
   } catch {
     return {
       open: false,
       activeTab: 'tasks',
+      lightWidth: getDefaultChatSidePanelWidth('light'),
+      artifactWidth: getDefaultChatSidePanelWidth('artifacts'),
     };
   }
 }
@@ -40,6 +63,9 @@ export function useChatSidePanelController(
   chatLayoutRef: RefObject<HTMLDivElement | null>,
 ) {
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
+  const setChatTakeoverMode = useLayoutStore((state) => state.setChatTakeoverMode);
+  const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
   const tasks = useTaskInboxStore((state) => state.tasks);
   const initialized = useTaskInboxStore((state) => state.initialized);
   const init = useTaskInboxStore((state) => state.init);
@@ -47,7 +73,7 @@ export function useChatSidePanelController(
   const resizeRafRef = useRef<number | null>(null);
   const [panelState, setPanelState] = useState<ChatSidePanelState>(() => readStoredPanelState());
   const [containerWidth, setContainerWidth] = useState<number>(() => (
-    typeof window === 'undefined' ? 0 : window.innerWidth
+    typeof window === 'undefined' ? 0 : readContainerWidth(chatLayoutRef)
   ));
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
   const unfinishedTaskCount = tasks.length;
@@ -55,19 +81,42 @@ export function useChatSidePanelController(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
     [tasks],
   );
+  const activeWidthPolicy = resolveSidePanelWidthPolicy(panelState.activeTab);
+  const activeStoredWidth = activeWidthPolicy === 'artifacts'
+    ? panelState.artifactWidth
+    : panelState.lightWidth;
+  const artifactWorkbenchFullscreen = (
+    panelState.open
+    && panelState.activeTab === 'artifacts'
+    && chatTakeoverMode === 'artifact-workbench'
+  );
   const layout = useMemo(
-    () => resolveChatSidePanelLayout(panelState.open, containerWidth),
-    [containerWidth, panelState.open],
+    () => resolveChatSidePanelLayout(panelState.open, containerWidth, activeStoredWidth, activeWidthPolicy),
+    [activeStoredWidth, activeWidthPolicy, containerWidth, panelState.open],
   );
 
   useEffect(() => {
     try {
       window.localStorage.setItem('chat:side-panel-open', panelState.open ? '1' : '0');
       window.localStorage.setItem('chat:side-panel-tab', panelState.activeTab);
+      window.localStorage.setItem('chat:side-panel-light-width', String(panelState.lightWidth));
+      window.localStorage.setItem('chat:side-panel-artifact-width', String(panelState.artifactWidth));
     } catch {
       // ignore localStorage errors
     }
-  }, [panelState.activeTab, panelState.open]);
+  }, [panelState.activeTab, panelState.artifactWidth, panelState.lightWidth, panelState.open]);
+
+  useEffect(() => {
+    return () => {
+      clearChatTakeoverMode();
+    };
+  }, [clearChatTakeoverMode]);
+
+  useEffect(() => {
+    if (!panelState.open || panelState.activeTab !== 'artifacts') {
+      clearChatTakeoverMode();
+    }
+  }, [clearChatTakeoverMode, panelState.activeTab, panelState.open]);
 
   useEffect(() => {
     const applyResize = () => {
@@ -181,28 +230,80 @@ export function useChatSidePanelController(
       ...prev,
       open: !prev.open,
     }));
-  }, []);
+    clearChatTakeoverMode();
+  }, [clearChatTakeoverMode]);
 
   const setActiveSidePanelTab = useCallback((tab: ChatSidePanelTab) => {
-    setPanelState((prev) => ({
-      open: true,
-      activeTab: tab,
-      ...(prev.open && prev.activeTab === tab ? prev : {}),
-    }));
-  }, []);
+    setPanelState((prev) => {
+      if (prev.open && prev.activeTab === tab) {
+        return prev;
+      }
+      return {
+        ...prev,
+        open: true,
+        activeTab: tab,
+      };
+    });
+    if (tab !== 'artifacts') {
+      clearChatTakeoverMode();
+    }
+  }, [clearChatTakeoverMode]);
 
   const closeSidePanel = useCallback(() => {
-    setPanelState((prev) => ({ ...prev, open: false }));
-  }, []);
+    setPanelState((prev) => ({
+      ...prev,
+      open: false,
+    }));
+    clearChatTakeoverMode();
+  }, [clearChatTakeoverMode]);
+
+  const setSidePanelWidth = useCallback((nextWidth: number) => {
+    setPanelState((prev) => {
+      const nextPolicy = resolveSidePanelWidthPolicy(prev.activeTab);
+      const clamped = clampChatSidePanelWidth(nextWidth, readContainerWidth(chatLayoutRef), nextPolicy);
+      if (nextPolicy === 'artifacts') {
+        if (prev.artifactWidth === clamped) {
+          return prev;
+        }
+        return {
+          ...prev,
+          artifactWidth: clamped,
+        };
+      }
+      if (prev.lightWidth === clamped) {
+        return prev;
+      }
+      return {
+        ...prev,
+        lightWidth: clamped,
+      };
+    });
+  }, [chatLayoutRef]);
+
+  const toggleArtifactWorkbenchFullscreen = useCallback(() => {
+    setPanelState((prev) => {
+      if (prev.activeTab !== 'artifacts') {
+        return prev;
+      }
+      return {
+        ...prev,
+        open: true,
+      };
+    });
+    setChatTakeoverMode(chatTakeoverMode === 'artifact-workbench' ? 'none' : 'artifact-workbench');
+  }, [chatTakeoverMode, setChatTakeoverMode]);
 
   return {
     sidePanelOpen: layout.sidePanelOpen,
     sidePanelMode: layout.sidePanelMode as ChatSidePanelMode,
-    sidePanelWidth: layout.sidePanelWidth,
+    sidePanelWidth: artifactWorkbenchFullscreen ? containerWidth : layout.sidePanelWidth,
     activeSidePanelTab: panelState.activeTab,
+    artifactWorkbenchFullscreen,
     unfinishedTaskCount,
     toggleSidePanel,
     setActiveSidePanelTab,
     closeSidePanel,
+    setSidePanelWidth,
+    toggleArtifactWorkbenchFullscreen,
   };
 }

@@ -80,6 +80,7 @@ describe('main layout chat workspace host', () => {
     useLayoutStore.setState({
       sidebarVisible: true,
       sidebarWidth: 256,
+      chatTakeoverMode: 'none',
     });
 
     useSubagentsStore.setState({
@@ -146,6 +147,28 @@ describe('main layout chat workspace host', () => {
     expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'true');
     expect(screen.getByTestId('agent-sessions-pane')).toBeInTheDocument();
     expect(screen.queryByTestId('layout-agent-sessions-resizer')).toBeNull();
+  });
+
+  it('lets artifact workbench takeover hide the app sidebar and agent sessions pane', () => {
+    useLayoutStore.setState({
+      chatTakeoverMode: 'artifact-workbench',
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<MainLayout />}>
+            <Route index element={null} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-workspace-host')).toHaveAttribute('data-takeover-mode', 'artifact-workbench');
+    expect(screen.getByTestId('chat-host')).toHaveAttribute('data-active', 'true');
+    expect(screen.queryByTestId('agent-sessions-pane')).toBeNull();
+    expect(screen.queryByTestId('layout-left-resizer')).toBeNull();
+    expect(screen.queryByRole('button', { name: /new chat/i })).toBeNull();
   });
 
   it('does not mount chat workspace on non-chat routes', () => {

@@ -28,6 +28,14 @@ async function bootChat(page: Page): Promise<void> {
   await expect(page.locator('textarea')).toBeVisible({ timeout: 15_000 });
 }
 
+function visibleByTestId(page: Page, testId: string) {
+  return page.locator(`[data-testid="${testId}"]:visible`).first();
+}
+
+function visibleMonacoEditorBackground(page: Page) {
+  return page.locator('.monaco-editor-background:visible').first();
+}
+
 test.describe('Chat e2e', () => {
   test('发送后进入流式并完成最终回复', async ({ page }) => {
     await bootChat(page);
@@ -95,5 +103,108 @@ test.describe('Chat e2e', () => {
     await page.getByTitle('Send').click();
 
     await expect(page.getByText('Mock reply: send with attachment')).toBeVisible();
+  });
+
+  test('artifact workbench navigates generated files, rich previews, and workspace skill files', async ({ page }) => {
+    await bootChat(page);
+
+    const sessionList = page.getByTestId('session-list-scroll-area');
+    await sessionList.getByText('Artifact Session').click();
+
+    await expect(page.getByTestId('chat-execution-graph')).toBeVisible();
+
+    const sidePanel = page.getByTestId('chat-side-panel');
+    await expect(sidePanel).toBeVisible();
+    await expect(sidePanel.getByTestId('chat-side-panel-tab-artifacts')).toHaveAttribute('data-state', 'active');
+    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
+    await page.getByTestId('execution-graph-artifact-edit-1').click();
+    await expect(sidePanel.getByText('export const value = 1;').first()).toBeVisible();
+    await expect(sidePanel.getByText('export const value = 2;').first()).toBeVisible();
+    await expect(sidePanel.getByTestId('artifact-preview-next-file')).toBeVisible();
+
+    await sidePanel.getByTestId('chat-side-panel-artifact-fullscreen-toggle').click();
+    await expect(page.getByTestId('chat-artifact-workbench-fullscreen')).toBeVisible();
+    await expect(page.getByTestId('chat-workspace-host')).toHaveAttribute('data-takeover-mode', 'artifact-workbench');
+    await expect(page.getByTestId('agent-sessions-pane')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /新对话|New Chat/i })).toHaveCount(0);
+    await sidePanel.getByTestId('chat-side-panel-artifact-fullscreen-toggle').click();
+    await expect(page.getByTestId('chat-artifact-workbench-fullscreen')).toHaveCount(0);
+    await expect(page.getByTestId('chat-workspace-host')).toHaveAttribute('data-takeover-mode', 'none');
+    await expect(page.getByTestId('agent-sessions-pane')).toBeVisible();
+    await expect(page.getByRole('button', { name: /新对话|New Chat/i })).toBeVisible();
+
+    await sidePanel.getByTestId('artifact-preview-next-file').click();
+    await expect(sidePanel).toContainText('report.pdf');
+    await expect(page.getByTestId('pdf-viewer')).toBeVisible();
+    await expect(sidePanel.getByTestId('chat-artifact-section-changes')).toBeDisabled();
+
+    await sidePanel.getByTestId('artifact-preview-next-file').click();
+    await expect(sidePanel).toContainText('sales.xlsx');
+    await expect(page.getByTestId('sheet-viewer')).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: 'Summary' })).toBeVisible();
+    await expect(sidePanel.getByTestId('chat-artifact-section-changes')).toBeDisabled();
+
+    await sidePanel.getByTestId('artifact-preview-prev-file').click();
+    await expect(page.getByTestId('pdf-viewer')).toBeVisible();
+
+    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
+    await expect(sidePanel.getByTestId('workspace-browser-body')).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
+    await expect(sidePanel.getByTestId('workspace-browser-body')).not.toContainText('/workspace');
+    await expect(page.locator('[data-testid="workspace-tree-select-toggle"]')).toHaveCount(0);
+
+    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
+    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: /report\.pdf/i }).first()).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: /sales\.xlsx/i }).first()).toBeVisible();
+  });
+
+  test('artifact diff viewer keeps light-theme background aligned with the app shell', async ({ page }) => {
+    await bootChat(page);
+
+    await page.evaluate(() => {
+      const root = document.documentElement;
+      root.classList.remove('dark');
+      root.classList.add('light');
+    });
+
+    const sessionList = page.getByTestId('session-list-scroll-area');
+    await sessionList.getByText('Artifact Session').click();
+
+    await page.getByTestId('execution-graph-artifact-edit-1').click();
+    const diffBackground = visibleMonacoEditorBackground(page);
+    await expect(diffBackground).toBeVisible({ timeout: 30_000 });
+
+    const colors = await diffBackground.evaluate((element) => {
+      return {
+        diffBackground: window.getComputedStyle(element).backgroundColor,
+        appBackground: window.getComputedStyle(document.body).backgroundColor,
+      };
+    });
+
+    expect(colors.diffBackground).toBe(colors.appBackground);
+    expect(colors.diffBackground).not.toBe('rgb(255, 255, 255)');
+  });
+
+  test('artifact workbench supports group-level open and workspace browsing without multi-select', async ({ page }) => {
+    await bootChat(page);
+
+    const sessionList = page.getByTestId('session-list-scroll-area');
+    await sessionList.getByText('Artifact Session').click();
+
+    const sidePanel = page.getByTestId('chat-side-panel');
+    await expect(sidePanel).toBeVisible();
+
+    await sidePanel.getByRole('button', { name: '打开最新' }).first().click();
+    await expect(page.getByTestId('sheet-viewer')).toBeVisible();
+
+    await sidePanel.getByRole('button', { name: /demo\.ts/i }).first().click();
+    await sidePanel.getByTestId('chat-artifact-section-workspace').click();
+    await expect(sidePanel.getByTestId('workspace-browser-body')).toBeVisible();
+    await expect(page.locator('[data-testid="workspace-tree-select-toggle"]')).toHaveCount(0);
+    await expect(sidePanel.getByRole('button', { name: /demo\.ts/i }).first()).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: /report\.pdf/i }).first()).toBeVisible();
+    await expect(sidePanel.getByRole('button', { name: /sales\.xlsx/i }).first()).toBeVisible();
+    await expect(sidePanel.getByTestId('workspace-browser-body')).not.toContainText('/workspace');
   });
 });

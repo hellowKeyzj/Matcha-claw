@@ -66,6 +66,7 @@ describe('chat viewport window', () => {
   it('renders viewport messages directly and exposes load older when more history exists', async () => {
     const currentSessionKey = 'agent:test:main';
     const allMessages = buildSessionMessages(35);
+    const viewportMessages = allMessages.slice(15);
     useGatewayStore.setState({
       status: {
         processState: 'running',
@@ -120,7 +121,7 @@ describe('chat viewport window', () => {
       },
       loadedSessions: {
         [currentSessionKey]: buildSessionRecord(currentSessionKey, {
-          messages: allMessages,
+          messages: viewportMessages,
           window: createViewportWindowState({
             totalItemCount: allMessages.length,
             windowStartOffset: 15,

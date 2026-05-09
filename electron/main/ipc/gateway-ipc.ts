@@ -5,6 +5,7 @@ import { getSetting } from '../../services/settings/settings-store';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import type { RuntimeHostManager } from '../runtime-host-manager';
+import { getE2EGatewayStatus } from './e2e-chat';
 
 export function registerGatewayHandlers(
   gatewayManager: GatewayManager,
@@ -19,6 +20,10 @@ export function registerGatewayHandlers(
   };
 
   ipcMain.handle('gateway:status', async () => {
+    const e2eStatus = getE2EGatewayStatus();
+    if (e2eStatus) {
+      return e2eStatus;
+    }
     const gatewayStatus = gatewayManager.getStatus();
     const runtimeStatus = runtimeHost
       ? await runtimeHost.readGatewayStatus().catch(() => null)

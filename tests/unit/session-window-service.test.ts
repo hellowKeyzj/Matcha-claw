@@ -51,6 +51,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
     const response = await service.getSessionWindow({
@@ -102,6 +103,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -175,6 +177,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
     const response = await service.getSessionWindow({
@@ -219,6 +222,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
     const response = await service.getSessionWindow({
@@ -254,6 +258,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
     const response = await service.getSessionWindow({
@@ -290,6 +295,7 @@ describe('session runtime service window', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({}),
+        gatewayRpc: async () => ({}),
       },
     });
 

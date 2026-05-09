@@ -19,7 +19,8 @@ import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
-  getSessionItemCount,
+  patchSessionMeta,
+  patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
@@ -33,9 +34,29 @@ import { useChatInit } from './useChatInit';
 import { useChatSidePanelController } from './useChatSidePanelController';
 import { useSkillConfig } from './useSkillConfig';
 import { useChatView } from './useChatView';
-import { hostApiFetch } from '@/lib/host-api';
+import {
+  applyAssistantPresentationToItems,
+  type ChatAssistantCatalogAgent,
+  type ChatRenderItem,
+} from './chat-render-item-model';
+import { hostApiFetch, hostSessionPatch } from '@/lib/host-api';
+import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
-
+import { collectChatArtifactGroups } from './artifacts';
+import { resolveArtifactWorkspaceRoot } from './artifact-workspace';
+import {
+  resolveArtifactGroupFocusFile,
+  resolveArtifactGroupKeyForFile,
+  resolvePreviewableArtifactGroupTarget,
+  resolveArtifactWorkbenchSelection,
+} from './artifact-workbench';
+import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
+import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import {
+  buildArtifactPreviewTargetFromAttachedFile,
+  buildArtifactPreviewTargetFromGeneratedFile,
+} from '@/components/file-preview/types';
+import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 type ChatSkillPreviewState = {
   skillId: string;
   skillName: string;
@@ -43,6 +64,14 @@ type ChatSkillPreviewState = {
   loading: boolean;
   error: string | null;
   filePath?: string;
+};
+
+type ChatArtifactSection = 'changes' | 'preview' | 'workspace';
+type OpenGeneratedArtifactOptions = {
+  preserveSection?: boolean | 'current';
+};
+type FocusArtifactTargetOptions = {
+  preserveSection?: 'workspace';
 };
 
 interface ChatProps {
@@ -209,6 +238,18 @@ function parseAgentIdFromSessionKey(sessionKey: string): string {
   return matched?.[1] ?? 'main';
 }
 
+function resolveEffectiveChatModelId(
+  sessionModel: string | null | undefined,
+  agentDefaultModel: string | null | undefined,
+): string {
+  const normalizedSessionModel = typeof sessionModel === 'string' ? sessionModel.trim() : '';
+  if (normalizedSessionModel) {
+    return normalizedSessionModel;
+  }
+  const normalizedAgentDefaultModel = typeof agentDefaultModel === 'string' ? agentDefaultModel.trim() : '';
+  return normalizedAgentDefaultModel;
+}
+
 export function Chat({ isActive = true }: ChatProps) {
   const { t } = useTranslation('chat');
   const location = useLocation();
@@ -248,10 +289,9 @@ export function Chat({ isActive = true }: ChatProps) {
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
-  const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
+  const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const currentAgent = agents.find((agent) => agent.id === currentAgentId);
   const skills = useSkillsStore((state) => state.skills);
@@ -260,8 +300,14 @@ export function Chat({ isActive = true }: ChatProps) {
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
   const [skillPreview, setSkillPreview] = useState<ChatSkillPreviewState | null>(null);
-  const [switchingModelId, setSwitchingModelId] = useState<string | null>(null);
+  const [artifactActiveSection, setArtifactActiveSection] = useState<ChatArtifactSection>('changes');
+  const [artifactFocusedGroupKey, setArtifactFocusedGroupKey] = useState<string | null>(null);
+  const [artifactFocusedFilePath, setArtifactFocusedFilePath] = useState<string | null>(null);
+  const [artifactFocusedFileOverride, setArtifactFocusedFileOverride] = useState<ArtifactPreviewTarget | null>(null);
+  const [artifactViewMode, setArtifactViewMode] = useState<'preview' | 'diff'>('diff');
   const skillPreviewRequestSeqRef = useRef(0);
+  const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
+  const artifactAutoOpenedSessionKeyRef = useRef<string | null>(null);
 
   const chatLayoutRef = useRef<HTMLDivElement>(null);
   const viewportPaneRef = useRef<ChatListHandle>(null);
@@ -285,10 +331,13 @@ export function Chat({ isActive = true }: ChatProps) {
     sidePanelMode,
     sidePanelWidth,
     activeSidePanelTab,
+    artifactWorkbenchFullscreen,
     unfinishedTaskCount,
     toggleSidePanel,
     setActiveSidePanelTab,
     closeSidePanel,
+    setSidePanelWidth,
+    toggleArtifactWorkbenchFullscreen,
   } = useChatSidePanelController(sideEffectsActive, chatLayoutRef);
 
   const {
@@ -307,14 +356,13 @@ export function Chat({ isActive = true }: ChatProps) {
     skillsSnapshotReady,
     skillsInitialLoading,
     fetchSkills,
-    updateAgent,
+    updateAgent: useSubagentsStore.getState().updateAgent,
   });
 
   useEffect(() => {
     resetSkillConfigSession();
     skillPreviewRequestSeqRef.current += 1;
     setSkillPreview(null);
-    setSwitchingModelId(null);
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
@@ -327,9 +375,10 @@ export function Chat({ isActive = true }: ChatProps) {
     }
   }, [activeSidePanelTab, prepareSkillConfig, sidePanelOpen]);
   const refreshing = foregroundHistorySessionKey === currentSessionKey;
+  const viewportItems = currentSession.items;
   const liveView = useChatView({
     currentSessionStatus: currentSession.meta.historyStatus,
-    itemCount: getSessionItemCount(currentSession),
+    itemCount: viewportItems.length,
     sending: currentSession.runtime.sending,
     refreshing,
     mutating,
@@ -338,6 +387,196 @@ export function Chat({ isActive = true }: ChatProps) {
     const matchedAgent = agents.find((agent) => agent.id === currentAgentId);
     return Array.isArray(matchedAgent?.skills) ? matchedAgent.skills : null;
   }, [agents, currentAgentId]);
+  const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
+    () => agents.map((agent) => ({
+      id: agent.id,
+      agentName: agent.name,
+      avatarSeed: agent.avatarSeed,
+      avatarStyle: agent.avatarStyle,
+    })),
+    [agents],
+  );
+  const renderItems = useMemo(() => {
+    const nextItems = applyAssistantPresentationToItems({
+      items: viewportItems,
+      agents: assistantCatalogAgents,
+      defaultAssistant: {
+        agentId: currentAgentId,
+        agentName: currentAgent?.name || currentAgentId,
+        avatarSeed: currentAgent?.avatarSeed,
+        avatarStyle: currentAgent?.avatarStyle,
+      },
+      previousItems: previousRenderedItemsRef.current ?? undefined,
+    });
+    previousRenderedItemsRef.current = nextItems;
+    return nextItems;
+  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, viewportItems]);
+  const artifactGroups = useMemo(() => collectChatArtifactGroups(renderItems), [renderItems]);
+  const artifactFiles = useMemo(
+    () => artifactGroups.flatMap((group) => group.files),
+    [artifactGroups],
+  );
+  const artifactWorkbenchSelection = useMemo(() => resolveArtifactWorkbenchSelection({
+    artifactGroups,
+    focusedGroupKey: artifactFocusedGroupKey,
+    focusedFilePath: artifactFocusedFilePath,
+    focusedFileOverride: artifactFocusedFileOverride,
+  }), [artifactFocusedFileOverride, artifactFocusedFilePath, artifactFocusedGroupKey, artifactGroups]);
+  const artifactFocusedGroupFiles = artifactWorkbenchSelection.focusedGroupFiles;
+  const artifactFocusedFile = artifactWorkbenchSelection.focusedFile;
+  const defaultArtifactWorkspaceRoot = useMemo(() => {
+    return resolveArtifactWorkspaceRoot({
+      currentWorkspace: currentAgent?.workspace,
+      artifactFiles,
+      artifactFocusedFile,
+    });
+  }, [artifactFiles, artifactFocusedFile, currentAgent?.workspace]);
+  const artifactWorkspaceRoot = defaultArtifactWorkspaceRoot;
+  const openGeneratedArtifact = useCallback((file: GeneratedFile, options?: OpenGeneratedArtifactOptions) => {
+    const canShowChanges = supportsInlineDiff(file);
+    const nextTarget = buildArtifactPreviewTargetFromGeneratedFile(file);
+    setArtifactFocusedGroupKey(resolveArtifactGroupKeyForFile(artifactGroups, file.filePath));
+    setActiveSidePanelTab('artifacts');
+    setArtifactFocusedFilePath(file.filePath);
+    setArtifactFocusedFileOverride(nextTarget);
+
+    if (options?.preserveSection) {
+      if (artifactActiveSection === 'changes' && canShowChanges) {
+        setArtifactActiveSection('changes');
+        setArtifactViewMode('diff');
+        return;
+      }
+      setArtifactActiveSection('preview');
+      setArtifactViewMode('preview');
+      return;
+    }
+
+    if (file.sourceTool === 'edit' && canShowChanges) {
+      setArtifactActiveSection('changes');
+      setArtifactViewMode('diff');
+      return;
+    }
+    setArtifactActiveSection('preview');
+    setArtifactViewMode('preview');
+  }, [artifactActiveSection, artifactGroups, setActiveSidePanelTab]);
+  const handleOpenArtifactFile = useCallback((file: GeneratedFile) => {
+    openGeneratedArtifact(file);
+  }, [openGeneratedArtifact]);
+  const handleOpenArtifactGroup = useCallback((groupKey: string, options?: OpenGeneratedArtifactOptions) => {
+    const group = artifactGroups.find((entry) => entry.graphItemKey === groupKey) ?? null;
+    if (!group) {
+      return;
+    }
+    const focusTarget = resolvePreviewableArtifactGroupTarget(group, artifactFocusedFilePath);
+    if (!focusTarget) {
+      return;
+    }
+    setArtifactFocusedGroupKey(group.graphItemKey);
+    setActiveSidePanelTab('artifacts');
+    setArtifactFocusedFilePath(focusTarget.filePath);
+    setArtifactFocusedFileOverride(focusTarget);
+
+    const matchedGeneratedFile = group.files.find((file) => file.filePath === focusTarget.filePath) ?? null;
+    if (matchedGeneratedFile) {
+      const canShowChanges = supportsInlineDiff(matchedGeneratedFile);
+      if (options?.preserveSection) {
+        if (artifactActiveSection === 'changes' && canShowChanges) {
+          setArtifactActiveSection('changes');
+          setArtifactViewMode('diff');
+          return;
+        }
+        if (artifactActiveSection === 'workspace') {
+          setArtifactActiveSection('workspace');
+          if (artifactViewMode === 'diff' && !canShowChanges) {
+            setArtifactViewMode('preview');
+          }
+          return;
+        }
+        setArtifactActiveSection('preview');
+        setArtifactViewMode('preview');
+        return;
+      }
+      if (matchedGeneratedFile.sourceTool === 'edit' && canShowChanges) {
+        setArtifactActiveSection('changes');
+        setArtifactViewMode('diff');
+        return;
+      }
+      setArtifactActiveSection('preview');
+      setArtifactViewMode('preview');
+      return;
+    }
+
+    if (focusTarget.isDirectory || focusTarget.mimeType === DIRECTORY_MIME_TYPE) {
+      setArtifactActiveSection('workspace');
+      return;
+    }
+    setArtifactActiveSection('preview');
+    setArtifactViewMode('preview');
+  }, [artifactActiveSection, artifactFocusedFilePath, artifactGroups, artifactViewMode, setActiveSidePanelTab]);
+  const handleArtifactFocusTarget = useCallback((file: ArtifactPreviewTarget, options?: FocusArtifactTargetOptions) => {
+    const matchedGeneratedFile = artifactFiles.find((entry) => entry.filePath === file.filePath);
+    setArtifactFocusedGroupKey(resolveArtifactGroupKeyForFile(artifactGroups, file.filePath));
+    setArtifactFocusedFilePath(file.filePath);
+    setArtifactFocusedFileOverride(matchedGeneratedFile
+      ? buildArtifactPreviewTargetFromGeneratedFile(matchedGeneratedFile)
+      : file);
+    if (file.isDirectory || file.mimeType === DIRECTORY_MIME_TYPE) {
+      setArtifactActiveSection('workspace');
+      return;
+    }
+    if (options?.preserveSection === 'workspace') {
+      setArtifactActiveSection('workspace');
+      if (artifactViewMode === 'diff' && !supportsInlineDiff(file)) {
+        setArtifactViewMode('preview');
+      }
+      return;
+    }
+    setArtifactActiveSection('preview');
+    if (artifactViewMode === 'diff' && !supportsInlineDiff(file)) {
+      setArtifactViewMode('preview');
+      return;
+    }
+    setArtifactViewMode('preview');
+  }, [artifactFiles, artifactGroups, artifactViewMode]);
+  useEffect(() => {
+    if (artifactGroups.length === 0) {
+      if (artifactAutoOpenedSessionKeyRef.current === currentSessionKey) {
+        artifactAutoOpenedSessionKeyRef.current = null;
+      }
+      if (artifactFocusedGroupKey !== null) {
+        setArtifactFocusedGroupKey(null);
+      }
+      return;
+    }
+    if (artifactAutoOpenedSessionKeyRef.current === currentSessionKey) {
+      return;
+    }
+    const firstArtifactFile = resolveArtifactGroupFocusFile(artifactGroups[0] ?? null, null);
+    if (!firstArtifactFile) {
+      return;
+    }
+    artifactAutoOpenedSessionKeyRef.current = currentSessionKey;
+    openGeneratedArtifact(firstArtifactFile);
+  }, [artifactFiles, artifactFocusedGroupKey, artifactGroups, currentSessionKey, openGeneratedArtifact]);
+  useEffect(() => {
+    if (!artifactFocusedFile && artifactActiveSection !== 'workspace') {
+      setArtifactActiveSection('workspace');
+      return;
+    }
+    if (artifactFocusedFile && artifactActiveSection === 'workspace' && artifactFiles.length > 0) {
+      return;
+    }
+  }, [artifactActiveSection, artifactFiles.length, artifactFocusedFile]);
+  useEffect(() => {
+    if (artifactActiveSection !== 'changes') {
+      return;
+    }
+    if (!artifactFocusedFile || supportsInlineDiff(artifactFocusedFile)) {
+      return;
+    }
+    setArtifactActiveSection('preview');
+    setArtifactViewMode('preview');
+  }, [artifactActiveSection, artifactFocusedFile]);
   const localizedRuntimeError = useMemo(() => {
     const localizedRuntimeIssue = localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t);
     const fallbackGatewayRuntimeError = (
@@ -362,9 +601,12 @@ export function Chat({ isActive = true }: ChatProps) {
     }
     return effectiveRuntimeError;
   }, [currentSession.runtime.lastIssue, currentSession.runtime.pendingFinal, currentSession.runtime.runPhase, currentSession.runtime.sending, localizedGatewayIssue, runtimeError, t]);
+  const effectiveCurrentModelId = useMemo(() => {
+    return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model);
+  }, [currentAgent?.model, currentSession.meta.model]);
   const modelPicker = useMemo(() => {
-    const currentModelId = currentAgent?.model?.trim();
-    if (!currentAgent || !currentModelId) {
+    const currentModelId = effectiveCurrentModelId;
+    if (!currentModelId) {
       return null;
     }
     const labels = new Map<string, string>();
@@ -386,9 +628,9 @@ export function Chat({ isActive = true }: ChatProps) {
       currentLabel: labels.get(currentModelId) ?? currentModelId,
       options,
       loading: modelsLoading,
-      switching: switchingModelId === currentModelId,
+      switching: false,
     };
-  }, [availableModels, currentAgent, modelsLoading, switchingModelId]);
+  }, [availableModels, effectiveCurrentModelId, modelsLoading]);
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -397,38 +639,45 @@ export function Chat({ isActive = true }: ChatProps) {
     await sendMessage(text, attachments);
   }, [sendMessage]);
   const handleSelectModel = useCallback(async (nextModelId: string) => {
-    const agent = currentAgent;
-    if (!agent) {
+    const normalizedNextModelId = nextModelId.trim();
+    const currentModelId = effectiveCurrentModelId;
+    if (!currentSessionKey) {
       return;
     }
-    const normalizedNextModelId = nextModelId.trim();
-    const currentModelId = agent.model?.trim() ?? '';
     if (!normalizedNextModelId || normalizedNextModelId === currentModelId) {
       return;
     }
-    setSwitchingModelId(normalizedNextModelId);
-    try {
-      await updateAgent({
-        agentId: agent.id,
-        name: agent.name || agent.id,
-        workspace: agent.workspace ?? '',
+    const previousModelId = currentSession.meta.model?.trim() || null;
+    useChatStore.setState((state) => ({
+      loadedSessions: patchSessionMeta(state, currentSessionKey, {
         model: normalizedNextModelId,
-        skills: Array.isArray(agent.skills) ? agent.skills : undefined,
-        avatarSeed: agent.avatarSeed,
-        avatarStyle: agent.avatarStyle,
+      }),
+    }));
+    try {
+      const result = await hostSessionPatch({
+        sessionKey: currentSessionKey,
+        model: normalizedNextModelId,
       });
-      const latestAgent = useSubagentsStore.getState().agentsResource.data.find((item) => item.id === agent.id);
-      const appliedModelId = latestAgent?.model?.trim() ?? '';
+      if (result.snapshot) {
+        useChatStore.setState((state) => ({
+          loadedSessions: patchSessionSnapshot(state, currentSessionKey, result.snapshot),
+        }));
+      }
+      const appliedModelId = result.snapshot?.catalog?.model?.trim() || normalizedNextModelId;
       if (appliedModelId !== normalizedNextModelId) {
         throw new Error(appliedModelId || normalizedNextModelId);
       }
+      void loadSessions();
     } catch (error) {
+      useChatStore.setState((state) => ({
+        loadedSessions: patchSessionMeta(state, currentSessionKey, {
+          model: previousModelId,
+        }),
+      }));
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('input.modelSwitchFailed', { error: message }));
-    } finally {
-      setSwitchingModelId(null);
     }
-  }, [currentAgent, t, updateAgent]);
+  }, [currentSession.meta.model, currentSessionKey, effectiveCurrentModelId, loadSessions, t]);
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
     name: string;
@@ -522,6 +771,8 @@ export function Chat({ isActive = true }: ChatProps) {
         sidePanelOpen={sidePanelOpen}
         sidePanelMode={sidePanelMode}
         sidePanelWidth={sidePanelWidth}
+        artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
+        onSidePanelResize={setSidePanelWidth}
         isEmptyState={liveView.isEmptyState}
         emptyState={<WelcomeScreen input={inputNode} />}
         sidePanel={(
@@ -529,8 +780,10 @@ export function Chat({ isActive = true }: ChatProps) {
             mode={sidePanelMode === 'hidden' ? 'docked' : sidePanelMode}
             width={sidePanelWidth}
             activeTab={activeSidePanelTab}
+            artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
             onTabChange={setActiveSidePanelTab}
             onClose={closeSidePanel}
+            onToggleArtifactWorkbenchFullscreen={toggleArtifactWorkbenchFullscreen}
             unfinishedTaskCount={unfinishedTaskCount}
             skillConfigLabel={t('toolbar.skillConfig')}
             skillConfigTitle={t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId })}
@@ -540,6 +793,27 @@ export function Chat({ isActive = true }: ChatProps) {
             onToggleSkill={toggleSkillConfigSelection}
             skillPreview={skillPreview}
             onClearSkillPreview={() => setSkillPreview(null)}
+            artifactGroups={artifactGroups}
+            artifactFocusedGroupKey={artifactWorkbenchSelection.focusedGroupKey}
+            artifactFocusedGroupFiles={artifactFocusedGroupFiles}
+            artifactFocusedFile={artifactFocusedFile}
+            artifactActiveSection={artifactActiveSection}
+            artifactViewMode={artifactViewMode}
+            artifactWorkspaceRoot={artifactWorkspaceRoot}
+            onArtifactFocusFile={handleArtifactFocusTarget}
+            onOpenGeneratedArtifactFile={openGeneratedArtifact}
+            onOpenArtifactGroup={handleOpenArtifactGroup}
+            onArtifactSectionChange={setArtifactActiveSection}
+            onArtifactViewModeChange={setArtifactViewMode}
+            onArtifactRevealInFileManager={(filePath) => {
+              void invokeIpc('shell:showItemInFolder', filePath).then((result) => {
+                if (result && typeof result === 'object' && 'success' in result && (result as { success?: boolean }).success === false) {
+                  toast.error(t('artifacts.revealFailed'));
+                }
+              }).catch(() => {
+                toast.error(t('artifacts.revealFailed'));
+              });
+            }}
           />
         )}
         header={(
@@ -564,18 +838,25 @@ export function Chat({ isActive = true }: ChatProps) {
             ref={viewportPaneRef}
             isActive={workspaceActive}
             currentSessionKey={currentSessionKey}
-            currentSession={currentSession}
-            approvalStatus={approvalStatus}
-            agents={agents}
-            isGatewayRunning={isGatewayRunning}
+            runtime={currentSession.runtime}
+            viewport={currentSession.window}
+            items={renderItems}
+            liveView={liveView}
             errorMessage={localizedRuntimeError}
             showThinking={showThinking}
             userAvatarDataUrl={userAvatarDataUrl}
-            defaultAssistant={{
-              agentId: currentAgentId,
-              agentName: currentAgent?.name || currentAgentId,
-              avatarSeed: currentAgent?.avatarSeed,
-              avatarStyle: currentAgent?.avatarStyle,
+            artifactGroups={artifactGroups}
+            onOpenArtifactFile={handleOpenArtifactFile}
+            onOpenAttachedArtifact={(file) => {
+              const target = buildArtifactPreviewTargetFromAttachedFile(file);
+              if (!target) {
+                if (file.filePath) {
+                  void invokeIpc('shell:openPath', file.filePath);
+                }
+                return;
+              }
+              setActiveSidePanelTab('artifacts');
+              handleArtifactFocusTarget(target);
             }}
             onLoadOlder={() => {
               void loadOlderViewportItems(currentSessionKey);

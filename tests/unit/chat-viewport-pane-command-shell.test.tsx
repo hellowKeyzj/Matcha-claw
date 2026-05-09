@@ -23,14 +23,6 @@ vi.mock('@/pages/Chat/useChatScroll', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/useChatView', () => ({
-  useChatView: () => ({
-    showBlockingLoading: false,
-    showBlockingError: false,
-    isEmptyState: false,
-  }),
-}));
-
 vi.mock('@/pages/Chat/components/ChatList', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/pages/Chat/components/ChatList')>();
   return {
@@ -54,12 +46,8 @@ vi.mock('@/pages/Chat/components/ChatList', async (importOriginal) => {
 function buildCurrentSession(hasMore = true) {
   const base = createEmptySessionRecord();
   return {
-    ...base,
-    meta: {
-      ...base.meta,
-      historyStatus: 'ready' as const,
-    },
-    messages: [],
+    runtime: base.runtime,
+    items: [],
     window: createViewportWindowState({
       totalItemCount: 0,
       windowStartOffset: hasMore ? 1 : 0,
@@ -85,17 +73,25 @@ describe('chat list command shell', () => {
       <ChatList
         isActive
         currentSessionKey="agent:test:first"
-        currentSession={buildCurrentSession(true)}
-        agents={[]}
-        isGatewayRunning={false}
+        runtime={buildCurrentSession(true).runtime}
+        viewport={buildCurrentSession(true).window}
+        items={buildCurrentSession(true).items}
+        liveView={{
+          showBlockingLoading: false,
+          showBlockingError: false,
+          showBackgroundStatus: false,
+          isEmptyState: false,
+        }}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={loadOlderFirst}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
         jumpToBottomLabel="Jump bottom"
+        artifactGroups={[]}
+        onOpenArtifactFile={() => {}}
+        onOpenAttachedArtifact={() => {}}
       />,
     );
 
@@ -110,17 +106,25 @@ describe('chat list command shell', () => {
       <ChatList
         isActive
         currentSessionKey="agent:test:second"
-        currentSession={buildCurrentSession(true)}
-        agents={[]}
-        isGatewayRunning={false}
+        runtime={buildCurrentSession(true).runtime}
+        viewport={buildCurrentSession(true).window}
+        items={buildCurrentSession(true).items}
+        liveView={{
+          showBlockingLoading: false,
+          showBlockingError: false,
+          showBackgroundStatus: false,
+          isEmptyState: false,
+        }}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={loadOlderSecond}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
         jumpToBottomLabel="Jump bottom"
+        artifactGroups={[]}
+        onOpenArtifactFile={() => {}}
+        onOpenAttachedArtifact={() => {}}
       />,
     );
 
@@ -137,17 +141,25 @@ describe('chat list command shell', () => {
         ref={paneRef}
         isActive
         currentSessionKey="agent:test:first"
-        currentSession={buildCurrentSession(false)}
-        agents={[]}
-        isGatewayRunning={false}
+        runtime={buildCurrentSession(false).runtime}
+        viewport={buildCurrentSession(false).window}
+        items={buildCurrentSession(false).items}
+        liveView={{
+          showBlockingLoading: false,
+          showBlockingError: false,
+          showBackgroundStatus: false,
+          isEmptyState: false,
+        }}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
         jumpToBottomLabel="Jump bottom"
+        artifactGroups={[]}
+        onOpenArtifactFile={() => {}}
+        onOpenAttachedArtifact={() => {}}
       />,
     );
 
@@ -162,17 +174,25 @@ describe('chat list command shell', () => {
         ref={paneRef}
         isActive
         currentSessionKey="agent:test:second"
-        currentSession={buildCurrentSession(false)}
-        agents={[]}
-        isGatewayRunning={false}
+        runtime={buildCurrentSession(false).runtime}
+        viewport={buildCurrentSession(false).window}
+        items={buildCurrentSession(false).items}
+        liveView={{
+          showBlockingLoading: false,
+          showBlockingError: false,
+          showBackgroundStatus: false,
+          isEmptyState: false,
+        }}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={() => {}}
         jumpToBottomLabel="Jump bottom"
+        artifactGroups={[]}
+        onOpenArtifactFile={() => {}}
+        onOpenAttachedArtifact={() => {}}
       />,
     );
 
@@ -187,27 +207,32 @@ describe('chat list command shell', () => {
       <ChatList
         isActive
         currentSessionKey="agent:test:main"
-        currentSession={{
-          ...buildCurrentSession(false),
-          window: createViewportWindowState({
-            totalItemCount: 12,
-            windowStartOffset: 0,
-            windowEndOffset: 6,
-            hasMore: false,
-            hasNewer: true,
-            isAtLatest: false,
-          }),
+        runtime={buildCurrentSession(false).runtime}
+        viewport={createViewportWindowState({
+          totalItemCount: 12,
+          windowStartOffset: 0,
+          windowEndOffset: 6,
+          hasMore: false,
+          hasNewer: true,
+          isAtLatest: false,
+        })}
+        items={buildCurrentSession(false).items}
+        liveView={{
+          showBlockingLoading: false,
+          showBlockingError: false,
+          showBackgroundStatus: false,
+          isEmptyState: false,
         }}
-        agents={[]}
-        isGatewayRunning={false}
         errorMessage={null}
         showThinking={false}
         userAvatarDataUrl={null}
-        defaultAssistant={{ agentId: 'test', agentName: 'Test Agent' }}
         onLoadOlder={() => {}}
         loadOlderLabel="Load older"
         onJumpToLatest={jumpViewportToLatest}
         jumpToBottomLabel="Jump bottom"
+        artifactGroups={[]}
+        onOpenArtifactFile={() => {}}
+        onOpenAttachedArtifact={() => {}}
       />,
     );
 

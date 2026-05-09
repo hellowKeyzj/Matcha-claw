@@ -106,9 +106,12 @@ export function createHostApiRequestHandler(ctx: HostApiContext, port: number) {
   };
 }
 
-export function startHostApiServer(ctx: HostApiContext, port = PORTS.MATCHACLAW_HOST_API): Server {
-  const resolvedPort = Number.isFinite(port) && port > 0
-    ? port
+export function startHostApiServer(
+  ctx: HostApiContext,
+  port?: number,
+): Server {
+  const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
+    ? Number(port)
     : getPort('MATCHACLAW_HOST_API');
   hostApiToken = randomBytes(32).toString('hex');
 

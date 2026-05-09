@@ -17,6 +17,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -55,6 +56,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-stale-live' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -70,6 +72,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
     const response = await restarted.getSessionStateSnapshot({ sessionKey: 'agent:main:main' });
@@ -202,6 +205,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -256,6 +260,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -314,6 +319,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -374,6 +380,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: nextRunId }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -413,6 +420,43 @@ describe('session runtime service', () => {
       status: 'streaming',
       pendingState: 'typing',
       text: '',
+    });
+  });
+
+  it('patchSession updates the current session model from gateway resolved result', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const gatewayRpc = vi.fn(async () => ({
+      resolved: {
+        modelProvider: 'anthropic',
+        model: 'claude-opus-4-6',
+      },
+    }));
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc,
+      },
+    });
+
+    const response = await service.patchSession({
+      sessionKey: 'agent:main:main',
+      model: 'anthropic/claude-opus-4-6',
+    });
+
+    expect(gatewayRpc).toHaveBeenCalledWith('sessions.patch', {
+      key: 'agent:main:main',
+      model: 'anthropic/claude-opus-4-6',
+    }, 30000);
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      success: true,
+      snapshot: {
+        catalog: {
+          key: 'agent:main:main',
+          model: 'anthropic/claude-opus-4-6',
+        },
+      },
     });
   });
 
@@ -536,6 +580,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -604,6 +649,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -676,6 +722,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -819,6 +866,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -928,6 +976,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-orphan-1' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -963,6 +1012,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-orphan-cleanup-1' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -999,6 +1049,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1061,6 +1112,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1239,6 +1291,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1274,6 +1327,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-1' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1402,6 +1456,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1498,6 +1553,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1550,6 +1606,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1615,6 +1672,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1686,6 +1744,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1763,6 +1822,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1853,6 +1913,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1954,6 +2015,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -1983,6 +2045,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -2102,6 +2165,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -2165,6 +2229,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => rootDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-2' }),
+        gatewayRpc: async () => ({}),
       },
     });
 
@@ -2190,6 +2255,7 @@ describe('session runtime service', () => {
       getOpenClawConfigDir: () => configDir,
       openclawBridge: {
         chatSend: async () => ({ runId: 'run-prompt-3' }),
+        gatewayRpc: async () => ({}),
       },
     });
 

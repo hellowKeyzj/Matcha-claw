@@ -1,6 +1,7 @@
 import { _electron as electron, expect, test as base, type ElectronApplication, type Page } from '@playwright/test';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -29,6 +30,32 @@ async function ensurePathExists(path: string): Promise<void> {
   await access(path, fsConstants.F_OK);
 }
 
+async function allocateFreePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    server.close();
+    throw new Error('Failed to allocate a free TCP port for Electron e2e');
+  }
+
+  const { port } = address;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+  return port;
+}
+
 export const test = base.extend<ElectronFixtures>({
   homeDir: async ({}, use) => {
     const dir = await mkdtemp(join(tmpdir(), 'matchaclaw-e2e-home-'));
@@ -40,6 +67,9 @@ export const test = base.extend<ElectronFixtures>({
   },
 
   electronApp: async ({ homeDir }, use) => {
+    const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+    delete process.env.ELECTRON_RUN_AS_NODE;
+
     const userDataDir = join(homeDir, 'user-data');
     const appDataDir = join(homeDir, 'AppData', 'Roaming');
     const localAppDataDir = join(homeDir, 'AppData', 'Local');
@@ -59,10 +89,17 @@ export const test = base.extend<ElectronFixtures>({
     await ensurePathExists(preloadEntry);
     await ensurePathExists(rendererIndex);
 
+    const [hostApiPort, runtimeHostPort] = await Promise.all([
+      allocateFreePort(),
+      allocateFreePort(),
+    ]);
+
     const launchEnv = {
       ...process.env,
       CLAWX_E2E: '1',
       CLAWX_E2E_USER_DATA_DIR: userDataDir,
+      MATCHACLAW_PORT_MATCHACLAW_HOST_API: String(hostApiPort),
+      MATCHACLAW_RUNTIME_HOST_PORT: String(runtimeHostPort),
       HOME: homeDir,
       USERPROFILE: homeDir,
       APPDATA: appDataDir,
@@ -71,15 +108,20 @@ export const test = base.extend<ElectronFixtures>({
     };
     delete launchEnv.ELECTRON_RUN_AS_NODE;
 
-    const app = await electron.launch({
-      args: [mainEntry],
-      env: launchEnv,
-    });
-
     try {
+      const app = await electron.launch({
+        args: [mainEntry],
+        env: launchEnv,
+      });
+
       await use(app);
-    } finally {
       await app.close();
+    } finally {
+      if (previousElectronRunAsNode === undefined) {
+        delete process.env.ELECTRON_RUN_AS_NODE;
+      } else {
+        process.env.ELECTRON_RUN_AS_NODE = previousElectronRunAsNode;
+      }
     }
   },
 

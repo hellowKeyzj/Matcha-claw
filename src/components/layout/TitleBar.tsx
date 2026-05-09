@@ -15,7 +15,7 @@ import { preloadLazyRouteForPath } from '@/lib/route-preload';
 export function TitleBar() {
   const platform = window.electron?.platform;
   if (platform === 'darwin') {
-    return <div className="drag-region h-12 shrink-0 border-b border-border/70 bg-card/96 backdrop-blur-xl" />;
+    return <div className="drag-region h-12 shrink-0 border-b border-border/70 bg-card" />;
   }
 
   if (platform !== 'win32') {
@@ -62,7 +62,7 @@ function WindowsTitleBar() {
   };
 
   return (
-    <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/96 px-3 backdrop-blur-xl">
+    <div className="drag-region flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card px-3">
       <div className="no-drag flex items-center gap-2">
         <img src={logoSvg} alt="MatchaClaw" className="h-5 w-auto" />
         <span className="select-none text-xs font-semibold tracking-[0.08em] text-muted-foreground">

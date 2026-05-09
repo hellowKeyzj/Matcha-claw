@@ -1,8 +1,10 @@
 import { memo, useCallback, useState } from 'react';
-import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Sparkles, Wrench, XCircle } from 'lucide-react';
+import type { MouseEvent, PointerEvent } from 'react';
+import { ArrowDown, ArrowUp, Bot, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Eye, FileCode2, GitBranch, GitCompare, Sparkles, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import type { SessionExecutionGraphStep } from '../../../runtime-host/shared/session-adapter-types';
+import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
 
 interface ExecutionGraphCardProps {
   agentLabel: string;
@@ -12,6 +14,8 @@ interface ExecutionGraphCardProps {
   triggerItemKey?: string;
   replyItemKey?: string;
   onJumpToItemKey?: (itemKey?: string) => void;
+  artifactFiles?: GeneratedFile[];
+  onOpenArtifactFile?: (file: GeneratedFile) => void;
 }
 
 function GraphStatusIcon({ status }: { status: SessionExecutionGraphStep['status'] }) {
@@ -76,6 +80,8 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   triggerItemKey,
   replyItemKey,
   onJumpToItemKey,
+  artifactFiles = [],
+  onOpenArtifactFile,
 }: ExecutionGraphCardProps) {
   const { t } = useTranslation('chat');
   const handleJumpToTrigger = useCallback(() => {
@@ -84,6 +90,24 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
   const handleJumpToReply = useCallback(() => {
     onJumpToItemKey?.(replyItemKey);
   }, [onJumpToItemKey, replyItemKey]);
+  const handleOpenArtifactByPointer = useCallback((event: PointerEvent<HTMLButtonElement>, file: GeneratedFile) => {
+    if (event.button !== 0) {
+      return;
+    }
+    onOpenArtifactFile?.(file);
+  }, [onOpenArtifactFile]);
+  const handleOpenArtifactByMouseDown = useCallback((event: MouseEvent<HTMLButtonElement>, file: GeneratedFile) => {
+    if (event.button !== 0) {
+      return;
+    }
+    onOpenArtifactFile?.(file);
+  }, [onOpenArtifactFile]);
+  const handleOpenArtifactByClick = useCallback((event: MouseEvent<HTMLButtonElement>, file: GeneratedFile) => {
+    if (event.detail !== 0) {
+      return;
+    }
+    onOpenArtifactFile?.(file);
+  }, [onOpenArtifactFile]);
 
   return (
     <div
@@ -190,6 +214,45 @@ export const ExecutionGraphCard = memo(function ExecutionGraphCard({
             )}
           </div>
         ))}
+
+        {artifactFiles.length > 0 ? (
+          <div className="rounded-[18px] border border-border/45 bg-background/60 px-3 py-3">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <FileCode2 className="h-3.5 w-3.5" />
+              <span>{t('executionGraph.generatedFiles', { count: artifactFiles.length })}</span>
+            </div>
+            <div className="space-y-2">
+              {artifactFiles.map((file) => {
+                const openAsDiff = file.sourceTool === 'edit' && supportsInlineDiff(file);
+                return (
+                  <button
+                    key={file.toolId}
+                    type="button"
+                    data-testid={`execution-graph-artifact-${file.toolId}`}
+                    onPointerDown={(event) => handleOpenArtifactByPointer(event, file)}
+                    onMouseDown={(event) => handleOpenArtifactByMouseDown(event, file)}
+                    onClick={(event) => handleOpenArtifactByClick(event, file)}
+                    className="flex w-full items-center justify-between gap-3 rounded-[14px] border border-border/45 bg-background/78 px-3 py-2 text-left transition-colors hover:bg-muted/45"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-foreground">{file.fileName}</p>
+                      <p className="truncate text-[11px] text-muted-foreground">{file.filePath}</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <span className="text-[11px] text-muted-foreground">
+                        +{file.lineStats.added} / -{file.lineStats.removed}
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border/40 bg-background/82 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {openAsDiff ? <GitCompare className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                        {openAsDiff ? t('executionGraph.openChanges') : t('executionGraph.openPreview')}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

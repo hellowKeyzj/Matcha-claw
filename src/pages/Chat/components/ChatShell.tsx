@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
+import { CHAT_WORKSPACE_LAYOUT } from '../chat-workspace-layout';
 import type { ChatSidePanelMode } from '../chat-workspace-layout';
 
 const CHAT_THREAD_BOTTOM_GAP_PX = 12;
@@ -15,6 +16,8 @@ interface ChatShellProps {
   sidePanelOpen: boolean;
   sidePanelMode: ChatSidePanelMode;
   sidePanelWidth: number;
+  artifactWorkbenchFullscreen?: boolean;
+  onSidePanelResize?: (nextWidth: number) => void;
   isEmptyState?: boolean;
   emptyState?: ReactNode;
   sidePanel: ReactNode;
@@ -30,6 +33,8 @@ export function ChatShell({
   sidePanelOpen,
   sidePanelMode,
   sidePanelWidth,
+  artifactWorkbenchFullscreen = false,
+  onSidePanelResize,
   isEmptyState = false,
   emptyState = null,
   sidePanel,
@@ -41,6 +46,7 @@ export function ChatShell({
 }: ChatShellProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
+  const resizePointerIdRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     const stageNode = stageRef.current;
@@ -82,84 +88,142 @@ export function ChatShell({
     };
   }, [isEmptyState]);
 
+  const handleSidePanelResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!onSidePanelResize) {
+      return;
+    }
+    event.preventDefault();
+    resizePointerIdRef.current = event.pointerId;
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const layoutNode = chatLayoutRef.current;
+      if (!layoutNode) {
+        return;
+      }
+      const rect = layoutNode.getBoundingClientRect();
+      const nextWidth = rect.right - moveEvent.clientX;
+      onSidePanelResize(nextWidth);
+    };
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (resizePointerIdRef.current !== upEvent.pointerId) {
+        return;
+      }
+      resizePointerIdRef.current = null;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+  };
+
   return (
     <div
       ref={chatLayoutRef}
       className={cn(
-        'relative grid h-full min-h-0 overflow-hidden bg-[linear-gradient(180deg,rgba(248,250,252,0.7),rgba(244,245,247,0.42))] [grid-template-columns:minmax(0,1fr)] dark:bg-[linear-gradient(180deg,rgba(24,24,27,0.42),rgba(18,18,20,0.24))]',
-        sidePanelOpen && sidePanelMode === 'docked' && '[grid-template-columns:minmax(0,1fr)_var(--chat-side-panel-width)]',
+        'relative grid h-full min-h-0 overflow-hidden bg-card [grid-template-columns:minmax(0,1fr)]',
+        !artifactWorkbenchFullscreen
+          && sidePanelOpen
+          && sidePanelMode === 'docked'
+          && '[grid-template-columns:minmax(0,1fr)_var(--chat-side-panel-resizer-width)_var(--chat-side-panel-width)]',
       )}
       style={{
         ['--chat-side-panel-width' as string]: `${sidePanelWidth}px`,
+        ['--chat-side-panel-resizer-width' as string]: `${CHAT_WORKSPACE_LAYOUT.paneResizerWidth}px`,
       }}
     >
-      <div
-        ref={stageRef}
-        className={`${CHAT_LAYOUT_TOKENS.stageSurface} chat-scroll-sync`}
-        style={CHAT_STAGE_CSS_VARS}
-      >
+      {artifactWorkbenchFullscreen ? (
         <div
-          data-testid="chat-stage-backdrop"
-          className={CHAT_LAYOUT_TOKENS.stageBackdrop}
-        />
-
-        <div
-          data-testid="chat-stage-header-overlay"
-          className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
+          data-testid="chat-artifact-workbench-fullscreen"
+          className="min-h-0 min-w-0 overflow-hidden"
         >
-          <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>
-            <div className="pointer-events-auto">
-              {header}
+          {sidePanel}
+        </div>
+      ) : (
+        <div
+          ref={stageRef}
+          className={`${CHAT_LAYOUT_TOKENS.stageSurface} chat-scroll-sync`}
+          style={CHAT_STAGE_CSS_VARS}
+        >
+          <div
+            data-testid="chat-stage-backdrop"
+            className={CHAT_LAYOUT_TOKENS.stageBackdrop}
+          />
+
+          <div
+            data-testid="chat-stage-header-overlay"
+            className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
+          >
+            <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>
+              <div className="pointer-events-auto">
+                {header}
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-          {isEmptyState ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-3 pb-8 pt-16 md:px-4 md:pb-10 md:pt-20">
-              {emptyState}
-            </div>
-          ) : (
-            <>
-              {viewportPane}
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            {isEmptyState ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-3 pb-8 pt-16 md:px-4 md:pb-10 md:pt-20">
+                {emptyState}
+              </div>
+            ) : (
+              <>
+                {viewportPane}
 
-              <div
-                data-testid="chat-stage-bottom-fade"
-                className={CHAT_LAYOUT_TOKENS.stageBottomFade}
-              />
+                <div
+                  data-testid="chat-stage-bottom-fade"
+                  className={CHAT_LAYOUT_TOKENS.stageBottomFade}
+                />
 
-              <div
-                ref={composerOverlayRef}
-                className={CHAT_LAYOUT_TOKENS.composerOverlay}
-              >
-                <div className={CHAT_LAYOUT_TOKENS.composerOverlayStack}>
-                  {errorBanner ? (
-                    <div className="pointer-events-auto">
-                      {errorBanner}
+                <div
+                  ref={composerOverlayRef}
+                  className={CHAT_LAYOUT_TOKENS.composerOverlay}
+                >
+                  <div className={CHAT_LAYOUT_TOKENS.composerOverlayStack}>
+                    {errorBanner ? (
+                      <div className="pointer-events-auto">
+                        {errorBanner}
+                      </div>
+                    ) : null}
+
+                    {approvalDock ? (
+                      <div className="pointer-events-auto">
+                        {approvalDock}
+                      </div>
+                    ) : null}
+
+                    <div className="pointer-events-auto chat-scroll-sync-input">
+                      {input}
                     </div>
-                  ) : null}
-
-                  {approvalDock ? (
-                    <div className="pointer-events-auto">
-                      {approvalDock}
-                    </div>
-                  ) : null}
-
-                  <div className="pointer-events-auto chat-scroll-sync-input">
-                    {input}
                   </div>
                 </div>
-              </div>
-            </>
-          )}
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
-      {sidePanelOpen && sidePanelMode === 'docked' ? (
-        sidePanel
+      {!artifactWorkbenchFullscreen && sidePanelOpen && sidePanelMode === 'docked' ? (
+        <>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            data-testid="chat-side-panel-resizer"
+            className="group relative z-10 w-[var(--chat-side-panel-resizer-width)] cursor-col-resize bg-transparent"
+            onPointerDown={handleSidePanelResizeStart}
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 transition-colors group-hover:bg-primary/60"
+            />
+          </div>
+          {sidePanel}
+        </>
       ) : null}
 
-      {sidePanelOpen && sidePanelMode === 'overlay' ? (
+      {!artifactWorkbenchFullscreen && sidePanelOpen && sidePanelMode === 'overlay' ? (
         <div
           data-testid="chat-side-panel-overlay"
           className="pointer-events-none absolute inset-y-3 right-3 z-20 flex max-w-[calc(100%-1.5rem)]"

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
 import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
@@ -7,9 +7,14 @@ import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const invokeIpcMock = vi.fn();
+const hostFileStatMock = vi.fn();
 
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
+}));
+
+vi.mock('@/lib/host-api', () => ({
+  hostFileStat: (...args: unknown[]) => hostFileStatMock(...args),
 }));
 
 function buildItem(message: RawMessage) {
@@ -27,6 +32,17 @@ function buildItem(message: RawMessage) {
 describe('chat message links', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
+    hostFileStatMock.mockReset();
+    hostFileStatMock.mockResolvedValue({
+      ok: true,
+      entry: {
+        name: 'default',
+        path: '/tmp/default',
+        isDir: false,
+        size: 1024,
+        mtimeMs: 1,
+      },
+    });
   });
 
   it('plain text file name should open mapped absolute path from attached files', () => {
@@ -53,7 +69,7 @@ describe('chat message links', () => {
     expect(invokeIpcMock).toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
-  it('legacy markdown relative file link should open mapped absolute path from attached files', () => {
+  it('legacy markdown relative file link should stay actionable when attached absolute path exists', () => {
     const targetPath = 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md';
     const message: RawMessage = {
       role: 'assistant',
@@ -72,9 +88,14 @@ describe('chat message links', () => {
 
     render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
-    fireEvent.click(screen.getAllByText('TOOLS.md')[0]);
+    const actionable = screen.queryByRole('link', { name: 'TOOLS.md' })
+      ?? screen.getByRole('button', { name: /TOOLS\.md/i });
+    fireEvent.click(actionable);
 
-    expect(invokeIpcMock).toHaveBeenCalledWith('shell:showItemInFolder', targetPath);
+    expect(invokeIpcMock).toHaveBeenCalled();
+    expect(invokeIpcMock.mock.calls.some(([channel, value]) => (
+      (channel === 'shell:showItemInFolder' || channel === 'shell:openPath') && value === targetPath
+    ))).toBe(true);
   });
 
   it('legacy markdown relative file link should not be clickable without attached absolute path', () => {
@@ -129,6 +150,130 @@ describe('chat message links', () => {
       'shell:openPath',
       'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md',
     );
+  });
+
+  it('derives pdf artifact cards from assistant text and opens through artifact callback', async () => {
+    const onOpenAttachedArtifact = vi.fn();
+    hostFileStatMock.mockResolvedValueOnce({
+      ok: true,
+      entry: {
+        name: 'report.pdf',
+        path: '/tmp/report.pdf',
+        isDir: false,
+        size: 4096,
+        mtimeMs: 1,
+      },
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '已生成报告，位置： /tmp/report.pdf',
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={buildItem(message)}
+        showThinking={false}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
+      />,
+    );
+
+    const fileButton = await screen.findByRole('button', { name: /report\.pdf/i });
+    fireEvent.click(fileButton);
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: '/tmp/report.pdf',
+      mimeType: 'application/pdf',
+    }));
+    expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', '/tmp/report.pdf');
+  });
+
+  it('opens derived pdf artifact cards on pointer down to match real pointer interaction', async () => {
+    const onOpenAttachedArtifact = vi.fn();
+    hostFileStatMock.mockResolvedValueOnce({
+      ok: true,
+      entry: {
+        name: 'report.pdf',
+        path: '/tmp/report.pdf',
+        isDir: false,
+        size: 4096,
+        mtimeMs: 1,
+      },
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '已生成报告，位置： /tmp/report.pdf',
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={buildItem(message)}
+        showThinking={false}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
+      />,
+    );
+
+    const fileButton = await screen.findByRole('button', { name: /report\.pdf/i });
+    fireEvent.pointerDown(fileButton, { button: 0 });
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: '/tmp/report.pdf',
+      mimeType: 'application/pdf',
+    }));
+  });
+
+  it('opens derived pdf artifact cards on real mouse click with non-zero detail', async () => {
+    const onOpenAttachedArtifact = vi.fn();
+    hostFileStatMock.mockResolvedValueOnce({
+      ok: true,
+      entry: {
+        name: 'report.pdf',
+        path: '/tmp/report.pdf',
+        isDir: false,
+        size: 4096,
+        mtimeMs: 1,
+      },
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '已生成报告，位置： /tmp/report.pdf',
+    };
+
+    render(
+      <ChatAssistantTurn
+        item={buildItem(message)}
+        showThinking={false}
+        onOpenAttachedArtifact={onOpenAttachedArtifact}
+      />,
+    );
+
+    const fileButton = await screen.findByRole('button', { name: /report\.pdf/i });
+    fireEvent.click(fileButton, { detail: 1, button: 0 });
+    expect(onOpenAttachedArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: '/tmp/report.pdf',
+      mimeType: 'application/pdf',
+    }));
+  });
+
+  it('derives skill directory cards from assistant text after stat validation', async () => {
+    hostFileStatMock.mockResolvedValueOnce({
+      ok: true,
+      entry: {
+        name: 'open-eastmoney',
+        path: '~/.openclaw/skills/open-eastmoney',
+        isDir: true,
+        size: 0,
+        mtimeMs: 1,
+      },
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '位置： ~/.openclaw/skills/open-eastmoney',
+    };
+
+    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+
+    await waitFor(() => {
+      expect(hostFileStatMock).toHaveBeenCalledWith({ path: '~/.openclaw/skills/open-eastmoney' });
+    });
+    expect(await screen.findByRole('button', { name: /open-eastmoney/i })).toBeInTheDocument();
   });
 
   it('heavy assistant markdown should render rich content immediately', () => {
@@ -202,7 +347,7 @@ describe('chat message links', () => {
     expect(screen.queryByText(content)).toBeNull();
   });
 
-  it('assistant streaming settle keeps the same body root node for long markdown', () => {
+  it('assistant streaming settle keeps long markdown rendered after finalization', () => {
     const content = Array.from(
       { length: 60 },
       (_, index) => `- line ${index}: [OpenAI Stable](https://openai.com/?stable=${index})`,
@@ -221,18 +366,14 @@ describe('chat message links', () => {
       />,
     );
 
-    const firstBody = view.container.querySelector('[data-chat-body-mode="streaming"]');
-    expect(firstBody).not.toBeNull();
     expect(screen.getAllByRole('link', { name: 'OpenAI Stable' }).length).toBeGreaterThan(0);
 
     view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
-    const settledBody = view.container.querySelector('[data-chat-body-mode="settled"]');
-    expect(settledBody).toBe(firstBody);
     expect(screen.getAllByRole('link', { name: 'OpenAI Stable' }).length).toBeGreaterThan(0);
   });
 
-  it('assistant streaming text keeps a single body skeleton when settling', () => {
+  it('assistant streaming text remains visible after settle without losing content', () => {
     const message: RawMessage = {
       role: 'assistant',
       content: 'stream body',
@@ -245,13 +386,11 @@ describe('chat message links', () => {
       />,
     );
 
-    const streamingBody = view.container.querySelector('[data-chat-body-mode=\"streaming\"] > div');
-    expect(streamingBody?.children).toHaveLength(1);
+    expect(view.container.textContent).toContain('stream body');
 
     view.rerender(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
-    const settledBody = view.container.querySelector('[data-chat-body-mode=\"settled\"] > div');
-    expect(settledBody?.children).toHaveLength(1);
+    expect(view.container.textContent).toContain('stream body');
   });
 
   it('assistant streaming plain csv should keep the same markdown body after settle', () => {

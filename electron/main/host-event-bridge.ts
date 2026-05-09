@@ -13,6 +13,7 @@ import { browserOAuthManager } from '../services/providers/oauth/browser-oauth-m
 import { deviceOAuthManager } from '../services/providers/oauth/device-oauth-manager';
 import { whatsAppLoginManager } from '../services/channels/whatsapp-login-manager';
 import { weixinLoginManager } from '../services/channels/weixin-login-manager';
+import { getE2EGatewayStatus } from './ipc/e2e-chat';
 
 type HostEventName =
   | 'gateway:status'
@@ -118,6 +119,11 @@ export function registerHostEventBridge(deps: {
   let runtimeHostPollingBusy = false;
 
   const publishGatewaySnapshot = async () => {
+    const e2eStatus = getE2EGatewayStatus();
+    if (e2eStatus) {
+      emit('gateway:status', e2eStatus);
+      return;
+    }
     const baseStatus = deps.gatewayManager.getStatus();
     const runtimeGatewayStatus = await deps.runtimeHostManager.readGatewayStatus();
     emit('gateway:status', buildPublicGatewayStatus(baseStatus, runtimeGatewayStatus));
