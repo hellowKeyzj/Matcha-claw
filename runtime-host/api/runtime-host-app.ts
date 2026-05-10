@@ -24,11 +24,11 @@ import {
 } from '../application/plugins/catalog';
 import { pickCatalogGroup } from '../application/plugins/plugin-groups';
 import {
-  ensureConfiguredManagedPluginsInstalled,
   listEnabledPluginIdsFromConfig,
   listRuntimePluginCatalog,
   setRuntimeEnabledPluginIds,
 } from '../application/plugins/runtime-plugin-service';
+import { ensureConfiguredManagedPluginsForGatewayLaunch } from '../application/runtime-host/prelaunch-plugin-maintenance';
 import { createRuntimeLogger } from '../shared/logger';
 
 const logger = createRuntimeLogger('runtime-host-app');
@@ -292,7 +292,7 @@ export function startRuntimeHostProcess() {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  void ensureConfiguredManagedPluginsInstalled()
+  void ensureConfiguredManagedPluginsForGatewayLaunch()
     .then(async () => {
       await refreshPluginCatalog();
       server.listen(port, '127.0.0.1', () => {

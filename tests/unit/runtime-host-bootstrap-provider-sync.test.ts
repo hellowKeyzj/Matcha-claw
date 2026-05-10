@@ -14,6 +14,8 @@ const hoisted = vi.hoisted(() => ({
   syncSessionIdleMinutesToOpenClawMock: vi.fn(async () => {}),
   syncProxyConfigToOpenClawMock: vi.fn(async () => {}),
   listConfiguredChannelsLocalMock: vi.fn(async () => []),
+  reconcileConfiguredChannelPluginsForGatewayLaunchMock: vi.fn(async () => []),
+  ensureConfiguredManagedPluginsForGatewayLaunchMock: vi.fn(async () => []),
   getAllSettingsLocalMock: vi.fn(async () => ({ browserMode: 'relay', gatewayToken: '' })),
   setSettingValueLocalMock: vi.fn(async () => {}),
   getOpenClawProviderKeyForTypeMock: vi.fn((type: string, id: string) => `${type}-${id}`),
@@ -48,6 +50,11 @@ vi.mock('../../runtime-host/application/channels/channel-runtime', () => ({
   listConfiguredChannelsLocal: (...args: unknown[]) => hoisted.listConfiguredChannelsLocalMock(...args),
 }));
 
+vi.mock('../../runtime-host/application/runtime-host/prelaunch-plugin-maintenance', () => ({
+  reconcileConfiguredChannelPluginsForGatewayLaunch: (...args: unknown[]) => hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock(...args),
+  ensureConfiguredManagedPluginsForGatewayLaunch: (...args: unknown[]) => hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock(...args),
+}));
+
 vi.mock('../../runtime-host/application/providers/provider-registry', () => ({
   getKeyableProviderTypes: vi.fn(() => []),
   getProviderEnvVar: vi.fn(() => undefined),
@@ -71,10 +78,12 @@ describe('runtime-host bootstrap provider sync', () => {
     vi.clearAllMocks();
     hoisted.getAllSettingsLocalMock.mockResolvedValue({ browserMode: 'relay', gatewayToken: '' });
     hoisted.listConfiguredChannelsLocalMock.mockResolvedValue([]);
+    hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue([]);
+    hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock.mockResolvedValue([]);
   });
 
   it('syncGatewayConfigLocal 会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
-    hoisted.listConfiguredChannelsLocalMock.mockResolvedValue(['openclaw-weixin']);
+    hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue(['openclaw-weixin']);
 
     const { syncGatewayConfigLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
     const result = await syncGatewayConfigLocal({
@@ -96,6 +105,8 @@ describe('runtime-host bootstrap provider sync', () => {
     expect(hoisted.sanitizeOpenClawConfigMock).toHaveBeenCalledTimes(1);
     expect(hoisted.syncBrowserModeToOpenClawMock).toHaveBeenCalledWith('relay');
     expect(hoisted.syncSessionIdleMinutesToOpenClawMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       configuredChannels: ['openclaw-weixin'],
     });

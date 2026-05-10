@@ -316,7 +316,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     ]);
   });
 
-  it('plugins.allow 非空时会补齐关键 bundled 插件，但不会补回未激活的 provider 插件', async () => {
+  it('plugins.allow 非空时不会补齐 OpenClaw bundled 插件', async () => {
     const tempOpenClawDir = await mkdtemp(join(tmpdir(), 'matchaclaw-openclaw-'));
     process.env.MATCHACLAW_OPENCLAW_DIR = tempOpenClawDir;
     try {
@@ -337,13 +337,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeOpenClawConfig();
 
-      expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-      const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-      expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'browser']),
-      );
-      expect(nextConfig.plugins.allow).not.toContain('openai');
-      expect(nextConfig.plugins.allow).not.toContain('diffs');
+      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -378,19 +372,14 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeOpenClawConfig();
 
-      expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-      const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-      expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'browser', 'openai']),
-      );
-      expect(nextConfig.plugins.allow).not.toContain('anthropic');
+      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
     }
   });
 
-  it('显式启用的 bundled 非默认插件在 allowlist 非空时仍会保留', async () => {
+  it('显式启用的 bundled 非默认插件不再由 sanitize 改写', async () => {
     const tempOpenClawDir = await mkdtemp(join(tmpdir(), 'matchaclaw-openclaw-'));
     process.env.MATCHACLAW_OPENCLAW_DIR = tempOpenClawDir;
     try {
@@ -411,11 +400,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeOpenClawConfig();
 
-      expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
-      const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-      expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'browser', 'diffs']),
-      );
+      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -445,8 +430,9 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
       expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'openclaw-lark', 'browser']),
+        expect.arrayContaining(['custom-plugin', 'openclaw-lark']),
       );
+      expect(nextConfig.plugins.allow).not.toContain('browser');
       expect(nextConfig.plugins.allow).not.toContain('feishu');
       expect(nextConfig.plugins.entries.feishu).toMatchObject({ enabled: false });
     } finally {
@@ -455,7 +441,7 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
     }
   });
 
-  it('bundled 但非 enabledByDefault 的插件会从 allowlist 移除', async () => {
+  it('bundled 但非 enabledByDefault 的插件不会被 sanitize 从用户 allowlist 移除', async () => {
     const tempOpenClawDir = await mkdtemp(join(tmpdir(), 'matchaclaw-openclaw-'));
     process.env.MATCHACLAW_OPENCLAW_DIR = tempOpenClawDir;
     try {
@@ -473,13 +459,43 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
 
       await sanitizeOpenClawConfig();
 
+      expect(writeOpenClawJsonMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.MATCHACLAW_OPENCLAW_DIR;
+      await rm(tempOpenClawDir, { recursive: true, force: true });
+    }
+  });
+
+  it('会移除未安装且未信任的禁用插件 entry，避免 Gateway 启动期 stale config warnings', async () => {
+    const tempOpenClawDir = await mkdtemp(join(tmpdir(), 'matchaclaw-openclaw-stale-entries-'));
+    process.env.MATCHACLAW_OPENCLAW_DIR = tempOpenClawDir;
+    try {
+      await writeBundledPluginManifests(tempOpenClawDir, [
+        { id: 'browser', enabledByDefault: true },
+      ]);
+      readJsonFileMock.mockResolvedValue({
+        ...createSanitizeNeutralConfig(),
+        plugins: {
+          allow: ['trusted-disabled-plugin'],
+          entries: {
+            browser: { enabled: false },
+            dingtalk: { enabled: false },
+            modelstudio: { enabled: false },
+            'trusted-disabled-plugin': { enabled: false },
+            'active-custom-plugin': { enabled: true },
+          },
+        },
+      });
+
+      await sanitizeOpenClawConfig();
+
       expect(writeOpenClawJsonMock).toHaveBeenCalledTimes(1);
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
-      expect(nextConfig.plugins.allow).toEqual(
-        expect.arrayContaining(['custom-plugin', 'unknown-plugin', 'browser']),
-      );
-      expect(nextConfig.plugins.allow).not.toContain('openai');
-      expect(nextConfig.plugins.allow).not.toContain('old-bundled');
+      expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });
+      expect(nextConfig.plugins.entries['trusted-disabled-plugin']).toMatchObject({ enabled: false });
+      expect(nextConfig.plugins.entries['active-custom-plugin']).toMatchObject({ enabled: true });
+      expect(nextConfig.plugins.entries.dingtalk).toBeUndefined();
+      expect(nextConfig.plugins.entries.modelstudio).toBeUndefined();
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -522,7 +538,8 @@ describe('sanitizeOpenClawConfig feishu plugin migration', () => {
       const nextConfig = writeOpenClawJsonMock.mock.calls[0][0] as Record<string, any>;
       expect(nextConfig.plugins.entries.minimax).toMatchObject({ enabled: true });
       expect(nextConfig.plugins.entries['minimax-portal-auth']).toBeUndefined();
-      expect(nextConfig.plugins.allow).not.toContain('minimax-portal-auth');
+      expect(nextConfig.plugins.allow ?? []).not.toContain('minimax-portal-auth');
+      expect(nextConfig.plugins.allow ?? []).not.toContain('minimax');
     } finally {
       delete process.env.MATCHACLAW_OPENCLAW_DIR;
       await rm(tempOpenClawDir, { recursive: true, force: true });
@@ -935,8 +952,8 @@ describe('syncProviderConfigToOpenClaw OAuth plugin compatibility', () => {
         apiKey: 'minimax-oauth',
         authHeader: true,
       });
-      expect(nextConfig.plugins.allow).toContain('minimax');
-      expect(nextConfig.plugins.allow).not.toContain('minimax-portal-auth');
+      expect(nextConfig.plugins.allow ?? []).not.toContain('minimax');
+      expect(nextConfig.plugins.allow ?? []).not.toContain('minimax-portal-auth');
       expect(nextConfig.plugins.entries.minimax).toMatchObject({ enabled: true });
       expect(nextConfig.plugins.entries['minimax-portal-auth']).toBeUndefined();
     } finally {

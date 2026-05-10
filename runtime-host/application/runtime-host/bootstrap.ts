@@ -6,7 +6,10 @@ import {
   syncSessionIdleMinutesToOpenClaw,
 } from '../openclaw/openclaw-provider-config-service';
 import { syncProxyConfigToOpenClaw } from '../openclaw/openclaw-proxy-sync';
-import { listConfiguredChannelsLocal } from '../channels/channel-runtime';
+import {
+  ensureConfiguredManagedPluginsForGatewayLaunch,
+  reconcileConfiguredChannelPluginsForGatewayLaunch,
+} from './prelaunch-plugin-maintenance';
 import {
   getKeyableProviderTypes,
   getProviderEnvVar,
@@ -42,9 +45,11 @@ export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
   const settings = await getAllSettingsLocal();
   await syncBrowserModeToOpenClaw(normalizeBrowserMode(settings.browserMode));
   await syncSessionIdleMinutesToOpenClaw();
+  const configuredChannels = await reconcileConfiguredChannelPluginsForGatewayLaunch();
+  await ensureConfiguredManagedPluginsForGatewayLaunch();
 
   return {
-    configuredChannels: await listConfiguredChannelsLocal(),
+    configuredChannels,
   };
 }
 

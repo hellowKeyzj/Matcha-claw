@@ -32,7 +32,7 @@ import {
 } from '../../api/storage/paths';
 import {
   applyEnabledPluginIdsToOpenClawConfig,
-  readEnabledPluginIdsFromOpenClawConfig,
+  readManuallyEnabledPluginIdsFromOpenClawConfig,
 } from './openclaw-plugin-config-service';
 import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
 import { STRICT_SCHEMA_CHANNEL_IDS } from '../channels/channel-plugin-bindings';
@@ -64,16 +64,6 @@ const AUTH_PROFILE_PROVIDER_KEY_REVERSE_MAP: Record<string, string[]> = Object.e
   accumulator[normalizedKey].push(rawKey);
   return accumulator;
 }, {});
-const OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS = new Set([
-  'talk-voice',
-  'voyage',
-]);
-const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
-  'browser',
-  'acpx',
-  'memory-core',
-]);
-
 type BundledPluginDiscovery = {
   dir: string;
   all: Set<string>;
@@ -284,6 +274,42 @@ function removePluginRegistrations(
   return modified;
 }
 
+function removeDisabledUndiscoveredPluginEntries(
+  plugins: Record<string, unknown>,
+): boolean {
+  const entries = (
+    plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries)
+      ? plugins.entries as Record<string, Record<string, unknown>>
+      : null
+  );
+  if (!entries) {
+    return false;
+  }
+
+  const allow = new Set(
+    Array.isArray(plugins.allow)
+      ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
+      : [],
+  );
+  const discoveredPluginIds = discoverBundledPlugins().all;
+  let modified = false;
+
+  for (const [pluginId, entry] of Object.entries(entries)) {
+    if (allow.has(pluginId) || discoveredPluginIds.has(pluginId) || entry.enabled === true) {
+      continue;
+    }
+    delete entries[pluginId];
+    modified = true;
+    logger.info(`[sanitize] Removed stale disabled plugins.entries.${pluginId} because the plugin is not installed`);
+  }
+
+  if (modified && Object.keys(entries).length === 0) {
+    delete plugins.entries;
+  }
+
+  return modified;
+}
+
 function removeOAuthPluginRegistrations(
   config: Record<string, unknown>,
   provider: string,
@@ -295,6 +321,27 @@ function removeOAuthPluginRegistrations(
   ]);
 }
 
+function removePluginIdsFromAllowlist(
+  plugins: Record<string, unknown>,
+  pluginIds: readonly string[],
+): boolean {
+  if (!Array.isArray(plugins.allow)) {
+    return false;
+  }
+  const removals = new Set(pluginIds);
+  const allow = (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string');
+  const nextAllow = allow.filter((pluginId) => !removals.has(pluginId));
+  if (nextAllow.length === allow.length) {
+    return false;
+  }
+  if (nextAllow.length > 0) {
+    plugins.allow = nextAllow;
+  } else {
+    delete plugins.allow;
+  }
+  return true;
+}
+
 function ensureOAuthPluginEnabled(
   config: Record<string, unknown>,
   provider: string,
@@ -304,9 +351,6 @@ function ensureOAuthPluginEnabled(
       ? { ...(config.plugins as Record<string, unknown>) }
       : {}
   ) as Record<string, unknown>;
-  const allow = Array.isArray(plugins.allow)
-    ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
-    : [];
   const entries = (
     plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries)
       ? { ...(plugins.entries as Record<string, unknown>) }
@@ -315,12 +359,7 @@ function ensureOAuthPluginEnabled(
   const { canonicalPluginId, stalePluginIds } = getOAuthPluginRegistration(provider);
 
   let modified = false;
-  const nextAllow = allow.filter((pluginId) => !stalePluginIds.includes(pluginId));
-  if (nextAllow.length !== allow.length) {
-    modified = true;
-  }
-  if (!nextAllow.includes(canonicalPluginId)) {
-    nextAllow.push(canonicalPluginId);
+  if (removePluginIdsFromAllowlist(plugins, stalePluginIds)) {
     modified = true;
   }
 
@@ -348,7 +387,6 @@ function ensureOAuthPluginEnabled(
     return false;
   }
 
-  plugins.allow = nextAllow;
   plugins.entries = entries;
   config.plugins = plugins;
   return true;
@@ -1031,6 +1069,7 @@ function ensurePackagedControlUiAllowedOrigins(
 export async function syncGatewayTokenToConfig(token: string): Promise<void> {
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
+    const previousSerialized = JSON.stringify(config);
 
     const gateway = (
       config.gateway && typeof config.gateway === 'object'
@@ -1057,6 +1096,10 @@ export async function syncGatewayTokenToConfig(token: string): Promise<void> {
 
     if (!gateway.mode) gateway.mode = 'local';
     config.gateway = gateway;
+
+    if (JSON.stringify(config) === previousSerialized) {
+      return;
+    }
 
     await writeOpenClawJson(config);
     logger.info('Synced gateway token to openclaw.json');
@@ -1102,11 +1145,12 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
 export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<void> {
   const browserMode = normalizeBrowserMode(modeInput);
   if (browserMode === 'relay') {
-    await ensureManagedPluginInstalled('browser-relay', { force: true });
+    await ensureManagedPluginInstalled('browser-relay');
   }
 
   await withOpenClawConfigLock(async () => {
     const config = readOpenClawConfigJson();
+    const previousSerialized = JSON.stringify(config);
 
     const browser = (
       config.browser && typeof config.browser === 'object'
@@ -1122,7 +1166,7 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
     }
     applyDefaultBrowserSsrfPolicy(browser);
 
-    const currentEnabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
+    const currentEnabledPluginIds = readManuallyEnabledPluginIdsFromOpenClawConfig(config);
     const nextEnabledPluginIds = currentEnabledPluginIds.filter(
       (pluginId) => pluginId !== 'browser' && pluginId !== 'browser-relay',
     );
@@ -1135,6 +1179,9 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
 
     const nextConfig = await applyEnabledPluginIdsToOpenClawConfig(config, nextEnabledPluginIds);
     nextConfig.browser = browser;
+    if (JSON.stringify(nextConfig) === previousSerialized) {
+      return;
+    }
     await writeOpenClawConfigJson(nextConfig);
     logger.info(`Synced browser mode "${browserMode}" to openclaw.json`);
   });
@@ -1160,6 +1207,7 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
   const DEFAULT_IDLE_MINUTES = 10_080;
   await withOpenClawConfigLock(async () => {
     const config = await readOpenClawJson();
+    const previousSerialized = JSON.stringify(config);
     const session = (
       config.session && typeof config.session === 'object'
         ? { ...(config.session as Record<string, unknown>) }
@@ -1179,6 +1227,9 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
 
     session.idleMinutes = DEFAULT_IDLE_MINUTES;
     config.session = session;
+    if (JSON.stringify(config) === previousSerialized) {
+      return;
+    }
     await writeOpenClawJson(config);
     logger.info(`Synced session.idleMinutes=${DEFAULT_IDLE_MINUTES} to openclaw.json`);
   });
@@ -1411,92 +1462,19 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         }
       }
 
-      const bundledPlugins = discoverBundledPlugins();
-      const activeProviders = new Set<string>(Object.keys(providers));
-      const agentsConfig = (
-        config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
-          ? config.agents as Record<string, unknown>
-          : {}
-      );
-      const agentDefaults = (
-        agentsConfig.defaults && typeof agentsConfig.defaults === 'object' && !Array.isArray(agentsConfig.defaults)
-          ? agentsConfig.defaults as Record<string, unknown>
-          : {}
-      );
-      const defaultModelConfig = (
-        agentDefaults.model && typeof agentDefaults.model === 'object' && !Array.isArray(agentDefaults.model)
-          ? agentDefaults.model as Record<string, unknown>
-          : {}
-      );
-      const defaultModel = typeof defaultModelConfig.primary === 'string'
-        ? defaultModelConfig.primary
-        : undefined;
-      if (typeof defaultModel === 'string' && defaultModel.includes('/')) {
-        activeProviders.add(defaultModel.split('/')[0]!);
-      }
-      for (const [pluginId, meta] of Object.entries(entries)) {
-        if (pluginId.endsWith('-auth') && meta?.enabled === true) {
-          activeProviders.add(pluginId.replace(/-auth$/, ''));
-        }
-      }
-      const auth = config.auth as Record<string, unknown> | undefined;
-      addProvidersFromProfileEntries(auth?.profiles as Record<string, unknown> | undefined, activeProviders);
-      const authProfileProviders = await getProvidersFromAuthProfileStores();
-      for (const provider of authProfileProviders) {
-        activeProviders.add(provider);
-      }
       const hasCanonicalFeishuPlugin = allowList.includes(NEW_FEISHU_ID) || Boolean(entries?.[NEW_FEISHU_ID]);
-      const explicitlyEnabledBundledPluginIds = Object.keys(entries)
-        .filter((pluginId) => {
-          if (!bundledPlugins.all.has(pluginId)) {
-            return false;
-          }
-          const entry = entries[pluginId];
-          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-            return false;
-          }
-          if ((entry as Record<string, unknown>).enabled !== true) {
-            return false;
-          }
-          if (pluginId === 'feishu' && hasCanonicalFeishuPlugin) {
-            return false;
-          }
-          return true;
-        });
-      const activeBundledProviderPluginIds = bundledPlugins.enabledByDefault.filter((pluginId) => {
+      const nextAllow = allowList.filter((pluginId) => {
         if (pluginId === 'feishu' && hasCanonicalFeishuPlugin) {
           return false;
         }
-        const manifest = bundledPlugins.manifests.find((entry) => entry.id === pluginId);
-        const providerIds = manifest?.providers ?? [];
-        const isProviderPlugin = providerIds.length > 0
-          || OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS.has(pluginId);
-        if (!isProviderPlugin) {
-          return false;
+        if (BUILTIN_CHANNEL_IDS.has(pluginId)) {
+          return configuredBuiltIns.has(pluginId);
         }
-        return providerIds.some((providerId) => activeProviders.has(providerId))
-          || activeProviders.has(pluginId);
+        return true;
       });
-      const requiredBundledPluginIds = Array.from(new Set([
-        ...BUNDLED_ALLOWLIST_PRESERVE_IDS,
-        ...activeBundledProviderPluginIds,
-        ...explicitlyEnabledBundledPluginIds,
-      ])).filter((pluginId) => bundledPlugins.all.has(pluginId));
-      const externalPluginIds = allowList.filter(
-        (pluginId) => !BUILTIN_CHANNEL_IDS.has(pluginId) && !bundledPlugins.all.has(pluginId),
-      );
-      const retainedBundledPluginIds = allowList.filter((pluginId) => requiredBundledPluginIds.includes(pluginId));
-      const nextAllow = [...new Set([...externalPluginIds, ...retainedBundledPluginIds])];
-      if (nextAllow.length > 0) {
-        for (const channelId of configuredBuiltIns) {
-          if (!nextAllow.includes(channelId)) {
-            nextAllow.push(channelId);
-          }
-        }
-        for (const pluginId of requiredBundledPluginIds) {
-          if (!nextAllow.includes(pluginId)) {
-            nextAllow.push(pluginId);
-          }
+      for (const channelId of configuredBuiltIns) {
+        if (!nextAllow.includes(channelId)) {
+          nextAllow.push(channelId);
         }
       }
 
@@ -1506,6 +1484,10 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         } else {
           delete pluginsObj.allow;
         }
+        modified = true;
+      }
+
+      if (removeDisabledUndiscoveredPluginEntries(pluginsObj)) {
         modified = true;
       }
 

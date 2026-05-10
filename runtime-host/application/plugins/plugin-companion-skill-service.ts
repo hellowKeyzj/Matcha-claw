@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getOpenClawConfigDir } from '../../api/storage/paths';
 import {
-  MANAGED_OPENCLAW_PLUGIN_DEFINITIONS,
-  findManagedOpenClawPluginDefinition,
+  CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS,
+  findCapabilityOpenClawPluginDefinition,
   type ManagedPluginCompanionSkillDefinition,
 } from './managed-plugin-definitions';
 
@@ -54,7 +54,7 @@ async function resolveCompanionSkillSourceDir(
 }
 
 function resolveCompanionSkillDefinitions(pluginId: string): readonly ManagedPluginCompanionSkillDefinition[] {
-  return findManagedOpenClawPluginDefinition(pluginId)?.companionSkills ?? [];
+  return findCapabilityOpenClawPluginDefinition(pluginId)?.companionSkills ?? [];
 }
 
 export function getCompanionSkillSlugsForPlugin(pluginId: string): readonly string[] {
@@ -91,7 +91,7 @@ export function reconcileCompanionSkillConfigStates(
 ): Record<string, unknown> {
   const enabledPluginIdSet = new Set(enabledPluginIds);
 
-  for (const definition of MANAGED_OPENCLAW_PLUGIN_DEFINITIONS) {
+  for (const definition of CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS) {
     applyCompanionSkillConfigState(config, definition.id, enabledPluginIdSet.has(definition.id));
   }
 

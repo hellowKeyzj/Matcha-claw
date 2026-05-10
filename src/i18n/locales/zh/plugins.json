@@ -13,21 +13,14 @@
   "catalog": {
     "title": "插件目录",
     "description": "管理插件启用状态",
-    "empty": "暂无可管理插件。",
-    "emptyGroup": "{{group}}分类下暂无插件。",
+    "empty": "暂无可管理的能力插件。",
     "companionSkills": "启用后将自动安装并启用配套技能：{{skills}}",
-    "channelManaged": "由渠道配置管理",
     "columns": {
       "plugin": "插件",
       "platform": "平台",
       "kind": "类型",
       "version": "版本",
       "enabled": "启用"
-    },
-    "groups": {
-      "channel": "渠道",
-      "model": "模型",
-      "general": "通用"
     },
     "platform": {
       "openclaw": "OpenClaw",

@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-import type { PluginGroupId } from '@/features/plugins/plugin-groups';
 
 export type PluginCatalogItem = {
   id: string;
@@ -9,10 +8,11 @@ export type PluginCatalogItem = {
   kind: 'builtin' | 'third-party';
   platform: 'openclaw' | 'matchaclaw';
   category: string;
-  group: PluginGroupId;
+  group: 'channel' | 'model' | 'general';
   description?: string;
   enabled: boolean;
-  controlMode?: 'manual' | 'channel-config';
+  controlMode?: 'manual';
+  source?: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
   companionSkillSlugs?: string[];
 };
 
@@ -326,15 +326,9 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
       return;
     }
     const catalog = get().catalog;
-    const targetPlugin = catalog.find((plugin) => plugin.id === pluginId);
-    if (targetPlugin?.controlMode === 'channel-config') {
-      return;
-    }
     const enabledPluginIds = runtime.execution.enabledPluginIds ?? [];
-    const manuallyManagedEnabledPluginIds = enabledPluginIds.filter((enabledPluginId) => {
-      const plugin = catalog.find((item) => item.id === enabledPluginId);
-      return plugin?.controlMode !== 'channel-config';
-    });
+    const catalogPluginIds = new Set(catalog.map((plugin) => plugin.id));
+    const manuallyManagedEnabledPluginIds = enabledPluginIds.filter((enabledPluginId) => catalogPluginIds.has(enabledPluginId));
     const nextIds = nextEnabled
       ? Array.from(new Set([...manuallyManagedEnabledPluginIds, pluginId]))
       : manuallyManagedEnabledPluginIds.filter((id) => id !== pluginId);

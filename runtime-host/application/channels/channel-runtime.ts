@@ -4,7 +4,8 @@ import {
   applyManuallyManagedPluginIdsToOpenClawConfig,
   readManuallyManagedPluginIdsFromConfig,
 } from '../openclaw/openclaw-plugin-config-service';
-import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
+import { findChannelOpenClawPluginDefinition } from '../plugins/managed-plugin-definitions';
+import { ensureManagedPluginDefinitionInstalled } from '../plugins/runtime-plugin-service';
 import { withOpenClawConfigLock } from '../openclaw/openclaw-config-mutex';
 import {
   LEGACY_BUILTIN_CHANNEL_PLUGIN_IDS,
@@ -142,6 +143,17 @@ async function reconcileChannelDerivedPluginStateLocal(config: Record<string, an
   ) as Record<string, any>;
 }
 
+async function ensureChannelPluginInstalledLocal(
+  pluginId: string,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  const definition = findChannelOpenClawPluginDefinition(pluginId);
+  if (!definition) {
+    return;
+  }
+  await ensureManagedPluginDefinitionInstalled(definition, options);
+}
+
 export async function listConfiguredChannelsLocal() {
   const config = readOpenClawConfigJson();
   const channels: string[] = [];
@@ -159,6 +171,29 @@ export async function listConfiguredChannelsLocal() {
   }
 
   return [...new Set(channels)];
+}
+
+export async function reconcileConfiguredChannelPluginsLocal(
+  configuredChannelsInput?: readonly string[],
+  options: { forceInstall?: boolean } = {},
+): Promise<string[]> {
+  const configuredChannels = configuredChannelsInput
+    ? [...new Set(configuredChannelsInput)]
+    : await listConfiguredChannelsLocal();
+
+  for (const channelType of configuredChannels) {
+    const externalPluginId = getExternalChannelPluginId(channelType);
+    if (externalPluginId) {
+      await ensureChannelPluginInstalledLocal(externalPluginId, { force: options.forceInstall === true });
+    }
+  }
+
+  await withOpenClawConfigLock(async () => {
+    const config = await reconcileChannelDerivedPluginStateLocal(readOpenClawConfigJson());
+    await writeOpenClawConfigJson(config);
+  });
+
+  return configuredChannels;
 }
 
 function normalizeCredentialString(value: unknown): string {
@@ -223,7 +258,7 @@ export async function saveChannelConfigLocal(input: unknown) {
   }
   const externalPluginId = getExternalChannelPluginId(channelType);
   if (externalPluginId && input.enabled !== false) {
-    await ensureManagedPluginInstalled(externalPluginId);
+    await ensureChannelPluginInstalledLocal(externalPluginId);
   }
 
   await withOpenClawConfigLock(async () => {
@@ -281,7 +316,7 @@ export async function saveChannelConfigLocal(input: unknown) {
 export async function setChannelEnabledLocal(channelType: string, enabled: boolean) {
   const externalPluginId = getExternalChannelPluginId(channelType);
   if (enabled && externalPluginId) {
-    await ensureManagedPluginInstalled(externalPluginId);
+    await ensureChannelPluginInstalledLocal(externalPluginId);
   }
   await withOpenClawConfigLock(async () => {
     if (!channelType) {

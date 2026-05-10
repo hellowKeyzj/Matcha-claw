@@ -188,7 +188,7 @@ describe('channel-runtime config save', () => {
     expect(channels).not.toContain('feishu');
   });
 
-  it('内置频道保存配置时会在存在外部插件时补齐 built-in allowlist', async () => {
+  it('内置频道保存配置时保留已有信任白名单但不把 bundled channel 写进 allowlist', async () => {
     await saveChannelConfigLocal({
       channelType: 'telegram',
       accountId: 'default',
@@ -202,8 +202,7 @@ describe('channel-runtime config save', () => {
       await readFile(join(tempDir, 'openclaw.json'), 'utf8'),
     ) as Record<string, any>;
 
-    expect(Array.isArray(config.plugins.allow)).toBe(true);
-    expect(config.plugins.allow).toContain('telegram');
+    expect(config.plugins.allow).toEqual(['openclaw-lark']);
   });
 
   it('保存 whatsapp 配置时会清理 legacy plugins.entries.whatsapp', async () => {
@@ -256,7 +255,7 @@ describe('channel-runtime config save', () => {
 
     expect(config.channels.wecom.enabled).toBe(false);
     expect(config.plugins.entries.wecom.enabled).toBe(false);
-    expect(config.plugins.allow).not.toContain('wecom');
+    expect(config.plugins.allow).toEqual(['openclaw-lark']);
   });
 
   it('删除外部频道配置时会同步禁用对应插件', async () => {

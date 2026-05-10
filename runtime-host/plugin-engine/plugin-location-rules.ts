@@ -14,6 +14,13 @@ export function getDefaultPluginDiscoveryRoots(): string[] {
   ].filter(Boolean);
 }
 
+export function getOpenClawRuntimePluginDiscoveryRoots(): string[] {
+  return [
+    join(getOpenClawConfigDir(), 'extensions'),
+    join(getOpenClawDirPath(), 'dist', 'extensions'),
+  ].filter(Boolean);
+}
+
 export function classifyPluginDiscoverySource(root: string): RuntimeHostDiscoveredPlugin['source'] {
   const normalizedRoot = resolve(root);
   if (normalizedRoot.includes(join('openclaw', 'dist', 'extensions'))) {

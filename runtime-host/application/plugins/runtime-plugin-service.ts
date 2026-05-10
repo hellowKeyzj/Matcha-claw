@@ -1,4 +1,4 @@
-import { access, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RuntimeHostCatalogPlugin } from '../../bootstrap/runtime-config';
 import { normalizePluginIds } from '../../bootstrap/runtime-config';
@@ -8,13 +8,11 @@ import {
   writeOpenClawConfigJson,
 } from '../../api/storage/paths';
 import { createPluginManifestLoader } from '../../plugin-engine/plugin-manifest-loader';
-import {
-  discoverPluginCatalogLocal,
-  mergePluginCatalogSnapshots,
-} from './catalog';
+import { mergePluginCatalogSnapshots } from './catalog';
 import { pickCatalogGroup } from './plugin-groups';
 import {
-  MANAGED_OPENCLAW_PLUGIN_DEFINITIONS,
+  CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS,
+  findCapabilityOpenClawPluginDefinition,
   findManagedOpenClawPluginDefinition,
   type ManagedOpenClawPluginDefinition,
 } from './managed-plugin-definitions';
@@ -39,12 +37,23 @@ interface ManagedRegistryPluginSnapshot extends RuntimeHostCatalogPlugin {
   readonly manifestId: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function pathExists(pathname: string): Promise<boolean> {
   return access(pathname).then(() => true).catch(() => false);
 }
 
 function normalizeManualPluginIds(pluginIds: readonly string[]): string[] {
-  return normalizePluginIds(pluginIds).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+  return normalizePluginIds(pluginIds).filter((pluginId) => (
+    !isChannelDerivedPluginId(pluginId)
+    && Boolean(findCapabilityOpenClawPluginDefinition(pluginId))
+  ));
+}
+
+function filterManagedPluginIds(pluginIds: readonly string[]): string[] {
+  return normalizePluginIds(pluginIds).filter((pluginId) => Boolean(findCapabilityOpenClawPluginDefinition(pluginId)));
 }
 
 function computeTransitionLifecycleState(
@@ -121,10 +130,7 @@ async function tryReadPackageJson(pluginDir: string): Promise<Record<string, unk
   try {
     const raw = await readFile(join(pluginDir, 'package.json'), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed as Record<string, unknown>;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -145,6 +151,29 @@ function pickVersion(
   return typeof packageJson?.version === 'string' && packageJson.version.trim()
     ? packageJson.version.trim()
     : manifestVersion;
+}
+
+async function readPluginInstallVersion(pluginDir: string): Promise<string | null> {
+  const [packageJson, manifestJson] = await Promise.all([
+    tryReadPackageJson(pluginDir),
+    (async () => {
+      try {
+        const raw = await readFile(join(pluginDir, 'openclaw.plugin.json'), 'utf8');
+        const parsed = JSON.parse(raw) as unknown;
+        return isRecord(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
+
+  const packageVersion = typeof packageJson?.version === 'string' ? packageJson.version.trim() : '';
+  if (packageVersion) {
+    return packageVersion;
+  }
+
+  const manifestVersion = typeof manifestJson?.version === 'string' ? manifestJson.version.trim() : '';
+  return manifestVersion || null;
 }
 
 function pickDescription(
@@ -177,9 +206,9 @@ async function discoverManagedRegistryPlugin(
         tryReadPackageJson(sourceDir),
         readFile(manifestPath, 'utf8'),
       ]);
-      const parsedManifest = JSON.parse(rawManifest) as Record<string, unknown>;
+      const parsedManifest = JSON.parse(rawManifest) as unknown;
       const description = pickDescription(manifest.description, packageJson);
-      const manifestId = typeof parsedManifest.id === 'string' && parsedManifest.id.trim()
+      const manifestId = isRecord(parsedManifest) && typeof parsedManifest.id === 'string' && parsedManifest.id.trim()
         ? parsedManifest.id.trim()
         : manifest.id;
       const companionSkillSlugs = getCompanionSkillSlugsForPlugin(definition.id);
@@ -190,6 +219,7 @@ async function discoverManagedRegistryPlugin(
         version: pickVersion(manifest.version, packageJson),
         kind: pickKind(packageJson),
         platform: 'openclaw',
+        source: 'openclaw-extension',
         category: manifest.category,
         group: pickCatalogGroup({
           id: definition.id,
@@ -209,13 +239,65 @@ async function discoverManagedRegistryPlugin(
   return null;
 }
 
+export async function getManagedPluginSourceSignatures(pluginIds: readonly string[]): Promise<Record<string, unknown>> {
+  const signatures: Record<string, unknown> = {};
+  const definitions = new Map<string, ManagedOpenClawPluginDefinition>();
+
+  for (const pluginId of normalizePluginIds(pluginIds)) {
+    const definition = findManagedOpenClawPluginDefinition(pluginId);
+    if (definition) {
+      definitions.set(definition.id, definition);
+    }
+  }
+
+  for (const definition of definitions.values()) {
+    const registryPlugin = await discoverManagedRegistryPlugin(definition);
+    signatures[definition.id] = registryPlugin
+      ? {
+          sourceDir: registryPlugin.sourceDir,
+          version: registryPlugin.version,
+          manifestId: registryPlugin.manifestId,
+        }
+      : 'missing';
+  }
+
+  return signatures;
+}
+
+async function readPathSignature(pathname: string): Promise<string> {
+  try {
+    const info = await stat(pathname);
+    return `${info.isDirectory() ? 'dir' : 'file'}:${Math.round(info.mtimeMs)}:${info.size}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+export async function getManagedPluginTargetSignatures(pluginIds: readonly string[]): Promise<Record<string, unknown>> {
+  const signatures: Record<string, unknown> = {};
+  const extensionsRoot = join(getOpenClawConfigDir(), 'extensions');
+
+  for (const pluginId of normalizePluginIds(pluginIds)) {
+    const targetDir = join(extensionsRoot, pluginId);
+    signatures[pluginId] = {
+      manifest: await readPathSignature(join(targetDir, 'openclaw.plugin.json')),
+      packageJson: await readPathSignature(join(targetDir, 'package.json')),
+    };
+  }
+
+  return signatures;
+}
+
 async function patchInstalledPluginId(
   pluginDir: string,
   sourceManifestId: string,
   targetPluginId: string,
 ): Promise<void> {
   const manifestPath = join(pluginDir, 'openclaw.plugin.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown;
+  if (!isRecord(manifest)) {
+    throw new Error(`Invalid plugin manifest JSON: ${manifestPath}`);
+  }
   if (manifest.id !== targetPluginId) {
     manifest.id = targetPluginId;
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
@@ -229,8 +311,9 @@ async function patchInstalledPluginId(
   if (!(await pathExists(pkgJsonPath))) {
     return;
   }
-  const pkg = JSON.parse(await readFile(pkgJsonPath, 'utf8')) as { main?: unknown; module?: unknown };
-  const entryFiles = [pkg.main, pkg.module].filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+  const pkg = JSON.parse(await readFile(pkgJsonPath, 'utf8')) as unknown;
+  const pkgRecord = isRecord(pkg) ? pkg : {};
+  const entryFiles = [pkgRecord.main, pkgRecord.module].filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
 
   for (const entryFile of entryFiles) {
     const entryPath = join(pluginDir, entryFile);
@@ -248,27 +331,31 @@ async function patchInstalledPluginId(
   }
 }
 
-export async function ensureManagedPluginInstalled(
-  pluginId: string,
+export async function ensureManagedPluginDefinitionInstalled(
+  definition: ManagedOpenClawPluginDefinition,
   options: {
     force?: boolean;
   } = {},
 ): Promise<void> {
-  const definition = findManagedOpenClawPluginDefinition(pluginId);
-  if (!definition) {
-    return;
-  }
-
+  const pluginId = definition.id;
   const extensionsRoot = join(getOpenClawConfigDir(), 'extensions');
   const targetDir = join(extensionsRoot, pluginId);
   const targetManifestPath = join(targetDir, 'openclaw.plugin.json');
-  if (options.force !== true && await pathExists(targetManifestPath)) {
-    return;
-  }
+  const hasInstalledManifest = await pathExists(targetManifestPath);
 
   const registryPlugin = await discoverManagedRegistryPlugin(definition);
   if (!registryPlugin) {
+    if (options.force !== true && hasInstalledManifest) {
+      return;
+    }
     throw new Error(`Plugin ${pluginId} is not bundled and no install source is available`);
+  }
+
+  if (options.force !== true && hasInstalledManifest) {
+    const installedVersion = await readPluginInstallVersion(targetDir);
+    if (installedVersion !== null && installedVersion === registryPlugin.version) {
+      return;
+    }
   }
 
   await mkdir(extensionsRoot, { recursive: true });
@@ -281,16 +368,26 @@ export async function ensureManagedPluginInstalled(
   }
 }
 
+export async function ensureManagedPluginInstalled(
+  pluginId: string,
+  options: {
+    force?: boolean;
+  } = {},
+): Promise<void> {
+  const definition = findCapabilityOpenClawPluginDefinition(pluginId);
+  if (!definition) {
+    throw new Error(`Plugin ${pluginId} is not managed by the MatchaClaw plugin center`);
+  }
+  await ensureManagedPluginDefinitionInstalled(definition, options);
+}
+
 export async function listRuntimePluginCatalog(): Promise<RuntimeHostCatalogPlugin[]> {
-  const [runtimeCatalog, managedRegistryCatalog] = await Promise.all([
-    discoverPluginCatalogLocal(),
-    Promise.all(
-      MANAGED_OPENCLAW_PLUGIN_DEFINITIONS.map(async (definition) => await discoverManagedRegistryPlugin(definition)),
-    ),
-  ]);
+  const managedRegistryCatalog = await Promise.all(
+    CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS.map(async (definition) => await discoverManagedRegistryPlugin(definition)),
+  );
 
   return mergePluginCatalogSnapshots(
-    runtimeCatalog,
+    [],
     managedRegistryCatalog.filter((plugin): plugin is RuntimeHostCatalogPlugin => Boolean(plugin)),
   );
 }
@@ -299,10 +396,37 @@ export function listEnabledPluginIdsFromConfig(): string[] {
   return readEnabledPluginIdsFromOpenClawConfig();
 }
 
-export async function ensureConfiguredManagedPluginsInstalled(): Promise<string[]> {
-  const enabledPluginIds = readEnabledPluginIdsFromOpenClawConfig();
+export function listConfiguredManagedPluginIdsFromConfig(): string[] {
+  const config = readOpenClawConfigJson();
+  const plugins = isRecord(config.plugins) ? config.plugins : {};
+  const configuredPluginIds = new Set<string>();
+
+  if (Array.isArray(plugins.allow)) {
+    for (const pluginId of plugins.allow) {
+      if (typeof pluginId === 'string') {
+        configuredPluginIds.add(pluginId);
+      }
+    }
+  }
+
+  const entries = isRecord(plugins.entries) ? plugins.entries : {};
+  for (const [pluginId, rawEntry] of Object.entries(entries)) {
+    if (isRecord(rawEntry) && rawEntry.enabled === true) {
+      configuredPluginIds.add(pluginId);
+    }
+  }
+
+  return normalizePluginIds([...configuredPluginIds]).filter(
+    (pluginId) => Boolean(findManagedOpenClawPluginDefinition(pluginId)),
+  );
+}
+
+export async function ensureConfiguredManagedPluginsInstalled(
+  options: { forceInstall?: boolean } = {},
+): Promise<string[]> {
+  const enabledPluginIds = filterManagedPluginIds(listConfiguredManagedPluginIdsFromConfig());
   for (const pluginId of enabledPluginIds) {
-    await ensureManagedPluginInstalled(pluginId);
+    await ensureManagedPluginInstalled(pluginId, { force: options.forceInstall === true });
   }
   await reconcileStartupPluginLifecycles(enabledPluginIds);
   return enabledPluginIds;

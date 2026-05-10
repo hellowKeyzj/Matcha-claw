@@ -1,5 +1,4 @@
 import { hostApiFetch } from '@/lib/host-api';
-import type { PluginGroupId } from '@/features/plugins/plugin-groups';
 
 export type RuntimePluginCatalogItem = {
   id: string;
@@ -8,10 +7,11 @@ export type RuntimePluginCatalogItem = {
   kind: 'builtin' | 'third-party';
   platform: 'openclaw' | 'matchaclaw';
   category: string;
-  group: PluginGroupId;
+  group: 'channel' | 'model' | 'general';
   description?: string;
   enabled: boolean;
-  controlMode?: 'manual' | 'channel-config';
+  controlMode?: 'manual';
+  source?: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
   companionSkillSlugs?: string[];
 };
 

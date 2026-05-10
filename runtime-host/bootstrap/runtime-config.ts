@@ -15,7 +15,8 @@ export interface RuntimeHostCatalogPlugin {
   readonly category: string;
   readonly group: RuntimeHostCatalogPluginGroup;
   readonly description?: string;
-  readonly controlMode?: 'manual' | 'channel-config';
+  readonly controlMode?: 'manual' | 'channel-config' | 'openclaw-managed';
+  readonly source?: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
   readonly companionSkillSlugs?: readonly string[];
 }
 

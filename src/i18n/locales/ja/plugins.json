@@ -13,21 +13,14 @@
   "catalog": {
     "title": "プラグイン一覧",
     "description": "プラグインの有効化はここで管理します。設定ページには配置しません。",
-    "empty": "管理可能なプラグインがありません。",
-    "emptyGroup": "{{group}}に該当するプラグインはありません。",
+    "empty": "管理可能な機能プラグインがありません。",
     "companionSkills": "有効化すると連携スキルも自動でインストールして有効化します: {{skills}}",
-    "channelManaged": "チャンネル設定で管理されます",
     "columns": {
       "plugin": "プラグイン",
       "platform": "プラットフォーム",
       "kind": "種別",
       "version": "バージョン",
       "enabled": "有効"
-    },
-    "groups": {
-      "channel": "チャネル",
-      "model": "モデル",
-      "general": "共通"
     },
     "platform": {
       "openclaw": "OpenClaw",

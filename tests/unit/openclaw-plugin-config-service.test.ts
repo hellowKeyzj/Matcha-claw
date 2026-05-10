@@ -40,39 +40,41 @@ describe('openclaw plugin config service', () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  it('从 openclaw.json 读取真实启用插件列表', async () => {
+  it('插件中心只从 openclaw.json 读取 MatchaClaw 能力插件启用列表', async () => {
+    const pluginADir = join(configDir, 'extensions', 'task-manager');
+    const pluginBDir = join(configDir, 'extensions', 'security-core');
+    const pluginCDir = join(configDir, 'extensions', 'custom-plugin');
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
-    const pluginADir = join(configDir, 'extensions', 'plugin-a');
-    const pluginBDir = join(configDir, 'extensions', 'plugin-b');
-    const pluginCDir = join(configDir, 'extensions', 'plugin-c');
-    mkdirSync(browserPluginDir, { recursive: true });
     mkdirSync(pluginADir, { recursive: true });
     mkdirSync(pluginBDir, { recursive: true });
     mkdirSync(pluginCDir, { recursive: true });
+    mkdirSync(browserPluginDir, { recursive: true });
     writeFileSync(join(browserPluginDir, 'openclaw.plugin.json'), JSON.stringify({
       id: 'browser',
       enabledByDefault: true,
     }, null, 2));
-    writeFileSync(join(pluginADir, 'openclaw.plugin.json'), JSON.stringify({ id: 'plugin-a' }, null, 2));
-    writeFileSync(join(pluginBDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'plugin-b' }, null, 2));
-    writeFileSync(join(pluginCDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'plugin-c' }, null, 2));
+    writeFileSync(join(pluginADir, 'openclaw.plugin.json'), JSON.stringify({ id: 'task-manager' }, null, 2));
+    writeFileSync(join(pluginBDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'security-core' }, null, 2));
+    writeFileSync(join(pluginCDir, 'openclaw.plugin.json'), JSON.stringify({ id: 'custom-plugin' }, null, 2));
 
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       plugins: {
-        allow: ['plugin-a', 'plugin-b', 'plugin-c'],
+        allow: ['task-manager', 'security-core', 'custom-plugin', 'browser'],
         entries: {
-          'plugin-a': { enabled: true },
-          'plugin-b': { enabled: false },
+          'task-manager': { enabled: true },
+          'security-core': { enabled: false },
+          'custom-plugin': { enabled: true },
+          browser: { enabled: true },
         },
       },
     }, null, 2));
 
     const { readEnabledPluginIdsFromOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
 
-    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual(['plugin-a', 'plugin-c']);
+    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual(['task-manager']);
   });
 
-  it('bundled enabledByDefault 插件在没有 allowlist 时也会判定为启用', async () => {
+  it('bundled enabledByDefault 插件不会进入插件中心启用列表', async () => {
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
     mkdirSync(browserPluginDir, { recursive: true });
     writeFileSync(join(browserPluginDir, 'openclaw.plugin.json'), JSON.stringify({
@@ -84,10 +86,10 @@ describe('openclaw plugin config service', () => {
 
     const { readEnabledPluginIdsFromOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
 
-    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual(['browser']);
+    expect(readEnabledPluginIdsFromOpenClawConfig()).toEqual([]);
   });
 
-  it('bundled enabledByDefault 插件显式禁用后不会再返回启用列表', async () => {
+  it('bundled enabledByDefault 插件显式禁用后也不会进入插件中心启用列表', async () => {
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
     mkdirSync(browserPluginDir, { recursive: true });
     writeFileSync(join(browserPluginDir, 'openclaw.plugin.json'), JSON.stringify({
@@ -154,9 +156,9 @@ describe('openclaw plugin config service', () => {
       };
     };
 
-    expect(nextConfig.plugins.allow).toEqual(['plugin-b', 'unit-test-plugin']);
+    expect(nextConfig.plugins.allow).toEqual(['plugin-a', 'plugin-b', 'unit-test-plugin']);
     expect(nextConfig.plugins.entries['plugin-a']).toMatchObject({
-      enabled: false,
+      enabled: true,
       source: 'path',
     });
     expect(nextConfig.plugins.entries['plugin-b']).toMatchObject({
@@ -171,6 +173,48 @@ describe('openclaw plugin config service', () => {
       enabled: true,
       env: { sample: '1' },
     });
+  });
+
+  it('同步启用插件列表时保留已有 bundled allowlist，但不会新增 bundled provider 插件', async () => {
+    const openaiPluginDir = join(openclawDir, 'dist', 'extensions', 'openai');
+    const acpxPluginDir = join(openclawDir, 'dist', 'extensions', 'acpx');
+    mkdirSync(openaiPluginDir, { recursive: true });
+    mkdirSync(acpxPluginDir, { recursive: true });
+    writeFileSync(join(openaiPluginDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'openai',
+      enabledByDefault: true,
+      providers: ['openai'],
+    }, null, 2));
+    writeFileSync(join(acpxPluginDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'acpx',
+      enabledByDefault: true,
+    }, null, 2));
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      plugins: {
+        allow: ['task-manager', 'acpx'],
+        entries: {
+          'task-manager': { enabled: true },
+          acpx: { enabled: true },
+          openai: { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncEnabledPluginIdsToOpenClawConfig } = await import('../../runtime-host/application/openclaw/openclaw-plugin-config-service');
+
+    await syncEnabledPluginIdsToOpenClawConfig(['task-manager', 'openai']);
+
+    const nextConfig = JSON.parse(readFileSync(join(configDir, 'openclaw.json'), 'utf8')) as {
+      plugins: {
+        allow: string[];
+        entries: Record<string, { enabled?: boolean }>;
+      };
+    };
+
+    expect(nextConfig.plugins.allow).toEqual(['acpx', 'task-manager']);
+    expect(nextConfig.plugins.allow).not.toContain('openai');
+    expect(nextConfig.plugins.entries.acpx).toMatchObject({ enabled: true });
+    expect(nextConfig.plugins.entries.openai).toMatchObject({ enabled: true });
   });
 
   it('手动插件列表同步时会保留由渠道配置派生的插件启用状态', async () => {
@@ -360,5 +404,53 @@ describe('openclaw plugin config service', () => {
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });
     expect(nextConfig.plugins.entries['browser-relay']).toMatchObject({ enabled: true });
     expect(readFileSync(join(configDir, 'extensions', 'browser-relay', 'openclaw.plugin.json'), 'utf8')).toContain('"id": "browser-relay"');
+  });
+
+  it('同步 browserMode=relay 时已安装同版本 browser-relay 不会重复覆盖插件目录', async () => {
+    const relaySourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
+    const relayTargetDir = join(configDir, 'extensions', 'browser-relay');
+    mkdirSync(relaySourceDir, { recursive: true });
+    mkdirSync(relayTargetDir, { recursive: true });
+    writeFileSync(join(relaySourceDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'browser-relay',
+      name: 'Source Browser Relay',
+      version: '1.0.0',
+      category: 'runtime',
+    }, null, 2));
+    writeFileSync(join(relaySourceDir, 'package.json'), JSON.stringify({
+      name: '@matchaclaw/browser-relay',
+      version: '1.0.0',
+    }, null, 2));
+    writeFileSync(join(relayTargetDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'browser-relay',
+      name: 'Installed Browser Relay',
+      version: '1.0.0',
+      category: 'runtime',
+    }, null, 2));
+    writeFileSync(join(relayTargetDir, 'package.json'), JSON.stringify({
+      name: '@matchaclaw/browser-relay',
+      version: '1.0.0',
+    }, null, 2));
+    writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
+      browser: {
+        enabled: true,
+      },
+      plugins: {
+        allow: ['browser-relay'],
+        entries: {
+          browser: { enabled: false },
+          'browser-relay': { enabled: true },
+        },
+      },
+    }, null, 2));
+
+    const { syncBrowserModeToOpenClaw } = await import('../../runtime-host/application/openclaw/openclaw-provider-config-service');
+
+    await syncBrowserModeToOpenClaw('relay');
+
+    const installedManifest = JSON.parse(readFileSync(join(relayTargetDir, 'openclaw.plugin.json'), 'utf8')) as {
+      name: string;
+    };
+    expect(installedManifest.name).toBe('Installed Browser Relay');
   });
 });

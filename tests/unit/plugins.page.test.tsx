@@ -193,30 +193,19 @@ describe('plugins page', () => {
     expect(screen.getByText('runtime-host health check failed')).toBeInTheDocument();
   });
 
-  it('按正式 group 分页签，只显示当前分类的插件', async () => {
+  it('插件中心直接展示后端返回的可管理能力插件，不再按渠道/模型分组', async () => {
     const { PluginsPage } = await import('@/pages/Plugins');
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload({ enabledPluginIds: ['plugin-channel'] });
+        return buildRuntimePayload({ enabledPluginIds: ['plugin-model'] });
       }
       if (path === '/api/plugins/catalog') {
         return {
           success: true,
           execution: {
-            enabledPluginIds: ['plugin-channel'],
+            enabledPluginIds: ['plugin-model'],
           },
           plugins: [
-            {
-              id: 'plugin-channel',
-              name: 'Channel Plugin',
-              version: '1.0.0',
-              kind: 'builtin',
-              platform: 'openclaw',
-              category: 'channel',
-              group: 'channel',
-              enabled: true,
-              controlMode: 'channel-config',
-            },
             {
               id: 'plugin-model',
               name: 'Model Plugin',
@@ -249,17 +238,9 @@ describe('plugins page', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Channel Plugin')).toBeInTheDocument();
-    expect(screen.queryByText('Model Plugin')).not.toBeInTheDocument();
-    expect(screen.queryByText('General Plugin')).not.toBeInTheDocument();
-
-    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Models (1)' }));
     expect(await screen.findByText('Model Plugin')).toBeInTheDocument();
-    expect(screen.queryByText('Channel Plugin')).not.toBeInTheDocument();
-
-    fireEvent.mouseDown(screen.getByRole('tab', { name: 'General (1)' }));
-    expect(await screen.findByText('General Plugin')).toBeInTheDocument();
-    expect(screen.queryByText('Model Plugin')).not.toBeInTheDocument();
+    expect(screen.getByText('General Plugin')).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
   });
 
   it('catalog 到达后直接渲染真实插件列表，不再额外等待 idle shell', async () => {
@@ -316,32 +297,44 @@ describe('plugins page', () => {
     expect(screen.queryByText('runtime:ready')).not.toBeInTheDocument();
   });
 
-  it('渠道托管插件在插件中心显示为只读', async () => {
+  it('切换插件时只提交 catalog 中的能力插件 ID，不带回渠道或 bundled 运行态 ID', async () => {
     const { PluginsPage } = await import('@/pages/Plugins');
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') {
-        return buildRuntimePayload({ enabledPluginIds: ['openclaw-lark'] });
+        return buildRuntimePayload({ enabledPluginIds: ['openclaw-lark', 'browser', 'task-manager'] });
       }
       if (path === '/api/plugins/catalog') {
         return {
           success: true,
           execution: {
-            enabledPluginIds: ['openclaw-lark'],
+            enabledPluginIds: ['task-manager'],
           },
           plugins: [
             {
-              id: 'openclaw-lark',
-              name: 'OpenClaw Lark',
+              id: 'task-manager',
+              name: 'Task Manager',
               version: '1.0.0',
               kind: 'builtin',
               platform: 'openclaw',
-              category: 'channel',
-              group: 'channel',
+              category: 'runtime',
+              group: 'general',
               enabled: true,
-              controlMode: 'channel-config',
+            },
+            {
+              id: 'memory-lancedb-pro',
+              name: 'Memory',
+              version: '1.0.0',
+              kind: 'builtin',
+              platform: 'openclaw',
+              category: 'runtime',
+              group: 'general',
+              enabled: false,
             },
           ],
         };
+      }
+      if (path === '/api/plugins/runtime/enabled-plugins') {
+        return buildRuntimePayload({ enabledPluginIds: ['memory-lancedb-pro'] });
       }
       throw new Error(`unexpected path: ${path}`);
     });
@@ -352,8 +345,15 @@ describe('plugins page', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('Managed by channel configuration')).toBeInTheDocument();
+    expect(await screen.findByText('Memory')).toBeInTheDocument();
     const switches = screen.getAllByRole('switch');
-    expect(switches[switches.length - 1]).toBeDisabled();
+    fireEvent.click(switches[switches.length - 1]!);
+
+    await waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/plugins/runtime/enabled-plugins', {
+        method: 'PUT',
+        body: JSON.stringify({ pluginIds: ['task-manager', 'memory-lancedb-pro'] }),
+      });
+    });
   });
 });

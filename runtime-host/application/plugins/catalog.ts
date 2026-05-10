@@ -107,6 +107,7 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
         version: pickCatalogVersion(manifest.version, packageJson),
         kind: inferPluginKind(plugin, packageJson),
         platform: plugin.platform,
+        source: plugin.source,
         category: manifest.category,
         group: pickCatalogGroup({
           id: manifest.id,
@@ -114,7 +115,7 @@ export async function discoverPluginCatalogLocal(): Promise<RuntimeHostCatalogPl
           description: manifest.description,
           groupHints: manifest.groupHints,
         }),
-        controlMode: 'manual',
+        controlMode: plugin.source === 'bundled' ? 'openclaw-managed' : 'manual',
         ...(description ? { description } : {}),
         ...(companionSkillSlugs.length > 0 ? { companionSkillSlugs: [...companionSkillSlugs] } : {}),
       } satisfies RuntimeHostCatalogPlugin;

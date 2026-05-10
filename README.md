@@ -85,6 +85,7 @@ Building AI agents shouldn't require mastering the command line. MatchaClaw was 
 | Skill/plugin installation | Built-in skill marketplace and management |
 
 When you enable a managed plugin from the Plugins page, MatchaClaw now applies that plugin's backend-owned default setup in the same lifecycle pass. For example, enabling `memory-lancedb-pro` automatically binds the memory slot and defaults its embedding backend to local MiniLM without requiring manual `openclaw.json` edits.
+The Plugins page only manages MatchaClaw-owned capability plugins; channel plugins are managed from Channels, and OpenClaw bundled plugins stay under OpenClaw's control.
 
 ### OpenClaw Inside
 

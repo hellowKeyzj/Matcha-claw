@@ -1,18 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  DEFAULT_PLUGIN_GROUP_ID,
-  PLUGIN_GROUP_REGISTRY,
-  type PluginGroupId,
-} from '@/features/plugins/plugin-groups';
 import { useGatewayStore } from '@/stores/gateway';
-import { usePluginsStore, type PluginCatalogItem } from '@/stores/plugins-store';
+import { usePluginsStore } from '@/stores/plugins-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useTranslation } from 'react-i18next';
 
@@ -22,24 +16,6 @@ function formatIsoTime(timestamp: number): string {
     return '';
   }
   return date.toISOString().replace('T', ' ').replace('.000Z', 'Z');
-}
-
-function buildPluginsByGroup(catalog: PluginCatalogItem[]): Record<PluginGroupId, PluginCatalogItem[]> {
-  const grouped: Record<PluginGroupId, PluginCatalogItem[]> = {
-    channel: [],
-    model: [],
-    general: [],
-  };
-
-  for (const plugin of catalog) {
-    grouped[plugin.group].push(plugin);
-  }
-
-  return grouped;
-}
-
-function pickFirstNonEmptyGroupId(groupedCatalog: Record<PluginGroupId, PluginCatalogItem[]>): PluginGroupId {
-  return PLUGIN_GROUP_REGISTRY.find((group) => groupedCatalog[group.id].length > 0)?.id ?? DEFAULT_PLUGIN_GROUP_ID;
 }
 
 export function PluginsPage() {
@@ -65,8 +41,6 @@ export function PluginsPage() {
   const togglePluginEnabledAction = usePluginsStore((state) => state.togglePluginEnabled);
   const manualRefreshing = refreshing && refreshReason === 'manual';
   const showRefreshingHint = useDelayedFlag(refreshing && !manualRefreshing, 180);
-  const [activeGroupId, setActiveGroupId] = useState<PluginGroupId>(() => pickFirstNonEmptyGroupId(buildPluginsByGroup(catalog)));
-  const didUserSelectGroupRef = useRef(false);
 
   useEffect(() => {
     void initGatewayEvents();
@@ -87,15 +61,6 @@ export function PluginsPage() {
     () => new Set(enabledPluginIds),
     [enabledPluginIds],
   );
-  const pluginsByGroup = useMemo(
-    () => buildPluginsByGroup(catalog),
-    [catalog],
-  );
-  const preferredGroupId = useMemo(
-    () => pickFirstNonEmptyGroupId(pluginsByGroup),
-    [pluginsByGroup],
-  );
-  const visiblePlugins = pluginsByGroup[activeGroupId];
   const lifecycleTags = useMemo(() => {
     if (!runtime) {
       return [];
@@ -111,15 +76,6 @@ export function PluginsPage() {
       },
     ];
   }, [runtime, t]);
-
-  useEffect(() => {
-    if (!catalogReady || didUserSelectGroupRef.current) {
-      return;
-    }
-    if (pluginsByGroup[activeGroupId].length === 0) {
-      setActiveGroupId(preferredGroupId);
-    }
-  }, [activeGroupId, catalogReady, pluginsByGroup, preferredGroupId]);
 
   const observedRuntimeHostStatus = runtimeHostEventState.lifecycle;
   const effectiveRuntimeHostStatus = observedRuntimeHostStatus !== 'unknown'
@@ -152,11 +108,6 @@ export function PluginsPage() {
       toast.error(t('plugins:errors.togglePluginFailed'));
     }
   }, [togglePluginEnabledAction, t]);
-  const handleGroupChange = useCallback((value: string) => {
-    didUserSelectGroupRef.current = true;
-    setActiveGroupId(value as PluginGroupId);
-  }, []);
-
   const showRuntimeLoading = !runtimeReady && runtimePending;
   const showCatalogLoading = !catalogReady && catalogPending;
 
@@ -267,25 +218,8 @@ export function PluginsPage() {
             </div>
           ) : (
             <div className="space-y-4">
-              {catalog.length > 0 && (
-                <Tabs value={activeGroupId} onValueChange={handleGroupChange}>
-                  <TabsList className="grid h-auto w-full grid-cols-3 gap-1">
-                    {PLUGIN_GROUP_REGISTRY.map((group) => (
-                      <TabsTrigger key={group.id} value={group.id}>
-                        {`${t(group.labelKey)} (${pluginsByGroup[group.id].length})`}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </Tabs>
-              )}
               {catalog.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t('plugins:catalog.empty')}</p>
-              ) : visiblePlugins.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  {t('plugins:catalog.emptyGroup', {
-                    group: t(PLUGIN_GROUP_REGISTRY.find((group) => group.id === activeGroupId)?.labelKey ?? 'plugins:catalog.groups.general'),
-                  })}
-                </p>
               ) : (
                 <div className="space-y-2">
                   <div className="grid grid-cols-[1.7fr_0.9fr_0.8fr_0.8fr_0.7fr] gap-2 px-3 text-xs text-muted-foreground">
@@ -295,61 +229,52 @@ export function PluginsPage() {
                     <span>{t('plugins:catalog.columns.version')}</span>
                     <span className="text-right">{t('plugins:catalog.columns.enabled')}</span>
                   </div>
-                  {visiblePlugins.map((plugin) => {
-                    const channelManaged = plugin.controlMode === 'channel-config';
-                    return (
-                      <div
-                        key={plugin.id}
-                        className="grid grid-cols-[1.7fr_0.9fr_0.8fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
-                      >
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">{plugin.name}</div>
-                          <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
-                          {plugin.description && (
-                            <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
-                          )}
-                          {plugin.companionSkillSlugs && plugin.companionSkillSlugs.length > 0 && (
-                            <div className="truncate text-xs text-muted-foreground">
-                              {t('plugins:catalog.companionSkills', {
-                                skills: plugin.companionSkillSlugs.join(', '),
-                              })}
-                            </div>
-                          )}
-                          {channelManaged && (
-                            <div className="truncate text-xs text-muted-foreground">
-                              {t('plugins:catalog.channelManaged')}
-                            </div>
-                          )}
-                        </div>
-                        <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
-                          {t(`plugins:catalog.platform.${plugin.platform}`)}
-                        </Badge>
-                        <Badge variant="outline" className="justify-self-start">
-                          {t(`plugins:catalog.kind.${plugin.kind}`)}
-                        </Badge>
-                        <span className="truncate text-sm">{plugin.version}</span>
-                        <div className="justify-self-end">
-                          {mutatingPluginId === plugin.id && (
-                            <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                          )}
-                          <Switch
-                            checked={enabledPluginIdSet.has(plugin.id)}
-                            disabled={
-                              !runtimeReady
-                              || runtimePending
-                              || manualRefreshing
-                              || mutatingAction !== null
-                              || mutatingPluginId !== null
-                              || channelManaged
-                            }
-                            onCheckedChange={(checked) => {
-                              void togglePluginEnabled(plugin.id, checked);
-                            }}
-                          />
-                        </div>
+                  {catalog.map((plugin) => (
+                    <div
+                      key={plugin.id}
+                      className="grid grid-cols-[1.7fr_0.9fr_0.8fr_0.8fr_0.7fr] items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{plugin.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">{plugin.id}</div>
+                        {plugin.description && (
+                          <div className="truncate text-xs text-muted-foreground">{plugin.description}</div>
+                        )}
+                        {plugin.companionSkillSlugs && plugin.companionSkillSlugs.length > 0 && (
+                          <div className="truncate text-xs text-muted-foreground">
+                            {t('plugins:catalog.companionSkills', {
+                              skills: plugin.companionSkillSlugs.join(', '),
+                            })}
+                          </div>
+                        )}
                       </div>
-                    );
-                  })}
+                      <Badge variant={plugin.platform === 'matchaclaw' ? 'default' : 'secondary'} className="justify-self-start">
+                        {t(`plugins:catalog.platform.${plugin.platform}`)}
+                      </Badge>
+                      <Badge variant="outline" className="justify-self-start">
+                        {t(`plugins:catalog.kind.${plugin.kind}`)}
+                      </Badge>
+                      <span className="truncate text-sm">{plugin.version}</span>
+                      <div className="justify-self-end">
+                        {mutatingPluginId === plugin.id && (
+                          <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        )}
+                        <Switch
+                          checked={enabledPluginIdSet.has(plugin.id)}
+                          disabled={
+                            !runtimeReady
+                            || runtimePending
+                            || manualRefreshing
+                            || mutatingAction !== null
+                            || mutatingPluginId !== null
+                          }
+                          onCheckedChange={(checked) => {
+                            void togglePluginEnabled(plugin.id, checked);
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

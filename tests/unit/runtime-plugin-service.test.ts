@@ -29,13 +29,13 @@ describe('runtime plugin service', () => {
     rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  function writeManagedPluginSource(pluginId: string, sourceDirName = pluginId): void {
+  function writeManagedPluginSource(pluginId: string, sourceDirName = pluginId, version = '1.0.0'): void {
     const sourceDir = join(workspaceDir, 'build', 'openclaw-plugins', sourceDirName);
     mkdirSync(sourceDir, { recursive: true });
     writeFileSync(join(sourceDir, 'openclaw.plugin.json'), JSON.stringify({
       id: `${pluginId}-src`,
       name: pluginId,
-      version: '1.0.0',
+      version,
       category: 'runtime',
       configSchema: {
         type: 'object',
@@ -44,7 +44,7 @@ describe('runtime plugin service', () => {
     }, null, 2));
     writeFileSync(join(sourceDir, 'package.json'), JSON.stringify({
       name: `@matchaclaw/${sourceDirName}`,
-      version: '1.0.0',
+      version,
     }, null, 2));
   }
 
@@ -69,21 +69,10 @@ describe('runtime plugin service', () => {
     }, null, 2));
   }
 
-  it('已安装的托管插件在非 force 模式下不会重复覆盖', async () => {
-    const sourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
+  it('已安装的托管插件版本一致时在非 force 模式下不会重复覆盖', async () => {
     const installedDir = join(configDir, 'extensions', 'browser-relay');
-    mkdirSync(sourceDir, { recursive: true });
+    writeManagedPluginSource('browser-relay');
     mkdirSync(installedDir, { recursive: true });
-    writeFileSync(join(sourceDir, 'openclaw.plugin.json'), JSON.stringify({
-      id: 'browser-relay-src',
-      name: 'Browser Relay',
-      version: '1.0.0',
-      category: 'runtime',
-    }, null, 2));
-    writeFileSync(join(sourceDir, 'package.json'), JSON.stringify({
-      name: '@matchaclaw/browser-relay',
-      version: '1.0.0',
-    }, null, 2));
     writeFileSync(join(installedDir, 'openclaw.plugin.json'), JSON.stringify({
       id: 'browser-relay',
       name: 'Installed Browser Relay',
@@ -99,6 +88,47 @@ describe('runtime plugin service', () => {
       name: string;
     };
     expect(installedManifest.name).toBe('Installed Browser Relay');
+  });
+
+  it('已安装的托管插件版本落后时会升级到随包版本', async () => {
+    const installedDir = join(configDir, 'extensions', 'browser-relay');
+    writeManagedPluginSource('browser-relay', 'browser-relay', '1.1.0');
+    mkdirSync(installedDir, { recursive: true });
+    writeFileSync(join(installedDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'browser-relay',
+      name: 'Old Browser Relay',
+      version: '1.0.0',
+      category: 'runtime',
+    }, null, 2));
+
+    const { ensureManagedPluginInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
+
+    await ensureManagedPluginInstalled('browser-relay');
+
+    const installedManifest = JSON.parse(readFileSync(join(installedDir, 'openclaw.plugin.json'), 'utf8')) as {
+      id: string;
+      name: string;
+      version: string;
+    };
+    const installedPackage = JSON.parse(readFileSync(join(installedDir, 'package.json'), 'utf8')) as {
+      version: string;
+    };
+    expect(installedManifest).toMatchObject({
+      id: 'browser-relay',
+      name: 'browser-relay',
+      version: '1.1.0',
+    });
+    expect(installedPackage.version).toBe('1.1.0');
+  });
+
+  it('渠道插件不能通过插件中心安装入口安装', async () => {
+    writeManagedPluginSource('openclaw-lark');
+
+    const { ensureManagedPluginInstalled } = await import('../../runtime-host/application/plugins/runtime-plugin-service');
+
+    await expect(ensureManagedPluginInstalled('openclaw-lark')).rejects.toThrow(
+      'not managed by the MatchaClaw plugin center',
+    );
   });
 
   it('首次启用 memory-lancedb-pro 时会补默认 memory slot 和 local MiniLM 配置', async () => {
@@ -131,8 +161,8 @@ describe('runtime plugin service', () => {
       };
     };
 
-    expect(enabledPluginIds).toEqual(['plugin-a', 'memory-lancedb-pro']);
-    expect(nextConfig.plugins?.allow).toEqual(['plugin-a', 'memory-lancedb-pro']);
+    expect(enabledPluginIds).toEqual(['memory-lancedb-pro']);
+    expect(nextConfig.plugins?.allow).toEqual(['memory-lancedb-pro', 'plugin-a']);
     expect(nextConfig.plugins?.slots?.memory).toBe('memory-lancedb-pro');
     expect(nextConfig.plugins?.entries?.['memory-lancedb-pro']).toMatchObject({
       enabled: true,

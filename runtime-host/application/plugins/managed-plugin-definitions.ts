@@ -10,27 +10,15 @@ export interface ManagedOpenClawPluginDefinition {
   readonly companionSkills?: readonly ManagedPluginCompanionSkillDefinition[];
 }
 
-export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [
-  {
-    id: 'dingtalk',
-    sourceDirs: ['dingtalk'],
-  },
-  {
-    id: 'openclaw-lark',
-    sourceDirs: ['openclaw-lark', 'feishu-openclaw-plugin'],
-  },
-  {
-    id: 'wecom',
-    sourceDirs: ['wecom', 'wecom-openclaw-plugin'],
-  },
-  {
-    id: 'openclaw-qqbot',
-    sourceDirs: ['openclaw-qqbot', 'qqbot'],
-  },
-  {
-    id: 'openclaw-weixin',
-    sourceDirs: ['openclaw-weixin'],
-  },
+export const CHANNEL_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [
+  { id: 'dingtalk', sourceDirs: ['dingtalk'] },
+  { id: 'openclaw-lark', sourceDirs: ['openclaw-lark', 'feishu-openclaw-plugin'] },
+  { id: 'wecom', sourceDirs: ['wecom', 'wecom-openclaw-plugin'] },
+  { id: 'openclaw-qqbot', sourceDirs: ['openclaw-qqbot', 'qqbot'] },
+  { id: 'openclaw-weixin', sourceDirs: ['openclaw-weixin'] },
+] as const;
+
+export const CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [
   {
     id: 'task-manager',
     sourceDirs: ['task-manager'],
@@ -63,8 +51,26 @@ export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPlugin
   },
 ] as const;
 
+export const MANAGED_OPENCLAW_PLUGIN_DEFINITIONS: readonly ManagedOpenClawPluginDefinition[] = [
+  ...CHANNEL_OPENCLAW_PLUGIN_DEFINITIONS,
+  ...CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS,
+] as const;
+
+export function findCapabilityOpenClawPluginDefinition(
+  pluginId: string,
+): ManagedOpenClawPluginDefinition | undefined {
+  return CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS.find((definition) => definition.id === pluginId);
+}
+
+export function findChannelOpenClawPluginDefinition(
+  pluginId: string,
+): ManagedOpenClawPluginDefinition | undefined {
+  return CHANNEL_OPENCLAW_PLUGIN_DEFINITIONS.find((definition) => definition.id === pluginId);
+}
+
 export function findManagedOpenClawPluginDefinition(
   pluginId: string,
 ): ManagedOpenClawPluginDefinition | undefined {
-  return MANAGED_OPENCLAW_PLUGIN_DEFINITIONS.find((definition) => definition.id === pluginId);
+  return findCapabilityOpenClawPluginDefinition(pluginId)
+    ?? findChannelOpenClawPluginDefinition(pluginId);
 }

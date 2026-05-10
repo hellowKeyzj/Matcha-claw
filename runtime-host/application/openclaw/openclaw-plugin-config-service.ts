@@ -9,13 +9,17 @@ import {
 } from '../../api/storage/paths';
 import { normalizePluginIds } from '../../bootstrap/runtime-config';
 import { createPluginDiscovery } from '../../plugin-engine/plugin-discovery';
-import { getDefaultPluginDiscoveryRoots, PLUGIN_MANIFEST_NAMES } from '../../plugin-engine/plugin-location-rules';
+import {
+  getOpenClawRuntimePluginDiscoveryRoots,
+  PLUGIN_MANIFEST_NAMES,
+} from '../../plugin-engine/plugin-location-rules';
 import { normalizePluginId } from '../../plugin-engine/plugin-id';
 import {
   EXTERNAL_CHANNEL_PLUGIN_BINDINGS,
   isBuiltinChannelId,
   isChannelDerivedPluginId,
 } from '../channels/channel-plugin-bindings';
+import { CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS } from '../plugins/managed-plugin-definitions';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
 
 const LEGACY_PLUGIN_ID_MAP: Record<string, string> = {
@@ -110,6 +114,7 @@ type DiscoveredPluginEnableState = {
   readonly id: string;
   readonly source: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
   readonly enabledByDefault: boolean;
+  readonly providers: string[];
 };
 
 function resolveManifestPathSync(pluginDir: string): string | null {
@@ -139,7 +144,7 @@ function resolveDiscoverySourceForRoot(root: string): DiscoveredPluginEnableStat
 function readDiscoveredPluginStateSync(): DiscoveredPluginEnableState[] {
   const discovered = new Map<string, DiscoveredPluginEnableState>();
 
-  for (const root of getDefaultPluginDiscoveryRoots()) {
+  for (const root of getOpenClawRuntimePluginDiscoveryRoots()) {
     let entries: Array<import('node:fs').Dirent>;
     try {
       entries = readdirSync(root, { withFileTypes: true });
@@ -176,6 +181,9 @@ function readDiscoveredPluginStateSync(): DiscoveredPluginEnableState[] {
         id: pluginId,
         source,
         enabledByDefault: manifest?.enabledByDefault === true,
+        providers: Array.isArray(manifest?.providers)
+          ? manifest.providers.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          : [],
       });
     }
   }
@@ -233,9 +241,52 @@ export function resolveEnabledPluginIdsFromDiscoveredState(
 }
 
 export function readEnabledPluginIdsFromOpenClawConfig(): string[] {
-  return resolveEnabledPluginIdsFromDiscoveredState(
-    readOpenClawConfigJson(),
-    readDiscoveredPluginStateSync(),
+  return readManuallyManagedPluginIdsFromConfig(readOpenClawConfigJson())
+    .filter((pluginId) => MATCHACLAW_MANAGED_PLUGIN_IDS.has(pluginId));
+}
+
+function isProviderBackedBundledPlugin(plugin: DiscoveredPluginEnableState): boolean {
+  return plugin.source === 'bundled' && plugin.providers.length > 0;
+}
+
+const MATCHACLAW_MANAGED_PLUGIN_IDS = new Set(
+  CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS.map((definition) => definition.id),
+);
+const MATCHACLAW_MANAGED_LEGACY_PLUGIN_IDS = new Set(Object.keys(LEGACY_PLUGIN_ID_MAP));
+
+function isMatchaClawManagedPluginId(pluginId: string): boolean {
+  return MATCHACLAW_MANAGED_PLUGIN_IDS.has(pluginId) || MATCHACLAW_MANAGED_LEGACY_PLUGIN_IDS.has(pluginId);
+}
+
+function discoverBundledProviderPluginIds(): Set<string> {
+  return new Set(
+    readDiscoveredPluginStateSync()
+      .filter(isProviderBackedBundledPlugin)
+      .map((plugin) => plugin.id),
+  );
+}
+
+function discoverBundledPluginIds(): Set<string> {
+  return new Set(
+    readDiscoveredPluginStateSync()
+      .filter((plugin) => plugin.source === 'bundled')
+      .map((plugin) => plugin.id),
+  );
+}
+
+export function readManuallyEnabledPluginIdsFromOpenClawConfig(config: Record<string, unknown>): string[] {
+  const allow = new Set(readPluginAllowlist(config));
+  const entries = cloneNormalizedPluginEntries(config);
+  const bundledPluginIds = discoverBundledPluginIds();
+  return normalizePluginIds(
+    readDiscoveredPluginStateSync()
+      .filter((plugin) => {
+        if (bundledPluginIds.has(plugin.id)) {
+          return false;
+        }
+        return allow.has(plugin.id) || entries[plugin.id]?.enabled === true;
+      })
+      .map((plugin) => plugin.id),
   );
 }
 
@@ -298,7 +349,28 @@ async function cleanupUnconfiguredExternalChannelPluginDirs(
 }
 
 export function readManuallyManagedPluginIdsFromConfig(config: Record<string, unknown>): string[] {
-  return readPluginAllowlist(config).filter((pluginId) => !isChannelDerivedPluginId(pluginId));
+  const entries = cloneNormalizedPluginEntries(config);
+  const bundledPluginIds = discoverBundledPluginIds();
+  const disabledPluginIds = new Set(
+    Object.entries(entries)
+      .filter(([, entry]) => entry.enabled === false)
+      .map(([pluginId]) => pluginId),
+  );
+  const manualEntryPluginIds = Object.entries(entries)
+    .filter(([pluginId, entry]) => (
+      entry.enabled === true
+      && !isChannelDerivedPluginId(pluginId)
+      && !bundledPluginIds.has(pluginId)
+    ))
+    .map(([pluginId]) => pluginId);
+  return normalizeCanonicalPluginIds([
+    ...readPluginAllowlist(config),
+    ...manualEntryPluginIds,
+  ]).filter((pluginId) => (
+    !isChannelDerivedPluginId(pluginId)
+    && !bundledPluginIds.has(pluginId)
+    && !disabledPluginIds.has(pluginId)
+  ));
 }
 
 export function resolveEffectivePluginIdsForConfig(
@@ -319,6 +391,72 @@ export function resolveEffectivePluginIdsForConfig(
 
 function cloneConfig(config: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+}
+
+function listOwnedPluginIds(
+  pluginIds: readonly string[],
+  currentEntries: Record<string, Record<string, unknown>>,
+): Set<string> {
+  const bundledPluginIds = discoverBundledPluginIds();
+  return new Set(normalizeCanonicalPluginIds([
+    ...pluginIds,
+    ...Object.keys(currentEntries).filter((pluginId) => (
+      (
+        isMatchaClawManagedPluginId(pluginId)
+        || isChannelDerivedPluginId(pluginId)
+        || pluginId === 'browser'
+        || pluginId === 'feishu'
+      )
+      && !bundledPluginIds.has(pluginId)
+    )),
+    ...CAPABILITY_OPENCLAW_PLUGIN_DEFINITIONS.map((definition) => definition.id),
+    ...Object.keys(LEGACY_PLUGIN_ID_MAP),
+    ...Object.values(LEGACY_PLUGIN_ID_MAP),
+    ...EXTERNAL_CHANNEL_PLUGIN_BINDINGS.map((binding) => binding.pluginId),
+    ...EXTERNAL_CHANNEL_PLUGIN_BINDINGS.flatMap((binding) => [...(binding.legacyPluginIds ?? [])]),
+    'browser',
+    'browser-relay',
+    'feishu',
+  ]));
+}
+
+function buildTrustedPluginAllowlist(
+  currentConfig: Record<string, unknown>,
+  nextEntries: Record<string, Record<string, unknown>>,
+  enabledPluginIds: readonly string[],
+  ownedPluginIds: ReadonlySet<string>,
+): string[] {
+  const bundledPluginIds = discoverBundledPluginIds();
+  const disabledSet = new Set(
+    Object.entries(nextEntries)
+      .filter(([, entry]) => entry.enabled === false)
+      .map(([pluginId]) => pluginId),
+  );
+  const trustedIds = new Set<string>();
+
+  for (const pluginId of readPluginAllowlist(currentConfig)) {
+    const canonicalPluginId = LEGACY_PLUGIN_ID_MAP[pluginId] ?? pluginId;
+    if (
+      !ownedPluginIds.has(canonicalPluginId)
+      && !disabledSet.has(canonicalPluginId)
+    ) {
+      trustedIds.add(canonicalPluginId);
+    }
+  }
+
+  for (const pluginId of enabledPluginIds) {
+    if (!disabledSet.has(pluginId) && !bundledPluginIds.has(pluginId)) {
+      trustedIds.add(pluginId);
+    }
+  }
+
+  for (const [pluginId, entry] of Object.entries(nextEntries)) {
+    if (entry.enabled === true && !bundledPluginIds.has(pluginId)) {
+      trustedIds.add(pluginId);
+    }
+  }
+
+  return normalizeCanonicalPluginIds([...trustedIds]);
 }
 
 async function collectSkillIdsFromDeclaredPath(rootDir: string, declaredPath: string): Promise<string[]> {
@@ -432,11 +570,14 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
   currentConfig: Record<string, unknown>,
   pluginIds: readonly string[],
 ): Promise<Record<string, unknown>> {
-  const normalizedPluginIds = normalizeCanonicalPluginIds(pluginIds);
+  const bundledProviderPluginIds = discoverBundledProviderPluginIds();
+  const normalizedPluginIds = normalizeCanonicalPluginIds(pluginIds)
+    .filter((pluginId) => !bundledProviderPluginIds.has(pluginId));
   const enabledSet = new Set(normalizedPluginIds);
   const config = cloneConfig(currentConfig);
   const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
   const nextEntries = cloneNormalizedPluginEntries(config);
+  const ownedPluginIds = listOwnedPluginIds(normalizedPluginIds, nextEntries);
 
   if (enabledSet.has('openclaw-lark') && nextEntries.feishu?.enabled !== false) {
     nextEntries.feishu = {
@@ -454,6 +595,9 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
   }
 
   for (const [pluginId, rawEntry] of Object.entries(nextEntries)) {
+    if (!ownedPluginIds.has(pluginId)) {
+      continue;
+    }
     if (enabledSet.has(pluginId)) {
       continue;
     }
@@ -466,7 +610,12 @@ export async function applyEnabledPluginIdsToOpenClawConfig(
     };
   }
 
-  plugins.allow = normalizedPluginIds;
+  const nextAllow = buildTrustedPluginAllowlist(currentConfig, nextEntries, normalizedPluginIds, ownedPluginIds);
+  if (nextAllow.length > 0) {
+    plugins.allow = nextAllow;
+  } else {
+    delete plugins.allow;
+  }
   plugins.entries = nextEntries;
   config.plugins = plugins;
   cleanupPluginContainer(config);
