@@ -15,7 +15,6 @@ import {
 import {
   discoverAgentIds,
   fileExists,
-  OPENCLAW_CONFIG_PATH,
   readAuthProfiles,
   readJsonFile,
   readOpenClawJson,
@@ -26,6 +25,7 @@ import { removeProfilesForProvider } from './openclaw-auth-profile-store';
 import { createRuntimeLogger } from '../../shared/logger';
 import { withOpenClawConfigLock } from './openclaw-config-mutex';
 import {
+  getOpenClawConfigFilePath,
   getOpenClawDirPath,
   readOpenClawConfigJson,
   writeOpenClawConfigJson,
@@ -33,6 +33,7 @@ import {
 import {
   applyEnabledPluginIdsToOpenClawConfig,
   readManuallyEnabledPluginIdsFromOpenClawConfig,
+  readManuallyManagedPluginIdsFromConfig,
 } from './openclaw-plugin-config-service';
 import { ensureManagedPluginInstalled } from '../plugins/runtime-plugin-service';
 import { STRICT_SCHEMA_CHANNEL_IDS } from '../channels/channel-plugin-bindings';
@@ -517,7 +518,7 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
   }
 
   for (const id of agentIds) {
-    const modelsPath = join(homedir(), '.openclaw', 'agents', id, 'agent', 'models.json');
+    const modelsPath = join(getOpenClawConfigDir(), 'agents', id, 'agent', 'models.json');
     try {
       if (await fileExists(modelsPath)) {
         const raw = await readFile(modelsPath, 'utf-8');
@@ -1167,9 +1168,15 @@ export async function syncBrowserModeToOpenClaw(modeInput: unknown): Promise<voi
     applyDefaultBrowserSsrfPolicy(browser);
 
     const currentEnabledPluginIds = readManuallyEnabledPluginIdsFromOpenClawConfig(config);
+    const currentManagedPluginIds = readManuallyManagedPluginIdsFromConfig(config);
     const nextEnabledPluginIds = currentEnabledPluginIds.filter(
       (pluginId) => pluginId !== 'browser' && pluginId !== 'browser-relay',
     );
+    for (const pluginId of currentManagedPluginIds) {
+      if (!nextEnabledPluginIds.includes(pluginId)) {
+        nextEnabledPluginIds.push(pluginId);
+      }
+    }
     if (browserMode === 'native') {
       nextEnabledPluginIds.push('browser');
     }
@@ -1237,11 +1244,12 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
 
 export async function sanitizeOpenClawConfig(): Promise<void> {
   await withOpenClawConfigLock(async () => {
-    if (!(await fileExists(OPENCLAW_CONFIG_PATH))) {
+    const openclawConfigPath = getOpenClawConfigFilePath();
+    if (!(await fileExists(openclawConfigPath))) {
       logger.info('[sanitize] openclaw.json does not exist yet, skipping sanitization');
       return;
     }
-    const rawConfig = await readJsonFile<Record<string, unknown>>(OPENCLAW_CONFIG_PATH);
+    const rawConfig = await readJsonFile<Record<string, unknown>>(openclawConfigPath);
     if (rawConfig === null) {
       logger.warn('[sanitize] openclaw.json is unreadable, skipping sanitization to avoid accidental overwrite');
       return;

@@ -145,6 +145,13 @@ describe('runtime-host manager request transport policy', () => {
     }, null, 2));
     vi.clearAllMocks();
     hoisted.childRequestMock.mockReset();
+    hoisted.childRequestMock.mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+        execution: { enabledPluginIds: ['security-core'] },
+      },
+    });
     hoisted.childHealthMock.mockReset();
     hoisted.childHealthMock.mockResolvedValue({
       version: 1,
@@ -313,10 +320,31 @@ describe('runtime-host manager request transport policy', () => {
     await expect(manager.start()).rejects.toThrow('Invalid gateway port from gateway manager: 0');
   });
 
-  it('setEnabledPluginIds 在运行态只持久化 execution state，不直接重启 runtime-host 子进程', async () => {
+  it('setEnabledPluginIds 通过 runtime-host 子进程路由持久化 execution state，不直接重启子进程', async () => {
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'running', port: 19876 })),
     } as never;
+    hoisted.childRequestMock.mockImplementation(async (method: string, route: string) => {
+      if (method === 'GET' && route === '/api/plugins/runtime') {
+        return {
+          status: 200,
+          data: {
+            success: true,
+            execution: { enabledPluginIds: ['security-core'] },
+          },
+        };
+      }
+      if (method === 'PUT' && route === '/api/plugins/runtime/enabled-plugins') {
+        return {
+          status: 200,
+          data: {
+            success: true,
+            execution: { enabledPluginIds: ['task-manager'] },
+          },
+        };
+      }
+      return { status: 200, data: {} };
+    });
 
     const { createRuntimeHostManager } = await import('../../electron/main/runtime-host-manager');
     const manager = createRuntimeHostManager({ gatewayManager });
@@ -330,6 +358,9 @@ describe('runtime-host manager request transport policy', () => {
 
     expect(result).toEqual({
       enabledPluginIds: ['task-manager'],
+    });
+    expect(hoisted.childRequestMock).toHaveBeenCalledWith('PUT', '/api/plugins/runtime/enabled-plugins', {
+      pluginIds: ['task-manager'],
     });
     expect(processManager?.restart).not.toHaveBeenCalled();
   });

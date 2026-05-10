@@ -130,8 +130,8 @@ describe('chat input slash skills', () => {
       />,
     );
 
-    const select = screen.getByTestId('chat-model-picker');
-    fireEvent.change(select, { target: { value: 'anthropic/claude-opus-4-6' } });
+    fireEvent.click(screen.getByTestId('chat-model-picker'));
+    fireEvent.click(screen.getByRole('option', { name: /Anthropic \/ claude-opus-4-6/i }));
 
     expect(onSelect).toHaveBeenCalledWith('anthropic/claude-opus-4-6');
   });

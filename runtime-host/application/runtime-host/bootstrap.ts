@@ -25,7 +25,7 @@ type GatewaySyncInput = {
   proxyBypassRules?: string;
 };
 
-export async function syncGatewayConfigLocal(input: GatewaySyncInput): Promise<{
+export async function prepareGatewayLaunchLocal(input: GatewaySyncInput): Promise<{
   configuredChannels: string[];
 }> {
   await syncProxyConfigToOpenClaw({

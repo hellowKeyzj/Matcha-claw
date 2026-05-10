@@ -25,10 +25,6 @@ import {
 import { getPort } from '../utils/config';
 import { shell } from 'electron';
 import { getOpenClawDir } from '../utils/paths';
-import {
-  readEnabledPluginIdsFromOpenClawConfig,
-  syncEnabledPluginIdsToOpenClawConfig,
-} from '../../runtime-host/application/openclaw/openclaw-plugin-config-service';
 import type { GatewayTransportIssue } from '../../runtime-host/shared/gateway-error';
 
 type RuntimeHostLifecycle = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
@@ -261,9 +257,6 @@ export function createRuntimeHostManager(
     const [gatewayToken] = await Promise.all([
       infrastructure.settingsStore.get('gatewayToken').catch(() => ''),
     ]);
-    executionState = {
-      enabledPluginIds: readEnabledPluginIdsFromOpenClawConfig(),
-    };
     const gatewayStatusPort = infrastructure.gatewayManager.getStatus().port;
     if (!Number.isFinite(gatewayStatusPort) || gatewayStatusPort <= 0) {
       throw new Error(`Invalid gateway port from gateway manager: ${String(gatewayStatusPort)}`);
@@ -275,10 +268,37 @@ export function createRuntimeHostManager(
   }
 
   async function setEnabledPluginIdsInternal(pluginIds: readonly string[]): Promise<RuntimeHostExecutionState> {
-    const normalizedPluginIds = await syncEnabledPluginIdsToOpenClawConfig(pluginIds);
+    const result = await infrastructure.httpClient.request<{
+      success?: boolean;
+      execution?: {
+        enabledPluginIds?: unknown;
+      };
+    }>('PUT', '/api/plugins/runtime/enabled-plugins', {
+      pluginIds: [...pluginIds],
+    });
+    const normalizedPluginIds = Array.isArray(result.data?.execution?.enabledPluginIds)
+      ? result.data.execution.enabledPluginIds.filter((item): item is string => typeof item === 'string')
+      : [...pluginIds];
     executionState = {
       ...executionState,
       enabledPluginIds: normalizedPluginIds,
+    };
+    return executionState;
+  }
+
+  async function refreshExecutionStateInternal(): Promise<RuntimeHostExecutionState> {
+    const result = await infrastructure.httpClient.request<{
+      success?: boolean;
+      execution?: {
+        enabledPluginIds?: unknown;
+      };
+    }>('GET', '/api/plugins/runtime');
+    const enabledPluginIds = Array.isArray(result.data?.execution?.enabledPluginIds)
+      ? result.data.execution.enabledPluginIds.filter((item): item is string => typeof item === 'string')
+      : [];
+    executionState = {
+      ...executionState,
+      enabledPluginIds,
     };
     return executionState;
   }
@@ -291,6 +311,12 @@ export function createRuntimeHostManager(
           return;
         }
         infrastructure.gatewayManager.debouncedRestart();
+      },
+      saveChannelConfig: async (payload) => {
+        const result = await infrastructure.httpClient.request('POST', '/api/channels/activate', payload);
+        if (result.status >= 400) {
+          throw new Error(`Failed to save channel config through runtime-host: HTTP ${String(result.status)}`);
+        }
       },
     }),
     providerOAuth: {
@@ -540,6 +566,7 @@ export function createRuntimeHostManager(
       try {
         await hydrateExecutionStateFromSources();
         await infrastructure.processManager.start();
+        await refreshExecutionStateInternal();
         lifecycle = 'running';
         logger.info(
           `Runtime Host started (plugins=${executionState.enabledPluginIds.join(', ') || 'none'})`,
@@ -564,6 +591,7 @@ export function createRuntimeHostManager(
     async restart() {
       await hydrateExecutionStateFromSources();
       await infrastructure.processManager.restart();
+      await refreshExecutionStateInternal();
       lifecycle = 'running';
     },
 
@@ -626,10 +654,6 @@ export function createRuntimeHostManager(
     },
 
     getState() {
-      executionState = {
-        ...executionState,
-        enabledPluginIds: readEnabledPluginIdsFromOpenClawConfig(),
-      };
       const processState = infrastructure.processManager.getState();
       const runtimeLifecycle = mapProcessLifecycleToRuntimeLifecycle(processState.lifecycle);
       return {
@@ -647,8 +671,7 @@ export function createRuntimeHostManager(
     },
 
     async refreshExecutionState() {
-      await hydrateExecutionStateFromSources();
-      return executionState;
+      return await refreshExecutionStateInternal();
     },
 
     async setEnabledPluginIds(pluginIds) {

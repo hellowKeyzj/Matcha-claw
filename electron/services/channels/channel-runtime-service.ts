@@ -1,4 +1,3 @@
-import { saveChannelConfigLocal } from '../../../runtime-host/application/channels/channel-runtime';
 import { whatsAppLoginManager } from './whatsapp-login-manager';
 import { weixinLoginManager } from './weixin-login-manager';
 type PendingWeixinPersist = Record<string, unknown>;
@@ -12,6 +11,11 @@ export interface ChannelRuntimeService {
   readonly cancelChannelSession: (channelType: string) => Promise<void>;
 }
 
+export interface ChannelRuntimeServiceDeps {
+  readonly scheduleGatewayRestart: (reason: string) => void;
+  readonly saveChannelConfig: (payload: unknown) => Promise<void>;
+}
+
 function normalizeSessionKey(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -21,7 +25,7 @@ function normalizeSessionKey(value: unknown): string | undefined {
 }
 
 export function createChannelRuntimeService(
-  deps: { scheduleGatewayRestart: (reason: string) => void },
+  deps: ChannelRuntimeServiceDeps,
 ): ChannelRuntimeService {
   const pendingWeixinPersists = new Map<string, PendingWeixinPersist>();
   const pendingWhatsAppAccounts = new Set<string>();
@@ -57,7 +61,7 @@ export function createChannelRuntimeService(
       ...pending,
       enabled: true,
     };
-    await saveChannelConfigLocal({
+    await deps.saveChannelConfig({
       channelType: 'openclaw-weixin',
       ...(resolvedAccountId ? { accountId: resolvedAccountId } : {}),
       config: persistedConfig,
@@ -74,7 +78,7 @@ export function createChannelRuntimeService(
       return;
     }
     pendingWhatsAppAccounts.delete(accountId);
-    await saveChannelConfigLocal({
+    await deps.saveChannelConfig({
       channelType: 'whatsapp',
       accountId,
       config: { enabled: true },

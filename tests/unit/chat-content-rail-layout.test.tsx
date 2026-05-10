@@ -630,15 +630,24 @@ describe('chat content rail layout', () => {
     );
 
     const picker = screen.getByTestId('chat-model-picker');
-    const controlsRow = picker.parentElement?.parentElement as HTMLElement | null;
+    const pickerWrap = picker.parentElement as HTMLElement | null;
+    const controlsRow = pickerWrap?.parentElement as HTMLElement | null;
     const statusRow = controlsRow?.nextElementSibling as HTMLElement | null;
 
+    expect(pickerWrap?.className).toContain('w-[176px]');
+    expect(pickerWrap?.className).toContain('flex-none');
     expect(controlsRow?.className).toContain('w-full');
     expect(controlsRow?.className).toContain('min-w-0');
     expect(controlsRow?.className).toContain('flex-wrap');
-    expect(statusRow?.className).toContain('min-h-[18px]');
+    expect(controlsRow?.className).toContain('items-end');
+    expect(controlsRow?.className).toContain('gap-1.5');
+    expect(statusRow).toBeNull();
     expect(CHAT_LAYOUT_TOKENS.inputActionsRow).toContain('flex-col');
     expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('w-full');
+    expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('h-9');
+    expect(CHAT_LAYOUT_TOKENS.inputModelPickerTrigger).toContain('bg-card');
+    expect(CHAT_LAYOUT_TOKENS.inputAttachButton).toContain('h-9');
+    expect(CHAT_LAYOUT_TOKENS.inputSendButton).toContain('h-9');
   });
 
   it('empty state no longer renders welcome content inside the message viewport rail', () => {

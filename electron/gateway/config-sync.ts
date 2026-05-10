@@ -12,7 +12,6 @@ import { fsPath } from '../utils/fs-path';
 import { ensureBundledPluginsMirrorDir } from './bundled-plugins-mirror';
 import { createDefaultRuntimeHostHttpClient } from '../main/runtime-host-client';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
-import { syncGatewayConfigLocal as syncGatewayConfigLocalFallback } from '../../runtime-host/application/runtime-host/bootstrap';
 
 function createGatewayConfigRuntimeHostClient() {
   return createDefaultRuntimeHostHttpClient({
@@ -51,7 +50,7 @@ export interface GatewayLaunchContext {
   bundledPluginsDir?: string;
 }
 
-export async function syncGatewayConfigBeforeLaunch(
+export async function prepareGatewayRuntimeBeforeLaunch(
   appSettings: Awaited<ReturnType<typeof getAllSettings>>,
 ): Promise<void> {
   try {
@@ -61,27 +60,12 @@ export async function syncGatewayConfigBeforeLaunch(
   }
 
   const runtimeHostClient = createGatewayConfigRuntimeHostClient();
-  try {
-    await runtimeHostClient.request('POST', '/api/runtime-host/sync-gateway-config', {
-      gatewayToken: appSettings.gatewayToken,
-      proxyEnabled: appSettings.proxyEnabled,
-      proxyServer: appSettings.proxyServer,
-      proxyBypassRules: appSettings.proxyBypassRules,
-    });
-  } catch (err) {
-    logger.warn('Failed to sync gateway bootstrap config through runtime-host:', err);
-    try {
-      await syncGatewayConfigLocalFallback({
-        gatewayToken: appSettings.gatewayToken,
-        proxyEnabled: appSettings.proxyEnabled,
-        proxyServer: appSettings.proxyServer,
-        proxyBypassRules: appSettings.proxyBypassRules,
-      });
-      logger.info('Applied gateway bootstrap config through local fallback sync');
-    } catch (fallbackError) {
-      logger.warn('Failed to sync gateway bootstrap config through local fallback:', fallbackError);
-    }
-  }
+  await runtimeHostClient.request('POST', '/api/runtime-host/prepare-gateway-launch', {
+    gatewayToken: appSettings.gatewayToken,
+    proxyEnabled: appSettings.proxyEnabled,
+    proxyServer: appSettings.proxyServer,
+    proxyBypassRules: appSettings.proxyBypassRules,
+  });
 }
 
 async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>; loadedProviderKeyCount: number }> {
@@ -228,7 +212,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   }
 
   const appSettings = await getAllSettings();
-  await syncGatewayConfigBeforeLaunch(appSettings);
+  await prepareGatewayRuntimeBeforeLaunch(appSettings);
 
   const bundledPluginsDir = await ensureBundledPluginsMirrorDir({
     openclawDir,

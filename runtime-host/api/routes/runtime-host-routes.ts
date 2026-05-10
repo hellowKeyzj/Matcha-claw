@@ -3,7 +3,7 @@ import { RuntimeHostService } from '../../application/runtime-host/service';
 interface RuntimeHostRoutesDeps {
   createHealthPayload: () => unknown;
   buildTransportStatsSnapshot: () => unknown;
-  syncGatewayConfigLocal: (input: {
+  prepareGatewayLaunchLocal: (input: {
     gatewayToken?: string;
     proxyEnabled?: boolean;
     proxyServer?: string;
@@ -49,7 +49,7 @@ export async function handleRuntimeHostRoute(
   const service = new RuntimeHostService({
     createHealthPayload: deps.createHealthPayload,
     buildTransportStatsSnapshot: deps.buildTransportStatsSnapshot,
-    syncGatewayConfig: deps.syncGatewayConfigLocal,
+    prepareGatewayLaunch: deps.prepareGatewayLaunchLocal,
     buildProviderEnvMap: deps.buildProviderEnvMap,
     syncProviderAuthBootstrap: deps.syncProviderAuthBootstrapLocal,
     collectDiagnostics: deps.collectDiagnosticsBundleLocal,
@@ -69,10 +69,10 @@ export async function handleRuntimeHostRoute(
     };
   }
 
-  if (method === 'POST' && routePath === '/api/runtime-host/sync-gateway-config') {
+  if (method === 'POST' && routePath === '/api/runtime-host/prepare-gateway-launch') {
     return {
       status: 200,
-      data: await service.syncGatewayConfig(payload),
+      data: await service.prepareGatewayLaunch(payload),
     };
   }
 

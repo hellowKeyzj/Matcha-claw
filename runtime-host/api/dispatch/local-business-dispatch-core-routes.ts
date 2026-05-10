@@ -35,7 +35,7 @@ import {
 } from '../../application/channels/channel-runtime';
 import {
   buildProviderEnvMap,
-  syncGatewayConfigLocal,
+  prepareGatewayLaunchLocal,
   syncProviderAuthBootstrapLocal,
 } from '../../application/runtime-host/bootstrap';
 import { syncProxyConfigToOpenClaw } from '../../application/openclaw/openclaw-proxy-sync';
@@ -87,7 +87,7 @@ export function createCoreLocalBusinessHandlers(
           generatedAt: Date.now(),
           stats: context.buildTransportStatsSnapshot(),
         }),
-        syncGatewayConfigLocal,
+        prepareGatewayLaunchLocal,
         buildProviderEnvMap,
         syncProviderAuthBootstrapLocal,
         collectDiagnosticsBundleLocal,

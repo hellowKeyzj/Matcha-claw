@@ -18,7 +18,7 @@ type DiagnosticsInput = {
 export interface RuntimeHostServiceDeps {
   readonly createHealthPayload: () => unknown;
   readonly buildTransportStatsSnapshot: () => unknown;
-  readonly syncGatewayConfig: (input: {
+  readonly prepareGatewayLaunch: (input: {
     gatewayToken?: string;
     proxyEnabled?: boolean;
     proxyServer?: string;
@@ -50,11 +50,11 @@ export class RuntimeHostService {
     return this.deps.buildTransportStatsSnapshot();
   }
 
-  async syncGatewayConfig(payload: unknown) {
+  async prepareGatewayLaunch(payload: unknown) {
     const body = isRecord(payload) ? payload : {};
     return {
       success: true,
-      ...(await this.deps.syncGatewayConfig({
+      ...(await this.deps.prepareGatewayLaunch({
         gatewayToken: typeof body.gatewayToken === 'string' ? body.gatewayToken : undefined,
         proxyEnabled: body.proxyEnabled === true,
         proxyServer: typeof body.proxyServer === 'string' ? body.proxyServer : undefined,

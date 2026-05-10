@@ -993,10 +993,10 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
-          <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-2')}>
-            <div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-2">
+          <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-1.5')}>
+            <div className="flex w-full min-w-0 flex-wrap items-end justify-end gap-1.5">
               {modelPicker ? (
-                <div ref={modelPickerRef} className="relative min-w-0 max-w-[220px] flex-[1_1_10rem]">
+                <div ref={modelPickerRef} className="relative w-[176px] min-w-0 max-w-[48vw] flex-none max-sm:w-[148px]">
                   <button
                     type="button"
                     aria-label={t('input.pickModel')}
@@ -1018,7 +1018,7 @@ export const ChatInput = memo(function ChatInput({
                       setModelPickerOpen((open) => !open);
                     }}
                   >
-                    <span className="truncate text-[13px] leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
+                    <span className="truncate leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
                     {modelPicker.switching ? (
                       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
                     ) : (
@@ -1045,10 +1045,10 @@ export const ChatInput = memo(function ChatInput({
                             role="option"
                             aria-selected={selected}
                             className={cn(
-                              'flex w-full items-center gap-3 rounded-[1rem] px-3 py-2.5 text-left transition-colors',
+                              'flex w-full items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left transition-colors',
                               selected
-                                ? 'bg-slate-100 text-foreground dark:bg-white/10'
-                                : 'text-foreground/88 hover:bg-slate-50 dark:hover:bg-white/6',
+                                ? 'bg-secondary text-foreground'
+                                : 'text-foreground/88 hover:bg-muted/70',
                             )}
                             onClick={() => {
                               setModelPickerOpen(false);
@@ -1058,7 +1058,7 @@ export const ChatInput = memo(function ChatInput({
                             }}
                           >
                             <div className="min-w-0 flex-1">
-                              <div className="truncate text-[13px] font-medium leading-5">{option.label}</div>
+                              <div className="truncate text-[12px] font-medium leading-5">{option.label}</div>
                             </div>
                             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                               {selected ? <Check className="h-3.5 w-3.5" /> : null}
@@ -1104,11 +1104,11 @@ export const ChatInput = memo(function ChatInput({
                 )}
               </Button>
             </div>
-            <div className="min-h-[18px] min-w-0 px-0.5 text-[11px] text-muted-foreground/78">
-              {statusText ? (
+            {statusText ? (
+              <div className="min-w-0 px-0.5 text-[11px] text-muted-foreground/78">
                 <span className="block truncate">{statusText}</span>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
           </div>
         </div>
         {hasFailedAttachments && (

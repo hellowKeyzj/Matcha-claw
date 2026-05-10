@@ -1,7 +1,7 @@
 import { join } from 'path';
-import { homedir } from 'os';
 import { discoverAgentIds, readJsonFile, writeJsonFile } from './openclaw-auth-store';
 import { createRuntimeLogger } from '../../shared/logger';
+import { getOpenClawConfigDir } from '../../api/storage/paths';
 
 const logger = createRuntimeLogger('openclaw-agent-model-store');
 
@@ -17,7 +17,7 @@ export async function updateAgentModelProvider(
 ): Promise<void> {
   const agentIds = await discoverAgentIds();
   for (const agentId of agentIds) {
-    const modelsPath = join(homedir(), '.openclaw', 'agents', agentId, 'agent', 'models.json');
+    const modelsPath = join(getOpenClawConfigDir(), 'agents', agentId, 'agent', 'models.json');
     let data: Record<string, unknown>;
     try {
       data = (await readJsonFile<Record<string, unknown>>(modelsPath)) ?? {};

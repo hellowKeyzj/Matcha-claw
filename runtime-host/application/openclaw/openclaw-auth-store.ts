@@ -1,14 +1,13 @@
 import { constants, type Dirent } from 'fs';
 import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { homedir } from 'os';
 import { createRuntimeLogger } from '../../shared/logger';
+import { getOpenClawConfigDir, getOpenClawConfigFilePath } from '../../api/storage/paths';
 
 const logger = createRuntimeLogger('openclaw-auth-store');
 
 export const AUTH_STORE_VERSION = 1;
 export const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
-export const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 
 export interface AuthProfileEntry {
   type: 'api_key';
@@ -66,7 +65,7 @@ export async function writeJsonFile(filePath: string, data: unknown): Promise<vo
 }
 
 export function getAuthProfilesPath(agentId = 'main'): string {
-  return join(homedir(), '.openclaw', 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
+  return join(getOpenClawConfigDir(), 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
 }
 
 export async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
@@ -87,7 +86,7 @@ export async function writeAuthProfiles(store: AuthProfilesStore, agentId = 'mai
 }
 
 export async function discoverAgentIds(): Promise<string[]> {
-  const agentsDir = join(homedir(), '.openclaw', 'agents');
+  const agentsDir = join(getOpenClawConfigDir(), 'agents');
   try {
     if (!(await fileExists(agentsDir))) {
       return ['main'];
@@ -106,7 +105,7 @@ export async function discoverAgentIds(): Promise<string[]> {
 }
 
 export async function readOpenClawJson(): Promise<Record<string, unknown>> {
-  return (await readJsonFile<Record<string, unknown>>(OPENCLAW_CONFIG_PATH)) ?? {};
+  return (await readJsonFile<Record<string, unknown>>(getOpenClawConfigFilePath())) ?? {};
 }
 
 export async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
@@ -117,5 +116,5 @@ export async function writeOpenClawJson(config: Record<string, unknown>): Promis
   ) as Record<string, unknown>;
   commands.restart = true;
   config.commands = commands;
-  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+  await writeJsonFile(getOpenClawConfigFilePath(), config);
 }

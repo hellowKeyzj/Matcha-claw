@@ -352,8 +352,10 @@ describe('openclaw plugin config service', () => {
   it('同步 browserMode=relay 时会关闭 bundled browser 并启用 browser-relay', async () => {
     const browserPluginDir = join(openclawDir, 'dist', 'extensions', 'browser');
     const relaySourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'browser-relay');
+    const taskManagerSourceDir = join(workspaceDir, 'build', 'openclaw-plugins', 'task-manager');
     mkdirSync(browserPluginDir, { recursive: true });
     mkdirSync(relaySourceDir, { recursive: true });
+    mkdirSync(taskManagerSourceDir, { recursive: true });
     writeFileSync(join(browserPluginDir, 'openclaw.plugin.json'), JSON.stringify({
       id: 'browser',
       enabledByDefault: true,
@@ -368,15 +370,26 @@ describe('openclaw plugin config service', () => {
       name: '@matchaclaw/browser-relay',
       version: '1.0.0',
     }, null, 2));
+    writeFileSync(join(taskManagerSourceDir, 'openclaw.plugin.json'), JSON.stringify({
+      id: 'task-manager',
+      name: 'Task Manager',
+      version: '1.0.0',
+      category: 'automation',
+    }, null, 2));
+    writeFileSync(join(taskManagerSourceDir, 'package.json'), JSON.stringify({
+      name: '@matchaclaw/task-manager',
+      version: '1.0.0',
+    }, null, 2));
     writeFileSync(join(configDir, 'openclaw.json'), JSON.stringify({
       browser: {
         enabled: true,
         defaultProfile: 'openclaw',
       },
       plugins: {
-        allow: ['browser'],
+        allow: ['browser', 'task-manager'],
         entries: {
           browser: { enabled: true },
+          'task-manager': { enabled: true },
         },
       },
     }, null, 2));
@@ -400,9 +413,11 @@ describe('openclaw plugin config service', () => {
       },
     });
     expect(nextConfig.plugins.allow).toContain('browser-relay');
+    expect(nextConfig.plugins.allow).toContain('task-manager');
     expect(nextConfig.plugins.allow).not.toContain('browser');
     expect(nextConfig.plugins.entries.browser).toMatchObject({ enabled: false });
     expect(nextConfig.plugins.entries['browser-relay']).toMatchObject({ enabled: true });
+    expect(nextConfig.plugins.entries['task-manager']).toMatchObject({ enabled: true });
     expect(readFileSync(join(configDir, 'extensions', 'browser-relay', 'openclaw.plugin.json'), 'utf8')).toContain('"id": "browser-relay"');
   });
 

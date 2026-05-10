@@ -4,6 +4,7 @@ import {
 } from './common/constants';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { resolveDeletedPath } from './common/http';
 import {
   buildLocalPluginsRuntimePayload as buildLocalPluginsRuntimePayloadFromState,
   buildLocalRuntimeHealth as buildLocalRuntimeHealthFromState,
@@ -28,7 +29,6 @@ import {
   listRuntimePluginCatalog,
   setRuntimeEnabledPluginIds,
 } from '../application/plugins/runtime-plugin-service';
-import { ensureConfiguredManagedPluginsForGatewayLaunch } from '../application/runtime-host/prelaunch-plugin-maintenance';
 import { createRuntimeLogger } from '../shared/logger';
 
 const logger = createRuntimeLogger('runtime-host-app');
@@ -138,7 +138,7 @@ const openclawBridge = createOpenClawBridge(gatewayClient);
 const platformRuntime = createRuntimeHostPlatformRoot(openclawBridge);
 sessionRuntimeService = getSessionRuntimeService({
   getOpenClawConfigDir,
-  resolveDeletedPath: (path) => `${path}.deleted`,
+  resolveDeletedPath,
   openclawBridge,
 });
 
@@ -292,17 +292,11 @@ export function startRuntimeHostProcess() {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  void ensureConfiguredManagedPluginsForGatewayLaunch()
-    .then(async () => {
-      await refreshPluginCatalog();
-      server.listen(port, '127.0.0.1', () => {
-        logger.info(`listening on http://127.0.0.1:${port}`);
-      });
-    })
-    .catch((error) => {
-      logger.error('failed to initialize runtime plugins', error);
-      process.exit(1);
-    });
+  server.listen(port, '127.0.0.1', () => {
+    logger.info(`listening on http://127.0.0.1:${port}`);
+  });
+
+  void refreshPluginCatalog();
 
   return server;
 }

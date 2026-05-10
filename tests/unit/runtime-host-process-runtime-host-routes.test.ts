@@ -10,7 +10,7 @@ describe('runtime-host process runtime-host routes', () => {
       {
         createHealthPayload: () => ({ success: true }),
         buildTransportStatsSnapshot: () => ({ success: true }),
-        syncGatewayConfigLocal: vi.fn(async () => ({ configuredChannels: [] })),
+        prepareGatewayLaunchLocal: vi.fn(async () => ({ configuredChannels: [] })),
         buildProviderEnvMap: () => ({
           keyableProviderTypes: ['openai', 'groq'],
           envVarByProviderType: {
@@ -36,14 +36,14 @@ describe('runtime-host process runtime-host routes', () => {
     });
   });
 
-  it('POST /api/runtime-host/sync-gateway-config 会调用本地同步能力', async () => {
-    const syncGatewayConfigLocal = vi.fn(async () => ({
+  it('POST /api/runtime-host/prepare-gateway-launch 会执行 gateway 启动前准备', async () => {
+    const prepareGatewayLaunchLocal = vi.fn(async () => ({
       configuredChannels: ['openclaw-weixin'],
     }));
 
     const result = await handleRuntimeHostRoute(
       'POST',
-      '/api/runtime-host/sync-gateway-config',
+      '/api/runtime-host/prepare-gateway-launch',
       {
         gatewayToken: 'token-1',
         proxyEnabled: true,
@@ -53,7 +53,7 @@ describe('runtime-host process runtime-host routes', () => {
       {
         createHealthPayload: () => ({ success: true }),
         buildTransportStatsSnapshot: () => ({ success: true }),
-        syncGatewayConfigLocal,
+        prepareGatewayLaunchLocal,
         buildProviderEnvMap: () => ({
           keyableProviderTypes: [],
           envVarByProviderType: {},
@@ -63,7 +63,7 @@ describe('runtime-host process runtime-host routes', () => {
       },
     );
 
-    expect(syncGatewayConfigLocal).toHaveBeenCalledWith({
+    expect(prepareGatewayLaunchLocal).toHaveBeenCalledWith({
       gatewayToken: 'token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',
@@ -91,7 +91,7 @@ describe('runtime-host process runtime-host routes', () => {
       {
         createHealthPayload: () => ({ success: true }),
         buildTransportStatsSnapshot: () => ({ success: true }),
-        syncGatewayConfigLocal: vi.fn(async () => ({ configuredChannels: [] })),
+        prepareGatewayLaunchLocal: vi.fn(async () => ({ configuredChannels: [] })),
         buildProviderEnvMap: () => ({
           keyableProviderTypes: [],
           envVarByProviderType: {},

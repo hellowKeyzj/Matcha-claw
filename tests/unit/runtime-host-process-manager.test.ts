@@ -3219,7 +3219,7 @@ describe('runtime-host process manager', () => {
     }
   });
 
-  it('启动时会把配置里已启用的 managed 插件安装到 extensions', async () => {
+  it('gateway prelaunch 请求会把配置里已启用的 managed 插件安装到 extensions', async () => {
     writeFileSync(join(openClawConfigDir, 'openclaw.json'), JSON.stringify({
       plugins: {
         allow: ['task-manager', 'security-core'],
@@ -3244,6 +3244,26 @@ describe('runtime-host process manager', () => {
 
     try {
       await manager.start();
+
+      expect(existsSync(join(openClawConfigDir, 'extensions', 'task-manager', 'openclaw.plugin.json'))).toBe(false);
+      expect(existsSync(join(openClawConfigDir, 'extensions', 'security-core', 'openclaw.plugin.json'))).toBe(false);
+
+      const prepareResponse = await fetch(`http://127.0.0.1:${port}/dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: 1,
+          method: 'POST',
+          route: '/api/runtime-host/prepare-gateway-launch',
+          payload: {
+            gatewayToken: 'test-gateway-token',
+            proxyEnabled: false,
+            proxyServer: '',
+            proxyBypassRules: '',
+          },
+        }),
+      });
+      expect(prepareResponse.status).toBe(200);
 
       expect(existsSync(join(openClawConfigDir, 'extensions', 'task-manager', 'openclaw.plugin.json'))).toBe(true);
       expect(existsSync(join(openClawConfigDir, 'extensions', 'security-core', 'openclaw.plugin.json'))).toBe(true);

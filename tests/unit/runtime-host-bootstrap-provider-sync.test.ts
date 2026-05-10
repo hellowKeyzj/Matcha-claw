@@ -82,11 +82,11 @@ describe('runtime-host bootstrap provider sync', () => {
     hoisted.ensureConfiguredManagedPluginsForGatewayLaunchMock.mockResolvedValue([]);
   });
 
-  it('syncGatewayConfigLocal 会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
+  it('prepareGatewayLaunchLocal 会同时同步 runtime-host settings 与 openclaw.json 的 gateway token', async () => {
     hoisted.reconcileConfiguredChannelPluginsForGatewayLaunchMock.mockResolvedValue(['openclaw-weixin']);
 
-    const { syncGatewayConfigLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
-    const result = await syncGatewayConfigLocal({
+    const { prepareGatewayLaunchLocal } = await import('../../runtime-host/application/runtime-host/bootstrap');
+    const result = await prepareGatewayLaunchLocal({
       gatewayToken: 'matchaclaw-token-1',
       proxyEnabled: true,
       proxyServer: 'http://127.0.0.1:7890',

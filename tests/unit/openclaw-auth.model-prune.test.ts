@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pruneProviderModelRefsInAgentsConfig } from '@electron/utils/openclaw-auth';
+import { pruneProviderModelRefsInAgentsConfig } from '../../runtime-host/application/openclaw/openclaw-provider-config-service';
 
 describe('openclaw auth model prune', () => {
   it('prunes provider model refs from agents.defaults and agents.list', () => {
@@ -92,4 +92,3 @@ describe('openclaw auth model prune', () => {
     });
   });
 });
-
