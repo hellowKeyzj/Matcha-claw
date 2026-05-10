@@ -16,6 +16,7 @@ export type {
   ApprovalDecision,
   ApprovalItem,
   TaskInboxChatBridgeState,
+  ChatRuntimeErrorDismissMarker,
   ChatSessionRuntimeState,
   ChatSessionMetaState,
   ChatSessionViewportState,

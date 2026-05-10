@@ -460,6 +460,36 @@ describe('session runtime service', () => {
     });
   });
 
+  it('patchSession clears stale runtime error from previous failed run', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-unused' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'error',
+      runId: 'run-old-error',
+      sessionKey: 'agent:main:main',
+      errorMessage: 'model unavailable',
+    });
+
+    const response = await service.patchSession({
+      sessionKey: 'agent:main:main',
+      model: 'openai/gpt-5.4',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data.snapshot.runtime).toMatchObject({
+      lastError: null,
+      lastIssue: null,
+    });
+  });
+
   it('team lane live ingress carries member lane metadata', () => {
     const [event] = buildSessionUpdateEventsFromGatewayConversationEvent({
       type: 'chat.message',
@@ -2278,5 +2308,39 @@ describe('session runtime service', () => {
       activeSessionKey: 'agent:main:main',
     });
     expect(persisted).not.toHaveProperty('liveSessions');
+  });
+
+  it('promptSession clears stale runtime error before starting a new run', async () => {
+    const configDir = await createRuntimeConfigDir();
+    const service = new SessionRuntimeService({
+      getOpenClawConfigDir: () => configDir,
+      openclawBridge: {
+        chatSend: async () => ({ runId: 'run-fresh-1' }),
+        gatewayRpc: async () => ({}),
+      },
+    });
+
+    service.consumeGatewayConversationEvent({
+      type: 'run.phase',
+      phase: 'error',
+      runId: 'run-old-error',
+      sessionKey: 'agent:main:main',
+      errorMessage: 'model unavailable',
+    });
+
+    const promptResponse = await service.promptSession({
+      sessionKey: 'agent:main:main',
+      message: 'hello runtime store',
+      idempotencyKey: 'user-local-fresh',
+    });
+
+    expect(promptResponse.status).toBe(200);
+    expect(promptResponse.data.snapshot.runtime).toMatchObject({
+      sending: true,
+      activeRunId: 'run-fresh-1',
+      runPhase: 'submitted',
+      lastError: null,
+      lastIssue: null,
+    });
   });
 });

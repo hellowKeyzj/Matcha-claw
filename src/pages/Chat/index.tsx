@@ -22,6 +22,7 @@ import {
   patchSessionMeta,
   patchSessionSnapshot,
 } from '@/stores/chat/store-state-helpers';
+import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
 import { ChatShell } from './components/ChatShell';
 import { ChatSidePanel } from './components/ChatSidePanel';
 import { ChatOffline } from './components/ChatOffline';
@@ -210,12 +211,12 @@ function selectChatPageState(state: ChatStoreState) {
   return {
     currentSessionKey,
     currentSession,
+    dismissedRuntimeError: state.dismissedRuntimeErrorBySession[currentSessionKey],
     approvalStatus: getSessionApprovalStatus(state, currentSessionKey),
     currentPendingApprovals: getPendingApprovals(state, currentSessionKey) ?? EMPTY_APPROVAL_ITEMS,
     foregroundHistorySessionKey: state.foregroundHistorySessionKey,
     sessionsLoading: state.sessionCatalogStatus.status === 'loading',
     mutating: state.mutating,
-    runtimeError: currentSession.runtime.lastError,
     showThinking: state.showThinking,
     refresh: state.refresh,
     toggleThinking: state.toggleThinking,
@@ -264,12 +265,12 @@ export function Chat({ isActive = true }: ChatProps) {
   const {
     currentSessionKey,
     currentSession,
+    dismissedRuntimeError,
     approvalStatus,
     currentPendingApprovals,
     foregroundHistorySessionKey,
     sessionsLoading,
     mutating,
-    runtimeError,
     showThinking,
     refresh,
     toggleThinking,
@@ -578,7 +579,16 @@ export function Chat({ isActive = true }: ChatProps) {
     setArtifactViewMode('preview');
   }, [artifactActiveSection, artifactFocusedFile]);
   const localizedRuntimeError = useMemo(() => {
-    const localizedRuntimeIssue = localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t);
+    const visibleRuntimeError = hasVisibleRuntimeError({
+      runtime: currentSession.runtime,
+      dismissedMarker: dismissedRuntimeError,
+    });
+    const localizedRuntimeIssue = visibleRuntimeError
+      ? localizeGatewayIssue(currentSession.runtime.lastIssue ?? undefined, t)
+      : null;
+    const runtimeMessage = visibleRuntimeError
+      ? (localizedRuntimeIssue ?? currentSession.runtime.lastError)
+      : null;
     const fallbackGatewayRuntimeError = (
       localizedGatewayIssue
       && (
@@ -590,9 +600,7 @@ export function Chat({ isActive = true }: ChatProps) {
         ? localizedGatewayIssue
         : null
     );
-    const effectiveRuntimeError = localizedRuntimeIssue
-      ?? runtimeError
-      ?? fallbackGatewayRuntimeError;
+    const effectiveRuntimeError = runtimeMessage ?? fallbackGatewayRuntimeError;
     if (!effectiveRuntimeError) {
       return null;
     }
@@ -600,7 +608,7 @@ export function Chat({ isActive = true }: ChatProps) {
       return t('errors.activeRunDisconnected');
     }
     return effectiveRuntimeError;
-  }, [currentSession.runtime.lastIssue, currentSession.runtime.pendingFinal, currentSession.runtime.runPhase, currentSession.runtime.sending, localizedGatewayIssue, runtimeError, t]);
+  }, [currentSession.runtime, dismissedRuntimeError, localizedGatewayIssue, t]);
   const effectiveCurrentModelId = useMemo(() => {
     return resolveEffectiveChatModelId(currentSession.meta.model, currentAgent?.model);
   }, [currentAgent?.model, currentSession.meta.model]);

@@ -101,6 +101,12 @@ export interface ChatSessionRuntimeState {
   lastUserMessageAt: number | null;
   lastError: string | null;
   lastIssue: GatewayTransportIssue | null;
+  updatedAt: number | null;
+}
+
+export interface ChatRuntimeErrorDismissMarker {
+  updatedAt: number | null;
+  fingerprint: string | null;
 }
 
 export interface ChatSessionMetaState {
@@ -147,6 +153,7 @@ export interface ChatStoreBaseState extends ChatViewState {
   currentSessionKey: string;
   loadedSessions: Record<string, ChatSessionRecord>;
   pendingApprovalsBySession: Record<string, ApprovalItem[]>;
+  dismissedRuntimeErrorBySession: Record<string, ChatRuntimeErrorDismissMarker | undefined>;
 }
 
 export interface ChatSendAttachment {
@@ -207,6 +214,7 @@ export const CHAT_BASE_STATE_KEYS = [
   'currentSessionKey',
   'loadedSessions',
   'pendingApprovalsBySession',
+  'dismissedRuntimeErrorBySession',
   'foregroundHistorySessionKey',
   'sessionCatalogStatus',
   'mutating',

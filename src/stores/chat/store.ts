@@ -42,8 +42,9 @@ import {
   DEFAULT_SESSION_KEY,
   type ChatStoreState,
 } from './types';
-import { createEmptySessionRecord, getSessionRuntime, patchSessionRecord } from './store-state-helpers';
+import { createEmptySessionRecord, getSessionRuntime } from './store-state-helpers';
 import { finishChatRunTelemetry } from './telemetry';
+import { buildRuntimeErrorDismissMarker } from './runtime-error-view';
 
 function isStaleApprovalResolveError(message: string): boolean {
   return /not found|expired|already resolved|unknown approval|invalid approval/i.test(message);
@@ -68,6 +69,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       [DEFAULT_SESSION_KEY]: createEmptySessionRecord(),
     },
     pendingApprovalsBySession: {},
+    dismissedRuntimeErrorBySession: {},
     foregroundHistorySessionKey: null,
     sessionCatalogStatus: createIdleResourceStatusState(),
     mutating: false,
@@ -252,18 +254,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     },
     clearError: () => set((state) => {
       const runtime = getSessionRuntime(state, state.currentSessionKey);
+      const marker = buildRuntimeErrorDismissMarker(runtime);
       return {
         error: null,
-        loadedSessions: patchSessionRecord(state, state.currentSessionKey, {
-          runtime: {
-            ...runtime,
-            lastError: null,
-            lastIssue: null,
-            ...(runtime.runPhase === 'error' && !runtime.sending && !runtime.pendingFinal
-              ? { runPhase: 'idle' as const }
-              : {}),
-          },
-        }),
+        dismissedRuntimeErrorBySession: {
+          ...state.dismissedRuntimeErrorBySession,
+          [state.currentSessionKey]: marker ?? undefined,
+        },
       };
     }),
   };

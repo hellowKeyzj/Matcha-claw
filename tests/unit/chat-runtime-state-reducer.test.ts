@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reduceSessionRuntime } from '@/stores/chat/runtime-state-reducer';
 import type { ChatSessionRuntimeState } from '@/stores/chat/types';
 
@@ -14,11 +14,18 @@ function buildRuntimeState(
     pendingTurnLaneKey: null,
     pendingFinal: false,
     lastUserMessageAt: null,
+    lastError: null,
+    lastIssue: null,
+    updatedAt: null,
     ...partial,
   };
 }
 
 describe('chat runtime state reducer', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('restores runtime and forces waiting_tool while approvals exist', () => {
     const snapshot = buildRuntimeState({
       sending: true,
@@ -181,4 +188,20 @@ describe('chat runtime state reducer', () => {
     expect(patch.activeTurnItemKey ?? state.activeTurnItemKey).toBe('assistant-1');
   });
 
+  it('marks a local send failure as a new runtime instance', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(20);
+
+    const patch = reduceSessionRuntime(buildRuntimeState({
+      sending: true,
+      runPhase: 'submitted',
+      updatedAt: 10,
+    }), {
+      type: 'send_failed',
+      error: 'model unavailable',
+    });
+
+    expect(patch.runPhase).toBe('error');
+    expect(patch.lastError).toBe('model unavailable');
+    expect(patch.updatedAt).toBe(20);
+  });
 });

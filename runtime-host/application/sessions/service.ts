@@ -1380,6 +1380,15 @@ export class SessionRuntimeService {
     });
   }
 
+  private clearSessionRuntimeErrorState(sessionKey: string): SessionRuntimeStateSnapshot {
+    const state = this.getSessionState(sessionKey);
+    return this.setSessionRuntime(sessionKey, {
+      runPhase: state.runtime.runPhase === 'error' ? 'idle' : state.runtime.runPhase,
+      lastError: null,
+      lastIssue: null,
+    });
+  }
+
   notifyTransportConnected(transportEpoch: number): void {
     if (!Number.isFinite(transportEpoch) || transportEpoch <= 0) {
       return;
@@ -1885,6 +1894,7 @@ export class SessionRuntimeService {
       hydrate: true,
       resetWindowToLatest: false,
     });
+    this.clearSessionRuntimeErrorState(sessionKey);
 
     return {
       status: 200,
@@ -2084,6 +2094,8 @@ export class SessionRuntimeService {
       pendingTurnLaneKey: 'main',
       pendingFinal: false,
       lastUserMessageAt: entry?.createdAt ?? Date.now(),
+      lastError: null,
+      lastIssue: null,
     });
     state.activeTransportEpoch = this.latestConnectedTransportEpoch || 1;
     state.window = createLatestWindowState(state.renderItems.length);

@@ -394,6 +394,7 @@ export function createEmptySessionRuntime(): ChatSessionRuntimeState {
     lastUserMessageAt: null,
     lastError: null,
     lastIssue: null,
+    updatedAt: null,
   };
 }
 
@@ -660,6 +661,15 @@ export function patchSessionSnapshot(
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
   const nextItems = reconcileSessionItems(current.items, snapshot.items);
+  const incomingRuntimeUpdatedAt = typeof snapshot.runtime.updatedAt === 'number'
+    ? snapshot.runtime.updatedAt
+    : null;
+  const currentRuntimeUpdatedAt = typeof current.runtime.updatedAt === 'number'
+    ? current.runtime.updatedAt
+    : null;
+  const shouldApplyRuntimeSnapshot = currentRuntimeUpdatedAt == null
+    || incomingRuntimeUpdatedAt == null
+    || incomingRuntimeUpdatedAt >= currentRuntimeUpdatedAt;
   return patchSessionRecord(state, sessionKey, {
     meta: {
       ...current.meta,
@@ -675,16 +685,21 @@ export function patchSessionSnapshot(
     items: nextItems,
     runtime: {
       ...current.runtime,
-      sending: snapshot.runtime.sending,
-      activeRunId: snapshot.runtime.activeRunId,
-      runPhase: snapshot.runtime.runPhase,
-      activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
-      pendingTurnKey: snapshot.runtime.pendingTurnKey,
-      pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
-      pendingFinal: snapshot.runtime.pendingFinal,
-      lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
-      lastError: snapshot.runtime.lastError,
-      lastIssue: snapshot.runtime.lastIssue,
+      ...(shouldApplyRuntimeSnapshot
+        ? {
+            sending: snapshot.runtime.sending,
+            activeRunId: snapshot.runtime.activeRunId,
+            runPhase: snapshot.runtime.runPhase,
+            activeTurnItemKey: snapshot.runtime.activeTurnItemKey,
+            pendingTurnKey: snapshot.runtime.pendingTurnKey,
+            pendingTurnLaneKey: snapshot.runtime.pendingTurnLaneKey,
+            pendingFinal: snapshot.runtime.pendingFinal,
+            lastUserMessageAt: snapshot.runtime.lastUserMessageAt,
+            lastError: snapshot.runtime.lastError,
+            lastIssue: snapshot.runtime.lastIssue,
+            updatedAt: incomingRuntimeUpdatedAt,
+          }
+        : {}),
     },
     window: syncViewportState(current.window, {
       totalItemCount: snapshot.window.totalItemCount,

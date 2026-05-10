@@ -1,9 +1,9 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { forwardRef, type ReactNode, useImperativeHandle } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Chat from '@/pages/Chat';
-import { useChatStore } from '@/stores/chat';
+import { useChatStore as realUseChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
@@ -11,6 +11,7 @@ import { createViewportWindowState } from '@/stores/chat/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 const chatViewportPaneRenderSpy = vi.fn();
+const useChatStore = realUseChatStore;
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
@@ -83,8 +84,17 @@ vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
 }));
 
 vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
-  ChatErrorBanner: ({ error }: { error: string }) => (
-    <div data-testid="chat-error-banner">{error}</div>
+  ChatErrorBanner: ({
+    error,
+    onDismiss,
+  }: {
+    error: string;
+    onDismiss: () => void;
+  }) => (
+    <div data-testid="chat-error-banner">
+      <span>{error}</span>
+      <button type="button" onClick={onDismiss}>dismiss</button>
+    </div>
   ),
   ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
 }));
@@ -202,6 +212,7 @@ describe('chat 顶层订阅收口', () => {
           ],
           runtime: {
             sending: true,
+            updatedAt: null,
           },
           window: createViewportWindowState({
             totalItemCount: 1,
@@ -231,7 +242,7 @@ describe('chat 顶层订阅收口', () => {
       jumpViewportToLatest: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       abortRun: vi.fn().mockResolvedValue(undefined),
-      clearError: vi.fn(),
+      clearError: realUseChatStore.getState().clearError,
       resolveApproval: vi.fn().mockResolvedValue(undefined),
       refresh: vi.fn().mockResolvedValue(undefined),
       toggleThinking: vi.fn(),
@@ -295,6 +306,7 @@ describe('chat 顶层订阅收口', () => {
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
             lastError: 'model unavailable',
+            updatedAt: 2,
           },
         }),
       },
@@ -319,6 +331,7 @@ describe('chat 顶层订阅收口', () => {
           runtime: {
             ...state.loadedSessions['agent:main:main']!.runtime,
             lastError: activeRunDisconnectedError,
+            updatedAt: 2,
           },
         }),
       },
@@ -436,6 +449,7 @@ describe('chat 顶层订阅收口', () => {
               code: 'MODEL_UNAVAILABLE',
               details: { provider: 'anthropic' },
             },
+            updatedAt: 2,
           },
         }),
       },
@@ -449,5 +463,103 @@ describe('chat 顶层订阅收口', () => {
     );
 
     expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('errors.modelUnavailable');
+  });
+
+  it('忽略后，同一次 runtime 错误快照再次灌回时不应重新显示', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            sending: false,
+            runPhase: 'error',
+            lastError: 'model unavailable',
+            updatedAt: 2,
+          },
+        }),
+      },
+      error: null,
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('chat-error-banner')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'dismiss' }));
+    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        loadedSessions: {
+          ...state.loadedSessions,
+          'agent:main:main': buildSessionRecord({
+            sessionKey: 'agent:main:main',
+            runtime: {
+              ...state.loadedSessions['agent:main:main']!.runtime,
+              sending: false,
+              runPhase: 'error',
+              lastError: 'model unavailable',
+              updatedAt: 2,
+            },
+          }),
+        },
+      }));
+    });
+
+    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
+  });
+
+  it('新的 runtime 错误实例到来时，即使上一次已忽略也应重新显示', () => {
+    useChatStore.setState((state) => ({
+      loadedSessions: {
+        ...state.loadedSessions,
+        'agent:main:main': buildSessionRecord({
+          sessionKey: 'agent:main:main',
+          runtime: {
+            ...state.loadedSessions['agent:main:main']!.runtime,
+            sending: false,
+            runPhase: 'error',
+            lastError: 'old model unavailable',
+            updatedAt: 2,
+          },
+        }),
+      },
+      error: null,
+    }));
+
+    render(
+      <MemoryRouter>
+        <Chat isActive={false} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'dismiss' }));
+    expect(screen.queryByTestId('chat-error-banner')).toBeNull();
+
+    act(() => {
+      useChatStore.setState((state) => ({
+        loadedSessions: {
+          ...state.loadedSessions,
+          'agent:main:main': buildSessionRecord({
+            sessionKey: 'agent:main:main',
+            runtime: {
+              ...state.loadedSessions['agent:main:main']!.runtime,
+              sending: false,
+              runPhase: 'error',
+              lastError: 'new model unavailable',
+              updatedAt: 3,
+            },
+          }),
+        },
+      }));
+    });
+
+    expect(screen.getByTestId('chat-error-banner')).toHaveTextContent('new model unavailable');
   });
 });
